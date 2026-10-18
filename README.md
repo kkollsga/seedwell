@@ -48,7 +48,8 @@ curl -fsSL …/install.sh | bash -s -- --version 0.1.0
 
 ### Update
 
-Run the install command again. A running Seedwell is quit cleanly first (trackers are told `stopped`) and
+Seedwell checks for a new release once a day (Settings › General › Updates) and offers it in the menu bar and in
+Settings; it can also install by itself when nothing is downloading. Or run the install command again. A running Seedwell is quit cleanly first (trackers are told `stopped`) and
 reopened afterwards. Your torrents and settings are kept.
 
 ### Uninstall

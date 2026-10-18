@@ -23,7 +23,7 @@ import os
     private let log = Logger(subsystem: "io.github.kkollsga.Seedwell", category: "app")
     private var quitting = false
     /// Set by the paths that really end the process: the menu bar menu's Quit row, the QA `quit`,
-    /// a Sparkle update about to relaunch the app. Every other quit request only closes the windows.
+    /// an update about to relaunch the app (Sparkle; the curl installer sends SIGTERM, which is `quitForReal`). Every other quit request only closes the windows.
     private var terminationAllowed = false
     /// SIGTERM (installers, `kill`, launchd) quits properly: the engine shuts down and trackers get
     /// their `stopped`, instead of the default immediate exit.
@@ -120,7 +120,8 @@ import os
     }
 
     private func start() {
-        UpdateSettings.shared.start()
+        UpdateCenter.shared.apply(settings.app.updates)
+        UpdateCenter.shared.start()
         let main = MainWindowController(commands: commands, settings: settings, defaultSize: options.showWindowSize)
         mainWindow = main
         main.onOpenChange = { [weak self] in self?.refreshActivationPolicy() }
@@ -155,6 +156,7 @@ import os
         commands.arrivals.note(core.snapshot())  // the baseline: what is downloading now is not new
         statusMenu?.onRefresh = { [weak self] s in
             self?.commands.arrivals.note(s)
+            UpdateCenter.shared.noteActivity(busy: s.downloading.contains { !$0.isHeld } || s.movingPercent != nil)
             self?.sleepAssertion.update(downloading: s.downloading.contains { !$0.awaitingChoice && $0.state == .downloading })
         }
         NSApp.mainMenu = MainMenu.make(commands: commands)
@@ -183,7 +185,7 @@ import os
             MainActor.assumeIsolated { self?.settings.reload(); self?.core.volumesChanged() }
         }
 
-        UpdateSettings.shared.willRelaunch = { [weak self] in self?.terminationAllowed = true }
+        UpdateCenter.shared.willRelaunch = { [weak self] in self?.terminationAllowed = true }
         if let path = options.qaControl {
             qaPinnedRegular = true
             PlayerLauncher.blocked = true  // QA never starts the user's players on its own
@@ -233,6 +235,7 @@ import os
             if !want, service.status == .enabled { try? service.unregister() }
         }
         sleepAssertion.enabled = s.general.preventSleepWhileDownloading
+        UpdateCenter.shared.apply(s.updates)
         if power == nil, !options.mock { power = PowerWatcher(core: core) }
         power?.mode = s.general.onBattery
         statusMenu?.refreshIcon()

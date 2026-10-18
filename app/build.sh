@@ -16,6 +16,10 @@ BUILD_NUMBER="${SEEDWELL_BUILD:-$(git -C "$REPO" rev-list --count HEAD 2>/dev/nu
 FEED_URL="${SEEDWELL_FEED_URL:-https://kkollsga.github.io/seedwell/appcast.xml}"
 SPARKLE_KEY="${SEEDWELL_SPARKLE_PUBLIC_KEY:-}"
 if [ -z "$SPARKLE_KEY" ] && [ -f "$APP_DIR/sparkle_public_key" ]; then SPARKLE_KEY="$(tr -d '[:space:]' < "$APP_DIR/sparkle_public_key")"; fi
+# The GitHub-release updater (SPEC 12A): where releases live, and whether this is a release build
+# (release-zip.sh exports SEEDWELL_RELEASE=1; only release builds check and install by themselves).
+REPO_URL="${SEEDWELL_REPO_URL:-https://github.com/kkollsga/seedwell}"
+if [ "${SEEDWELL_RELEASE:-0}" = "1" ]; then RELEASE_BUILD=true; else RELEASE_BUILD=false; fi
 echo "==> Seedwell $VERSION (build $BUILD_NUMBER)"
 
 # SEEDWELL_FAST=1: skip fat LTO for quick development builds (never for measurements or releases).
@@ -108,6 +112,9 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     </dict>
     <!-- Sparkle. No automatic checks until the user switches them on, and the updater does not start at
          all without SUPublicEDKey: a default build makes no network request of its own. -->
+    <!-- The GitHub-release updater, used when Sparkle is not configured. -->
+    <key>SeedwellRepoURL</key><string>$REPO_URL</string>
+    <key>SeedwellReleaseBuild</key><$RELEASE_BUILD/>
     <key>SUFeedURL</key><string>$FEED_URL</string>
     <key>SUPublicEDKey</key><string>$SPARKLE_KEY</string>
     <key>SUEnableAutomaticChecks</key><false/>

@@ -16,13 +16,13 @@ against the release's `SHA256SUMS`, verifies the code signature, quits a running
 ```sh
 git status                                              # must be clean
 tools/sysguard/heavy.sh app/release-zip.sh              # full LTO build → app/build/release/
-#   Seedwell-<version>.zip  install.sh  SHA256SUMS  NOTES.md   (checked locally: checksum, signature, script syntax)
+#   Seedwell-<version>.zip  install.sh  SHA256SUMS  latest.json  NOTES.md   (checked locally: checksum, signature, script syntax)
 app/release-zip.sh --draft                              # optional: creates a DRAFT GitHub release with the assets (gh CLI)
 ```
 
 Then open the draft on GitHub, read it, and press **Publish**. The install URL
 (`https://github.com/kkollsga/seedwell/releases/latest/download/install.sh`) works from the moment it is published.
-Updates: users run the same command again (Sparkle is the next step, see below).
+Updates: users run the same command again, or let the app do it (see "Updates" below).
 
 Test the installer without touching your own install: `SEEDWELL_REPO_URL=http://127.0.0.1:8765 SEEDWELL_INSTALL_DIR=/tmp/x`
 against a local `python3 -m http.server` that serves `releases/latest/download/` with the three assets.
@@ -71,8 +71,8 @@ Settings › General shows both ("Seedwell 0.1.0 (build 86)"). To release: bump 
    app/.sparkle/bin/generate_keys   # prints the public key; export a backup with: generate_keys -x seedwell-private.key
    ```
    Put the printed public key in `app/sparkle_public_key` (one line; add it to git, it is public) or in `SEEDWELL_SPARKLE_PUBLIC_KEY`.
-   Losing the private key means installed copies can never update again. Builds without a public key never start the updater
-   and Settings says "Updates are not set up in this build".
+   Losing the private key means installed copies can never update again. Builds without a public key never start Sparkle;
+   the GitHub-release updater drives those.
 5. **Environment** (for example in `~/.zshrc`):
    ```sh
    export SEEDWELL_SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)"
@@ -99,7 +99,26 @@ What gets signed, inside-out, all with the hardened runtime (`--options runtime`
 user-selected-files entitlements, which only exist inside a sandbox, would do nothing. Peer/tracker/DHT/uTP sockets and file
 access work under the hardened runtime as is. No JIT, no DYLD variables, no Apple events.
 
-## Updates (Sparkle)
+## Updates
+
+Two back ends, chosen at launch (SPEC §12A): the GitHub-release updater below, used by every build until Sparkle is
+configured; Sparkle, used only by a build that carries `SUPublicEDKey` and `SUFeedURL`.
+
+### GitHub release updater (now)
+
+- `release-zip.sh` writes `latest.json` next to the zip (`version`, `tag`, `notes_url`, `minimum_macos`, `zip`, `sha256`, all from
+  the script's own values) and `--draft` uploads it with the other assets. It is not in `SHA256SUMS`; `install.sh` checks the zip itself.
+- Installed copies read `<repo>/releases/latest/download/latest.json` once a day, which GitHub resolves to the release marked
+  **Latest**. So **Publish is the moment users are notified** (within a day). A draft, or a release marked as pre-release,
+  is never offered. A bad release is withdrawn by deleting it or by marking the previous release as Latest.
+- Only release builds (`SEEDWELL_RELEASE=1`, set by `release-zip.sh`) check and install by themselves; your own
+  development builds (`build.sh`, `tools/install-local.sh`) only check when you press Check Now.
+- `build.sh` writes `SeedwellRepoURL` into Info.plist (default `https://github.com/kkollsga/seedwell`; `SEEDWELL_REPO_URL` overrides).
+  For tests, launch the app with `SEEDWELL_UPDATE_REPO=http://127.0.0.1:PORT` and serve `/releases/latest/download/latest.json`
+  and `/releases/download/v<version>/install.sh` (plus the installer's own files) from there.
+- The install log is `~/Library/Logs/Seedwell/update.log`.
+
+### Sparkle (when a Developer ID exists)
 
 - `SUFeedURL` in Info.plist is `https://kkollsga.github.io/seedwell/appcast.xml` (a placeholder; override with
   `SEEDWELL_FEED_URL` when building). Publish it with GitHub Pages (repository `kkollsga/seedwell`, branch `gh-pages` or `/docs`).

@@ -285,6 +285,22 @@ impl Default for General {
     }
 }
 
+/// Updates (Settings > General). Both only act in release builds of the app.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Updates {
+    /// Look for a newer release once a day.
+    pub check: bool,
+    /// Install a found update by itself when nothing is downloading.
+    pub auto_install: bool,
+}
+
+impl Default for Updates {
+    fn default() -> Self {
+        Updates { check: true, auto_install: false }
+    }
+}
+
 /// Alternative ("Limit Speed") limits and their schedule.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -730,6 +746,8 @@ pub struct Config {
     pub network: Network,
     /// Agents tab.
     pub agents: Agents,
+    /// Updates group of the General tab.
+    pub updates: Updates,
     /// Advanced tab.
     pub advanced: Advanced,
     /// Keys this build does not know, preserved verbatim when saving.
@@ -747,6 +765,7 @@ impl Default for Config {
             detection: Detection::default(),
             network: Network::default(),
             agents: Agents::default(),
+            updates: Updates::default(),
             advanced: Advanced::default(),
             unknown: toml::Table::new(),
         }
@@ -1091,6 +1110,21 @@ mod tests {
         assert!(out.contains("developer_mode = true"), "{out}");
         let again = Config::parse_str(&out).unwrap();
         assert!(again.value.advanced.developer_mode);
+        assert!(again.warnings.is_empty(), "{:?}", again.warnings);
+    }
+
+    #[test]
+    fn updates_default_and_round_trip() {
+        let d = Config::default().updates;
+        assert!(d.check && !d.auto_install);
+        let old = Config::parse_str("version = 6\n[general]\nlaunch_at_login = true\n").unwrap();
+        assert!(old.value.updates.check && !old.value.updates.auto_install, "absent section means defaults");
+        assert!(old.warnings.is_empty(), "{:?}", old.warnings);
+        let c = Config { updates: Updates { check: false, auto_install: true }, ..Config::default() };
+        let out = c.render().unwrap();
+        assert!(out.contains("[updates]") && out.contains("auto_install = true"), "{out}");
+        let again = Config::parse_str(&out).unwrap();
+        assert_eq!(again.value.updates, Updates { check: false, auto_install: true });
         assert!(again.warnings.is_empty(), "{:?}", again.warnings);
     }
 

@@ -111,7 +111,6 @@ let enUS = Locale(identifier: "en_US")
 
 struct GeneralTab: View {
     @Bindable var model: SettingsModel
-    @Bindable private var updates = UpdateSettings.shared
 
     var body: some View {
         SettingsPage {
@@ -139,15 +138,7 @@ struct GeneralTab: View {
                     .pickerStyle(.segmented).labelsHidden().fixedSize()
                 }
             }
-            SettingsGroup(title: "Updates") {
-                SettingsRow(label: "Check automatically", hint: updates.configured ? nil : "Updates are not set up in this build") {
-                    sw($updates.automaticChecks).disabled(!updates.configured)
-                }
-                SettingsRow(label: "Check for updates") {
-                    Button("Check Now") { updates.checkNow() }.disabled(!updates.configured)
-                        .help("Look for a newer version of Seedwell now")
-                }
-            }
+            UpdatesGroup(model: model)
         }
     }
 }

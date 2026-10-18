@@ -108,6 +108,14 @@ pub struct GeneralSettings {
 }
 
 #[derive(Clone, Debug, PartialEq, uniffi::Record)]
+pub struct UpdatePreferences {
+    /// Look for a newer release once a day (release builds only).
+    pub check: bool,
+    /// Install it by itself when nothing is downloading (release builds only).
+    pub auto_install: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
 pub struct TransferSettings {
     /// Bytes per second; 0 = unlimited.
     pub download_limit: u64,
@@ -208,6 +216,7 @@ pub struct AppSettings {
     pub folders: FolderSettings,
     pub network: NetworkSettings,
     pub agents: AgentSettings,
+    pub updates: UpdatePreferences,
     pub advanced: AdvancedSettings,
 }
 
@@ -411,6 +420,7 @@ pub(crate) fn from_config(c: &Config) -> AppSettings {
             },
             notify_changes: c.agents.notify_changes,
         },
+        updates: UpdatePreferences { check: c.updates.check, auto_install: c.updates.auto_install },
         advanced: AdvancedSettings {
             write_cache_mib: c.advanced.write_cache_mib,
             preallocation: match c.advanced.preallocation {
@@ -521,6 +531,8 @@ pub(crate) fn apply_to_config(s: &AppSettings, c: &mut Config) {
         AgentPermission::Full => Permission::Full,
     };
     c.agents.notify_changes = s.agents.notify_changes;
+    c.updates.check = s.updates.check;
+    c.updates.auto_install = s.updates.auto_install;
 
     c.advanced.write_cache_mib = s.advanced.write_cache_mib;
     c.advanced.preallocation = match s.advanced.preallocation {
@@ -988,6 +1000,7 @@ mod tests {
         let again = store.load_settings();
         assert_eq!(again.transfers.upload_limit, 5_000_000);
         assert!(again.general.notify_goal);
+        assert!(again.updates.check && !again.updates.auto_install);
         assert_eq!(s, again);
     }
 

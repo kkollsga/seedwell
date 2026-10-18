@@ -262,6 +262,12 @@ import os
             update(s)
         }
         menu.addItem(.separator())
+        // Only while an update is waiting (read when the menu is rebuilt; no timer of its own).
+        if let v = UpdateCenter.shared.availableVersion {
+            let item = ActionItem(title: "Update to \(AppInfo.name) \(v)") { UpdateCenter.shared.install() }
+            item.image = NSImage(systemSymbolName: "arrow.down.circle", accessibilityDescription: nil)
+            menu.addItem(item)
+        }
         // One row: Open on the left, Quit on the right; the shortcuts stay on hidden items.
         let showMain: @MainActor () -> Void = { [commands] in commands.showMain(nil, nil) }
         // The only Quit that ends the process; ⌘Q elsewhere (and the Dock's Quit) just close the windows.

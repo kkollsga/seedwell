@@ -54,6 +54,13 @@ echo "==> Zip"
 ditto -c -k --sequesterRsrc --keepParent "$APP" "$OUT/$ZIP"
 cp "$REPO/install.sh" "$OUT/install.sh"
 (cd "$OUT" && shasum -a 256 "$ZIP" install.sh > SHA256SUMS)
+# latest.json: what the app's updater reads (<repo>/releases/latest/download/latest.json). Not in SHA256SUMS;
+# install.sh verifies the zip itself. Every value comes from this script.
+REPO_URL="${SEEDWELL_REPO_URL:-https://github.com/kkollsga/seedwell}"
+ZIP_SHA="$(cd "$OUT" && shasum -a 256 "$ZIP" | cut -d' ' -f1)"
+MIN_MACOS="$(sed -n 's/.*<key>LSMinimumSystemVersion<\/key><string>\(.*\)<\/string>.*/\1/p' "$APP/Contents/Info.plist" | head -1)"
+printf '{"version":"%s","tag":"%s","notes_url":"%s/releases/tag/%s","minimum_macos":"%s","zip":"%s","sha256":"%s"}\n' \
+    "$VERSION" "$TAG" "$REPO_URL" "$TAG" "$MIN_MACOS" "$ZIP" "$ZIP_SHA" > "$OUT/latest.json"
 
 echo "==> Check the installer against the zip (local, no network)"
 CHECK="$(mktemp -d)"; trap 'rm -rf "$CHECK"' EXIT
@@ -61,6 +68,8 @@ CHECK="$(mktemp -d)"; trap 'rm -rf "$CHECK"' EXIT
 ditto -x -k "$OUT/$ZIP" "$CHECK"
 codesign --verify --deep --strict "$CHECK/Seedwell.app"
 bash -n "$OUT/install.sh"
+[ -n "$MIN_MACOS" ] || { echo "no LSMinimumSystemVersion in the app" >&2; exit 1; }
+plutil -lint "$OUT/latest.json" >/dev/null 2>&1 || python3 -I -c 'import json,sys; json.load(open(sys.argv[1]))' "$OUT/latest.json"
 
 PREV="$(git -C "$REPO" describe --tags --abbrev=0 2>/dev/null || true)"
 {
@@ -90,7 +99,7 @@ if [ "$DRAFT" = 1 ]; then
     command -v gh >/dev/null || { echo "gh (GitHub CLI) is not installed." >&2; exit 1; }
     echo "==> Draft release $TAG (not published)"
     gh release create "$TAG" --draft --title "Seedwell $VERSION" --notes-file "$OUT/NOTES.md" \
-        "$OUT/$ZIP" "$OUT/install.sh" "$OUT/SHA256SUMS"
+        "$OUT/$ZIP" "$OUT/install.sh" "$OUT/SHA256SUMS" "$OUT/latest.json"
     echo "    Review it on GitHub and press Publish. The install URL works once it is published."
 else
     echo "    Next: app/release-zip.sh --draft (creates a draft GitHub release), then publish it on GitHub."

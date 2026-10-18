@@ -53,12 +53,14 @@ installed_app() {
 quit_running() {
   local app="$1" pid
   [ -n "$app" ] || return 0
-  pid=$(pgrep -f "^$app/Contents/MacOS/$EXE_NAME" | head -1 || true)
+  # -a: include our ancestors. When the app itself runs this script (its updater), the app is our parent,
+  # and pgrep leaves out ancestors by default.
+  pid=$(pgrep -a -f "^$app/Contents/MacOS/$EXE_NAME" | head -1 || true)
   [ -n "$pid" ] || return 0
-  say "Quitting the running $APP_NAME (trackers are told 'stopped')"
+  say "Quitting the running $APP_NAME (trackers are told 'stopped', up to two minutes)"
   kill -TERM "$pid" 2>/dev/null || true
-  for _ in $(seq 1 30); do kill -0 "$pid" 2>/dev/null || return 0; sleep 1; done
-  die "$APP_NAME did not quit within 30 s; quit it from the menu bar and run this again"
+  for _ in $(seq 1 130); do kill -0 "$pid" 2>/dev/null || return 0; sleep 1; done
+  die "$APP_NAME did not quit within 130 s; quit it from the menu bar and run this again"
 }
 
 # Only a link into the app being removed (never someone else's `seedwell`).
