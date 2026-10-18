@@ -5,7 +5,7 @@
 
 use crate::bencode::{Value, encode_bytes};
 use anyhow::{Context, Result};
-use rand::RngCore;
+use rand::Rng;
 use sha1::{Digest, Sha1};
 use std::path::PathBuf;
 
