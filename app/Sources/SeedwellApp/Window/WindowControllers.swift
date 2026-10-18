@@ -40,7 +40,8 @@ import os
         let opening = self.model == nil
         let model = self.model ?? makeWindow()
         if openSettings || tab != nil || editTracker != nil || newTrackerHost != nil {
-            if let tab { nav.tab = tab }
+            // A plain open starts on General; a deep link (a tab, a tracker to edit) names its own tab.
+            if let tab { nav.tab = tab } else if editTracker == nil, newTrackerHost == nil, model.section != .settings { nav.tab = .general }
             if let editTracker { nav.trackerToEdit = editTracker }
             if let newTrackerHost { nav.newTrackerHost = newTrackerHost }
             self.settings.reload()

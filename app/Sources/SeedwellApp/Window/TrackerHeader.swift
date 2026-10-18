@@ -1,24 +1,28 @@
 import Charts
 import SwiftUI
 
-/// The summary above a tracker's torrents (SPEC §7E.2): four labelled totals and, when there is traffic,
+/// The summary above a tracker's torrents (SPEC §7E.2): the last 7 days' upload, download and ratio, the completed count and, when there is traffic,
 /// one small sparkline of the last 30 days of upload. No axes, no dates: the caption says what it is.
 struct TrackerHeader: View {
     let tracker: TrackerSummary
     let stats: TrackerStats
     let daily: [DailyStat]
 
-    private var ratio: Double { stats.lifetimeDown == 0 ? 0 : Double(stats.lifetimeUp) / Double(stats.lifetimeDown) }
-    private var week: ArraySlice<DailyStat> { daily.suffix(7) }
+    /// Uploaded, downloaded and their ratio over today and the six days before it.
+    static func lastWeek(_ daily: [DailyStat]) -> (up: UInt64, down: UInt64, ratio: Double) {
+        let week = daily.filter { $0.daysAgo < 7 }
+        let up = week.reduce(0) { $0 + $1.upBytes }, down = week.reduce(0) { $0 + $1.downBytes }
+        return (up, down, down == 0 ? 0 : Double(up) / Double(down))
+    }
+    private var week: (up: UInt64, down: UInt64, ratio: Double) { Self.lastWeek(daily) }
     private var hasTraffic: Bool { daily.contains { $0.upBytes > 0 } }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .top, spacing: 16) {
-                // An automatic tracker keeps no daily history: its totals are its torrents' own.
-                stat(Fmt.bytes(stats.lifetimeUp), "Uploaded", sub: daily.isEmpty ? nil : "\(Fmt.bytes(week.reduce(0) { $0 + $1.upBytes })) this week")
-                stat(Fmt.bytes(stats.lifetimeDown), "Downloaded", sub: daily.isEmpty ? nil : "\(Fmt.bytes(week.reduce(0) { $0 + $1.downBytes })) this week")
-                stat(Fmt.ratio(ratio), "Ratio", sub: "all time")
+                stat(Fmt.bytes(week.up), "Uploaded", sub: "Last 7 days")
+                stat(Fmt.bytes(week.down), "Downloaded", sub: "Last 7 days")
+                stat(Fmt.ratio(week.ratio), "Ratio", sub: "Last 7 days")
                 stat("\(stats.torrentsCompleted)", "Torrents completed", sub: nil)
             }
             if hasTraffic {

@@ -486,6 +486,8 @@ private final class FlippedView: NSView { override var isFlipped: Bool { true } 
     func rebuild() {
         guard let tree = state() else { return }
         let list = MenuFileList(tree: tree, open: open)
+        // Replacing the rows must not send the list back to its top: keep where the clip view was.
+        let keptY = scroll.contentView.bounds.origin.y
         doc.subviews.forEach { $0.removeFromSuperview() }
         rows = []
         let w = scroll.contentSize.width
@@ -512,6 +514,9 @@ private final class FlippedView: NSView { override var isFlipped: Bool { true } 
         }
         doc.setFrameSize(NSSize(width: w, height: y + 2))
         doc.autoresizingMask = .width
+        let maxY = max(0, doc.frame.height - scroll.contentView.bounds.height)
+        scroll.contentView.scroll(to: NSPoint(x: 0, y: min(keptY, maxY)))
+        scroll.reflectScrolledClipView(scroll.contentView)
         footer.stringValue = list.footer
         DispatchQueue.main.async { [weak self] in self?.onMoved?() }
     }
@@ -620,8 +625,8 @@ private final class FlippedView: NSView { override var isFlipped: Bool { true } 
                                    },
                                    more: { [weak self] in
                                        let section: LibraryModel.Section = sharing ? .sharing : .downloads
+                                       self?.commands.showMain(section, nil)  // a tab switch closes every list: open this one after it
                                        FilesStore.shared.expand(id)
-                                       self?.commands.showMain(section, nil)
                                        menu.cancelTracking()
                                    },
                                    play: { [weak self] node in

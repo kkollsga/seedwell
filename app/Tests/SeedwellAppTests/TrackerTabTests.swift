@@ -4,10 +4,10 @@ import Testing
 
 // The tracker tab (SPEC 8.3): its groups, fold keys and the shift-click range.
 
-private func row(_ id: String, tracker: String = "t1") -> TransferRow {
+private func row(_ id: String, tracker: String = "t1", kind: TransferKind = .torrent, down: UInt64 = 0, up: UInt64 = 0) -> TransferRow {
     TransferRow(
-        id: id, name: id, displayName: id, kind: .torrent, category: .movie,
-        sizeBytes: 1, doneBytes: 0, downRate: 0, upRate: 0, etaSecs: nil, trackerId: tracker,
+        id: id, name: id, displayName: id, kind: kind, category: .movie,
+        sizeBytes: 1, doneBytes: 0, downRate: down, upRate: up, etaSecs: nil, trackerId: tracker,
         trackerName: tracker, ratio: 0, ratioGoal: nil, seedSecs: 0, state: .queued, finishedAt: nil, savePath: "/x",
         fileExt: "mkv", seedGroup: nil, error: nil, retryInSecs: nil, movingPercent: nil, awaitingChoice: false,
         pending: nil, peers: 0, swarm: nil, knownPeers: 0, hasVideo: false, videoExt: "", fileCount: 1, lastActivity: nil, waitingNote: nil, waitingIsError: false, trackerHalted: false)
@@ -23,11 +23,11 @@ private let counts = SharingCounts(popular: 1, active: 2, dormant: 1, error: 0, 
 @MainActor @Suite("Tracker tab")
 struct TrackerTabTests {
     @Test func blocksAndSubgroupsInOrderWithCounts() {
-        let g = build(down: ["a"], recent: ["b", "c"], sharing: [.popular: ["p"], .dormant: ["d"]])
-        #expect(g.map(\.id) == ["downloads", "downloading", "recent", "sharing", "popular", "dormant"])
-        #expect(g.first?.isBlock == true && g.first?.trailing == "3")
+        let g = build(down: ["a"], queued: ["q"], sharing: [.popular: ["p"], .dormant: ["d"]])
+        #expect(g.map(\.id) == ["downloads", "downloading", "queued", "sharing", "popular", "dormant"])
+        #expect(g.first?.isBlock == true && g.first?.trailing == "2")
         #expect(g.first { $0.id == "sharing" }?.trailing == "2")
-        #expect(g.filter { $0.parent == "downloads" }.map(\.id) == ["downloading", "recent"])
+        #expect(g.filter { $0.parent == "downloads" }.map(\.id) == ["downloading", "queued"])
     }
 
     @Test func emptyGroupsAndBlocksAreHidden() {
@@ -36,9 +36,65 @@ struct TrackerTabTests {
         #expect(build(queued: ["q"]).map(\.id) == ["downloads", "queued"])
     }
 
-    @Test func aRecentlyFinishedTorrentIsListedOnce() {
+    @Test func aFinishedTorrentMovesToSharing() {
+        // Just finished: still in the recent list, already a seed. It is listed once, as a seed.
         let g = build(recent: ["a"], sharing: [.active: ["a"]])
+        #expect(g.map(\.id) == ["sharing", "active"])
+        #expect(g.first { $0.id == "active" }?.rows.map(\.id) == ["a"])
+        // No longer downloading, whatever the recent list says.
+        #expect(!build(down: [], recent: ["a"], sharing: [.popular: ["a"]]).contains { $0.id == "recent" || $0.id == "downloads" })
+    }
+
+    @Test func aFinishedDirectDownloadStaysUnderRecentlyFinished() {
+        let g = Lists.trackerGroups(downloading: [], queued: [], recent: [row("w", kind: .direct), row("t")],
+                                    sharing: [:], counts: counts, remaining: { _ in 0 }, showMore: { _ in })
         #expect(g.map(\.id) == ["downloads", "recent"])
+        #expect(g.last?.rows.map(\.id) == ["w"])
+    }
+
+    @Test func seedRowsShowTheirUploadRate() {
+        let seeding = row("s", up: 2_000_000)
+        #expect(seeding.headlineRate(.active)?.hasPrefix("↑ ") == true)
+        #expect(row("d", down: 1_000_000).headlineRate(.download) == nil)  // queued state: nothing flows
+    }
+
+    @Test func summaryTextShowsCombinedRates() {
+        #expect(LibraryModel.trackerSummary(name: "t1", down: 0, up: 0) == "t1 · ↓ \(Fmt.rate(0)) · ↑ \(Fmt.rate(0))")
+        let rows = [row("a", down: 100, up: 5), row("a", down: 100, up: 5), row("b", up: 7), row("c", tracker: "t2", up: 99)]
+        let r = LibraryModel.sumRates(rows, tracker: "t1")  // a duplicate counts once; other trackers do not
+        #expect(r.down == 100 && r.up == 12)
+    }
+
+    @Test func lastWeekCoversTodayAndSixDaysBefore() {
+        let d = (0..<30).map { DailyStat(daysAgo: UInt32($0), downBytes: 10, upBytes: 20) }
+        let w = TrackerHeader.lastWeek(d)
+        #expect(w.up == 140 && w.down == 70 && w.ratio == 2)
+        #expect(TrackerHeader.lastWeek([]).ratio == 0)
+    }
+
+    @MainActor @Test func tickingFilesOfAnOpenListDoesNotTakeTheWindow() throws {
+        let m = try #require(Self.model())
+        let s = m.snapshot
+        #expect(!LibraryModel.staysInPlace("zz", section: .downloads, trackerInfo: false, open: false, snapshot: s))  // list closed: normal takeover
+        #expect(LibraryModel.staysInPlace("zz", section: .downloads, trackerInfo: false, open: true, snapshot: s))
+        #expect(!LibraryModel.staysInPlace("zz", section: .sharing, trackerInfo: false, open: true, snapshot: s))  // it leaves Sharing: follow it
+        #expect(!LibraryModel.staysInPlace("zz", section: .tracker("t1"), trackerInfo: false, open: true, snapshot: s))  // not that tracker's
+    }
+
+    @MainActor @Test func switchingTabsClosesEveryTorrent() throws {
+        let m = try #require(Self.model())
+        FilesStore.shared.expand("x1")
+        #expect(FilesStore.shared.isExpanded("x1"))
+        m.select(.downloads)  // same tab: stays open
+        #expect(FilesStore.shared.isExpanded("x1"))
+        m.select(.sharing)
+        #expect(!FilesStore.shared.isExpanded("x1"))
+        FilesStore.shared.expand("x2")
+        m.select(.downloads)
+        #expect(!FilesStore.shared.isExpanded("x2"))
+        FilesStore.shared.expand("x3")  // a takeover that opens its row after the switch keeps it
+        #expect(FilesStore.shared.isExpanded("x3"))
+        FilesStore.shared.collapseAll()
     }
 
     @Test func rangeFollowsListOrderAcrossGroups() {

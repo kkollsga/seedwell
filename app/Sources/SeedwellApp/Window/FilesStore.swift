@@ -38,6 +38,13 @@ import Observation
         if selectedTorrent == id { clearSelection() }
     }
 
+    /// A tab switch: every torrent opens closed again (the group folds are a separate, remembered setting).
+    func collapseAll() {
+        for id in expanded { states[id] = nil }
+        expanded = []
+        clearSelection()
+    }
+
     /// The menu bar's own store: lists it fetched itself (`FileTreeState.loadNow`) and frees when its submenu closes.
     func adopt(_ st: FileTreeState) { states[st.id] = st }
     func drop(_ id: String) { states[id] = nil }

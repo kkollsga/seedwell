@@ -13,16 +13,18 @@ struct UpdatesGroup: View {
             SettingsRow(label: "Install automatically", hint: "When nothing is downloading") {
                 sw(installBinding).disabled(!center.switchesActive || !checkBinding.wrappedValue)
             }
-            HStack(spacing: 8) {
-                statusView
-                Spacer(minLength: 12)
-                Button("Check Now") { center.checkNow() }
-                    .disabled(!center.canCheck)
-                    .help("Look for a newer version of Seedwell now")
-                if let v = center.availableVersion {
-                    Button("Update to \(v)") { center.install() }
+            SettingsRow(label: "Check for updates", hint: statusText) {
+                HStack(spacing: 8) {
+                    Button("Check Now") { center.checkNow() }
                         .disabled(!center.canCheck)
-                        .help("Download, check and install Seedwell \(v), then reopen it")
+                        .help("Look for a newer version of Seedwell now")
+                    if let v = center.availableVersion {
+                        Button("Update to \(v)") { center.install() }
+                            .disabled(!center.canCheck)
+                            .help("Download, check and install Seedwell \(v), then reopen it")
+                    }
+                    if case .available(_, let notes?) = center.status { Link("Release Notes", destination: notes) }
+                    if case .installFailed = center.status { Button("Show Log") { center.revealLog() }.buttonStyle(.link) }
                 }
             }
         }
@@ -40,34 +42,19 @@ struct UpdatesGroup: View {
             : $model.app.updates.autoInstall
     }
 
-    @ViewBuilder private var statusView: some View {
+    /// The status line beside the buttons, in the row's secondary text.
+    private var statusText: String {
         let v = center.currentVersion
         switch center.status {
-        case .idle:
-            Text(center.backend == .sparkle ? "Seedwell \(v)" : "Seedwell \(v) · not checked yet").foregroundStyle(.secondary)
-        case .checking:
-            Text("Checking…").foregroundStyle(.secondary)
-        case .upToDate(let at):
-            Text(at.map { "Seedwell \(v) is up to date · checked \(Self.ago($0))" } ?? "Seedwell \(v) is up to date").foregroundStyle(.secondary)
-        case .available(let ver, let notes):
-            HStack(spacing: 8) {
-                Text("Seedwell \(ver) is available")
-                if let notes { Link("Release Notes", destination: notes) }
-            }
-        case .noReleases:
-            Text("No releases yet").foregroundStyle(.secondary)
-        case .checkFailed(let why):
-            Text("Couldn't check: \(why)").foregroundStyle(.secondary)
-        case .installing(let ver):
-            Text("Installing \(ver)…").foregroundStyle(.secondary)
-        case .installFailed(let ver):
-            HStack(spacing: 8) {
-                Text("Update to \(ver) failed")
-                Text("·").foregroundStyle(.secondary)
-                Button("Show Log") { center.revealLog() }.buttonStyle(.link)
-            }
-        case .updated(let ver):
-            Text("Updated to \(ver)").foregroundStyle(.secondary)
+        case .idle: return center.backend == .sparkle ? "Seedwell \(v)" : "Seedwell \(v) · not checked yet"
+        case .checking: return "Checking…"
+        case .upToDate(let at): return at.map { "Seedwell \(v) is up to date · checked \(Self.ago($0))" } ?? "Seedwell \(v) is up to date"
+        case .available(let ver, _): return "Seedwell \(ver) is available"
+        case .noReleases: return "No releases yet"
+        case .checkFailed(let why): return "Couldn't check: \(why)"
+        case .installing(let ver): return "Installing \(ver)…"
+        case .installFailed(let ver): return "Update to \(ver) failed"
+        case .updated(let ver): return "Updated to \(ver)"
         }
     }
 

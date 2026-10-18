@@ -98,9 +98,7 @@ import Observation
             // Lifetime totals change slowly and reading them forces a database flush: every 5 s.
             if statsFor != id || ticks % 5 == 0 {
                 trackerStats = core.trackerStats(trackerId: id)
-            }
-            if statsFor != id {
-                daily = core.trackerDaily(trackerId: id, days: 30)
+                daily = core.trackerDaily(trackerId: id, days: 30)  // the header's last 7 days move with today
                 statsFor = id
             }
         } else {
@@ -124,6 +122,9 @@ import Observation
             downloadsFlag = true
             return false
         }
+        // The user is ticking files in this torrent's open list and the torrent stays in this tab (Downloads, or
+        // its own tracker's): the window must not jump, scroll to the row or clear the file selection under them.
+        if Self.staysInPlace(id, section: section, trackerInfo: trackerInfo, open: FilesStore.shared.isExpanded(id), snapshot: snapshot) { return false }
         if !search.isEmpty { search = "" }
         adding = false
         if section != .downloads || trackerInfo { select(.downloads) } else { FilesStore.shared.clearSelection(); infoID = nil }
@@ -134,11 +135,25 @@ import Observation
         return true
     }
 
+    /// Whether a download that arrives because its files were ticked in the window's own open list needs no
+    /// takeover: it will be listed in the tab already shown.
+    static func staysInPlace(_ id: String, section: Section, trackerInfo: Bool, open: Bool, snapshot s: Snapshot) -> Bool {
+        guard open, !trackerInfo else { return false }
+        switch section {
+        case .downloads: return true
+        case .tracker(let t): return (s.allDownloading + s.allQueued).contains { $0.id == id && $0.trackerId == t }
+        default: return false
+        }
+    }
+
     func scrollDone(_ r: ScrollRequest) { if scrollRequest == r { scrollRequest = nil } }
 
     func select(_ s: Section) {
         if s == .downloads { downloadsFlag = false }
-        if s != section { statsFor = nil; trackerStats = nil; groups = [:] }
+        if s != section {
+            statsFor = nil; trackerStats = nil; groups = [:]
+            FilesStore.shared.collapseAll()  // a tab opens with every torrent closed (SPEC 8.3)
+        }
         section = s
         trackerInfo = false
         selection = []
@@ -191,13 +206,13 @@ import Observation
         }
     }
 
-    /// "tracker-z.cc · 44 torrents" on a tracker tab, else the section's own line.
+    /// "tracker-z.cc · ↓ 2.1 MB/s · ↑ 340 KB/s" on a tracker tab, else the section's own line.
     var summary: String {
         switch section {
         case .tracker(let id):
             guard let t = tracker else { return id }
             if trackerInfo { return "\(t.name) · Info" }
-            return "\(t.name) · \(t.count) torrent\(t.count == 1 ? "" : "s")"
+            return Self.trackerSummary(name: t.name, down: trackerRates.down, up: trackerRates.up)
         case .downloads:
             let s = snapshot
             let held = s.downloading.filter(\.awaitingChoice).count
@@ -216,6 +231,29 @@ import Observation
         }
     }
 
+    static func trackerSummary(name: String, down: UInt64, up: UInt64) -> String {
+        "\(name) · ↓ \(Fmt.rate(down)) · ↑ \(Fmt.rate(up))"
+    }
+
+    /// The tracker's torrents moving now, bytes/s: its downloads and the sharing rows fetched for the tab (the
+    /// same rows the tab lists, so the line agrees with them).
+    var trackerRates: (down: UInt64, up: UInt64) {
+        guard let id = trackerID else { return (0, 0) }
+        let s = snapshot
+        let rows = (s.allDownloading + s.allQueued + SeedGroup.allCases.flatMap { groups[$0] ?? [] })
+        return Self.sumRates(rows, tracker: id)
+    }
+
+    static func sumRates(_ rows: [TransferRow], tracker: String) -> (down: UInt64, up: UInt64) {
+        var seen = Set<String>()
+        var down: UInt64 = 0, up: UInt64 = 0
+        for r in rows where r.trackerId == tracker && r.kind == .torrent && seen.insert(r.id).inserted {
+            down += r.downRate
+            up += r.upRate
+        }
+        return (down, up)
+    }
+
     /// "↓ 2.1 MB/s · ↑ 340 KB/s": both rates in the toolbar line of Downloads and Sharing.
     static func rates(_ s: Snapshot) -> String { "↓ \(Fmt.rate(s.downRate)) · ↑ \(Fmt.rate(s.upRate))" }
 
@@ -231,9 +269,11 @@ import Observation
         case .downloads: return (s.downloading + s.queued + s.recent).filter(matches)
         case .sharing: return SeedGroup.allCases.flatMap { groups[$0] ?? [] }
         case .tracker:
-            let top = (s.allDownloading + s.allQueued + s.allRecent).filter(matches)
-            let shownTop = Set(top.map(\.id))
-            return top + SeedGroup.allCases.flatMap { groups[$0] ?? [] }.filter { !shownTop.contains($0.id) }
+            let seeds = SeedGroup.allCases.flatMap { groups[$0] ?? [] }
+            let seeding = Set(seeds.map(\.id))
+            // As the tab lists them: a finished torrent is in Sharing; only a finished direct download stays under Recently Finished.
+            let top = (s.allDownloading + s.allQueued + s.allRecent.filter { $0.kind != .torrent && !seeding.contains($0.id) }).filter(matches)
+            return top + seeds
         case .settings: return []
         }
     }

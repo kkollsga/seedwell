@@ -2,7 +2,7 @@ import SwiftUI
 
 /// Which tab is showing, and which tracker profile to open in Rules (from the sidebar's "Edit Tracker…").
 @MainActor @Observable final class SettingsNavigation {
-    var tab: SettingsTab = .transfers
+    var tab: SettingsTab = .general
     var trackerToEdit: String?
     /// Opens a tracker's tab in the main window ("Show Torrents" of a hidden tracker); wired by the window controller.
     @ObservationIgnored var openTracker: (String) -> Void = { _ in }
@@ -116,6 +116,7 @@ struct GeneralTab: View {
 
     var body: some View {
         SettingsPage {
+            UpdatesGroup(model: model)
             SettingsGroup(title: "Startup") {
                 SettingsRow(label: "Launch at login") { sw($model.app.general.launchAtLogin) }
             }
@@ -140,7 +141,6 @@ struct GeneralTab: View {
                     .pickerStyle(.segmented).labelsHidden().fixedSize()
                 }
             }
-            UpdatesGroup(model: model)
         }
     }
 }

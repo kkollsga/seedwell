@@ -240,9 +240,10 @@ extension RowList where Header == EmptyView {
 }
 
 extension Lists {
-    /// A tracker tab (SPEC §8.3): a Downloads block (Downloading, Queued, Recently Finished) and a Sharing block
-    /// (the sharing groups), each subgroup only when it has rows and each block only when a subgroup does.
-    /// A just-finished torrent is listed once, under Recently Finished.
+    /// A tracker tab (SPEC §8.3): a Downloads block (Downloading, Queued, and Recently Finished for downloads that
+    /// are not torrents) and a Sharing block (the sharing groups), each subgroup only when it has rows and each
+    /// block only when a subgroup does. A torrent that finished downloading leaves the Downloads block at once and
+    /// is listed in its Sharing group, with its upload rate like any other seed.
     static func tracker(_ model: LibraryModel, commands: Commands) -> [RowGroup] {
         let s = model.snapshot
         return trackerGroups(downloading: s.allDownloading.filter(model.matches), queued: s.allQueued.filter(model.matches),
@@ -256,17 +257,19 @@ extension Lists {
         func sub(_ id: String, _ title: String, _ style: RowStyle, _ rows: [TransferRow], parent: String) -> RowGroup {
             RowGroup(id: id, title: title, trailing: "\(rows.count)", style: style, rows: rows, parent: parent)
         }
+        // A finished torrent is a seed: it is in the Sharing groups, not here. Only what Sharing cannot list
+        // (a finished direct download) stays under Recently Finished.
+        let seeding = Set(sharing.values.flatMap { $0.map(\.id) })
+        let finished = recent.filter { $0.kind != .torrent && !seeding.contains($0.id) }
         let downloads = [
             sub("downloading", "Downloading", .download, downloading, parent: "downloads"),
             sub("queued", "Queued", .queued, queued, parent: "downloads"),
-            sub("recent", "Recently Finished", .recent, recent, parent: "downloads"),
+            sub("recent", "Recently Finished", .recent, finished, parent: "downloads"),
         ].filter { !$0.rows.isEmpty }
-        let listed = Set(recent.map(\.id))
         let seeds: [RowGroup] = SeedGroup.allCases.compactMap { g in
-            let all = sharing[g] ?? []
-            let rows = all.filter { !listed.contains($0.id) }
+            let rows = sharing[g] ?? []
             guard !rows.isEmpty else { return nil }
-            let n = max(rows.count, counts.count(g) - (all.count - rows.count))
+            let n = max(rows.count, counts.count(g))
             let hint: String? = switch g {
             case .dormant: "Resting in low power: still announcing on schedule, wakes instantly when a peer asks."
             case .error: "Retrying automatically."
