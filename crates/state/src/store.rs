@@ -27,7 +27,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use redb::{Database, ReadTransaction, ReadableTable, TableDefinition, WriteTransaction};
+use redb::{Database, ReadTransaction, ReadableDatabase, ReadableTable, TableDefinition, WriteTransaction};
 
 use crate::error::{DecodeError, StateError};
 use crate::fsutil::{atomic_write, unique_stamped};
@@ -141,6 +141,9 @@ pub struct OpenReport {
     pub recovered: Option<Recovery>,
     /// A schema migration ran.
     pub migrated: Option<Migrated>,
+    /// The file was written by Seedwell 0.1 (redb 2) and was converted; this is the copy of the
+    /// original taken first.
+    pub converted: Option<PathBuf>,
     /// Schema version of the open database.
     pub schema_version: u32,
 }
@@ -248,6 +251,9 @@ struct State {
     roots_by_path: HashMap<String, u32>,
     roots_by_id: HashMap<u32, String>,
     next_root: u32,
+    /// `.torrent` files written since the writer last took a batch. A commit that removed one of
+    /// these torrents must not delete its file: it belongs to the re-add.
+    rewritten: HashSet<InfoHash>,
 }
 
 pub(crate) struct Shared {
@@ -295,9 +301,11 @@ pub fn hex20(id: &InfoHash) -> String {
 
 // ------------------------------------------------------------------ open
 
-enum OpenFail {
+pub(crate) enum OpenFail {
     /// The file is damaged; moving it aside and starting fresh is safe.
     Corrupt(String),
+    /// The file uses an older redb file format (Seedwell 0.1); convert it ([`crate::legacy`]).
+    OldFormat(u8),
     /// Anything else: report and leave the file alone.
     Fatal(StateError),
 }
@@ -306,6 +314,7 @@ impl From<redb::Error> for OpenFail {
     fn from(e: redb::Error) -> Self {
         match e {
             redb::Error::Corrupted(m) => OpenFail::Corrupt(m),
+            redb::Error::UpgradeRequired(v) => OpenFail::OldFormat(v),
             redb::Error::Io(io)
                 if matches!(io.kind(), io::ErrorKind::InvalidData | io::ErrorKind::UnexpectedEof) =>
             {
@@ -325,15 +334,15 @@ impl From<StateError> for OpenFail {
     }
 }
 
-fn io_err(context: &'static str) -> impl FnOnce(io::Error) -> StateError {
+pub(crate) fn io_err(context: &'static str) -> impl FnOnce(io::Error) -> StateError {
     move |source| StateError::Io { context, source }
 }
 
-/// Run `f`, turning a panic into an error. redb 2.6 and 3.1 contain `assert!`s and unchecked slice
+/// Run `f`, turning a panic into an error. redb (2.6 for the conversion, and 4) contains `assert!`s and unchecked slice
 /// indexing on structures read from the file, so a damaged file can panic instead of returning
 /// `Corrupted`. With `panic = "unwind"` this converts it; with `panic = "abort"` (the release
 /// profile) the opening-marker protocol in [`Store::open_with`] takes over.
-fn guarded<T>(f: impl FnOnce() -> Result<T, OpenFail>) -> Result<T, OpenFail> {
+pub(crate) fn guarded<T>(f: impl FnOnce() -> Result<T, OpenFail>) -> Result<T, OpenFail> {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
         Ok(r) => r,
         Err(payload) => {
@@ -505,6 +514,7 @@ fn init_atomically(dir: &Path, path: &Path, opts: &OpenOptions) -> Result<(), St
         Ok(p) => drop(p.db),
         Err(OpenFail::Fatal(e)) => return Err(e),
         Err(OpenFail::Corrupt(m)) => return Err(StateError::Corrupt(m)),
+        Err(OpenFail::OldFormat(v)) => return Err(StateError::Legacy(format!("a new database has file format {v}"))),
     }
     fs::File::open(&tmp).and_then(|f| f.sync_all()).map_err(io_err("sync the new database"))?;
     fs::rename(&tmp, path).map_err(io_err("move the new database into place"))?;
@@ -521,6 +531,7 @@ impl Store {
     ///
     /// * A database written by a newer schema is refused with [`StateError::NewerSchema`] and not touched.
     /// * An older one is copied to `backups/` and migrated in a single transaction.
+    /// * One written by Seedwell 0.1 (redb 2) is copied to `backups/` and converted first.
     /// * A damaged one is moved to `state.redb.corrupt-<time>` and a fresh one is created; the
     ///   report says so. Other failures (permissions, already open by another process) never
     ///   move anything.
@@ -548,6 +559,7 @@ impl Store {
         }
 
         let mut fresh = false;
+        let mut converted = None;
         let prepared = loop {
             // A brand-new database is built under a temporary name and renamed into place, so a
             // crash during the very first run can never leave a half-initialised `state.redb`.
@@ -563,6 +575,31 @@ impl Store {
                 Err(OpenFail::Fatal(e)) => {
                     let _ = fs::remove_file(&marker);
                     return Err(e);
+                }
+                Err(OpenFail::OldFormat(_)) if converted.is_none() => match crate::legacy::convert(dir, &path, opts) {
+                    Ok(backup) => converted = Some(backup),
+                    Err(OpenFail::Corrupt(reason)) => {
+                        // Damaged as well as old: set it aside like any damaged file (the backup
+                        // taken before the attempt stays too).
+                        let _ = fs::remove_file(&marker);
+                        let moved_to = unique_stamped(dir, "state.redb.corrupt-", "");
+                        fs::rename(&path, &moved_to).map_err(|e| {
+                            StateError::Corrupt(format!("{reason}; and the damaged file could not be moved aside: {e}"))
+                        })?;
+                        recovered = Some(Recovery { moved_to, reason });
+                    }
+                    Err(OpenFail::Fatal(e)) => {
+                        let _ = fs::remove_file(&marker);
+                        return Err(e);
+                    }
+                    Err(OpenFail::OldFormat(v)) => {
+                        let _ = fs::remove_file(&marker);
+                        return Err(StateError::Legacy(format!("unexpected file format {v} during conversion")));
+                    }
+                },
+                Err(OpenFail::OldFormat(v)) => {
+                    let _ = fs::remove_file(&marker);
+                    return Err(StateError::Legacy(format!("still file format {v} after conversion")));
                 }
                 Err(OpenFail::Corrupt(reason)) => {
                     let _ = fs::remove_file(&marker);
@@ -611,6 +648,7 @@ impl Store {
                 roots_by_path,
                 roots_by_id,
                 next_root,
+                rewritten: HashSet::new(),
             }),
             wake: Condvar::new(),
             done: Condvar::new(),
@@ -625,6 +663,7 @@ impl Store {
             created: created || fresh,
             recovered,
             migrated,
+            converted,
             schema_version: version,
         };
         Ok(Opened { store: Store { shared, writer: Mutex::new(Some(handle)) }, report })
@@ -734,6 +773,7 @@ impl Store {
             b.counters.insert(id, CounterOp { reset: true, ..CounterOp::default() });
             b.purge_timing.insert(id);
             b.delete_files.insert(id);
+            st.rewritten.remove(&id);
         })
     }
 
@@ -771,6 +811,12 @@ impl Store {
     pub fn put_torrent_file(&self, id: &InfoHash, bytes: &[u8]) -> Result<(), StateError> {
         if bytes.len() > MAX_TORRENT_FILE {
             return Err(StateError::TooLarge { what: ".torrent file", size: bytes.len(), max: MAX_TORRENT_FILE });
+        }
+        {
+            // Claim the file before writing it; the writer deletes removed files under the same lock.
+            let mut st = self.shared.lock();
+            st.batch.delete_files.remove(id);
+            st.rewritten.insert(*id);
         }
         atomic_write(&self.torrent_file_path(id), bytes).map_err(io_err("write the .torrent file"))
     }
@@ -1228,6 +1274,7 @@ fn writer_loop(shared: &Shared) {
             }
             st.flush_requested = false;
             st.first_dirty = None;
+            st.rewritten.clear();
             (std::mem::take(&mut st.batch), st.seq)
         };
 
@@ -1241,16 +1288,23 @@ fn writer_loop(shared: &Shared) {
                 if !st.batch.is_empty() && st.first_dirty.is_none() {
                     st.first_dirty = Some(Instant::now());
                 }
-                let files: Vec<InfoHash> = batch.delete_files.iter().copied().collect();
-                // Only delete files of torrents that were not re-added since.
-                let files: Vec<InfoHash> = files.into_iter().filter(|id| !st.batch.torrents.contains_key(id)).collect();
-                drop(st);
-                for id in files {
-                    let _ = fs::remove_file(shared.torrents_dir().join(format!("{}.torrent", hex20(&id))));
+                // Only delete files of torrents that were not re-added since the batch was taken.
+                // Under the lock, so a concurrent `put_torrent_file` is either seen here or writes
+                // after the delete.
+                for id in &batch.delete_files {
+                    if !st.rewritten.contains(id) && !st.batch.torrents.contains_key(id) {
+                        let _ = fs::remove_file(shared.torrents_dir().join(format!("{}.torrent", hex20(id))));
+                    }
                 }
+                drop(st);
                 shared.done.notify_all();
             }
             Err(e) => {
+                let mut batch = batch;
+                // Files re-added while this commit ran stay, as on success.
+                for id in &st.rewritten {
+                    batch.delete_files.remove(id);
+                }
                 let newer = std::mem::take(&mut st.batch);
                 st.batch = batch.merge(newer);
                 st.fail_count += 1;

@@ -11,6 +11,7 @@
 
 use std::sync::Weak;
 
+use redb::ReadableDatabase;
 use trs_tracker::store::{StoreError, TimingKey, TimingRecord, TimingStore};
 use trs_tracker::time::Millis;
 

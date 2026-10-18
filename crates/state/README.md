@@ -363,6 +363,17 @@ would misread. Opening:
 
 Add a migration by appending to `SCHEMA.migrations` (`Migration { from, to, name, run }`) and raising `current`.
 
+### Seedwell 0.1 databases (redb 2 file format)
+
+Seedwell 0.1 wrote `state.redb` with redb 2.6 (file format v2). redb 3 dropped that format and re-encoded
+variable-width tuple keys (`stats_daily` is keyed by `(&str, u32)`), so redb 4 refuses the file with
+`UpgradeRequired`. Open then converts it: the file is copied to `backups/state.redb.redb2.<stamp>`, every
+table is read with redb 2.6 and written to `state.redb.convert` with redb 4, and that file is renamed over
+`state.redb`. A crash at any point leaves the old file or the new one, never neither. `OpenReport::converted`
+names the backup. The `meta` table comes across too, so schema migrations then run as usual. A 0.1 file that
+is also damaged is set aside like any damaged file; a conversion that fails otherwise (`StateError::Legacy`)
+leaves the file alone.
+
 ### Corruption handling
 
 * Garbage / truncated / mutated `state.redb` that redb reports as corrupt, or that makes it panic
@@ -370,7 +381,7 @@ Add a migration by appending to `SCHEMA.migrations` (`Migration { from, to, name
   `OpenReport::recovered` says why. `Store::list_torrent_files()` lets the engine rebuild its torrent
   list from `torrents/*.torrent`. Other failures (permissions, already open elsewhere, newer schema)
   never move anything.
-* **redb 2.6 (and 3.1) can panic on damaged files** (an `assert!` in the page manager, unchecked slice
+* **redb can panic on damaged files** (seen in 2.6 and 3.1) (an `assert!` in the page manager, unchecked slice
   indexing in the allocator). Two defences: `catch_unwind` around open and the integrity check, and, because
   the release profile uses `panic = "abort"`, an `opening` marker file: if opening aborts the process, the
   next launch retries once, and a second consecutive abort sets the file aside. A crash loop is therefore
@@ -396,7 +407,8 @@ which keeps DST handling with the OS and makes tests deterministic. Weeks start 
 
 | Crate | Why |
 |---|---|
-| `redb` 2.x | the transactional store; pure Rust, copy-on-write, crash safe. 2.x because 3.x needs Rust 1.89 and the workspace MSRV is 1.85 (3.1 has the same panic-on-corruption behaviour) |
+| `redb` 4.x | the transactional store; pure Rust, copy-on-write, crash safe |
+| `redb` 2.6 (as `redb2`) | reads a Seedwell 0.1 database once to convert it (`src/legacy.rs`); can go once no 0.1 files are left |
 | `serde` (derive) + `toml` | TOML documents; `toml` with `preserve_order` (uses `indexmap`, already in the tree via `toml_edit`) so files keep the struct order |
 | `trs-tracker` (no default features) | the `TimingStore` trait only; none of the async transports are built |
 | `trs-classify` | the `Category` enum |
