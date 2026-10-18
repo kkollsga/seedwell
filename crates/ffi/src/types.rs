@@ -332,6 +332,9 @@ pub struct RowQuery {
     pub tracker_id: Option<String>,
     /// Case-insensitive substring of the name; empty = all.
     pub text: String,
+    /// Only this category; none = all.
+    #[uniffi(default = None)]
+    pub category: Option<Category>,
     pub offset: u32,
     pub limit: u32,
 }

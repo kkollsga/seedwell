@@ -685,7 +685,7 @@ import AppKit
             let s = core.snapshot()
             snap.append(Double(DispatchTime.now().uptimeNanoseconds - t0) / 1e6)
             let t1 = DispatchTime.now().uptimeNanoseconds
-            _ = core.sharingCounts(trackerId: nil, text: "")
+            _ = core.sharingCounts(trackerId: nil, category: nil, text: "")
             for g in SeedGroup.allCases {
                 _ = core.sharingRows(query: RowQuery(group: g, trackerId: nil, text: "", offset: 0, limit: 150))
             }

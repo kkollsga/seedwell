@@ -132,7 +132,8 @@ configured; Sparkle, used only by a build that carries `SUPublicEDKey` and `SUFe
 - `release-zip.sh` writes `latest.json` next to the zip (`version`, `tag`, `notes_url`, `minimum_macos`, `zip`, `sha256`, all from
   the script's own values) and `--draft` uploads it with the other assets. It is not in `SHA256SUMS`; `install.sh` checks the zip itself.
 - Installed copies read `<repo>/releases/latest/download/latest.json` once a day, which GitHub resolves to the release marked
-  **Latest**. So **Publish is the moment users are notified** (within a day). A draft, or a release marked as pre-release,
+  **Latest**. So **Publish is the moment users are notified** (within a day). For a minute or two after publishing, GitHub still
+  resolves `latest` to the previous release on some requests, so an immediate Check Now can report "up to date". A draft, or a release marked as pre-release,
   is never offered. A bad release is withdrawn by deleting it or by marking the previous release as Latest.
 - Only release builds (`SEEDWELL_RELEASE=1`, set by `release-zip.sh`) check and install by themselves; your own
   development builds (`build.sh`, `tools/install-local.sh`) only check when you press Check Now.

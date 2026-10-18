@@ -253,7 +253,7 @@ indirect enum MenuEntry {
         out.append(.submenu("Priority", Priority.all.map { p in
             .item(p == .high ? "★ High" : p.label, checked: info?.priority == p) { self.core.setPriority(ids: ids, priority: p) }
         }))
-        if !sharing {
+        do {
             let title = single ? "Category: \(first.category.label)" : "Category"
             var cats: [MenuEntry] = Category.all.map { c in
                 .item(c.label, checked: single && c == first.category) { self.core.setCategory(ids: ids, category: c) }

@@ -1,6 +1,6 @@
 ---
 name: release
-description: Cut a Seedwell release end to end - tidy the repo (open pull requests, stale branches, leftovers), publish master's tree to public main, wait for CI, tag, let the release workflow build the draft, check it, and publish when the user says so. Use when the user asks to release, ship, or make a new version.
+description: Cut a Seedwell release end to end - tidy the repo (open pull requests, stale branches, leftovers), publish master's tree to public main, wait for CI, tag, let the release workflow build the draft, check it, and publish it. Invoked while work is in progress, it pre-authorizes the release for when that work is done. Use when the user asks to release, ship, or make a new version.
 ---
 
 # /release
@@ -13,9 +13,16 @@ Read `AGENTS.md` and `docs/RELEASING.md` first. Their rules win over anything he
 - Never touch the installed `/Applications/Seedwell.app` or its data. Do not run `tools/install-local.sh` unless the
   user asks.
 
-Invoking `/release` is the user's go-ahead for steps 1-6: merging Dependabot pull requests, pushing `main`, and
-pushing the tag. **Publishing the draft (step 7) needs a separate, explicit yes.** Anything the steps below say to
-ask about, ask about. Stop and report if a step fails, rather than working around it.
+Invoking `/release` is the user's go-ahead for the whole release, publishing included: merging Dependabot pull
+requests, pushing `main`, pushing the tag and publishing the draft. Anything the steps below say to ask about
+(a PR or branch we did not make, removals), ask about. Stop and report if a step fails, rather than working around
+it. If the release is withdrawn or the user says to hold, stop where you are.
+
+**Called mid-flight.** If `/release` arrives while work the user asked for is still open (a worker running, edits
+not yet built, tested or committed, follow-ups the user just raised), it is a pre-authorization, not an interrupt:
+finish that work first, to the usual standard (built, tested, reviewed, committed), then run the steps below without
+asking again. Requests the user adds before the release is published join it. Tell the user in one line that the
+release will follow once the work is done.
 
 ## 1. Version
 
@@ -138,9 +145,10 @@ gh pr list --state open --json number,title,author,headRefName,statusCheckRollup
     compare.
   - The notes read sensibly.
 
-## 7. Publish (ask first)
+## 7. Publish
 
-- Show the user the notes and the asset list, and ask whether to publish. On a yes:
+- Covered by `/release`. If the notes need tidying (CI plumbing, lines that are no longer true), edit them first
+  (`gh release edit vX.Y.Z --notes-file …`). Then:
   ```sh
   gh release edit vX.Y.Z --draft=false --latest
   ```
@@ -148,8 +156,9 @@ gh pr list --state open --json number,title,author,headRefName,statusCheckRollup
   ```sh
   curl -fsSL https://github.com/kkollsga/seedwell/releases/latest/download/latest.json
   ```
-  Installed copies notice within a day, or at once with **Check Now** (Settings › General › Updates, or the menu's
-  Update row).
+  For a minute or two after publishing, GitHub's `releases/latest` still answers with the previous release on some
+  requests. Repeat the check until several answers in a row name X.Y.Z before telling the user to press **Check Now**
+  (Settings › General › Updates, or the menu's Update row). Installed copies otherwise notice within a day.
 
 ## 8. Report
 

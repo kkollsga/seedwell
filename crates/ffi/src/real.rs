@@ -882,8 +882,8 @@ impl Backend for RealBackend {
         rows::query(&self.loaded(CACHE_AGE).rows, q, &self.hidden())
     }
 
-    fn sharing_counts(&self, tracker_id: Option<&str>, text: &str) -> SharingCounts {
-        rows::counts(&self.loaded(CACHE_AGE).rows, tracker_id, text, &self.hidden())
+    fn sharing_counts(&self, tracker_id: Option<&str>, category: Option<Category>, text: &str) -> SharingCounts {
+        rows::counts(&self.loaded(CACHE_AGE).rows, tracker_id, category, text, &self.hidden())
     }
 
     fn tracker_of(&self, id: &str) -> Option<String> {

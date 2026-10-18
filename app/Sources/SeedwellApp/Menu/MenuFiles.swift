@@ -94,38 +94,44 @@ extension FileTree {
     var hovered: Bool { get set }
 }
 
-/// The small checkbox of the menu's rows (torrent rows and file rows alike): an outlined rounded box, filled
-/// with the accent colour and a tick when on, a dash when mixed, empty when off.
+/// The checkbox of the menu's rows (torrent rows and file rows alike), drawn rather than an NSButton so it
+/// follows the row's own highlight: an accent-filled rounded box with a bold white tick when on (a dash when
+/// mixed), a softly filled box with a clear outline when off, so on and off read at a glance.
 enum MenuCheckbox {
-    static let size: CGFloat = 13
+    static let size: CGFloat = 14
 
     static func draw(at origin: NSPoint, state: FileTree.Check, hovered: Bool) {
         let box = NSRect(origin: origin, size: NSSize(width: size, height: size))
-        let path = NSBezierPath(roundedRect: box.insetBy(dx: 0.5, dy: 0.5), xRadius: 3, yRadius: 3)
+        let path = NSBezierPath(roundedRect: box.insetBy(dx: 0.5, dy: 0.5), xRadius: 4, yRadius: 4)
         // On a lit row the accent is the background: the box turns white there.
-        let mark: NSColor
         if state == .off {
+            (hovered ? NSColor.selectedMenuItemTextColor.withAlphaComponent(0.18) : NSColor.quaternaryLabelColor).setFill()
+            path.fill()
             (hovered ? NSColor.selectedMenuItemTextColor : NSColor.secondaryLabelColor).setStroke()
-            path.lineWidth = 1
+            path.lineWidth = 1.2
             path.stroke()
             return
         }
+        let mark: NSColor
         if hovered {
             NSColor.selectedMenuItemTextColor.setFill(); mark = .selectedContentBackgroundColor
+            path.fill()
         } else {
-            NSColor.controlAccentColor.setFill(); mark = .white
+            let accent = NSColor.controlAccentColor
+            let top = accent.blended(withFraction: 0.18, of: .white) ?? accent
+            NSGradient(starting: top, ending: accent)?.draw(in: path, angle: -90)
+            mark = .white
         }
-        path.fill()
         mark.setStroke()
         let m = NSBezierPath()
-        m.lineWidth = 1.6; m.lineCapStyle = .round; m.lineJoinStyle = .round
+        m.lineWidth = 2; m.lineCapStyle = .round; m.lineJoinStyle = .round
         if state == .on {
-            m.move(to: NSPoint(x: box.minX + 3.2, y: box.midY - 0.2))
-            m.line(to: NSPoint(x: box.minX + 5.5, y: box.minY + 3.4))
-            m.line(to: NSPoint(x: box.maxX - 3, y: box.maxY - 3.6))
+            m.move(to: NSPoint(x: box.minX + 3.4, y: box.midY))
+            m.line(to: NSPoint(x: box.minX + 5.9, y: box.minY + 3.6))
+            m.line(to: NSPoint(x: box.maxX - 3.2, y: box.maxY - 3.6))
         } else {
-            m.move(to: NSPoint(x: box.minX + 3.5, y: box.midY))
-            m.line(to: NSPoint(x: box.maxX - 3.5, y: box.midY))
+            m.move(to: NSPoint(x: box.minX + 3.6, y: box.midY))
+            m.line(to: NSPoint(x: box.maxX - 3.6, y: box.midY))
         }
         m.stroke()
     }
@@ -157,6 +163,8 @@ extension NSView {
         var playable = false
         /// The list has videos: the Play column is kept free in every row, so the sizes line up.
         var reservesPlay = false
+        /// The file type's icon (the folder icon for a folder), as in the window's file list. nil for a command.
+        var iconExt: String?
     }
 
     var content: Content { didSet { if content != oldValue { needsDisplay = true; refreshAccessibility() } } }
@@ -233,6 +241,7 @@ extension NSView {
             NSBezierPath(roundedRect: bounds.insetBy(dx: Self.edge, dy: 1), xRadius: 5, yRadius: 5).fill()
         }
         let isFile = content.check != nil
+        let skippedIcon = content.check == .off && !hovered
         let ink: NSColor = hovered ? .selectedMenuItemTextColor : (isFile ? .secondaryLabelColor : .labelColor)
         let faint: NSColor = hovered ? .selectedMenuItemTextColor : (isFile ? .tertiaryLabelColor : .secondaryLabelColor)
         func symbol(_ name: String, size: CGFloat, color: NSColor, at x: CGFloat) -> CGFloat {
@@ -244,12 +253,21 @@ extension NSView {
 
         var x = Self.edge + 10
         if content.check != nil {
-            if let open = content.disclosure { _ = symbol(open ? "chevron.down" : "chevron.right", size: 8, color: faint, at: chevronX + 2) }
+            // The fold chevron in the label colour, not the faint one: it is a control, and must be seen.
+            if let open = content.disclosure {
+                _ = symbol(open ? "chevron.down" : "chevron.right", size: 10, color: hovered ? .selectedMenuItemTextColor : .secondaryLabelColor, at: chevronX + 1)
+            }
             x = chevronX + 18
             if let check = content.check {
                 MenuCheckbox.draw(at: NSPoint(x: x, y: ((bounds.height - MenuCheckbox.size) / 2).rounded()), state: check, hovered: hovered)
             }
-            x += 17
+            x += 19
+        }
+        if let ext = content.iconExt {
+            let s: CGFloat = 14
+            FileIcons.icon(ext: ext).draw(in: NSRect(x: x, y: ((bounds.height - s) / 2).rounded(), width: s, height: s),
+                                          from: .zero, operation: .sourceOver, fraction: skippedIcon ? 0.5 : 1)
+            x += s + 5
         }
 
         // File rows sit in a scroll view whose overlay scroller and the menu's own inset eat into the
@@ -383,7 +401,7 @@ extension NSView {
         if let running {
             // The same checkbox as the file rows: ticked while it runs, empty while it is paused.
             MenuCheckbox.draw(at: NSPoint(x: Self.checkX, y: ((bounds.height - MenuCheckbox.size) / 2).rounded()), state: running ? .on : .off, hovered: hovered)
-            x += 17
+            x += 19
         }
         if let image {
             let r = NSRect(x: x, y: (bounds.height - image.size.height) / 2, width: image.size.width, height: image.size.height)
@@ -432,8 +450,8 @@ private final class FlippedView: NSView { override var isFlipped: Bool { true } 
     private let footerHeight: CGFloat = 22
     /// The window's file rows are 21 pt; the menu's are as compact.
     private static let rowHeight: CGFloat = 20
-    /// Visible height of the list.
-    static let maxList: CGFloat = 200
+    /// Visible height of the list: about seven rows, so an open list never takes over the menu.
+    static let maxList: CGFloat = 144
     private(set) var open: Set<Int>
     private(set) var rows: [MenuCheckRow] = []
     private let state: () -> FileTree?
@@ -467,6 +485,15 @@ private final class FlippedView: NSView { override var isFlipped: Bool { true } 
         footer.frame = NSRect(x: 16, y: 3, width: width - 32, height: 16)
         footer.autoresizingMask = .width
         footer.lineBreakMode = .byTruncatingTail
+        // NSMenu highlights the whole item under the pointer, and this panel is one item: behind its rows that
+        // drew one grey block, as if every file were hovered. The menu's own material, opaque to that highlight,
+        // keeps the only highlight the row's own.
+        let backdrop = NSVisualEffectView(frame: bounds)
+        backdrop.material = .menu
+        backdrop.blendingMode = .behindWindow
+        backdrop.state = .followsWindowActiveState
+        backdrop.autoresizingMask = [.width, .height]
+        addSubview(backdrop)
         addSubview(scroll); addSubview(header); addSubview(footer)
         scroll.contentView.postsBoundsChangedNotifications = true
         NotificationCenter.default.addObserver(forName: NSView.boundsDidChangeNotification, object: scroll.contentView, queue: .main) { [weak self] _ in
@@ -523,7 +550,8 @@ private final class FlippedView: NSView { override var isFlipped: Bool { true } 
 
     private static func content(_ e: MenuFileList.Entry, reservesPlay: Bool) -> MenuCheckRow.Content {
         .init(title: e.title, trailing: e.size, check: e.check, disclosure: e.isFolder ? e.isOpen : nil, indent: e.depth,
-              playable: e.isVideo, reservesPlay: reservesPlay)
+              playable: e.isVideo, reservesPlay: reservesPlay,
+              iconExt: e.isFolder ? "" : (e.title as NSString).pathExtension.lowercased())
     }
 
     /// A tick changed (an edit, the engine's answer): checks and footer follow the tree.

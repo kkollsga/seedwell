@@ -12,6 +12,9 @@ enum Fmt {
         return String(format: value < 10 ? "%.1f %@" : "%.0f %@", value, units[k])
     }
 
+    /// A live rate for a slot that is always there: "2.1 MB/s", or "– KB/s" while nothing flows.
+    static func liveRate(_ n: UInt64) -> String { n == 0 ? "– KB/s" : rate(n) }
+
     static func rate(_ n: UInt64) -> String {
         n == 0 ? "0 KB/s" : bytes(max(n, 1_000)) + "/s"
     }

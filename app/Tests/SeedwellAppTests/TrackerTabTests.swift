@@ -54,12 +54,13 @@ struct TrackerTabTests {
 
     @Test func seedRowsShowTheirUploadRate() {
         let seeding = row("s", up: 2_000_000)
-        #expect(seeding.headlineRate(.active)?.hasPrefix("↑ ") == true)
-        #expect(row("d", down: 1_000_000).headlineRate(.download) == nil)  // queued state: nothing flows
+        #expect(seeding.rateSlot(.active)?.active == true && seeding.rateSlot(.active)?.text.hasPrefix("↑ ") == true)
+        #expect(row("i").rateSlot(.active)?.text == "↑ – KB/s" && row("i").rateSlot(.active)?.active == false)  // idle: still there
+        #expect(row("d", down: 1_000_000).rateSlot(.download)?.text == "↓ – KB/s")  // queued state: nothing flows
     }
 
     @Test func summaryTextShowsCombinedRates() {
-        #expect(LibraryModel.trackerSummary(name: "t1", down: 0, up: 0) == "t1 · ↓ \(Fmt.rate(0)) · ↑ \(Fmt.rate(0))")
+        #expect(Fmt.liveRate(0) == "– KB/s" && Fmt.liveRate(2_100_000) == Fmt.rate(2_100_000))
         let rows = [row("a", down: 100, up: 5), row("a", down: 100, up: 5), row("b", up: 7), row("c", tracker: "t2", up: 99)]
         let r = LibraryModel.sumRates(rows, tracker: "t1")  // a duplicate counts once; other trackers do not
         #expect(r.down == 100 && r.up == 12)
@@ -79,6 +80,24 @@ struct TrackerTabTests {
         #expect(LibraryModel.staysInPlace("zz", section: .downloads, trackerInfo: false, open: true, snapshot: s))
         #expect(!LibraryModel.staysInPlace("zz", section: .sharing, trackerInfo: false, open: true, snapshot: s))  // it leaves Sharing: follow it
         #expect(!LibraryModel.staysInPlace("zz", section: .tracker("t1"), trackerInfo: false, open: true, snapshot: s))  // not that tracker's
+    }
+
+    @MainActor @Test func theCategoryPillFiltersAndClears() throws {
+        let m = try #require(Self.model())
+        var tv = row("a"); tv.category = .tv
+        var movie = row("b"); movie.category = .movie
+        #expect(m.matches(tv) && m.matches(movie))
+        m.toggleCategory(.tv)  // a click on a TV pill
+        #expect(m.categoryFilter == .tv && m.matches(tv) && !m.matches(movie))
+        m.search = "a"  // combines with the search text
+        #expect(m.matches(tv))
+        m.search = ""
+        m.toggleCategory(.tv)  // the same pill again clears
+        #expect(m.categoryFilter == nil && m.matches(movie))
+        m.toggleCategory(.music)
+        m.select(.sharing)  // a tab switch clears it
+        #expect(m.categoryFilter == nil)
+        #expect(["Movie", "TV", "App"] == [Category.movie, .tv, .software].map(\.label))
     }
 
     @MainActor @Test func switchingTabsClosesEveryTorrent() throws {

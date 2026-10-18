@@ -48,6 +48,11 @@ struct RowList<Header: View>: View {
         ScrollViewReader { proxy in
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 0, pinnedViews: []) {
+                if let c = model.categoryFilter {
+                    CategoryFilterChip(category: c) { model.categoryFilter = nil }
+                        .padding(.horizontal, 10).padding(.top, 10)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
                 header
                 ForEach(groups.filter { !hidden($0) }) { g in
                     if let title = g.title { groupHeader(g, title) }
@@ -55,10 +60,7 @@ struct RowList<Header: View>: View {
                     ForEach(Array((folded ? [] : g.rows).enumerated()), id: \.element.id) { n, row in
                         // Divider snaps to whole device pixels; a 0.5 pt Rectangle vanishes at fractional offsets.
                         if n > 0 { Divider().opacity(0.6).padding(.leading, 52 + FileLayout.iconX).padding(.trailing, 10) }
-                        TransferRowView(row: row, style: g.style, selected: model.selection.contains(row.id), commands: commands, infoID: $model.infoID,
-                                        showTracker: model.trackerID == nil,
-                                        disclosure: hasList(row)
-                                            ? (files.isExpanded(row.id), { files.toggle(row.id) }) : nil)
+                        rowView(row, style: g.style)
                             .onTapGesture { click(row, group: g.id) }
                             .contextMenu { MenuEntriesView(entries: commands.entries(for: target(row))) }
                         if let p = commands.removal.pending, !p.plural, row.id == removalAnchor {
@@ -131,6 +133,15 @@ struct RowList<Header: View>: View {
             files.clearSelection()  // Escape drops a file selection too, not only the rows
             return .handled
         }
+    }
+
+    private func rowView(_ row: TransferRow, style: RowStyle) -> TransferRowView {
+        let selected = model.selection.contains(row.id)
+        let list: (expanded: Bool, toggle: () -> Void)? = hasList(row) ? (files.isExpanded(row.id), { files.toggle(row.id) }) : nil
+        let filtered = model.categoryFilter == row.category
+        return TransferRowView(row: row, style: style, selected: selected, commands: commands, infoID: $model.infoID,
+                               showTracker: model.trackerID == nil, disclosure: list,
+                               categoryAction: { model.toggleCategory($0) }, categoryActive: filtered)
     }
 
     /// A click on the title folds the group (its count stays); the chevron says which way.

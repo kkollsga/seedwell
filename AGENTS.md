@@ -24,7 +24,8 @@ release procedure.
 - **Never `git add -A` or `git add .` when the working folder may be missing tracked files.** Check
   `git status` first: it should list only the changes you meant to make.
 - **Outward-facing steps need the user's explicit go-ahead each time:** creating repos, pushing, tags, releases,
-  publishing a draft. One approval does not cover the next step.
+  publishing a draft. One approval does not cover the next step. The exception is the `/release` skill: invoking it is
+  the go-ahead for that whole release (push, tag, publish), also when it is invoked while other work is still open.
 - Releases are built by GitHub Actions when a `vX.Y.Z` tag is pushed (`docs/RELEASING.md`); the result is a draft
   that a person publishes.
 - Agents do not commit unless the coordinator asks. Commit messages end with the attribution trailer the session

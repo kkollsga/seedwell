@@ -92,7 +92,7 @@ struct TrackerInfoPage: View {
                 }
 
                 if let stats = model.trackerStats {
-                    TrackerHeader(tracker: tracker, stats: stats, daily: model.daily).padding(.horizontal, -10)
+                    TrackerHeader(tracker: tracker, stats: stats, daily: model.daily, down: nowDown, up: nowUp).padding(.horizontal, -10)
                 }
                 factsBlock
                 speedLimits(e)
@@ -275,7 +275,7 @@ struct TrackerInfoPage: View {
     private func tally() {
         let s = model.snapshot
         downloading = (s.allDownloading + s.allQueued).filter { $0.trackerId == tracker.id }.count
-        let c = commands.core.sharingCounts(trackerId: tracker.id, text: "")
+        let c = commands.core.sharingCounts(trackerId: tracker.id, category: nil, text: "")
         seeding = SeedGroup.allCases.reduce(0) { $0 + c.count($1) }
     }
 

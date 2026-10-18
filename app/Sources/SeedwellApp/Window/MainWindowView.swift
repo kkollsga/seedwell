@@ -58,13 +58,13 @@ struct SidebarView: View {
         .safeAreaInset(edge: .bottom, spacing: 0) {
             HStack(spacing: 10) {
                 if s.online {
-                    // A limit in force shows quietly after the rate: "↓ 2.0 / 5 MB/s".
-                    Text("↓ \(RateText.line(rate: s.downRate, limit: s.downLimit))")
+                    // Only the live rates; the limits are in the tooltips.
+                    Text("↓ \(Fmt.rate(s.downRate))")
                         .font(.system(size: 13, weight: .medium)).foregroundStyle(.primary)
-                        .help(s.downLimit.map { "Download limit \(RateText.label($0))\(s.altSpeed ? " (Limit Speed)" : "")" } ?? "")
-                    Text("↑ \(RateText.line(rate: s.upRate, limit: s.upLimit))")
+                        .help(RateText.limitHelp("Download", limit: s.downLimit, altSpeed: s.altSpeed))
+                    Text("↑ \(Fmt.rate(s.upRate))")
                         .font(.system(size: 13, weight: .medium)).foregroundStyle(.primary)
-                        .help(s.upLimit.map { "Upload limit \(RateText.label($0))\(s.altSpeed ? " (Limit Speed)" : "")" } ?? "")
+                        .help(RateText.limitHelp("Upload", limit: s.upLimit, altSpeed: s.altSpeed))
                     if s.altSpeed {
                         Image(systemName: "tortoise.fill").font(.system(size: 10)).foregroundStyle(.secondary)
                             .help("Limit Speed is on (⌥⌘L)")
@@ -121,7 +121,7 @@ struct DetailView: View {
             .navigationTitle(AppInfo.name)
             .toolbar(removing: .title)
             .toolbar {
-                TitleToolbarItem(summary: model.summary)
+                TitleToolbarItem(title: model.title, summary: model.summary, favorite: model.tracker?.favorite == true)
                 RemoveConfirmToolbarItem(commands: commands)
             }
             .sheet(isPresented: $model.adding) { AddSheet(commands: commands, isPresented: $model.adding) }
@@ -137,12 +137,12 @@ struct DetailView: View {
         case .downloads:
             let groups = Lists.downloads(model, commands: commands)
             RowList(model: model, commands: commands, groups: groups) {
-                if groups.isEmpty { EmptyListNote(text: model.search.isEmpty ? EmptyListNote.downloads : EmptyListNote.noMatches) }
+                if groups.isEmpty { EmptyListNote(text: model.search.isEmpty && model.categoryFilter == nil ? EmptyListNote.downloads : EmptyListNote.noMatches) }
             }
         case .sharing:
             let groups = Lists.sharing(model, commands: commands)
             RowList(model: model, commands: commands, groups: groups) {
-                if groups.isEmpty { EmptyListNote(text: model.search.isEmpty ? EmptyListNote.sharing : EmptyListNote.noMatches) }
+                if groups.isEmpty { EmptyListNote(text: model.search.isEmpty && model.categoryFilter == nil ? EmptyListNote.sharing : EmptyListNote.noMatches) }
             }
         case .tracker where model.trackerInfo && model.tracker != nil:
             TrackerInfoPage(model: model, tracker: model.tracker!, commands: commands)
@@ -154,10 +154,10 @@ struct DetailView: View {
                         FavoriteRemoveStrip(question: q, confirm: commands.favorites.confirmRemoval, cancel: commands.favorites.cancelRemoval)
                             .padding(.horizontal, 10).padding(.top, 8)
                     }
-                    if let stats = model.trackerStats { TrackerHeader(tracker: t, stats: stats, daily: model.daily) }
+                    if let stats = model.trackerStats { TrackerHeader(tracker: t, stats: stats, daily: model.daily, down: model.trackerRates.down, up: model.trackerRates.up) }
                 }
                 if groups.isEmpty {
-                    Text(model.search.isEmpty ? "No torrents on \(model.tracker?.name ?? "this tracker")" : "No matches on \(model.tracker?.name ?? "this tracker")")
+                    Text(model.search.isEmpty && model.categoryFilter == nil ? "No torrents on \(model.tracker?.name ?? "this tracker")" : "No matches on \(model.tracker?.name ?? "this tracker")")
                         .font(.system(size: 13)).foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity).padding(.top, 60)
                 }
@@ -211,11 +211,13 @@ struct AddSheet: View {
     }
 }
 
-/// The app's icon and name at the leading edge of the title bar, with the section's live summary
-/// under the name. On macOS 26+ toolbar items share a glass capsule by default; the title is not a
-/// control, so it sits directly on the bar.
+/// The page title at the leading edge of the title bar: the section's name (a tracker's own name, with its
+/// star when it is a favorite), and under it the section's calm summary line. On macOS 26+ toolbar items
+/// share a glass capsule by default; the title is not a control, so it sits directly on the bar.
 struct TitleToolbarItem: ToolbarContent {
+    let title: String
     let summary: String
+    var favorite = false
 
     var body: some ToolbarContent {
         if #available(macOS 26.0, *) {
@@ -226,16 +228,12 @@ struct TitleToolbarItem: ToolbarContent {
     }
 
     private var label: some View {
-        HStack(spacing: 9) {
-            Image(nsImage: NSApp.applicationIconImage)
-                .resizable()
-                .interpolation(.high)
-                .frame(width: 30, height: 30)
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 0) {
-                Text(AppInfo.name).font(.system(size: 14, weight: .semibold))
-                Text(summary).font(.system(size: 11.5)).foregroundStyle(.secondary).monospacedDigit()
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 6) {
+                if favorite { Image(systemName: "star.fill").font(.system(size: 12)).foregroundStyle(Color.accentColor.opacity(0.85)).accessibilityHidden(true) }
+                Text(title).font(.system(size: 18, weight: .semibold)).lineLimit(1)
             }
+            Text(summary).font(.system(size: 11.5)).foregroundStyle(.secondary).monospacedDigit().lineLimit(1)
         }
         .fixedSize()
         .accessibilityElement(children: .contain)

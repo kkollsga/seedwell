@@ -54,8 +54,7 @@ extension TransferRow {
 
     /// "4 of 250 peers": the connected peers against the swarm (the tracker's last seeders + leechers, else
     /// the peers known), else just "4 peers". Empty when nothing is connected. Downloads only: a Sharing row
-    /// has its own short line (`sharingLine`). The rate is not here: it stands out at the right of the name
-    /// (`headlineRate`).
+    /// has its own short line (`sharingLine`). The rate is not here: it has its own slot (`rateSlot`).
     func liveSuffix(_ style: RowStyle) -> String {
         guard style == .download, peers > 0 || (state == .downloading && downRate > 0) else { return "" }
         guard let swarm = swarm.flatMap({ $0 > 0 ? $0 : nil }) ?? (knownPeers > 0 ? knownPeers : nil) else {
@@ -67,9 +66,22 @@ extension TransferRow {
     /// The live rate a row shows at the right of its name, big and in the primary colour: "↓ 2.1 MB/s" while a
     /// download moves data, "↑ 1.2 MB/s" while a sharing row uploads. Nil when nothing flows.
     func headlineRate(_ style: RowStyle) -> String? {
+        guard let slot = rateSlot(style), slot.active else { return nil }
+        return slot.text
+    }
+
+    /// The rate slot at the right of a row, always there for a download (↓) and a sharing row (↑): "↑ 1.2 MB/s" in
+    /// the primary colour while data flows, "↑ – KB/s" in the secondary colour when idle. Nil for rows without one
+    /// (held, queued, finished, errors).
+    func rateSlot(_ style: RowStyle) -> (text: String, active: Bool)? {
         switch style {
-        case .download: return state == .downloading && downRate > 0 ? "↓ " + Fmt.rate(downRate) : nil
-        case .popular, .active, .dormant: return movingPercent == nil && upRate > 0 ? "↑ " + Fmt.rate(upRate) : nil
+        case .download:
+            guard !isHeld, !awaitingChoice, pending == nil else { return nil }
+            let on = state == .downloading && downRate > 0
+            return ("↓ " + Fmt.liveRate(on ? downRate : 0), on)
+        case .popular, .active, .dormant, .stopped:
+            let on = movingPercent == nil && upRate > 0
+            return ("↑ " + Fmt.liveRate(on ? upRate : 0), on)
         default: return nil
         }
     }
@@ -223,10 +235,17 @@ struct TransferRowView: View {
     var showTracker = true
     /// A torrent with several files: the triangle that opens its file list. Nil = no triangle (its column stays).
     var disclosure: (expanded: Bool, toggle: () -> Void)?
+    /// A click on the category pill (filters the list to it); nil = the pill is not clickable.
+    var categoryAction: ((Category) -> Void)?
+    /// The list is filtered to this row's category: the pill shows it.
+    var categoryActive = false
     @State private var hovering = false
     /// Get Info opens below the row, or above it when the screen has no room below (PopoverPlacement).
     @State private var infoEdge: Edge = .bottom
     @State private var rowFrame: CGRect = .zero
+
+    /// Wide enough for "↑ 999.9 MB/s", so the text beside it never moves as the value changes.
+    static let rateWidth: CGFloat = 96
 
     private var dimmed: Bool { style == .queued || style == .dormant || style == .stopped }
     private var attention: Bool { row.awaitingChoice || (style == .download && row.error != nil) }
@@ -253,14 +272,8 @@ struct TransferRowView: View {
                         .lineLimit(1)
                         .truncationMode(.middle)
                         .help(row.name == row.displayName ? "" : row.name)
-                    if let rate = row.headlineRate(style) {
-                        Spacer(minLength: 8)
-                        Text(rate)
-                            .font(.system(size: 13, weight: .medium)).monospacedDigit()
-                            .foregroundStyle(.primary)
-                            .lineLimit(1).fixedSize()
-                            .help(style == .download ? "Download speed" : "Upload speed")
-                    }
+                    RowCategoryPill(category: row.category, active: categoryActive, action: categoryAction)
+                        .layoutPriority(1)
                 }
                 statusText
                     .font(.system(size: 12))
@@ -277,6 +290,14 @@ struct TransferRowView: View {
                 if style == .download, !row.isHeld { ThinProgress(value: row.fraction).padding(.top, 5) }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+            if let slot = row.rateSlot(style) {
+                Text(slot.text)
+                    .font(.system(size: 13, weight: .medium)).monospacedDigit()
+                    .foregroundStyle(slot.active ? Color.primary : Color.secondary)
+                    .lineLimit(1)
+                    .frame(width: Self.rateWidth, alignment: .trailing)
+                    .help(style == .download ? "Download speed" : "Upload speed")
+            }
             trailing
         }
         .padding(.leading, FileLayout.lead)
@@ -417,5 +438,57 @@ struct TransferRowView: View {
         }
         .buttonStyle(.plain)
         .help("Get Info")
+    }
+}
+
+/// The row's category as a small capsule after its name. A click filters the list to that category (and
+/// clears the filter when it is on already); the context menu's Category submenu changes it.
+struct RowCategoryPill: View {
+    let category: Category
+    var active = false
+    var action: ((Category) -> Void)?
+    @State private var hovering = false
+
+    var body: some View {
+        let pill = HStack(spacing: 3) {
+            Image(systemName: category.symbol).font(.system(size: 8.5, weight: .medium))
+            Text(category.label).font(.system(size: 10.5, weight: .medium))
+        }
+        .foregroundStyle(active ? Color.accentColor : .secondary)
+        .padding(.horizontal, 6).padding(.vertical, 1.5)
+        .background(Capsule().fill(active ? Color.accentColor.opacity(0.16) : Color.primary.opacity(hovering && action != nil ? 0.12 : 0.07)))
+        .lineLimit(1).fixedSize()
+        if let action {
+            Button { action(category) } label: { pill.contentShape(Capsule()) }
+                .buttonStyle(.plain)
+                .onHover { hovering = $0 }
+                .help(active ? "Showing only \(category.label). Click to show all" : "Show only \(category.label)")
+                .accessibilityLabel("Category \(category.label)")
+        } else {
+            pill
+        }
+    }
+}
+
+/// "TV ×" above a filtered list: the category being shown, and the way back.
+struct CategoryFilterChip: View {
+    let category: Category
+    let clear: () -> Void
+
+    var body: some View {
+        Button(action: clear) {
+            HStack(spacing: 5) {
+                Image(systemName: category.symbol).font(.system(size: 10, weight: .medium))
+                Text(category.label).font(.system(size: 11.5, weight: .medium))
+                Image(systemName: "xmark").font(.system(size: 8.5, weight: .bold))
+            }
+            .foregroundStyle(Color.accentColor)
+            .padding(.horizontal, 9).padding(.vertical, 3)
+            .background(Capsule().fill(Color.accentColor.opacity(0.16)))
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .help("Showing only \(category.label). Click to show all")
+        .accessibilityLabel("Category filter \(category.label), clear")
     }
 }

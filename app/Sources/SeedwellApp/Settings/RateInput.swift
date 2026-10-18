@@ -10,6 +10,12 @@ enum RateUnit: String, CaseIterable, Identifiable {
 
 /// Parsing and writing speed limits. Limits are stored in bytes per second, 0 = unlimited.
 enum RateText {
+    /// The sidebar rate's tooltip: "Download limit: 18 MB/s (Limit Speed)", or "No download limit".
+    static func limitHelp(_ kind: String, limit: UInt64?, altSpeed: Bool) -> String {
+        guard let limit, limit > 0 else { return "No \(kind.lowercased()) limit" + (altSpeed ? " (Limit Speed is on)" : "") }
+        return "\(kind) limit: \(label(limit))" + (altSpeed ? " (Limit Speed)" : "")
+    }
+
     /// Highest limit the core accepts (1 TiB/s).
     static let maxBytes: UInt64 = 1 << 40
 

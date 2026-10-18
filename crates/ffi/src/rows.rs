@@ -1,6 +1,7 @@
 //! Row classification, filtering and paging shared by the real and the mock backend.
 
 use crate::types::{
+    Category,
     RowQuery, SeedGroup, SharingCounts, Snapshot, TrackerSummary, TransferKind, TransferRow,
     TransferState,
 };
@@ -85,8 +86,9 @@ impl Hidden {
 }
 
 /// `tracker` is the tab being listed; without one, hidden trackers' rows are left out.
-fn matches(r: &TransferRow, tracker: Option<&str>, text: &str, hidden: &Hidden) -> bool {
+fn matches(r: &TransferRow, tracker: Option<&str>, category: Option<Category>, text: &str, hidden: &Hidden) -> bool {
     tracker.map_or_else(|| !hidden.sharing(r), |t| r.tracker_id == t)
+        && category.is_none_or(|c| r.category == c)
         && (text.is_empty()
             || r.name.to_lowercase().contains(&text.to_lowercase())
             || r.display_name.to_lowercase().contains(&text.to_lowercase()))
@@ -99,7 +101,7 @@ pub(crate) fn query(all: &[TransferRow], q: &RowQuery, hidden: &Hidden) -> Vec<T
         .iter()
         .filter(|r| is_sharing(r))
         .filter(|r| q.group.is_none_or(|g| r.seed_group == Some(g)))
-        .filter(|r| matches(r, q.tracker_id.as_deref(), &text, hidden))
+        .filter(|r| matches(r, q.tracker_id.as_deref(), q.category, &text, hidden))
         .collect();
     v.sort_by(|a, b| {
         let ga = a.seed_group.map_or(9, group_order);
@@ -115,11 +117,11 @@ pub(crate) fn query(all: &[TransferRow], q: &RowQuery, hidden: &Hidden) -> Vec<T
         .collect()
 }
 
-pub(crate) fn counts(all: &[TransferRow], tracker: Option<&str>, text: &str, hidden: &Hidden) -> SharingCounts {
+pub(crate) fn counts(all: &[TransferRow], tracker: Option<&str>, category: Option<Category>, text: &str, hidden: &Hidden) -> SharingCounts {
     let text = text.to_lowercase();
     let mut c = SharingCounts::default();
     for r in all.iter().filter(|r| is_sharing(r)) {
-        if matches(r, tracker, &text, hidden)
+        if matches(r, tracker, category, &text, hidden)
             && let Some(g) = r.seed_group
         {
             c.add(g);
@@ -158,7 +160,7 @@ pub(crate) fn snapshot(
     let (hidden_downloading, downloading): (Vec<_>, Vec<_>) = downloading.into_iter().partition(|r| hide.downloads(r));
     let (hidden_queued, queued): (Vec<_>, Vec<_>) = all.iter().filter(|r| is_queued(r)).cloned().partition(|r| hide.downloads(r));
     let (hidden_recent, recent): (Vec<_>, Vec<_>) = recent.into_iter().partition(|r| hide.sharing(r));
-    let sharing = counts(all, None, "", &hide);
+    let sharing = counts(all, None, None, "", &hide);
     let mut busiest: Vec<&TransferRow> = all
         .iter()
         .filter(|r| is_sharing(r) && r.up_rate > 0 && !hide.sharing(r))
@@ -328,11 +330,11 @@ mod tests {
         assert_eq!(t.count, 3);
         // Sharing rows and counts leave it out, unless its own tab asks.
         let hide = Hidden::of(&[fav("h", true, false)]);
-        let q = |tracker: Option<&str>| RowQuery { group: None, tracker_id: tracker.map(Into::into), text: String::new(), offset: 0, limit: 50 };
+        let q = |tracker: Option<&str>| RowQuery { group: None, tracker_id: tracker.map(Into::into), text: String::new(), category: None, offset: 0, limit: 50 };
         assert_eq!(ids(&query(&all, &q(None), &hide)), ["pub-seed"]);
         assert_eq!(ids(&query(&all, &q(Some("h")), &hide)), ["h-seed"], "the tracker tab still shows them");
-        assert_eq!(counts(&all, None, "", &hide).total(), 1);
-        assert_eq!(counts(&all, Some("h"), "", &hide).total(), 1);
+        assert_eq!(counts(&all, None, None, "", &hide).total(), 1);
+        assert_eq!(counts(&all, Some("h"), None, "", &hide).total(), 1);
     }
 
     #[test]
@@ -346,7 +348,7 @@ mod tests {
         assert!(s.hidden_downloading.is_empty() && s.hidden_queued.is_empty());
         assert_eq!(s.sharing_total, 1);
         let hide = Hidden::of(&[fav("h", true, true)]);
-        assert_eq!(counts(&all, None, "", &hide).total(), 1);
+        assert_eq!(counts(&all, None, None, "", &hide).total(), 1);
     }
 
     #[test]

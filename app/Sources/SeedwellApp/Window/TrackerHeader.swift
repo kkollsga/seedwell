@@ -7,6 +7,9 @@ struct TrackerHeader: View {
     let tracker: TrackerSummary
     let stats: TrackerStats
     let daily: [DailyStat]
+    /// The tracker's torrents moving now, bytes/s.
+    var down: UInt64 = 0
+    var up: UInt64 = 0
 
     /// Uploaded, downloaded and their ratio over today and the six days before it.
     static func lastWeek(_ daily: [DailyStat]) -> (up: UInt64, down: UInt64, ratio: Double) {
@@ -20,6 +23,8 @@ struct TrackerHeader: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .top, spacing: 16) {
+                stat("↓ " + Fmt.liveRate(down), "Download speed", sub: nil)
+                stat("↑ " + Fmt.liveRate(up), "Upload speed", sub: nil)
                 stat(Fmt.bytes(week.up), "Uploaded", sub: "Last 7 days")
                 stat(Fmt.bytes(week.down), "Downloaded", sub: "Last 7 days")
                 stat(Fmt.ratio(week.ratio), "Ratio", sub: "Last 7 days")
@@ -39,7 +44,7 @@ struct TrackerHeader: View {
 
     private func stat(_ value: String, _ caption: String, sub: String?) -> some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text(value).font(.system(size: 20, weight: .semibold)).monospacedDigit().lineLimit(1)
+            Text(value).font(.system(size: 20, weight: .semibold)).monospacedDigit().lineLimit(1).minimumScaleFactor(0.7)
             Text(caption).font(.system(size: 12)).foregroundStyle(.secondary)
             Text(sub ?? " ").font(.system(size: 11)).foregroundStyle(.tertiary).monospacedDigit()
         }

@@ -40,7 +40,7 @@ pub trait Backend: Send + Sync {
     fn set_listener(&self, listener: Arc<dyn CoreListener>);
     /// Finished torrents (the Sharing view), filtered and paged.
     fn rows(&self, q: &RowQuery) -> Vec<TransferRow>;
-    fn sharing_counts(&self, tracker_id: Option<&str>, text: &str) -> SharingCounts;
+    fn sharing_counts(&self, tracker_id: Option<&str>, category: Option<Category>, text: &str) -> SharingCounts;
     /// The sidebar tracker id of a transfer (hidden or not), for deciding about a notification.
     fn tracker_of(&self, _id: &str) -> Option<String> {
         None

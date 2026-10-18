@@ -104,8 +104,8 @@ impl Core {
     }
 
     /// Sizes of the Sharing groups, optionally within one tracker and matching a search text.
-    pub fn sharing_counts(&self, tracker_id: Option<String>, text: String) -> SharingCounts {
-        self.backend.sharing_counts(tracker_id.as_deref(), &text)
+    pub fn sharing_counts(&self, tracker_id: Option<String>, category: Option<Category>, text: String) -> SharingCounts {
+        self.backend.sharing_counts(tracker_id.as_deref(), category, &text)
     }
 
     /// Lifetime totals of one tracker; call when its header is shown, not every second.
@@ -581,6 +581,7 @@ mod tests {
             group,
             tracker_id: tracker.map(str::to_owned),
             text: String::new(),
+            category: None,
             offset: 0,
             limit: 1000,
         };
@@ -588,8 +589,13 @@ mod tests {
         assert!(dormant.len() > 150);
         let z = core.sharing_rows(q(None, Some("tracker-z.cc")));
         assert!(!z.is_empty() && z.iter().all(|r| r.tracker_id == "tracker-z.cc"));
-        let counts = core.sharing_counts(Some("tracker-z.cc".into()), String::new());
+        let counts = core.sharing_counts(Some("tracker-z.cc".into()), None, String::new());
         assert_eq!(counts.total() as usize, z.len());
+        // A category narrows rows and counts alike.
+        let cat = z[0].category;
+        let only = core.sharing_rows(RowQuery { category: Some(cat), ..q(None, Some("tracker-z.cc")) });
+        assert!(!only.is_empty() && only.len() <= z.len() && only.iter().all(|r| r.category == cat));
+        assert_eq!(core.sharing_counts(Some("tracker-z.cc".into()), Some(cat), String::new()).total() as usize, only.len());
     }
 
     #[test]

@@ -854,8 +854,8 @@ impl Backend for MockBackend {
         rows::query(&self.lock().all_rows(), q, &rows::Hidden::default())
     }
 
-    fn sharing_counts(&self, tracker_id: Option<&str>, text: &str) -> SharingCounts {
-        rows::counts(&self.lock().all_rows(), tracker_id, text, &rows::Hidden::default())
+    fn sharing_counts(&self, tracker_id: Option<&str>, category: Option<Category>, text: &str) -> SharingCounts {
+        rows::counts(&self.lock().all_rows(), tracker_id, category, text, &rows::Hidden::default())
     }
 
     fn tracker_hosts(&self, group_id: &str) -> Vec<String> {

@@ -17,6 +17,9 @@ import Observation
     var selection: Set<String> = []
     var search = "" { didSet { if search != oldValue { refresh() } } }
     var infoID: String?
+    /// Only torrents of this category are listed (the pill on a row sets it, the chip above the list clears it).
+    /// Combines with the search text and the tracker; a tab switch clears it.
+    var categoryFilter: Category? { didSet { if categoryFilter != oldValue { refresh() } } }
     /// The tracker's Info page is shown instead of its torrent list (the sidebar item stays selected).
     var trackerInfo = false
     /// Group headers the user folded ("sharing.dormant", "downloads.recent"). Remembered per Mac, a
@@ -87,11 +90,11 @@ import Observation
             return
         }
         guard section == .sharing || trackerID != nil else { return }
-        counts = core.sharingCounts(trackerId: trackerID, text: search)
+        counts = core.sharingCounts(trackerId: trackerID, category: categoryFilter, text: search)
         var next: [SeedGroup: [TransferRow]] = [:]
         for g in SeedGroup.allCases where counts.count(g) > 0 {
             let limit = UInt32(shown[g] ?? Self.page)
-            next[g] = core.sharingRows(query: RowQuery(group: g, trackerId: trackerID, text: search, offset: 0, limit: limit))
+            next[g] = core.sharingRows(query: RowQuery(group: g, trackerId: trackerID, text: search, category: categoryFilter, offset: 0, limit: limit))
         }
         groups = next
         if let id = trackerID {
@@ -161,6 +164,7 @@ import Observation
         selectionAnchor = nil
         infoID = nil
         shown = [:]
+        categoryFilter = nil  // like the open file lists, a filter does not follow to another tab
         refresh()
     }
 
@@ -206,13 +210,14 @@ import Observation
         }
     }
 
-    /// "tracker-z.cc · ↓ 2.1 MB/s · ↑ 340 KB/s" on a tracker tab, else the section's own line.
+    /// The calm line under the page title: "Favorite tracker" / "Tracker" on a tracker tab (no count: its
+    /// figures are in the header), else the section's own line.
     var summary: String {
         switch section {
         case .tracker(let id):
             guard let t = tracker else { return id }
-            if trackerInfo { return "\(t.name) · Info" }
-            return Self.trackerSummary(name: t.name, down: trackerRates.down, up: trackerRates.up)
+            if trackerInfo { return "Info" }
+            return t.favorite ? "Favorite tracker" : "Tracker"
         case .downloads:
             let s = snapshot
             let held = s.downloading.filter(\.awaitingChoice).count
@@ -229,10 +234,6 @@ import Observation
         case .settings:
             return "Settings"
         }
-    }
-
-    static func trackerSummary(name: String, down: UInt64, up: UInt64) -> String {
-        "\(name) · ↓ \(Fmt.rate(down)) · ↑ \(Fmt.rate(up))"
     }
 
     /// The tracker's torrents moving now, bytes/s: its downloads and the sharing rows fetched for the tab (the
@@ -257,8 +258,12 @@ import Observation
     /// "↓ 2.1 MB/s · ↑ 340 KB/s": both rates in the toolbar line of Downloads and Sharing.
     static func rates(_ s: Snapshot) -> String { "↓ \(Fmt.rate(s.downRate)) · ↑ \(Fmt.rate(s.upRate))" }
 
+    /// A click on a row's category pill: filter to it, or clear when it already is the filter.
+    func toggleCategory(_ c: Category) { categoryFilter = categoryFilter == c ? nil : c }
+
     func matches(_ row: TransferRow) -> Bool {
-        (search.isEmpty || row.name.localizedCaseInsensitiveContains(search) || row.displayName.localizedCaseInsensitiveContains(search))
+        (categoryFilter == nil || row.category == categoryFilter)
+            && (search.isEmpty || row.name.localizedCaseInsensitiveContains(search) || row.displayName.localizedCaseInsensitiveContains(search))
             && (trackerID == nil || row.trackerId == trackerID)
     }
 

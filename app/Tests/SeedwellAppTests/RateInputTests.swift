@@ -66,6 +66,9 @@ struct RateInputTests {
         #expect(RateText.line(rate: 2_000_000, limit: 5_000_000) == "2.0 / 5 MB/s")
         #expect(RateText.line(rate: 850_000, limit: 5_000_000) == "850 KB/s / 5 MB/s")
         #expect(RateText.line(rate: 120_000, limit: 500_000) == "120 / 500 KB/s")
+        #expect(RateText.limitHelp("Download", limit: 18_000_000, altSpeed: false) == "Download limit: 18 MB/s")
+        #expect(RateText.limitHelp("Upload", limit: nil, altSpeed: false) == "No upload limit")
+        #expect(RateText.limitHelp("Upload", limit: 500_000, altSpeed: true) == "Upload limit: 500 KB/s (Limit Speed)")
         #expect(RateText.line(rate: 2_000_000, limit: nil) == "2.0 MB/s")
         #expect(RateText.line(rate: 2_000_000, limit: 0) == "2.0 MB/s")
     }
