@@ -18,7 +18,7 @@ jobs:
     runs-on: macos-26
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0   # the release notes list the commits since the previous tag
       - name: Rust (version pinned in rust-toolchain.toml)
