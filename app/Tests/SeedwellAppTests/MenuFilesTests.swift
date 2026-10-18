@@ -103,4 +103,12 @@ import Testing
         t.apply(t.toggleChanges([s1]))
         #expect(t.check(s1) == .off)
     }
+
+    @Test func onlyVideoFilesGetAPlayIcon() {
+        let t = Self.pack
+        let s1 = MenuFileList(tree: t, open: []).entries[0].node
+        let list = MenuFileList(tree: t, open: [s1])
+        // Season 1 (a folder), e01.mkv, e02.mkv, Season 2, readme.txt
+        #expect(list.entries.map(\.isVideo) == [false, true, true, false, false])
+    }
 }

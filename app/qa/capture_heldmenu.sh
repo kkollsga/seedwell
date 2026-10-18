@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The context menu and the menu bar's row submenu of a held row (SPEC 8.5, 7A.6): a countdown row and a row that
+# The context menu and the menu bar's right-click menu of a held row (SPEC 8.5, 7A.6): a countdown row and a row that
 # waits for a choice offer Start, Cancel and Choose Files… (no Pause or Start Now). Own QA root (seedwell-qa-heldmenu);
 # fake Trash in the root. Shots: app/build/qa/heldmenu-*.png.
 set -uo pipefail

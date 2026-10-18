@@ -24,7 +24,9 @@ use std::fmt;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::config::check_range;
+use trs_classify::Category;
+
+use crate::config::{CategoryLocations, LocationOverride, check_path, check_range};
 use crate::doc::{Document, Parsed, parse_toml, render_table};
 use crate::error::{DocError, FieldError, Warning};
 use crate::ids::valid_id;
@@ -236,9 +238,45 @@ pub struct Profile {
     /// = unlimited.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub up_limit: Option<u64>,
+    /// This tracker's own folders (SPEC §7A.4): they stand in for the app-level ones for its
+    /// torrents. Empty = "same as Settings".
+    #[serde(skip_serializing_if = "LocationOverride::is_empty")]
+    pub location: LocationOverride,
+    /// Per-category folders of this tracker (`[tracker.categories.movie]`); a category listed
+    /// here wins over `location` for torrents of that category.
+    #[serde(skip_serializing_if = "CategoryLocations::is_empty")]
+    pub categories: CategoryLocations,
+    /// Hidden mode (SPEC §7E.5): the tracker's torrents are left out of the Downloads and Sharing
+    /// tabs, the menu bar and the counts; its own tab shows them. Display only.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub hidden: bool,
+    /// With `hidden`: hide only what is seeding (Sharing, the menu's sharing line, Recent);
+    /// downloads show as usual.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub hide_only_seeding: bool,
 }
 
 impl Profile {
+    /// The folders this tracker sets for a torrent of `category` (`None` = not detected), as
+    /// written: `(incomplete, finished)`. A category entry wins over the tracker-wide one,
+    /// each of the two folders on its own.
+    pub fn location_for(&self, category: Option<Category>) -> (Option<&str>, Option<&str>) {
+        let c = category.map(|c| self.categories.get(c));
+        let inc = c.and_then(|o| o.incomplete_dir.as_deref()).or(self.location.incomplete_dir.as_deref());
+        let fin = c.and_then(|o| o.finished_dir.as_deref()).or(self.location.finished_dir.as_deref());
+        (inc, fin)
+    }
+
+    /// Every folder this tracker sets, as written.
+    pub fn folders(&self) -> Vec<&str> {
+        let mut v: Vec<&str> = self.location.incomplete_dir.iter().chain(&self.location.finished_dir).map(String::as_str).collect();
+        for c in Category::ALL {
+            let o = self.categories.get(c);
+            v.extend(o.incomplete_dir.iter().chain(&o.finished_dir).map(String::as_str));
+        }
+        v
+    }
+
     /// The shared download cap, with `0` read as unlimited.
     pub fn down_cap(&self) -> Option<u64> {
         self.down_limit.filter(|v| *v != 0)
@@ -442,6 +480,22 @@ fn validate_profile(p: &Profile, path: &str, errs: &mut Vec<FieldError>) {
     for (name, v) in [("down_limit", p.down_limit), ("up_limit", p.up_limit)] {
         if let Some(v) = v {
             check_range(errs, &format!("{path}.{name}"), v, 0, crate::config::MAX_RATE);
+        }
+    }
+    if let Some(d) = &p.location.incomplete_dir {
+        check_path(errs, &format!("{path}.location.incomplete_dir"), d);
+    }
+    if let Some(d) = &p.location.finished_dir {
+        check_path(errs, &format!("{path}.location.finished_dir"), d);
+    }
+    for c in Category::ALL {
+        let o = p.categories.get(c);
+        let cp = format!("{path}.categories.{}", c.as_str());
+        if let Some(d) = &o.incomplete_dir {
+            check_path(errs, &format!("{cp}.incomplete_dir"), d);
+        }
+        if let Some(d) = &o.finished_dir {
+            check_path(errs, &format!("{cp}.finished_dir"), d);
         }
     }
     if let Some(i) = &p.icon
@@ -926,6 +980,33 @@ nickname = "tl!"
         assert!(t.set_limits("tl", Some(u64::MAX), None).is_err(), "out of range is refused");
         assert_eq!(t.get("tl").unwrap().up_limit, Some(250_000), "a refused edit rolls back");
         assert!(t.set_limits("zz", None, None).is_err());
+    }
+
+    #[test]
+    fn location_and_hidden_mode_round_trip_and_old_files_still_load() {
+        let old = "[[tracker]]\nid=\"a\"\nname=\"A\"\nurls=[\"x.org\"]\n";
+        let p = TrackerProfiles::parse_str(old).unwrap().value;
+        let a = p.get("a").unwrap();
+        assert!(a.location.is_empty() && a.categories.is_empty() && !a.hidden && !a.hide_only_seeding);
+        let out = p.render().unwrap();
+        for k in ["hidden", "hide_only_seeding", "location", "categories"] {
+            assert!(!out.contains(k), "{k} is skipped when unset: {out}");
+        }
+        let text = "[[tracker]]\nid=\"a\"\nname=\"A\"\nurls=[\"x.org\"]\nhidden=true\nhide_only_seeding=true\n\
+            [tracker.location]\nfinished_dir=\"/Volumes/M/A\"\nincomplete_dir=\"~/inc\"\n\
+            [tracker.categories.movie]\nfinished_dir=\"/Volumes/M/A/Movies\"\n";
+        let p = TrackerProfiles::parse_str(text).unwrap().value;
+        let a = p.get("a").unwrap();
+        assert!(a.hidden && a.hide_only_seeding);
+        assert_eq!(a.location_for(Some(Category::Movie)), (Some("~/inc"), Some("/Volumes/M/A/Movies")));
+        assert_eq!(a.location_for(Some(Category::Tv)), (Some("~/inc"), Some("/Volumes/M/A")));
+        assert_eq!(a.location_for(None), (Some("~/inc"), Some("/Volumes/M/A")));
+        assert_eq!(a.folders().len(), 3);
+        let out = p.render().unwrap();
+        assert_eq!(TrackerProfiles::parse_str(&out).unwrap().value, p, "{out}");
+        let bad = "[[tracker]]\nid=\"a\"\nname=\"A\"\nurls=[\"x.org\"]\n[tracker.categories.tv]\nfinished_dir=\"relative\"\n";
+        let Err(DocError::Invalid { errors, .. }) = TrackerProfiles::parse_str(bad) else { panic!() };
+        assert!(errors.iter().any(|e| e.path == "tracker[0].categories.tv.finished_dir"), "{errors:?}");
     }
 
     #[test]

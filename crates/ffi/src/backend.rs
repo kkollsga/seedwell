@@ -41,6 +41,10 @@ pub trait Backend: Send + Sync {
     /// Finished torrents (the Sharing view), filtered and paged.
     fn rows(&self, q: &RowQuery) -> Vec<TransferRow>;
     fn sharing_counts(&self, tracker_id: Option<&str>, text: &str) -> SharingCounts;
+    /// The sidebar tracker id of a transfer (hidden or not), for deciding about a notification.
+    fn tracker_of(&self, _id: &str) -> Option<String> {
+        None
+    }
     /// The primary announce hosts of the torrents of an automatic tracker (for "Save as Favorite").
     fn tracker_hosts(&self, group_id: &str) -> Vec<String>;
     fn tracker_stats(&self, tracker_id: &str) -> TrackerStats;

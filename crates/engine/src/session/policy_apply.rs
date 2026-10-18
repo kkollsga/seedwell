@@ -83,7 +83,11 @@ impl Session {
         // Only a change of ids or addresses can move a torrent between trackers; a renamed, recoloured
         // or re-capped favorite keeps every torrent where it is.
         if old.as_deref().is_none_or(|o| !same_matching(&o.profiles, &pol.profiles)) {
-            self.rematch_profiles(pol);
+            self.rematch_profiles(pol.clone());
+        }
+        // A tracker's folders changed: torrents may now sit elsewhere than they belong (SPEC 7A.5).
+        if old.as_deref().is_some_and(|o| !same_locations(&o.profiles, &pol.profiles)) {
+            self.announce_location_changes();
         }
     }
 
@@ -197,4 +201,17 @@ impl Session {
 /// The profiles match the same torrents: same ids in the same order with the same addresses.
 fn same_matching(a: &trs_state::TrackerProfiles, b: &trs_state::TrackerProfiles) -> bool {
     a.profiles.len() == b.profiles.len() && a.profiles.iter().zip(&b.profiles).all(|(x, y)| x.id == y.id && x.urls == y.urls)
+}
+
+/// Every profile sets the same folders as before (a profile that is new or gone counts as a change
+/// only when it sets folders).
+fn same_locations(a: &trs_state::TrackerProfiles, b: &trs_state::TrackerProfiles) -> bool {
+    let key = |t: &trs_state::TrackerProfiles| -> Vec<(String, trs_state::config::LocationOverride, trs_state::config::CategoryLocations)> {
+        t.profiles
+            .iter()
+            .filter(|p| !p.location.is_empty() || !p.categories.is_empty())
+            .map(|p| (p.id.clone(), p.location.clone(), p.categories.clone()))
+            .collect()
+    };
+    key(a) == key(b)
 }

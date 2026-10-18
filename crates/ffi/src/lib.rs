@@ -98,6 +98,11 @@ impl Core {
         self.backend.rows(&query)
     }
 
+    /// The sidebar tracker id of a transfer, hidden or not (notifications of hidden trackers are held back).
+    pub fn tracker_of(&self, id: String) -> Option<String> {
+        self.backend.tracker_of(&id)
+    }
+
     /// Sizes of the Sharing groups, optionally within one tracker and matching a search text.
     pub fn sharing_counts(&self, tracker_id: Option<String>, text: String) -> SharingCounts {
         self.backend.sharing_counts(tracker_id.as_deref(), &text)
@@ -294,6 +299,11 @@ impl Core {
     /// saved settings. Cheap: a few `stat` calls.
     pub fn volume_warnings(&self) -> Vec<VolumeWarning> {
         settings::volume_warnings(&self.settings.config())
+    }
+
+    /// The different-disk warnings of a favorite's own folders, from the editor's draft.
+    pub fn tracker_volume_warnings(&self, profile: ProfileRecord) -> Vec<VolumeWarning> {
+        settings::tracker_volume_warnings(&self.settings.config(), &profile)
     }
 
     /// `~/` expanded against the home folder in use (`--home-root` aware).

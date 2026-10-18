@@ -1199,6 +1199,10 @@ fn release_peer_id_prefix_follows_the_version() {
     assert_eq!(&release_prefix("0.1.0"), b"-SW0100-");
     assert_eq!(&release_prefix("1.2.3"), b"-SW1230-");
     assert_eq!(&release_prefix("0.1.0-rc1"), b"-SW0100-");
+    // Parts above 9 use letters, as libtorrent does.
+    assert_eq!(&release_prefix("0.1.10"), b"-SW01A0-");
+    assert_eq!(&release_prefix("0.12.35"), b"-SW0CZ0-");
+    assert_eq!(&release_prefix("10.0.9-beta"), b"-SWA090-");
 }
 
 #[test]

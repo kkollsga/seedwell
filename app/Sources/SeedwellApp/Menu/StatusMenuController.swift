@@ -45,6 +45,7 @@ import os
         menu.delegate = self
         menu.autoenablesItems = false
         statusItem?.menu = menu
+        menuFiles.onMoved = { [weak self] in self?.refreshHover() }
         refreshIcon()
         // Errors, dead torrents and uploads start without an event: look again every 30 s (cheap, coalesced).
         let slow = Timer(timeInterval: 30, repeats: true) { [weak self] _ in MainActor.assumeIsolated { self?.refreshIcon() } }
@@ -146,10 +147,52 @@ import os
         timer = nil
         if let m = rightClickMonitor { NSEvent.removeMonitor(m) }
         rightClickMonitor = nil
+        clearHover()
         rowItems = [:]
         qaMenuOpen = false
         menuFiles.menuClosed()
         refreshIcon()
+    }
+
+    /// Only the row NSMenu highlights (or, when it highlights none, the one under the pointer) looks hovered.
+    func menu(_ menu: NSMenu, willHighlight item: NSMenuItem?) {
+        guard menu === self.menu else { return }
+        refreshHover(highlighted: item)
+    }
+
+    // MARK: Hover
+
+    private var hoverRows: [any HoverRow] {
+        var all: [any HoverRow] = rowItems.values.compactMap { $0.view as? MenuTorrentRow }
+        all += menuFiles.hoverRows
+        all += footerRow?.hoverRows ?? []
+        return all
+    }
+
+    /// One row at most is lit. A row keeps its own tracking, but a missed mouse-exit (a fast move, a scroll,
+    /// rows inserted under the pointer) would leave it lit, so the highlight is worked out again from where
+    /// the pointer is and which item NSMenu has highlighted.
+    private func refreshHover(highlighted: NSMenuItem?? = nil) {
+        guard qaMenuOpen else { return }
+        let item = highlighted ?? menu.highlightedItem
+        var taken = false
+        for v in hoverRows {
+            var on = false
+            if !taken {
+                if let owner = item?.view, v.isDescendant(of: owner) {
+                    // A torrent row is lit by the highlight itself (the keyboard too); list rows follow the pointer.
+                    on = v is MenuTorrentRow || v.menuPointerInside
+                } else if item == nil {
+                    on = v.menuPointerInside
+                }
+            }
+            if on { taken = true }
+            v.hovered = on
+        }
+    }
+
+    private func clearHover() {
+        for v in hoverRows { v.hovered = false }
     }
 
     // MARK: Build and refresh
@@ -200,10 +243,21 @@ import os
     /// QA: the menu is tracking.
     private(set) var qaMenuOpen = false
 
-    /// QA: the titles of the ▸ submenu of the open menu's row whose title contains `key`.
-    func qaRowSubmenu(_ key: String) -> String {
-        menu.items.first(where: { $0.submenu != nil && $0.title.localizedCaseInsensitiveContains(key) })?.submenu?.items
-            .map { $0.isSeparatorItem ? "-" : $0.title }.joined(separator: "|") ?? "none"
+    /// QA: the titles of the right-click menu of the open menu's row whose title contains `key`, plus the row's
+    /// check ("check on|off|none") and Play icon ("play yes|no").
+    func qaRowContext(_ key: String) -> String {
+        guard let item = rowItems.values.first(where: { ($0.attributedTitle?.string ?? $0.title).localizedCaseInsensitiveContains(key) }),
+              let id = item.representedObject as? String, let row = rows[id] else { return "none" }
+        let titles = commands.entries(for: [row], inMenuBar: true).map { e -> String in
+            switch e {
+            case .separator: return "-"
+            case let .item(title, _, _, _, _, _): return title
+            case let .submenu(title, _): return "\(title) >"
+            }
+        }.joined(separator: "|")
+        let view = item.view as? MenuTorrentRow
+        let check = view?.running.map { $0 ? "on" : "off" } ?? "none"
+        return "\(titles) [check \(check), play \(view?.playable == true ? "yes" : "no")]"
     }
 
     private func signatureOf(_ s: Snapshot) -> String {
@@ -223,6 +277,7 @@ import os
         menu.removeAllItems()
         rowItems = [:]
         rows = [:]
+        clearHover()
         for r in s.downloading + s.queued + s.recent { rows[r.id] = r }
 
         if !s.online, s.sharingTotal == 0 {
@@ -284,12 +339,17 @@ import os
             menu.addItem(item)
         }
         update(s)
+        // New rows under a pointer that has not moved: NSMenu says nothing until it does.
+        DispatchQueue.main.async { [weak self] in self?.refreshHover() }
     }
 
     /// Updates titles, subtitles and rings in place; no structural change, so the highlight stays put.
     private func update(_ s: Snapshot) {
+        for r in s.downloading + s.queued + s.recent { rows[r.id] = r }
+        for r in s.queued { (rowItems[r.id]?.view as? MenuTorrentRow)?.running = Self.isRunning(r) }
         for r in Self.layout(s, arrivals: commands.arrivals.arrivals).downloading where !r.awaitingChoice {
             guard let item = rowItems[r.id] else { continue }
+            (item.view as? MenuTorrentRow)?.running = Self.isRunning(r)
             if let p = r.pending {
                 item.subtitle = StartingText.line(remaining: p.remaining(at: Date()), paused: p.paused)
                 continue
@@ -302,6 +362,7 @@ import os
         }
         if let item = sharingItem { item.attributedTitle = Self.sharingTitle(s) }
         for item in rowItems.values { (item.view as? MenuTorrentRow)?.sync(from: item) }
+        refreshHover()
     }
 
     /// "Sharing 2 torrents · 14 KB/s" (the rate only while uploading), plus "· 1 error" in orange. No badge.
@@ -332,6 +393,7 @@ import os
             item = ActionItem(title: r.displayName) { [commands] in commands.showChooser(r.id) }
             item.image = Drawing.dot(.systemOrange)
             item.subtitle = "Choose what to download…"
+            menuFiles.decorate(item, row: r, revealOnClick: false, interactive: true, onActivate: { [commands] in commands.showChooser(r.id) })
         } else if kind == .recent {
             // Recent: a plain row; a click reveals it in Finder.
             item = ActionItem(title: r.displayName) { [commands] in commands.reveal([r]) }
@@ -340,7 +402,7 @@ import os
         } else {
             // The name gives way, never the numbers under it (SPEC 8.2).
             item = NSMenuItem(title: kind == .active ? Fmt.middleTruncated(r.displayName, to: Self.titleLimit) : r.displayName, action: nil, keyEquivalent: "")
-            item.submenu = MenuBuilder.menu(commands.entries(for: [r], inMenuBar: true))
+            // No submenu: the commands are on the right-click menu (`handleRightClick`).
             if r.pending != nil {
                 item.image = Drawing.ring(0)
             } else if r.state == .queued {
@@ -353,19 +415,47 @@ import os
             item.attributedTitle = NSAttributedString(string: r.displayName, attributes: [.foregroundColor: NSColor.secondaryLabelColor])
         }
         item.representedObject = r.id
-        // A multi-file torrent gets a chevron that opens its file list under the row (SPEC 8.2).
-        menuFiles.decorate(item, row: r, revealOnClick: kind == .recent)
+        // A multi-file torrent gets a chevron that opens its file list under the row, a download a check
+        // (running / paused) and a video a Play icon (SPEC 8.2).
+        if !r.awaitingChoice {
+            let live = kind != .recent
+            menuFiles.decorate(item, row: r, revealOnClick: kind == .recent, interactive: live,
+                               running: live ? Self.isRunning(r) : nil, onCheck: { [weak self] in self?.toggleRunning(r.id) })
+        }
+        (item.view as? MenuTorrentRow)?.onContext = { [weak self] in
+            guard let self, let row = self.rows[r.id] else { return }
+            self.popContext(row)
+        }
         rowItems[r.id] = item
         return item
     }
 
-    // MARK: Right-click spike (SPEC §8.2)
+    /// The check of a row: running = downloading or queued, off = paused. A held row's countdown pauses too.
+    static func isRunning(_ r: TransferRow) -> Bool {
+        if let p = r.pending { return !p.paused }
+        return r.state != .paused
+    }
 
-    /// Right-click attempt: a local monitor that, on right-mouse-up, takes the highlighted row,
-    /// closes the menu and pops the context menu at the pointer. SPIKE RESULT: in a synthetic test
-    /// (events posted with NSApp.postEvent while the menu tracked) the menu's tracking loop consumed
-    /// the mouse events without calling monitors, so this probably never fires; the hover submenu
-    /// is the real mechanism. Kept because it is harmless; verify with real hardware input.
+    private func toggleRunning(_ id: String) {
+        guard let r = rows[id] else { return }
+        let running = Self.isRunning(r)
+        if r.pending != nil { commands.pendingCountdown(id, pause: running) }
+        else if running { core.pause(ids: [id]) }
+        else { core.resume(ids: [id]) }
+        // The row follows at once; the next refresh confirms it from the engine.
+        (rowItems[id]?.view as? MenuTorrentRow)?.running = !running
+        if var next = rows[id] {
+            if next.pending != nil { next.pending?.paused = running } else { next.state = running ? .paused : .queued }
+            rows[id] = next
+        }
+    }
+
+    // MARK: Right-click (SPEC §8.2)
+
+    /// Right-click on a row closes the menu and pops its commands (`commands.entries`, the same as the window's
+    /// context menu minus the window-only ones) at the pointer. Two routes, as the menu's tracking loop is not
+    /// documented to pass right-clicks on: a local monitor, and `MenuTorrentRow.onContext` (its rightMouseUp).
+    /// Whichever fires first wins; neither is verified with real hardware input.
     private func installRightClickMonitor() {
         rightClickMonitor = NSEvent.addLocalMonitorForEvents(matching: [.rightMouseDown, .rightMouseUp]) { [weak self] event in
             let isUp = event.type == .rightMouseUp
@@ -374,21 +464,26 @@ import os
         }
     }
 
+    /// The row under the pointer, else the highlighted one.
+    private func rowForContext() -> TransferRow? {
+        if let id = rowItems.first(where: { $0.value.view?.menuPointerInside == true })?.key, let row = rows[id] { return row }
+        guard let id = menu.highlightedItem?.representedObject as? String else { return nil }
+        return rows[id]
+    }
+
     /// Returns true when the click was consumed.
     private func handleRightClick(isUp: Bool) -> Bool {
         log.notice("right-click event during menu tracking (up: \(isUp))")
-        guard isUp, let id = Self.deepestHighlighted(menu)?.representedObject as? String, let row = rows[id] else { return false }
+        guard isUp, let row = rowForContext() else { return false }
+        popContext(row)
+        return true
+    }
+
+    private func popContext(_ row: TransferRow) {
         log.notice("right-click on row \(row.name, privacy: .public)")
         menu.cancelTracking()
         let ctx = MenuBuilder.menu(commands.entries(for: [row], inMenuBar: true))
         DispatchQueue.main.async { ctx.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil) }
-        return true
-    }
-
-    private static func deepestHighlighted(_ menu: NSMenu) -> NSMenuItem? {
-        guard let item = menu.highlightedItem else { return nil }
-        if let sub = item.submenu, let inner = deepestHighlighted(sub) { return inner }
-        return item
     }
 }
 

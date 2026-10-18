@@ -156,7 +156,7 @@ import Observation
     func section(forInfo id: String) -> Section {
         let s = snapshot
         if case .tracker(let t) = section,
-           (s.downloading + s.queued + s.recent + visibleRows).contains(where: { $0.id == id && $0.trackerId == t }) { return section }
+           (s.allDownloading + s.allQueued + s.allRecent + visibleRows).contains(where: { $0.id == id && $0.trackerId == t }) { return section }
         if (s.downloading + s.queued).contains(where: { $0.id == id }) { return .downloads }
         if s.recent.contains(where: { $0.id == id }) { if case .sharing = section { return .sharing }
             return .downloads
@@ -207,13 +207,17 @@ import Observation
             if starting > 0 { parts.append("\(starting) starting") }
             let today = s.recent.count
             if today > 0 { parts.append("\(today) finished today") }
+            parts.append(Self.rates(s))
             return parts.joined(separator: " · ")
         case .sharing:
-            return "\(Fmt.count(snapshot.sharingTotal, "torrent")) · ↑ \(Fmt.rate(snapshot.upRate))"
+            return "\(Fmt.count(snapshot.sharingTotal, "torrent")) · \(Self.rates(snapshot))"
         case .settings:
             return "Settings"
         }
     }
+
+    /// "↓ 2.1 MB/s · ↑ 340 KB/s": both rates in the toolbar line of Downloads and Sharing.
+    static func rates(_ s: Snapshot) -> String { "↓ \(Fmt.rate(s.downRate)) · ↑ \(Fmt.rate(s.upRate))" }
 
     func matches(_ row: TransferRow) -> Bool {
         (search.isEmpty || row.name.localizedCaseInsensitiveContains(search) || row.displayName.localizedCaseInsensitiveContains(search))
@@ -227,7 +231,7 @@ import Observation
         case .downloads: return (s.downloading + s.queued + s.recent).filter(matches)
         case .sharing: return SeedGroup.allCases.flatMap { groups[$0] ?? [] }
         case .tracker:
-            let top = (s.downloading + s.queued + s.recent).filter(matches)
+            let top = (s.allDownloading + s.allQueued + s.allRecent).filter(matches)
             let shownTop = Set(top.map(\.id))
             return top + SeedGroup.allCases.flatMap { groups[$0] ?? [] }.filter { !shownTop.contains($0.id) }
         case .settings: return []
@@ -280,4 +284,13 @@ extension LibraryModel {
         selection.subtract(ids)
         if let a = selectionAnchor, ids.contains(a) { selectionAnchor = nil }
     }
+}
+
+extension Snapshot {
+    /// Every download, including those of a tracker in hidden mode (SPEC 7E.5). `downloading`, `queued`
+    /// and `recent` are what the Downloads tab and the menu list; a tracker's own tab, the sleep assertion,
+    /// the chooser and the notifications need all of them.
+    var allDownloading: [TransferRow] { downloading + hiddenDownloading }
+    var allQueued: [TransferRow] { queued + hiddenQueued }
+    var allRecent: [TransferRow] { recent + hiddenRecent }
 }

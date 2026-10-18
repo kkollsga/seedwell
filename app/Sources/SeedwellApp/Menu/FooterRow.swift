@@ -39,6 +39,9 @@ import AppKit
         NSSize(width: Self.edge * 2 + open.fitting + quit.fitting + 4 * Self.pad + 24, height: Self.height)
     }
 
+    /// The two sides (hover).
+    var hoverRows: [FooterButton] { [open, quit] }
+
     /// QA: draws one side highlighted, as a hover would ("open", "quit" or nil).
     func qaHighlight(_ side: String?) {
         open.hovered = side == "open"
@@ -51,7 +54,7 @@ import AppKit
     }
 }
 
-@MainActor final class FooterButton: NSView {
+@MainActor final class FooterButton: NSView, HoverRow {
     private let title: String
     private let run: @MainActor () -> Void
     var hovered = false { didSet { if hovered != oldValue { needsDisplay = true } } }
@@ -78,16 +81,13 @@ import AppKit
         super.updateTrackingAreas()
         for a in trackingAreas { removeTrackingArea(a) }
         addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways, .inVisibleRect], owner: self))
+        hovered = menuPointerInside
     }
 
     /// The highlight follows the pointer's real position, never an event that was missed: it is off at
     /// rest, on only while the pointer is inside, and off again the moment it leaves or the menu closes.
-    private var pointerInside: Bool {
-        guard let w = window else { return false }
-        return bounds.contains(convert(w.mouseLocationOutsideOfEventStream, from: nil))
-    }
-    override func mouseEntered(with event: NSEvent) { hovered = pointerInside }
-    override func mouseMoved(with event: NSEvent) { hovered = pointerInside }
+    override func mouseEntered(with event: NSEvent) { hovered = menuPointerInside }
+    override func mouseMoved(with event: NSEvent) { hovered = menuPointerInside }
     override func mouseExited(with event: NSEvent) { hovered = false }
     override func viewDidMoveToWindow() { hovered = false }
     override func viewWillMove(toWindow newWindow: NSWindow?) { if newWindow == nil { hovered = false } }

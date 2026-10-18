@@ -5,8 +5,8 @@
 # rate-limited local seeder = headless seedwell daemon on 127.0.0.1): Night Harbor S01 (13 files) and a 2,303-file photo
 # archive downloading, Big Buck Bunny (3 files) finished into Recent.
 # The REAL status menu is opened (`menu open`); QAControl clicks the chevron and the list's rows exactly as their mouse
-# handlers would (`menu-files expand|press|fold|state|submenu`; a real pointer cannot be driven inside a tracking menu).
-# Asserts: no "Files" submenu item, expand adds rows and the menu keeps tracking, ticking changes the engine's wanted
+# handlers would (`menu-files expand|press|fold|state|context`; a real pointer cannot be driven inside a tracking menu).
+# Asserts: no "Files" item in the right-click menu, expand adds rows and the menu keeps tracking, ticking changes the engine's wanted
 # count (file, folder open + file inside), expanding a second torrent closes the first, Recent works.
 # Captures (the menu window by id, QA_PID limits winid to this QA app): app/build/qa/menufiles-inline-*.png.
 set -uo pipefail
@@ -51,10 +51,10 @@ QA_PID=$(pgrep -f "SeedwellApp --state-dir $STATE" | head -1); export QA_PID
 [ -n "$QA_PID" ] || { echo "QA app not running"; exit 1; }
 "$CLI" --socket "$SOCK" list 2>&1 | head -4
 
-echo "== 1. collapsed by default, chevron on the rows, no Files submenu item"
+echo "== 1. collapsed by default, chevron on the rows, no Files item in the right-click menu"
 qa_cmd "menu open" >/dev/null; sleep 1.3
 s=$(state Night); check "nothing open" "$s" "expanded none"
-sub=$(say 'menu-files submenu Night'); case "$sub" in *"submenu Files|"*) echo "  FAIL: a Files submenu item is still there: $sub"; FAIL=1;; *) echo "  ok: no Files item in the row submenu";; esac
+sub=$(say 'menu-files context Night'); case "$sub" in *"context Files|"*) echo "  FAIL: a Files item is still there: $sub"; FAIL=1;; *) echo "  ok: no Files item in the row's right-click menu";; esac
 R0=$(rows "$s")
 shot "collapsed"
 

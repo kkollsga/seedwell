@@ -827,7 +827,7 @@ impl Backend for MockBackend {
         recent.sort_by_key(|i| std::cmp::Reverse(i.finished_at));
         recent.truncate(MENU_RECENT);
         let recent = recent.into_iter().map(|i| s.row(i)).collect();
-        let profiles: Vec<(String, String)> = Vec::new();
+        let profiles: Vec<rows::Favorite> = Vec::new();
         rows::snapshot(
             &all,
             recent,
@@ -851,11 +851,11 @@ impl Backend for MockBackend {
     }
 
     fn rows(&self, q: &RowQuery) -> Vec<TransferRow> {
-        rows::query(&self.lock().all_rows(), q)
+        rows::query(&self.lock().all_rows(), q, &rows::Hidden::default())
     }
 
     fn sharing_counts(&self, tracker_id: Option<&str>, text: &str) -> SharingCounts {
-        rows::counts(&self.lock().all_rows(), tracker_id, text)
+        rows::counts(&self.lock().all_rows(), tracker_id, text, &rows::Hidden::default())
     }
 
     fn tracker_hosts(&self, group_id: &str) -> Vec<String> {

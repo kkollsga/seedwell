@@ -16,6 +16,8 @@ struct MenuFileList: Equatable {
         let check: FileTree.Check
         let isFolder: Bool
         let isOpen: Bool
+        /// A video file: the row gets a Play icon.
+        var isVideo = false
     }
 
     /// Rows drawn before "Show All in Seedwell…" (the list scrolls; this only bounds a huge archive).
@@ -52,7 +54,7 @@ struct MenuFileList: Equatable {
                 if !n.isFolder, n.priority != .skip, n.done > 0, n.done < n.length {
                     size = "\(Int(Double(n.done) / Double(n.length) * 100))% · \(size)"
                 }
-                out.append(Entry(node: id, depth: depth, title: n.name, size: size, check: tree.check(id), isFolder: n.isFolder, isOpen: open.contains(id)))
+                out.append(Entry(node: id, depth: depth, title: n.name, size: size, check: tree.check(id), isFolder: n.isFolder, isOpen: open.contains(id), isVideo: n.isVideo))
             } else {
                 hidden += 1
             }
@@ -84,11 +86,65 @@ extension FileTree {
     }
 }
 
+// MARK: Hover
+
+/// A custom menu row that draws its own hover highlight. The controller keeps at most one of them lit
+/// (`StatusMenuController.refreshHover`).
+@MainActor protocol HoverRow: NSView {
+    var hovered: Bool { get set }
+}
+
+/// The small checkbox of the menu's rows (torrent rows and file rows alike): an outlined rounded box, filled
+/// with the accent colour and a tick when on, a dash when mixed, empty when off.
+enum MenuCheckbox {
+    static let size: CGFloat = 13
+
+    static func draw(at origin: NSPoint, state: FileTree.Check, hovered: Bool) {
+        let box = NSRect(origin: origin, size: NSSize(width: size, height: size))
+        let path = NSBezierPath(roundedRect: box.insetBy(dx: 0.5, dy: 0.5), xRadius: 3, yRadius: 3)
+        // On a lit row the accent is the background: the box turns white there.
+        let mark: NSColor
+        if state == .off {
+            (hovered ? NSColor.selectedMenuItemTextColor : NSColor.secondaryLabelColor).setStroke()
+            path.lineWidth = 1
+            path.stroke()
+            return
+        }
+        if hovered {
+            NSColor.selectedMenuItemTextColor.setFill(); mark = .selectedContentBackgroundColor
+        } else {
+            NSColor.controlAccentColor.setFill(); mark = .white
+        }
+        path.fill()
+        mark.setStroke()
+        let m = NSBezierPath()
+        m.lineWidth = 1.6; m.lineCapStyle = .round; m.lineJoinStyle = .round
+        if state == .on {
+            m.move(to: NSPoint(x: box.minX + 3.2, y: box.midY - 0.2))
+            m.line(to: NSPoint(x: box.minX + 5.5, y: box.minY + 3.4))
+            m.line(to: NSPoint(x: box.maxX - 3, y: box.maxY - 3.6))
+        } else {
+            m.move(to: NSPoint(x: box.minX + 3.5, y: box.midY))
+            m.line(to: NSPoint(x: box.maxX - 3.5, y: box.midY))
+        }
+        m.stroke()
+    }
+}
+
+extension NSView {
+    /// Whether the pointer is over the visible part of this view. A row scrolled out of its list is clipped, so
+    /// its (off-screen) bounds must not count.
+    var menuPointerInside: Bool {
+        guard let w = window else { return false }
+        return visibleRect.contains(convert(w.mouseLocationOutsideOfEventStream, from: nil))
+    }
+}
+
 // MARK: Rows
 
 /// A row of the checklist: [fold chevron] ✓ / − / empty, the name, the size on the right. A click on the
 /// chevron folds a folder, a click elsewhere runs `run`; neither closes the menu.
-@MainActor final class MenuCheckRow: NSView {
+@MainActor final class MenuCheckRow: NSView, HoverRow {
     struct Content: Equatable {
         var title: String
         var trailing = ""
@@ -97,11 +153,16 @@ extension FileTree {
         /// A folder: open or closed. nil for a file.
         var disclosure: Bool?
         var indent = 0
+        /// A video file: a Play icon at the right edge.
+        var playable = false
+        /// The list has videos: the Play column is kept free in every row, so the sizes line up.
+        var reservesPlay = false
     }
 
     var content: Content { didSet { if content != oldValue { needsDisplay = true; refreshAccessibility() } } }
     var run: @MainActor () -> Void
     var onDisclosure: @MainActor () -> Void = {}
+    var onPlay: @MainActor () -> Void = {}
     var hovered = false { didSet { if hovered != oldValue { needsDisplay = true } } }
     private static let edge: CGFloat = 5
     private static let step: CGFloat = 14
@@ -138,19 +199,20 @@ extension FileTree {
     private var chevronX: CGFloat { Self.edge + 6 + CGFloat(content.indent) * Self.step }
     /// The chevron's hit area: its column, 24 pt wide.
     private var disclosureZone: NSRect { NSRect(x: chevronX - 4, y: 0, width: 24, height: bounds.height) }
+    /// The Play icon's column at the right edge, left of the menu's inset.
+    private static let playColumn: CGFloat = 22
+    private var playZone: NSRect { NSRect(x: bounds.maxX - Self.edge - 24 - Self.playColumn, y: 0, width: Self.playColumn + 4, height: bounds.height) }
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         for a in trackingAreas { removeTrackingArea(a) }
         addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways, .inVisibleRect], owner: self))
+        // The areas were rebuilt (a scroll, a resize): the pointer may be on the other side of the edge now.
+        hovered = menuPointerInside
     }
 
-    private var pointerInside: Bool {
-        guard let w = window else { return false }
-        return bounds.contains(convert(w.mouseLocationOutsideOfEventStream, from: nil))
-    }
-    override func mouseEntered(with event: NSEvent) { hovered = pointerInside }
-    override func mouseMoved(with event: NSEvent) { hovered = pointerInside }
+    override func mouseEntered(with event: NSEvent) { hovered = menuPointerInside }
+    override func mouseMoved(with event: NSEvent) { hovered = menuPointerInside }
     override func mouseExited(with event: NSEvent) { hovered = false }
     override func viewDidMoveToWindow() { hovered = false }
     override func viewWillMove(toWindow newWindow: NSWindow?) { if newWindow == nil { hovered = false } }
@@ -158,7 +220,9 @@ extension FileTree {
     override func mouseUp(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
         guard bounds.contains(p) else { return }
-        if content.disclosure != nil, disclosureZone.contains(p) { onDisclosure() } else { run() }
+        if content.disclosure != nil, disclosureZone.contains(p) { onDisclosure() }
+        else if content.playable, playZone.contains(p) { onPlay() }
+        else { run() }
     }
 
     override func accessibilityPerformPress() -> Bool { run(); return true }
@@ -182,13 +246,19 @@ extension FileTree {
         if content.check != nil {
             if let open = content.disclosure { _ = symbol(open ? "chevron.down" : "chevron.right", size: 8, color: faint, at: chevronX + 2) }
             x = chevronX + 18
-            if let check = content.check, check != .off { _ = symbol(check == .on ? "checkmark" : "minus", size: 9.5, color: ink, at: x) }
+            if let check = content.check {
+                MenuCheckbox.draw(at: NSPoint(x: x, y: ((bounds.height - MenuCheckbox.size) / 2).rounded()), state: check, hovered: hovered)
+            }
             x += 17
         }
 
         // File rows sit in a scroll view whose overlay scroller and the menu's own inset eat into the
         // right edge: keep the size column clear of both.
-        let right = bounds.maxX - Self.edge - (content.check != nil ? 24 : 9)
+        var right = bounds.maxX - Self.edge - (content.check != nil ? 24 : 9)
+        if content.reservesPlay {
+            if content.playable { _ = symbol(QAFlags.playGlyph, size: 9.5, color: hovered ? .selectedMenuItemTextColor : .secondaryLabelColor, at: right - 11) }
+            right -= Self.playColumn
+        }
         var textRight = right
         if !content.trailing.isEmpty {
             let attrs: [NSAttributedString.Key: Any] = [.font: isFile ? Self.fileSize : Self.small, .foregroundColor: faint]
@@ -206,15 +276,25 @@ extension FileTree {
 }
 
 /// The torrent's own row in the menu when it has a file list: a native-looking two-line row (ring, name,
-/// grey line, ▸ when it has a submenu) with a chevron at the left edge. The chevron (24 pt hit area)
-/// opens the list; elsewhere a Recent row reveals the file and a download row leaves the click to its
-/// submenu. It takes its texts from the NSMenuItem the controller keeps up to date (`sync`).
-@MainActor final class MenuTorrentRow: NSView {
+/// grey line) with a chevron at the left edge when it has a file list, a check (running / paused) for a
+/// download and a Play icon at the right edge for a video. The chevron (24 pt hit area) opens the list, the
+/// check pauses or resumes, the Play icon plays; elsewhere a Recent row reveals the file, a held row
+/// opens its chooser and a download row does nothing (its commands are on the right-click menu). It takes its texts from the NSMenuItem the controller keeps up to date (`sync`).
+@MainActor final class MenuTorrentRow: NSView, HoverRow {
     private var title = ""
     private var subtitle = ""
     private var image: NSImage?
     private var dimmed = false
-    private var hasSubmenu = false
+    /// A chevron at the left edge opens the file list.
+    var canExpand = false { didSet { if canExpand != oldValue { needsDisplay = true } } }
+    /// The checkbox: ticked = running, empty = paused; nil = the row has none.
+    var running: Bool? { didSet { if running != oldValue { needsDisplay = true } } }
+    /// A Play icon at the right edge.
+    var playable = false { didSet { if playable != oldValue { needsDisplay = true } } }
+    var onCheck: (@MainActor () -> Void)?
+    var onPlay: (@MainActor () -> Void)?
+    /// A right-click: the row's commands.
+    var onContext: (@MainActor () -> Void)?
     var expanded = false { didSet { if expanded != oldValue { needsDisplay = true } } }
     var onToggle: @MainActor () -> Void = {}
     /// A click outside the chevron (Recent: Show in Finder). The menu closes first.
@@ -236,26 +316,27 @@ extension FileTree {
         let t = item.attributedTitle?.string ?? item.title
         let dim = item.attributedTitle != nil && item.state != .on && item.attributedTitle?.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor == .secondaryLabelColor
         let s = item.subtitle ?? ""
-        let changed = (t, s, dim, item.submenu != nil) != (title, subtitle, dimmed, hasSubmenu)
-        title = t; subtitle = s; dimmed = dim; hasSubmenu = item.submenu != nil; image = item.image
+        let changed = (t, s, dim) != (title, subtitle, dimmed)
+        title = t; subtitle = s; dimmed = dim; image = item.image
         if changed { setAccessibilityLabel(s.isEmpty ? t : "\(t), \(s)") }
         needsDisplay = true
     }
 
     private var chevronZone: NSRect { NSRect(x: Self.edge, y: 0, width: 24, height: bounds.height) }
+    private static let checkX: CGFloat = edge + 28
+    private var checkZone: NSRect { NSRect(x: Self.checkX - 6, y: 0, width: 26, height: bounds.height) }
+    private var playZone: NSRect { NSRect(x: bounds.maxX - Self.edge - 32, y: 0, width: 32, height: bounds.height) }
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         for a in trackingAreas { removeTrackingArea(a) }
         addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways, .inVisibleRect], owner: self))
+        // The areas were rebuilt (a scroll, a resize): the pointer may be on the other side of the edge now.
+        hovered = menuPointerInside
     }
 
-    private var pointerInside: Bool {
-        guard let w = window else { return false }
-        return bounds.contains(convert(w.mouseLocationOutsideOfEventStream, from: nil))
-    }
-    override func mouseEntered(with event: NSEvent) { hovered = pointerInside }
-    override func mouseMoved(with event: NSEvent) { hovered = pointerInside }
+    override func mouseEntered(with event: NSEvent) { hovered = menuPointerInside }
+    override func mouseMoved(with event: NSEvent) { hovered = menuPointerInside }
     override func mouseExited(with event: NSEvent) { hovered = false }
     override func viewDidMoveToWindow() { hovered = false }
     override func viewWillMove(toWindow newWindow: NSWindow?) { if newWindow == nil { hovered = false } }
@@ -263,14 +344,26 @@ extension FileTree {
     override func mouseUp(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
         guard bounds.contains(p) else { return }
-        if chevronZone.contains(p) { onToggle(); return }
+        if canExpand, chevronZone.contains(p) { onToggle(); return }
+        if running != nil, checkZone.contains(p) { onCheck?(); return }
+        if playable, playZone.contains(p) { hovered = false; closeThen { self.onPlay?() }; return }
         guard let run = onActivate else { return }
         hovered = false
+        closeThen(run)
+    }
+
+    /// The menu closes first, then the action runs (as a plain item's action would).
+    private func closeThen(_ run: @escaping @MainActor () -> Void) {
         enclosingMenuItem?.menu?.cancelTracking()
         DispatchQueue.main.async { MainActor.assumeIsolated { run() } }
     }
 
-    override func accessibilityPerformPress() -> Bool { onToggle(); return true }
+    override func rightMouseUp(with event: NSEvent) { onContext?() }
+
+    override func accessibilityPerformPress() -> Bool {
+        if canExpand { onToggle() } else if let onActivate { closeThen(onActivate) } else { onCheck?() }
+        return true
+    }
 
     /// QA: a click on the chevron.
     func qaToggle() { onToggle() }
@@ -283,10 +376,15 @@ extension FileTree {
         let ink: NSColor = hovered ? .selectedMenuItemTextColor : (dimmed ? .secondaryLabelColor : .labelColor)
         let faint: NSColor = hovered ? .selectedMenuItemTextColor : .secondaryLabelColor
         let cfg = NSImage.SymbolConfiguration(pointSize: 10, weight: .semibold).applying(.init(paletteColors: [faint]))
-        if let img = NSImage(systemSymbolName: expanded ? "chevron.down" : "chevron.right", accessibilityDescription: nil)?.withSymbolConfiguration(cfg) {
+        if canExpand, let img = NSImage(systemSymbolName: expanded ? "chevron.down" : "chevron.right", accessibilityDescription: nil)?.withSymbolConfiguration(cfg) {
             img.draw(at: NSPoint(x: Self.edge + 7, y: (bounds.height - img.size.height) / 2), from: .zero, operation: .sourceOver, fraction: 1)
         }
         var x = Self.edge + 28
+        if let running {
+            // The same checkbox as the file rows: ticked while it runs, empty while it is paused.
+            MenuCheckbox.draw(at: NSPoint(x: Self.checkX, y: ((bounds.height - MenuCheckbox.size) / 2).rounded()), state: running ? .on : .off, hovered: hovered)
+            x += 17
+        }
         if let image {
             let r = NSRect(x: x, y: (bounds.height - image.size.height) / 2, width: image.size.width, height: image.size.height)
             if image.isTemplate {
@@ -297,9 +395,9 @@ extension FileTree {
             x += image.size.width + 8
         }
         var right = bounds.maxX - Self.edge - 10
-        if hasSubmenu {
-            let c = NSImage.SymbolConfiguration(pointSize: 10, weight: .semibold).applying(.init(paletteColors: [faint]))
-            if let img = NSImage(systemSymbolName: "chevron.right", accessibilityDescription: nil)?.withSymbolConfiguration(c) {
+        if playable {
+            let c = NSImage.SymbolConfiguration(pointSize: 10.5, weight: .semibold).applying(.init(paletteColors: [faint]))
+            if let img = NSImage(systemSymbolName: QAFlags.playGlyph, accessibilityDescription: nil)?.withSymbolConfiguration(c) {
                 right -= img.size.width
                 img.draw(at: NSPoint(x: right, y: (bounds.height - img.size.height) / 2), from: .zero, operation: .sourceOver, fraction: 1)
                 right -= 6
@@ -342,11 +440,14 @@ private final class FlippedView: NSView { override var isFlipped: Bool { true } 
     private let toggleNode: (Int) -> Void
     private let setAll: (Bool) -> Void
     private let more: () -> Void
+    private let play: (Int) -> Void
+    /// The rows moved under the pointer (a scroll, a rebuild): the controller looks at the hover again.
+    var onMoved: (() -> Void)?
 
     init(tree: FileTree, width: CGFloat, state: @escaping () -> FileTree?, toggleNode: @escaping (Int) -> Void,
-         setAll: @escaping (Bool) -> Void, more: @escaping () -> Void) {
+         setAll: @escaping (Bool) -> Void, more: @escaping () -> Void, play: @escaping (Int) -> Void) {
         open = MenuFileList.initiallyOpen(tree)
-        self.state = state; self.toggleNode = toggleNode; self.setAll = setAll; self.more = more
+        self.state = state; self.toggleNode = toggleNode; self.setAll = setAll; self.more = more; self.play = play
         let n = min(tree.nodes.count - 1, MenuFileList.cap + 1)
         let list = min(Self.maxList, CGFloat(n) * Self.rowHeight + 4)
         super.init(frame: NSRect(x: 0, y: 0, width: width, height: headerHeight + list + footerHeight))
@@ -367,6 +468,10 @@ private final class FlippedView: NSView { override var isFlipped: Bool { true } 
         footer.autoresizingMask = .width
         footer.lineBreakMode = .byTruncatingTail
         addSubview(scroll); addSubview(header); addSubview(footer)
+        scroll.contentView.postsBoundsChangedNotifications = true
+        NotificationCenter.default.addObserver(forName: NSView.boundsDidChangeNotification, object: scroll.contentView, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.onMoved?() }
+        }
         rebuild()
     }
 
@@ -387,9 +492,11 @@ private final class FlippedView: NSView { override var isFlipped: Bool { true } 
         // The document has its final width before rows go in: its autoresizing would stretch them otherwise.
         doc.frame.size.width = w
         var y: CGFloat = 2
+        let reservesPlay = list.entries.contains(where: \.isVideo)
         for e in list.entries {
-            let row = MenuCheckRow(content: Self.content(e), width: w) { [toggleNode] in toggleNode(e.node) }
+            let row = MenuCheckRow(content: Self.content(e, reservesPlay: reservesPlay), width: w) { [toggleNode] in toggleNode(e.node) }
             row.onDisclosure = { [weak self] in self?.toggleFolder(e.node) }
+            row.onPlay = { [play] in play(e.node) }
             row.frame = NSRect(x: 0, y: y, width: w, height: Self.rowHeight)
             row.autoresizingMask = .width
             row.identifier = NSUserInterfaceItemIdentifier(String(e.node))
@@ -406,10 +513,12 @@ private final class FlippedView: NSView { override var isFlipped: Bool { true } 
         doc.setFrameSize(NSSize(width: w, height: y + 2))
         doc.autoresizingMask = .width
         footer.stringValue = list.footer
+        DispatchQueue.main.async { [weak self] in self?.onMoved?() }
     }
 
-    private static func content(_ e: MenuFileList.Entry) -> MenuCheckRow.Content {
-        .init(title: e.title, trailing: e.size, check: e.check, disclosure: e.isFolder ? e.isOpen : nil, indent: e.depth)
+    private static func content(_ e: MenuFileList.Entry, reservesPlay: Bool) -> MenuCheckRow.Content {
+        .init(title: e.title, trailing: e.size, check: e.check, disclosure: e.isFolder ? e.isOpen : nil, indent: e.depth,
+              playable: e.isVideo, reservesPlay: reservesPlay)
     }
 
     /// A tick changed (an edit, the engine's answer): checks and footer follow the tree.
@@ -455,6 +564,10 @@ private final class FlippedView: NSView { override var isFlipped: Bool { true } 
     private var panel: MenuFilesPanel?
     private var rowViews: [String: WeakRow] = [:]
     private struct WeakRow { weak var view: MenuTorrentRow? }
+    /// The list's rows moved or changed shape: the controller looks at the hover again.
+    var onMoved: (() -> Void)?
+    /// The open list's rows (hover).
+    var hoverRows: [MenuCheckRow] { panel?.rows ?? [] }
 
     init(core: Core, commands: Commands) {
         self.commands = commands
@@ -466,12 +579,21 @@ private final class FlippedView: NSView { override var isFlipped: Bool { true } 
     /// A list is open: the menu is not rebuilt under it (the 1 s refresh only updates texts).
     var isOpen: Bool { expanded != nil }
 
-    /// Gives the torrent's menu item its row view (chevron, ring, texts) when it has files to choose from.
-    func decorate(_ item: NSMenuItem, row r: TransferRow, revealOnClick: Bool) {
-        guard MenuFileList.offers(r) else { return }
+    /// Gives the torrent's menu item its row view (ring, texts, and as the row needs them the chevron, the
+    /// check and the Play icon). A Recent row without a file list keeps the plain item.
+    func decorate(_ item: NSMenuItem, row r: TransferRow, revealOnClick: Bool, interactive: Bool = false,
+                  onActivate: (@MainActor () -> Void)? = nil, running: Bool? = nil, onCheck: (@MainActor () -> Void)? = nil) {
+        let expands = MenuFileList.offers(r)
+        guard expands || interactive else { return }
         let view = MenuTorrentRow()
+        view.canExpand = expands
         if revealOnClick { view.onActivate = { [commands] in commands.reveal([r]) } }
-        view.onToggle = { [weak self, weak item] in if let item { self?.toggle(r.id, item: item, sharing: r.isSharing) } }
+        if let onActivate { view.onActivate = onActivate }
+        view.running = running
+        view.onCheck = onCheck
+        view.playable = r.showsPlayButton
+        view.onPlay = { [commands] in commands.playButtonPressed(r) }
+        view.onToggle = { [weak self, weak item] in if let item { self?.toggle(r, item: item) } }
         item.view = view
         view.sync(from: item)
         rowViews[r.id] = WeakRow(view: view)
@@ -479,7 +601,8 @@ private final class FlippedView: NSView { override var isFlipped: Bool { true } 
 
     // MARK: Opening and closing
 
-    func toggle(_ id: String, item: NSMenuItem, sharing: Bool) {
+    func toggle(_ row: TransferRow, item: NSMenuItem) {
+        let (id, sharing) = (row.id, row.isSharing)
         if expanded == id { collapse(); return }
         collapse()
         guard let menu = item.menu else { return }
@@ -500,7 +623,14 @@ private final class FlippedView: NSView { override var isFlipped: Bool { true } 
                                        FilesStore.shared.expand(id)
                                        self?.commands.showMain(section, nil)
                                        menu.cancelTracking()
+                                   },
+                                   play: { [weak self] node in
+                                       guard let self, let file = self.store.states[id]?.tree?.torrentFile(node) else { return }
+                                       menu.cancelTracking()
+                                       let commands = self.commands
+                                       DispatchQueue.main.async { MainActor.assumeIsolated { commands.play(row, file: file) } }
                                    })
+        panel.onMoved = { [weak self] in self?.onMoved?() }
         let pi = NSMenuItem()
         pi.view = panel
         menu.insertItem(pi, at: menu.index(of: item) + 1)
@@ -509,6 +639,7 @@ private final class FlippedView: NSView { override var isFlipped: Bool { true } 
         expanded = id
         (item.view as? MenuTorrentRow)?.expanded = true
         cleanup?.cancel()
+        DispatchQueue.main.async { [weak self] in self?.onMoved?() }
     }
 
     func collapse() {
@@ -516,6 +647,7 @@ private final class FlippedView: NSView { override var isFlipped: Bool { true } 
         if let pi = panelItem, let m = pi.menu { m.removeItem(pi) }
         panel = nil; panelItem = nil; expanded = nil
         scheduleCleanup()
+        DispatchQueue.main.async { [weak self] in self?.onMoved?() }
     }
 
     /// The whole menu closed: the list goes, its data a moment later.

@@ -47,7 +47,7 @@ import IOKit.ps
             case .limit:
                 if !core.snapshot().altSpeed { core.setAltSpeed(on: true); limitedByUs = true }
             case .pause:
-                let ids = core.snapshot().downloading.filter { $0.state == .downloading && !$0.awaitingChoice }.map(\.id)
+                let ids = core.snapshot().allDownloading.filter { $0.state == .downloading && !$0.awaitingChoice }.map(\.id)
                 if !ids.isEmpty { core.pause(ids: ids); pausedByUs += ids }
             }
         } else {

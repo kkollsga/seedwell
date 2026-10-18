@@ -14,6 +14,9 @@ enum FileLayout {
     static let rowHeight: CGFloat = 21
     /// An open list is at most this tall; beyond it the group scrolls inside (about 13 rows).
     static let maxListHeight: CGFloat = 280
+    /// UserDefaults key of "Show All": the lists grow to their full height instead of scrolling inside (one choice
+    /// for every torrent, the held-files list included).
+    static let showAllKey = "fileListShowAll"
     static let sizeWidth: CGFloat = 62
     /// "↓ 12.3 MB/s" next to the size; fixed so the names do not move as the numbers change.
     static let rateWidth: CGFloat = 74
@@ -48,6 +51,7 @@ struct FileTreeBlock: View {
     let commands: Commands
     let store: FilesStore
     @Binding var selection: Set<String>
+    @AppStorage(FileLayout.showAllKey) private var showAll = false
 
     var body: some View {
         if let st = store.states[row.id] {
@@ -61,7 +65,12 @@ struct FileTreeBlock: View {
                 // Its own height, known from the fixed row height, so the inner scroll view takes no more
                 // room than the rows need; the rows stay lazy inside it.
                 let height = min((FileLayout.maxListHeight / FileLayout.rowHeight).rounded(.down) * FileLayout.rowHeight, CGFloat(st.visible.count) * FileLayout.rowHeight)
-                if st.visible.count > 0 {
+                if st.visible.count > 0, showAll {
+                    // No inner scroll: the rows are children of the outer list (still lazy there).
+                    ForEach(st.visible) { v in
+                        FileRowView(row: row, commands: commands, state: st, store: store, tree: tree, node: v.id, depth: v.depth, selection: $selection)
+                    }
+                } else if st.visible.count > 0 {
                     ScrollView {
                         LazyVStack(spacing: 0) {
                             ForEach(st.visible) { v in
@@ -96,6 +105,7 @@ struct FilesHeader: View {
                     .help("Skipped files stay on disk")
                 Spacer(minLength: 8)
                 if t.fileCount > 20 { filterField }
+                ShowAllButton(overflows: CGFloat(state.visible.count) * FileLayout.rowHeight > FileLayout.maxListHeight)
                 Button("Select All") { state.selectAll(true) }.disabled(t.wantedCount == t.fileCount && state.filter.isEmpty)
                     .help("Download every file")
                 Button("Select None") { state.selectAll(false) }.disabled(t.wantedCount == 0 && state.filter.isEmpty)
@@ -123,6 +133,20 @@ struct FilesHeader: View {
         }
         .padding(.horizontal, 6).padding(.vertical, 1.5)
         .background(RoundedRectangle(cornerRadius: 5).fill(Color.primary.opacity(0.07)))
+    }
+}
+
+/// "Show All" / "Show Less": lifts the height cap of the file lists (SPEC 8.3). It shows only while a list is
+/// taller than the cap, or while the cap is lifted (so it can be put back).
+struct ShowAllButton: View {
+    let overflows: Bool
+    @AppStorage(FileLayout.showAllKey) private var showAll = false
+
+    var body: some View {
+        if overflows || showAll {
+            Button(showAll ? "Show Less" : "Show All") { showAll.toggle() }
+                .help(showAll ? "Scroll long file lists inside their row again" : "Grow long file lists to their full height instead of scrolling inside")
+        }
     }
 }
 

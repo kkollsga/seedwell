@@ -58,6 +58,9 @@ struct ChoiceChecklist: View {
     var showButtons = true
     /// The list never grows past this; the popover's is `ChoiceBlock.listHeight`.
     var maxListHeight = ChoiceBlock.listHeight
+    /// The main window's list has "Show All" (SPEC 8.3); the popover's does not.
+    var offersShowAll = false
+    @AppStorage(FileLayout.showAllKey) private var showAll = false
     @FocusState private var focused: Bool
     @State private var cursor: String?
 
@@ -73,6 +76,10 @@ struct ChoiceChecklist: View {
                 .buttonStyle(.plain)
                 .help(model.allState == .on ? "Untick every file" : "Tick every file")
                 Spacer()
+                if offersShowAll {
+                    ShowAllButton(overflows: fullHeight > maxListHeight)
+                        .buttonStyle(.plain).font(.system(size: 12)).foregroundStyle(Color.accentColor)
+                }
                 Text("\(Fmt.bytes(model.selectedBytes)) of \(Fmt.bytes(model.totalBytes))")
                     .font(.system(size: 12)).monospacedDigit()
                     .foregroundStyle(model.notEnoughSpace ? Color.orange : .secondary)
@@ -84,6 +91,7 @@ struct ChoiceChecklist: View {
                     }
                 }
             }
+            .scrollDisabled(unlimited)
             .frame(height: listHeight)
             .background(RoundedRectangle(cornerRadius: 8).fill(.primary.opacity(0.05)))
             .clipShape(RoundedRectangle(cornerRadius: 8))
@@ -104,9 +112,10 @@ struct ChoiceChecklist: View {
         }
     }
 
-    private var listHeight: CGFloat {
-        min(maxListHeight, max(60, CGFloat(model.visibleRows.count) * 28 + 4))
-    }
+    private var fullHeight: CGFloat { max(60, CGFloat(model.visibleRows.count) * 28 + 4) }
+    /// "Show All" is on: the list is as tall as its rows and does not scroll inside.
+    private var unlimited: Bool { offersShowAll && showAll }
+    private var listHeight: CGFloat { unlimited ? fullHeight : min(maxListHeight, fullHeight) }
 
     private func toggleCursor() {
         let rows = model.visibleRows

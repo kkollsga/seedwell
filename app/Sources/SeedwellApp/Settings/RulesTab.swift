@@ -530,6 +530,32 @@ private struct TrackersEditor: View {
                     .labelsHidden().fixedSize()
                 }
             }
+            SettingsGroup(title: "Download location") {
+                TrackerLocationEditor(record: $draft, warnings: model.trackerVolumeWarnings(draft))
+                    .padding(.horizontal, 14).padding(.vertical, 9)
+            }
+            SettingsGroup(title: "Hidden") {
+                ToggleRow(title: "Hide this tracker", isOn: $draft.hidden)
+                if draft.hidden {
+                    ToggleRow(title: "Hide only what is sharing", isOn: $draft.hideOnlySeeding)
+                }
+                Text(draft.hidden
+                     ? (draft.hideOnlySeeding
+                        ? "Finished torrents of this tracker are left out of Sharing and the menu bar; downloads show as usual."
+                        : "Its torrents are left out of Downloads, Sharing and the menu bar, and the tracker is not in the sidebar.")
+                     : "Hide a tracker to keep its torrents out of the lists and the menu bar. Nothing else changes.")
+                    .font(.system(size: 12)).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 14).padding(.vertical, 9)
+                if !isNew, saved != nil {
+                    HStack {
+                        Button("Show Torrents") { nav.openTracker(draft.id) }
+                            .help("Open this tracker's tab with all of its torrents")
+                        Spacer()
+                    }
+                    .padding(.horizontal, 14).padding(.vertical, 9)
+                }
+            }
             SettingsGroup(title: "Announce addresses") {
                 ForEach(draft.urls.indices, id: \.self) { i in
                     HStack(spacing: 8) {
@@ -606,6 +632,7 @@ private struct TrackersEditor: View {
 
 extension ProfileRecord {
     static func blank() -> ProfileRecord {
-        ProfileRecord(id: "", name: "", urls: [""], rule: nil, color: nil, icon: nil, downLimit: nil, upLimit: nil)
+        ProfileRecord(id: "", name: "", urls: [""], rule: nil, color: nil, icon: nil, downLimit: nil, upLimit: nil,
+                      incompleteDir: nil, finishedDir: nil, categories: [], hidden: false, hideOnlySeeding: false)
     }
 }

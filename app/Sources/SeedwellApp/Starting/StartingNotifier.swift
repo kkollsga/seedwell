@@ -29,6 +29,7 @@ import SwiftUI
     /// Looks at the core and shows, updates or closes the popover. Cheap; called on every pending event
     /// and once a second while the popover is up.
     func refresh(launch: Bool = false) {
+        // The displayed list: a fully hidden tracker is not named in the "starting" popover (SPEC 7E.7).
         let rows = commands.core.snapshot().downloading
         model.sync(rows, requested: chooserRequests, hasSource: { [store] in store.hasSource($0) },
                    // The chooser's own destination (it follows a category change at once), when the plan says one.

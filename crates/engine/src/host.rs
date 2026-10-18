@@ -127,6 +127,7 @@ impl Host {
             t(&mut ec);
         }
         crate::guard::check_config(&ec).map_err(EngineError::Io)?;
+        crate::guard::check_profiles(&docs.profiles).map_err(EngineError::Io)?;
         if report.recovered.is_some() {
             // The database was damaged and set aside: rebuild the torrent list from `torrents/`.
             let n = store.rebuild_from_torrent_files(&ec.default_save_dir).unwrap_or(0);

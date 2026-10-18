@@ -811,6 +811,11 @@ impl EngineHandle {
 
     /// Replace the rules and tracker profiles; every torrent is re-evaluated at once.
     pub fn apply_policy(&self, policy: PolicyData) {
+        if let Err(error) = crate::guard::check_profiles(&policy.profiles) {
+            // A hot reload must not be the way around the guard.
+            self.sh.emit(EngineEvent::ConfigRejected { file: "trackers.toml".into(), error });
+            return;
+        }
         let p = Arc::new(policy);
         // Adds that follow this call already see the new rules; the session re-evaluates the table.
         self.sh.set_policy(Some(p.clone()));

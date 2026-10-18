@@ -198,7 +198,7 @@ import AppKit
             NSApp.appearance = arg == "dark" ? NSAppearance(named: .darkAqua) : arg == "light" ? NSAppearance(named: .aqua) : nil
         case "chooser":
             // `chooser first` opens the first torrent that waits for a choice; `chooser <n>` the n-th.
-            let held = commands.core.snapshot().downloading.filter(\.awaitingChoice)
+            let held = commands.core.snapshot().allDownloading.filter(\.awaitingChoice)
             let i = Int(arg) ?? 0
             if held.indices.contains(i) { commands.showChooser(held[i].id) }
         case "chooser-category":
@@ -220,7 +220,7 @@ import AppKit
             let ids = arg.split(separator: " ").map(String.init)
             if ids.first == "close" { openMenu?.cancelTracking(); return }
             let all = commands.core.snapshot()
-            let rows = (all.downloading + all.queued + all.recent + all.sharingBusiest)
+            let rows = (all.allDownloading + all.allQueued + all.allRecent + all.sharingBusiest)
                 + commands.core.sharingRows(query: RowQuery(group: nil, trackerId: nil, text: "", offset: 0, limit: 400))
             let wanted = ids.first.flatMap { id in id == "first" ? rows.first : rows.first { $0.id.hasPrefix(id) || $0.name.localizedCaseInsensitiveContains(id) || $0.displayName.localizedCaseInsensitiveContains(id) } }
             guard let row = wanted, let win = app.mainWindowController?.nsWindow else { return }
@@ -244,13 +244,13 @@ import AppKit
         case "play":
             // Only unfinished rows: they open a stream; the blocked launch reports its URL.
             let snap = commands.core.snapshot()
-            guard let row = (snap.downloading + snap.queued + snap.recent).first(where: { $0.id.hasPrefix(arg) || $0.displayName.localizedCaseInsensitiveContains(arg) }) else { return report("play: no row \(arg)") }
+            guard let row = (snap.allDownloading + snap.allQueued + snap.allRecent).first(where: { $0.id.hasPrefix(arg) || $0.displayName.localizedCaseInsensitiveContains(arg) }) else { return report("play: no row \(arg)") }
             guard row.doneBytes < row.sizeBytes else { return report("play: \(row.displayName) is finished, QA does not launch players") }
             commands.play(row)
         case "play-row":
             // `play-row <row>`: the Play button of any row (finished or not); the blocked launch reports the file or URL.
             let snap = commands.core.snapshot()
-            let all = snap.downloading + snap.queued + snap.recent + snap.sharingBusiest
+            let all = snap.allDownloading + snap.allQueued + snap.allRecent + snap.sharingBusiest
                 + commands.core.sharingRows(query: RowQuery(group: nil, trackerId: nil, text: "", offset: 0, limit: 400))
             guard let row = all.first(where: { $0.id.hasPrefix(arg) || $0.displayName.localizedCaseInsensitiveContains(arg) }) else { return report("play-row: no row \(arg)") }
             let largest = commands.largestVideo(row)
@@ -260,7 +260,7 @@ import AppKit
             // `play-live <row>`: the real Play of an unfinished row, launching the chosen player once
             // (the stream URL is resolved off the main thread, so launching stays open for 20 s).
             let snap = commands.core.snapshot()
-            guard let row = (snap.downloading + snap.queued).first(where: { $0.id.hasPrefix(arg) || $0.displayName.localizedCaseInsensitiveContains(arg) }) else { return report("play-live: no row \(arg)") }
+            guard let row = (snap.allDownloading + snap.allQueued).first(where: { $0.id.hasPrefix(arg) || $0.displayName.localizedCaseInsensitiveContains(arg) }) else { return report("play-live: no row \(arg)") }
             PlayerLauncher.blocked = false
             commands.play(row)
             DispatchQueue.main.asyncAfter(deadline: .now() + 20) { PlayerLauncher.blocked = true }
@@ -342,7 +342,7 @@ import AppKit
             if arg == "confirm" { commands.confirmedRemove(); return }
             let parts = arg.split(separator: " ").map(String.init)
             let snap = commands.core.snapshot()
-            let rows = snap.downloading + snap.queued + snap.recent
+            let rows = snap.allDownloading + snap.allQueued + snap.allRecent
                 + commands.core.sharingRows(query: RowQuery(group: nil, trackerId: nil, text: "", offset: 0, limit: 400))
             guard let name = parts.first, let row = rows.first(where: { $0.id.hasPrefix(name) || $0.displayName.localizedCaseInsensitiveContains(name) || $0.name.localizedCaseInsensitiveContains(name) })
             else { return report("remove-ask: no row \(arg)") }
@@ -350,7 +350,7 @@ import AppKit
         case "getinfo":
             // Get Info the way the context menu asks for it: it must stay in the section shown.
             let snap = commands.core.snapshot()
-            let rows = snap.downloading + snap.queued + snap.recent + snap.sharingBusiest
+            let rows = snap.allDownloading + snap.allQueued + snap.allRecent + snap.sharingBusiest
                 + commands.core.sharingRows(query: RowQuery(group: nil, trackerId: nil, text: "", offset: 0, limit: 400))
             guard let row = rows.first(where: { $0.id.hasPrefix(arg) || $0.displayName.localizedCaseInsensitiveContains(arg) || $0.name.localizedCaseInsensitiveContains(arg) })
             else { return report("getinfo: no row \(arg)") }
@@ -480,7 +480,7 @@ import AppKit
         guard words.count > 1 else { return }
         let core = app.commands.core
         let snap = core.snapshot()
-        let rows = snap.downloading + snap.queued + snap.recent + core.sharingRows(query: RowQuery(group: nil, trackerId: nil, text: "", offset: 0, limit: 400))
+        let rows = snap.allDownloading + snap.allQueued + snap.allRecent + core.sharingRows(query: RowQuery(group: nil, trackerId: nil, text: "", offset: 0, limit: 400))
         guard let row = rows.first(where: { $0.id.hasPrefix(words[1]) || $0.name.localizedCaseInsensitiveContains(words[1]) }) else { return report("files: no torrent \(words[1])") }
         let rest = words.count > 2 ? words[2] : ""
         switch verb {
@@ -546,7 +546,7 @@ import AppKit
             name = parts.joined(separator: " ")
         }
         let commands = app.commands!
-        let rows = commands.core.snapshot().downloading.filter { $0.pending != nil || $0.awaitingChoice || $0.isUnresolvedMagnet }
+        let rows = commands.core.snapshot().allDownloading.filter { $0.pending != nil || $0.awaitingChoice || $0.isUnresolvedMagnet }
         let row = rows.first { name.isEmpty || $0.displayName.localizedCaseInsensitiveContains(name) || $0.id.hasPrefix(name) }
         switch verb {
         case "show": notifier.qaShow()
@@ -645,7 +645,7 @@ import AppKit
     ///     menu-files expand <torrent>      a click on the row's chevron (opens, or closes when open; another one closes)
     ///     menu-files press <file|folder|all|none>   a click on a row of the list; `menu-files fold <folder>` its chevron
     ///     menu-files state <torrent>       engine wanted/total, which list is open, rows, footer, menu still tracking
-    ///     menu-files submenu <row>         the titles of the row's ▸ submenu
+    ///     menu-files context <row>         the titles of the row's right-click menu, its check and Play icon
     private func menuFilesCommand(_ arg: String) {
         guard let menu = app.statusMenuController else { return }
         let files = menu.menuFiles
@@ -653,14 +653,14 @@ import AppKit
         let rest = words.count > 1 ? words[1] : ""
         func row(_ key: String) -> TransferRow? {
             let snap = app.commands.core.snapshot()
-            return (snap.downloading + snap.queued + snap.recent).first { $0.displayName.localizedCaseInsensitiveContains(key) || $0.id.hasPrefix(key) }
+            return (snap.allDownloading + snap.allQueued + snap.allRecent).first { $0.displayName.localizedCaseInsensitiveContains(key) || $0.id.hasPrefix(key) }
         }
         switch words.first {
         case "expand": report("menu-files: expand \(files.qaToggle(rest, items: menu.qaItems))")
         case "press": report("menu-files: press \(files.qaPress(rest, fold: false))")
         case "fold": report("menu-files: fold \(files.qaPress(rest, fold: true))")
         case "frames": report("menu-files: frames \(files.qaFrames)")
-        case "submenu": report("menu-files: submenu \(menu.qaRowSubmenu(rest))")
+        case "context": report("menu-files: context \(menu.qaRowContext(rest))")
         case "state":
             guard let r = row(rest) else { report("menu-files: no torrent"); return }
             report("menu-files: engine \(files.qaEngineWanted(r.id, core: app.commands.core)) expanded \(files.expanded.map { String($0.prefix(8)) } ?? "none") this \(files.expanded == r.id) rows \(files.qaRowCount) open \(menu.qaMenuOpen) footer \(files.qaFooter)")

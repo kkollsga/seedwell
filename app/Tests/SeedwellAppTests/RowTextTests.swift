@@ -20,15 +20,43 @@ private func row(state: TransferState = .seeding, seedSecs: UInt64 = 0, error: S
 
 @Suite("Row text")
 struct RowTextTests {
-    @Test func sharingRowsShowRatePeersAndRatioOnly() {
-        // No tracker, goal, seeding time or swarm: those are in Get Info.
-        #expect(row(ratio: 0.27, goal: nil, peers: 1, swarm: 250, up: 1_200_000).statusLine(.active) == "1.2 MB/s · 1 peer · Ratio 0.27")
-        #expect(row(ratio: 0.27, goal: 1.0, peers: 1, up: 1_200_000).statusLine(.active) == "1.2 MB/s · 1 peer · Ratio 0.27 of 1.0")
-        #expect(row(seedSecs: 3 * 86_400, ratio: 1.04, goal: nil).statusLine(.dormant) == "– · 0 peers · Ratio 1.04")
-        #expect(row(peers: 4, up: 45_000).statusLine(.popular) == "45 KB/s · 4 peers · Ratio 0.94 of 2.0")
+    @Test func sharingRowsShowPeersAndRatioOnly() {
+        // No rate (it stands out at the right of the name), tracker, goal, seeding time or swarm.
+        #expect(row(ratio: 0.27, goal: nil, peers: 1, swarm: 250, up: 1_200_000).statusLine(.active) == "1 peer · Ratio 0.27")
+        #expect(row(ratio: 0.27, goal: 1.0, peers: 1, up: 1_200_000).statusLine(.active) == "1 peer · Ratio 0.27 of 1.0")
+        #expect(row(seedSecs: 3 * 86_400, ratio: 1.04, goal: nil).statusLine(.dormant) == "0 peers · Ratio 1.04")
+        #expect(row(peers: 4, up: 45_000).statusLine(.popular) == "4 peers · Ratio 0.94 of 2.0")
         // Moving wins.
         var r = row(); r.movingPercent = 42
         #expect(r.statusLine(.active) == "Moving… 42%")
+    }
+
+    @Test @MainActor func theMenuCheckIsTickedWhileARowRuns() {
+        #expect(StatusMenuController.isRunning(row(state: .downloading, group: nil)))
+        #expect(StatusMenuController.isRunning(row(state: .queued, group: nil)))
+        #expect(!StatusMenuController.isRunning(row(state: .paused, group: nil)))
+        let p = PendingStart(startsAtMs: 0, remainingMs: 5_000, paused: true)
+        #expect(!StatusMenuController.isRunning(row(state: .queued, group: nil, pending: p)))
+    }
+
+    @Test @MainActor func theToolbarLineShowsBothRates() {
+        let s = Snapshot(downRate: 2_100_000, upRate: 340_000, downloading: [], queued: [], recent: [], sharingBusiest: [],
+                         sharing: SharingCounts(popular: 0, active: 1, dormant: 0, error: 0, dead: 0, stopped: 0), sharingTotal: 1, trackers: [],
+                         altSpeed: false, downLimit: nil, upLimit: nil, errorCount: 0, movingPercent: nil, attention: false, listenPort: 0,
+                         connections: 0, online: true, offlineSinceMs: nil)
+        #expect(LibraryModel.rates(s) == "↓ 2.1 MB/s · ↑ 340 KB/s")
+    }
+
+    @Test func theLiveRateStandsOutAtTheRightOfTheName() {
+        #expect(row(peers: 4, up: 45_000).headlineRate(.popular) == "↑ 45 KB/s")
+        #expect(row(up: 1_200_000).headlineRate(.active) == "↑ 1.2 MB/s")
+        #expect(row(up: 0).headlineRate(.active) == nil)
+        #expect(row(state: .downloading, group: nil, down: 2_100_000).headlineRate(.download) == "↓ 2.1 MB/s")
+        #expect(row(state: .downloading, group: nil, down: 0).headlineRate(.download) == nil)
+        #expect(row(state: .paused, group: nil, down: 2_100_000).headlineRate(.download) == nil)
+        var moving = row(up: 1_000); moving.movingPercent = 3
+        #expect(moving.headlineRate(.active) == nil)
+        #expect(row(up: 1_000).headlineRate(.recent) == nil)
     }
 
     @Test func aDownloadThatCannotFitSaysSoAndHowToRetry() {
@@ -60,19 +88,19 @@ struct RowTextTests {
         #expect(row(state: .paused, group: .stopped, ratio: 0.4, goal: 1.0).statusLine(.stopped) == "Ratio 0.40 of 1.0 · Stopped")
     }
 
-    @Test func downloadsEndWithTheDownloadRateAndPeers() {
+    @Test func downloadsEndWithThePeersAndLeaveTheRateToTheName() {
         var r = row(state: .downloading, group: nil, peers: 12, swarm: 340, down: 2_100_000)
         r.doneBytes = 73_000_000; r.sizeBytes = 85_000_000; r.etaSecs = 120
-        #expect(r.statusLine(.download) == "73 of 85 MB — 2 minutes remaining · 2.1 MB/s (12 of 340)")
+        #expect(r.statusLine(.download) == "73 of 85 MB — 2 minutes remaining · 12 of 340 peers")
     }
 
     @Test func downloadsFallBackToKnownPeersThenToTheBareCount() {
         func dl(peers: UInt32, known: UInt32 = 0, down: UInt64 = 0) -> TransferRow {
             row(state: .downloading, group: nil, peers: peers, known: known, down: down)
         }
-        #expect(dl(peers: 4, known: 90, down: 1_000).liveSuffix(.download) == "1.0 KB/s (4 of 90)")
-        #expect(dl(peers: 4).liveSuffix(.download) == "(4 peers)")
-        #expect(dl(peers: 1).liveSuffix(.download) == "(1 peer)")
+        #expect(dl(peers: 4, known: 90, down: 1_000).liveSuffix(.download) == "4 of 90 peers")
+        #expect(dl(peers: 4).liveSuffix(.download) == "4 peers")
+        #expect(dl(peers: 1).liveSuffix(.download) == "1 peer")
     }
 
     @Test func nothingConnectedAndNoRateShowsNothing() {

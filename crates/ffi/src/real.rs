@@ -175,6 +175,11 @@ pub struct StartOptions {
     pub forbidden_root: Option<PathBuf>,
 }
 
+/// Every folder `trackers.toml` makes the engine touch, `~` expanded.
+fn profile_folders(p: &TrackerProfiles) -> Vec<PathBuf> {
+    p.profiles.iter().flat_map(|p| p.folders()).map(crate::settings::expand_home).collect()
+}
+
 /// Every folder `config.toml` makes the engine touch, `~` expanded.
 fn config_folders(c: &trs_state::Config) -> Vec<PathBuf> {
     use crate::settings::expand_home;
@@ -197,9 +202,10 @@ impl RealBackend {
     pub fn start(o: StartOptions) -> Result<Arc<dyn Backend>, CoreError> {
         let failed = |m: String| CoreError::Failed { message: m };
         if let Some(forbidden) = &o.forbidden_root {
-            let cfg = SettingsStore::new(&o.dir).config();
+            let store = SettingsStore::new(&o.dir);
+            let cfg = store.config();
             let inside = |p: &Path| !p.as_os_str().is_empty() && p.starts_with(forbidden);
-            if inside(&o.dir) || config_folders(&cfg).iter().any(|p| inside(p)) {
+            if inside(&o.dir) || config_folders(&cfg).iter().any(|p| inside(p)) || profile_folders(&store.load_profiles_set()).iter().any(|p| inside(p)) {
                 return Err(failed(format!(
                     "Refusing to start: a folder of this isolated run lies inside {}",
                     forbidden.display()
@@ -591,13 +597,21 @@ impl RealBackend {
         }
     }
 
+    /// The favorites in hidden mode, as the stored profiles say now.
+    fn hidden(&self) -> rows::Hidden {
+        rows::Hidden::of(&favorites_of(&lock(&self.policy).profiles))
+    }
+
     fn recent_of(&self, engine_rows: &[TorrentRow], rows: &[TransferRow], now: u64) -> Vec<TransferRow> {
         let cleared = *lock(&self.cleared_at);
         let since = cleared.max(now.saturating_sub(RECENT_SECS));
+        // Hidden trackers' finished torrents stay out of the shown count (`rows::snapshot` splits
+        // them off for the tracker's own tab anyway).
+        let hidden = self.hidden();
         let mut v: Vec<&TransferRow> = rows
             .iter()
             .zip(engine_rows)
-            .filter(|(r, e)| r.finished_at.is_some_and(|t| t > since) && (e.kind == RowKind::Direct || e.downloaded_total > 0))
+            .filter(|(r, e)| r.finished_at.is_some_and(|t| t > since) && !hidden.sharing(r) && (e.kind == RowKind::Direct || e.downloaded_total > 0))
             .map(|(r, _)| r)
             .collect();
         v.sort_by_key(|r| std::cmp::Reverse(r.finished_at));
@@ -613,6 +627,14 @@ impl RealBackend {
     fn row_by_id(&self, id: &str) -> Option<TransferRow> {
         self.loaded(Duration::from_secs(5)).rows.iter().find(|r| r.id == id).cloned()
     }
+}
+
+fn favorites_of(profiles: &TrackerProfiles) -> Vec<rows::Favorite> {
+    profiles
+        .profiles
+        .iter()
+        .map(|p| rows::Favorite { id: p.id.clone(), name: p.name.clone(), hidden: p.hidden, hide_only_seeding: p.hide_only_seeding })
+        .collect()
 }
 
 fn reload_policy(policy: &Arc<Mutex<Policy>>, dir: &Path) {
@@ -832,7 +854,7 @@ impl Backend for RealBackend {
     fn snapshot(&self) -> Snapshot {
         let l = self.loaded(CACHE_AGE);
         let pol = lock(&self.policy);
-        let profiles: Vec<(String, String)> = pol.profiles.profiles.iter().map(|p| (p.id.clone(), p.name.clone())).collect();
+        let profiles = favorites_of(&pol.profiles);
         drop(pol);
         rows::snapshot(
             &l.rows,
@@ -857,11 +879,15 @@ impl Backend for RealBackend {
     }
 
     fn rows(&self, q: &RowQuery) -> Vec<TransferRow> {
-        rows::query(&self.loaded(CACHE_AGE).rows, q)
+        rows::query(&self.loaded(CACHE_AGE).rows, q, &self.hidden())
     }
 
     fn sharing_counts(&self, tracker_id: Option<&str>, text: &str) -> SharingCounts {
-        rows::counts(&self.loaded(CACHE_AGE).rows, tracker_id, text)
+        rows::counts(&self.loaded(CACHE_AGE).rows, tracker_id, text, &self.hidden())
+    }
+
+    fn tracker_of(&self, id: &str) -> Option<String> {
+        self.row_by_id(id).map(|r| r.tracker_id)
     }
 
     fn tracker_hosts(&self, group_id: &str) -> Vec<String> {

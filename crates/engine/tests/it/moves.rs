@@ -408,6 +408,39 @@ async fn a_changed_default_folder_proposes_and_moves_the_torrents() {
     assert!(s.h.location_moves().await.unwrap().items.is_empty(), "now it is where it belongs");
 }
 
+/// A tracker's own folder (SPEC 7A.4) is a location setting like the app's: saving it says which
+/// torrents of that tracker now sit elsewhere, and accepting moves them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_changed_tracker_folder_proposes_and_moves_its_torrents() {
+    use trs_state::trackers::{Profile, UrlPattern};
+    let t = standard_named("trackerbundle", 50_000, Some("http://tracker-z.test/announce".into()), false, 912);
+    let l = lab();
+    let profile = |folder: Option<&Path>| {
+        let mut p = Profile { id: "tz".into(), name: "TZ".into(), urls: vec![UrlPattern::parse("tracker-z.test").unwrap()], ..Profile::default() };
+        p.location.finished_dir = folder.map(|f| f.display().to_string());
+        let mut tp = trs_state::TrackerProfiles::default();
+        tp.add(p).unwrap();
+        PolicyData { rules: trs_state::RuleSet::default(), profiles: tp, private_min_seed: None, idle: None }
+    };
+    t.write_to(&l.dl);
+    let s = snode(&l.state, &l.dl, Some(profile(None)), plain(&l)).await;
+    s.h.add_torrent_file(t.bytes.clone(), AddOptions::default()).await.unwrap();
+    wait_done_h(&s.h, &t.id, 30).await;
+    let mut ev = s.h.subscribe();
+    // Saving the same folders (a rename, a colour) says nothing.
+    s.h.apply_policy(profile(None));
+    assert!(s.h.location_moves().await.unwrap().items.is_empty());
+    s.h.apply_policy(profile(Some(&l.other)));
+    let e = wait_event(&mut ev, 10, |e| matches!(e, EngineEvent::LocationsChanged { .. })).await;
+    let EngineEvent::LocationsChanged { torrents, .. } = e else { unreachable!() };
+    assert_eq!(torrents, 1);
+    let p = s.h.location_moves().await.unwrap();
+    assert_eq!(p.items[0].to, l.other.join("trackerbundle"));
+    s.h.move_torrents(&[t.id]).await.unwrap();
+    assert!(matches!(wait_move_end(&mut ev, t.id, 30).await, EngineEvent::MoveFinished { .. }));
+    t.verify(&l.other, &[]);
+}
+
 /// "Move to..." pins the torrent: later settings changes leave it alone.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn move_to_pins_the_torrent_against_later_settings_changes() {

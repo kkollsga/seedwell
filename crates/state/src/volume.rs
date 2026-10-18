@@ -106,6 +106,36 @@ pub fn cross_volume_pairs(cfg: &Config) -> Vec<CrossVolume> {
     out
 }
 
+/// The pairs of a tracker's own folders (SPEC §7A.4) that cross volumes: the tracker-wide pair
+/// (scope `AppDefault` = "this tracker's default") and every category the tracker sets itself.
+/// A location the tracker leaves open is the app's (its category's, where it has one).
+pub fn tracker_cross_volume_pairs(cfg: &Config, own: &crate::config::LocationOverride, cats: &crate::config::CategoryLocations) -> Vec<CrossVolume> {
+    let f = &cfg.folders;
+    let crosses = |inc: &str, fin: &str| matches!(same_volume(&expand_tilde(inc), &expand_tilde(fin)), Ok(false));
+    let mut out = Vec::new();
+    if !own.is_empty() {
+        let inc = own.incomplete_dir.as_deref().unwrap_or(&f.incomplete_dir);
+        let fin = own.finished_dir.as_deref().unwrap_or(&f.download_dir).trim_end_matches('/').to_owned();
+        if crosses(inc, &fin) {
+            out.push(CrossVolume { scope: LocationScope::AppDefault, incomplete: inc.to_owned(), finished: fin });
+        }
+    }
+    for c in Category::ALL {
+        let o = cats.get(c);
+        if o.is_empty() {
+            continue;
+        }
+        let app = f.categories.get(c);
+        let inc = o.incomplete_dir.as_deref().or(own.incomplete_dir.as_deref()).or(app.incomplete_dir.as_deref()).unwrap_or(&f.incomplete_dir);
+        let fin = o.finished_dir.as_deref().or(own.finished_dir.as_deref()).or(app.finished_dir.as_deref()).unwrap_or(&f.download_dir);
+        let fin = fin.trim_end_matches('/').to_owned();
+        if crosses(inc, &fin) {
+            out.push(CrossVolume { scope: LocationScope::Category(c), incomplete: inc.to_owned(), finished: fin });
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -159,5 +189,18 @@ mod tests {
         assert!(pairs.iter().any(|p| p.scope == LocationScope::AppDefault));
         // The TV override sits next to its incomplete folder (the app default) on /dev: no crossing.
         assert!(!pairs.iter().any(|p| p.scope == LocationScope::Category(Category::Tv)));
+    }
+
+    #[test]
+    fn a_trackers_folders_are_checked_with_the_apps_for_what_it_leaves_open() {
+        let mut cfg = Config::default();
+        cfg.folders.download_dir = "/tmp".into();
+        cfg.folders.incomplete_dir = "/tmp/inc".into();
+        let mut own = crate::config::LocationOverride::default();
+        let cats = crate::config::CategoryLocations::default();
+        assert!(tracker_cross_volume_pairs(&cfg, &own, &cats).is_empty(), "nothing set: nothing to warn about");
+        own.finished_dir = Some("/Volumes/definitely-not-mounted-xyz/T".into());
+        // An unmounted disk is an error elsewhere, never a "different disks" warning.
+        assert!(tracker_cross_volume_pairs(&cfg, &own, &cats).is_empty());
     }
 }

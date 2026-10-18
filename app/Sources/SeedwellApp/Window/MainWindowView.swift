@@ -60,11 +60,13 @@ struct SidebarView: View {
                 if s.online {
                     // A limit in force shows quietly after the rate: "↓ 2.0 / 5 MB/s".
                     Text("↓ \(RateText.line(rate: s.downRate, limit: s.downLimit))")
+                        .font(.system(size: 13, weight: .medium)).foregroundStyle(.primary)
                         .help(s.downLimit.map { "Download limit \(RateText.label($0))\(s.altSpeed ? " (Limit Speed)" : "")" } ?? "")
                     Text("↑ \(RateText.line(rate: s.upRate, limit: s.upLimit))")
+                        .font(.system(size: 13, weight: .medium)).foregroundStyle(.primary)
                         .help(s.upLimit.map { "Upload limit \(RateText.label($0))\(s.altSpeed ? " (Limit Speed)" : "")" } ?? "")
                     if s.altSpeed {
-                        Image(systemName: "tortoise.fill").font(.system(size: 10))
+                        Image(systemName: "tortoise.fill").font(.system(size: 10)).foregroundStyle(.secondary)
                             .help("Limit Speed is on (⌥⌘L)")
                     }
                 } else {
@@ -77,7 +79,7 @@ struct SidebarView: View {
                                   active: model.section == .settings) { commands.showSettings(nil) }
             }
             .font(.system(size: 11.5)).monospacedDigit()
-            .lineLimit(1).minimumScaleFactor(0.8)
+            .lineLimit(1).minimumScaleFactor(0.7)
             .foregroundStyle(.secondary)
             .padding(.leading, 18).padding(.trailing, 10).padding(.vertical, 8)
         }

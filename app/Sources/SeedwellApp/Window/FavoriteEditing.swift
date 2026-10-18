@@ -26,10 +26,11 @@ enum TrackerOrder {
         }
     }
 
-    /// The sidebar's trackers: only those with torrents, in `sorted` order. The open tracker stays
-    /// while its tab is shown, so the place the user is looking at does not vanish under them.
+    /// The sidebar's trackers: only those with torrents, in `sorted` order, and not those in hidden mode
+    /// (SPEC 7E.5). The open tracker stays while its tab is shown, so the place the user is looking at
+    /// does not vanish under them.
     static func visible(_ trackers: [TrackerSummary], selected: String?) -> [TrackerSummary] {
-        sorted(trackers).filter { $0.count > 0 || $0.id == selected }
+        sorted(trackers).filter { $0.id == selected || ($0.count > 0 && !$0.hidden) }
     }
 
     /// More automatic trackers than this and the list scrolls (it always can; this is only the note).
@@ -83,6 +84,7 @@ protocol FavoriteStore: AnyObject {
     func profilesLoad() -> [ProfileRecord]
     func profilesSave(profiles: [ProfileRecord]) throws -> [ProfileRecord]
     func urlCheck(raw: String) -> UrlCheck
+    func trackerVolumeWarnings(profile: ProfileRecord) -> [VolumeWarning]
     func favoriteAdd(groupId: String) throws -> ProfileRecord
     func favoriteRuleCount(id: String) -> UInt32
 }
@@ -209,6 +211,17 @@ extension Core: FavoriteStore {}
         guard r.downLimit != d || r.upLimit != u else { return }
         r.downLimit = d
         r.upLimit = u
+        _ = save(replacing: r)
+    }
+
+    /// The different-disk warnings of a favorite's folders as edited (SPEC 7A.4).
+    func volumeWarnings(for r: ProfileRecord) -> [VolumeWarning] { store.trackerVolumeWarnings(profile: r) }
+
+    /// Stores the folders of `draft` on the saved favorite, leaving everything else of it (limits, name) as it is.
+    func saveFolders(_ id: String, from draft: ProfileRecord) {
+        reload()
+        guard var r = record(id) else { return }
+        r.copyFolders(from: draft)
         _ = save(replacing: r)
     }
 

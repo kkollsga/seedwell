@@ -4,8 +4,8 @@ import Testing
 
 // Favorite trackers (SPEC 7E.1, 8.3): the sidebar order and the inline editing of a favorite.
 
-private func t(_ id: String, _ name: String, _ count: UInt32, fav: Bool = false) -> TrackerSummary {
-    TrackerSummary(id: id, name: name, count: count, favorite: fav)
+private func t(_ id: String, _ name: String, _ count: UInt32, fav: Bool = false, hidden: Bool = false, onlySeeding: Bool = false) -> TrackerSummary {
+    TrackerSummary(id: id, name: name, count: count, favorite: fav, hidden: hidden, hideOnlySeeding: onlySeeding)
 }
 
 /// What the core does with a line: drops a query and secret-looking path segments.
@@ -40,6 +40,68 @@ struct TrackerOrderTests {
 
     @Test func publicIsLastEvenWhenItIsTheBusiest() {
         #expect(TrackerOrder.sorted([t("public", "Public", 99), t("a.org", "A", 0)]).last?.id == "public")
+    }
+}
+
+@Suite("Hidden trackers")
+struct HiddenTrackerTests {
+    @Test func aHiddenTrackerIsNotInTheSidebarUnlessItsTabIsOpen() {
+        let list = [t("public", "Public", 4), t("h.org", "Hush", 3, fav: true, hidden: true), t("a.org", "A", 2, fav: true)]
+        #expect(TrackerOrder.visible(list, selected: nil).map(\.id) == ["a.org", "public"])
+        #expect(TrackerOrder.visible(list, selected: "h.org").map(\.id) == ["a.org", "h.org", "public"])
+    }
+
+    @Test func aTrackerWithoutTorrentsStaysOutUnlessSelected() {
+        let list = [t("e.org", "Empty", 0, fav: true), t("public", "Public", 1)]
+        #expect(TrackerOrder.visible(list, selected: nil).map(\.id) == ["public"])
+        #expect(TrackerOrder.visible(list, selected: "e.org").map(\.id) == ["e.org", "public"])
+    }
+}
+
+@Suite("Hidden notices")
+struct HiddenNoticesTests {
+    private let list = [t("full", "Full", 1, fav: true, hidden: true), t("seed", "Seed", 1, fav: true, hidden: true, onlySeeding: true),
+                        t("shown", "Shown", 1, fav: true), t("public", "Public", 1)]
+
+    @Test func aFullyHiddenTrackerSaysNothing() {
+        #expect(HiddenNotices.silenced("full", .download, in: list))
+        #expect(HiddenNotices.silenced("full", .sharing, in: list))
+    }
+
+    @Test func hideOnlySharingKeepsDownloadNoticesAndDropsSharingOnes() {
+        #expect(!HiddenNotices.silenced("seed", .download, in: list))
+        #expect(HiddenNotices.silenced("seed", .sharing, in: list))
+    }
+
+    @Test func otherTrackersAndUnknownIdsAreAnnouncedAsUsual() {
+        for id in ["shown", "public", "nope", nil] as [String?] {
+            #expect(!HiddenNotices.silenced(id, .download, in: list) && !HiddenNotices.silenced(id, .sharing, in: list))
+        }
+    }
+}
+
+@Suite("Tracker folders")
+struct TrackerFoldersTests {
+    @Test func settingFoldersForAContentTypeAddsAndClearsTheEntry() {
+        var r = rec("tl", "TL", ["t.org"])
+        #expect(!r.hasOwnFolders)
+        r.setFolders(CategoryLocationSetting(category: .movie, incompleteDir: nil, finishedDir: "/Volumes/M/TL/Movies"))
+        #expect(r.hasOwnFolders && r.folders(for: .movie).finishedDir == "/Volumes/M/TL/Movies" && r.folders(for: .tv).finishedDir == nil)
+        r.setFolders(CategoryLocationSetting(category: .movie, incompleteDir: nil, finishedDir: nil))
+        #expect(r.categories.isEmpty && !r.hasOwnFolders)
+    }
+
+    @Test func comparingAndCopyingFoldersLeavesTheRestAlone() {
+        var saved = rec("tl", "TL", ["t.org"])
+        saved.downLimit = 5
+        var draft = saved
+        draft.downLimit = nil
+        #expect(draft.sameFolders(as: saved))
+        draft.finishedDir = "/Volumes/M/TL"
+        draft.setFolders(CategoryLocationSetting(category: .tv, incompleteDir: "/Volumes/F/inc", finishedDir: nil))
+        #expect(!draft.sameFolders(as: saved))
+        saved.copyFolders(from: draft)
+        #expect(saved.sameFolders(as: draft) && saved.downLimit == 5 && saved.finishedDir == "/Volumes/M/TL")
     }
 }
 
@@ -92,15 +154,17 @@ private final class FakeStore: FavoriteStore {
     func profilesSave(profiles p: [ProfileRecord]) throws -> [ProfileRecord] { profiles = p; return p }
     func urlCheck(raw: String) -> UrlCheck { check(raw) }
     func favoriteAdd(groupId: String) throws -> ProfileRecord {
-        let r = ProfileRecord(id: "fav", name: "Fav", urls: [groupId], rule: nil, color: nil, icon: nil, downLimit: nil, upLimit: nil)
+        let r = rec("fav", "Fav", [groupId])
         profiles.append(r)
         return r
     }
     func favoriteRuleCount(id: String) -> UInt32 { rules }
+    func trackerVolumeWarnings(profile: ProfileRecord) -> [VolumeWarning] { [] }
 }
 
 private func rec(_ id: String, _ name: String, _ urls: [String]) -> ProfileRecord {
-    ProfileRecord(id: id, name: name, urls: urls, rule: nil, color: nil, icon: nil, downLimit: nil, upLimit: nil)
+    ProfileRecord(id: id, name: name, urls: urls, rule: nil, color: nil, icon: nil, downLimit: nil, upLimit: nil,
+                  incompleteDir: nil, finishedDir: nil, categories: [], hidden: false, hideOnlySeeding: false)
 }
 
 @MainActor @Suite("Favorite editing")

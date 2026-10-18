@@ -156,8 +156,8 @@ import os
         commands.arrivals.note(core.snapshot())  // the baseline: what is downloading now is not new
         statusMenu?.onRefresh = { [weak self] s in
             self?.commands.arrivals.note(s)
-            UpdateCenter.shared.noteActivity(busy: s.downloading.contains { !$0.isHeld } || s.movingPercent != nil)
-            self?.sleepAssertion.update(downloading: s.downloading.contains { !$0.awaitingChoice && $0.state == .downloading })
+            UpdateCenter.shared.noteActivity(busy: s.allDownloading.contains { !$0.isHeld } || s.movingPercent != nil)
+            self?.sleepAssertion.update(downloading: s.allDownloading.contains { !$0.awaitingChoice && $0.state == .downloading })
         }
         NSApp.mainMenu = MainMenu.make(commands: commands)
         settings.applied = { [weak self] s in self?.apply(s) }
@@ -243,31 +243,35 @@ import os
 
     private func handle(_ event: CoreEvent) {
         let g = settings.app.general
+        let trackers = core.snapshot().trackers
+        let silenced = { (tracker: String?, kind: HiddenNotices.Kind) in HiddenNotices.silenced(tracker, kind, in: trackers) }
         switch event {
         case .finished(let row):
-            if g.notifyFinished { Notifier.finished(row) }
+            if g.notifyFinished, !silenced(row.trackerId, .download) { Notifier.finished(row) }
             statusMenu?.refreshIcon()
         case .error(let id, let message):
             log.error("core error \(id ?? "-", privacy: .public): \(message, privacy: .public)")
-            if g.notifyErrors {
-                let name = id.flatMap { id in core.snapshot().downloading.first { $0.id == id }?.displayName } ?? "a transfer"
+            let snap = core.snapshot()
+            let downloading = id.map { id in (snap.allDownloading + snap.allQueued).contains { $0.id == id } } ?? false
+            if g.notifyErrors, !silenced(id.flatMap { core.trackerOf(id: $0) }, downloading ? .download : .sharing) {
+                let name = id.flatMap { id in snap.allDownloading.first { $0.id == id }?.displayName } ?? "a transfer"
                 Notifier.failed(name, message: message, id: id)
             }
             statusMenu?.refreshIcon()
         case .goalReached(let row):
-            if g.notifyGoal { Notifier.goalReached(row.displayName) }
+            if g.notifyGoal, !silenced(row.trackerId, .sharing) { Notifier.goalReached(row.displayName) }
         case .needsChoice(let row):
             // "Choose Files…" on a magnet link asked for this chooser: open it, no notification.
             // The notifier popover is the notice, and holds the checklist (SPEC 8.6).
             let requested = startingNotifier?.consumeChooserRequest(row.id) == true
             startingNotifier?.refresh()
             if startingNotifier?.isShown != true {
-                if requested { commands.showChooser(row.id) } else { Notifier.needsChoice(row) }
+                if requested { commands.showChooser(row.id) } else if !silenced(row.trackerId, .download) { Notifier.needsChoice(row) }
             }
             statusMenu?.refreshIcon()
         case .autoAdded(let a):
             // The notifier is the notification of a torrent that waits to start.
-            if core.snapshot().downloading.first(where: { $0.id == a.id })?.pending == nil { Notifier.autoAdded(a) }
+            if core.snapshot().allDownloading.first(where: { $0.id == a.id })?.pending == nil, !silenced(core.trackerOf(id: a.id), .download) { Notifier.autoAdded(a) }
             statusMenu?.refreshIcon()
         case .pending:
             startingNotifier?.refresh()

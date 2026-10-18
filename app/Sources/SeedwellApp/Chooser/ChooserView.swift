@@ -246,7 +246,7 @@ struct TriCheck: View {
     }
 
     private func isAwaiting(_ id: String, _ commands: Commands) -> Bool {
-        commands.core.snapshot().downloading.first { $0.id == id }?.awaitingChoice ?? false
+        commands.core.snapshot().allDownloading.first { $0.id == id }?.awaitingChoice ?? false
     }
 
     func present(_ model: ChooserModel, id: String, commands: Commands) {

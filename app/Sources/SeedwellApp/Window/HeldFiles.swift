@@ -10,7 +10,7 @@ struct HeldFilesBlock: View {
     var body: some View {
         ChoiceChecklist(model: model, active: false, id: id, actions: StartingActions(
             chooseFiles: { _ in }, togglePause: { _, _ in }, startNow: { _ in }),
-            showButtons: false, maxListHeight: 280)
+            showButtons: false, maxListHeight: FileLayout.maxListHeight, offersShowAll: true)
             .padding(.leading, FileLayout.iconX).padding(.trailing, 10).padding(.top, 2).padding(.bottom, 10)
     }
 }

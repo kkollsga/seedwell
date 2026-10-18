@@ -205,19 +205,27 @@ pub(crate) fn plan(mi: &Metainfo, opts: &AddOptions, ctx: &PlanCtx<'_>) -> Plan 
     }
 
     // ---- location ------------------------------------------------------------------------
-    // The finished location (SPEC 7A.4): the rule's folder > the category's > the app default.
-    // The torrent keeps its own layout below it (SPEC 7A.3). Organized by status, a torrent that
-    // is not pinned starts in `Active/`; the status check files it elsewhere when it belongs
-    // elsewhere (session/status.rs).
+    // The finished location (SPEC 7A.4): the matched rule's own folder > the tracker's folder for
+    // the category > the tracker's folder > the Default rule's > the category's > the app
+    // default. The torrent keeps its own layout below it (SPEC 7A.3). Organized by status, a
+    // torrent that is not pinned starts in `Active/`; the status check files it elsewhere when it
+    // belongs elsewhere (session/status.rs).
     let cat_in_effect = category.unwrap_or(Category::Other);
-    let finished_base = match resolved.finished_dir.as_deref() {
+    let tracker = profile.profile.as_deref().zip(ctx.policy).and_then(|(id, p)| p.profiles.get(id));
+    let (tracker_inc, tracker_fin) = tracker.map_or((None, None), |t| t.location_for(Some(cat_in_effect)));
+    let from_rule = |own: bool| resolved.finished_dir.as_deref().filter(|_| resolved.own_finished_dir == own);
+    let finished_base = match from_rule(true).or(tracker_fin).or_else(|| from_rule(false)) {
         Some(d) => expand_tilde(d.trim_end_matches('/')),
         None => cfg.category_locations[cat_in_effect.index()].finished.clone().unwrap_or_else(|| cfg.default_save_dir.clone()),
     };
     let save_path = opts.save_path.clone().unwrap_or_else(|| {
         if cfg.by_status { finished_base.join(crate::status::StatusFolder::Active.name()) } else { finished_base.clone() }
     });
-    let stage_root = cfg.category_locations[cat_in_effect.index()].incomplete.clone().or_else(|| cfg.incomplete_dir.clone());
+    // The staging root: the tracker's (for the category) > the category's > the app default.
+    let stage_root = tracker_inc
+        .map(|d| expand_tilde(d.trim_end_matches('/')))
+        .or_else(|| cfg.category_locations[cat_in_effect.index()].incomplete.clone())
+        .or_else(|| cfg.incomplete_dir.clone());
     let destination = Some(save_path.clone());
 
     let choice = ctx.choice.then(|| {
@@ -592,6 +600,82 @@ pub(crate) fn prune_empty_dirs(file: &Path, stop: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tiny_torrent() -> Metainfo {
+        let b = b"d8:announce25:http://t.example/announce4:infod6:lengthi1000e4:name4:test12:piece lengthi16384e6:pieces20:AAAAAAAAAAAAAAAAAAAAee";
+        Metainfo::from_bytes(b).unwrap()
+    }
+
+    /// The placement of a torrent of the tracker `t.example` in `category`.
+    fn placed(profile: Option<trs_state::trackers::Profile>, rules: trs_state::RuleSet, opts: AddOptions) -> Plan {
+        let mut profiles = trs_state::TrackerProfiles::default();
+        if let Some(p) = profile {
+            profiles.add(p).unwrap();
+        }
+        let pol = PolicyData { rules, profiles, private_min_seed: None, idle: None };
+        let mut cfg = EngineConfig {
+            default_save_dir: "/app/default".into(),
+            incomplete_dir: Some("/app/inc".into()),
+            ..EngineConfig::default()
+        };
+        cfg.category_locations[Category::Movie.index()] =
+            crate::config::CategoryLocation { incomplete: Some("/app/movie-inc".into()), finished: Some("/app/movies".into()) };
+        plan(&tiny_torrent(), &opts, &PlanCtx { cfg: &cfg, policy: Some(&pol), choice: false, folder_ask: false })
+    }
+
+    fn tracker(fin: Option<&str>, inc: Option<&str>, movie: Option<&str>) -> trs_state::trackers::Profile {
+        let mut p = trs_state::trackers::Profile {
+            id: "t".into(),
+            name: "T".into(),
+            urls: vec![trs_state::trackers::UrlPattern::parse("t.example").unwrap()],
+            ..Default::default()
+        };
+        p.location.finished_dir = fin.map(Into::into);
+        p.location.incomplete_dir = inc.map(Into::into);
+        p.categories.movie.finished_dir = movie.map(Into::into);
+        p
+    }
+
+    fn movie() -> AddOptions {
+        AddOptions { category: Some(Category::Movie), ..AddOptions::default() }
+    }
+
+    #[test]
+    fn a_tracker_location_beats_the_app_category_and_default_and_a_tracker_category_beats_it() {
+        use trs_state::RuleSet;
+        // No tracker folders: the app's category folder.
+        let p = placed(Some(tracker(None, None, None)), RuleSet::default(), movie());
+        assert_eq!((p.finished_base.as_path(), p.stage_root.as_deref()), (Path::new("/app/movies"), Some(Path::new("/app/movie-inc"))));
+        // The tracker's folders replace the category's.
+        let p = placed(Some(tracker(Some("/t/all/"), Some("/t/inc"), None)), RuleSet::default(), movie());
+        assert_eq!((p.finished_base.as_path(), p.stage_root.as_deref()), (Path::new("/t/all"), Some(Path::new("/t/inc"))));
+        // Its category entry wins for that category only.
+        let t = tracker(Some("/t/all"), None, Some("/t/movies"));
+        let p = placed(Some(t.clone()), RuleSet::default(), movie());
+        assert_eq!(p.finished_base, Path::new("/t/movies"));
+        assert_eq!(p.stage_root.as_deref(), Some(Path::new("/app/movie-inc")), "incomplete falls back to the app's category");
+        let p = placed(Some(t), RuleSet::default(), AddOptions { category: Some(Category::Tv), ..AddOptions::default() });
+        assert_eq!((p.finished_base.as_path(), p.stage_root.as_deref()), (Path::new("/t/all"), Some(Path::new("/app/inc"))));
+    }
+
+    #[test]
+    fn the_default_rule_folder_loses_to_the_tracker_but_a_rules_own_folder_wins() {
+        use trs_state::rules::{DefaultRule, Rule};
+        let mut rs = trs_state::RuleSet::default();
+        rs.set_default(DefaultRule { finished_dir: Some("/rule/default".into()), ..DefaultRule::default() }).unwrap();
+        rs.add_rule(Rule { id: "own".into(), name: "own".into(), enabled: false, finished_dir: Some("/rule/own".into()), ..Rule::default() }, None).unwrap();
+        rs.add_rule(Rule { id: "plain".into(), name: "plain".into(), enabled: false, ..Rule::default() }, None).unwrap();
+        // The two rules are off, so only a forced one applies. Default rule only: it beats the app category, the tracker beats it.
+        assert_eq!(placed(Some(tracker(None, None, None)), rs.clone(), movie()).finished_base, Path::new("/rule/default"));
+        assert_eq!(placed(Some(tracker(Some("/t/all"), None, None)), rs.clone(), movie()).finished_base, Path::new("/t/all"));
+        // A rule without a folder of its own inherits the Default rule's: still weaker than the tracker.
+        let with = |rule: &str| AddOptions { rule: Some(rule.into()), ..movie() };
+        assert_eq!(placed(Some(tracker(Some("/t/all"), None, None)), rs.clone(), with("plain")).finished_base, Path::new("/t/all"));
+        // A rule's own folder beats the tracker's, and an explicit save path beats everything.
+        assert_eq!(placed(Some(tracker(Some("/t/all"), None, Some("/t/movies"))), rs.clone(), with("own")).finished_base, Path::new("/rule/own"));
+        let explicit = AddOptions { save_path: Some("/explicit".into()), ..with("own") };
+        assert_eq!(placed(Some(tracker(Some("/t/all"), None, None)), rs, explicit).save_path, Path::new("/explicit"));
+    }
 
     #[test]
     fn edge_destinations_round_trip() {

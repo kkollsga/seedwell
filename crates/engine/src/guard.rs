@@ -95,6 +95,29 @@ pub(crate) fn check_config(cfg: &EngineConfig) -> Result<(), String> {
     Ok(())
 }
 
+/// `Err(text)` if a tracker profile (`trackers.toml`) sets a folder inside the real home while
+/// the guard is on.
+pub(crate) fn check_profiles(profiles: &trs_state::TrackerProfiles) -> Result<(), String> {
+    if !active() {
+        return Ok(());
+    }
+    let Some(home) = home() else { return Ok(()) };
+    for p in &profiles.profiles {
+        for d in p.folders() {
+            let d = expand_tilde(d);
+            if d.starts_with(&home) {
+                return Err(format!(
+                    "refusing to use the folder {} of tracker {} inside the real home directory while running under test; \
+                     point the folders into a temporary directory or set HOME (TRS_ALLOW_REAL_HOME=1 overrides)",
+                    d.display(),
+                    p.id
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

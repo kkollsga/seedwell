@@ -197,28 +197,33 @@ pub const PEER_ID_PREFIX: [u8; 8] = match option_env!("SEEDWELL_RELEASE") {
     _ => *b"-SX0001-",
 };
 
-/// `-SW` + one digit each for major, minor and patch + `0-` ("0.1.0" → `-SW0100-`). A version
-/// part above 9 does not fit the four-digit scheme and fails the build.
+/// `-SW` + one character each for major, minor and patch + `0-`. A part is `0`-`9`, then `A`-`Z`
+/// for 10-35, as libtorrent does ("0.1.0" → `-SW0100-`, "0.1.10" → `-SW01A0-`). A part above 35
+/// fails the build.
 pub(crate) const fn release_prefix(version: &str) -> [u8; 8] {
+    const DIGITS: &[u8; 36] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
     let v = version.as_bytes();
     let mut out = *b"-SW0000-";
-    let (mut i, mut part, mut len) = (0, 0, 0);
-    while i < v.len() && part < 3 {
-        let c = v[i];
-        if c == b'.' {
-            assert!(len == 1, "each version part must be one digit for the peer id");
-            part += 1;
-            len = 0;
-        } else if c.is_ascii_digit() {
-            assert!(len == 0, "each version part must be one digit for the peer id");
-            out[3 + part] = c;
-            len = 1;
+    let (mut i, mut part, mut value, mut len) = (0, 0, 0usize, 0);
+    while i <= v.len() && part < 3 {
+        let c = if i < v.len() { v[i] } else { b'-' };
+        if c.is_ascii_digit() {
+            value = value * 10 + (c - b'0') as usize;
+            len += 1;
+            assert!(value < 36, "a version part above 35 does not fit the peer id");
         } else {
-            break; // a pre-release suffix such as "-rc1"
+            // '.', the end, or a pre-release suffix such as "-rc1" ends a part.
+            assert!(len > 0, "the version must be major.minor.patch");
+            out[3 + part] = DIGITS[value];
+            part += 1;
+            (value, len) = (0, 0);
+            if c != b'.' {
+                break;
+            }
         }
         i += 1;
     }
-    assert!(part == 2 && len == 1, "the version must be major.minor.patch");
+    assert!(part == 3, "the version must be major.minor.patch");
     out
 }
 

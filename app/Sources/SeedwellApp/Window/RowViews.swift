@@ -52,30 +52,34 @@ extension TransferRow {
     /// What to do about a download that stopped with an error (not enough space, a disk problem).
     static let retryHint = " · Resume to try again"
 
-    /// "45 KB/s (4 of 250)": the download rate (only above 0) and the connected peers against the
-    /// swarm (the tracker's last seeders + leechers, else the peers known, else just "(4 peers)").
-    /// Empty when nothing is connected and the rate is 0. Downloads only: a Sharing row has its own
-    /// short line (`sharingLine`).
+    /// "4 of 250 peers": the connected peers against the swarm (the tracker's last seeders + leechers, else
+    /// the peers known), else just "4 peers". Empty when nothing is connected. Downloads only: a Sharing row
+    /// has its own short line (`sharingLine`). The rate is not here: it stands out at the right of the name
+    /// (`headlineRate`).
     func liveSuffix(_ style: RowStyle) -> String {
-        let rate: UInt64
-        switch style {
-        case .download: rate = state == .downloading ? downRate : 0
-        default: return ""
+        guard style == .download, peers > 0 || (state == .downloading && downRate > 0) else { return "" }
+        guard let swarm = swarm.flatMap({ $0 > 0 ? $0 : nil }) ?? (knownPeers > 0 ? knownPeers : nil) else {
+            return "\(peers) peer\(peers == 1 ? "" : "s")"
         }
-        guard rate > 0 || peers > 0 else { return "" }
-        var parts: [String] = []
-        if rate > 0 { parts.append(Fmt.rate(rate)) }
-        parts.append(Fmt.peers(connected: peers, swarm: swarm.flatMap { $0 > 0 ? $0 : nil } ?? (knownPeers > 0 ? knownPeers : nil)))
-        return parts.joined(separator: " ")
+        return "\(peers) of \(max(swarm, peers)) peers"
     }
 
-    /// Second line of a Sharing row: "1.2 MB/s · 1 peer · Ratio 0.27" ("–" when nothing is uploading).
-    /// The tracker, the goal, the seeding time and the swarm are in Get Info.
+    /// The live rate a row shows at the right of its name, big and in the primary colour: "↓ 2.1 MB/s" while a
+    /// download moves data, "↑ 1.2 MB/s" while a sharing row uploads. Nil when nothing flows.
+    func headlineRate(_ style: RowStyle) -> String? {
+        switch style {
+        case .download: return state == .downloading && downRate > 0 ? "↓ " + Fmt.rate(downRate) : nil
+        case .popular, .active, .dormant: return movingPercent == nil && upRate > 0 ? "↑ " + Fmt.rate(upRate) : nil
+        default: return nil
+        }
+    }
+
+    /// Second line of a Sharing row: "1 peer · Ratio 0.27" (the upload rate stands out at the right of the
+    /// name, `headlineRate`). The tracker, the goal, the seeding time and the swarm are in Get Info.
     var sharingLine: String {
         if let p = movingPercent { return "Moving… \(p)%" }
-        let up = upRate > 0 ? Fmt.rate(upRate) : "–"
         let goal = ratioGoal.map { " of \(Fmt.goal($0))" } ?? ""
-        return "\(up) · \(Fmt.count(peers, "peer")) · Ratio \(Fmt.ratio(ratio))\(goal)"
+        return "\(Fmt.count(peers, "peer")) · Ratio \(Fmt.ratio(ratio))\(goal)"
     }
 
     /// Third line of a Sharing row: "3 of 24 files · 1.8 GB of 14 GB downloaded · 3 GB uploaded". The
@@ -249,6 +253,14 @@ struct TransferRowView: View {
                         .lineLimit(1)
                         .truncationMode(.middle)
                         .help(row.name == row.displayName ? "" : row.name)
+                    if let rate = row.headlineRate(style) {
+                        Spacer(minLength: 8)
+                        Text(rate)
+                            .font(.system(size: 13, weight: .medium)).monospacedDigit()
+                            .foregroundStyle(.primary)
+                            .lineLimit(1).fixedSize()
+                            .help(style == .download ? "Download speed" : "Upload speed")
+                    }
                 }
                 statusText
                     .font(.system(size: 12))

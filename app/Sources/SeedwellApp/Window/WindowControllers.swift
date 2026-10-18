@@ -26,6 +26,8 @@ import os
         self.commands = commands
         self.settings = settings
         self.defaultSize = defaultSize
+        super.init()
+        nav.openTracker = { [weak self] id in self?.commands.showMain(.tracker(id), nil) }
     }
 
     var isOpen: Bool { window != nil }

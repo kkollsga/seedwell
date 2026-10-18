@@ -68,6 +68,8 @@ struct TrackerInfoPage: View {
     /// The tracker's torrents moving now, bytes/s, against its shared caps.
     @State private var nowDown: UInt64 = 0
     @State private var nowUp: UInt64 = 0
+    /// The folders being edited, until saved or reverted (a path typed half way must not move anything).
+    @State private var folderDraft: ProfileRecord?
 
     var body: some View {
         let e = commands.favorites
@@ -94,6 +96,7 @@ struct TrackerInfoPage: View {
                 }
                 factsBlock
                 speedLimits(e)
+                downloadLocation(e)
                 addresses(e)
             }
             .padding(.horizontal, 22).padding(.vertical, 16)
@@ -113,6 +116,7 @@ struct TrackerInfoPage: View {
             }
         }
         .onChange(of: model.snapshot.trackers.map(\.count)) { _, _ in tally() }
+        .onChange(of: tracker.id) { _, _ in folderDraft = nil }
     }
 
     // MARK: Facts
@@ -173,6 +177,31 @@ struct TrackerInfoPage: View {
         }
     }
 
+    // MARK: Download location
+
+    /// The favorite's own folders (SPEC 7A.4); an automatic tracker says how to get them.
+    @ViewBuilder private func downloadLocation(_ e: FavoriteEditing) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            section("Download location")
+            if tracker.favorite, let saved = e.record(tracker.id) {
+                let draft = Binding<ProfileRecord>(get: { folderDraft ?? saved }, set: { folderDraft = $0 })
+                TrackerLocationEditor(record: draft, warnings: e.volumeWarnings(for: draft.wrappedValue))
+                if let d = folderDraft, !d.sameFolders(as: saved) {
+                    HStack(spacing: 8) {
+                        Spacer()
+                        Button("Revert") { folderDraft = nil }.help("Discard the changed folders")
+                        Button("Save") { e.saveFolders(tracker.id, from: d); folderDraft = nil }
+                            .buttonStyle(.borderedProminent).help("Use these folders for this tracker")
+                    }
+                }
+                if let h = e.hint { Text(h).font(.system(size: 11)).foregroundStyle(.red) }
+            } else {
+                Text("Save as Favorite to choose folders").font(.system(size: 11)).foregroundStyle(.tertiary)
+            }
+        }
+        .id(tracker.id)
+    }
+
     // MARK: Addresses
 
     @ViewBuilder private func addresses(_ e: FavoriteEditing) -> some View {
@@ -221,7 +250,7 @@ struct TrackerInfoPage: View {
         commands.favorites.reload()
         if !tracker.favorite { hosts = commands.core.trackerHosts(groupId: tracker.id) }
         tally()
-        let rows = model.snapshot.downloading + model.snapshot.queued
+        let rows = model.snapshot.allDownloading + model.snapshot.allQueued
             + commands.core.sharingRows(query: RowQuery(group: nil, trackerId: tracker.id, text: "", offset: 0, limit: 200))
         let mine = rows.filter { $0.trackerId == tracker.id && $0.kind == .torrent }
         busiest = mine.max { $0.upRate < $1.upRate }
@@ -237,7 +266,7 @@ struct TrackerInfoPage: View {
 
     private func rates() {
         let s = model.snapshot
-        let rows = s.downloading + s.queued + commands.core.sharingRows(query: RowQuery(group: nil, trackerId: tracker.id, text: "", offset: 0, limit: 200))
+        let rows = s.allDownloading + s.allQueued + commands.core.sharingRows(query: RowQuery(group: nil, trackerId: tracker.id, text: "", offset: 0, limit: 200))
         let mine = rows.filter { $0.trackerId == tracker.id && $0.kind == .torrent }
         nowDown = mine.reduce(0) { $0 + $1.downRate }
         nowUp = mine.reduce(0) { $0 + $1.upRate }
@@ -245,7 +274,7 @@ struct TrackerInfoPage: View {
 
     private func tally() {
         let s = model.snapshot
-        downloading = (s.downloading + s.queued).filter { $0.trackerId == tracker.id }.count
+        downloading = (s.allDownloading + s.allQueued).filter { $0.trackerId == tracker.id }.count
         let c = commands.core.sharingCounts(trackerId: tracker.id, text: "")
         seeding = SeedGroup.allCases.reduce(0) { $0 + c.count($1) }
     }

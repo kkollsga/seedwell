@@ -100,6 +100,9 @@ enum SettingsTab: String, CaseIterable, Identifiable {
 
     func clearProblems() { problems = [] }
 
+    /// The different-disk warnings of a tracker's folders as the editor has them (SPEC 7A.4).
+    func trackerVolumeWarnings(_ p: ProfileRecord) -> [VolumeWarning] { core.trackerVolumeWarnings(profile: p) }
+
     /// Reads the remembered offer; it is dropped once the listening port already is that port.
     func refreshTransmissionOffer() {
         let dir = core.stateDir()

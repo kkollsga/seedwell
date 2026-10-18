@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Play while downloading (SPEC 7F.3): a row with a Play button, the context menu, the Play With
-# submenu (pack and single), the menu bar row's submenu, Get Info, the calm "streaming" note and
+# submenu (pack and single), the menu bar row's right-click menu, Get Info, the calm "streaming" note and
 # Settings > General > Play videos with (closed and open), dark and light, into app/build/qa/play-*.png.
 # Run after scenario.sh. Nothing launches a player: the QA build blocks launching, and `play` only
 # acts on unfinished rows. The one real launch is `./capture_play.sh launch-test <App.app> <video>`.
@@ -62,7 +62,7 @@ for mode in dark light; do
   qa_cmd "contextmenu $movie playwith"; sleep 1; shot_popups "play-with-$mode"; qa_cmd "contextmenu close"
   qa_cmd "contextmenu $pack"; sleep 1; shot_popups "play-contextmenu-pack-$mode"; qa_cmd "contextmenu close"
   qa_cmd "contextmenu $pack playwith"; sleep 1; shot_popups "play-with-pack-$mode"; qa_cmd "contextmenu close"
-  qa_cmd "contextmenu $movie menubar"; sleep 1; shot_popups "play-menubar-submenu-$mode"; qa_cmd "contextmenu close"
+  qa_cmd "contextmenu $movie menubar"; sleep 1; shot_popups "play-menubar-context-$mode"; qa_cmd "contextmenu close"
   id=$("$CLI" --socket "$SOCK" list downloading --json 2>/dev/null | python3 -c "import json,sys;d=json.load(sys.stdin)['transfers'];print(next((t['id'] for t in d if '$pack' in t['name']),''))")
   if [ -n "$id" ]; then qa_cmd "select $id" "info $id"; sleep 1; shot_main "play-info-pack-$mode"; qa_cmd "info none"; fi
   qa_cmd "play $movie"; sleep 0.6; shot_main "play-notice-$mode"

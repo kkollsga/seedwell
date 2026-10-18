@@ -121,13 +121,16 @@ pub(crate) struct Resolved {
     pub up_limit: Option<u64>,
     /// Finished-location override of the rule (a plain folder).
     pub finished_dir: Option<String>,
+    /// `finished_dir` is the matched rule's own, not the Default rule's: it is stronger than a
+    /// tracker's folders, which in turn beat the Default rule's (SPEC 7A.4).
+    pub own_finished_dir: bool,
     /// The rule that produced this (matched, linked or forced).
     pub rule: Option<String>,
 }
 
 impl Default for Resolved {
     fn default() -> Self {
-        Self { priority: Priority::Normal, goal: SeedGoal::FOREVER, up_limit: None, finished_dir: None, rule: None }
+        Self { priority: Priority::Normal, goal: SeedGoal::FOREVER, up_limit: None, finished_dir: None, own_finished_dir: false, rule: None }
     }
 }
 
@@ -254,15 +257,18 @@ pub(crate) fn resolve(
         }
         None => rules.resolve_full(&attrs, private_floor, idle),
     };
+    let rule = match &r.source {
+        PolicySource::Rule(id) | PolicySource::LinkedRule(id) => Some(id.clone()),
+        PolicySource::Default => None,
+    };
+    let own_finished_dir = rule.as_deref().and_then(|id| rules.get(id)).is_some_and(|r| r.finished_dir.is_some());
     Resolved {
         priority: engine_priority(r.priority),
         goal: engine_goal(&r),
         up_limit: r.up_limit,
         finished_dir: r.finished_dir.clone(),
-        rule: match r.source {
-            PolicySource::Rule(id) | PolicySource::LinkedRule(id) => Some(id),
-            PolicySource::Default => None,
-        },
+        own_finished_dir,
+        rule,
     }
 }
 

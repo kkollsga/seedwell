@@ -762,6 +762,23 @@ pub struct ProfileRecord {
     pub down_limit: Option<u64>,
     /// One shared upload cap for all of this tracker's torrents, bytes/s; `None` = unlimited.
     pub up_limit: Option<u64>,
+    /// This tracker's own incomplete folder (SPEC §7A.4); `None` = same as Settings.
+    #[uniffi(default = None)]
+    pub incomplete_dir: Option<String>,
+    /// This tracker's own finished folder; `None` = same as Settings.
+    #[uniffi(default = None)]
+    pub finished_dir: Option<String>,
+    /// Per-category folders of this tracker; a category not listed (or with both `None`) follows
+    /// the tracker-wide folders.
+    #[uniffi(default = [])]
+    pub categories: Vec<CategoryLocationSetting>,
+    /// Hidden mode (SPEC §7E.5): left out of the Downloads and Sharing tabs, the menu and the
+    /// sidebar; opened from Settings.
+    #[uniffi(default = false)]
+    pub hidden: bool,
+    /// With `hidden`: only the seeding torrents are hidden.
+    #[uniffi(default = false)]
+    pub hide_only_seeding: bool,
 }
 
 pub(crate) fn profile_to(p: &Profile) -> ProfileRecord {
@@ -774,6 +791,22 @@ pub(crate) fn profile_to(p: &Profile) -> ProfileRecord {
         icon: p.icon.clone(),
         down_limit: p.down_cap(),
         up_limit: p.up_cap(),
+        incomplete_dir: p.location.incomplete_dir.clone(),
+        finished_dir: p.location.finished_dir.clone(),
+        categories: CATEGORIES
+            .iter()
+            .map(|&cat| {
+                let o = p.categories.get(cat);
+                CategoryLocationSetting {
+                    category: category_to(cat),
+                    incomplete_dir: o.incomplete_dir.clone(),
+                    finished_dir: o.finished_dir.clone(),
+                }
+            })
+            .filter(|o| o.incomplete_dir.is_some() || o.finished_dir.is_some())
+            .collect(),
+        hidden: p.hidden,
+        hide_only_seeding: p.hide_only_seeding,
     }
 }
 
@@ -918,6 +951,7 @@ impl SettingsStore {
                 p.id.clone()
             };
             taken.push(id.clone());
+            let (location, categories) = record_locations(p);
             out.push(Profile {
                 id,
                 name: p.name.trim().to_string(),
@@ -927,6 +961,10 @@ impl SettingsStore {
                 icon: p.icon.clone(),
                 down_limit: p.down_limit.filter(|v| *v != 0),
                 up_limit: p.up_limit.filter(|v| *v != 0),
+                location,
+                categories,
+                hidden: p.hidden,
+                hide_only_seeding: p.hidden && p.hide_only_seeding,
             });
         }
         set.profiles = out;
@@ -982,6 +1020,35 @@ pub(crate) fn volume_warnings(c: &Config) -> Vec<VolumeWarning> {
             finished: p.finished,
         })
         .collect()
+}
+
+/// The different-disk pairs among a tracker's own folders (the editor's draft, SPEC §7A.4); the
+/// warning's `category` is `None` for the tracker-wide pair.
+pub(crate) fn tracker_volume_warnings(c: &Config, rec: &ProfileRecord) -> Vec<VolumeWarning> {
+    let (own, cats) = record_locations(rec);
+    trs_state::volume::tracker_cross_volume_pairs(c, &own, &cats)
+        .into_iter()
+        .map(|p| VolumeWarning {
+            category: match p.scope {
+                trs_state::volume::LocationScope::AppDefault => None,
+                trs_state::volume::LocationScope::Category(c) => Some(category_to(c)),
+            },
+            incomplete: p.incomplete,
+            finished: p.finished,
+        })
+        .collect()
+}
+
+/// The folders a [`ProfileRecord`] sets, blanks read as "same as Settings".
+fn record_locations(p: &ProfileRecord) -> (trs_state::config::LocationOverride, trs_state::config::CategoryLocations) {
+    let blank = |d: &Option<String>| d.clone().filter(|d| !d.trim().is_empty());
+    let mut categories = trs_state::config::CategoryLocations::default();
+    for o in &p.categories {
+        let slot = categories.get_mut(category_from(o.category));
+        slot.incomplete_dir = blank(&o.incomplete_dir);
+        slot.finished_dir = blank(&o.finished_dir);
+    }
+    (trs_state::config::LocationOverride { incomplete_dir: blank(&p.incomplete_dir), finished_dir: blank(&p.finished_dir) }, categories)
 }
 
 #[cfg(test)]
@@ -1121,10 +1188,50 @@ mod tests {
                 icon: None,
                 down_limit: None,
                 up_limit: None,
+                incomplete_dir: None,
+                finished_dir: None,
+                categories: vec![],
+                hidden: false,
+                hide_only_seeding: false,
             }])
             .unwrap();
         assert_eq!(saved[0].id, "tracker-z");
         assert!(!saved[0].urls[0].contains("0123456789abcdef"));
+    }
+
+    #[test]
+    fn a_favorites_folders_and_hidden_mode_survive_a_save_and_a_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SettingsStore::new(dir.path());
+        let rec = ProfileRecord {
+            id: "tz".into(),
+            name: "TZ".into(),
+            urls: vec!["tracker-z.test".into()],
+            rule: None,
+            color: None,
+            icon: None,
+            down_limit: None,
+            up_limit: None,
+            incomplete_dir: Some(" ".into()),
+            finished_dir: Some("/Volumes/Media/TZ".into()),
+            categories: vec![
+                CategoryLocationSetting { category: Category::Movie, incomplete_dir: None, finished_dir: Some("/Volumes/Media/TZ/Movies".into()) },
+                CategoryLocationSetting { category: Category::Tv, incomplete_dir: None, finished_dir: None },
+            ],
+            hidden: true,
+            hide_only_seeding: true,
+        };
+        let saved = store.save_profiles(&[rec]).unwrap();
+        assert_eq!(saved[0].incomplete_dir, None, "a blank folder is \"same as Settings\"");
+        assert_eq!(saved[0].finished_dir.as_deref(), Some("/Volumes/Media/TZ"));
+        assert_eq!(saved[0].categories.len(), 1, "an empty category entry is dropped");
+        assert!(saved[0].hidden && saved[0].hide_only_seeding);
+        assert_eq!(store.load_profiles(), saved);
+        let relative = ProfileRecord { finished_dir: Some("relative".into()), ..saved[0].clone() };
+        assert!(matches!(store.save_profiles(&[relative]), Err(CoreError::Invalid { .. })));
+        // "Only seeding" means nothing without hidden mode.
+        let off = ProfileRecord { hidden: false, ..saved[0].clone() };
+        assert!(!store.save_profiles(&[off]).unwrap()[0].hide_only_seeding);
     }
 
     #[test]
@@ -1140,6 +1247,11 @@ mod tests {
             icon: None,
             down_limit: down,
             up_limit: up,
+            incomplete_dir: None,
+            finished_dir: None,
+            categories: vec![],
+            hidden: false,
+            hide_only_seeding: false,
         };
         let saved = store.save_profiles(&[rec(Some(5_000_000), Some(0))]).unwrap();
         // 0 is "unlimited", stored as no key at all.

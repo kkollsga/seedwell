@@ -4,6 +4,8 @@ import SwiftUI
 @MainActor @Observable final class SettingsNavigation {
     var tab: SettingsTab = .transfers
     var trackerToEdit: String?
+    /// Opens a tracker's tab in the main window ("Show Torrents" of a hidden tracker); wired by the window controller.
+    @ObservationIgnored var openTracker: (String) -> Void = { _ in }
     /// "Create tracker profile…" for an unknown private tracker: its host, to pre-fill the editor.
     var newTrackerHost: String?
     /// The tracker log viewer (Settings > Advanced > Developer) is open.

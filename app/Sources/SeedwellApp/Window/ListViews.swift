@@ -245,8 +245,8 @@ extension Lists {
     /// A just-finished torrent is listed once, under Recently Finished.
     static func tracker(_ model: LibraryModel, commands: Commands) -> [RowGroup] {
         let s = model.snapshot
-        return trackerGroups(downloading: s.downloading.filter(model.matches), queued: s.queued.filter(model.matches),
-                             recent: s.recent.filter(model.matches), sharing: model.groups, counts: model.counts,
+        return trackerGroups(downloading: s.allDownloading.filter(model.matches), queued: s.allQueued.filter(model.matches),
+                             recent: s.allRecent.filter(model.matches), sharing: model.groups, counts: model.counts,
                              remaining: { model.remaining($0) }, showMore: { model.showMore($0) })
     }
 

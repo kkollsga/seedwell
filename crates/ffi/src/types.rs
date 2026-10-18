@@ -187,6 +187,13 @@ pub struct TrackerSummary {
     /// A favorite: a stored profile that can have settings (SPEC 7E.1). Automatic trackers,
     /// Public and Other private are not.
     pub favorite: bool,
+    /// A favorite in hidden mode (SPEC 7E.5): the sidebar does not list it; it stays here so its
+    /// tab still works and Settings can open it.
+    #[uniffi(default = false)]
+    pub hidden: bool,
+    /// With `hidden`: only the sharing side is hidden (downloads, and their notifications, show as usual).
+    #[uniffi(default = false)]
+    pub hide_only_seeding: bool,
 }
 
 /// Lifetime totals of one tracker (SPEC §7E.2); read when its header is shown, not every second.
@@ -274,6 +281,14 @@ pub struct Snapshot {
     pub queued: Vec<TransferRow>,
     /// Finished downloads, newest first (until "Clear").
     pub recent: Vec<TransferRow>,
+    /// What hidden mode (SPEC 7E.5) left out of `downloading`, `queued` and `recent`: the
+    /// tracker's own tab, notifications and the sleep assertion still need them.
+    #[uniffi(default = [])]
+    pub hidden_downloading: Vec<TransferRow>,
+    #[uniffi(default = [])]
+    pub hidden_queued: Vec<TransferRow>,
+    #[uniffi(default = [])]
+    pub hidden_recent: Vec<TransferRow>,
     /// The busiest few seeding torrents (the menu's Sharing submenu).
     pub sharing_busiest: Vec<TransferRow>,
     pub sharing: SharingCounts,
