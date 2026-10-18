@@ -1,0 +1,19 @@
+# cargo-nextest (CI). Every test runs in its own process, so tests that measure their process (heap, RSS)
+# are not disturbed by their neighbours.
+[test-groups]
+measure = { max-threads = 1 }
+
+[[profile.default.overrides]]
+# Memory and scale measurements run one at a time, not beside CPU-heavy tests.
+filter = 'binary(scale) | binary(scale_redb) | binary(seek_storm) | (package(trs-tracker) & test(/^memory::/))'
+test-group = "measure"
+
+[profile.ci]
+fail-fast = false
+# A test that fails and then passes is reported as FLAKY (a real problem to fix, but not a red build).
+retries = 1
+# A test running for 60 s is reported as slow; at 5 minutes it is a hang and is killed.
+slow-timeout = { period = "60s", terminate-after = 5 }
+failure-output = "immediate-final"
+status-level = "slow"
+final-status-level = "flaky"

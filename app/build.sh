@@ -5,6 +5,14 @@ set -euo pipefail
 APP_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$APP_DIR/.." && pwd)"
 TARGET=aarch64-apple-darwin
+# SEEDWELL_PROFILE=dev (CI): debug Rust and Swift for the host target, sharing the artifacts `cargo test` and
+# `swift test` already built, so CI compiles everything once. Never for releases or measurements.
+if [ "${SEEDWELL_PROFILE:-release}" = "dev" ]; then
+    [ "$(uname -m)" = "arm64" ] || { echo "SEEDWELL_PROFILE=dev needs an Apple silicon host" >&2; exit 1; }
+    CARGO_PROFILE_ARGS=(); RUST_OUT="$REPO/target/debug"; SWIFT_ARGS=(-c debug)   # no --arch: same build as `swift test`
+else
+    CARGO_PROFILE_ARGS=(--release --target "$TARGET"); RUST_OUT="$REPO/target/$TARGET/release"; SWIFT_ARGS=(-c release --arch arm64)
+fi
 BUILD="$APP_DIR/build"
 APP="$BUILD/Seedwell.app"
 # One version for everything: [workspace.package] version in Cargo.toml (also trs-cli --version, User-Agent,
@@ -29,15 +37,15 @@ if [ "${SEEDWELL_FAST:-0}" = "1" ]; then
 fi
 export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-4}"
 
-echo "==> Rust core (trs-ffi, release)"
-(cd "$REPO" && cargo build -p trs-ffi --release --target "$TARGET")
-LIB="$REPO/target/$TARGET/release/libtrs_ffi.a"
+echo "==> Rust core (trs-ffi, ${SEEDWELL_PROFILE:-release})"
+(cd "$REPO" && cargo build -p trs-ffi ${CARGO_PROFILE_ARGS[@]+"${CARGO_PROFILE_ARGS[@]}"})
+LIB="$RUST_OUT/libtrs_ffi.a"
 mkdir -p "$BUILD/rust"
 cp "$LIB" "$BUILD/rust/libtrs_ffi.a"
 
 echo "==> seedwell CLI (client + embedded skill, no engine)"
-(cd "$REPO" && cargo build -p trs-cli --release --target "$TARGET" --no-default-features)
-CLI="$REPO/target/$TARGET/release/seedwell"
+(cd "$REPO" && cargo build -p trs-cli ${CARGO_PROFILE_ARGS[@]+"${CARGO_PROFILE_ARGS[@]}"} --no-default-features)
+CLI="$RUST_OUT/seedwell"
 
 echo "==> Swift bindings (uniffi-bindgen)"
 GEN="$BUILD/generated"
@@ -63,9 +71,9 @@ if [ -z "${SDKROOT:-}" ]; then
 fi
 
 "$APP_DIR/fetch-sparkle.sh"
-echo "==> Swift app (release)"
-(cd "$APP_DIR" && swift build -c release --arch arm64 --product SeedwellApp)
-BIN="$(cd "$APP_DIR" && swift build -c release --arch arm64 --show-bin-path)/SeedwellApp"
+echo "==> Swift app (${SWIFT_ARGS[*]})"
+(cd "$APP_DIR" && swift build "${SWIFT_ARGS[@]}" --product SeedwellApp)
+BIN="$(cd "$APP_DIR" && swift build "${SWIFT_ARGS[@]}" --show-bin-path)/SeedwellApp"
 
 echo "==> Assembling $APP"
 rm -rf "$APP"

@@ -1,10 +1,13 @@
-# Lint, tests and an app build on every push to main and every pull request.
+# One build, every test. The Rust test build (debug) is reused by the app build and the Swift tests;
+# clippy runs beside it as a check-only pass. Documentation-only changes do not run CI.
 name: CI
 
 on:
   push:
     branches: [main]
+    paths-ignore: ["**.md", "docs/**", "LICENSE-*", "bench/**", ".github/dependabot.yml"]
   pull_request:
+    paths-ignore: ["**.md", "docs/**", "LICENSE-*", "bench/**", ".github/dependabot.yml"]
   workflow_dispatch:
 
 permissions:
@@ -16,39 +19,55 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  # Line tables keep panic locations and backtraces readable at a fraction of full debug info.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
   # Tests refuse to touch the real home folder.
   TRS_FORBID_REAL_HOME: "1"
 
 jobs:
-  rust:
-    name: Rust (clippy, tests)
-    runs-on: macos-26
-    timeout-minutes: 90
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - run: cargo test --workspace --locked --no-fail-fast
-
-  app:
-    name: App (build, Swift tests, scripts)
+  test:
+    name: Build and test
     runs-on: macos-26
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-apple-darwin
+      - name: Rust (version pinned in rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
       - uses: Swatinem/rust-cache@v2
-      # Builds the Rust core, generates the Swift bindings the tests need, builds Seedwell.app.
-      - run: bash app/build.sh
+        with:
+          shared-key: dev
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - name: Rust tests
+        run: cargo nextest run --workspace --locked --profile ci
+      - uses: actions/cache@v4
+        with:
+          path: app/.sparkle
+          key: sparkle-${{ hashFiles('app/fetch-sparkle.sh') }}
+      - name: App (reuses the test build)
+        run: bash app/build.sh
         env:
-          SEEDWELL_FAST: "1"
-      - run: swift test --package-path app
+          SEEDWELL_PROFILE: dev
+      - name: Swift tests (reuse the app build)
+        run: swift test --package-path app
       - name: Shell scripts
         run: |
           for f in install.sh app/build.sh app/release-zip.sh app/qa/update_e2e.sh; do bash -n "$f"; done
-          if command -v shellcheck >/dev/null; then shellcheck -e SC1091 install.sh app/release-zip.sh; fi
+          if command -v shellcheck >/dev/null; then shellcheck -e SC1091 install.sh app/build.sh app/release-zip.sh; fi
+
+  clippy:
+    name: Clippy
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: clippy
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
