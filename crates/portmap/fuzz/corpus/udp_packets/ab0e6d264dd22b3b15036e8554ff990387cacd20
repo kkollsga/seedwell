@@ -1,0 +1,4 @@
+HTTP/1.1 200 OK
+LOCATION: http://c.xml
+ST: urn:schemarg:device:InternetGatewayDevice:1
+

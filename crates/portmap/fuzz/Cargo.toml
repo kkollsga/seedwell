@@ -1,0 +1,44 @@
+[package]
+name = "trs-portmap-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+# The sans-I/O core and all parsers; no tokio.
+trs-portmap = { path = "..", default-features = false }
+
+# Standalone: not part of the Seedwell workspace (fuzzers need nightly and libFuzzer).
+[workspace]
+
+[[bin]]
+name = "udp_packets"
+path = "fuzz_targets/udp_packets.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "upnp_xml_soap"
+path = "fuzz_targets/upnp_xml_soap.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "http_gateway_misc"
+path = "fuzz_targets/http_gateway_misc.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "core_inputs"
+path = "fuzz_targets/core_inputs.rs"
+test = false
+doc = false
+bench = false

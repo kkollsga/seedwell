@@ -1,0 +1,21 @@
+[package]
+name = "trs-portmap"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "NAT-PMP (RFC 6886), PCP (RFC 6887) and UPnP-IGD port mapping: sans-I/O protocol core plus a small tokio driver"
+
+[features]
+default = ["driver"]
+# The tokio driver (UDP/TCP sockets, timers, `route` for the default gateway).
+# The sans-I/O core and every parser build without it (fuzz targets use that).
+driver = ["dep:tokio"]
+
+[dependencies]
+# The only dependency; justified in README.md.
+tokio = { version = "1", optional = true, default-features = false, features = ["rt", "net", "time", "sync", "io-util", "macros"] }
+
+[dev-dependencies]
+tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-thread", "net", "time", "sync", "io-util", "macros"] }

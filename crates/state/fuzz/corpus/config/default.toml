@@ -1,0 +1,92 @@
+# Seedwell settings. Edits are picked up within a few seconds.
+# Comments are not preserved when the app rewrites this file; unknown keys are.
+
+version = 6
+
+[general]
+launch_at_login = false
+notify_finished = true
+notify_errors = true
+notify_goal = false
+menu_bar_show_speed = false
+menu_bar_split_by_tracker = false
+prevent_sleep_while_downloading = true
+on_battery = "limit"
+play_with = "auto"
+
+[transfers]
+download_limit = 0
+upload_limit = 0
+max_active_downloads = 3
+max_connections_per_host = 4
+ask_before_adding = "multi_file"
+start_delay_secs = 10
+
+[transfers.alt]
+enabled = false
+download_limit = 2000000
+upload_limit = 500000
+
+[transfers.alt.schedule]
+enabled = false
+days = "weekdays"
+from = "08:00"
+to = "17:00"
+
+[folders]
+download_dir = "~/Downloads"
+incomplete_dir = "~/Downloads/.incomplete"
+by_status = false
+torrent_after_add = "trash"
+
+[[folders.watch]]
+path = "~/Downloads"
+enabled = true
+mode = "auto"
+after_add = "trash"
+
+[detection]
+skip_junk = true
+ask_when_unsure = true
+confidence_threshold = 0.8
+online_lookup = false
+
+[network]
+listen_port = 0
+dht = true
+pex = true
+lsd = true
+upnp = true
+natpmp = true
+utp = true
+ipv6 = true
+encryption = "prefer"
+max_connections = 200
+max_connections_per_torrent = 50
+allow_lan_trackers = false
+
+[agents]
+permission = "off"
+notify_changes = true
+rate_limit_per_sec = 20
+
+[advanced]
+write_cache_mib = 32
+preallocation = "sparse"
+verify_on_completion = true
+background_scrub = true
+scrub_on_ac_only = true
+fd_limit = 256
+peers_cache_per_torrent = 64
+db_cache_mib = 4
+
+[advanced.tiers]
+hot_to_warm = "5m"
+warm_to_cold = "5m"
+promote_upload_after = "1m"
+promote_interested_peers = 2
+
+[advanced.logging]
+level = "info"
+max_file_mib = 8
+keep_files = 5

@@ -1,0 +1,9 @@
+# Arch Linux. The official archlinux image is x86_64 only; on Apple Silicon we use the
+# multi-arch lopsided/archlinux (Arch Linux ARM userland on arm64, same pacman, same rolling
+# package set modulo ARM lag). Pass --build-arg BASE=archlinux --platform linux/amd64 for the real thing.
+ARG BASE=lopsided/archlinux:latest
+FROM --platform=${BUILDPLATFORM:-linux/arm64} ${BASE}
+RUN pacman-key --init && pacman-key --populate || true
+RUN pacman -Syu --noconfirm --needed base-devel curl git cmake perl pkgconf xz ca-certificates && pacman -Scc --noconfirm
+ENV RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo PATH=/opt/cargo/bin:$PATH
+RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable

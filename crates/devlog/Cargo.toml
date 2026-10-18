@@ -1,0 +1,18 @@
+[package]
+name = "trs-devlog"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Developer-mode log of tracker communication: masked JSON lines, bounded off-thread writer, rotation, readers"
+
+[dependencies]
+# The one masking implementation (`mask_secrets_for_log`, `mask_text`).
+trs-state = { path = "../state" }
+serde_json = { version = "1", default-features = false, features = ["std"] }
+# Local wall-clock time for the human rendering (the file keeps UTC).
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"

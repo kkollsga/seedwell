@@ -1,0 +1,43 @@
+[package]
+name = "trs-engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "BitTorrent session engine: torrents, peers, picker, choker, limits, queue, tiers, persistence boundary and control API"
+
+[dependencies]
+trs-bencode = { path = "../bencode" }
+trs-metainfo = { path = "../metainfo" }
+trs-wire = { path = "../wire" }
+trs-storage = { path = "../storage" }
+trs-tracker = { path = "../tracker" }
+# Developer mode: the masked, bounded log of tracker exchanges.
+trs-devlog = { path = "../devlog" }
+trs-dht = { path = "../dht" }
+# Persistence adapter (`state_store`), settings types, rules and tracker profiles.
+trs-state = { path = "../state" }
+# Content detection and placement templates (organizer, SPEC 7A).
+trs-classify = { path = "../classify" }
+# Direct HTTP(S) downloads (SPEC 7D).
+trs-http = { path = "../http" }
+# uTP (BEP 29) on the shared UDP port.
+trs-utp = { path = "../utp" }
+# NAT-PMP / PCP / UPnP port mapping for the listen port.
+trs-portmap = { path = "../portmap" }
+# Play while downloading (SPEC 7F): the loopback range server and its `PieceSource` contract.
+trs-stream = { path = "../stream" }
+# Runtime, sockets, timers, channels. No `full`: only what the engine uses.
+tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-thread", "net", "time", "sync", "macros", "io-util", "fs"] }
+# Zero-copy receive buffers shared with trs-wire.
+bytes = { version = "1", default-features = false }
+# OS entropy for the per-process tracker `key` and the engine's shuffle RNG seed.
+getrandom = { version = "0.3", default-features = false }
+libc = "0.2"
+
+[dev-dependencies]
+# `signal` only for the bench_client example (SIGTERM = graceful shutdown).
+tokio = { version = "1", default-features = false, features = ["signal", "process"] }
+tempfile = "3"
+serde_json = { version = "1", default-features = false, features = ["std"] }

@@ -1,0 +1,21 @@
+[package]
+name = "trs-metainfo"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = ".torrent and magnet parsing, info-hash and peer-id types for Seedwell"
+
+[dependencies]
+trs-bencode = { path = "../bencode" }
+# RustCrypto SHA-1/SHA-256 0.11: ARM SHA intrinsics on aarch64, picked at runtime
+# (cpufeatures); pure-Rust fallback elsewhere; no asm or linking needed.
+sha1 = { version = "0.11", default-features = false }
+sha2 = { version = "0.11", default-features = false }
+# OS entropy for PeerId::generate (getentropy on macOS); no rand stack needed.
+getrandom = { version = "0.3", default-features = false }
+
+[dev-dependencies]
+sha1 = { version = "0.11", default-features = false }
+proptest = { version = "1", default-features = false, features = ["std"] }

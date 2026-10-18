@@ -1,0 +1,3 @@
+## check v6refuse
+PASS  v6refuse   (0 violation(s), 0 warning(s))
+exit=0

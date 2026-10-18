@@ -1,0 +1,176 @@
+import Foundation
+import Testing
+@testable import SeedwellApp
+
+// The grey line under a row: what the engine says is shown as it is, plus what the app adds around it.
+
+private func row(state: TransferState = .seeding, seedSecs: UInt64 = 0, error: String? = nil, group: SeedGroup? = .active,
+                 ratio: Double = 0.94, goal: Double? = 2.0,
+                 peers: UInt32 = 0, swarm: UInt32? = nil, known: UInt32 = 0, down: UInt64 = 0, up: UInt64 = 0,
+                 pending: PendingStart? = nil, waiting: String? = nil, waitingIsError: Bool = false, halted: Bool = false,
+                 retryIn: UInt64? = nil) -> TransferRow {
+    TransferRow(
+        id: "a", name: "Sintel.2010.1080p", displayName: "Sintel (2010)", kind: .torrent, category: .movie,
+        sizeBytes: 1_000_000_000, doneBytes: 1_000_000_000, downRate: down, upRate: up, etaSecs: nil, trackerId: "public",
+        trackerName: "Public", ratio: ratio, ratioGoal: goal, seedSecs: seedSecs, state: state, finishedAt: 1, savePath: "/x",
+        fileExt: "mkv", seedGroup: group, error: error, retryInSecs: retryIn, movingPercent: nil, awaitingChoice: false, pending: pending, peers: peers,
+        swarm: swarm, knownPeers: known, hasVideo: false, videoExt: "", fileCount: 1, lastActivity: nil,
+        waitingNote: waiting, waitingIsError: waitingIsError, trackerHalted: halted)
+}
+
+@Suite("Row text")
+struct RowTextTests {
+    @Test func sharingRowsShowRatePeersAndRatioOnly() {
+        // No tracker, goal, seeding time or swarm: those are in Get Info.
+        #expect(row(ratio: 0.27, goal: nil, peers: 1, swarm: 250, up: 1_200_000).statusLine(.active) == "1.2 MB/s · 1 peer · Ratio 0.27")
+        #expect(row(ratio: 0.27, goal: 1.0, peers: 1, up: 1_200_000).statusLine(.active) == "1.2 MB/s · 1 peer · Ratio 0.27 of 1.0")
+        #expect(row(seedSecs: 3 * 86_400, ratio: 1.04, goal: nil).statusLine(.dormant) == "– · 0 peers · Ratio 1.04")
+        #expect(row(peers: 4, up: 45_000).statusLine(.popular) == "45 KB/s · 4 peers · Ratio 0.94 of 2.0")
+        // Moving wins.
+        var r = row(); r.movingPercent = 42
+        #expect(r.statusLine(.active) == "Moving… 42%")
+    }
+
+    @Test func aDownloadThatCannotFitSaysSoAndHowToRetry() {
+        let msg = "Not enough space: 4.2 GB still to download, 1.1 GB free"
+        let line = row(state: .error, error: msg, group: nil).statusLine(.download)
+        #expect(line == msg + " · Resume to try again")
+        // A running download has no retry hint.
+        #expect(!row(state: .downloading, group: nil).statusLine(.download).contains("Resume"))
+    }
+
+    @Test func sharingTotalsLine() {
+        // Against the whole torrent: 9.8 MB held of 17 MB, 8 of 13 files wanted and done.
+        var r = row(ratio: 0.0)
+        r.sizeBytes = 9_800_000; r.doneBytes = 9_800_000; r.totalBytes = 17_000_000; r.heldBytes = 9_800_000
+        r.fileCount = 13; r.filesDone = 8; r.uploadedBytes = 0
+        #expect(r.sharingTotalsLine == "8 of 13 files · 9.8 MB of 17 MB downloaded · 0 bytes uploaded")
+        r.heldBytes = 17_000_000; r.filesDone = 13; r.uploadedBytes = 3_000_000_000
+        #expect(r.sharingTotalsLine == "13 of 13 files · 17 MB downloaded · 3.0 GB uploaded")
+        // One file leaves the file count out.
+        var single = row()
+        single.sizeBytes = 592_000_000; single.doneBytes = 592_000_000; single.totalBytes = 592_000_000; single.heldBytes = 592_000_000
+        single.uploadedBytes = 3_000_000_000
+        #expect(single.sharingTotalsLine == "592 MB downloaded · 3.0 GB uploaded")
+        single.heldBytes = 100_000_000; single.doneBytes = 100_000_000
+        #expect(single.sharingTotalsLine == "100 MB of 592 MB downloaded · 3.0 GB uploaded")
+    }
+
+    @Test func aStoppedRowDropsTheTrackerAndKeepsTheGoal() {
+        #expect(row(state: .paused, group: .stopped, ratio: 0.4, goal: 1.0).statusLine(.stopped) == "Ratio 0.40 of 1.0 · Stopped")
+    }
+
+    @Test func downloadsEndWithTheDownloadRateAndPeers() {
+        var r = row(state: .downloading, group: nil, peers: 12, swarm: 340, down: 2_100_000)
+        r.doneBytes = 73_000_000; r.sizeBytes = 85_000_000; r.etaSecs = 120
+        #expect(r.statusLine(.download) == "73 of 85 MB — 2 minutes remaining · 2.1 MB/s (12 of 340)")
+    }
+
+    @Test func downloadsFallBackToKnownPeersThenToTheBareCount() {
+        func dl(peers: UInt32, known: UInt32 = 0, down: UInt64 = 0) -> TransferRow {
+            row(state: .downloading, group: nil, peers: peers, known: known, down: down)
+        }
+        #expect(dl(peers: 4, known: 90, down: 1_000).liveSuffix(.download) == "1.0 KB/s (4 of 90)")
+        #expect(dl(peers: 4).liveSuffix(.download) == "(4 peers)")
+        #expect(dl(peers: 1).liveSuffix(.download) == "(1 peer)")
+    }
+
+    @Test func nothingConnectedAndNoRateShowsNothing() {
+        #expect(row(state: .downloading, group: nil, swarm: 250).liveSuffix(.download) == "")
+        // Sharing rows have no live suffix; their line is `sharingLine`.
+        #expect(row(peers: 4, up: 5_000_000).liveSuffix(.active) == "")
+        #expect(row(state: .downloading, group: nil, up: 5_000_000).liveSuffix(.download) == "")
+    }
+
+    // An engine note replaces "Calculating time remaining…" when nothing is connected.
+    @Test func aDownloadWithoutPeersSaysWhy() {
+        var r = row(state: .downloading, group: nil, waiting: "Waiting for peers")
+        r.doneBytes = 0; r.sizeBytes = 1_900_000_000
+        #expect(r.statusLine(.download) == "0.0 of 1.9 GB — Waiting for peers")
+        #expect(!r.statusLine(.download).contains("Calculating"))
+        #expect(r.downloadWaiting?.note == "Waiting for peers")
+    }
+
+    @Test func aHaltedTrackerIsNamedInTheRowAndOffersAskingAgain() {
+        var r = row(state: .downloading, group: nil, waiting: "Tracker: Unregistered torrent", waitingIsError: true, halted: true)
+        r.doneBytes = 0; r.sizeBytes = 1_900_000_000
+        #expect(r.statusLine(.download) == "0.0 of 1.9 GB — Tracker: Unregistered torrent")
+        #expect(r.canAskAgain)
+        // A failing (not halted) tracker also says when it retries.
+        var f = row(state: .downloading, group: nil, waiting: "Tracker unreachable", waitingIsError: true, retryIn: 7_200)
+        f.doneBytes = 0
+        #expect(f.statusLine(.download).hasSuffix("Tracker unreachable · retrying in 2 h"))
+        #expect(!row(state: .downloading, group: nil).canAskAgain)
+    }
+
+    @Test func aFlowingDownloadKeepsItsTimeRemaining() {
+        var r = row(state: .downloading, group: nil, peers: 3, down: 1_000_000)
+        r.doneBytes = 500_000_000; r.sizeBytes = 1_000_000_000; r.etaSecs = 500
+        #expect(r.statusLine(.download).contains("remaining"))
+    }
+}
+
+@Suite("Progress of a download again")
+struct SessionProgressTests {
+    /// A finished 4-file selection (600 MB held) that got a 200 MB episode ticked: the bar and the
+    /// text count the new batch, not the 600 MB already there.
+    private func again(sessionDone: UInt64, eta: UInt64? = 240) -> TransferRow {
+        var r = row(state: .downloading, group: nil, down: 1_000_000)
+        r.sizeBytes = 800_000_000; r.doneBytes = 600_000_000 + sessionDone; r.etaSecs = eta
+        r.sessionSize = 200_000_000; r.sessionDone = sessionDone
+        return r
+    }
+
+    @Test func startsAtZeroForTheNewFile() {
+        let r = again(sessionDone: 0)
+        #expect(r.fraction == 0)
+        #expect(r.statusLine(.download, showTracker: false).hasPrefix("0.0 of 200 MB"))
+    }
+
+    @Test func countsTheNewBatchOnly() {
+        let r = again(sessionDone: 50_000_000)
+        #expect(r.fraction == 0.25)
+        #expect(r.percent == 25)
+        #expect(r.menuSubtitle == "25% · 1.0 MB/s · 4 min left")
+    }
+
+    @Test func rowsWithoutASessionUseTheWantedBytes() {
+        var r = row(state: .downloading, group: nil)
+        r.sizeBytes = 1_000_000_000; r.doneBytes = 420_000_000
+        #expect(r.fraction == 0.42)
+    }
+
+    @Test func aSharingRowStillCountsTheWholeTorrent() {
+        var r = row()
+        r.sizeBytes = 592_000_000; r.doneBytes = 592_000_000; r.totalBytes = 1_400_000_000; r.heldBytes = 700_000_000
+        r.fileCount = 24; r.filesDone = 4
+        #expect(r.sharingTotalsLine.contains("700 MB of 1.4 GB downloaded"))
+    }
+}
+
+@Suite("Menu line of a download")
+struct MenuSubtitleTests {
+    private func dl(rate: UInt64, eta: UInt64?, waiting: String? = nil) -> TransferRow {
+        var r = row(state: .downloading, group: nil, down: rate, waiting: waiting)
+        r.doneBytes = 420_000_000; r.sizeBytes = 1_000_000_000; r.etaSecs = eta
+        return r
+    }
+
+    @Test func speedComesWithTimeLeft() {
+        #expect(dl(rate: 3_100_000, eta: 240).menuSubtitle == "42% · 3.1 MB/s · 4 min left")
+        #expect(dl(rate: 3_100_000, eta: nil).menuSubtitle == "42% · 3.1 MB/s · calculating…")
+    }
+
+    @Test func noSpeedShowsTheWaitingTextNotAStaleTime() {
+        #expect(dl(rate: 0, eta: 240, waiting: "Waiting for peers").menuSubtitle == "42% · Waiting for peers")
+        #expect(dl(rate: 0, eta: 240, waiting: "Tracker: Unregistered torrent").menuSubtitle == "42% · Tracker: Unregistered torrent")
+        #expect(dl(rate: 0, eta: 240).menuSubtitle.contains("calculating"))
+    }
+
+    @Test func pausedAndLongNames() {
+        #expect(row(state: .paused, group: nil).menuSubtitle.hasPrefix("Paused · "))
+        let n = Fmt.middleTruncated(String(repeating: "a", count: 30) + String(repeating: "b", count: 30), to: 20)
+        #expect(n.count == 20 && n.contains("…") && n.hasPrefix("aaaa") && n.hasSuffix("bbbb"))
+        #expect(Fmt.middleTruncated("short", to: 20) == "short")
+    }
+}

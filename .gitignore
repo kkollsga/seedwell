@@ -1,0 +1,15 @@
+/target
+/app/.build
+/app/build
+*.xcuserstate
+.DS_Store
+/bench/runs
+/bench/downloads
+# local, untracked leftovers of the removed capture lab
+/bench/capture/
+/tools/*/captures
+/target-ffi
+__pycache__/
+*.pyc
+/app/.sparkle
+/tools/sysguard/local.env

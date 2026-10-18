@@ -1,0 +1,41 @@
+[14:15:52] MARKER run-start
+[14:15:52] MARKER add
+[14:15:53] MARKER torrents-added
+[14:15:53] torrents in Seedwell: 5
+[14:15:53] observing 900s
+
+v6blackhole=5 v6blackhole=5 
+
+v6blackhole=10 
+v6blackhole=10 v6blackhole=15 
+v6blackhole=15 
+
+v6blackhole=20 v6blackhole=20 
+
+v6blackhole=25 
+v6blackhole=25 
+v6blackhole=30 
+v6blackhole=30 
+v6blackhole=35 v6blackhole=35 
+v6blackhole=40 
+v6blackhole=40 
+
+v6blackhole=45 v6blackhole=45 
+v6blackhole=50 
+
+v6blackhole=50 
+v6blackhole=55 
+v6blackhole=55 v6blackhole=60 
+
+v6blackhole=60 
+v6blackhole=65 v6blackhole=65 
+v6blackhole=70 
+
+v6blackhole=70 v6blackhole=75 
+
+v6blackhole=75 [14:30:53] MARKER quit
+[14:30:56] daemon exited after 3 s
+[14:30:58] MARKER run-end
+## check v6blackhole
+PASS  v6blackhole   (0 violation(s), 0 warning(s))
+exit=0

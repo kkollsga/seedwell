@@ -1,0 +1,41 @@
+[package]
+name = "trs-ffi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "UniFFI surface between the Rust core and the Swift shell"
+
+[lib]
+name = "trs_ffi"
+# staticlib is linked into the app; lib lets the bindgen binary and tests use it.
+crate-type = ["staticlib", "lib"]
+
+[features]
+# Only the bindgen binary needs clap & friends; keep them out of the app's static library.
+bindgen = ["uniffi/cli"]
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+required-features = ["bindgen"]
+
+[dependencies]
+uniffi = { version = "0.32", default-features = false }
+trs-engine = { path = "../engine" }
+# `MappedAlloc`, the app's global allocator (big blocks leave the footprint when freed).
+trs-storage = { path = "../storage" }
+trs-state = { path = "../state" }
+trs-classify = { path = "../classify" }
+trs-control = { path = "../control" }
+trs-tracker = { path = "../tracker" }
+# Developer mode: the tracker log viewer reads and clears the log.
+trs-devlog = { path = "../devlog" }
+# Content types and container families of file names (the Play entries); the server itself is the engine's.
+trs-stream = { path = "../stream" }
+# Runtime handle, broadcast receiver for engine events, timers.
+tokio = { version = "1", default-features = false, features = ["rt", "sync", "time"] }
+
+[dev-dependencies]
+tempfile = "3"

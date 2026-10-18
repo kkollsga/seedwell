@@ -1,0 +1,6 @@
+[network]
+listen_port = 51413
+[[folders.watch]]
+path = "~/Torrents"
+mode = "ask"
+category = "book"

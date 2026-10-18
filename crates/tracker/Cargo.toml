@@ -1,0 +1,38 @@
+[package]
+name = "trs-tracker"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Safety-critical BitTorrent tracker client: sans-I/O announce machines, host gate, HTTP(S) and UDP transports"
+
+[features]
+default = ["transport"]
+# Async transports (HTTP(S) via hyper+rustls, UDP BEP 15/41). The sans-I/O core
+# builds without it, which keeps the model checker and fuzz targets light.
+transport = [
+    "dep:tokio", "dep:hyper", "dep:hyper-util", "dep:http-body-util", "dep:bytes",
+    "dep:hyper-rustls", "dep:flate2", "dep:tower-service", "dep:getrandom",
+]
+
+[dependencies]
+trs-bencode = { path = "../bencode" }
+tokio = { version = "1", optional = true, default-features = false, features = ["rt", "net", "time", "sync", "io-util"] }
+hyper = { version = "1", optional = true, default-features = false, features = ["http1", "client"] }
+hyper-util = { version = "0.1", optional = true, default-features = false, features = ["tokio", "client-legacy", "http1"] }
+http-body-util = { version = "0.1", optional = true }
+bytes = { version = "1", optional = true }
+hyper-rustls = { version = "0.27", optional = true, default-features = false, features = ["http1", "ring", "webpki-roots", "tls12"] }
+flate2 = { version = "1", optional = true, default-features = false, features = ["rust_backend"] }
+# The `Service` trait of hyper's connector/resolver layer (already in the tree via hyper-util).
+tower-service = { version = "0.3", optional = true }
+# UDP transaction ids come from the OS RNG (never from a seeded PRNG).
+getrandom = { version = "0.3", optional = true, default-features = false }
+
+[dev-dependencies]
+# Property tests, the model checker, and the (ignored) network test.
+proptest = { version = "1", default-features = false, features = ["std"] }
+stateright = { version = "0.30", default-features = false }
+sha1 = { version = "0.11", default-features = false }
+tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-thread", "macros", "net", "time", "sync", "io-util"] }

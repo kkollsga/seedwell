@@ -1,0 +1,280 @@
+# Capture report: mock-v6blackhole.jsonl
+records: 85 total, 80 announce, 0 scrape, 5 markers
+
+## Client `v6blackhole`  torrent 1d764b9fb13f2642bab57dded2247e17d3b848e3  tracker id `mock`
+User-Agent: `Seedwell/0.0.1` x16
+Request header order: host, user-agent, accept, accept-encoding
+
+### Timeline (t0 = first record; delta = since previous announce of this torrent)
+time         delta  event          uploaded   downloaded         left numwant  response
++00:00.0            -- MARKER: run-start --
++00:00.2            -- MARKER: add --
++00:00.8            -- MARKER: torrents-added --
++00:17.1            started               0            0        65536      50  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++01:17.1    +60.0s  none                  0            0        65536      50  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++02:17.1    +60.0s  none                  0            0        65536      50  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++03:17.2    +60.0s  none                  0            0        65536      50  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++04:17.2    +60.0s  none                  0            0        65536      50  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++05:17.2    +60.0s  none                  0            0        65536      50  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++06:17.2    +60.0s  none                  0            0        65536      50  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++07:17.2    +60.0s  none                  0            0        65536      50  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++08:17.2    +60.0s  none                  0            0        65536      50  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++09:17.2    +60.0s  none                  0            0        65536      50  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++10:17.2    +60.0s  none                  0            0        65536      50  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++11:17.3    +60.0s  none                  0            0        65536      50  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++12:17.3    +60.0s  none                  0            0        65536      50  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++13:17.3    +60.0s  none                  0            0        65536      50  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++14:17.3    +60.0s  none                  0            0        65536      50  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++15:01.1            -- MARKER: quit --
++15:03.1    +45.8s  stopped               0            0        65536       0  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++15:05.6            -- MARKER: run-end --
+
+### Summary
+event sequence: started, none x14, stopped
+responses that were not a clean success: 0
+
+parameter order by event (count):
+  none      x14  info_hash&peer_id&port&uploaded&downloaded&left&numwant&key&compact
+  started   x1   info_hash&peer_id&port&uploaded&downloaded&left&numwant&key&compact&event
+  stopped   x1   info_hash&peer_id&port&uploaded&downloaded&left&numwant&key&compact&event
+
+encoding:
+  info_hash  320 bytes: 240 escaped, 80 literal; needlessly escaped unreserved bytes: 0; unsafe literal bytes: 0; hex digit case: upper
+  peer_id    320 bytes: 0 escaped, 320 literal; needlessly escaped unreserved bytes: 0; unsafe literal bytes: 0; hex digit case: none
+  peer_id prefix(es) (ASCII, first 8): ["-SX0001-"]
+
+parameter values seen (other than info_hash/peer_id):
+  compact        "1" x16
+  event          "started" x1, "stopped" x1
+  key            "55D0AEFE" x16
+  numwant        "0" x1, "50" x15
+  port           "51600" x16
+
+sessions (a session starts at event=started):
+  #1: 16 announces, starts +00:17.1, key=["55D0AEFE"], peer_id=["-SX0001-FOeoxD9bB59o"]
+
+interval adherence (regular announces following a successful response):
+  n=14 gaps: min 60.0s, median 60.0s, max 60.0s; tracker interval=Some(60) min interval=Some(30)
+
+## Client `v6blackhole`  torrent 2646445a49ba6982c0ffbb4c4a3ccd44bf49aeca  tracker id `mock`
+User-Agent: `Seedwell/0.0.1` x16
+Request header order: host, user-agent, accept, accept-encoding
+
+### Timeline (t0 = first record; delta = since previous announce of this torrent)
+time         delta  event          uploaded   downloaded         left numwant  response
++00:00.0            -- MARKER: run-start --
++00:00.2            -- MARKER: add --
++00:00.8            -- MARKER: torrents-added --
++00:17.1            started               0            0        65536      50  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++01:18.1    +61.0s  none                  0            0        65536      50  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++02:18.1    +60.0s  none                  0            0        65536      50  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++03:18.1    +60.0s  none                  0            0        65536      50  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++04:18.2    +60.0s  none                  0            0        65536      50  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++05:18.2    +60.0s  none                  0            0        65536      50  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++06:18.2    +60.0s  none                  0            0        65536      50  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++07:18.2    +60.0s  none                  0            0        65536      50  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++08:18.2    +60.0s  none                  0            0        65536      50  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++09:18.2    +60.0s  none                  0            0        65536      50  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++10:18.2    +60.0s  none                  0            0        65536      50  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++11:18.3    +60.0s  none                  0            0        65536      50  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++12:18.3    +60.0s  none                  0            0        65536      50  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++13:18.3    +60.0s  none                  0            0        65536      50  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++14:18.3    +60.0s  none                  0            0        65536      50  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++15:01.1            -- MARKER: quit --
++15:01.1    +42.8s  stopped               0            0        65536       0  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++15:05.6            -- MARKER: run-end --
+
+### Summary
+event sequence: started, none x14, stopped
+responses that were not a clean success: 0
+
+parameter order by event (count):
+  none      x14  info_hash&peer_id&port&uploaded&downloaded&left&numwant&key&compact
+  started   x1   info_hash&peer_id&port&uploaded&downloaded&left&numwant&key&compact&event
+  stopped   x1   info_hash&peer_id&port&uploaded&downloaded&left&numwant&key&compact&event
+
+encoding:
+  info_hash  320 bytes: 176 escaped, 144 literal; needlessly escaped unreserved bytes: 0; unsafe literal bytes: 0; hex digit case: upper
+  peer_id    320 bytes: 0 escaped, 320 literal; needlessly escaped unreserved bytes: 0; unsafe literal bytes: 0; hex digit case: none
+  peer_id prefix(es) (ASCII, first 8): ["-SX0001-"]
+
+parameter values seen (other than info_hash/peer_id):
+  compact        "1" x16
+  event          "started" x1, "stopped" x1
+  key            "55D0AEFE" x16
+  numwant        "0" x1, "50" x15
+  port           "51600" x16
+
+sessions (a session starts at event=started):
+  #1: 16 announces, starts +00:17.1, key=["55D0AEFE"], peer_id=["-SX0001-FOeoxD9bB59o"]
+
+interval adherence (regular announces following a successful response):
+  n=14 gaps: min 60.0s, median 60.0s, max 61.0s; tracker interval=Some(60) min interval=Some(30)
+
+## Client `v6blackhole`  torrent b862fa5e6cdf75adb8dcc419a94f9a9cbddc8e43  tracker id `mock`
+User-Agent: `Seedwell/0.0.1` x16
+Request header order: host, user-agent, accept, accept-encoding
+
+### Timeline (t0 = first record; delta = since previous announce of this torrent)
+time         delta  event          uploaded   downloaded         left numwant  response
++00:00.0            -- MARKER: run-start --
++00:00.2            -- MARKER: add --
++00:00.8            -- MARKER: torrents-added --
++00:17.1            started               0            0        65536      50  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++01:17.1    +60.0s  none                  0            0        65536      50  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++02:17.1    +60.0s  none                  0            0        65536      50  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++03:17.2    +60.0s  none                  0            0        65536      50  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++04:17.2    +60.0s  none                  0            0        65536      50  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++05:17.2    +60.0s  none                  0            0        65536      50  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++06:17.2    +60.0s  none                  0            0        65536      50  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++07:17.2    +60.0s  none                  0            0        65536      50  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++08:17.2    +60.0s  none                  0            0        65536      50  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++09:17.2    +60.0s  none                  0            0        65536      50  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++10:17.2    +60.0s  none                  0            0        65536      50  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++11:17.2    +60.0s  none                  0            0        65536      50  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++12:17.3    +60.0s  none                  0            0        65536      50  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++13:17.3    +60.0s  none                  0            0        65536      50  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++14:17.3    +60.0s  none                  0            0        65536      50  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++15:01.1            -- MARKER: quit --
++15:01.1    +43.8s  stopped               0            0        65536       0  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++15:05.6            -- MARKER: run-end --
+
+### Summary
+event sequence: started, none x14, stopped
+responses that were not a clean success: 0
+
+parameter order by event (count):
+  none      x14  info_hash&peer_id&port&uploaded&downloaded&left&numwant&key&compact
+  started   x1   info_hash&peer_id&port&uploaded&downloaded&left&numwant&key&compact&event
+  stopped   x1   info_hash&peer_id&port&uploaded&downloaded&left&numwant&key&compact&event
+
+encoding:
+  info_hash  320 bytes: 240 escaped, 80 literal; needlessly escaped unreserved bytes: 0; unsafe literal bytes: 0; hex digit case: upper
+  peer_id    320 bytes: 0 escaped, 320 literal; needlessly escaped unreserved bytes: 0; unsafe literal bytes: 0; hex digit case: none
+  peer_id prefix(es) (ASCII, first 8): ["-SX0001-"]
+
+parameter values seen (other than info_hash/peer_id):
+  compact        "1" x16
+  event          "started" x1, "stopped" x1
+  key            "55D0AEFE" x16
+  numwant        "0" x1, "50" x15
+  port           "51600" x16
+
+sessions (a session starts at event=started):
+  #1: 16 announces, starts +00:17.1, key=["55D0AEFE"], peer_id=["-SX0001-FOeoxD9bB59o"]
+
+interval adherence (regular announces following a successful response):
+  n=14 gaps: min 60.0s, median 60.0s, max 60.0s; tracker interval=Some(60) min interval=Some(30)
+
+## Client `v6blackhole`  torrent d131899b6dcd8b7bd6542687d41ae39c485d708b  tracker id `mock`
+User-Agent: `Seedwell/0.0.1` x16
+Request header order: host, user-agent, accept, accept-encoding
+
+### Timeline (t0 = first record; delta = since previous announce of this torrent)
+time         delta  event          uploaded   downloaded         left numwant  response
++00:00.0            -- MARKER: run-start --
++00:00.2            -- MARKER: add --
++00:00.8            -- MARKER: torrents-added --
++00:17.4            started               0            0        65536      50  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++01:19.1    +61.7s  none                  0            0        65536      50  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++02:19.1    +60.0s  none                  0            0        65536      50  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++03:19.1    +60.0s  none                  0            0        65536      50  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++04:19.2    +60.0s  none                  0            0        65536      50  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++05:19.2    +60.0s  none                  0            0        65536      50  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++06:19.2    +60.0s  none                  0            0        65536      50  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++07:19.2    +60.0s  none                  0            0        65536      50  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++08:19.2    +60.0s  none                  0            0        65536      50  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++09:19.2    +60.0s  none                  0            0        65536      50  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++10:19.2    +60.0s  none                  0            0        65536      50  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++11:19.2    +60.0s  none                  0            0        65536      50  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++12:19.3    +60.0s  none                  0            0        65536      50  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++13:19.3    +60.0s  none                  0            0        65536      50  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++14:19.3    +60.0s  none                  0            0        65536      50  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++15:01.1            -- MARKER: quit --
++15:02.1    +42.8s  stopped               0            0        65536       0  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++15:05.6            -- MARKER: run-end --
+
+### Summary
+event sequence: started, none x14, stopped
+responses that were not a clean success: 0
+
+parameter order by event (count):
+  none      x14  info_hash&peer_id&port&uploaded&downloaded&left&numwant&key&compact
+  started   x1   info_hash&peer_id&port&uploaded&downloaded&left&numwant&key&compact&event
+  stopped   x1   info_hash&peer_id&port&uploaded&downloaded&left&numwant&key&compact&event
+
+encoding:
+  info_hash  320 bytes: 240 escaped, 80 literal; needlessly escaped unreserved bytes: 0; unsafe literal bytes: 0; hex digit case: upper
+  peer_id    320 bytes: 0 escaped, 320 literal; needlessly escaped unreserved bytes: 0; unsafe literal bytes: 0; hex digit case: none
+  peer_id prefix(es) (ASCII, first 8): ["-SX0001-"]
+
+parameter values seen (other than info_hash/peer_id):
+  compact        "1" x16
+  event          "started" x1, "stopped" x1
+  key            "55D0AEFE" x16
+  numwant        "0" x1, "50" x15
+  port           "51600" x16
+
+sessions (a session starts at event=started):
+  #1: 16 announces, starts +00:17.4, key=["55D0AEFE"], peer_id=["-SX0001-FOeoxD9bB59o"]
+
+interval adherence (regular announces following a successful response):
+  n=14 gaps: min 60.0s, median 60.0s, max 61.7s; tracker interval=Some(60) min interval=Some(30)
+
+## Client `v6blackhole`  torrent fc401c7b59bd0b475a1e7b0e00c3f50b0930d64b  tracker id `mock`
+User-Agent: `Seedwell/0.0.1` x16
+Request header order: host, user-agent, accept, accept-encoding
+
+### Timeline (t0 = first record; delta = since previous announce of this torrent)
+time         delta  event          uploaded   downloaded         left numwant  response
++00:00.0            -- MARKER: run-start --
++00:00.2            -- MARKER: add --
++00:00.8            -- MARKER: torrents-added --
++00:17.1            started               0            0        65536      50  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++01:17.1    +60.0s  none                  0            0        65536      50  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++02:17.1    +60.0s  none                  0            0        65536      50  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++03:17.1    +60.0s  none                  0            0        65536      50  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++04:17.2    +60.0s  none                  0            0        65536      50  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++05:17.2    +60.0s  none                  0            0        65536      50  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++06:17.2    +60.0s  none                  0            0        65536      50  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++07:17.2    +60.0s  none                  0            0        65536      50  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++08:17.2    +60.0s  none                  0            0        65536      50  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++09:17.2    +60.0s  none                  0            0        65536      50  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++10:17.2    +60.0s  none                  0            0        65536      50  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++11:17.2    +60.0s  none                  0            0        65536      50  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++12:17.3    +60.0s  none                  0            0        65536      50  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++13:17.3    +60.0s  none                  0            0        65536      50  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++14:17.3    +60.0s  none                  0            0        65536      50  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++15:01.1            -- MARKER: quit --
++15:01.1    +43.8s  stopped               0            0        65536       0  200 int=60 min=30 S/L=0/0 peers=0 (0ms, 73B)
++15:05.6            -- MARKER: run-end --
+
+### Summary
+event sequence: started, none x14, stopped
+responses that were not a clean success: 0
+
+parameter order by event (count):
+  none      x14  info_hash&peer_id&port&uploaded&downloaded&left&numwant&key&compact
+  started   x1   info_hash&peer_id&port&uploaded&downloaded&left&numwant&key&compact&event
+  stopped   x1   info_hash&peer_id&port&uploaded&downloaded&left&numwant&key&compact&event
+
+encoding:
+  info_hash  320 bytes: 240 escaped, 80 literal; needlessly escaped unreserved bytes: 0; unsafe literal bytes: 0; hex digit case: upper
+  peer_id    320 bytes: 0 escaped, 320 literal; needlessly escaped unreserved bytes: 0; unsafe literal bytes: 0; hex digit case: none
+  peer_id prefix(es) (ASCII, first 8): ["-SX0001-"]
+
+parameter values seen (other than info_hash/peer_id):
+  compact        "1" x16
+  event          "started" x1, "stopped" x1
+  key            "55D0AEFE" x16
+  numwant        "0" x1, "50" x15
+  port           "51600" x16
+
+sessions (a session starts at event=started):
+  #1: 16 announces, starts +00:17.1, key=["55D0AEFE"], peer_id=["-SX0001-FOeoxD9bB59o"]
+
+interval adherence (regular announces following a successful response):
+  n=14 gaps: min 60.0s, median 60.0s, max 60.0s; tracker interval=Some(60) min interval=Some(30)
+
+## Detector verdict (tolerance 2000 ms, max 10 req/min/host)
+PASS  v6blackhole   (0 violation(s), 0 warning(s))

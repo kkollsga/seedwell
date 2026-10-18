@@ -1,0 +1,63 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Right-click concept</title>
+<link rel="stylesheet" href="shared.css"><link rel="stylesheet" href="mainwin.css">
+<style>
+  body { width: 1440px; height: 640px; position: relative; }
+  .frag { position: absolute; width: 600px; border-radius: 16px; background: #1c1c1f; padding: 10px 12px;
+     box-shadow: 0 0 0 0.5px rgba(255,255,255,0.12), 0 24px 60px rgba(0,0,0,0.5); }
+  .frag .ttl { font-size: 12px; font-weight: 600; color: rgba(235,235,245,0.45); padding: 4px 10px 6px; }
+  .row.ctx { background: rgba(255,255,255,0.06); box-shadow: inset 0 0 0 2px #0a84ff; }
+  .nm2 { position: absolute; padding: 6px; background: rgba(48,48,54,0.80); backdrop-filter: blur(40px) saturate(180%);
+     border: 0.5px solid rgba(255,255,255,0.16); box-shadow: 0 0 0 0.5px rgba(0,0,0,0.55), 0 20px 50px rgba(0,0,0,0.5);
+     border-radius: 14px; color: rgba(255,255,255,0.92); font-size: 13.5px; }
+  .nm2 .mi { position: relative; display: flex; align-items: center; height: 26px; padding: 0 12px 0 28px; border-radius: 7px; gap: 8px; white-space: nowrap; }
+  .nm2 .mi .t { flex: 1; }
+  .nm2 .mi .chk { position: absolute; left: 10px; font-size: 12px; }
+  .nm2 .mi .k { color: rgba(255,255,255,0.45); }
+  .nm2 .mi .chev { color: rgba(255,255,255,0.55); font-size: 11px; }
+  .nm2 .mi.sel { background: #0a6cf0; color: #fff; } .nm2 .mi.sel .chev { color: #fff; }
+  .nm2 .mi.red { color: #ff6961; }
+  .nm2 .mi.dis { color: rgba(255,255,255,0.38); font-size: 12px; }
+  .nm2 .sep { height: 1px; background: rgba(255,255,255,0.12); margin: 5px 10px; }
+  .cursor { position: absolute; width: 22px; height: 30px; }
+  .lab { position: absolute; font-size: 15px; font-weight: 600; color: #fff; }
+  .lab span { display: block; font-size: 12px; font-weight: 400; color: rgba(255,255,255,0.65); margin-top: 2px; }
+</style></head>
+<body class="wall-dark">
+<svg width="0" height="0" style="position:absolute">
+  <defs>
+    <symbol id="s-down" viewBox="0 0 18 18"><circle cx="9" cy="9" r="7.2" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M9 5.2v7M6.2 9.6L9 12.4l2.8-2.8" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="s-up" viewBox="0 0 18 18"><circle cx="9" cy="9" r="7.2" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M9 12.8v-7M6.2 8.4L9 5.6l2.8 2.8" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="s-clock" viewBox="0 0 18 18"><circle cx="9" cy="9" r="7.2" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M9 5v4.2l2.8 1.7" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></symbol>
+    <symbol id="s-tower" viewBox="0 0 18 18"><circle cx="9" cy="8" r="1.6" fill="currentColor"/><path d="M5.6 4.6a4.8 4.8 0 0 0 0 6.8M12.4 4.6a4.8 4.8 0 0 1 0 6.8M3.4 2.4a7.9 7.9 0 0 0 0 11.2M14.6 2.4a7.9 7.9 0 0 1 0 11.2M9 9.6V16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></symbol>
+    <symbol id="s-globe" viewBox="0 0 18 18"><circle cx="9" cy="9" r="7.2" fill="none" stroke="currentColor" stroke-width="1.4"/><ellipse cx="9" cy="9" rx="3.2" ry="7.2" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M2 9h14" stroke="currentColor" stroke-width="1.3"/></symbol>
+    <symbol id="s-plus" viewBox="0 0 18 18"><path d="M9 3.5v11M3.5 9h11" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></symbol>
+    <symbol id="s-pause" viewBox="0 0 18 18"><rect x="5" y="4" width="2.6" height="10" rx="1" fill="currentColor"/><rect x="10.4" y="4" width="2.6" height="10" rx="1" fill="currentColor"/></symbol>
+    <symbol id="s-search" viewBox="0 0 18 18"><circle cx="8" cy="8" r="5" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M11.8 11.8L15.5 15.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></symbol>
+    <symbol id="s-info" viewBox="0 0 22 22"><circle cx="11" cy="11" r="9" fill="none" stroke="currentColor" stroke-width="1.5"/><circle cx="11" cy="7" r="1.1" fill="currentColor"/><path d="M11 10v6" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></symbol>
+    <symbol id="s-moon" viewBox="0 0 16 16"><path d="M10.8 2.2a6 6 0 1 0 3 8.6A5 5 0 0 1 10.8 2.2z" fill="currentColor"/></symbol>
+  </defs>
+</svg>
+
+<div class="lab" style="left:40px;top:34px">Downloading torrent<span>Same menu in the menu bar dropdown and the main window</span></div>
+<div class="frag" style="left:40px;top:90px;width:560px">
+  <div class="ttl">Downloads</div>
+  <div class="row ctx"><div class="doc"><i class="sheet"></i><i class="fold"></i><b class="ext" style="background:#ff453a">MKV</b></div><div class="grow"><div class="nm">Sprite Fright (2021)</div><div class="meta">1.1 of 5.3 GB — 14 minutes remaining</div><div class="pbar"><i style="width:21%"></i></div></div></div>
+  <div class="row"><div class="doc"><i class="sheet"></i><i class="fold"></i><b class="ext" style="background:#5e5ce6">ISO</b></div><div class="grow"><div class="nm">ubuntu-26.04-desktop-arm64.iso</div><div class="meta">4.6 of 6.2 GB — 2 minutes remaining</div><div class="pbar"><i style="width:74%"></i></div></div></div>
+</div>
+<svg class="cursor" style="left:300px;top:128px" viewBox="0 0 22 30"><path d="M2 2v22l6-5.5 4 9 3.4-1.5-4-8.8H19z" fill="#000" stroke="#fff" stroke-width="1.6" stroke-linejoin="round"/></svg>
+<div class="nm2" style="left:316px;top:146px;width:236px"><div class="mi "><span class="chk"></span><span class="t">Pause</span></div><div class="mi "><span class="chk"></span><span class="t">Move to Top</span></div><div class="sep"></div><div class="mi "><span class="chk"></span><span class="t">Show in Finder</span></div><div class="mi "><span class="chk"></span><span class="t">Get Info</span><span class=k>⌘I</span></div><div class="sep"></div><div class="mi "><span class="chk"></span><span class="t">Priority</span><span class=chev>❯</span></div><div class="mi sel"><span class="chk"></span><span class="t">Category</span><span class=chev>❯</span></div><div class="mi "><span class="chk"></span><span class="t">Rule</span><span class=chev>❯</span></div><div class="sep"></div><div class="mi "><span class="chk"></span><span class="t">Copy Magnet Link</span></div><div class="sep"></div><div class="mi "><span class="chk"></span><span class="t">Remove…</span></div><div class="mi red"><span class="chk"></span><span class="t">Remove and Delete Files…</span></div></div>
+<div class="nm2" style="left:556px;top:302px;width:220px"><div class="mi "><span class="chk">✓</span><span class="t">Movie</span></div><div class="mi "><span class="chk"></span><span class="t">TV</span></div><div class="mi "><span class="chk"></span><span class="t">Music</span></div><div class="mi "><span class="chk"></span><span class="t">Audiobook</span></div><div class="mi "><span class="chk"></span><span class="t">Book</span></div><div class="mi "><span class="chk"></span><span class="t">Software</span></div><div class="mi "><span class="chk"></span><span class="t">Other</span></div><div class="sep"></div><div class="mi dis"><span class="chk"></span><span class="t">Detected: Movie (97%)</span></div></div>
+
+<div class="lab" style="left:760px;top:34px">Shared torrent<span>Goal, priority and rule, changeable per torrent</span></div>
+<div class="frag" style="left:760px;top:90px;width:560px">
+  <div class="ttl">Sharing</div>
+  <div class="row ctx"><div class="doc folder"><i class="fold"></i><i class="sheet"></i></div><div class="grow"><div class="nm">enwiki-20261001-pages-articles</div><div class="meta">tracker-z.cc · Ratio 0.94 of 2.0 · 10 days</div></div><span class="trail" style="color:rgba(255,255,255,0.85)">↑ 640 KB/s</span></div>
+  <div class="row"><div class="doc"><i class="sheet"></i><i class="fold"></i><b class="ext" style="background:#5e5ce6">ISO</b></div><div class="grow"><div class="nm">archlinux-2026.10.01-x86_64.iso</div><div class="meta">tracker-z.cc · Ratio 1.24 of 2.0 · 9 days</div></div><span class="trail" style="color:rgba(255,255,255,0.85)">↑ 1.2 MB/s</span></div>
+</div>
+<svg class="cursor" style="left:950px;top:128px" viewBox="0 0 22 30"><path d="M2 2v22l6-5.5 4 9 3.4-1.5-4-8.8H19z" fill="#000" stroke="#fff" stroke-width="1.6" stroke-linejoin="round"/></svg>
+<div class="nm2" style="left:966px;top:146px;width:226px"><div class="mi "><span class="chk"></span><span class="t">Stop Sharing</span></div><div class="sep"></div><div class="mi "><span class="chk"></span><span class="t">Show in Finder</span></div><div class="mi "><span class="chk"></span><span class="t">Get Info</span><span class=k>⌘I</span></div><div class="sep"></div><div class="mi sel"><span class="chk"></span><span class="t">Seeding Goal</span><span class=chev>❯</span></div><div class="mi "><span class="chk"></span><span class="t">Priority</span><span class=chev>❯</span></div><div class="mi "><span class="chk"></span><span class="t">Rule</span><span class=chev>❯</span></div><div class="sep"></div><div class="mi "><span class="chk"></span><span class="t">Verify Files</span></div><div class="mi "><span class="chk"></span><span class="t">Copy Magnet Link</span></div><div class="sep"></div><div class="mi "><span class="chk"></span><span class="t">Remove…</span></div><div class="mi red"><span class="chk"></span><span class="t">Remove and Delete Files…</span></div></div>
+<div class="nm2" style="left:1196px;top:260px;width:236px"><div class="mi "><span class="chk">✓</span><span class="t">Rule default (2.0, ≥ 72 h)</span></div><div class="sep"></div><div class="mi "><span class="chk"></span><span class="t">Ratio 1.0</span></div><div class="mi "><span class="chk"></span><span class="t">Ratio 3.0</span></div><div class="mi "><span class="chk"></span><span class="t">Seed Forever</span></div><div class="sep"></div><div class="mi "><span class="chk"></span><span class="t">Custom…</span></div></div>
+
+<div class="caption" style="left: 40px; bottom: 30px;"><b>Concept 4 — Right-click menu</b>Standard macOS context menus: actions first, then settings in submenus, destructive items last. Everything else is in Get Info.</div>
+</body></html>

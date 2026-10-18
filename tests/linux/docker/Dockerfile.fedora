@@ -1,0 +1,6 @@
+# Fedora (latest). Toolchain only; the source arrives at run time.
+FROM fedora:latest
+RUN dnf install -y gcc gcc-c++ make cmake perl-core pkgconf-pkg-config curl git xz findutils tar procps-ng \
+    && dnf clean all
+ENV RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo PATH=/opt/cargo/bin:$PATH
+RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable

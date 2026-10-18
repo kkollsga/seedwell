@@ -1,0 +1,30 @@
+[package]
+name = "trs-wire-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+bytes = { version = "1", default-features = false }
+trs-wire = { path = ".." }
+
+# Own workspace so the fuzz crate is not pulled into the main workspace.
+[workspace]
+
+[[bin]]
+name = "decoder"
+path = "fuzz_targets/decoder.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "extensions"
+path = "fuzz_targets/extensions.rs"
+test = false
+doc = false
+bench = false

@@ -1,0 +1,23 @@
+#!/usr/bin/env python3
+"""Stand-in for $TRS_BENCH_BIN that follows the adapter contract (bench/README.md) without doing any BitTorrent.
+Pretends every added torrent is already complete after 2 s.  Use to test the harness:
+  TRS_BENCH_BIN=$PWD/bench/scripts/tests/fake-trs-bench python3 -I bench/scripts/bench.py scale --clients torrentrs --sizes 5 --idle-secs 20"""
+import json, signal, sys, time, os
+
+args = sys.argv[1:]
+if args[:1] == ["--version"]:
+    print("fake-trs-bench 0.0")
+    sys.exit(0)
+assert args[0] == "add"
+files = [args[1]] + [args[i + 1] for i, a in enumerate(args) if a == "--add"]
+dl = args[args.index("--download-dir") + 1]
+total = sum(os.path.getsize(os.path.join(dl, f)) for f in os.listdir(dl) if os.path.isfile(os.path.join(dl, f))) or 1
+stop = []
+signal.signal(signal.SIGTERM, lambda *_: stop.append(1))
+t0 = time.time()
+while not stop:
+    seeding = time.time() - t0 > 2
+    print(json.dumps({"done_bytes": total if seeding else 0, "total_bytes": total, "down_rate": 0, "up_rate": 0, "peers": 0,
+                      "state": "seeding" if seeding else "checking", "torrents": len(files)}), flush=True)
+    time.sleep(1)
+sys.exit(0)

@@ -1,0 +1,26 @@
+[package]
+name = "trs-http"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Direct HTTP(S) downloads: resumable, segmented, throttled, staged in .part files (SPEC 7D)"
+
+[dependencies]
+# Same HTTP stack as trs-tracker (hyper 1 + rustls via hyper-rustls) so the binary carries one.
+tokio = { version = "1", default-features = false, features = ["rt", "net", "time", "sync", "macros"] }
+hyper = { version = "1", default-features = false, features = ["http1", "client"] }
+hyper-util = { version = "0.1", default-features = false, features = ["tokio", "client-legacy", "http1"] }
+http-body-util = "0.1"
+bytes = "1"
+hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "ring", "webpki-roots", "tls12"] }
+# Optional integrity check. 0.11 has the ARMv8 SHA backends (same as trs-storage/trs-metainfo).
+sha2 = { version = "0.11", default-features = false }
+# Retry-After HTTP-date parsing (already in the lock file via hyper).
+httpdate = "1"
+
+[dev-dependencies]
+tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-thread", "macros", "net", "time", "sync"] }
+hyper = { version = "1", default-features = false, features = ["http1", "client", "server"] }
+tempfile = "3"

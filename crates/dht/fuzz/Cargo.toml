@@ -1,0 +1,29 @@
+[package]
+name = "trs-dht-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+trs-dht = { path = ".." }
+
+# Standalone: not part of the Seedwell workspace (fuzzers need nightly and libFuzzer).
+[workspace]
+
+[[bin]]
+name = "krpc_parse"
+path = "fuzz_targets/krpc_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "core_packets"
+path = "fuzz_targets/core_packets.rs"
+test = false
+doc = false
+bench = false

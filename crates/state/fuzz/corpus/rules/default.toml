@@ -1,0 +1,13 @@
+# Seeding rules. The first matching rule wins; [default] applies when none matches.
+# A rule only needs the actions it changes; the rest come from [default].
+
+version = 1
+
+[default]
+priority = "normal"
+on_goal = "stop_keep"
+
+[default.goal]
+kind = "ratio_or_time"
+ratio = 1.0
+time = "7d"

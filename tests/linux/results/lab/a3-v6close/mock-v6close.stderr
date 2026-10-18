@@ -1,0 +1,4 @@
+tracker-probe mock on 203.0.113.9:7071 (interval 60s, min interval 30s, ipv6=Close) -> /out/mock-v6close.jsonl
+tracker-probe mock: 1 IPv6 connection attempts were deliberately broken
+tracker-probe mock: max concurrent in-flight announce/scrape requests: 1
+tracker-probe mock: shut down cleanly, log flushed

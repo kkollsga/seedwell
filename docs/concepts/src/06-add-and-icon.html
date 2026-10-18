@@ -1,0 +1,97 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Add torrent concept</title>
+<link rel="stylesheet" href="shared.css">
+<style>
+  body { width: 1200px; height: 800px; position: relative; color: #ececf0; }
+  .panel {
+    position: absolute; left: 470px; top: 60px; width: 470px;
+    background: rgba(38, 38, 44, 0.86); backdrop-filter: blur(40px) saturate(180%);
+    border: 0.5px solid rgba(255,255,255,0.16); border-radius: 16px;
+    box-shadow: 0 0 0 0.5px rgba(0,0,0,0.6), 0 24px 70px rgba(0,0,0,0.6);
+    padding: 18px;
+  }
+  .panel h2 { font-size: 15px; font-weight: 600; word-break: break-all; }
+  .muted { color: rgba(235,235,245,0.55); }
+  .rulebox { margin-top: 14px; border-radius: 10px; background: rgba(255,255,255,0.06); border: 0.5px solid rgba(255,255,255,0.10); padding: 10px 12px; font-size: 12.5px; line-height: 1.55; }
+  .rulebox b { color: #fff; font-weight: 600; }
+  .files { margin-top: 14px; border-radius: 10px; background: rgba(0,0,0,0.18); padding: 4px 0; font-size: 12.5px; }
+  .f { display: flex; align-items: center; gap: 8px; height: 26px; padding: 0 12px; }
+  .f .s { margin-left: auto; font-variant-numeric: tabular-nums; }
+  .f.ind { padding-left: 34px; }
+  .cb { width: 14px; height: 14px; border-radius: 4px; background: #0a84ff; color: #fff; font-size: 10px; display: inline-flex; align-items: center; justify-content: center; flex: none; }
+  .cb.off { background: transparent; border: 1px solid rgba(255,255,255,0.35); }
+  .cb.mix { font-size: 12px; }
+  .foot { display: flex; align-items: center; gap: 8px; margin-top: 14px; font-size: 12.5px; }
+  .btn { height: 26px; padding: 0 14px; border-radius: 7px; display: inline-flex; align-items: center; background: rgba(255,255,255,0.12); font-size: 13px; }
+  .btn.pri { background: #0a84ff; color: #fff; }
+  .btn.sm { height: 22px; padding: 0 9px; font-size: 12px; }
+  .detect { margin-top: 14px; display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-radius: 10px; background: rgba(10,132,255,0.14); border: 0.5px solid rgba(10,132,255,0.35); font-size: 13px; }
+  .detect b { font-weight: 600; color: #fff; }
+  .badge { width: 34px; height: 34px; border-radius: 9px; background: rgba(255,255,255,0.10); display: flex; align-items: center; justify-content: center; font-size: 18px; }
+  .states { position: absolute; left: 50px; top: 80px; width: 360px; }
+  .states h3 { font-size: 15px; font-weight: 600; margin-bottom: 4px; color: #fff; }
+  .states p { font-size: 12px; color: rgba(255,255,255,0.7); margin-bottom: 16px; line-height: 1.45; }
+  .st { display: flex; align-items: center; gap: 14px; height: 52px; border-bottom: 0.5px solid rgba(255,255,255,0.12); }
+  .st .bar { width: 64px; height: 30px; border-radius: 8px; background: rgba(20,20,28,0.55); display: flex; align-items: center; justify-content: center; gap: 6px; position: relative; flex: none; }
+  .st .d { font-size: 12.5px; }
+  .st .d span { display: block; font-size: 11.5px; color: rgba(255,255,255,0.55); }
+  .drop { position: absolute; left: 50px; top: 470px; width: 360px; border: 1.5px dashed rgba(255,255,255,0.35); border-radius: 14px; padding: 16px; font-size: 12px; color: rgba(255,255,255,0.75); line-height: 1.5; }
+  .drop b { color: #fff; font-size: 13px; }
+  .caption { position: absolute; left: 50px; bottom: 30px; color: rgba(255,255,255,0.75); font-size: 12px; }
+  .caption b { color: #fff; font-size: 15px; display: block; margin-bottom: 3px; }
+</style></head>
+<body class="wall-dark">
+  <div class="states">
+    <h3>Menu bar icon states</h3>
+    <p>Monochrome template icon. It shows state at a glance and never animates while idle.</p>
+    <div class="st"><div class="bar">
+      <svg width="18" height="18" viewBox="0 0 16 16"><path d="M5 2v9M2 8l3 3 3-3" stroke="#fff" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round" opacity=".55"/><path d="M11 14V5M8 8l3-3 3 3" stroke="#fff" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round" opacity=".55"/></svg>
+    </div><div class="d">Idle / seeding<span>Both arrows dimmed. Seeding alone is "idle".</span></div></div>
+    <div class="st"><div class="bar">
+      <svg width="18" height="18" viewBox="0 0 16 16"><path d="M5 2v9M2 8l3 3 3-3" stroke="#fff" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/><path d="M11 14V5M8 8l3-3 3 3" stroke="#fff" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round" opacity=".55"/></svg>
+      <i style="position:absolute;left:14px;right:14px;bottom:4px;height:2px;border-radius:1px;background:rgba(255,255,255,0.25)"><i style="display:block;width:68%;height:100%;background:#fff;border-radius:1px"></i></i>
+    </div><div class="d">Downloading<span>Down arrow lit, with a hairline showing total progress.</span></div></div>
+    <div class="st"><div class="bar" style="width:132px">
+      <svg width="18" height="18" viewBox="0 0 16 16"><path d="M5 2v9M2 8l3 3 3-3" stroke="#fff" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/><path d="M11 14V5M8 8l3-3 3 3" stroke="#fff" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round" opacity=".55"/></svg>
+      <span class="mono" style="font-size:11px;line-height:1.05;text-align:left">↓ 12.4 MB/s<br>↑ 3.1 MB/s</span>
+    </div><div class="d">With speed text<span>Optional, off by default.</span></div></div>
+    <div class="st" style="border:0"><div class="bar">
+      <svg width="18" height="18" viewBox="0 0 16 16"><path d="M5 2v9M2 8l3 3 3-3" stroke="#fff" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round" opacity=".55"/><path d="M11 14V5M8 8l3-3 3 3" stroke="#fff" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round" opacity=".55"/></svg>
+      <i style="position:absolute;right:13px;top:5px;width:7px;height:7px;border-radius:4px;background:#ff9f0a"></i>
+    </div><div class="d">Needs attention<span>Dot for missing data or errors. Details in the menu.</span></div></div>
+  </div>
+
+  <div class="drop"><b>Adding torrents</b><br>Save a .torrent to a watch folder (~/Downloads by default), double-click it, click a magnet: link, drop it on the icon or main window, or use + Add in the main window. Confident matches start silently with a notification. This panel appears only when a folder is set to "ask first" or detection is unsure.</div>
+
+  <div class="panel">
+    <div class="muted" style="font-size:11px;font-weight:600;letter-spacing:0.02em;margin-bottom:8px">NEW IN ~/DOWNLOADS · WATCH FOLDER</div>
+    <h2>Night.of.the.Living.Dead.1968.1080p.BluRay.x264</h2>
+    <div class="muted" style="font-size:12px;margin-top:2px">8.4 GB · 5 files · tracker-y.net</div>
+    <div class="detect">
+      <div class="badge">🎬</div>
+      <div style="flex:1">
+        <div><b>Movie</b> · Night of the Living Dead (1968)</div>
+        <div class="muted" style="font-size:11.5px">97% confident · from file profile + name</div>
+      </div>
+      <span class="btn sm">Change ▾</span>
+    </div>
+    <div class="rulebox">
+      <span class="muted">Rule</span> <b>Y – seed to 1.0</b><br>
+      <span class="muted">Saves to</span> ~/Downloads<br>
+      <span class="muted">Then seeds until</span> ratio 1.0
+    </div>
+    <div class="files">
+      <div class="f"><span class="cb">✓</span>Night of the Living Dead (1968).mkv <span class="s muted">8.3 GB</span></div>
+      <div class="f"><span class="cb">✓</span>Night of the Living Dead (1968).en.srt <span class="s muted">92 KB</span></div>
+      <div class="f"><span class="cb off"></span><span class="muted">sample.mkv</span><span class="s muted">skipped · sample</span></div>
+      <div class="f"><span class="cb off"></span><span class="muted">WWW.EXAMPLE-SITE.txt</span><span class="s muted">skipped · junk</span></div>
+      <div class="f"><span class="cb off"></span><span class="muted">movie.nfo</span><span class="s muted">skipped · nfo</span></div>
+    </div>
+    <div class="foot">
+      <span class="muted">8.3 GB · 412 GB free</span>
+      <span style="margin-left:auto" class="btn">Cancel</span><span class="btn pri">Download</span>
+    </div>
+  </div>
+
+  <div class="caption"><b>Concept 6 — Adding a torrent &amp; icon states</b>Detect the content type, match the rule, skip junk files, choose the folder. All before the first byte arrives.</div>
+</body></html>

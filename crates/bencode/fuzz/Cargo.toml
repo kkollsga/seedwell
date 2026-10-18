@@ -1,0 +1,23 @@
+[package]
+name = "trs-bencode-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+trs-bencode = { path = ".." }
+
+# An empty workspace table keeps this crate out of the root workspace
+# (`crates/*` would otherwise not match it, but cargo still needs the marker).
+[workspace]
+
+[[bin]]
+name = "decode"
+path = "fuzz_targets/decode.rs"
+test = false
+doc = false
+bench = false

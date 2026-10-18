@@ -1,0 +1,11 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc b9c77e58526af211698d00d22542c26188a72a9f0280e3f11d14813c926beffe # shrinks to n = 3, seed = 3017021871973784973, p_fail = 42, sloppy = false, tids = false, hang_err = false, complete_at_add = 0, acts = [Complete(0), Start(0), Advance(2379), Advance(2071), Crash(false), Advance(1096), Advance(1267), Sleep(4940)]
+cc 4a2d3826bf9d4fab1b59f16029aa214f43550159512a4350c5bdb9cec549d03b # shrinks to n = 5, seed = 7354476410921757212, p_fail = 59, sloppy = false, tids = true, complete_at_add = 1, acts = [Resume(2), Sleep(21730), Advance(24292), Stop(2), StartAll, Advance(18533), Pause(2), Manual(6), Complete(0), Sleep(129747), Start(2), Advance(98)]
+cc 9d1ded0542fd1d4d46ca223f1933ecb0bea58272826edd22798ae6f67357edd7 # shrinks to n = 7, seed = 3399949271910287880, p_fail = 29, sloppy = false, tids = false, complete_at_add = 0, acts = [Start(6), Start(3), Advance(63), Sleep(163519), Start(4), Start(5), Resume(2), Advance(951)]
+cc 1e2b93dea5e8cf204fbf8ac4e81310dd7f1bcede498ecb2c6ea61035bb2fc88a # shrinks to n = 7, seed = 16424581077155485989, p_fail = 58, sloppy = false, tids = true, complete_at_add = 8, acts = [Advance(347), StartAll, Advance(310), StartAll, Advance(192), Stop(7), Advance(47), Pause(5), Start(5), Advance(0), Advance(13706), Sleep(88638), Sleep(586), Start(0), Pause(1), Advance(70), Advance(0), Advance(0), Pause(1), Advance(0), Advance(0), StartAll, Advance(152), Advance(0), Advance(0)]
+cc f1efb112cfd35788b61554e2445efc86c61f047798e3a3c12a0cdb72dd396436 # shrinks to n = 5, seed = 13618380862090203517, p_fail = 67, sloppy = false, tids = true, complete_at_add = 0, acts = [Resume(0), Advance(126), Advance(278), Advance(53), Advance(63), Start(3), Advance(5155), Stop(0), Advance(39175), StartAll, Network, Advance(389), Pause(4), Pause(4), Network, Advance(7300)]

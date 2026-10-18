@@ -1,0 +1,62 @@
+== env: Alpine Linux v3.24 | aarch64 | rustc 1.99.0 (b940084d7 2026-09-28) host: aarch64-unknown-linux-musl  | libc: musl libc (aarch64)
+=== trs-bencode: build+test
+RESULT trs-bencode rc=0 passed=24 failed=0 ignored=0 build=ok secs=21
+=== trs-metainfo: build+test
+RESULT trs-metainfo rc=0 passed=67 failed=0 ignored=3 build=ok secs=9
+=== trs-wire: build+test
+RESULT trs-wire rc=0 passed=79 failed=0 ignored=1 build=ok secs=14
+=== trs-tracker: build+test
+RESULT trs-tracker rc=0 passed=296 failed=0 ignored=1 build=ok secs=153
+=== trs-storage: build+test
+RESULT trs-storage rc=101 passed=69 failed=1 ignored=1 build=ERRORS secs=26
+    error: 1 target failed:
+    error: test failed, to rerun pass `-p trs-storage --test download`
+    failures:
+    test preallocate_option_reserves_full_files ... FAILED
+    test result: FAILED. 7 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.32s
+    thread 'preallocate_option_reserves_full_files' (7792) panicked at crates/storage/tests/download.rs:349:5:
+=== trs-dht: build+test
+RESULT trs-dht rc=0 passed=95 failed=0 ignored=1 build=ok secs=69
+=== trs-utp: build+test
+RESULT trs-utp rc=0 passed=65 failed=0 ignored=1 build=ok secs=23
+=== trs-http: build+test
+RESULT trs-http rc=0 passed=54 failed=0 ignored=0 build=ok secs=35
+=== trs-state: build+test
+RESULT trs-state rc=0 passed=134 failed=0 ignored=0 build=ok secs=57
+=== trs-classify: build+test
+RESULT trs-classify rc=0 passed=157 failed=0 ignored=0 build=ok secs=17
+=== trs-engine: build+test
+RESULT trs-engine rc=101 passed=200 failed=10 ignored=1 build=ERRORS secs=768
+    error: 5 targets failed:
+    error: test failed, to rerun pass `-p trs-engine --lib`
+    error: test failed, to rerun pass `-p trs-engine --test locations`
+    error: test failed, to rerun pass `-p trs-engine --test moves`
+    error: test failed, to rerun pass `-p trs-engine --test utp`
+    error: test failed, to rerun pass `-p trs-engine --test watch`
+    failures:
+    test a_category_can_stage_in_its_own_incomplete_folder ... FAILED
+    test a_category_change_moves_a_placed_torrent ... FAILED
+    test a_hardlink_torrent_moves_its_seeding_layout_and_the_links_stay_valid ... FAILED
+    test a_running_download_keeps_its_staging_folder_when_the_setting_changes ... FAILED
+    test finished_location_precedence_rule_then_category_then_default ... FAILED
+    test garbage_is_reported_once_and_other_files_are_ignored ... FAILED
+    test peers_that_spoke_utp_are_dialled_over_utp ... FAILED
+    test result: FAILED. 1 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 61.94s
+    test result: FAILED. 15 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 56.97s
+    test result: FAILED. 3 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 157.53s
+    test result: FAILED. 7 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 46.26s
+    test result: FAILED. 82 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+    test the_dht_works_on_the_shared_port ... FAILED
+=== trs-control: build+test
+RESULT trs-control rc=0 passed=85 failed=0 ignored=0 build=ok secs=54
+=== trs-cli: build+test
+RESULT trs-cli rc=101 passed=25 failed=1 ignored=0 build=ERRORS secs=51
+    error: 1 target failed:
+    error: test failed, to rerun pass `-p trs-cli --test e2e`
+    failures:
+    test download_pause_resume_info_stats_and_two_step_remove ... FAILED
+    test result: FAILED. 7 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.94s
+    thread 'download_pause_resume_info_stats_and_two_step_remove' (31911) panicked at crates/cli/tests/common/mod.rs:152:9:
+    thread 'download_pause_resume_info_stats_and_two_step_remove' (31911) panicked at crates/cli/tests/common/mod.rs:83:63:
+=== trs-portmap: build+test
+RESULT trs-portmap rc=0 passed=71 failed=0 ignored=1 build=ok secs=16

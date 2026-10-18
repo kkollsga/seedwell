@@ -1,0 +1,736 @@
+# Seedwell content-detection corpus. Tab-separated; see tests/corpus.rs for the column format.
+# Hand-written rows (names in the style of real-world releases; titles are public-domain works or
+# invented) come first; the tail ("# generated") is produced by a seeded combinatorial generator
+# with ground truth by construction.
+# ---------------- MOVIES: scene dotted
+movie	Night.of.the.Living.Dead.1968.1080p.BluRay.x264-GRP	Night.of.the.Living.Dead.1968.1080p.BluRay.x264-GRP.mkv:8G;Sample/sample.mkv:50M;KESTREL.COM.txt:30;Night.of.the.Living.Dead.1968.1080p.BluRay.x264-GRP.nfo:3K	-	-	title=Night of the Living Dead|year=1968|resolution=1080p|source=BluRay|codec=x264|junk=1,2,3
+movie	Nosferatu.1922.REMASTERED.1080p.BluRay.x265.10bit-KESTREL	Nosferatu.1922.REMASTERED.1080p.BluRay.x265.10bit-KESTREL.mkv:3.2G	-	-	title=Nosferatu|year=1922|edition=Remastered|codec=x265
+movie	Metropolis.1927.2160p.UHD.BluRay.x265.HDR.DTS-HD.MA.5.1-GRP	Metropolis.1927.2160p.UHD.BluRay.x265.HDR.DTS-HD.MA.5.1-GRP.mkv:42G	-	-	title=Metropolis|year=1927|resolution=2160p|hdr=HDR10|audio=DTS-HD
+movie	The.General.1926.720p.BluRay.x264-GRP	The.General.1926.720p.BluRay.x264-GRP.mkv:4G;The.General.1926.720p.BluRay.x264-GRP.srt:60K	-	-	title=The General|year=1926|resolution=720p
+movie	Sherlock.Jr.1924.1080p.WEB-DL.AAC2.0.H.264-GRP	Sherlock.Jr.1924.1080p.WEB-DL.AAC2.0.H.264-GRP.mkv:2.1G	-	-	title=Sherlock Jr|year=1924|source=WEB-DL|codec=x264
+movie	The.Cabinet.of.Dr.Caligari.1920.1080p.BluRay.REMUX.AVC.FLAC.1.0-GRP	The.Cabinet.of.Dr.Caligari.1920.1080p.BluRay.REMUX.AVC.FLAC.1.0-GRP.mkv:22G	-	-	title=The Cabinet of Dr Caligari|year=1920
+movie	Her.Girl.Tuesday.1940.1080p.BluRay.x264.DTS-GRP	Her.Girl.Tuesday.1940.1080p.BluRay.x264.DTS-GRP.mkv:11G	-	-	title=Her Girl Tuesday|year=1940|audio=DTS
+movie	Charlatan.1963.Criterion.1080p.BluRay.x264-GRP	Charlatan.1963.Criterion.1080p.BluRay.x264-GRP.mkv:13G	-	-	title=Charlatan|year=1963|edition=Criterion
+movie	The.Fourth.Guest.1949.1080p.BluRay.x264-SPRUCE	The.Fourth.Guest.1949.1080p.BluRay.x264-SPRUCE.mkv:9G;Sample/the.fourth.guest.sample.mkv:70M	-	-	title=The Fourth Guest|year=1949|junk=1
+movie	Casalinda.1942.1080p.BluRay.H264.AAC-KESTREL	Casalinda.1942.1080p.BluRay.H264.AAC-KESTREL.mp4:1.9G;KESTREL.COM.txt:99	-	-	title=Casalinda|year=1942|junk=1
+movie	Citizen.Rowan.1941.REPACK.720p.BluRay.x264-GRP	Citizen.Rowan.1941.REPACK.720p.BluRay.x264-GRP.mkv:5G	-	-	title=Citizen Rowan|year=1941
+movie	Plan.9.from.Outer.Space.1959.DVDRip.XviD-GRP	Plan.9.from.Outer.Space.1959.DVDRip.XviD-GRP.avi:700M	-	-	title=Plan 9 from Outer Space|year=1959|source=DVDRip|codec=XviD
+movie	Carnival.of.Souls.1962.DVDRip.XviD-GRP	Carnival.of.Souls.1962.DVDRip.XviD-GRP.avi:699M	-	-	title=Carnival of Souls|year=1962
+movie	The.Little.Shop.of.Horrors.1960.720p.HDTV.x264-GRP	The.Little.Shop.of.Horrors.1960.720p.HDTV.x264-GRP.mkv:2.2G	-	-	title=The Little Shop of Horrors|year=1960|source=HDTV
+movie	Detour.1945.1080p.BluRay.x264-GRP	Detour.1945.1080p.BluRay.x264-GRP.mkv:6G	-	-	title=Detour|year=1945
+movie	D.O.A.1950.1080p.BluRay.x264-GRP	D.O.A.1950.1080p.BluRay.x264-GRP.mkv:5G	-	-	year=1950
+movie	The.Kid.1921.1080p.BluRay.x264-GRP	The.Kid.1921.1080p.BluRay.x264-GRP.mkv:4G	-	-	title=The Kid|year=1921
+movie	Safety.Last.1923.1080p.WEBRip.x265-KESTREL	Safety.Last.1923.1080p.WEBRip.x265-KESTREL.mp4:1.1G	-	-	title=Safety Last|year=1923|source=WEBRip
+movie	The.Gold.Rush.1925.720p.BluRay.x264-GRP	The.Gold.Rush.1925.720p.BluRay.x264-GRP.mkv:3G	-	-	title=The Gold Rush|year=1925
+movie	Modern.Tides.1936.1080p.BluRay.x264.AAC-GRP	Modern.Tides.1936.1080p.BluRay.x264.AAC-GRP.mkv:7G	-	-	title=Modern Tides|year=1936
+movie	Town.Lanterns.1931.1080p.BluRay.x264-GRP	Town.Lanterns.1931.1080p.BluRay.x264-GRP.mkv:7G	-	-	title=Town Lanterns|year=1931
+movie	Q.1931.1080p.BluRay.x264-GRP	Q.1931.1080p.BluRay.x264-GRP.mkv:8G	-	-	title=Q|year=1931
+movie	Battleship.Potemkin.1925.720p.BluRay.x264-GRP	Battleship.Potemkin.1925.720p.BluRay.x264-GRP.mkv:3G	-	-	title=Battleship Potemkin|year=1925
+movie	The.Passion.of.Joan.of.Arc.1928.1080p.BluRay.x264-GRP	The.Passion.of.Joan.of.Arc.1928.1080p.BluRay.x264-GRP.mkv:6G	-	-	title=The Passion of Joan of Arc|year=1928
+movie	Its.a.Wonderful.Life.1946.1080p.BluRay.x264-GRP	Its.a.Wonderful.Life.1946.1080p.BluRay.x264-GRP.mkv:10G	-	-	year=1946
+movie	Goose.Broth.1933.1080p.BluRay.x264-GRP	Goose.Broth.1933.1080p.BluRay.x264-GRP.mkv:5G	-	-	title=Goose Broth|year=1933
+movie	The.Last.Harbor.2019.2160p.WEB-DL.DDP5.1.Atmos.DV.HDR.H.265-FJORD	The.Last.Harbor.2019.2160p.WEB-DL.DDP5.1.Atmos.DV.HDR.H.265-FJORD.mkv:18G	-	-	title=The Last Harbor|year=2019|resolution=2160p|source=WEB-DL|codec=x265|hdr=DV
+movie	Midnight.in.Oslo.2021.1080p.AMZN.WEB-DL.DDP5.1.H.264-NIMBUS	Midnight.in.Oslo.2021.1080p.AMZN.WEB-DL.DDP5.1.H.264-NIMBUS.mkv:5.4G	-	-	title=Midnight in Oslo|year=2021|source=WEB-DL|codec=x264
+movie	Crimson.Dusk.Rising.2023.1080p.WEBRip.x264.AAC5.1-[LHB.MX]	Crimson.Dusk.Rising.2023.1080p.WEBRip.x264.AAC5.1-[LHB.MX].mp4:2.3G;www.LHB.MX.jpg:50K	-	-	title=Crimson Dusk Rising|year=2023|junk=1
+movie	A.Quiet.Winter.2022.IMAX.2160p.UHD.BluRay.x265.HDR10.TrueHD.7.1.Atmos-GRP	A.Quiet.Winter.2022.IMAX.2160p.UHD.BluRay.x265.HDR10.TrueHD.7.1.Atmos-GRP.mkv:55G	-	-	title=A Quiet Winter|year=2022|edition=IMAX|resolution=2160p|audio=TrueHD
+movie	Stone.Garden.2018.Directors.Cut.1080p.BluRay.x264-GRP	Stone.Garden.2018.Directors.Cut.1080p.BluRay.x264-GRP.mkv:12G	-	-	title=Stone Garden|year=2018|edition=Director's Cut
+movie	The.Long.Road.Home.2015.EXTENDED.1080p.BluRay.x264-GRP	The.Long.Road.Home.2015.EXTENDED.1080p.BluRay.x264-GRP.mkv:14G	-	-	title=The Long Road Home|year=2015|edition=Extended
+movie	Glass.Runner.2049.2017.2160p.UHD.BluRay.x265.HDR-GRP	Glass.Runner.2049.2017.2160p.UHD.BluRay.x265.HDR-GRP.mkv:60G	-	-	title=Glass Runner 2049|year=2017
+movie	2002.A.Space.Voyage.1968.1080p.BluRay.x264-GRP	2002.A.Space.Voyage.1968.1080p.BluRay.x264-GRP.mkv:15G	-	-	title=2002 A Space Voyage|year=1968
+movie	1911.2019.1080p.BluRay.x264-GRP	1911.2019.1080p.BluRay.x264-GRP.mkv:12G	-	-	title=1911|year=2019
+movie	12.Patient.Men.1957.1080p.BluRay.x264-GRP	12.Patient.Men.1957.1080p.BluRay.x264-GRP.mkv:9G	-	-	title=12 Patient Men|year=1957
+movie	Copper.Queen.1984.2020.1080p.BluRay.x264-GRP	Copper.Queen.1984.2020.1080p.BluRay.x264-GRP.mkv:11G	-	-	title=Copper Queen 1984|year=2020
+movie	Moth-Man.Homecoming.2017.1080p.BluRay.x264-GRP	Moth-Man.Homecoming.2017.1080p.BluRay.x264-GRP.mkv:13G	-	-	title=Moth-Man Homecoming|year=2017
+movie	Iron.Mel.2.The.Salt.Warrior.1981.1080p.BluRay.x264-GRP	Iron.Mel.2.The.Salt.Warrior.1981.1080p.BluRay.x264-GRP.mkv:9G	-	-	title=Iron Mel 2 The Salt Warrior|year=1981
+movie	Charlottes.Web.2006.1080p.WEB-DL.DDP5.1.x264-GRP	Charlottes.Web.2006.1080p.WEB-DL.DDP5.1.x264-GRP.mkv:6G	-	-	year=2006
+movie	The.Web.1947.720p.BluRay.x264-GRP	The.Web.1947.720p.BluRay.x264-GRP.mkv:3G	-	-	title=The Web|year=1947
+movie	Mac.and.Mia.1988.1080p.BluRay.x264-GRP	Mac.and.Mia.1988.1080p.BluRay.x264-GRP.mkv:8G	-	-	title=Mac and Mia|year=1988
+movie	A.Season.in.Hell.2017.1080p.WEB-DL.x264-GRP	A.Season.in.Hell.2017.1080p.WEB-DL.x264-GRP.mkv:3G	-	-	title=A Season in Hell|year=2017
+movie	Season.of.the.Heron.2011.1080p.BluRay.x264-GRP	Season.of.the.Heron.2011.1080p.BluRay.x264-GRP.mkv:8G	-	-	title=Season of the Heron|year=2011
+movie	The.Final.Cut.2004.1080p.BluRay.x264-GRP	The.Final.Cut.2004.1080p.BluRay.x264-GRP.mkv:8G	-	-	title=The Final Cut|year=2004
+movie	Glass.Runner.1982.The.Final.Cut.1080p.BluRay.x264-GRP	Glass.Runner.1982.The.Final.Cut.1080p.BluRay.x264-GRP.mkv:14G	-	-	title=Glass Runner|year=1982|edition=Final Cut
+movie	Das.Floss.1981.GERMAN.DL.1080p.BluRay.x264-GRP	Das.Floss.1981.GERMAN.DL.1080p.BluRay.x264-GRP.mkv:12G	-	-	title=Das Floss|year=1981
+movie	Odile.2001.FRENCH.1080p.BluRay.x264-GRP	Odile.2001.FRENCH.1080p.BluRay.x264-GRP.mkv:9G	-	-	title=Odile|year=2001
+movie	The.Hidden.Bastion.1958.CRITERION.1080p.BluRay.FLAC.1.0.x264-GRP	The.Hidden.Bastion.1958.CRITERION.1080p.BluRay.FLAC.1.0.x264-GRP.mkv:20G;Extras/Making.Of.mkv:1G	-	-	title=The Hidden Bastion|year=1958
+movie	Seven.Sailors.1954.720p.BluRay.x264-GRP	Seven.Sailors.1954.720p.BluRay.x264-GRP.mkv:5G	-	-	title=Seven Sailors|year=1954
+# ---------------- MOVIES: spaced, brackets, LHB style
+movie	The Fourth Guest (1949) [1080p] [BluRay] [LHB.MX]	The.Fourth.Guest.1949.1080p.BluRay.x264-[LHB.MX].mp4:1.8G;WWW.LHB.MX.jpg:40K;HalcyonStatus.com.txt:100	-	-	title=The Fourth Guest|year=1949|resolution=1080p|source=BluRay|junk=1,2
+movie	Charlatan (1963) [720p] [LHB.AM]	Charlatan.1963.720p.BluRay.x264-[LHB.AM].mp4:900M;www.LHB.AM.jpg:30K	-	-	title=Charlatan|year=1963|resolution=720p
+movie	Metropolis (1927) 1080p BrRip x264 - HALCYON	Metropolis.1927.1080p.BrRip.x264.HALCYON.mp4:1.6G;Metropolis.1927.1080p.BrRip.x264.HALCYON.srt:80K	-	-	title=Metropolis|year=1927
+movie	Citizen Rowan (1941) 720p BluRay x264 [Dual Audio]	Citizen Rowan (1941).mkv:4.5G	-	-	title=Citizen Rowan|year=1941
+movie	The Kid [1921] 1080p BluRay x264	The Kid [1921].mkv:5G	-	-	title=The Kid|year=1921
+movie	Plan 9 from Outer Space (1959)	Plan 9 from Outer Space (1959).avi:1.4G	-	-	title=Plan 9 from Outer Space|year=1959
+movie	Charlatan (1963)	Charlatan (1963).mkv:7G;Charlatan (1963).en.srt:80K;Charlatan (1963).no.srt:80K	-	-	title=Charlatan|year=1963
+movie	[ www.Torrenting.com ] - The.General.1926.720p.BluRay.x264	The.General.1926.720p.BluRay.x264.mkv:3G;Torrenting.com.txt:200	-	-	title=The General|year=1926|junk=1
+movie	www.ExampleBit.com - Goose.Broth.1933.1080p.BluRay.x264	Goose.Broth.1933.1080p.BluRay.x264.mkv:5G;Visit www.ExampleBit.com for more.url:120	-	-	title=Goose Broth|year=1933|junk=1
+movie	Q (1931)	Q (1931).mkv:5G	-	-	title=Q|year=1931
+movie	Her Girl Tuesday 1940	Her Girl Tuesday 1940.mkv:4G	-	-	title=Her Girl Tuesday|year=1940
+movie	Metropolis.1927.Restored.1080p	Metropolis.1927.Restored.1080p.mkv:7G	-	-	title=Metropolis|year=1927|edition=Restored
+movie	A.Trip.to.the.Moon.1902.COLORIZED.720p.WEBRip.x264	A.Trip.to.the.Moon.1902.COLORIZED.720p.WEBRip.x264.mp4:400M	-	-	title=A Trip to the Moon|year=1902|edition=Colorized
+movie	the-fourth-guest-1949-1080p-bluray-x264-grp	the-fourth-guest-1949-1080p-bluray-x264-grp.mkv:8G	-	-	title=The Fourth Guest|year=1949
+movie	casalinda_1942_720p_bluray_x264	casalinda_1942_720p_bluray_x264.mkv:4G	-	-	title=Casalinda|year=1942
+movie	THE.GRAND.ORATOR.1940.1080p.BLURAY.X264-GRP	THE.GRAND.ORATOR.1940.1080p.BLURAY.X264-GRP.mkv:9G	-	-	title=The Grand Orator|year=1940
+movie	Dr. Strangelove or How I Learned to Stop Worrying and Love the Bomb (1964) 1080p BluRay	Dr. Strangelove (1964).mkv:9G	-	-	year=1964
+movie	The.Reclaimer.1984.Remastered.1080p.BluRay.x264	The.Reclaimer.1984.Remastered.1080p.BluRay.x264.mkv:9G	-	-	title=The Reclaimer|year=1984|edition=Remastered
+# ---------------- MOVIES: discs, multi-part, collections, odd layouts
+movie	The.Gold.Rush.1925.1080p.BluRay.Remux.AVC.DTS-HD.MA.2.0-GRP	BDMV/STREAM/00001.m2ts:22G;BDMV/STREAM/00002.m2ts:80M;BDMV/PLAYLIST/00000.mpls:2K;BDMV/index.bdmv:1K	-	-	title=The Gold Rush|year=1925
+movie	Safety.Last.1923.PAL.DVD9-GRP	VIDEO_TS/VTS_01_1.VOB:1G;VIDEO_TS/VTS_01_2.VOB:1G;VIDEO_TS/VTS_01_0.IFO:40K;VIDEO_TS/VIDEO_TS.IFO:12K;VIDEO_TS/VIDEO_TS.BUP:12K	-	-	title=Safety Last|year=1923
+movie	Nosferatu.1922.1080p.BluRay.x264.ISO	Nosferatu.1922.1080p.BluRay.x264.iso:23G	-	-	title=Nosferatu|year=1922
+movie	Battleship.Potemkin.1925.DVDRip.XviD-GRP	Battleship.Potemkin.1925.DVDRip.XviD-GRP.CD1.avi:700M;Battleship.Potemkin.1925.DVDRip.XviD-GRP.CD2.avi:700M	-	-	title=Battleship Potemkin|year=1925
+movie	Seven.Sailors.1954.DVDRip.XviD-GRP	Seven.Sailors.1954.cd1.avi:700M;Seven.Sailors.1954.cd2.avi:700M;Seven.Sailors.1954.cd3.avi:700M	-	-	title=Seven Sailors|year=1954
+movie	The Dollars Trilogy 1964-1966 1080p BluRay x264	A Fistful of Dollars (1964).mkv:9G;For a Few Dollars More (1965).mkv:10G;The Good the Bad and the Ugly (1966).mkv:12G	-	-	-
+movie	Charlie.Chaplin.Collection.1914-1936.720p.BluRay.x264	The.Kid.1921.mkv:4G;The.Gold.Rush.1925.mkv:3G;Town.Lanterns.1931.mkv:4G;Modern.Tides.1936.mkv:4G	-	-	-
+movie	Alien Anthology (1979-1997) 1080p BluRay	Alien (1979)/Alien (1979).mkv:10G;Aliens (1986)/Aliens (1986).mkv:12G;Alien 3 (1992)/Alien 3 (1992).mkv:11G;Alien Resurrection (1997)/Alien Resurrection (1997).mkv:11G	-	-	-
+movie	The.Lord.of.the.Rings.Trilogy.EXTENDED.1080p.BluRay.x264	The.Fellowship.of.the.Ring.EXTENDED.mkv:15G;The.Two.Towers.EXTENDED.mkv:16G;The.Return.of.the.King.EXTENDED.mkv:18G	-	-	-
+movie	Dust.Part.Two.2024.1080p.WEB-DL.DDP5.1.Atmos.H.264-GRP	Dust.Part.Two.2024.1080p.WEB-DL.DDP5.1.Atmos.H.264-GRP.mkv:9G	-	-	title=Dust Part Two|year=2024
+movie	Moonlight.Sonata.2020.1080p.BluRay.x264-GRP	moonlight.sonata.2020.1080p.bluray.x264-grp.mkv:10G;Subs/English.srt:90K;Subs/Norwegian.srt:90K;Sample/sample.mkv:30M;grp.nfo:3K	-	-	title=Moonlight Sonata|year=2020|junk=3,4
+movie	Iron.Harvest.2016.1080p.BluRay.x264-GRP	Iron.Harvest.2016.1080p.BluRay.x264-GRP.mkv:9G;Codec.Pack.exe:3M;Readme.bat:1K	-	-	title=Iron Harvest|year=2016|suspicious=1,2
+movie	Silent.Rivers.2014.720p.BluRay.x264-GRP	Silent.Rivers.2014.720p.BluRay.x264-GRP.mkv:4G;Silent.Rivers.2014.720p.BluRay.x264-GRP.mp4.exe:800K	-	-	title=Silent Rivers|year=2014|suspicious=1
+movie	Frozen.Lake.2012.1080p.BluRay.x264-GRP	Frozen.Lake.2012.1080p.BluRay.x264-GRP.mkv:9G;Behind.the.Scenes/Making.Of.mkv:600M;Behind.the.Scenes/Interview.mkv:200M;Trailers/Trailer.mkv:60M	-	-	title=Frozen Lake|year=2012
+# ---------------- MOVIES: ambiguity, hints, no-year (some should ask)
+movie	Night.of.the.Living.Dead.1080p.BluRay.x264-GRP	Night.of.the.Living.Dead.1080p.BluRay.x264-GRP.mkv:8G	-	-	title=Night of the Living Dead
+movie	Salesman.of.the.Year.HDRip.XviD	Salesman.of.the.Year.HDRip.XviD.avi:1.4G	Movies	-	title=Salesman of the Year
+movie	video_final_v3.mkv	=	Movies/HD	-	-
+movie	New Folder (2)	movie.mkv:5G	Movies	-	-
+movie	The Grand Retreat (1963)	The Grand Retreat (1963).mp4:2G	Movies	-	title=The Grand Retreat|year=1963
+movie	Nanook of the North (1922).mkv	=	-	-	title=Nanook of the North|year=1922
+movie	The Phantom of the Opera 1925.avi	=	-	-	title=The Phantom of the Opera|year=1925
+# ---------------- TV: single episodes, scene dotted
+tv	Harbor.Lights.S01E01.1080p.WEB-DL.DDP5.1.H.264-NIMBUS	=	-	-	show=Harbor Lights|season=1|episode=1|resolution=1080p|source=WEB-DL|codec=x264
+tv	Harbor.Lights.S01E02.720p.HDTV.x264-GRP.mkv	=	-	-	show=Harbor Lights|season=1|episode=2|resolution=720p|source=HDTV
+tv	The.Night.Shift.S03E10.PROPER.720p.HDTV.x264-KITES	The.Night.Shift.S03E10.PROPER.720p.HDTV.x264-KITES.mkv:1.1G;The.Night.Shift.S03E10.PROPER.720p.HDTV.x264-KITES.nfo:2K	-	-	show=The Night Shift|season=3|episode=10|junk=1
+tv	Brass.Lantern.S02E05E06.1080p.BluRay.x264-GRP	Brass.Lantern.S02E05E06.1080p.BluRay.x264-GRP.mkv:4G	-	-	show=Brass Lantern|season=2|episode=5|episode_end=6
+tv	Brass.Lantern.S02E07-E08.1080p.WEB.h264-GRP	Brass.Lantern.S02E07-E08.1080p.WEB.h264-GRP.mkv:3.5G	-	-	show=Brass Lantern|season=2|episode=7|episode_end=8
+tv	Cedar.Falls.2019.S01E03.1080p.AMZN.WEB-DL.DDP5.1.H.264-NIMBUS	Cedar.Falls.2019.S01E03.1080p.AMZN.WEB-DL.DDP5.1.H.264-NIMBUS.mkv:2.4G	-	-	show=Cedar Falls|year=2019|season=1|episode=3
+tv	Quiet.Hours.S10E22.2160p.WEB-DL.DDP5.1.HDR.HEVC-FJORD	Quiet.Hours.S10E22.2160p.WEB-DL.DDP5.1.HDR.HEVC-FJORD.mkv:9G	-	-	show=Quiet Hours|season=10|episode=22|resolution=2160p|codec=x265
+tv	Blue.Mountain.s04e11.hdtv.xvid-lark	Blue.Mountain.s04e11.hdtv.xvid-lark.avi:350M	-	-	show=Blue Mountain|season=4|episode=11
+tv	Iron.Valley.1x07.HDTV.XviD-FoV	Iron.Valley.1x07.HDTV.XviD-FoV.avi:350M	-	-	show=Iron Valley|season=1|episode=7
+tv	Iron Valley 2x13 [720p]	Iron Valley 2x13 [720p].mkv:900M	-	-	show=Iron Valley|season=2|episode=13
+tv	The Lantern Society - S01E04 - The Missing Key.mkv	=	-	-	show=The Lantern Society|season=1|episode=4
+tv	The Lantern Society - 01x05 - Night Watch.avi	=	-	-	show=The Lantern Society|season=1|episode=5
+tv	Salt Road (2021) S02E04 (1080p BluRay x265 HEVC 10bit AAC 5.1 Silence)	Salt Road (2021) S02E04 (1080p BluRay x265 HEVC 10bit AAC 5.1 Silence).mkv:1.9G	-	-	show=Salt Road|year=2021|season=2|episode=4
+tv	Salt.Road.S02E04.Chapter.Four.1080p.NF.WEB-DL.DDP5.1.x264-GRP	Salt.Road.S02E04.Chapter.Four.1080p.NF.WEB-DL.DDP5.1.x264-GRP.mkv:3.3G	-	-	show=Salt Road|season=2|episode=4
+tv	The.Nightly.Brief.2026.10.11.Guest.Name.720p.WEB.h264-GRP	=	-	-	show=The Nightly Brief|date=2026-10-11
+tv	Evening.News.Live.2026-10-09.1080p.WEB.H264-GRP.mkv	=	-	-	show=Evening News Live|date=2026-10-09
+tv	Late.Hour.With.Sam.11.10.2026.720p.HDTV.x264	Late.Hour.With.Sam.11.10.2026.720p.HDTV.x264.mkv:800M	-	-	show=Late Hour With Sam
+tv	[HarborSubs] Moon Garden - 07 (1080p) [ABCD1234].mkv	=	-	-	show=Moon Garden|season=1|episode=7|resolution=1080p|group=HarborSubs
+tv	[Lark-raws] Tide Walker - 12 [1080p][Multiple Subtitle][A1B2C3D4].mkv	=	-	-	show=Tide Walker|episode=12
+tv	[LanternSubs] Star Lantern - 105 [720p].mkv	=	-	-	show=Star Lantern|episode=105
+tv	[Jasper] Glass Orchard - S02E03 [1080p][HEVC x265 10bit][Multi-Subs]	[Jasper] Glass Orchard - S02E03 [1080p][HEVC x265 10bit][Multi-Subs].mkv:700M	-	-	show=Glass Orchard|season=2|episode=3
+tv	[Group] Paper Birds (BD 1080p) [Batch]	[Group] Paper Birds - 01 (BD 1080p).mkv:1.4G;[Group] Paper Birds - 02 (BD 1080p).mkv:1.4G;[Group] Paper Birds - 03 (BD 1080p).mkv:1.4G;[Group] Paper Birds - 04 (BD 1080p).mkv:1.4G;[Group] Paper Birds - 05 (BD 1080p).mkv:1.4G;[Group] Paper Birds - 06 (BD 1080p).mkv:1.4G	-	-	show=Paper Birds
+tv	[Group] Paper Birds - 08v2 [720p][C1D2E3F4].mkv	=	-	-	show=Paper Birds|episode=8
+tv	Winter Kingdom Ep05 720p.mkv	=	-	-	show=Winter Kingdom|episode=5
+tv	Winter Kingdom Episode 6 1080p WEB.mkv	=	-	-	show=Winter Kingdom|episode=6
+tv	Village Doctor Season 2 Episode 3 720p.mp4	=	-	-	show=Village Doctor|season=2|episode=3
+# ---------------- TV: season packs
+tv	Harbor.Lights.S01.1080p.WEB-DL.DDP5.1.H.264-NIMBUS	Harbor.Lights.S01E{01..10}.1080p.WEB-DL.DDP5.1.H.264-NIMBUS.mkv:2.5G	-	-	show=Harbor Lights|season=1|resolution=1080p
+tv	The.Night.Shift.S02.COMPLETE.720p.HDTV.x264-GRP	The.Night.Shift.S02E{01..13}.720p.HDTV.x264-GRP.mkv:1.1G;Sample/sample.mkv:40M;grp.nfo:2K	-	-	show=The Night Shift|season=2|junk=13,14
+tv	Brass Lantern Season 1 Complete 1080p BluRay x265	Brass Lantern S01E{01..08}.mkv:3G	-	-	show=Brass Lantern|season=1
+tv	Cedar Falls (2019) Season 2 S02 (1080p AMZN WEB-DL x265 HEVC 10bit AAC 5.1 Silence)	Cedar Falls (2019) - S02E{01..08} (1080p AMZN WEB-DL x265 Silence).mkv:1.2G	-	-	show=Cedar Falls|year=2019|season=2
+tv	Quiet Hours Season 4	Quiet Hours - S04E{01..12}.mkv:400M	-	-	show=Quiet Hours|season=4
+tv	Blue.Mountain.Season.3.DVDRip.XviD	Season 3/Blue.Mountain.S03E{01..22}.avi:350M	-	-	show=Blue Mountain|season=3
+tv	Iron.Valley.S01-S03.1080p.BluRay.x264-GRP	Iron.Valley.S01/Iron.Valley.S01E{01..04}.1080p.mkv:2G;Iron.Valley.S02/Iron.Valley.S02E{01..04}.1080p.mkv:2G;Iron.Valley.S03/Iron.Valley.S03E{01..04}.1080p.mkv:2G	-	-	show=Iron Valley|season=1|season_end=3
+tv	Iron Valley Complete Series 1080p	Season 1/Iron Valley S01E{01..04}.mkv:2G;Season 2/Iron Valley S02E{01..04}.mkv:2G	-	-	show=Iron Valley
+tv	The Lantern Society - The Complete Series	Season 1/The Lantern Society - S01E{01..06}.mkv:1G;Season 2/The Lantern Society - S02E{01..06}.mkv:1G;Season 3/The Lantern Society - S03E{01..06}.mkv:1G	-	-	show=The Lantern Society
+tv	Salt.Road.S03.2160p.WEB-DL.DDP5.1.Atmos.DV.HDR.H.265-FJORD	Salt.Road.S03E{01..06}.2160p.WEB-DL.DDP5.1.Atmos.DV.HDR.H.265-FJORD.mkv:12G	-	-	show=Salt Road|season=3|resolution=2160p
+tv	Moon Garden Complete	Moon Garden - {01..24} [1080p].mkv:400M	-	-	-
+tv	Staffel 2 - Das Nachtschicht Team	Das.Nachtschicht.Team.S02E{01..06}.GERMAN.720p.WEB.x264-GRP.mkv:1.2G	-	-	-
+tv	Winter.Kingdom.S01.Complete.NORDiC.1080p.WEB-DL.H.264-GRP	Winter.Kingdom.S01E{01..08}.NORDiC.1080p.WEB-DL.H.264-GRP.mkv:2.8G	-	-	show=Winter Kingdom|season=1
+tv	Village.Doctor.S05.1080p.HDTV.x264-GRP	Village.Doctor.S05E01.1080p.HDTV.x264-GRP.mkv:2G;Village.Doctor.S05E02.1080p.HDTV.x264-GRP.mkv:2G	-	-	show=Village Doctor|season=5
+tv	Documentary.Planet.Rivers.S01.720p.BluRay.x264	Documentary.Planet.Rivers.S01E{01..06}.720p.BluRay.x264.mkv:3G	-	-	season=1
+tv	Mini Series - Northern Passage (1998) 1080p	Northern Passage Part {1..3}.mkv:2G	TV	-	-
+tv	Glass.Orchard.S01.1080p.BluRay.REMUX.AVC.DTS-HD.MA.5.1-GRP	Glass.Orchard.S01E{01..03}.1080p.BluRay.REMUX.AVC.DTS-HD.MA.5.1-GRP.mkv:25G	-	-	show=Glass Orchard|season=1
+tv	Tide.Walker.S01E01-E12.1080p	Tide.Walker.S01E{01..12}.1080p.mkv:1.5G	-	-	show=Tide Walker
+tv	Cooking.With.Ada.S01.WEBRip	Cooking.With.Ada.S01E{01..12}.WEBRip.mp4:300M	-	-	show=Cooking With Ada|season=1
+tv	Star.Lantern.2020.S02.1080p	Star.Lantern.2020.S02E01.1080p.mkv:2G;Star.Lantern.2020.S02E02.1080p.mkv:2G;Star.Lantern.2020.S02E03.1080p.mkv:2G	-	-	show=Star Lantern|year=2020|season=2
+tv	SHOW NAME ALL CAPS S01E01	SHOW NAME ALL CAPS S01E01.mkv:800M	-	-	show=Show Name All Caps|season=1|episode=1
+tv	24 S08E01 720p	24 S08E01 720p.mkv:900M	-	-	show=24|season=8|episode=1
+tv	7-4-2.S05E10.720p.HDTV.x264-SYNCOPATE	=	-	-	show=7-4-2|season=5|episode=10
+tv	The.250.S07E16.1080p.WEB.H264-BTX	=	-	-	show=The 250|season=7|episode=16
+tv	HVAC.S20E05.1080p.WEB.h264-ELSPETH	=	-	-	show=HVAC|season=20|episode=5
+tv	Show.With.A.Web.S01E01.1080p	Show.With.A.Web.S01E01.1080p.mkv:2G	-	-	show=Show With a Web
+tv	weird_folder_name	Season 1/Cedar Falls - S01E01 - Pilot.mkv:1G;Season 1/Cedar Falls - S01E02 - Second.mkv:1G;Season 1/Cedar Falls - S01E03 - Third.mkv:1G	-	-	-
+tv	Complete Season	Blue Mountain/S01E01.mkv:500M;Blue Mountain/S01E02.mkv:500M;Blue Mountain/S01E03.mkv:500M;Blue Mountain/S01E04.mkv:500M	-	-	-
+tv	Unknown.Series.Pack	ep01.mkv:300M;ep02.mkv:300M;ep03.mkv:300M;ep04.mkv:300M;ep05.mkv:300M	TV	-	-
+tv	Cooking Show Collection	Cooking Show - 01.mp4:200M;Cooking Show - 02.mp4:200M;Cooking Show - 03.mp4:200M	-	-	-
+tv	S01E05.mkv	=	TV	-	season=1|episode=5
+tv	Dark.Matters.S01E01.1080p.WEB.H264-CRUMBS[kestrel]	Dark.Matters.S01E01.1080p.WEB.H264-CRUMBS[kestrel].mkv:2G;KESTREL.COM.txt:100	-	-	show=Dark Matters|season=1|episode=1|junk=1
+tv	Dark Matters S01E02 720p WEB-DL x264 [ezhub]	Dark Matters S01E02 720p WEB-DL x264 [ezhub].mkv:900M;Torrent downloaded from ezhub.re.txt:90	-	-	show=Dark Matters|season=1|episode=2|junk=1
+# ---------------- MUSIC: folders
+music	The Velvet Harbor - Salt and Lanterns (2005) [FLAC]	01 - Salt.flac:35M;02 - Lanterns.flac:38M;03 - Harbor Song.flac:41M;04 - Low Tide.flac:30M;05 - Morning Bell.flac:33M;cover.jpg:600K;The Velvet Harbor - Salt and Lanterns.cue:2K;rip.log:5K	-	-	artist=The Velvet Harbor|album=Salt and Lanterns|year=2005|format=FLAC
+music	Silver Fields - Long Way Down (2011) FLAC	01 Long Way Down.flac:40M;02 Paper Boats.flac:36M;03 Ash.flac:31M;04 Glass.flac:29M;folder.jpg:200K	-	-	artist=Silver Fields|album=Long Way Down|year=2011|format=FLAC
+music	Silver Fields - Long Way Down [2011] MP3 320kbps	01 Long Way Down.mp3:12M;02 Paper Boats.mp3:11M;03 Ash.mp3:9M;04 Glass.mp3:8M	-	-	artist=Silver Fields|album=Long Way Down|year=2011
+music	North Wind Collective - Aurora (2019) [WEB FLAC]	01. Aurora.flac:30M;02. Frost.flac:33M;03. Drift.flac:28M	-	-	artist=North Wind Collective|album=Aurora|year=2019|format=FLAC
+music	North Wind Collective - Aurora (2019) [24-96]	01. Aurora.flac:90M;02. Frost.flac:95M;03. Drift.flac:80M	-	-	artist=North Wind Collective|album=Aurora|year=2019
+music	Daft Orchard - Random Gardens (2013) [Vinyl] [24bit-96kHz]	A1 Random.flac:120M;A2 Gardens.flac:110M;B1 Lucky.flac:100M;B2 Touch.flac:105M	-	-	artist=Daft Orchard|album=Random Gardens|year=2013
+music	Marble Arch - 1999 (1982) [FLAC]	01 - 1999.flac:30M;02 - Little Red.flac:32M	-	-	artist=Marble Arch|album=1999|year=1982
+music	Cold Rivers - Greatest Hits (Remastered) [MP3 V0]	01 - Song A.mp3:9M;02 - Song B.mp3:9M;03 - Song C.mp3:9M;04 - Song D.mp3:9M	-	-	artist=Cold Rivers|album=Greatest Hits
+music	Cold Rivers - Discography (1991-2010) [MP3]	1991 - First/01 - A.mp3:9M;1991 - First/02 - B.mp3:9M;1995 - Second/01 - C.mp3:9M;1995 - Second/02 - D.mp3:9M;2010 - Last/01 - E.mp3:9M	-	-	artist=Cold Rivers
+music	Various Artists - Summer Mix 2018 [MP3 320]	01 - Artist One - Hit.mp3:9M;02 - Artist Two - Hit.mp3:9M;03 - Artist Three - Hit.mp3:9M;04 - Artist Four - Hit.mp3:9M	-	-	artist=Various Artists
+music	VA - Chill Lounge Vol.3 (2012)	01 - Track.mp3:9M;02 - Track.mp3:9M;03 - Track.mp3:9M;04 - Track.mp3:9M;05 - Track.mp3:9M	-	-	artist=Various Artists|year=2012
+music	OST - The Last Harbor (2019) [FLAC]	01 - Main Theme.flac:30M;02 - The Dock.flac:28M;03 - Storm.flac:35M	-	-	-
+music	Original Motion Picture Soundtrack - Midnight in Oslo (2021)	01 - Oslo.mp3:8M;02 - Midnight.mp3:8M;03 - Snow.mp3:8M	-	-	-
+music	Johann Sebastian Bach - The Well-Tempered Clavier (Gould) [FLAC]	CD1/01 Prelude in C.flac:30M;CD1/02 Fugue in C.flac:25M;CD2/01 Prelude in D.flac:28M	-	-	artist=Johann Sebastian Bach
+music	Beethoven - Symphony No.9 (Karajan 1963) [320]	01 I Allegro.mp3:30M;02 II Scherzo.mp3:20M;03 III Adagio.mp3:25M;04 IV Finale.mp3:40M	-	-	artist=Beethoven
+music	Ludwig van Beethoven - Piano Sonatas Complete (FLAC)	Disc 1/01 Moonlight.flac:60M;Disc 1/02 Pathetique.flac:55M;Disc 2/01 Appassionata.flac:60M	-	-	artist=Ludwig van Beethoven
+music	Amber_Skies-Harvest_Moon-WEB-2019-GRP	01-amber_skies-harvest_moon.flac:30M;02-amber_skies-low_light.flac:32M	-	-	artist=Amber Skies|album=Harvest Moon|year=2019
+music	Moonhead_Clone-OK_Calculators-CD-FLAC-1997-GRP	01-ok_calculators.flac:30M;02-airbag_2.flac:32M	-	-	artist=Moonhead Clone|album=OK Calculators|year=1997
+music	Various_Artists-Dance_Hits_2010-2CD-2010-GRP	cd1/01-track.mp3:9M;cd1/02-track.mp3:9M;cd2/01-track.mp3:9M	-	-	artist=Various Artists|album=Dance Hits 2010|year=2010
+music	Silver_Fields_-_Long_Way_Down_(2011)	01_-_Long_Way_Down.mp3:9M;02_-_Paper_Boats.mp3:9M	-	-	artist=Silver Fields|album=Long Way Down|year=2011
+music	(2007) Hollow Pines - Evergreen [FLAC]	01 Evergreen.flac:30M;02 Needles.flac:30M	-	-	artist=Hollow Pines|album=Evergreen|year=2007
+music	1994 - Hollow Pines - Roots	01 Roots.mp3:9M;02 Branches.mp3:9M	-	-	artist=Hollow Pines|album=Roots|year=1994
+music	Hollow Pines - 2003 - Canopy	01 Canopy.mp3:9M;02 Leaves.mp3:9M	-	-	artist=Hollow Pines|album=Canopy|year=2003
+music	Hollow Pines - Canopy [2003] [Deluxe Edition] [CD FLAC]	01 Canopy.flac:30M;02 Leaves.flac:30M;03 Bonus.flac:30M	-	-	artist=Hollow Pines|album=Canopy|year=2003
+music	Hollow Pines - Evergreen (Live at the Fjord) (2008)	01 Intro.mp3:5M;02 Evergreen (Live).mp3:12M	-	-	artist=Hollow Pines|year=2008
+music	Tidal Wave Radio - Mixtape Vol. 2	01 - mix.mp3:90M	-	-	-
+music	Luna Park - EP (2016) [WEB]	01 - One.m4a:9M;02 - Two.m4a:9M;03 - Three.m4a:9M	-	-	artist=Luna Park|year=2016
+music	Luna Park - Singles Collection [AAC 256]	01 - A.m4a:7M;02 - B.m4a:7M;03 - C.m4a:7M;04 - D.m4a:7M	-	-	artist=Luna Park
+music	The Beatless - Beatless 1 (2000) [FLAC] [Hi-Res]	01.flac:50M;02.flac:50M;03.flac:50M	-	-	artist=The Beatless|album=Beatless 1|year=2000
+music	Stahl Fabrik Clone - Rechner Welt [1981] [Remastered] [WAV]	01 Computer.wav:60M;02 Welt.wav:60M	-	-	artist=Stahl Fabrik Clone|album=Rechner Welt|year=1981
+music	Mono Tone - Mono Tone (1978) [APE]	Mono Tone.ape:200M;Mono Tone.cue:3K	-	-	artist=Mono Tone|album=Mono Tone|year=1978
+music	Quiet Storm - Rainy Days [2014][OGG Q8]	01 Rain.ogg:7M;02 Cloud.ogg:7M	-	-	artist=Quiet Storm|album=Rainy Days|year=2014
+music	Sleep Machine - Nature Sounds (2020)	01 - Forest.mp3:20M;02 - Ocean.mp3:20M;03 - Rain.mp3:20M	Music	-	-
+music	Unknown Album	01.mp3:9M;02.mp3:9M;03.mp3:9M;04.mp3:9M	Music	-	-
+music	Greatest Hits	01 - Song.mp3:9M;02 - Song.mp3:9M;03 - Song.mp3:9M;04 - Song.mp3:9M;05 - Song.mp3:9M	-	-	-
+# single tracks
+music	Silver Fields - Paper Boats.mp3	=	-	-	artist=Silver Fields|title=Paper Boats
+music	01 - Salt.flac	=	-	-	-
+music	Amber Skies - Harvest Moon (Extended Mix).flac	=	-	-	artist=Amber Skies
+music	Cold Rivers - Song A (Official Audio).m4a	=	-	-	artist=Cold Rivers
+music	Hollow Pines - Roots (1994) [FLAC]	Hollow Pines - Roots.flac:300M	-	-	artist=Hollow Pines|album=Roots|year=1994
+music	Hollow Pines - Roots [FLAC]	Hollow Pines - Roots.flac:300M;Hollow Pines - Roots.cue:2K	-	-	artist=Hollow Pines|album=Roots
+music	Marble Arch - Box Set (1975-1985) [FLAC]	1975 - First/01.flac:30M;1975 - First/02.flac:30M;1985 - Last/01.flac:30M;1985 - Last/02.flac:30M	-	-	artist=Marble Arch
+music	Pale Horizon - Echoes (2022) [MP3-V0]	01 Echoes.mp3:7M;02 Horizon.mp3:7M;03 Pale.mp3:7M	-	-	artist=Pale Horizon|album=Echoes|year=2022
+music	Pale Horizon - Echoes (2022) [CD-FLAC]	01 Echoes.flac:30M;02 Horizon.flac:30M;03 Pale.flac:30M;Scans/booklet.pdf:20M;Scans/back.jpg:2M	-	-	artist=Pale Horizon|album=Echoes|year=2022
+music	Dream Weaver - Lucid [FLAC 24-48] (2018)	01 Lucid.flac:70M;02 Dream.flac:70M	Music	-	artist=Dream Weaver|album=Lucid|year=2018
+music	Dream Weaver - Lucid (2018)	01 Lucid.mp3:9M;02 Dream.mp3:9M;Thumbs.db:6K;.DS_Store:6K	Music	-	artist=Dream Weaver|album=Lucid|year=2018|junk=2,3
+music	Folk Collective - Mountain Songs (2009)	01 Mountain.mp3:9M;02 Valley.mp3:9M;03 River.mp3:9M;setup.exe:300K	-	-	artist=Folk Collective|album=Mountain Songs|year=2009|suspicious=3
+music	Jazz Quartet - Blue Hour (1959) [FLAC] [Mono]	01 Blue Hour.flac:50M;02 Smoke.flac:50M	-	-	artist=Jazz Quartet|album=Blue Hour|year=1959
+music	Jazz Quartet - The Complete Studio Recordings [24Bit-192kHz FLAC]	CD1/01 A.flac:200M;CD1/02 B.flac:200M;CD2/01 C.flac:200M	-	-	artist=Jazz Quartet
+music	Electro Fog - Night Drive (2015) [WAV]	01 Night Drive.wav:80M;02 Fog.wav:80M	-	-	artist=Electro Fog|album=Night Drive|year=2015
+music	Brass Band of the Valley - Marches (1989).flac	=	-	-	-
+music	Symphony Orchestra - Tchaikovsky - The Nutcracker (Complete Ballet) [FLAC]	CD1/01 Overture.flac:20M;CD1/02 March.flac:18M;CD2/01 Waltz.flac:25M	-	-	-
+music	Acoustic Sessions - Live in Bergen 2017 MP3	01.mp3:9M;02.mp3:9M;03.mp3:9M	-	-	-
+music	A Cappella Weekend [2015] mp3	01 - Song.mp3:9M;02 - Song.mp3:9M	-	-	-
+other	Podcast Archive 2020	ep01.mp3:40M;ep02.mp3:40M;ep03.mp3:40M	-	-	-
+# ---------------- AUDIOBOOKS
+audiobook	Jane Austen - Pride and Prejudice (Unabridged) [M4B]	Pride and Prejudice.m4b:420M;cover.jpg:200K	-	-	author=Jane Austen|title=Pride and Prejudice
+audiobook	Mark Twain - The Adventures of Tom Sawyer (2012) {Narrated by Ron Meyer} [m4b]	Tom Sawyer.m4b:300M	-	-	author=Mark Twain|title=The Adventures of Tom Sawyer
+audiobook	Arthur Conan Doyle - The Hound of the Baskervilles [Audiobook] [MP3]	01 - Chapter 1.mp3:20M;02 - Chapter 2.mp3:22M;03 - Chapter 3.mp3:19M;04 - Chapter 4.mp3:21M;05 - Chapter 5.mp3:20M	-	-	author=Arthur Conan Doyle|title=The Hound of the Baskervilles
+audiobook	H. G. Wells - The Time Machine (Audiobook)	The Time Machine.m4b:150M	-	-	author=H. G. Wells|title=The Time Machine
+audiobook	Jules Verne - Twenty Thousand Leagues Under the Sea (Read by Alan Cooper)	Part 01.mp3:30M;Part 02.mp3:30M;Part 03.mp3:30M;Part 04.mp3:30M	-	-	author=Jules Verne|title=Twenty Thousand Leagues Under the Sea|narrator=Alan Cooper
+audiobook	Mary Shelley - Frankenstein [Unabridged Audiobook]	Frankenstein/Chapter 01.mp3:15M;Frankenstein/Chapter 02.mp3:16M;Frankenstein/Chapter 03.mp3:14M;Frankenstein/Chapter 04.mp3:15M	-	-	author=Mary Shelley|title=Frankenstein
+audiobook	Dracula by Bram Stoker (Audiobook)	dracula.m4b:600M	-	-	author=Bram Stoker|title=Dracula
+audiobook	Charles Dickens - A Christmas Carol - Audiobook - narrated by Jim Carter	A Christmas Carol.m4b:200M	-	-	author=Charles Dickens|title=A Christmas Carol|narrator=Jim Carter
+audiobook	Lewis Carroll - Alice's Adventures in Wonderland [MP3 64kbps] [Audiobook]	alice_01.mp3:8M;alice_02.mp3:8M;alice_03.mp3:8M;alice_04.mp3:8M	-	-	author=Lewis Carroll|title=Alice's Adventures in Wonderland
+audiobook	pride_and_prejudice_librivox	prideandprejudice_01_austen_64kb.mp3:15M;prideandprejudice_02_austen_64kb.mp3:15M;prideandprejudice_03_austen_64kb.mp3:15M;prideandprejudice_04_austen_64kb.mp3:15M;prideandprejudice_05_austen_64kb.mp3:15M	-	-	-
+audiobook	Sherlock Holmes - Complete Adventures (Audiobook)	Disc 1/Track 01.mp3:30M;Disc 1/Track 02.mp3:30M;Disc 2/Track 01.mp3:30M	-	-	-
+audiobook	[Audiobook] Sun Tzu - The Art of War	The Art of War.m4b:90M	-	-	author=Sun Tzu|title=The Art of War
+audiobook	The Art of War (Unabridged) - Sun Tzu	The Art of War.m4b:90M	-	-	author=Sun Tzu|title=The Art of War
+audiobook	Moby Dick - Herman Melville - Audio Book	moby_01.mp3:25M;moby_02.mp3:25M;moby_03.mp3:25M	-	-	-
+audiobook	Edgar Allan Poe - Tales of Mystery [Audiobook]	Tales.m4b:180M	-	-	author=Edgar Allan Poe|title=Tales of Mystery
+audiobook	Kenneth Grahame - The Wind in the Willows (2008) [Narrator Jane Doe] [M4B]	The Wind in the Willows.m4b:250M	-	-	author=Kenneth Grahame|title=The Wind in the Willows
+audiobook	Homer - The Odyssey (Audible AAX)	The Odyssey.aax:500M	-	-	-
+audiobook	Lars Hansen - Mørketid (Lydbok)	Mørketid.m4b:350M	-	-	-
+audiobook	Cormac Finnegan - The Long Voyage (2020) {Series 01}	The Long Voyage.m4b:700M	Audiobooks	-	-
+audiobook	Nora Fields - Winter Orchard	Winter Orchard.m4b:500M;cover.jpg:300K;Winter Orchard.cue:3K	-	-	author=Nora Fields|title=Winter Orchard
+audiobook	Nora Fields - Winter Orchard	01.mp3:30M;02.mp3:30M;03.mp3:30M;04.mp3:30M;05.mp3:30M;06.mp3:30M	Audiobooks	-	author=Nora Fields|title=Winter Orchard
+audiobook	Silas Moore - The Cartographer's Daughter [ENG / 2018 / Unabridged / MP3 / 64 kbps]	01 The Cartographer's Daughter.mp3:25M;02 Part Two.mp3:25M;03 Part Three.mp3:25M	-	-	author=Silas Moore|title=The Cartographer's Daughter
+audiobook	Wells, H. G. - The War of the Worlds (read by Orson-style Reader)	war_of_the_worlds.m4b:200M	-	-	author=H. G. Wells|title=The War of the Worlds
+audiobook	Harper Lane - Seaside Mysteries Book 3 - Tidal Secrets (Unabridged)	Tidal Secrets.m4b:400M	-	-	author=Harper Lane
+audiobook	Learn Norwegian in 30 Days - Audio Course (Audiobook)	Day 01.mp3:10M;Day 02.mp3:10M;Day 03.mp3:10M;Day 04.mp3:10M	-	-	-
+audiobook	Self-Help Bestsellers Audiobook Collection	Atomic Habits.m4b:400M;Deep Work.m4b:350M;Grit.m4b:300M	-	-	-
+audiobook	Lena Park - The Quiet Year.m4b	=	-	-	author=Lena Park|title=The Quiet Year
+audiobook	Great Expectations - Charles Dickens (Unabridged Audiobook)	GreatExpectations_01.mp3:20M;GreatExpectations_02.mp3:20M;GreatExpectations_03.mp3:20M	-	-	author=Charles Dickens|title=Great Expectations
+audiobook	Jonas Berg - Nattens Skygge	Kapittel 01.mp3:15M;Kapittel 02.mp3:15M;Kapittel 03.mp3:15M;Kapittel 04.mp3:15M	Audiobooks	-	-
+audiobook	Oliver Twist - Dickens [Audiobook, MP3, 128kbps]	Chapter 01.mp3:20M;Chapter 02.mp3:20M;Chapter 03.mp3:20M	-	-	-
+audiobook	Willa Cather - My Antonia (Audiobook 1918)	My Antonia.m4b:230M	-	-	author=Willa Cather
+audiobook	Rudyard Kipling - The Jungle Book (unabridged)	The Jungle Book.mp3:200M	-	-	author=Rudyard Kipling|title=The Jungle Book
+# ---------------- BOOKS
+book	Jane Austen - Emma (1815).epub	=	-	-	author=Jane Austen|title=Emma|year=1815
+book	Jane Austen - Sense and Sensibility.epub	=	-	-	author=Jane Austen|title=Sense and Sensibility
+book	Mark Twain - Adventures of Huckleberry Finn (1884) [epub]	Mark Twain - Adventures of Huckleberry Finn.epub:900K	-	-	author=Mark Twain|title=Adventures of Huckleberry Finn|year=1884
+book	Arthur Conan Doyle - The Complete Sherlock Holmes (2009) [EPUB MOBI AZW3]	The Complete Sherlock Holmes.epub:3M;The Complete Sherlock Holmes.mobi:4M;The Complete Sherlock Holmes.azw3:3M	-	-	author=Arthur Conan Doyle|title=The Complete Sherlock Holmes|year=2009
+book	Frankenstein by Mary Shelley.epub	=	-	-	author=Mary Shelley|title=Frankenstein
+book	Dracula - Bram Stoker.epub	=	-	-	author=Bram Stoker|title=Dracula
+book	Stoker, Bram - Dracula.epub	=	-	-	author=Bram Stoker|title=Dracula
+book	Charles Dickens - Great Expectations.mobi	=	-	-	author=Charles Dickens|title=Great Expectations
+book	Great Expectations (Charles Dickens) (booklib.org).epub	=	-	-	author=Charles Dickens|title=Great Expectations
+book	The Art of War (Sun Tzu)	The Art of War.epub:600K;The Art of War.pdf:2M	-	-	author=Sun Tzu|title=The Art of War
+book	Moby Dick.epub	=	-	-	title=Moby Dick
+book	Walden.pdf	=	Books	-	title=Walden
+book	Leaves of Grass - Walt Whitman.pdf	=	-	-	author=Walt Whitman|title=Leaves of Grass
+book	O'Reilly.Learning.Quillscript.5th.Edition.2013.eBook-GRP	Learning.Quillscript.5th.Edition.pdf:12M;Learning.Quillscript.5th.Edition.epub:6M	-	-	title=Learning Quillscript|year=2013
+book	Packt - Mastering Fennel (2nd Edition) [2022] [PDF]	Mastering Fennel 2nd Edition.pdf:22M;code.zip:3M	-	-	title=Mastering Fennel|year=2022
+book	Programming Rust, 2nd Edition (O'Reilly, 2021).pdf	=	-	-	-
+book	Manning - Fennel in Action (2021).pdf	=	-	-	title=Fennel in Action|year=2021
+book	The Careful Programmer 20th Anniversary Edition.epub	=	-	-	title=The Careful Programmer
+book	Elements of Sorting Theory 4th Edition.pdf	=	-	-	title=Elements of Sorting Theory
+book	Tidy Code - Robert T Marlow (2008).pdf	=	-	-	author=Robert T Marlow|title=Tidy Code|year=2008
+book	Calculus Early Transcendentals 8th Ed - Stewart.pdf	=	-	-	-
+book	Finite Structures and Their Uses.djvu	=	-	-	title=Finite Structures and Their Uses
+book	Reasoning in Loops - Dorothea Mellor [ebook] [mobi]	Reasoning in Loops.mobi:2M	-	-	author=Dorothea Mellor|title=Reasoning in Loops
+book	Ada Lovelace - Notes on the Analytical Engine (1843).pdf	=	-	-	author=Ada Lovelace|title=Notes on the Analytical Engine|year=1843
+book	Cooking for Beginners - Mary Kitchen (2019).epub	=	-	-	author=Mary Kitchen|title=Cooking for Beginners|year=2019
+book	[Jane Roe] The Salt Marsh (2016).epub	=	-	-	author=Jane Roe|title=The Salt Marsh|year=2016
+book	Jane Roe - The Salt Marsh Series 02 - Tides (2017).epub	=	-	-	author=Jane Roe|year=2017
+book	Nora Fields - Winter Orchard [EPUB]	Nora Fields - Winter Orchard.epub:1M	Books	-	author=Nora Fields|title=Winter Orchard
+book	Harper Lane Collection (45 books) [epub]	Harper Lane - Tidal Secrets.epub:1M;Harper Lane - Sea Glass.epub:1M;Harper Lane - Lighthouse.epub:1M;Harper Lane - Salt Air.epub:1M	-	-	author=Harper Lane
+book	Sci-Fi Classics Pack	Wells - The Time Machine.epub:500K;Verne - Around the World.epub:600K;Shelley - Frankenstein.epub:700K;Wells - War of the Worlds.epub:800K	-	-	-
+book	Free Technical Books Bundle	Rust.pdf:10M;Go.pdf:8M;C.pdf:6M;Python.pdf:12M;Linux.pdf:9M	-	-	-
+book	National Geographic 2024-10 (October).pdf	=	-	-	-
+book	The Economist - October 5th 2024 [PDF]	The Economist 2024-10-05.pdf:80M	-	-	-
+book	Wired Magazine Issue 2024.09.pdf	=	-	-	-
+book	PC Player UK - Issue 400 (2024).pdf	=	Magazines	-	-
+book	Night Garden 001 (2019) (Digital) (Zone-Realm).cbz	=	-	-	-
+book	Night Garden v01 (2019) (Digital)	Night Garden v01 c001.cbz:30M;Night Garden v01 c002.cbz:30M;Night Garden v01 c003.cbz:30M	-	-	-
+book	Tintin Complete Collection (cbr)	Tintin 01.cbr:40M;Tintin 02.cbr:40M;Tintin 03.cbr:40M	-	-	-
+book	One Punch Garden - Volume 12 [Digital] [cbz]	=	-	-	-
+book	Sandman Style Graphic Novel Collection	Vol 1.cbr:90M;Vol 2.cbr:90M;Vol 3.cbr:90M	Comics	-	-
+book	The Careful Programmer (2019)	The Careful Programmer.pdf:15M	-	-	title=The Careful Programmer|year=2019
+book	1972 - Gilbert Orme.epub	=	-	-	author=Gilbert Orme|title=1972
+book	Celsius 212 by Roy Bramley [mobi].mobi	=	-	-	author=Roy Bramley|title=Celsius 212
+book	Elena Rossi - La Casa sul Mare (2018).epub	=	-	-	author=Elena Rossi|title=La Casa sul Mare|year=2018
+book	Der Prozess - Franz Kafka.epub	=	-	-	author=Franz Kafka|title=Der Prozess
+book	ISBN 9780141439518 Pride and Prejudice	Pride and Prejudice.epub:700K	-	-	-
+book	Anna's Archive - Dune Messiah.epub	=	-	-	-
+book	User Manual for HeatPump X200.pdf	=	-	-	-
+book	The_Hobbit_J.R.R._Tolkien.epub	=	-	-	-
+book	Les Misérables - Victor Hugo (1862).epub	=	-	-	author=Victor Hugo|title=Les Misérables|year=1862
+book	Poetry Collection	Whitman.epub:400K;Dickinson.epub:300K;Frost.epub:350K	Books	-	-
+book	Math Textbook Collection PDF	Algebra.pdf:20M;Geometry.pdf:25M;Calculus.pdf:30M	-	-	-
+book	Beginner Guitar Chords.pdf	=	-	-	-
+book	Hildegard Voss - Gartenjahr (2015) [PDF]	Gartenjahr.pdf:40M	-	-	author=Hildegard Voss|title=Gartenjahr|year=2015
+# ---------------- SOFTWARE
+software	ubuntu-24.04-desktop-amd64.iso	=	-	-	name=Ubuntu|version=24.04|arch=x64
+software	ubuntu-24.04.1-live-server-amd64.iso	=	-	-	name=Ubuntu|version=24.04.1|arch=x64
+software	debian-12.5.0-amd64-netinst.iso	=	-	-	name=Debian|version=12.5.0|arch=x64
+software	archlinux-2024.06.01-x86_64.iso	=	-	-	name=Archlinux|arch=x64
+software	Fedora-Workstation-Live-x86_64-40-1.14.iso	=	-	-	arch=x64
+software	linuxmint-21.3-cinnamon-64bit.iso	=	-	-	-
+software	kali-linux-2024.2-installer-amd64.iso	=	-	-	arch=x64
+software	raspios-bookworm-arm64-lite.img.xz	=	-	-	-
+software	Win11_23H2_English_x64v2.iso	=	-	-	arch=x64
+software	Windows 10 22H2 Pro x64 Multilingual (Pre-Activated)	Windows10_22H2_x64.iso:5.7G	-	-	arch=x64
+software	macOS Sequoia 15.0.1 (24A348).dmg	=	-	-	platform=macOS
+software	Calendrix 3.8.12 (arm64).dmg	=	-	-	name=Calendrix|version=3.8.12|arch=arm64
+software	Some App 1.2.3 (arm64).dmg	=	-	-	name=Some App|version=1.2.3|arch=arm64
+software	Some.App.v1.2.3.macOS.Universal	Some App.dmg:120M	-	-	name=Some App|version=1.2.3|arch=universal|platform=macOS
+software	Lantern Editor Pro 4.5.0 macOS	Lantern Editor Pro.dmg:200M;Install Notes.txt:1K	-	-	name=Lantern Editor Pro|version=4.5.0|platform=macOS|junk=1
+software	Photo Suite 2024 v25.1.0 (x64) Multilingual	Setup.exe:1.5G;Crack/patch.exe:2M;Readme.txt:3K	-	-	name=Photo Suite 2024|version=25.1.0|arch=x64
+software	Photo.Suite.2024.v25.1.0.x64.Multilingual-R4R	Photo.Suite.2024.v25.1.0.x64.Multilingual-R4R.zip:1.9G	-	-	name=Photo Suite 2024|version=25.1.0|arch=x64
+software	SynthMaster Plugin v2.9.1 [CRACKED] macOS	SynthMaster.pkg:80M;crack/readme.txt:1K	-	-	version=2.9.1
+software	Scribble-like Editor 5.0.2.dmg	=	-	-	version=5.0.2
+software	VLC-3.0.20-x64.exe	=	-	-	name=VLC|version=3.0.20|arch=x64
+software	7z2406-x64.msi	=	-	-	arch=x64
+software	OpenOffice_4.1.15_Win_x86_install_en-US.exe	=	-	-	version=4.1.15
+software	GIMP-2.10.38-setup.exe	=	-	-	name=GIMP|version=2.10.38
+software	Blender-4.2.0-macos-arm64.dmg	=	-	-	name=Blender|version=4.2.0|arch=arm64|platform=macOS
+software	blender-4.2.0-linux-x64.tar.xz	=	-	-	name=Blender|version=4.2.0|arch=x64
+software	firefox-128.0.2.tar.bz2	=	-	-	-
+software	audacity-linux-3.5.1-x86_64.AppImage	=	-	-	name=Audacity|version=3.5.1|arch=x64
+software	obs-studio_30.2.2-1_amd64.deb	=	-	-	arch=x64
+software	inkscape-1.3.2.x86_64.rpm	=	-	-	version=1.3.2|arch=x64
+software	Notes App v4.3.1 Pro [Android APK].apk	=	-	-	-
+software	TaskPlanner 8.0 iOS IPA	TaskPlanner.ipa:90M	-	-	-
+game	Cyber Hunter Reloaded [Foxhound Repack]	setup.exe:1M;fg-01.bin:4G;fg-02.bin:4G;fg-03.bin:3G;MD5/QuickSFV.exe:300K;Verify BIN files before installation.bat:1K	-	-	-
+software	Star Colony-ZEPHYR	star.colony-zephyr.iso:25G;zephyr.nfo:3K	-	-	-
+software	Iron Frontier v1.4.2 BASALT	setup_iron_frontier_1.4.2.exe:9G;setup_iron_frontier_1.4.2-1.bin:4G	-	-	version=1.4.2
+software	Dungeon Delvers Deluxe Edition (Build 123456) [DOVETAIL Repack]	setup.exe:50M;data-01.bin:6G	-	-	-
+software	Farm Sim Gold Edition PLINTH	plinth.iso:6G	-	-	-
+software	Racing Legends (2022) PC	Racing.Legends.exe:8G	-	-	-
+software	Space Trader Mac Game	Space Trader.app/Contents/MacOS/Space Trader:80M;Space Trader.app/Contents/Resources/data.pak:2G;Space Trader.app/Contents/Info.plist:2K	-	-	-
+software	Sequencer-like DAW 12.0.5 macOS [TXN]	DAW Installer.pkg:3G;TXN.nfo:2K;Keygen/keygen.app/Contents/MacOS/keygen:1M	-	-	version=12.0.5
+software	Sample Pack Manager 2.0 Setup	Setup.msi:40M	-	-	-
+software	MyTool-1.0.zip	=	-	-	version=1.0
+software	plugin_installer_v2.0_win.zip	=	-	-	version=2.0
+software	NodeJS 20.15.0 LTS x64	node-v20.15.0-x64.msi:30M	-	-	version=20.15.0|arch=x64
+software	Python 3.12.4 (64-bit) Windows installer	python-3.12.4-amd64.exe:25M	-	-	version=3.12.4
+software	container-desktop-4.31.1-arm64.dmg	=	-	-	version=4.31.1|arch=arm64
+software	TeX Live 2024 ISO	texlive2024.iso:5G	-	-	-
+software	FreeBSD-14.1-RELEASE-amd64-disc1.iso	=	-	-	arch=x64
+software	proxmox-ve_8.2-1.iso	=	-	-	-
+software	TrueNAS-SCALE-24.04.2.iso	=	-	-	-
+software	gparted-live-1.6.0-3-amd64.iso	=	-	-	arch=x64
+software	Office 2021 Pro Plus x64 en-US	SW_DVD9_Office_2021.iso:4G	-	-	arch=x64
+software	Hex Editor Neo v7.0 Portable	HexEditorNeo.exe:20M;Portable.ini:1K	-	-	version=7.0
+software	VPN Client 5.4.1 Windows macOS Linux	VPN-5.4.1.exe:60M;VPN-5.4.1.dmg:70M;VPN-5.4.1.deb:55M	-	-	version=5.4.1
+software	Utility Suite	Utility Suite.exe:120M	Apps	-	-
+software	SomeThing.dmg	=	-	-	-
+software	Cool Tool	cooltool.pkg:50M	Software	-	-
+software	unknown.exe	=	-	-	-
+software	Sower 7.20 Windows x64 Crack	reaper720_x64-install.exe:20M;Crack/sower-patch.exe:1M	-	-	version=7.20|arch=x64
+software	download	download:30M	-	application/x-apple-diskimage	-
+software	setup	setup:30M	-	application/x-msdownload	-
+# ---------------- OTHER
+other	Udemy - Complete Python Bootcamp 2024	01 - Introduction.mp4:100M;02 - Setup.mp4:120M;03 - Variables.mp4:150M;04 - Loops.mp4:140M;05 - Functions.mp4:160M;Exercises.zip:5M	-	-	-
+other	Lynda - Learning Photoshop CC (2023)	01 Welcome.mp4:50M;02 Tools.mp4:80M;03 Layers.mp4:90M;04 Masks.mp4:70M	-	-	-
+other	Pluralsight - Docker Fundamentals	docker-01.mp4:60M;docker-02.mp4:60M;docker-03.mp4:60M	-	-	-
+other	MasterClass - Cooking Essentials (2021)	Lesson 01.mp4:200M;Lesson 02.mp4:200M;Lesson 03.mp4:200M	-	-	-
+other	Skillshare - Watercolor for Beginners	1 Intro.mp4:80M;2 Materials.mp4:90M;3 Washes.mp4:120M	-	-	-
+other	4K Nature Wallpapers Pack	forest.jpg:8M;ocean.jpg:9M;mountain.jpg:7M;desert.jpg:8M;aurora.jpg:9M	-	-	-
+other	Free Fonts Collection (500 fonts)	Fonts/Sans/a.ttf:300K;Fonts/Sans/b.ttf:300K;Fonts/Serif/c.otf:400K;Fonts/Serif/d.otf:400K	-	-	-
+other	Photoshop Brushes Bundle 2023	brushes.abr:60M;preview.jpg:2M	-	-	-
+other	Lightroom Presets - Moody Collection	Moody.xmp:4K;Moody2.xmp:4K;Preview.jpg:1M	-	-	-
+other	Sample Pack - Lo-Fi Drums Vol.2	kick01.wav:1M;kick02.wav:1M;snare01.wav:1M;hat01.wav:500K;loop01.wav:4M;loop02.wav:4M	-	-	-
+other	Royalty Free Stock Photos 2022	photo001.jpg:5M;photo002.jpg:5M;photo003.jpg:5M;photo004.jpg:5M;photo005.jpg:5M;photo006.jpg:5M	-	-	-
+other	Family Photos 2019	IMG_0001.JPG:4M;IMG_0002.JPG:4M;IMG_0003.JPG:4M;IMG_0004.JPG:4M	-	-	-
+other	Project Backup 2024-09	project.zip:900M	-	-	-
+other	backup.tar.gz	=	-	-	-
+other	Taxes 2023	return.pdf:2M;receipts.pdf:5M;summary.xlsx:200K	-	-	-
+other	Resume Templates	resume1.docx:50K;resume2.docx:50K;cover.docx:30K	-	-	-
+other	Excel Budget Spreadsheet Templates	budget.xlsx:80K;planner.xlsx:90K;tracker.xlsx:70K	-	-	-
+other	Retro ROMs Collection - NES	Game A.nes:40K;Game B.nes:40K;Game C.nes:60K;Game D.nes:60K	-	-	-
+other	Dataset - Weather Observations 2000-2020	data.csv:1.2G;README.md:3K	-	-	-
+other	3D Printing STL Models Pack	benchy.stl:20M;gear.stl:5M;vase.stl:8M	-	-	-
+other	Blockcraft Texture Pack 16x	pack.zip:50M	-	-	-
+other	Icons Pack - 2000 SVG icons	icons.zip:30M	-	-	-
+other	Wordlists for Security Testing	rockyou.txt:130M;common.txt:5M	-	-	-
+other	Stock Footage 4K Clouds Timelapse	clouds01.mov:800M;clouds02.mov:900M;clouds03.mov:700M	-	-	-
+other	Conference Talks 2023 (Videos)	Keynote.mp4:600M;Talk 1.mp4:400M;Talk 2.mp4:400M;Talk 3.mp4:400M	-	-	-
+software	Linux Kernel Source 6.9	linux-6.9.tar.xz:140M	-	-	-
+other	misc stuff	a.bin:10M;b.dat:20M;c.xyz:5M	-	-	-
+other	New folder	file1:3M;file2:4M	-	-	-
+other	1234567890abcdef	blob:100M	-	-	-
+other	Presentation Slides	deck.pptx:20M;notes.docx:1M	-	-	-
+other	Scanned Documents 2021	scan001.pdf:3M;scan002.pdf:3M;scan003.pdf:3M	-	-	-
+other	XXX Adult Pack 1080p	clip01.mp4:1G;clip02.mp4:1G;clip03.mp4:1G	XXX	-	-
+other	Video Tutorials - Learn Guitar	01 Basics.mp4:100M;02 Chords.mp4:100M;03 Strumming.mp4:100M	-	-	-
+other	Subtitles Pack - English	movie1.srt:80K;movie2.srt:80K;movie3.srt:80K	-	-	-
+other	Engine Asset Store Bundle	assets.unitypackage:900M	-	-	-
+other	Sequencer Sample Library	samples.zip:2G	-	-	-
+other	Raspberry Pi Config Files	config.txt:2K;cmdline.txt:1K;wpa.conf:1K	-	-	-
+# generated
+movie	A.Map.of.Small.Hours.2012.2160p.BluRay.HEVC-GRP.mkv	=	-	-	title=A Map of Small Hours|year=2012|resolution=2160p|source=BluRay|codec=x265
+movie	Orchid.Express.1981.DC.1080p.HDRip.x265.TrueHD.7.1.Atmos-GRP	Orchid.Express.1981.DC.1080p.HDRip.x265.TrueHD.7.1.Atmos-GRP.mkv:30G	-	-	title=Orchid Express|year=1981|resolution=1080p|source=HDRip|codec=x265
+movie	Burning Meridian (2019) [720p] [WEB-DL] [H.264]	Burning Meridian (2019).mkv:11G;Sample/sample.mkv:40M	-	-	title=Burning Meridian|year=2019|resolution=720p|source=WEB-DL|codec=x264
+movie	red-sails-at-dawn-1958-1080p-bluray-x264	red-sails-at-dawn-1958-1080p-bluray-x264.mkv:7G	-	-	year=1958|resolution=1080p
+movie	Echoes.of.Granite.2017.2160p.BluRay.x265-FALCO	Echoes.of.Granite.2017.2160p.BluRay.x265-FALCO.mkv:9G;Echoes.of.Granite.2017.2160p.BluRay.x265-FALCO.nfo:3K	-	-	title=Echoes of Granite|year=2017|resolution=2160p|source=BluRay|codec=x265
+movie	Red Sails at Dawn (1958) [2160p] [WEBDL] [LHB.MX]	Red.Sails.at.Dawn.1958.2160p.WEB-DL.x264-[LHB.MX].mp4:1.8G;www.LHB.MX.jpg:40K	-	-	title=Red Sails at Dawn|year=1958|resolution=2160p
+movie	midnight-ferry-1987-720p-hdrip-x264	midnight-ferry-1987-720p-hdrip-x264.mkv:10G	-	-	year=1987|resolution=720p
+movie	The_Painted_Veil_of_Night_1966_1080p_WEBRip	The_Painted_Veil_of_Night_1966_1080p_WEBRip.mkv:7G	-	-	title=The Painted Veil of Night|year=1966|resolution=1080p
+movie	Seven.Bridges.1976.1080p.HDRip.XviD.AAC-CAIRN	Seven.Bridges.1976.1080p.HDRip.XviD.AAC-CAIRN.mkv:6G	-	-	title=Seven Bridges|year=1976|resolution=1080p|source=HDRip|codec=XviD
+movie	Echoes.of.Granite.2017.720p.BDRip.XviD.DDP5.1-ELM	Echoes.of.Granite.2017.720p.BDRip.XviD.DDP5.1-ELM.mkv:27G;Sample/sample.mkv:40M	-	-	title=Echoes of Granite|year=2017|resolution=720p|source=BDRip|codec=XviD
+movie	the-clockmakers-daughter-2014-1080p-bdrip-x264	the-clockmakers-daughter-2014-1080p-bdrip-x264.mkv:6G	-	-	year=2014|resolution=1080p
+movie	Crown of Dust (2016) [1080p] [HDRip] [LHB.MX]	Crown.of.Dust.2016.1080p.HDRip.x264-[LHB.MX].mp4:1.8G;www.LHB.MX.jpg:40K	-	-	title=Crown of Dust|year=2016|resolution=1080p
+movie	Tales from the Harbor Inn (1969) [2160p] [WEBDL] [LHB.MX]	Tales.from.the.Harbor.Inn.1969.2160p.WEB-DL.x264-[LHB.MX].mp4:1.8G;www.LHB.MX.jpg:40K	-	-	title=Tales from the Harbor Inn|year=1969|resolution=2160p
+movie	Kingdom.of.Ash.2022.2160p.WEB-DL.HEVC.AC3-TERN	Kingdom.of.Ash.2022.2160p.WEB-DL.HEVC.AC3-TERN.mkv:14G	-	-	title=Kingdom of Ash|year=2022|resolution=2160p|source=WEB-DL|codec=x265
+movie	Echoes of Granite (2017) [1080p] [DVDRip] [LHB.MX]	Echoes.of.Granite.2017.1080p.DVDRip.x264-[LHB.MX].mp4:1.8G;www.LHB.MX.jpg:40K	-	-	title=Echoes of Granite|year=2017|resolution=1080p
+movie	Salt and Thunder (2018)	Salt and Thunder (2018).mkv:8G;Salt and Thunder (2018).en.srt:90K;poster.jpg:200K	-	-	title=Salt and Thunder|year=2018
+movie	Rust and Roses (1996) [2160p] [WEB-DL] [x265]	Rust and Roses (1996).mkv:18G	-	-	title=Rust and Roses|year=1996|resolution=2160p|source=WEB-DL|codec=x265
+movie	Iron.Garden.2008.720p.WEB-DL.x264.DD5.1-NIMBUS	Iron.Garden.2008.720p.WEB-DL.x264.DD5.1-NIMBUS.mkv:28G;Sample/sample.mkv:40M	-	-	title=Iron Garden|year=2008|resolution=720p|source=WEB-DL|codec=x264
+movie	desert-lullaby-2024-1080p-bluray-x264	desert-lullaby-2024-1080p-bluray-x264.mkv:5G	-	-	year=2024|resolution=1080p
+movie	Paper Moon Rising (1973) [720p] [WEBRip] [x265]	Paper Moon Rising (1973).mkv:2G	-	-	title=Paper Moon Rising|year=1973|resolution=720p|source=WEBRip|codec=x265
+movie	return-to-hollow-hill-1990-2160p-web-dl-x264	return-to-hollow-hill-1990-2160p-web-dl-x264.mkv:5G	-	-	year=1990|resolution=2160p
+movie	shadow-of-the-lighthouse-1983-1080p-dvdrip-x264	shadow-of-the-lighthouse-1983-1080p-dvdrip-x264.mkv:9G	-	-	year=1983|resolution=1080p
+movie	The_Gentle_Giants_1985_1080p_WEBRip	The_Gentle_Giants_1985_1080p_WEBRip.mkv:4G	-	-	title=The Gentle Giants|year=1985|resolution=1080p
+movie	The_Weight_of_Snow_2021_1080p_DVDRip	The_Weight_of_Snow_2021_1080p_DVDRip.mkv:6G	-	-	title=The Weight of Snow|year=2021|resolution=1080p
+movie	Burning Meridian (2019) [1080p] [BDRip] [x264]	Burning Meridian (2019).mkv:2G	-	-	title=Burning Meridian|year=2019|resolution=1080p|source=BDRip|codec=x264
+movie	The.Ninth.Lantern.2006.1080p.DVDRip.x264-HALCYON	The.Ninth.Lantern.2006.1080p.DVDRip.x264-HALCYON.mkv:17G;Sample/sample.mkv:40M	-	-	title=The Ninth Lantern|year=2006|resolution=1080p|source=DVDRip|codec=x264
+movie	Ghosts.of.Marigold.Street.2015.1080p.BDRip.x264-KESTREL.mkv	=	-	-	title=Ghosts of Marigold Street|year=2015|resolution=1080p|source=BDRip|codec=x264
+movie	The.Long.Goodbye.of.Mr.Finch.1999.720p.WEB-DL.H.264.AAC-SPRUCE	The.Long.Goodbye.of.Mr.Finch.1999.720p.WEB-DL.H.264.AAC-SPRUCE.mkv:19G	-	-	title=The Long Goodbye of Mr Finch|year=1999|resolution=720p|source=WEB-DL|codec=x264
+movie	The Salt Road (2009) [1080p] [DVDRip] [LHB.MX]	The.Salt.Road.2009.1080p.DVDRip.x264-[LHB.MX].mp4:1.8G;www.LHB.MX.jpg:40K	-	-	title=The Salt Road|year=2009|resolution=1080p
+movie	Desert.Lullaby.2024.2160p.WEB-DL.HEVC.AAC-KESTREL	Desert.Lullaby.2024.2160p.WEB-DL.HEVC.AAC-KESTREL.mkv:7G	-	-	title=Desert Lullaby|year=2024|resolution=2160p|source=WEB-DL|codec=x265
+movie	Under.the.Willow.1991.DC.1080p.BluRay.XviD.DD5.1-FJORD	Under.the.Willow.1991.DC.1080p.BluRay.XviD.DD5.1-FJORD.mkv:19G;KESTREL.COM.txt:30	-	-	title=Under the Willow|year=1991|resolution=1080p|source=BluRay|codec=XviD
+movie	red-sails-at-dawn-1958-1080p-web-dl-x264	red-sails-at-dawn-1958-1080p-web-dl-x264.mkv:10G	-	-	year=1958|resolution=1080p
+movie	A Winter's Tale of Iron (2011)	A Winter's Tale of Iron (2011).mkv:8G;A Winter's Tale of Iron (2011).en.srt:90K;poster.jpg:200K	-	-	title=A Winter's Tale of Iron|year=2011
+movie	Kingdom.of.Ash.2022.1080p.BluRay.XviD-KESTREL	Kingdom.of.Ash.2022.1080p.BluRay.XviD-KESTREL.mkv:8G;Kingdom.of.Ash.2022.1080p.BluRay.XviD-KESTREL.nfo:3K	-	-	title=Kingdom of Ash|year=2022|resolution=1080p|source=BluRay|codec=XviD
+movie	The_Long_Goodbye_of_Mr_Finch_1999_720p_WEB-DL	The_Long_Goodbye_of_Mr_Finch_1999_720p_WEB-DL.mkv:6G	-	-	title=The Long Goodbye of Mr Finch|year=1999|resolution=720p
+movie	Iron_Garden_2008_1080p_BDRip	Iron_Garden_2008_1080p_BDRip.mkv:3G	-	-	title=Iron Garden|year=2008|resolution=1080p
+movie	The.Amber.Room.2000.720p.HDRip.H.265-CAIRN	The.Amber.Room.2000.720p.HDRip.H.265-CAIRN.mkv:18G	-	-	title=The Amber Room|year=2000|resolution=720p|source=HDRip|codec=x265
+movie	Orchid_Express_1981_1080p_WEBRip	Orchid_Express_1981_1080p_WEBRip.mkv:5G	-	-	title=Orchid Express|year=1981|resolution=1080p
+movie	A.Winter's.Tale.of.Iron.2011.720p.WEBRip.H.264.AC3-SPRUCE.mkv	=	-	-	title=A Winter's Tale of Iron|year=2011|resolution=720p|source=WEBRip|codec=x264
+movie	A.Map.of.Small.Hours.2012.EXTENDED.2160p.WEB-DL.HEVC.DTS-NIMBUS	A.Map.of.Small.Hours.2012.EXTENDED.2160p.WEB-DL.HEVC.DTS-NIMBUS.mkv:11G	-	-	title=A Map of Small Hours|year=2012|resolution=2160p|source=WEB-DL|codec=x265|edition=Extended
+movie	Desert Lullaby (2024) [720p] [WEBRip] [x264]	Desert Lullaby (2024).mkv:12G	-	-	title=Desert Lullaby|year=2024|resolution=720p|source=WEBRip|codec=x264
+movie	Silver Linings of Tromsø (2016) [2160p] [BluRay] [LHB.MX]	Silver.Linings.of.Tromsø.2016.2160p.BluRay.x264-[LHB.MX].mp4:1.8G;www.LHB.MX.jpg:40K	-	-	title=Silver Linings of Tromsø|year=2016|resolution=2160p
+movie	Burning.Meridian.2019.1080p.DVDRip.H.264.AAC-NIMBUS	Burning.Meridian.2019.1080p.DVDRip.H.264.AAC-NIMBUS.mkv:14G	-	-	title=Burning Meridian|year=2019|resolution=1080p|source=DVDRip|codec=x264
+movie	salt-and-thunder-2018-2160p-bluray-x264	salt-and-thunder-2018-2160p-bluray-x264.mkv:10G	-	-	year=2018|resolution=2160p
+movie	Kingdom.of.Ash.2022.2160p.WEB-DL.x265.DTS-ELDER	Kingdom.of.Ash.2022.2160p.WEB-DL.x265.DTS-ELDER.mkv:22G;Kingdom.of.Ash.2022.2160p.WEB-DL.x265.DTS-ELDER.nfo:3K	-	-	title=Kingdom of Ash|year=2022|resolution=2160p|source=WEB-DL|codec=x265
+movie	Velvet_Thunder_1993_720p_WEB-DL	Velvet_Thunder_1993_720p_WEB-DL.mkv:3G	-	-	title=Velvet Thunder|year=1993|resolution=720p
+movie	evening-star-1952-2160p-web-dl-x264	evening-star-1952-2160p-web-dl-x264.mkv:3G	-	-	year=1952|resolution=2160p
+movie	Orchid Express (1981) [720p] [HDRip] [H.265]	Orchid Express (1981).mkv:20G;WWW.LHB.MX.jpg:40K	-	-	title=Orchid Express|year=1981|resolution=720p|source=HDRip|codec=x265
+movie	a-winters-tale-of-iron-2011-720p-hdrip-x264	a-winters-tale-of-iron-2011-720p-hdrip-x264.mkv:4G	-	-	year=2011|resolution=720p
+movie	The.Gentle.Giants.1985.2160p.WEB-DL.x265-GRP.mkv	=	-	-	title=The Gentle Giants|year=1985|resolution=2160p|source=WEB-DL|codec=x265
+movie	The Violet Hour (2007)	The Violet Hour (2007).mkv:8G;The Violet Hour (2007).en.srt:90K;poster.jpg:200K	-	-	title=The Violet Hour|year=2007
+movie	Shadow of the Lighthouse (1983)	Shadow of the Lighthouse (1983).mkv:8G;Shadow of the Lighthouse (1983).en.srt:90K;poster.jpg:200K	-	-	title=Shadow of the Lighthouse|year=1983
+movie	Paper Moon Rising (1973)	Paper Moon Rising (1973).mkv:8G;Paper Moon Rising (1973).en.srt:90K;poster.jpg:200K	-	-	title=Paper Moon Rising|year=1973
+movie	Moonlit Cargo (1989) [1080p] [BDRip] [LHB.MX]	Moonlit.Cargo.1989.1080p.BDRip.x264-[LHB.MX].mp4:1.8G;www.LHB.MX.jpg:40K	-	-	title=Moonlit Cargo|year=1989|resolution=1080p
+movie	Moonlit Cargo (1989) [720p] [BluRay] [x265]	Moonlit Cargo (1989).mkv:12G;Sample/sample.mkv:40M	-	-	title=Moonlit Cargo|year=1989|resolution=720p|source=BluRay|codec=x265
+movie	Tin Soldier's Return (2002)	Tin Soldier's Return (2002).mkv:8G;Tin Soldier's Return (2002).en.srt:90K;poster.jpg:200K	-	-	title=Tin Soldier's Return|year=2002
+movie	A.Winter's.Tale.of.Iron.2011.1080p.WEB-DL.HEVC.AAC2.0-KESTREL	A.Winter's.Tale.of.Iron.2011.1080p.WEB-DL.HEVC.AAC2.0-KESTREL.mkv:17G;A.Winter's.Tale.of.Iron.2011.1080p.WEB-DL.HEVC.AAC2.0-KESTREL.nfo:3K	-	-	title=A Winter's Tale of Iron|year=2011|resolution=1080p|source=WEB-DL|codec=x265
+movie	Hollow.Crown.2013.1080p.BluRay.H.265.TrueHD.7.1.Atmos-SPRUCE	Hollow.Crown.2013.1080p.BluRay.H.265.TrueHD.7.1.Atmos-SPRUCE.mkv:22G;Sample/sample.mkv:40M	-	-	title=Hollow Crown|year=2013|resolution=1080p|source=BluRay|codec=x265
+movie	Orchid Express (1981) [1080p] [BDRip] [XviD]	Orchid Express (1981).mkv:4G;Sample/sample.mkv:40M	-	-	title=Orchid Express|year=1981|resolution=1080p|source=BDRip|codec=XviD
+movie	Under.the.Willow.1991.Criterion.1080p.WEBRip.x265-KESTREL.mkv	=	-	-	title=Under the Willow|year=1991|resolution=1080p|source=WEBRip|codec=x265|edition=Criterion
+movie	The_Wolf_of_Pine_Street_2001_720p_WEBRip	The_Wolf_of_Pine_Street_2001_720p_WEBRip.mkv:9G	-	-	title=The Wolf of Pine Street|year=2001|resolution=720p
+movie	Burning Meridian (2019)	Burning Meridian (2019).mkv:8G;Burning Meridian (2019).en.srt:90K;poster.jpg:200K	-	-	title=Burning Meridian|year=2019
+movie	The.Long.Goodbye.of.Mr.Finch.1999.1080p.DVDRip.x264.AAC-ELM	The.Long.Goodbye.of.Mr.Finch.1999.1080p.DVDRip.x264.AAC-ELM.mkv:6G;WWW.LHB.MX.jpg:40K	-	-	title=The Long Goodbye of Mr Finch|year=1999|resolution=1080p|source=DVDRip|codec=x264
+movie	The Long Goodbye of Mr Finch (1999) [1080p] [WEB-DL] [HEVC]	The Long Goodbye of Mr Finch (1999).mkv:15G	-	-	title=The Long Goodbye of Mr Finch|year=1999|resolution=1080p|source=WEB-DL|codec=x265
+movie	frozen-meridian-2023-2160p-bluray-x264	frozen-meridian-2023-2160p-bluray-x264.mkv:10G	-	-	year=2023|resolution=2160p
+movie	Kingdom of Ash (2022) [2160p] [BluRay] [LHB.MX]	Kingdom.of.Ash.2022.2160p.BluRay.x264-[LHB.MX].mp4:1.8G;www.LHB.MX.jpg:40K	-	-	title=Kingdom of Ash|year=2022|resolution=2160p
+movie	Red_Sails_at_Dawn_1958_2160p_BluRay	Red_Sails_at_Dawn_1958_2160p_BluRay.mkv:5G	-	-	title=Red Sails at Dawn|year=1958|resolution=2160p
+movie	The Wolf of Pine Street (2001)	The Wolf of Pine Street (2001).mkv:8G;The Wolf of Pine Street (2001).en.srt:90K;poster.jpg:200K	-	-	title=The Wolf of Pine Street|year=2001
+movie	The.Clockmaker's.Daughter.2014.1080p.BluRay.XviD-CAIRN	The.Clockmaker's.Daughter.2014.1080p.BluRay.XviD-CAIRN.mkv:18G	-	-	title=The Clockmaker's Daughter|year=2014|resolution=1080p|source=BluRay|codec=XviD
+movie	Red Sails at Dawn (1958) [1080p] [DVDRip] [XviD]	Red Sails at Dawn (1958).mkv:18G	-	-	title=Red Sails at Dawn|year=1958|resolution=1080p|source=DVDRip|codec=XviD
+tv	The.Lighthouse.Keepers.S05E07-E08.480p.AMZN.WEB-DL.h264-GRP.mkv	=	-	-	show=The Lighthouse Keepers|season=5|episode=7|episode_end=8
+tv	Backstage.Pass.S04E23.480p.WEB-DL.x265-HALCYON	Backstage.Pass.S04E23.480p.WEB-DL.x265-HALCYON.mkv:3241M	-	-	show=Backstage Pass|season=4|episode=23|resolution=480p
+tv	Cedar Falls 7x24 [720p].mkv	=	-	-	show=Cedar Falls|season=7|episode=24
+tv	Winter.Kingdom.S02E21-E22.1080p.WEB.x264-TERRY.mkv	=	-	-	show=Winter Kingdom|season=2|episode=21|episode_end=22
+tv	Coastal.Detectives.S04E15.480p.AMZN.WEB-DL.HEVC-TERN	Coastal.Detectives.S04E15.480p.AMZN.WEB-DL.HEVC-TERN.mkv:3094M	-	-	show=Coastal Detectives|season=4|episode=15|resolution=480p
+tv	Northern.Passage.S12.1080p.WEB-DL.x264-TERRY	Northern.Passage.S12E{01..04}.1080p.WEB-DL.x264-TERRY.mkv:1518M;Sample/sample.mkv:40M	-	-	show=Northern Passage|season=12
+tv	The.Lantern.Society.S04E04.1080p.WEB.H.264-LARK	The.Lantern.Society.S04E04.1080p.WEB.H.264-LARK.mkv:3068M	-	-	show=The Lantern Society|season=4|episode=4|resolution=1080p
+tv	Paper.Birds.S02E09.480p.WEB.HEVC-KESTREL	Paper.Birds.S02E09.480p.WEB.HEVC-KESTREL.mkv:977M;Paper.Birds.S02E09.480p.WEB.HEVC-KESTREL.nfo:2K	-	-	show=Paper Birds|season=2|episode=9|resolution=480p
+tv	The.Lighthouse.Keepers.S02E01.480p.AMZN.WEB-DL.h264-TERN	The.Lighthouse.Keepers.S02E01.480p.AMZN.WEB-DL.h264-TERN.mkv:1372M	-	-	show=The Lighthouse Keepers|season=2|episode=1|resolution=480p
+tv	Coastal.Detectives.2015.S06E05.1080p.HDTV.HEVC-GRP	Coastal.Detectives.2015.S06E05.1080p.HDTV.HEVC-GRP.mkv:3978M	-	-	show=Coastal Detectives|season=6|episode=5|resolution=1080p|year=2015
+tv	Paper.Birds.S05E13-E14.2160p.WEB-DL.h264-NIMBUS.mkv	=	-	-	show=Paper Birds|season=5|episode=13|episode_end=14
+tv	Quiet.Hours.S09E09.480p.BluRay.h264-IONA.mkv	=	-	-	show=Quiet Hours|season=9|episode=9|resolution=480p
+tv	Cooking.With.Ada.S03E22.2160p.WEB-DL.H.264-NIMBUS	Cooking.With.Ada.S03E22.2160p.WEB-DL.H.264-NIMBUS.mkv:459M	-	-	show=Cooking With Ada|season=3|episode=22|resolution=2160p
+tv	Coastal.Detectives.S12.COMPLETE.480p.WEB.h264-KITES	Coastal.Detectives.S12E{01..12}.480p.WEB.h264-KITES.mkv:2634M;Coastal.Detectives.S12.COMPLETE.nfo:3K	-	-	show=Coastal Detectives|season=12
+tv	Salt.Road.S10E23.480p.BluRay.x265-LARK	Salt.Road.S10E23.480p.BluRay.x265-LARK.mkv:2478M;Salt.Road.S10E23.480p.BluRay.x265-LARK.nfo:2K	-	-	show=Salt Road|season=10|episode=23|resolution=480p
+tv	Brass Lantern - S07E22 - Some Episode Title.mkv	=	-	-	show=Brass Lantern|season=7|episode=22
+tv	Blue.Mountain.S02E23.1080p.WEB.H.264-IONA	Blue.Mountain.S02E23.1080p.WEB.H.264-IONA.mkv:814M	-	-	show=Blue Mountain|season=2|episode=23|resolution=1080p
+tv	Winter.Kingdom.S06.COMPLETE.720p.AMZN.WEB-DL.H.264-FJORD	Winter.Kingdom.S06E{01..12}.720p.AMZN.WEB-DL.H.264-FJORD.mkv:1420M;Winter.Kingdom.S06.COMPLETE.nfo:3K	-	-	show=Winter Kingdom|season=6
+tv	Little.Harbour.S12E20.1080p.AMZN.WEB-DL.H.264-LARK	Little.Harbour.S12E20.1080p.AMZN.WEB-DL.H.264-LARK.mkv:1428M	-	-	show=Little Harbour|season=12|episode=20|resolution=1080p
+tv	Iron Valley 7x07 [480p].mkv	=	-	-	show=Iron Valley|season=7|episode=7
+tv	Backstage Pass Season 10 S10 (2160p HDTV x265 HEVC)	Backstage Pass - S10E{01..09} (2160p).mkv:1481M	-	-	show=Backstage Pass|season=10
+tv	Cooking With Ada 6x22 [2160p].mkv	=	-	-	show=Cooking With Ada|season=6|episode=22
+tv	The.Night.Shift.S04E11.480p.WEB.x264-ELM	The.Night.Shift.S04E11.480p.WEB.x264-ELM.mkv:645M	-	-	show=The Night Shift|season=4|episode=11|resolution=480p
+tv	Iron.Valley.S07.1080p.WEB-DL.x265-HALCYON	Iron.Valley.S07E{01..10}.1080p.WEB-DL.x265-HALCYON.mkv:2803M	-	-	show=Iron Valley|season=7
+tv	Frontier.Doctors.S08E23.1080p.WEB-DL.h264-FALCO	Frontier.Doctors.S08E23.1080p.WEB-DL.h264-FALCO.mkv:588M	-	-	show=Frontier Doctors|season=8|episode=23|resolution=1080p
+tv	The.Lantern.Society.S10E18.2160p.BluRay.H.264-CAIRN	The.Lantern.Society.S10E18.2160p.BluRay.H.264-CAIRN.mkv:825M	-	-	show=The Lantern Society|season=10|episode=18|resolution=2160p
+tv	Tide.Walker.S01E05.480p.HDTV.HEVC-KITES	Tide.Walker.S01E05.480p.HDTV.HEVC-KITES.mkv:2936M;Tide.Walker.S01E05.480p.HDTV.HEVC-KITES.nfo:2K	-	-	show=Tide Walker|season=1|episode=5|resolution=480p
+tv	Tide.Walker.2012.S11E03.2160p.WEB-DL.x265-BTX.mkv	=	-	-	show=Tide Walker|season=11|episode=3|resolution=2160p|year=2012
+tv	Salt Road Season 2 S02 (720p WEB-DL x264 HEVC)	Salt Road - S02E{01..08} (720p).mkv:2713M	-	-	show=Salt Road|season=2
+tv	The.Archive.Room.S12.1080p.BluRay.H.264-KITES	The.Archive.Room.S12E{01..06}.1080p.BluRay.H.264-KITES.mkv:560M	-	-	show=The Archive Room|season=12
+tv	Backstage.Pass.S12E03.1080p.WEBRip.H.264-TERN	Backstage.Pass.S12E03.1080p.WEBRip.H.264-TERN.mkv:3420M	-	-	show=Backstage Pass|season=12|episode=3|resolution=1080p
+tv	The.Baker.Street.Club.S06E10.2160p.HDTV.HEVC-KESTREL	The.Baker.Street.Club.S06E10.2160p.HDTV.HEVC-KESTREL.mkv:3496M	-	-	show=The Baker Street Club|season=6|episode=10|resolution=2160p
+tv	Paper.Birds.2019.S05E04.480p.WEB.H.264-BTX	Paper.Birds.2019.S05E04.480p.WEB.H.264-BTX.mkv:496M	-	-	show=Paper Birds|season=5|episode=4|resolution=480p|year=2019
+tv	Brass.Lantern.S09E05.1080p.HDTV.x265-GRP	Brass.Lantern.S09E05.1080p.HDTV.x265-GRP.mkv:3003M;Brass.Lantern.S09E05.1080p.HDTV.x265-GRP.nfo:2K	-	-	show=Brass Lantern|season=9|episode=5|resolution=1080p
+tv	Maple.Street.Mysteries.2004.S05E21.1080p.WEB.x265-ELDER	Maple.Street.Mysteries.2004.S05E21.1080p.WEB.x265-ELDER.mkv:3116M	-	-	show=Maple Street Mysteries|season=5|episode=21|resolution=1080p|year=2004
+tv	Dark Matters - S06E01 - Some Episode Title.mkv	=	-	-	show=Dark Matters|season=6|episode=1
+tv	The Lighthouse Keepers Season 10	Season 10/The Lighthouse Keepers S10E{01..09}.mp4:407M	-	-	show=The Lighthouse Keepers|season=10
+tv	Dark Matters 1x05 [480p].mkv	=	-	-	show=Dark Matters|season=1|episode=5
+tv	Little Harbour 3x01 [1080p].mkv	=	-	-	show=Little Harbour|season=3|episode=1
+tv	Cooking.With.Ada.S10E04.2160p.WEBRip.x264-NIMBUS	Cooking.With.Ada.S10E04.2160p.WEBRip.x264-NIMBUS.mkv:3985M	-	-	show=Cooking With Ada|season=10|episode=4|resolution=2160p
+tv	The Understudy - S04E11 - Some Episode Title.mkv	=	-	-	show=The Understudy|season=4|episode=11
+tv	Brass.Lantern.S07E09.2160p.WEB-DL.HEVC-KITES	Brass.Lantern.S07E09.2160p.WEB-DL.HEVC-KITES.mkv:2097M	-	-	show=Brass Lantern|season=7|episode=9|resolution=2160p
+tv	Rivers of London Town 12x14 [480p].mkv	=	-	-	show=Rivers of London Town|season=12|episode=14
+tv	Northern Passage - S02E24 - Some Episode Title.mkv	=	-	-	show=Northern Passage|season=2|episode=24
+tv	Moonshine County Season 4	Season 4/Moonshine County S04E{01..11}.mp4:306M	-	-	show=Moonshine County|season=4
+tv	Tide.Walker.S09E13.1080p.WEBRip.HEVC-HALCYON	Tide.Walker.S09E13.1080p.WEBRip.HEVC-HALCYON.mkv:2078M	-	-	show=Tide Walker|season=9|episode=13|resolution=1080p
+tv	Frontier.Doctors.S12E07-E08.2160p.AMZN.WEB-DL.x264-HALCYON.mkv	=	-	-	show=Frontier Doctors|season=12|episode=7|episode_end=8
+tv	Orbit Station Nine Season 12	Season 12/Orbit Station Nine S12E{01..09}.mp4:605M	-	-	show=Orbit Station Nine|season=12
+tv	Backstage Pass 11x22 [720p].mkv	=	-	-	show=Backstage Pass|season=11|episode=22
+tv	Blue Mountain Season 11 S11 (480p WEBRip x264 HEVC)	Blue Mountain - S11E{01..10} (480p).mkv:2273M	-	-	show=Blue Mountain|season=11
+tv	Moonshine.County.S10.COMPLETE.1080p.WEBRip.x265-TERRY	Moonshine.County.S10E{01..13}.1080p.WEBRip.x265-TERRY.mkv:2945M;Moonshine.County.S10.COMPLETE.nfo:3K	-	-	show=Moonshine County|season=10
+tv	Winter.Kingdom.S04E04.720p.WEBRip.HEVC-BTX.mkv	=	-	-	show=Winter Kingdom|season=4|episode=4|resolution=720p
+tv	The Lighthouse Keepers Season 5 S05 (2160p BluRay x264 HEVC)	The Lighthouse Keepers - S05E{01..12} (2160p).mkv:995M	-	-	show=The Lighthouse Keepers|season=5
+tv	Brass.Lantern.S12E10-E11.1080p.WEB-DL.x265-TERN.mkv	=	-	-	show=Brass Lantern|season=12|episode=10|episode_end=11
+tv	Cooking.With.Ada.S12E09-E10.1080p.AMZN.WEB-DL.x264-FALCO.mkv	=	-	-	show=Cooking With Ada|season=12|episode=9|episode_end=10
+tv	Northern Passage - S11E06 - Some Episode Title.mkv	=	-	-	show=Northern Passage|season=11|episode=6
+tv	The.Lantern.Society.S07E11.480p.WEB-DL.x265-KESTREL	The.Lantern.Society.S07E11.480p.WEB-DL.x265-KESTREL.mkv:3123M	-	-	show=The Lantern Society|season=7|episode=11|resolution=480p
+tv	Cooking.With.Ada.S01E15.720p.WEBRip.x265-ELDER	Cooking.With.Ada.S01E15.720p.WEBRip.x265-ELDER.mkv:3438M	-	-	show=Cooking With Ada|season=1|episode=15|resolution=720p
+tv	Brass Lantern - S10E19 - Some Episode Title.mkv	=	-	-	show=Brass Lantern|season=10|episode=19
+tv	Little.Harbour.S12.COMPLETE.1080p.HDTV.h264-FJORD	Little.Harbour.S12E{01..08}.1080p.HDTV.h264-FJORD.mkv:686M;Little.Harbour.S12.COMPLETE.nfo:3K	-	-	show=Little Harbour|season=12
+tv	Orbit.Station.Nine.S11E13.720p.WEB.h264-BTX.mkv	=	-	-	show=Orbit Station Nine|season=11|episode=13|resolution=720p
+tv	Harbor Lights 7x02 [480p].mkv	=	-	-	show=Harbor Lights|season=7|episode=2
+tv	Village.Doctor.S02.COMPLETE.2160p.WEB-DL.x264-FALCO	Village.Doctor.S02E{01..13}.2160p.WEB-DL.x264-FALCO.mkv:939M;Village.Doctor.S02.COMPLETE.nfo:3K	-	-	show=Village Doctor|season=2
+tv	The.Lighthouse.Keepers.1999.S03E22.480p.AMZN.WEB-DL.H.264-TERN.mkv	=	-	-	show=The Lighthouse Keepers|season=3|episode=22|resolution=480p|year=1999
+tv	Star.Lantern.S02E16.720p.BluRay.x264-ELDER	Star.Lantern.S02E16.720p.BluRay.x264-ELDER.mkv:2748M	-	-	show=Star Lantern|season=2|episode=16|resolution=720p
+tv	Quiet.Hours.S01E03.1080p.WEB.H.264-ELM.mkv	=	-	-	show=Quiet Hours|season=1|episode=3|resolution=1080p
+tv	Little.Harbour.2017.S01E22.480p.WEB.x265-IONA	Little.Harbour.2017.S01E22.480p.WEB.x265-IONA.mkv:1872M;Little.Harbour.2017.S01E22.480p.WEB.x265-IONA.nfo:2K	-	-	show=Little Harbour|season=1|episode=22|resolution=480p|year=2017
+tv	Northern Passage 4x02 [2160p].mkv	=	-	-	show=Northern Passage|season=4|episode=2
+tv	Maple.Street.Mysteries.S09E15.720p.HDTV.HEVC-ELDER	Maple.Street.Mysteries.S09E15.720p.HDTV.HEVC-ELDER.mkv:2158M;Maple.Street.Mysteries.S09E15.720p.HDTV.HEVC-ELDER.nfo:2K	-	-	show=Maple Street Mysteries|season=9|episode=15|resolution=720p
+tv	Tide.Walker.S09E16-E17.480p.BluRay.x264-KITES.mkv	=	-	-	show=Tide Walker|season=9|episode=16|episode_end=17
+tv	[HarborSubs] Ocean Pilot (BD 1080p HEVC) [Batch]	[HarborSubs] Ocean Pilot - {01..09} (BD 1080p).mkv:1.4G	-	-	show=Ocean Pilot|group=HarborSubs
+tv	[HarborSubs] Star Lantern - 23 (1080p) [80EAD013].mkv	=	-	-	show=Star Lantern|episode=23|group=HarborSubs
+tv	[HarborSubs] Silver Fox Chronicle - 16 (720p) [BEA18F3E].mkv	=	-	-	show=Silver Fox Chronicle|episode=16|group=HarborSubs
+tv	[CINDER] Moon Garden (BD 1080p HEVC) [Batch]	[CINDER] Moon Garden - {01..13} (BD 1080p).mkv:1.4G	-	-	show=Moon Garden|group=CINDER
+tv	[LanternSubs] Tiny Dragons School - 01 (1080p) [A22EECD1].mkv	=	-	-	show=Tiny Dragons School|episode=1|group=LanternSubs
+tv	[ZSW] Autumn Blade (BD 1080p HEVC) [Batch]	[ZSW] Autumn Blade - {01..09} (BD 1080p).mkv:1.4G	-	-	show=Autumn Blade|group=ZSW
+tv	[ZSW] Tiny Dragons School (BD 1080p HEVC) [Batch]	[ZSW] Tiny Dragons School - {01..13} (BD 1080p).mkv:1.4G	-	-	show=Tiny Dragons School|group=ZSW
+tv	[Comet] Tiny Dragons School (BD 1080p HEVC) [Batch]	[Comet] Tiny Dragons School - {01..10} (BD 1080p).mkv:1.4G	-	-	show=Tiny Dragons School|group=Comet
+tv	[Anime Hour] Moon Garden - 23 (720p) [57EFB09F].mkv	=	-	-	show=Moon Garden|episode=23|group=Anime Hour
+tv	[LanternSubs] Paper Birds - 09 (720p) [77D79906].mkv	=	-	-	show=Paper Birds|episode=9|group=LanternSubs
+tv	[LanternSubs] Autumn Blade (BD 1080p HEVC) [Batch]	[LanternSubs] Autumn Blade - {01..06} (BD 1080p).mkv:1.4G	-	-	show=Autumn Blade|group=LanternSubs
+tv	[CINDER] Cloud Harbor - 20 (720p) [3D17FDF9].mkv	=	-	-	show=Cloud Harbor|episode=20|group=CINDER
+tv	[ZSW] Star Lantern - 08 (1080p) [730239CB].mkv	=	-	-	show=Star Lantern|episode=8|group=ZSW
+tv	[CINDER] Paper Birds - 20 (1080p) [C6B3CEDA].mkv	=	-	-	show=Paper Birds|episode=20|group=CINDER
+tv	[Jasper] Ocean Pilot (BD 1080p HEVC) [Batch]	[Jasper] Ocean Pilot - {01..10} (BD 1080p).mkv:1.4G	-	-	show=Ocean Pilot|group=Jasper
+tv	[LanternSubs] Silver Fox Chronicle - 01 (1080p) [52467316].mkv	=	-	-	show=Silver Fox Chronicle|episode=1|group=LanternSubs
+tv	[LanternSubs] Star Lantern - 02 (1080p) [AAB3C8F8].mkv	=	-	-	show=Star Lantern|episode=2|group=LanternSubs
+tv	[Comet] Silver Fox Chronicle (BD 1080p HEVC) [Batch]	[Comet] Silver Fox Chronicle - {01..06} (BD 1080p).mkv:1.4G	-	-	show=Silver Fox Chronicle|group=Comet
+tv	[ZSW] Ocean Pilot - 14 (720p) [12ED0043].mkv	=	-	-	show=Ocean Pilot|episode=14|group=ZSW
+tv	[Comet] Paper Birds - 17 (1080p) [DB479FCA].mkv	=	-	-	show=Paper Birds|episode=17|group=Comet
+music	Iron & Ale Cellar - Random Gardens (1998) [FLAC]	01 - Track 1.flac:30M;02 - Track 2.flac:30M;03 - Track 3.flac:30M;04 - Track 4.flac:30M;05 - Track 5.flac:30M;06 - Track 6.flac:30M;07 - Track 7.flac:30M;08 - Track 8.flac:30M;cover.jpg:500K;album.cue:2K	-	-	artist=Iron & Ale Cellar|album=Random Gardens|year=1998|format=FLAC
+music	Cold Rivers - Winter Sessions [1966] FLAC	01 - Track 1.flac:30M;02 - Track 2.flac:30M;03 - Track 3.flac:30M;04 - Track 4.flac:30M;05 - Track 5.flac:30M;06 - Track 6.flac:30M;folder.jpg:200K;rip.log:4K	-	-	artist=Cold Rivers|album=Winter Sessions|year=1966
+music	Quiet_Storm_-_Second_Skin_(2019)	01 - Track 1.flac:30M;02 - Track 2.flac:30M;03 - Track 3.flac:30M;04 - Track 4.flac:30M;05 - Track 5.flac:30M;06 - Track 6.flac:30M;07 - Track 7.flac:30M;08 - Track 8.flac:30M;09 - Track 9.flac:30M;10 - Track 10.flac:30M;11 - Track 11.flac:30M;12 - Track 12.flac:30M;cover.jpg:500K	-	-	artist=Quiet Storm|album=Second Skin|year=2019
+music	(2013) Amber Skies - First Light [MP3 320]	01 - Track 1.mp3:9M;02 - Track 2.mp3:9M;03 - Track 3.mp3:9M;04 - Track 4.mp3:9M;05 - Track 5.mp3:9M;06 - Track 6.mp3:9M;07 - Track 7.mp3:9M	-	-	artist=Amber Skies|album=First Light|year=2013
+music	North Wind Collective - Canopy [2013] MP3 320	01 - Track 1.mp3:9M;02 - Track 2.mp3:9M;03 - Track 3.mp3:9M;04 - Track 4.mp3:9M;05 - Track 5.mp3:9M;06 - Track 6.mp3:9M;07 - Track 7.mp3:9M;08 - Track 8.mp3:9M;09 - Track 9.mp3:9M;10 - Track 10.mp3:9M	-	-	artist=North Wind Collective|album=Canopy|year=2013
+music	The Paper Lanterns Orchestra - The Quiet Years (1974) [FLAC]	01 - Track 1.flac:30M;02 - Track 2.flac:30M;03 - Track 3.flac:30M;04 - Track 4.flac:30M;05 - Track 5.flac:30M;06 - Track 6.flac:30M;07 - Track 7.flac:30M;08 - Track 8.flac:30M;09 - Track 9.flac:30M;10 - Track 10.flac:30M;folder.jpg:200K;rip.log:4K	-	-	artist=The Paper Lanterns Orchestra|album=The Quiet Years|year=1974|format=FLAC
+music	Iron & Ale Cellar - Echoes [1970] FLAC	01 - Track 1.flac:30M;02 - Track 2.flac:30M;03 - Track 3.flac:30M;04 - Track 4.flac:30M;05 - Track 5.flac:30M;06 - Track 6.flac:30M;07 - Track 7.flac:30M;08 - Track 8.flac:30M;09 - Track 9.flac:30M;10 - Track 10.flac:30M;11 - Track 11.flac:30M	-	-	artist=Iron & Ale Cellar|album=Echoes|year=1970
+music	(2023) Harbor Choir - First Light [MP3]	01 - Track 1.mp3:9M;02 - Track 2.mp3:9M;03 - Track 3.mp3:9M;04 - Track 4.mp3:9M;05 - Track 5.mp3:9M;06 - Track 6.mp3:9M;07 - Track 7.mp3:9M;folder.jpg:200K;rip.log:4K	-	-	artist=Harbor Choir|album=First Light|year=2023
+music	The Velvet Harbor - Long Way Down (2010) MP3	01 - Track 1.mp3:9M;02 - Track 2.mp3:9M;03 - Track 3.mp3:9M;04 - Track 4.mp3:9M;05 - Track 5.mp3:9M;06 - Track 6.mp3:9M;07 - Track 7.mp3:9M;folder.jpg:200K;rip.log:4K	-	-	artist=The Velvet Harbor|album=Long Way Down|year=2010
+music	Hollow Pines - Harvest Moon (1973) FLAC	01 - Track 1.flac:30M;02 - Track 2.flac:30M;03 - Track 3.flac:30M;04 - Track 4.flac:30M;05 - Track 5.flac:30M;06 - Track 6.flac:30M;07 - Track 7.flac:30M;08 - Track 8.flac:30M;09 - Track 9.flac:30M	-	-	artist=Hollow Pines|album=Harvest Moon|year=1973
+music	Midnight Radio - Live at the Fjord [2016] MP3 320	01 - Track 1.mp3:9M;02 - Track 2.mp3:9M;03 - Track 3.mp3:9M;04 - Track 4.mp3:9M;05 - Track 5.mp3:9M;06 - Track 6.mp3:9M;07 - Track 7.mp3:9M;08 - Track 8.mp3:9M	-	-	artist=Midnight Radio|album=Live at the Fjord|year=2016
+music	(1979) The Wandering Strings - Mountain Songs [MP3]	01 - Track 1.mp3:9M;02 - Track 2.mp3:9M;03 - Track 3.mp3:9M;04 - Track 4.mp3:9M;05 - Track 5.mp3:9M;06 - Track 6.mp3:9M;07 - Track 7.mp3:9M;08 - Track 8.mp3:9M;09 - Track 9.mp3:9M;cover.jpg:500K;album.cue:2K	-	-	artist=The Wandering Strings|album=Mountain Songs|year=1979
+music	(2016) Folk Collective - Blue Hour [MP3]	01 - Track 1.mp3:9M;02 - Track 2.mp3:9M;03 - Track 3.mp3:9M;04 - Track 4.mp3:9M;05 - Track 5.mp3:9M;06 - Track 6.mp3:9M;folder.jpg:200K;rip.log:4K	-	-	artist=Folk Collective|album=Blue Hour|year=2016
+music	North_Wind_Collective-Summer_EP-CD-2023-FOGHEAD	01 - Track 1.flac:30M;02 - Track 2.flac:30M;03 - Track 3.flac:30M;04 - Track 4.flac:30M;05 - Track 5.flac:30M;06 - Track 6.flac:30M;07 - Track 7.flac:30M;08 - Track 8.flac:30M;09 - Track 9.flac:30M;10 - Track 10.flac:30M;cover.jpg:500K;album.cue:2K	-	-	artist=North Wind Collective|album=Summer EP|year=2023
+music	Iron_&_Ale_Cellar-Rechner_World-CD-1992-ENTiTLE	01 - Track 1.flac:30M;02 - Track 2.flac:30M;03 - Track 3.flac:30M;04 - Track 4.flac:30M;05 - Track 5.flac:30M;06 - Track 6.flac:30M;07 - Track 7.flac:30M;08 - Track 8.flac:30M;09 - Track 9.flac:30M;10 - Track 10.flac:30M;11 - Track 11.flac:30M;12 - Track 12.flac:30M;cover.jpg:500K;album.cue:2K	-	-	artist=Iron & Ale Cellar|album=Rechner World|year=1992
+music	North Wind Collective - Rainy Days (1994) MP3	01 - Track 1.mp3:9M;02 - Track 2.mp3:9M;03 - Track 3.mp3:9M;04 - Track 4.mp3:9M;05 - Track 5.mp3:9M;06 - Track 6.mp3:9M;07 - Track 7.mp3:9M;08 - Track 8.mp3:9M;09 - Track 9.mp3:9M;10 - Track 10.mp3:9M;11 - Track 11.mp3:9M;12 - Track 12.mp3:9M;13 - Track 13.mp3:9M;cover.jpg:500K;album.cue:2K	-	-	artist=North Wind Collective|album=Rainy Days|year=1994
+music	Iron & Ale Cellar - Rechner World (2011) AAC	01 - Track 1.m4a:9M;02 - Track 2.m4a:9M;03 - Track 3.m4a:9M;04 - Track 4.m4a:9M;05 - Track 5.m4a:9M;06 - Track 6.m4a:9M;07 - Track 7.m4a:9M;08 - Track 8.m4a:9M;09 - Track 9.m4a:9M;cover.jpg:500K	-	-	artist=Iron & Ale Cellar|album=Rechner World|year=2011
+music	Kari_Nordheim_-_Second_Skin_(1986)	01 - Track 1.mp3:9M;02 - Track 2.mp3:9M;03 - Track 3.mp3:9M;04 - Track 4.mp3:9M;05 - Track 5.mp3:9M;06 - Track 6.mp3:9M;07 - Track 7.mp3:9M;cover.jpg:500K	-	-	artist=Kari Nordheim|album=Second Skin|year=1986
+music	The Velvet Harbor - Nature Sounds [1991] MP3	01 - Track 1.mp3:9M;02 - Track 2.mp3:9M;03 - Track 3.mp3:9M;04 - Track 4.mp3:9M;05 - Track 5.mp3:9M;06 - Track 6.mp3:9M;folder.jpg:200K;rip.log:4K	-	-	artist=The Velvet Harbor|album=Nature Sounds|year=1991
+music	Echo_Chamber-The_Quiet_Years-CDDA-1980-GRP	01 - Track 1.flac:30M;02 - Track 2.flac:30M;03 - Track 3.flac:30M;04 - Track 4.flac:30M;05 - Track 5.flac:30M;06 - Track 6.flac:30M;07 - Track 7.flac:30M;08 - Track 8.flac:30M;09 - Track 9.flac:30M;10 - Track 10.flac:30M;11 - Track 11.flac:30M;12 - Track 12.flac:30M	-	-	artist=Echo Chamber|album=The Quiet Years|year=1980
+music	Willow Tree - Lucid (2003) MP3	01 - Track 1.mp3:9M;02 - Track 2.mp3:9M;03 - Track 3.mp3:9M;04 - Track 4.mp3:9M;05 - Track 5.mp3:9M;06 - Track 6.mp3:9M;07 - Track 7.mp3:9M;08 - Track 8.mp3:9M	-	-	artist=Willow Tree|album=Lucid|year=2003
+music	North_Wind_Collective_-_Long_Way_Down_(2009)	01 - Track 1.m4a:9M;02 - Track 2.m4a:9M;03 - Track 3.m4a:9M;04 - Track 4.m4a:9M;05 - Track 5.m4a:9M;06 - Track 6.m4a:9M;07 - Track 7.m4a:9M;08 - Track 8.m4a:9M;09 - Track 9.m4a:9M;cover.jpg:500K;album.cue:2K	-	-	artist=North Wind Collective|album=Long Way Down|year=2009
+music	Mono Tone - Night Drive (1966) [MP3 320]	01 - Track 1.mp3:9M;02 - Track 2.mp3:9M;03 - Track 3.mp3:9M;04 - Track 4.mp3:9M;05 - Track 5.mp3:9M;06 - Track 6.mp3:9M;07 - Track 7.mp3:9M;08 - Track 8.mp3:9M;09 - Track 9.mp3:9M;10 - Track 10.mp3:9M;cover.jpg:500K	-	-	artist=Mono Tone|album=Night Drive|year=1966|format=MP3 320
+music	(1965) Kari Nordheim - Aurora [MP3 320]	01 - Track 1.mp3:9M;02 - Track 2.mp3:9M;03 - Track 3.mp3:9M;04 - Track 4.mp3:9M;05 - Track 5.mp3:9M;06 - Track 6.mp3:9M;cover.jpg:500K	-	-	artist=Kari Nordheim|album=Aurora|year=1965
+music	Electro Fog - Night Drive (2017) WEB	01 - Track 1.flac:30M;02 - Track 2.flac:30M;03 - Track 3.flac:30M;04 - Track 4.flac:30M;05 - Track 5.flac:30M;06 - Track 6.flac:30M;07 - Track 7.flac:30M;08 - Track 8.flac:30M	-	-	artist=Electro Fog|album=Night Drive|year=2017
+music	Echo_Chamber-Winter_Sessions-CD-2005-GRP	01 - Track 1.flac:30M;02 - Track 2.flac:30M;03 - Track 3.flac:30M;04 - Track 4.flac:30M;05 - Track 5.flac:30M;06 - Track 6.flac:30M;07 - Track 7.flac:30M;08 - Track 8.flac:30M;09 - Track 9.flac:30M;10 - Track 10.flac:30M;11 - Track 11.flac:30M	-	-	artist=Echo Chamber|album=Winter Sessions|year=2005
+music	Johan_Berg_Trio_-_Random_Gardens_(1968)	01 - Track 1.flac:30M;02 - Track 2.flac:30M;03 - Track 3.flac:30M;04 - Track 4.flac:30M;05 - Track 5.flac:30M;06 - Track 6.flac:30M;07 - Track 7.flac:30M;folder.jpg:200K;rip.log:4K	-	-	artist=Johan Berg Trio|album=Random Gardens|year=1968
+music	(2006) The Paper Lanterns Orchestra - Canopy [FLAC]	01 - Track 1.flac:30M;02 - Track 2.flac:30M;03 - Track 3.flac:30M;04 - Track 4.flac:30M;05 - Track 5.flac:30M;06 - Track 6.flac:30M;07 - Track 7.flac:30M;08 - Track 8.flac:30M;09 - Track 9.flac:30M	-	-	artist=The Paper Lanterns Orchestra|album=Canopy|year=2006
+music	Johan Berg Trio - Collected Works (2007) [WEB FLAC]	01 - Track 1.flac:30M;02 - Track 2.flac:30M;03 - Track 3.flac:30M;04 - Track 4.flac:30M;05 - Track 5.flac:30M;06 - Track 6.flac:30M;07 - Track 7.flac:30M;08 - Track 8.flac:30M;09 - Track 9.flac:30M;10 - Track 10.flac:30M;11 - Track 11.flac:30M	-	-	artist=Johan Berg Trio|album=Collected Works|year=2007|format=FLAC
+music	(2018) Blue Note Collective - Aurora [WEB FLAC]	01 - Track 1.flac:30M;02 - Track 2.flac:30M;03 - Track 3.flac:30M;04 - Track 4.flac:30M;05 - Track 5.flac:30M;06 - Track 6.flac:30M;07 - Track 7.flac:30M;08 - Track 8.flac:30M;09 - Track 9.flac:30M;10 - Track 10.flac:30M;11 - Track 11.flac:30M;cover.jpg:500K	-	-	artist=Blue Note Collective|album=Aurora|year=2018
+music	Folk Collective - Night Drive (1981) [MP3]	01 - Track 1.mp3:9M;02 - Track 2.mp3:9M;03 - Track 3.mp3:9M;04 - Track 4.mp3:9M;05 - Track 5.mp3:9M;06 - Track 6.mp3:9M;07 - Track 7.mp3:9M;08 - Track 8.mp3:9M;09 - Track 9.mp3:9M;10 - Track 10.mp3:9M;11 - Track 11.mp3:9M;12 - Track 12.mp3:9M;13 - Track 13.mp3:9M	-	-	artist=Folk Collective|album=Night Drive|year=1981|format=MP3
+music	Stone Circle - Harvest Moon (2001) FLAC	01 - Track 1.flac:30M;02 - Track 2.flac:30M;03 - Track 3.flac:30M;04 - Track 4.flac:30M;05 - Track 5.flac:30M;06 - Track 6.flac:30M;07 - Track 7.flac:30M;08 - Track 8.flac:30M;folder.jpg:200K;rip.log:4K	-	-	artist=Stone Circle|album=Harvest Moon|year=2001
+music	Jazz Quartet - Collected Works (1992) FLAC	01 - Track 1.flac:30M;02 - Track 2.flac:30M;03 - Track 3.flac:30M;04 - Track 4.flac:30M;05 - Track 5.flac:30M;06 - Track 6.flac:30M;07 - Track 7.flac:30M;08 - Track 8.flac:30M;cover.jpg:500K;album.cue:2K	-	-	artist=Jazz Quartet|album=Collected Works|year=1992
+music	The Wandering Strings - Night Drive (1970) [MP3]	01 - Track 1.mp3:9M;02 - Track 2.mp3:9M;03 - Track 3.mp3:9M;04 - Track 4.mp3:9M;05 - Track 5.mp3:9M;06 - Track 6.mp3:9M;07 - Track 7.mp3:9M;08 - Track 8.mp3:9M;09 - Track 9.mp3:9M;10 - Track 10.mp3:9M;folder.jpg:200K;rip.log:4K	-	-	artist=The Wandering Strings|album=Night Drive|year=1970|format=MP3
+music	Sleep Machine - Greatest Hits [1990] MP3 320	01 - Track 1.mp3:9M;02 - Track 2.mp3:9M;03 - Track 3.mp3:9M;04 - Track 4.mp3:9M;05 - Track 5.mp3:9M;06 - Track 6.mp3:9M;folder.jpg:200K;rip.log:4K	-	-	artist=Sleep Machine|album=Greatest Hits|year=1990
+music	Johan_Berg_Trio-First_Light-WEB-1969-FOGHEAD	01 - Track 1.flac:30M;02 - Track 2.flac:30M;03 - Track 3.flac:30M;04 - Track 4.flac:30M;05 - Track 5.flac:30M;06 - Track 6.flac:30M;07 - Track 7.flac:30M;cover.jpg:500K	-	-	artist=Johan Berg Trio|album=First Light|year=1969
+music	Cold_Rivers_-_Unplugged_(1967)	01 - Track 1.flac:30M;02 - Track 2.flac:30M;03 - Track 3.flac:30M;04 - Track 4.flac:30M;05 - Track 5.flac:30M;06 - Track 6.flac:30M;07 - Track 7.flac:30M;08 - Track 8.flac:30M;09 - Track 9.flac:30M;10 - Track 10.flac:30M;11 - Track 11.flac:30M;12 - Track 12.flac:30M	-	-	artist=Cold Rivers|album=Unplugged|year=1967
+music	The Paper Lanterns Orchestra - Lucid (1985) MP3	01 - Track 1.mp3:9M;02 - Track 2.mp3:9M;03 - Track 3.mp3:9M;04 - Track 4.mp3:9M;05 - Track 5.mp3:9M;06 - Track 6.mp3:9M;07 - Track 7.mp3:9M;08 - Track 8.mp3:9M;09 - Track 9.mp3:9M;10 - Track 10.mp3:9M;11 - Track 11.mp3:9M;12 - Track 12.mp3:9M;13 - Track 13.mp3:9M;14 - Track 14.mp3:9M;folder.jpg:200K;rip.log:4K	-	-	artist=The Paper Lanterns Orchestra|album=Lucid|year=1985
+music	Pale Horizon - Harvest Moon [1968] MP3 320	01 - Track 1.mp3:9M;02 - Track 2.mp3:9M;03 - Track 3.mp3:9M;04 - Track 4.mp3:9M;05 - Track 5.mp3:9M;06 - Track 6.mp3:9M;07 - Track 7.mp3:9M;08 - Track 8.mp3:9M;09 - Track 9.mp3:9M;10 - Track 10.mp3:9M;folder.jpg:200K;rip.log:4K	-	-	artist=Pale Horizon|album=Harvest Moon|year=1968
+music	Hollow Pines - Summer EP [1987] MP3	01 - Track 1.mp3:9M;02 - Track 2.mp3:9M;03 - Track 3.mp3:9M;04 - Track 4.mp3:9M;05 - Track 5.mp3:9M;06 - Track 6.mp3:9M;07 - Track 7.mp3:9M;08 - Track 8.mp3:9M;09 - Track 9.mp3:9M;10 - Track 10.mp3:9M;11 - Track 11.mp3:9M;folder.jpg:200K;rip.log:4K	-	-	artist=Hollow Pines|album=Summer EP|year=1987
+music	Iron & Ale Cellar - Canopy [1989] AAC	01 - Track 1.m4a:9M;02 - Track 2.m4a:9M;03 - Track 3.m4a:9M;04 - Track 4.m4a:9M;05 - Track 5.m4a:9M;06 - Track 6.m4a:9M;07 - Track 7.m4a:9M;folder.jpg:200K;rip.log:4K	-	-	artist=Iron & Ale Cellar|album=Canopy|year=1989
+music	(1977) Pale Horizon - Winter Sessions [AAC]	01 - Track 1.m4a:9M;02 - Track 2.m4a:9M;03 - Track 3.m4a:9M;04 - Track 4.m4a:9M;05 - Track 5.m4a:9M;06 - Track 6.m4a:9M	-	-	artist=Pale Horizon|album=Winter Sessions|year=1977
+music	Quiet Storm - Random Gardens (1967) [FLAC]	01 - Track 1.flac:30M;02 - Track 2.flac:30M;03 - Track 3.flac:30M;04 - Track 4.flac:30M;05 - Track 5.flac:30M;06 - Track 6.flac:30M;07 - Track 7.flac:30M;folder.jpg:200K;rip.log:4K	-	-	artist=Quiet Storm|album=Random Gardens|year=1967|format=FLAC
+music	(1986) Luna Park - Random Gardens [MP3 320]	01 - Track 1.mp3:9M;02 - Track 2.mp3:9M;03 - Track 3.mp3:9M;04 - Track 4.mp3:9M;05 - Track 5.mp3:9M;06 - Track 6.mp3:9M;07 - Track 7.mp3:9M;08 - Track 8.mp3:9M;09 - Track 9.mp3:9M;cover.jpg:500K;album.cue:2K	-	-	artist=Luna Park|album=Random Gardens|year=1986
+music	(1987) Iron & Ale Cellar - Blue Hour [FLAC]	01 - Track 1.flac:30M;02 - Track 2.flac:30M;03 - Track 3.flac:30M;04 - Track 4.flac:30M;05 - Track 5.flac:30M;06 - Track 6.flac:30M;07 - Track 7.flac:30M	-	-	artist=Iron & Ale Cellar|album=Blue Hour|year=1987
+music	Kari Nordheim - Winter Sessions (2004) WEB	01 - Track 1.flac:30M;02 - Track 2.flac:30M;03 - Track 3.flac:30M;04 - Track 4.flac:30M;05 - Track 5.flac:30M;06 - Track 6.flac:30M;07 - Track 7.flac:30M;cover.jpg:500K;album.cue:2K	-	-	artist=Kari Nordheim|album=Winter Sessions|year=2004
+music	(1991) Sleep Machine - Mountain Songs [FLAC]	01 - Track 1.flac:30M;02 - Track 2.flac:30M;03 - Track 3.flac:30M;04 - Track 4.flac:30M;05 - Track 5.flac:30M;06 - Track 6.flac:30M;07 - Track 7.flac:30M;08 - Track 8.flac:30M;09 - Track 9.flac:30M;10 - Track 10.flac:30M;11 - Track 11.flac:30M;12 - Track 12.flac:30M;cover.jpg:500K	-	-	artist=Sleep Machine|album=Mountain Songs|year=1991
+music	Harbor_Choir_-_First_Light_(1992)	01 - Track 1.flac:30M;02 - Track 2.flac:30M;03 - Track 3.flac:30M;04 - Track 4.flac:30M;05 - Track 5.flac:30M;06 - Track 6.flac:30M;07 - Track 7.flac:30M;08 - Track 8.flac:30M;09 - Track 9.flac:30M;10 - Track 10.flac:30M;cover.jpg:500K;album.cue:2K	-	-	artist=Harbor Choir|album=First Light|year=1992
+music	(1982) Quiet Storm - Rainy Days [FLAC]	01 - Track 1.flac:30M;02 - Track 2.flac:30M;03 - Track 3.flac:30M;04 - Track 4.flac:30M;05 - Track 5.flac:30M;06 - Track 6.flac:30M;cover.jpg:500K	-	-	artist=Quiet Storm|album=Rainy Days|year=1982
+music	Silver Fields - Mountain Songs (1968) WEB	01 - Track 1.flac:30M;02 - Track 2.flac:30M;03 - Track 3.flac:30M;04 - Track 4.flac:30M;05 - Track 5.flac:30M;06 - Track 6.flac:30M;07 - Track 7.flac:30M;08 - Track 8.flac:30M	-	-	artist=Silver Fields|album=Mountain Songs|year=1968
+book	Edith Wharton - The Age of Innocence (1908) [epub]	Edith Wharton - The Age of Innocence.epub:2M	-	-	author=Edith Wharton|title=The Age of Innocence|year=1908
+book	War and Peace - Leo Tolstoy.azw3	=	-	-	author=Leo Tolstoy|title=War and Peace
+book	Herman Melville - Bartleby the Scrivener (1912) [epub]	Herman Melville - Bartleby the Scrivener.epub:28M	-	-	author=Herman Melville|title=Bartleby the Scrivener|year=1912
+book	Crime and Punishment - Fyodor Dostoevsky.azw3	=	-	-	author=Fyodor Dostoevsky|title=Crime and Punishment
+book	Herman Melville - Bartleby the Scrivener (1862).epub	=	-	-	author=Herman Melville|title=Bartleby the Scrivener|year=1862
+book	Arthur Conan Doyle - The Sign of the Four (1877) [pdf]	Arthur Conan Doyle - The Sign of the Four.pdf:28M	-	-	author=Arthur Conan Doyle|title=The Sign of the Four|year=1877
+book	Mark Twain - Adventures of Huckleberry Finn (1882).epub	=	-	-	author=Mark Twain|title=Adventures of Huckleberry Finn|year=1882
+book	H. G. Wells - The Time Machine [EPUB]	H. G. Wells - The Time Machine.epub:19M	-	-	author=H. G. Wells|title=The Time Machine
+book	Emily Bronte - Wuthering Heights (1871) [pdf]	Emily Bronte - Wuthering Heights.pdf:29M	-	-	author=Emily Bronte|title=Wuthering Heights|year=1871
+book	Virginia Woolf - Mrs Dalloway.epub	=	-	-	author=Virginia Woolf|title=Mrs Dalloway
+book	The Call of the Wild - Jack London.pdf	=	-	-	author=Jack London|title=The Call of the Wild
+book	Emily Bronte - Wuthering Heights.epub	=	-	-	author=Emily Bronte|title=Wuthering Heights
+book	The Cherry Orchard - Anton Chekhov.mobi	=	-	-	author=Anton Chekhov|title=The Cherry Orchard
+book	War and Peace (Leo Tolstoy) (booklib.org).epub	=	-	-	author=Leo Tolstoy|title=War and Peace
+book	Leo Tolstoy - War and Peace (1910).epub	=	-	-	author=Leo Tolstoy|title=War and Peace|year=1910
+book	The Age of Innocence by Edith Wharton.epub	=	-	-	author=Edith Wharton|title=The Age of Innocence
+book	The Cherry Orchard (Anton Chekhov) (booklib.org).pdf	=	-	-	author=Anton Chekhov|title=The Cherry Orchard
+book	H. G. Wells - The Time Machine [MOBI]	H. G. Wells - The Time Machine.mobi:14M	-	-	author=H. G. Wells|title=The Time Machine
+book	Anton Chekhov - The Cherry Orchard [MOBI]	Anton Chekhov - The Cherry Orchard.mobi:13M	-	-	author=Anton Chekhov|title=The Cherry Orchard
+book	Jane Austen - Pride and Prejudice (1897) [pdf]	Jane Austen - Pride and Prejudice.pdf:2M	-	-	author=Jane Austen|title=Pride and Prejudice|year=1897
+book	Around the World in Eighty Days - Jules Verne.epub	=	-	-	author=Jules Verne|title=Around the World in Eighty Days
+book	Crime and Punishment by Fyodor Dostoevsky.pdf	=	-	-	author=Fyodor Dostoevsky|title=Crime and Punishment
+book	Thomas Hardy - Tess of the dUrbervilles.mobi	=	-	-	author=Thomas Hardy|title=Tess of the dUrbervilles
+book	Bartleby the Scrivener (Herman Melville) (booklib.org).epub	=	-	-	author=Herman Melville|title=Bartleby the Scrivener
+book	The Cherry Orchard (Anton Chekhov) (booklib.org).mobi	=	-	-	author=Anton Chekhov|title=The Cherry Orchard
+book	Leo Tolstoy - War and Peace (1900).azw3	=	-	-	author=Leo Tolstoy|title=War and Peace|year=1900
+book	Leo Tolstoy - War and Peace (1860) [epub]	Leo Tolstoy - War and Peace.epub:18M	-	-	author=Leo Tolstoy|title=War and Peace|year=1860
+book	Tess of the dUrbervilles (Thomas Hardy) (booklib.org).epub	=	-	-	author=Thomas Hardy|title=Tess of the dUrbervilles
+book	The Picture of Dorian Gray (Oscar Wilde) (booklib.org).pdf	=	-	-	author=Oscar Wilde|title=The Picture of Dorian Gray
+book	Jane Austen - Pride and Prejudice (1867) [pdf]	Jane Austen - Pride and Prejudice.pdf:25M	-	-	author=Jane Austen|title=Pride and Prejudice|year=1867
+book	Bartleby the Scrivener - Herman Melville.pdf	=	-	-	author=Herman Melville|title=Bartleby the Scrivener
+book	Joseph Conrad - Heart of Darkness (1912) [mobi]	Joseph Conrad - Heart of Darkness.mobi:29M	-	-	author=Joseph Conrad|title=Heart of Darkness|year=1912
+book	Leo Tolstoy - War and Peace [AZW3]	Leo Tolstoy - War and Peace.azw3:25M	-	-	author=Leo Tolstoy|title=War and Peace
+book	Heart of Darkness - Joseph Conrad.azw3	=	-	-	author=Joseph Conrad|title=Heart of Darkness
+book	Charles Dickens - Great Expectations [MOBI]	Charles Dickens - Great Expectations.mobi:23M	-	-	author=Charles Dickens|title=Great Expectations
+book	Around the World in Eighty Days by Jules Verne.pdf	=	-	-	author=Jules Verne|title=Around the World in Eighty Days
+book	Tess of the dUrbervilles by Thomas Hardy.epub	=	-	-	author=Thomas Hardy|title=Tess of the dUrbervilles
+book	Virginia Woolf - Mrs Dalloway [MOBI]	Virginia Woolf - Mrs Dalloway.mobi:13M	-	-	author=Virginia Woolf|title=Mrs Dalloway
+book	Emily Bronte - Wuthering Heights (1855).epub	=	-	-	author=Emily Bronte|title=Wuthering Heights|year=1855
+book	Anton Chekhov - The Cherry Orchard (1904) [epub]	Anton Chekhov - The Cherry Orchard.epub:18M	-	-	author=Anton Chekhov|title=The Cherry Orchard|year=1904
+book	Pride and Prejudice by Jane Austen.epub	=	-	-	author=Jane Austen|title=Pride and Prejudice
+book	Crime and Punishment (Fyodor Dostoevsky) (booklib.org).pdf	=	-	-	author=Fyodor Dostoevsky|title=Crime and Punishment
+book	Jane Austen - Pride and Prejudice (1871).azw3	=	-	-	author=Jane Austen|title=Pride and Prejudice|year=1871
+book	Emily Bronte - Wuthering Heights.mobi	=	-	-	author=Emily Bronte|title=Wuthering Heights
+book	Wuthering Heights by Emily Bronte.azw3	=	-	-	author=Emily Bronte|title=Wuthering Heights
+book	Emily Bronte - Wuthering Heights.pdf	=	-	-	author=Emily Bronte|title=Wuthering Heights
+book	The Call of the Wild - Jack London.epub	=	-	-	author=Jack London|title=The Call of the Wild
+book	Emily Bronte - Wuthering Heights (1922).epub	=	-	-	author=Emily Bronte|title=Wuthering Heights|year=1922
+book	Virginia Woolf - Mrs Dalloway (1919) [epub]	Virginia Woolf - Mrs Dalloway.epub:20M	-	-	author=Virginia Woolf|title=Mrs Dalloway|year=1919
+book	Emily Bronte - Wuthering Heights.epub	=	-	-	author=Emily Bronte|title=Wuthering Heights
+book	Mrs Dalloway by Virginia Woolf.pdf	=	-	-	author=Virginia Woolf|title=Mrs Dalloway
+book	Joseph Conrad - Heart of Darkness.mobi	=	-	-	author=Joseph Conrad|title=Heart of Darkness
+book	Adventures of Huckleberry Finn by Mark Twain.mobi	=	-	-	author=Mark Twain|title=Adventures of Huckleberry Finn
+book	Bartleby the Scrivener - Herman Melville.epub	=	-	-	author=Herman Melville|title=Bartleby the Scrivener
+book	Around the World in Eighty Days by Jules Verne.pdf	=	-	-	author=Jules Verne|title=Around the World in Eighty Days
+software	Task Planner v15.2.15 x64 Portable	Task Planner.exe:211M;readme.txt:2K	-	-	name=Task Planner|version=15.2.15|arch=x64
+software	Lantern Editor 17.6.2 (arm64).dmg	=	-	-	name=Lantern Editor|version=17.6.2|arch=arm64
+software	backup-pro-1.3.3-x86_64.AppImage	=	-	-	version=1.3.3|arch=x64
+software	sound-lab-21.5-x86_64.AppImage	=	-	-	version=21.5|arch=x64
+software	Image Resizer v2.8.20 x64 Portable	Image Resizer.exe:65M;readme.txt:2K	-	-	name=Image Resizer|version=2.8.20|arch=x64
+software	markdown-notes-5.1.0-x86_64.AppImage	=	-	-	version=5.1.0|arch=x64
+software	Task Planner 8.8.9 (arm64).dmg	=	-	-	name=Task Planner|version=8.8.9|arch=arm64
+software	backup-pro-18.0.7-x86_64.AppImage	=	-	-	version=18.0.7|arch=x64
+software	video-cutter-3.10.17-x86_64.AppImage	=	-	-	version=3.10.17|arch=x64
+software	Code Canvas-2.1-universal.dmg	=	-	-	name=Code Canvas|version=2.1
+software	Mail Pilot v17.1.8 x64 Portable	Mail Pilot.exe:34M;readme.txt:2K	-	-	name=Mail Pilot|version=17.1.8|arch=x64
+software	PDF Studio-13.6-universal.dmg	=	-	-	name=PDF Studio|version=13.6
+software	Calendrix 1.4.7 (arm64).dmg	=	-	-	name=Calendrix|version=1.4.7|arch=arm64
+software	Photo_Suite_v6.12.13_Win_x64.zip	=	-	-	version=6.12.13|arch=x64
+software	TerminalPlus_24.9.7_x64_setup.exe	=	-	-	version=24.9.7|arch=x64
+software	Sketch Pad Pro 9.6 (arm64).dmg	=	-	-	name=Sketch Pad Pro|version=9.6|arch=arm64
+software	Audio Forge-5.11-universal.dmg	=	-	-	name=Audio Forge|version=5.11
+software	Task Planner 23.1.2 (arm64).dmg	=	-	-	name=Task Planner|version=23.1.2|arch=arm64
+software	PDF_Studio_v25.4.13_Win_x64.zip	=	-	-	version=25.4.13|arch=x64
+software	Backup Pro v14.9.0 x64 Portable	Backup Pro.exe:268M;readme.txt:2K	-	-	name=Backup Pro|version=14.9.0|arch=x64
+software	font-manager-6.12.1-x86_64.AppImage	=	-	-	version=6.12.1|arch=x64
+software	Mail_Pilot_v6.5.5_Win_x64.zip	=	-	-	version=6.5.5|arch=x64
+software	SketchPadPro_15.12.17_x64_setup.exe	=	-	-	version=15.12.17|arch=x64
+software	DiskDoctor_8.1.15_x64_setup.exe	=	-	-	version=8.1.15|arch=x64
+software	Lantern Editor v13.11.14 x64 Portable	Lantern Editor.exe:131M;readme.txt:2K	-	-	name=Lantern Editor|version=13.11.14|arch=x64
+software	Sketch Pad Pro v18.4 x64 Portable	Sketch Pad Pro.exe:211M;readme.txt:2K	-	-	name=Sketch Pad Pro|version=18.4|arch=x64
+software	TerminalPlus_6.2.10_x64_setup.exe	=	-	-	version=6.2.10|arch=x64
+software	Terminal Plus-21.2.17-universal.dmg	=	-	-	name=Terminal Plus|version=21.2.17
+software	Calendrix_v18.6_Win_x64.zip	=	-	-	version=18.6|arch=x64
+software	font-manager-9.11-x86_64.AppImage	=	-	-	version=9.11|arch=x64
+audiobook	Edith Wharton - The Age of Innocence [Audiobook] [MP3]	Chapter {01..10}.mp3:20M	-	-	author=Edith Wharton|title=The Age of Innocence
+audiobook	Arthur Conan Doyle - The Sign of the Four [Audiobook] [MP3]	Chapter {01..07}.mp3:20M	-	-	author=Arthur Conan Doyle|title=The Sign of the Four
+audiobook	Virginia Woolf - Mrs Dalloway [Audiobook] [MP3]	Chapter {01..20}.mp3:20M	-	-	author=Virginia Woolf|title=Mrs Dalloway
+audiobook	Charles Dickens - Great Expectations (Unabridged) [M4B]	Great Expectations.m4b:496M	-	-	author=Charles Dickens|title=Great Expectations
+audiobook	Oscar Wilde - The Picture of Dorian Gray [Audiobook] [MP3]	Chapter {01..18}.mp3:20M	-	-	author=Oscar Wilde|title=The Picture of Dorian Gray
+audiobook	Mark Twain - Adventures of Huckleberry Finn (Unabridged) [M4B]	Adventures of Huckleberry Finn.m4b:375M	-	-	author=Mark Twain|title=Adventures of Huckleberry Finn
+audiobook	Jules Verne - Around the World in Eighty Days (Unabridged) [M4B]	Around the World in Eighty Days.m4b:104M	-	-	author=Jules Verne|title=Around the World in Eighty Days
+audiobook	The Cherry Orchard by Anton Chekhov (Audiobook)	The Cherry Orchard.m4b:422M	-	-	author=Anton Chekhov|title=The Cherry Orchard
+audiobook	Little Women by Louisa May Alcott (Audiobook)	Little Women.m4b:425M	-	-	author=Louisa May Alcott|title=Little Women
+audiobook	Adventures of Huckleberry Finn by Mark Twain (Audiobook)	Adventures of Huckleberry Finn.m4b:345M	-	-	author=Mark Twain|title=Adventures of Huckleberry Finn
+audiobook	Emily Bronte - Wuthering Heights [Audiobook] [MP3]	Chapter {01..12}.mp3:20M	-	-	author=Emily Bronte|title=Wuthering Heights
+audiobook	Leo Tolstoy - War and Peace (Unabridged) [M4B]	War and Peace.m4b:527M	-	-	author=Leo Tolstoy|title=War and Peace
+audiobook	The Picture of Dorian Gray by Oscar Wilde (Audiobook)	The Picture of Dorian Gray.m4b:458M	-	-	author=Oscar Wilde|title=The Picture of Dorian Gray
+audiobook	Frankenstein by Mary Shelley (Audiobook)	Frankenstein.m4b:306M	-	-	author=Mary Shelley|title=Frankenstein
+# ---------------- GAMES (post-decided from Software/Other; conservative)
+game	Hollow.Hearth.II.Early.Access.v0.90-BASALT	setup_hollow_hearth_ii_0.90.exe:900M;setup_hollow_hearth_ii_0.90-1.bin:4G;setup_hollow_hearth_ii_0.90-2.bin:3G	-	-	-
+game	Alder.Ring.Shadow.of.the.Grove.DLC-RUNIC	runic.nfo:2K;alder.iso:50G	-	-	-
+game	Starbloom.Update.v1.12.30-ZEPHYR	update.exe:600M;zephyr.nfo:1K	-	-	-
+game	Brindle.Gate.3.Patch.8-FLK	flk.nfo:1K;patch.exe:900M	-	-	-
+game	Neonpunk.2099.Phantom.Harbor.v2.1-BASALT	setup_neonpunk.exe:1M;setup_neonpunk-1.bin:4G;setup_neonpunk-2.bin:4G	-	-	-
+game	Hollowmoor Legacy [DOVETAIL Repack]	setup.exe:2M;dovetail-1.bin:4G;dovetail-2.bin:4G	-	-	-
+game	Rust Mesa Redemption 2 (v1436.28 + DLC) [Foxhound Repack]	setup.exe:2M;fg-01.bin:4G;fg-02.bin:4G;fg-03.bin:4G	-	-	-
+game	The Warden 3 Wild Chase Complete Edition [ElPatio]	setup.exe:3M;data.bin:6G;data2.bin:6G	-	-	-
+game	Marlo.Kart.8.Deluxe.NSW-SIXXERS	mk8x.nsp:7G	-	-	-
+game	The.Legend.of.Zephra.Tears.of.the.Realm.NSW-VESPER	tzra.xci:16G	-	-	-
+game	Giant.of.War.Twilight.PS5-DUPLET	gtw.pkg:80G	-	-	-
+game	Moth-Man.Mila.Moran.PS4-HX	mm.pkg:36G	-	-	-
+game	Forge.Horizon.5.XBOX360-iMARX	forge.iso:7G	-	-	-
+game	Sonar Mania Switch NSP	sonar.nsp:1G	-	-	-
+game	Haze.Infinite.Campaign.v1.0-SLATEROW	slaterow.nfo:1K;haze.exe:60G	-	-	-
+game	Sekai.Shadows.Fade.Twice.GOTY-PLINTH	plinth.nfo:1K;setup.exe:2G	-	-	-
+game	Hollow Knave Silkwing	Game/steam_api64.dll:200K;Game/silkwing.exe:60M;Game/data.pak:2G	-	-	-
+game	Terrarium 1.4.4.9	Terrarium.exe:2M;steam_api.dll:200K;Content/a.xnb:20M	-	-	-
+game	Starlit Valley v1.6.8	Starlit Valley.exe:1M;steam_api64.dll:200K;Content/a.xnb:300M	-	-	-
+game	PC Game Pack 2024	disk1.bin:5G;disk2.bin:5G;setup.exe:1M	-	-	-
+game	Dread.Eternal.Deluxe-DUSKRIDERS	duskriders.nfo:1K;dread.iso:40G	-	-	-
+game	Mask.5.Royal.PS4-DUPLET	m5r.pkg:30G;eboot.bin:5M	-	-	-
+game	Unreal Pack	Paks/a.pak:1G;Paks/b.pak:1G;Paks/c.pak:1G;Game.exe:50M	-	-	-

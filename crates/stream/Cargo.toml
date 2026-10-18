@@ -1,0 +1,16 @@
+[package]
+name = "trs-stream"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Seedwell streaming server: loopback HTTP range server over verified pieces, playhead urgency, container index probes (SPEC 7F)"
+
+[dependencies]
+tokio = { version = "1", default-features = false, features = ["rt", "net", "time", "sync", "macros", "io-util"] }
+# 128-bit stream tokens from the OS RNG (same as trs-control / trs-metainfo).
+getrandom = { version = "0.3", default-features = false }
+
+[dev-dependencies]
+tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-thread", "net", "time", "sync", "macros", "io-util", "process"] }

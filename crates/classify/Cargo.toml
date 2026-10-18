@@ -1,0 +1,15 @@
+[package]
+name = "trs-classify"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "On-device content detection for Seedwell"
+
+[dependencies]
+# Deliberately empty: all parsers are hand-written (no regex), see README.
+
+[dev-dependencies]
+# Property tests only; never part of a release build.
+proptest = { version = "1", default-features = false, features = ["std"] }

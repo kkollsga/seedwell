@@ -1,0 +1,4 @@
+build/
+.build/
+Sources/trs_ffiFFI/include/
+Sources/SeedwellApp/Generated/

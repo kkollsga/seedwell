@@ -1,0 +1,5 @@
+# Alpine (musl libc). Toolchain only; the source arrives at run time.
+FROM alpine:latest
+RUN apk add --no-cache build-base bash curl ca-certificates git cmake perl pkgconf xz tar findutils procps coreutils
+ENV RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo PATH=/opt/cargo/bin:$PATH
+RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable

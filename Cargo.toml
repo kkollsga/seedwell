@@ -1,0 +1,22 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "tools/*"]
+exclude = ["tools/sysguard"]
+
+[workspace.package]
+# The one version of Seedwell: app/build.sh reads it for Info.plist, trs-cli and trs-ffi inherit it (--version, peer id, User-Agent).
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+# unwind, not abort: a panic in one peer task or a damaged redb file must not take down an
+# app that seeds for years. tokio isolates task panics; UniFFI and trs-state catch at their boundaries.
+panic = "unwind"
+debug = "line-tables-only"
+
+[profile.bench]
+inherits = "release"

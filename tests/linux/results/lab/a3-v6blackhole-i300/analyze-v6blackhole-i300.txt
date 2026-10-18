@@ -1,0 +1,220 @@
+# Capture report: mock-v6blackhole-i300.jsonl
+records: 25 total, 20 announce, 0 scrape, 5 markers
+
+## Client `v6blackhole-i300`  torrent 19e0d64f7bbe3af36701f376192d60fa4257e3e4  tracker id `mock`
+User-Agent: `Seedwell/0.0.1` x4
+Request header order: host, user-agent, accept, accept-encoding
+
+### Timeline (t0 = first record; delta = since previous announce of this torrent)
+time         delta  event          uploaded   downloaded         left numwant  response
++00:00.0            -- MARKER: run-start --
++00:00.2            -- MARKER: add --
++00:00.8            -- MARKER: torrents-added --
++00:17.4            started               0            0        65536      50  200 int=300 min=120 S/L=0/0 peers=0 (0ms, 75B)
++05:17.4   +300.0s  none                  0            0        65536      50  200 int=300 min=120 S/L=0/0 peers=0 (0ms, 75B)
++10:17.4   +300.0s  none                  0            0        65536      50  200 int=300 min=120 S/L=0/0 peers=0 (0ms, 75B)
++15:01.1            -- MARKER: quit --
++15:01.1   +283.7s  stopped               0            0        65536       0  200 int=300 min=120 S/L=0/0 peers=0 (0ms, 75B)
++15:05.6            -- MARKER: run-end --
+
+### Summary
+event sequence: started, none x2, stopped
+responses that were not a clean success: 0
+
+parameter order by event (count):
+  none      x2   info_hash&peer_id&port&uploaded&downloaded&left&numwant&key&compact
+  started   x1   info_hash&peer_id&port&uploaded&downloaded&left&numwant&key&compact&event
+  stopped   x1   info_hash&peer_id&port&uploaded&downloaded&left&numwant&key&compact&event
+
+encoding:
+  info_hash  80 bytes: 56 escaped, 24 literal; needlessly escaped unreserved bytes: 0; unsafe literal bytes: 0; hex digit case: upper
+  peer_id    80 bytes: 0 escaped, 80 literal; needlessly escaped unreserved bytes: 0; unsafe literal bytes: 0; hex digit case: none
+  peer_id prefix(es) (ASCII, first 8): ["-SX0001-"]
+
+parameter values seen (other than info_hash/peer_id):
+  compact        "1" x4
+  event          "started" x1, "stopped" x1
+  key            "0C9FFA2E" x4
+  numwant        "0" x1, "50" x3
+  port           "51600" x4
+
+sessions (a session starts at event=started):
+  #1: 4 announces, starts +00:17.4, key=["0C9FFA2E"], peer_id=["-SX0001-ZhJCxEL05ETe"]
+
+interval adherence (regular announces following a successful response):
+  n=2 gaps: min 300.0s, median 300.0s, max 300.0s; tracker interval=Some(300) min interval=Some(120)
+
+## Client `v6blackhole-i300`  torrent 4bf25d18fe922f7b43d10b756d8c81366ddc9771  tracker id `mock`
+User-Agent: `Seedwell/0.0.1` x4
+Request header order: host, user-agent, accept, accept-encoding
+
+### Timeline (t0 = first record; delta = since previous announce of this torrent)
+time         delta  event          uploaded   downloaded         left numwant  response
++00:00.0            -- MARKER: run-start --
++00:00.2            -- MARKER: add --
++00:00.8            -- MARKER: torrents-added --
++00:17.4            started               0            0        65536      50  200 int=300 min=120 S/L=0/0 peers=0 (0ms, 75B)
++05:17.4   +300.0s  none                  0            0        65536      50  200 int=300 min=120 S/L=0/0 peers=0 (0ms, 75B)
++10:17.4   +300.0s  none                  0            0        65536      50  200 int=300 min=120 S/L=0/0 peers=0 (0ms, 75B)
++15:01.1            -- MARKER: quit --
++15:01.1   +283.7s  stopped               0            0        65536       0  200 int=300 min=120 S/L=0/0 peers=0 (0ms, 75B)
++15:05.6            -- MARKER: run-end --
+
+### Summary
+event sequence: started, none x2, stopped
+responses that were not a clean success: 0
+
+parameter order by event (count):
+  none      x2   info_hash&peer_id&port&uploaded&downloaded&left&numwant&key&compact
+  started   x1   info_hash&peer_id&port&uploaded&downloaded&left&numwant&key&compact&event
+  stopped   x1   info_hash&peer_id&port&uploaded&downloaded&left&numwant&key&compact&event
+
+encoding:
+  info_hash  80 bytes: 52 escaped, 28 literal; needlessly escaped unreserved bytes: 0; unsafe literal bytes: 0; hex digit case: upper
+  peer_id    80 bytes: 0 escaped, 80 literal; needlessly escaped unreserved bytes: 0; unsafe literal bytes: 0; hex digit case: none
+  peer_id prefix(es) (ASCII, first 8): ["-SX0001-"]
+
+parameter values seen (other than info_hash/peer_id):
+  compact        "1" x4
+  event          "started" x1, "stopped" x1
+  key            "0C9FFA2E" x4
+  numwant        "0" x1, "50" x3
+  port           "51600" x4
+
+sessions (a session starts at event=started):
+  #1: 4 announces, starts +00:17.4, key=["0C9FFA2E"], peer_id=["-SX0001-ZhJCxEL05ETe"]
+
+interval adherence (regular announces following a successful response):
+  n=2 gaps: min 300.0s, median 300.0s, max 300.0s; tracker interval=Some(300) min interval=Some(120)
+
+## Client `v6blackhole-i300`  torrent 722710517aa2c9355932f6866cfd6e55cd30f63b  tracker id `mock`
+User-Agent: `Seedwell/0.0.1` x4
+Request header order: host, user-agent, accept, accept-encoding
+
+### Timeline (t0 = first record; delta = since previous announce of this torrent)
+time         delta  event          uploaded   downloaded         left numwant  response
++00:00.0            -- MARKER: run-start --
++00:00.2            -- MARKER: add --
++00:00.8            -- MARKER: torrents-added --
++00:17.4            started               0            0        65536      50  200 int=300 min=120 S/L=0/0 peers=0 (0ms, 75B)
++05:18.4   +301.0s  none                  0            0        65536      50  200 int=300 min=120 S/L=0/0 peers=0 (0ms, 75B)
++10:18.4   +300.0s  none                  0            0        65536      50  200 int=300 min=120 S/L=0/0 peers=0 (0ms, 75B)
++15:01.1            -- MARKER: quit --
++15:03.1   +284.7s  stopped               0            0        65536       0  200 int=300 min=120 S/L=0/0 peers=0 (0ms, 75B)
++15:05.6            -- MARKER: run-end --
+
+### Summary
+event sequence: started, none x2, stopped
+responses that were not a clean success: 0
+
+parameter order by event (count):
+  none      x2   info_hash&peer_id&port&uploaded&downloaded&left&numwant&key&compact
+  started   x1   info_hash&peer_id&port&uploaded&downloaded&left&numwant&key&compact&event
+  stopped   x1   info_hash&peer_id&port&uploaded&downloaded&left&numwant&key&compact&event
+
+encoding:
+  info_hash  80 bytes: 40 escaped, 40 literal; needlessly escaped unreserved bytes: 0; unsafe literal bytes: 0; hex digit case: upper
+  peer_id    80 bytes: 0 escaped, 80 literal; needlessly escaped unreserved bytes: 0; unsafe literal bytes: 0; hex digit case: none
+  peer_id prefix(es) (ASCII, first 8): ["-SX0001-"]
+
+parameter values seen (other than info_hash/peer_id):
+  compact        "1" x4
+  event          "started" x1, "stopped" x1
+  key            "0C9FFA2E" x4
+  numwant        "0" x1, "50" x3
+  port           "51600" x4
+
+sessions (a session starts at event=started):
+  #1: 4 announces, starts +00:17.4, key=["0C9FFA2E"], peer_id=["-SX0001-ZhJCxEL05ETe"]
+
+interval adherence (regular announces following a successful response):
+  n=2 gaps: min 300.0s, median 301.0s, max 301.0s; tracker interval=Some(300) min interval=Some(120)
+
+## Client `v6blackhole-i300`  torrent cbb2b301e695c040e35ce0bd6831fd38a2077571  tracker id `mock`
+User-Agent: `Seedwell/0.0.1` x4
+Request header order: host, user-agent, accept, accept-encoding
+
+### Timeline (t0 = first record; delta = since previous announce of this torrent)
+time         delta  event          uploaded   downloaded         left numwant  response
++00:00.0            -- MARKER: run-start --
++00:00.2            -- MARKER: add --
++00:00.8            -- MARKER: torrents-added --
++00:17.4            started               0            0        65536      50  200 int=300 min=120 S/L=0/0 peers=0 (0ms, 75B)
++05:17.4   +300.0s  none                  0            0        65536      50  200 int=300 min=120 S/L=0/0 peers=0 (0ms, 75B)
++10:17.4   +300.0s  none                  0            0        65536      50  200 int=300 min=120 S/L=0/0 peers=0 (0ms, 75B)
++15:01.1            -- MARKER: quit --
++15:02.1   +284.7s  stopped               0            0        65536       0  200 int=300 min=120 S/L=0/0 peers=0 (0ms, 75B)
++15:05.6            -- MARKER: run-end --
+
+### Summary
+event sequence: started, none x2, stopped
+responses that were not a clean success: 0
+
+parameter order by event (count):
+  none      x2   info_hash&peer_id&port&uploaded&downloaded&left&numwant&key&compact
+  started   x1   info_hash&peer_id&port&uploaded&downloaded&left&numwant&key&compact&event
+  stopped   x1   info_hash&peer_id&port&uploaded&downloaded&left&numwant&key&compact&event
+
+encoding:
+  info_hash  80 bytes: 60 escaped, 20 literal; needlessly escaped unreserved bytes: 0; unsafe literal bytes: 0; hex digit case: upper
+  peer_id    80 bytes: 0 escaped, 80 literal; needlessly escaped unreserved bytes: 0; unsafe literal bytes: 0; hex digit case: none
+  peer_id prefix(es) (ASCII, first 8): ["-SX0001-"]
+
+parameter values seen (other than info_hash/peer_id):
+  compact        "1" x4
+  event          "started" x1, "stopped" x1
+  key            "0C9FFA2E" x4
+  numwant        "0" x1, "50" x3
+  port           "51600" x4
+
+sessions (a session starts at event=started):
+  #1: 4 announces, starts +00:17.4, key=["0C9FFA2E"], peer_id=["-SX0001-ZhJCxEL05ETe"]
+
+interval adherence (regular announces following a successful response):
+  n=2 gaps: min 300.0s, median 300.0s, max 300.0s; tracker interval=Some(300) min interval=Some(120)
+
+## Client `v6blackhole-i300`  torrent d3d2f9fd80efe9cd24e8eb88410b1e419bc54769  tracker id `mock`
+User-Agent: `Seedwell/0.0.1` x4
+Request header order: host, user-agent, accept, accept-encoding
+
+### Timeline (t0 = first record; delta = since previous announce of this torrent)
+time         delta  event          uploaded   downloaded         left numwant  response
++00:00.0            -- MARKER: run-start --
++00:00.2            -- MARKER: add --
++00:00.8            -- MARKER: torrents-added --
++00:19.2            started               0            0        65536      50  200 int=300 min=120 S/L=0/0 peers=0 (0ms, 75B)
++05:19.4   +300.3s  none                  0            0        65536      50  200 int=300 min=120 S/L=0/0 peers=0 (0ms, 75B)
++10:19.5   +300.0s  none                  0            0        65536      50  200 int=300 min=120 S/L=0/0 peers=0 (0ms, 75B)
++15:01.1            -- MARKER: quit --
++15:01.1   +281.7s  stopped               0            0        65536       0  200 int=300 min=120 S/L=0/0 peers=0 (0ms, 75B)
++15:05.6            -- MARKER: run-end --
+
+### Summary
+event sequence: started, none x2, stopped
+responses that were not a clean success: 0
+
+parameter order by event (count):
+  none      x2   info_hash&peer_id&port&uploaded&downloaded&left&numwant&key&compact
+  started   x1   info_hash&peer_id&port&uploaded&downloaded&left&numwant&key&compact&event
+  stopped   x1   info_hash&peer_id&port&uploaded&downloaded&left&numwant&key&compact&event
+
+encoding:
+  info_hash  80 bytes: 64 escaped, 16 literal; needlessly escaped unreserved bytes: 0; unsafe literal bytes: 0; hex digit case: upper
+  peer_id    80 bytes: 0 escaped, 80 literal; needlessly escaped unreserved bytes: 0; unsafe literal bytes: 0; hex digit case: none
+  peer_id prefix(es) (ASCII, first 8): ["-SX0001-"]
+
+parameter values seen (other than info_hash/peer_id):
+  compact        "1" x4
+  event          "started" x1, "stopped" x1
+  key            "0C9FFA2E" x4
+  numwant        "0" x1, "50" x3
+  port           "51600" x4
+
+sessions (a session starts at event=started):
+  #1: 4 announces, starts +00:19.2, key=["0C9FFA2E"], peer_id=["-SX0001-ZhJCxEL05ETe"]
+
+interval adherence (regular announces following a successful response):
+  n=2 gaps: min 300.0s, median 300.3s, max 300.3s; tracker interval=Some(300) min interval=Some(120)
+
+## Detector verdict (tolerance 2000 ms, max 10 req/min/host)
+PASS  v6blackhole-i300   (0 violation(s), 0 warning(s))

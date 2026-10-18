@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Hardened runtime entitlements for Seedwell: none.
+
+  Seedwell is not sandboxed (SPEC 12 #19: watch folders, library organizing, the agent socket), so the
+  network entitlements (com.apple.security.network.client/server) and user-selected files only exist
+  inside a sandbox and would do nothing here. Outgoing and incoming peer, tracker, DHT and uTP traffic
+  and every file access work under the hardened runtime as is.
+
+  Not needed, so not granted: JIT / unsigned executable memory (the Rust allocator maps anonymous
+  non-executable pages), DYLD environment variables, Apple events, camera, microphone, contacts.
+  Library validation stays ON: the only library loaded from outside is Sparkle.framework, signed with
+  the same identity as the app. (Ad-hoc builds have no team id, so sign.sh adds
+  disable-library-validation to those only; they are not distributable.)
+-->
+<plist version="1.0">
+<dict/>
+</plist>

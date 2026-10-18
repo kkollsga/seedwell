@@ -1,0 +1,1 @@
+<root><URLBase>ht8.1.1:5000/</URLBase><device><serficeList><service><serviceType>urn:schemas-upnp-org:service:WANIPConnection:2</serviceType><controlURL>/ctl</controlURL></service></serviceList></device></root>

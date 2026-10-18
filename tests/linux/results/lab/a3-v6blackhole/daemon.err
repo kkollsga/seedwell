@@ -1,0 +1,3 @@
+seedwell daemon: directory /tmp/mr/state is accessible to other users (mode 755); the socket itself stays private
+seedwell daemon: shutting down
+seedwell daemon: stopped (trackers confirmed 5, abandoned 0)

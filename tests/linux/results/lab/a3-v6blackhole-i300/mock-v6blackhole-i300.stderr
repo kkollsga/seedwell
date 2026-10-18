@@ -1,0 +1,4 @@
+tracker-probe mock on 203.0.113.9:7071 (interval 300s, min interval 120s, ipv6=Blackhole) -> /out/mock-v6blackhole-i300.jsonl
+tracker-probe mock: 2 IPv6 connection attempts were deliberately broken
+tracker-probe mock: max concurrent in-flight announce/scrape requests: 1
+tracker-probe mock: shut down cleanly, log flushed

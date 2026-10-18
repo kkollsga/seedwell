@@ -1,0 +1,114 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Menu concept</title>
+<link rel="stylesheet" href="shared.css">
+<style>
+  body { width: 1180px; height: 700px; position: relative; }
+  /* macOS 26+ style native menu */
+  .nm {
+    position: absolute; padding: 6px;
+    background: rgba(48, 48, 54, 0.72);
+    backdrop-filter: blur(40px) saturate(180%);
+    border: 0.5px solid rgba(255,255,255,0.18);
+    box-shadow: 0 0 0 0.5px rgba(0,0,0,0.55), 0 20px 50px rgba(0,0,0,0.5);
+    border-radius: 16px; color: rgba(255,255,255,0.92); font-size: 13.5px;
+  }
+  .nm .mi { position: relative; display: flex; align-items: center; min-height: 26px; padding: 3px 12px 3px 30px; border-radius: 8px; gap: 8px; }
+  .nm .mi.two { padding-top: 4px; padding-bottom: 5px; }
+  .nm .mi .t { flex: 1; min-width: 0; }
+  .nm .mi .t div:first-child { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .nm .mi .s { font-size: 11.5px; color: rgba(255,255,255,0.55); margin-top: 1px; font-variant-numeric: tabular-nums; }
+  .nm .mi .chk { position: absolute; left: 11px; font-size: 12px; }
+  .nm .mi .ic { position: absolute; left: 9px; top: 50%; transform: translateY(-50%); display: flex; }
+  .nm .mi .k { color: rgba(255,255,255,0.45); font-size: 13px; }
+  .nm .mi .badge { font-size: 12px; color: rgba(255,255,255,0.55); font-variant-numeric: tabular-nums; }
+  .nm .mi .chev { color: rgba(255,255,255,0.55); font-size: 11px; }
+  .nm .mi.dis { color: rgba(255,255,255,0.36); }
+  .nm .mi.hl { background: rgba(255,255,255,0.13); }
+  .nm .mi.sel { background: #0a6cf0; color: #fff; }
+  .nm .mi.sel .k, .nm .mi.sel .chev, .nm .mi.sel .s { color: rgba(255,255,255,0.85); }
+  .nm .hd { font-size: 11.5px; font-weight: 700; color: rgba(255,255,255,0.5); padding: 7px 12px 2px 12px; }
+  .nm .sep { height: 1px; background: rgba(255,255,255,0.12); margin: 5px 12px; }
+  .nm .mi.red { color: #ff6961; }
+  .cursor { position: absolute; width: 22px; height: 30px; }
+  .note { position: absolute; color: rgba(255,255,255,0.88); font-size: 12px; line-height: 1.45; max-width: 300px; padding-left: 12px; border-left: 2px solid rgba(255,255,255,0.35); }
+  .note b { color: #fff; }
+  .caption { position: absolute; left: 40px; bottom: 26px; color: rgba(255,255,255,0.75); font-size: 12px; }
+  .caption b { color: #fff; font-size: 15px; display: block; margin-bottom: 3px; }
+</style></head>
+<body class="wall-dark">
+  <div class="menubar">
+    <div class="left"><span class="apple"></span><b>Finder</b><span>File</span><span>Edit</span><span>View</span><span>Go</span><span>Window</span><span>Help</span></div>
+    <div class="right">
+      <div class="mb-item active">
+        <svg width="16" height="16" viewBox="0 0 16 16"><path d="M5 2v9M2 8l3 3 3-3" stroke="#fff" stroke-width="1.7" fill="none" stroke-linecap="round" stroke-linejoin="round"/><path d="M11 14V5M8 8l3-3 3 3" stroke="#fff" stroke-width="1.7" fill="none" stroke-linecap="round" stroke-linejoin="round" opacity=".5"/></svg>
+      </div>
+      <span><svg width="17" height="13" viewBox="0 0 17 13"><path d="M8.5 12.2l2-2.4a3 3 0 0 0-4 0zM4.7 7.6a5.6 5.6 0 0 1 7.6 0l1.3-1.6a7.7 7.7 0 0 0-10.2 0zM1.9 4.3a9.9 9.9 0 0 1 13.2 0l1.3-1.6a12 12 0 0 0-15.8 0z" fill="#fff"/></svg></span>
+      <span><svg width="26" height="12" viewBox="0 0 26 12"><rect x=".5" y=".5" width="22" height="11" rx="3.2" fill="none" stroke="#fff" opacity=".5"/><rect x="2" y="2" width="16" height="8" rx="2" fill="#fff"/><path d="M24 4v4" stroke="#fff" stroke-width="1.4" opacity=".5" stroke-linecap="round"/></svg></span>
+      <span>Sun 11 Oct  14:32</span>
+    </div>
+  </div>
+
+  <!-- Main menu -->
+  <div class="nm" style="left: 430px; top: 36px; width: 330px;">
+    <div class="hd">Downloading</div>
+    <div class="mi two hl">
+      <span class="ic"><svg width="14" height="14" viewBox="0 0 14 14"><circle cx="7" cy="7" r="5.5" fill="none" stroke="rgba(255,255,255,.25)" stroke-width="2"/><circle cx="7" cy="7" r="5.5" fill="none" stroke="#fff" stroke-width="2" stroke-dasharray="25.6 34.6" transform="rotate(-90 7 7)" stroke-linecap="round"/></svg></span>
+      <div class="t"><div>ubuntu-26.04-desktop-arm64.iso</div><div class="s">74% · 2 min left</div></div>
+    </div>
+    <div class="mi two">
+      <span class="ic"><svg width="14" height="14" viewBox="0 0 14 14"><circle cx="7" cy="7" r="5.5" fill="none" stroke="rgba(255,255,255,.25)" stroke-width="2"/><circle cx="7" cy="7" r="5.5" fill="none" stroke="#fff" stroke-width="2" stroke-dasharray="7.3 34.6" transform="rotate(-90 7 7)" stroke-linecap="round"/></svg></span>
+      <div class="t"><div>Sprite Fright 4K</div><div class="s">21% · 14 min left</div></div>
+    </div>
+    <div class="hd">Queued</div>
+    <div class="mi dis"><span class="t">debian-13.2.0-amd64-DVD-1.iso</span></div>
+    <div class="mi dis"><span class="t">Common Voice Corpus 22</span></div>
+    <div class="mi dis"><span class="t">+ 3 more</span></div>
+    <div class="sep"></div>
+
+    <div class="hd">Recent</div>
+    <div class="mi two"><span class="ic"><svg width="14" height="14" viewBox="0 0 14 14"><circle cx="7" cy="7" r="6" fill="rgba(48,209,88,0.9)"/><path d="M4.2 7.2l1.9 1.9 3.7-4" stroke="#fff" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg></span><div class="t"><div>Night of the Living Dead (1968)</div><div class="s">Movie · 12 min ago</div></div></div>
+    <div class="mi two"><span class="ic"><svg width="14" height="14" viewBox="0 0 14 14"><circle cx="7" cy="7" r="6" fill="rgba(48,209,88,0.9)"/><path d="M4.2 7.2l1.9 1.9 3.7-4" stroke="#fff" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg></span><div class="t"><div>Frankenstein — Mary Shelley</div><div class="s">Book · 1 h ago</div></div></div>
+    <div class="mi two"><span class="ic"><svg width="14" height="14" viewBox="0 0 14 14"><circle cx="7" cy="7" r="6" fill="rgba(48,209,88,0.9)"/><path d="M4.2 7.2l1.9 1.9 3.7-4" stroke="#fff" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg></span><div class="t"><div>archlinux-2026.10.01-x86_64.iso</div><div class="s">Software · yesterday</div></div></div>
+    <div class="sep"></div>
+
+    <div class="mi"><span class="ic" style="font-size:13px;left:11px">↑</span><span class="t">Sharing 212 torrents</span><span class="badge">3.1 MB/s</span><span class="chev">❯</span></div>
+    <div class="sep"></div>
+
+    <div class="mi"><span class="t" style="font-weight:600">Open Seedwell…</span><span class="k">⌘L</span></div>
+    <div class="mi"><span class="t">Quit</span><span class="k">⌘Q</span></div>
+  </div>
+
+  <!-- Right-click context menu on a download -->
+  <div class="nm" style="left: 752px; top: 92px; width: 250px;">
+    <div class="mi"><span class="t">Pause</span></div>
+    <div class="mi"><span class="t">Move to Top of Queue</span></div>
+    <div class="mi"><span class="t">Show in Finder</span></div>
+    <div class="sep"></div>
+    <div class="mi sel"><span class="t">Priority</span><span class="chev">❯</span></div>
+    <div class="mi"><span class="t">Category: Software</span><span class="chev">❯</span></div>
+    <div class="mi"><span class="t">Rule: Default</span><span class="chev">❯</span></div>
+    <div class="mi"><span class="t">Files…</span></div>
+    <div class="sep"></div>
+    <div class="mi"><span class="t">Copy Magnet Link</span></div>
+    <div class="mi"><span class="t">Remove…</span></div>
+    <div class="mi red"><span class="t">Remove and Delete Files…</span></div>
+  </div>
+
+  <!-- Priority submenu -->
+  <div class="nm" style="left: 1006px; top: 204px; width: 160px;">
+    <div class="mi"><span class="chk">✓</span><span class="t">★ High</span></div>
+    <div class="mi"><span class="t">Normal</span></div>
+    <div class="mi"><span class="t">Low</span></div>
+  </div>
+
+  <svg class="cursor" style="left: 736px; top: 74px;" viewBox="0 0 22 30"><path d="M2 2v22l6-5.5 4 9 3.4-1.5-4-8.8H19z" fill="#000" stroke="#fff" stroke-width="1.6" stroke-linejoin="round"/></svg>
+
+  <div class="note" style="left: 50px; top: 70px;"><b>Downloading.</b> Name, plus a grey subtitle with % and time left. The progress ring is the item's image. Native menu subtitles, nothing custom-drawn.</div>
+  <div class="note" style="left: 50px; top: 190px;"><b>Queued.</b> The next few only, dimmed, then "+ N more".</div>
+  <div class="note" style="left: 50px; top: 290px;"><b>Recent.</b> The last 3 finished downloads with category and time. Click to open in Finder.</div>
+  <div class="note" style="left: 50px; top: 400px;"><b>Sharing: one line.</b> Seeding count and upload rate. Hover for the busiest torrents, or a split by tracker if enabled.</div>
+  <div class="note" style="left: 50px; top: 480px;"><b>Right-click any torrent</b> for pause, priority, category, rule, files and remove.</div>
+  <div class="note" style="left: 50px; top: 545px;"><b>Then only Open and Quit.</b> Adding torrents, settings, pausing and limits all live in the main window.</div>
+
+  <div class="caption"><b>Concept 1 — Menu bar menu</b>Plain native menu, Plex-style: downloading, the next few queued, recent downloads, one line of sharing activity. That's it.</div>
+</body></html>

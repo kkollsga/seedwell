@@ -1,0 +1,16 @@
+[package]
+name = "trs-utp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "uTP (BEP 29) with LEDBAT congestion control: sans-I/O core, UDP multiplexer, tokio driver"
+
+[dependencies]
+# Each dependency is justified in README.md.
+tokio = { version = "1", default-features = false, features = ["net", "time", "sync", "rt", "macros"] }
+libc = "0.2"
+
+[dev-dependencies]
+tokio = { version = "1", default-features = false, features = ["net", "time", "sync", "rt", "rt-multi-thread", "macros", "io-util"] }

@@ -1,0 +1,100 @@
+# Held-out rows: written after the classifier was tuned on corpus.tsv and never used for tuning.
+movie	The Maple Ridge Affair (2010) 1080p BrRip x264 - HALCYON	The.Maple.Ridge.Affair.2010.1080p.BrRip.x264.HALCYON.mp4:1.7G;The.Maple.Ridge.Affair.2010.1080p.BrRip.x264.HALCYON.srt:70K	-	-	title=The Maple Ridge Affair|year=2010
+movie	Copper.Canyon.2010.720p.BluRay.x264.HALCYON	Copper.Canyon.2010.720p.BluRay.x264.HALCYON.mp4:900M	-	-	title=Copper Canyon|year=2010
+movie	Harvest of Stars 2016 1080p BluRay DDP5 1 x265-ORBIT2020	Harvest of Stars 2016 1080p BluRay DDP5 1 x265-ORBIT2020.mkv:6G	-	-	title=Harvest of Stars|year=2016
+movie	Salt Flats [2012] [BDRip] [1080p] [HEVC] [10bit]	Salt Flats [2012].mkv:3G	-	-	title=Salt Flats|year=2012
+movie	[LHB] Winter Garden (2012)	Winter.Garden.2012.720p.BluRay.x264-[LHB.MX].mp4:1G	-	-	title=Winter Garden|year=2012
+movie	The Iron Bridge (2014) {Extended Cut} 1080p	The Iron Bridge (2014) Extended Cut.mkv:11G	-	-	title=The Iron Bridge|year=2014
+movie	Les.Chemins.de.la.Mer.2013.MULTi.1080p.BluRay.x264-GRP	Les.Chemins.de.la.Mer.2013.MULTi.1080p.BluRay.x264-GRP.mkv:9G	-	-	title=Les Chemins de la Mer|year=2013
+movie	Le.Petit.Phare.2018.TRUEFRENCH.1080p.WEB.H264-GRP	Le.Petit.Phare.2018.TRUEFRENCH.1080p.WEB.H264-GRP.mkv:4G	-	-	title=Le Petit Phare|year=2018
+movie	Quiet Rivers Part 1 2014 720p BluRay x264	Quiet Rivers Part 1 2014.mkv:4G	-	-	year=2014
+movie	Solstice - The Longest Night (2017)	Solstice - The Longest Night (2017).mkv:7G	-	-	title=Solstice - The Longest Night|year=2017
+movie	700 (2006) 1080p BluRay	700 (2006).mkv:8G	-	-	title=700|year=2006
+movie	Ni9ne 1995 REMASTERED 1080p BluRay x265	Ni9ne 1995.mkv:8G	-	-	title=Ni9ne|year=1995
+movie	Lakes.Twelve.2004.1080p.BluRay.DTS.x264-HDMaVeRiCk	Lakes.Twelve.2004.1080p.BluRay.DTS.x264-HDMaVeRiCk.mkv:12G	-	-	title=Lakes Twelve|year=2004
+movie	Der Nebel über Münster (1987) 1080p BluRay	Der Nebel über Münster (1987).mkv:9G	-	-	title=Der Nebel über Münster|year=1987
+movie	Parasite-like.Harvest.2019.KOREAN.1080p.BluRay.x264-GRP	Parasite-like.Harvest.2019.KOREAN.1080p.BluRay.x264-GRP.mkv:10G	-	-	year=2019
+movie	Night.Train.2024.HDCAM.x264-GRP	Night.Train.2024.HDCAM.x264-GRP.mp4:1.3G	-	-	title=Night Train|year=2024
+movie	Tin.Whistle.Blues.1999.DVDRip.XviD-GRP	Tin.Whistle.Blues.1999.DVDRip.XviD-GRP.avi:700M;Tin.Whistle.Blues.1999.DVDRip.XviD-GRP.nfo:2K;Tin.Whistle.Blues.1999.DVDRip.XviD-GRP.sfv:1K	-	-	title=Tin Whistle Blues|year=1999|junk=1,2
+movie	Whispering Pines (1993)	Whispering Pines (1993).mkv:6G;Subs/English.srt:60K;Subs/French.srt:60K;Featurettes/Making Of.mkv:400M	-	-	title=Whispering Pines|year=1993
+movie	The Orchard Keeper 2008 DVDRip.avi	=	-	-	title=The Orchard Keeper|year=2008
+movie	Beacon.Hill.2020.1080p.WEBRip.x264-KESTREL	Beacon.Hill.2020.1080p.WEBRip.x264-KESTREL.mp4:2.2G;KESTREL.COM.txt:30;KESTREL_DO_NOT_MIRROR.exe:99K	-	-	title=Beacon Hill|year=2020|junk=1|suspicious=2
+movie	Ghost Ship Blues (2003) [1080p]	Ghost Ship Blues (2003) [1080p].mp4:2G	Movies	-	title=Ghost Ship Blues|year=2003
+movie	Elevator Pitch	elevator.pitch.2011.720p.mkv:3G	Movies	-	-
+movie	The Last Telegram.2009.BDRip.x264.AC3-GRP	The Last Telegram.2009.BDRip.x264.AC3-GRP.mkv:2G	-	-	year=2009
+movie	Harbour.Lights.The.Movie.2015.1080p.WEB-DL.DD5.1.H264-GRP	Harbour.Lights.The.Movie.2015.1080p.WEB-DL.DD5.1.H264-GRP.mkv:4G	-	-	title=Harbour Lights The Movie|year=2015
+tv	Maple Street S01E01 Pilot 1080p AMZN WEB-DL DDP5.1 H.264-GRP	Maple Street S01E01 Pilot 1080p AMZN WEB-DL DDP5.1 H.264-GRP.mkv:2.6G	-	-	show=Maple Street|season=1|episode=1
+tv	Maple.Street.S01E02.iNTERNAL.720p.HDTV.x264-GRP	Maple.Street.S01E02.iNTERNAL.720p.HDTV.x264-GRP.mkv:1G	-	-	show=Maple Street|season=1|episode=2
+tv	Maple Street - 1x03 - The Letter (HDTV-LARK)	Maple Street - 1x03 - The Letter (HDTV-LARK).avi:350M	-	-	show=Maple Street|season=1|episode=3
+tv	Maple Street (2008) - S01E04 - The Fence [Bluray-1080p]	Maple Street (2008) - S01E04 - The Fence [Bluray-1080p].mkv:4G	-	-	show=Maple Street|year=2008|season=1|episode=4
+tv	Fox Hollow Season 01 Complete [720p x265 HEVC]	Fox Hollow S01E{01..10}.mkv:500M	-	-	show=Fox Hollow|season=1
+tv	Der.Leuchtturm.S03.GERMAN.DL.1080p.WEB.h264-GRP	Der.Leuchtturm.S03E{01..08}.GERMAN.DL.1080p.WEB.h264-GRP.mkv:2.5G	-	-	season=3
+tv	Copper Kings (2015) Season 1-4 S01-S04 (1080p BluRay x265 HEVC 10bit AAC 5.1 RCVR)	Season 1/Copper Kings S01E{01..03} 1080p.mkv:1G;Season 2/Copper Kings S02E{01..03} 1080p.mkv:1G;Season 3/Copper Kings S03E{01..03} 1080p.mkv:1G;Season 4/Copper Kings S04E{01..03} 1080p.mkv:1G	-	-	show=Copper Kings|year=2015|season=1|season_end=4
+tv	[HarborSubs] Sky Ferry (01-12) (1080p) [Batch]	[HarborSubs] Sky Ferry - {01..12} (1080p) [A1B2C3D4].mkv:1.4G	-	-	show=Sky Ferry
+tv	[Anime Hour] Sky Ferry S02 [BD][1080p][HEVC 10bit x265][Dual Audio][Eng Sub]	[Anime Hour] Sky Ferry S02E{01..12}.mkv:1.2G	-	-	show=Sky Ferry|season=2
+tv	Morning.Brew.2024.10.09.Guest.Star.720p.HDTV.x264-GRP	Morning.Brew.2024.10.09.Guest.Star.720p.HDTV.x264-GRP.mkv:700M	-	-	show=Morning Brew|date=2024-10-09
+tv	Seoul Nights E05 240101 1080p-NEXT	Seoul Nights E05 240101 1080p-NEXT.mp4:1.5G	-	-	show=Seoul Nights|episode=5
+tv	Coastal Watch Series 3 Complete 720p	Coastal Watch S03E{01..06}.mkv:1G	-	-	show=Coastal Watch|season=3
+tv	Maple.Street.S01E05E06E07.720p.HDTV.x264	Maple.Street.S01E05E06E07.720p.HDTV.x264.mkv:2G	-	-	show=Maple Street|season=1|episode=5
+tv	Winter Hollow S02E08 1080p WEB H264-CRUMBS	=	-	-	show=Winter Hollow|season=2|episode=8
+tv	Lake District Diaries.S04E03.HDTV.XviD-AFG	Lake District Diaries.S04E03.HDTV.XviD-AFG.avi:350M;Lake District Diaries.S04E03.HDTV.XviD-AFG.nfo:1K	-	-	show=Lake District Diaries|season=4|episode=3|junk=1
+tv	The Weekly Roundup S05 E12	The Weekly Roundup S05 E12.mp4:600M	TV	-	show=The Weekly Roundup
+tv	Kitchen Stories 2x04 720p	Kitchen Stories 2x04 720p.mkv:900M	-	-	show=Kitchen Stories|season=2|episode=4
+tv	Tales from Pinewood - Season 2 [DVDRip]	Tales from Pinewood S02E{01..07} DVDRip.avi:350M	-	-	show=Tales from Pinewood|season=2
+music	Astra Lune - Night Library (2010) [FLAC 24-96]	01 - Night Library.flac:90M;02 - Stacks.flac:85M;03 - Dewey.flac:88M	-	-	artist=Astra Lune|album=Night Library|year=2010
+music	Astra Lune – Night Library (Deluxe Edition) (2012) FLAC	01 - Night Library.flac:40M;02 - Stacks.flac:40M;03 - Bonus.flac:40M	-	-	artist=Astra Lune|album=Night Library|year=2012
+music	VA – Now Hits 54 (2024) [WEB FLAC]	01 - A.flac:30M;02 - B.flac:30M;03 - C.flac:30M	-	-	artist=Various Artists|year=2024
+music	Astra Lune - Live in Reykjavik (2019) [MP3]	01 Intro.mp3:9M;02 Song.mp3:9M;03 Song2.mp3:9M	-	-	artist=Astra Lune|year=2019
+music	Astra Lune - 2015 - Quiet Machines [CD-FLAC]	01.flac:35M;02.flac:35M;03.flac:35M;Astra Lune - Quiet Machines.log:8K;Astra Lune - Quiet Machines.cue:2K	-	-	artist=Astra Lune|album=Quiet Machines|year=2015
+music	Astra.Lune.-.Paper.Moons.2008.FLAC-GRP	01.flac:35M;02.flac:35M;03.flac:35M	-	-	artist=Astra Lune|year=2008
+music	Berliner Philharmoniker - Brahms Symphony No. 1 (2015)	01 I.flac:60M;02 II.flac:50M;03 III.flac:40M;04 IV.flac:70M	-	-	artist=Berliner Philharmoniker
+music	Tidal Pool [FLAC]	01 - Tidal Pool.flac:35M;02 - Low.flac:35M;03 - High.flac:35M	-	-	-
+music	Astra Lune - Hollow Echo.m4a	=	-	-	artist=Astra Lune
+music	Astra Lune Discography (1998 - 2020) [FLAC]	1998 - First/01.flac:30M;1998 - First/02.flac:30M;2020 - Last/01.flac:30M;2020 - Last/02.flac:30M	-	-	artist=Astra Lune
+music	The Lighthouse (Original Score) (2019)	01 - Main Theme.mp3:9M;02 - Fog.mp3:9M;03 - Storm.mp3:9M;04 - Finale.mp3:9M	-	-	year=2019
+music	Rhapsody Ensemble - Winter Suite [24-192 HD] [2021]	01 Winter.flac:150M;02 Frost.flac:150M	-	-	artist=Rhapsody Ensemble|album=Winter Suite|year=2021
+music	Blue Heron - Wide Water (2007) (320 kbps)	01 Wide.mp3:12M;02 Water.mp3:12M;03 Heron.mp3:12M	-	-	artist=Blue Heron|album=Wide Water|year=2007
+music	Blue Heron-Wide_Water-CD-FLAC-2007-GRP	01-blue_heron-wide.flac:30M;02-blue_heron-water.flac:30M	-	-	artist=Blue Heron|album=Wide Water|year=2007
+music	MixCloud Sets - DJ Foxglove (2022)	set1.mp3:150M;set2.mp3:150M	-	-	-
+audiobook	Silas Moore - The Salt Cellar, Book 3 - The Last Tide [ENG/MP3/64kbps]	01 - Chapter 1.mp3:20M;02 - Chapter 2.mp3:20M;03 - Chapter 3.mp3:20M;04 - Chapter 4.mp3:20M	-	-	author=Silas Moore
+audiobook	The Glass Harbor - Nora Fields (Narrated by Tom Reed) (Audiobook)	The Glass Harbor.m4b:480M	-	-	author=Nora Fields|title=The Glass Harbor|narrator=Tom Reed
+audiobook	Audiobook - Winter Orchard (Nora Fields) m4b	Winter Orchard.m4b:430M	-	-	author=Nora Fields|title=Winter Orchard
+audiobook	The Quiet Year (Unabridged) by Lena Park [Audible AAX]	The Quiet Year.aax:350M	-	-	author=Lena Park|title=The Quiet Year
+audiobook	Sherlock Holmes Short Stories (Librivox)	story01.mp3:25M;story02.mp3:25M;story03.mp3:25M;story04.mp3:25M	-	-	-
+audiobook	Harper Lane - Tidal Secrets.m4b	=	-	-	author=Harper Lane|title=Tidal Secrets
+book	The Salt Cellar (Salt Cellar #2) - Silas Moore [epub]	The Salt Cellar.epub:900K	-	-	author=Silas Moore
+book	Silas Moore - The Salt Cellar [2014] [Harbor Press].pdf	=	-	-	author=Silas Moore|title=The Salt Cellar|year=2014
+book	Practical Rust, 3rd Edition (Nora Fields).pdf	=	-	-	author=Nora Fields
+book	Moore, Silas - The Salt Cellar.epub	=	-	-	author=Silas Moore|title=The Salt Cellar
+book	Författare Anna Berg - Skärgårdsliv.epub	=	-	-	-
+book	Night Garden #001 (2020).cbz	=	-	-	-
+book	Night Garden v03 (2021) (digital) (Fox-Empire)	Night Garden v03 c014.cbz:30M;Night Garden v03 c015.cbz:30M;Night Garden v03 c016.cbz:30M	-	-	-
+book	Garden & Home - October 2024.pdf	=	-	-	-
+book	Anna Berg - Skärgårdsliv.epub	=	-	-	author=Anna Berg|title=Skärgårdsliv
+book	Design Patterns Explained (Addison-Wesley, 2004).pdf	=	-	-	-
+book	Calm Mind Daily Practice - Lena Park - 2019.epub	=	-	-	-
+book	Harbor Press Catalog 2024	catalog.pdf:20M	-	-	-
+software	Fox_Editor_1.2.3_Setup.exe	=	-	-	version=1.2.3
+software	Fox-Editor-1.2.3.dmg	=	-	-	name=Fox Editor|version=1.2.3
+software	Fox Editor 2024 for Mac	Fox Editor 2024.dmg:300M	-	-	-
+software	Fox.Editor.v1.2.Incl.Keygen-GRP	Fox.Editor.v1.2.Incl.Keygen-GRP.zip:80M	-	-	name=Fox Editor|version=1.2
+software	Fox.Editor.Pro.v1.0.0.Portable	FoxEditorPortable.exe:60M	-	-	version=1.0.0
+software	app-release.apk	=	-	-	-
+software	Fox Editor 1.2 (Build 1234).zip	=	-	-	version=1.2
+software	ubuntu-22.04.4-desktop-amd64.iso	=	-	-	name=Ubuntu|version=22.04.4|arch=x64
+software	Windows.11.Pro.x64.22H2.Multilingual	Win11_22H2_x64.iso:5.4G	-	-	arch=x64
+software	Starfall.Frontier.v1.0.0.REPACK-KaZo	setup.exe:5M;data-1.bin:3G;data-2.bin:3G	-	-	-
+software	Starfall Frontier [BASALT]	setup_starfall_frontier.exe:6G	-	-	-
+software	Starfall.Frontier-REFILLED	rld-starfall.iso:8G;rld.nfo:2K	-	-	-
+software	Pagewise Reader Pro DC 2024.002.20687 (x64)	Setup.exe:900M;Crack/patch.exe:2M	-	-	arch=x64
+software	SuperPlayer-2.5.1-win32.zip	=	-	-	version=2.5.1
+software	Notes.app	Contents/MacOS/Notes:40M;Contents/Resources/a.icns:1M;Contents/Info.plist:3K	-	-	-
+software	Debian-12-netinst	debian-12.5.0-amd64-netinst.iso:650M	-	-	-
+other	Wedding Photos	DSC_0001.JPG:5M;DSC_0002.JPG:5M;DSC_0003.JPG:5M;DSC_0004.JPG:5M	-	-	-
+other	Invoice_2024-09.pdf	=	-	-	-
+other	Lecture Notes Physics	week1.pdf:3M;week2.pdf:3M;week3.pdf:3M	-	-	-
+other	Python Course 2024 (Udemy)	1. Intro.mp4:100M;2. Basics.mp4:100M;3. Functions.mp4:100M	-	-	-
+other	icons-pack-free.zip	=	-	-	-
+other	Vacation Videos 2023	VID_0001.mp4:300M;VID_0002.mp4:400M;VID_0003.mp4:200M	-	-	-
+other	Backup 2023	photos.zip:1.9G;docs.zip:500M	-	-	-
+other	Synth Presets Mega Pack	lead.fxp:20K;pad.fxp:20K;bass.fxp:20K;readme.txt:1K	-	-	-

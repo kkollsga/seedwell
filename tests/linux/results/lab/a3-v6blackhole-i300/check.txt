@@ -1,0 +1,3 @@
+## check v6blackhole-i300
+PASS  v6blackhole-i300   (0 violation(s), 0 warning(s))
+exit=0

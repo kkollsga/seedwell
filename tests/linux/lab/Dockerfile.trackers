@@ -1,0 +1,12 @@
+# Real tracker implementations built from source: chihaya (Go) and aquatic_http / aquatic_udp (Rust).
+FROM golang:1-bookworm AS chihaya
+# chihaya main still links the JWT middleware, whose jose dependency panics at init on current Go
+# (RegisterHash of an unknown hash); we do not use JWT, so that one import is dropped.
+RUN git clone -q https://github.com/chihaya/chihaya /c && cd /c && git log -1 --format='chihaya %h %cd' > /chihaya.version \
+ && sed -i '/middleware\/jwt/d' cmd/chihaya/config.go && mkdir -p /out && go build -o /out/chihaya ./cmd/chihaya
+FROM rust:1-bookworm AS aquatic
+RUN cargo install --root /out aquatic_udp aquatic_http aquatic_ws 2>&1 | tail -3 || true
+FROM debian:13
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl iproute2 procps python3 jq && rm -rf /var/lib/apt/lists/*
+COPY --from=chihaya /out/chihaya /usr/local/bin/chihaya
+COPY --from=aquatic /out/bin/ /usr/local/bin/

@@ -1,0 +1,36 @@
+[package]
+name = "trs-tracker-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+trs-tracker = { path = "..", default-features = false }
+
+# Keeps this crate out of the main workspace (it needs nightly + libFuzzer).
+[workspace]
+
+[[bin]]
+name = "response_parse"
+path = "fuzz_targets/response_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "udp_decode"
+path = "fuzz_targets/udp_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "url_and_misc"
+path = "fuzz_targets/url_and_misc.rs"
+test = false
+doc = false
+bench = false

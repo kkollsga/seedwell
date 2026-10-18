@@ -1,0 +1,4 @@
+# Tracker profiles. Announce URLs here never contain passkeys: only the host and
+# path pattern are kept (`*` matches one path segment).
+
+version = 1

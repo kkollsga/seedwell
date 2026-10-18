@@ -1,0 +1,22 @@
+[package]
+name = "trs-classify-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+trs-classify = { path = ".." }
+
+# Keeps this crate out of the root workspace.
+[workspace]
+
+[[bin]]
+name = "classify"
+path = "fuzz_targets/classify.rs"
+test = false
+doc = false
+bench = false

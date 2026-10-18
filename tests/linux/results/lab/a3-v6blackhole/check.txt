@@ -1,0 +1,3 @@
+## check v6blackhole
+PASS  v6blackhole   (0 violation(s), 0 warning(s))
+exit=0

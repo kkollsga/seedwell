@@ -1,0 +1,29 @@
+[package]
+name = "trs-http-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+trs-http = { path = ".." }
+
+# Keeps this crate out of the root workspace.
+[workspace]
+
+[[bin]]
+name = "content_disposition"
+path = "fuzz_targets/content_disposition.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sidecar"
+path = "fuzz_targets/sidecar.rs"
+test = false
+doc = false
+bench = false

@@ -1,0 +1,41 @@
+[14:15:52] MARKER run-start
+[14:15:52] MARKER add
+[14:15:53] MARKER torrents-added
+[14:15:53] torrents in Seedwell: 5
+[14:15:53] observing 900s
+v6close=5 
+
+v6close=5 
+v6close=10 v6close=10 
+
+v6close=15 v6close=15 
+v6close=20 
+
+v6close=20 v6close=25 
+v6close=25 
+v6close=30 
+v6close=30 
+v6close=35 
+
+v6close=35 v6close=40 
+v6close=40 
+v6close=45 
+v6close=45 
+v6close=50 
+
+v6close=50 v6close=55 
+v6close=55 
+
+v6close=60 v6close=60 
+v6close=65 
+
+v6close=65 v6close=70 
+v6close=70 
+v6close=75 
+
+v6close=75 [14:30:53] MARKER quit
+[14:30:56] daemon exited after 3 s
+[14:30:58] MARKER run-end
+## check v6close
+PASS  v6close   (0 violation(s), 0 warning(s))
+exit=0

@@ -1,0 +1,1 @@
+<root><URLBase>http://192.168.1.1:5000/</URLBase><device><serviceList><service><serviceType>urn:schemas-upnp-org:service:WANIPConnection:1</serviceType><controlURL>/ctl</controlURL></sase>ervice></serviceLroot>

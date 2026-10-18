@@ -1,0 +1,61 @@
+== env: Debian GNU/Linux 13 (trixie) | aarch64 | rustc 1.99.0 (b940084d7 2026-09-28) host: aarch64-unknown-linux-gnu  | libc: ldd (Debian GLIBC 2.41-12+deb13u4) 2.41
+=== trs-bencode: build+test
+RESULT trs-bencode rc=0 passed=24 failed=0 ignored=0 build=ok secs=12
+=== trs-metainfo: build+test
+RESULT trs-metainfo rc=0 passed=67 failed=0 ignored=3 build=ok secs=4
+=== trs-wire: build+test
+RESULT trs-wire rc=0 passed=79 failed=0 ignored=1 build=ok secs=4
+=== trs-tracker: build+test
+RESULT trs-tracker rc=0 passed=296 failed=0 ignored=1 build=ok secs=78
+=== trs-storage: build+test
+RESULT trs-storage rc=101 passed=69 failed=1 ignored=1 build=ERRORS secs=10
+    error: 1 target failed:
+    error: test failed, to rerun pass `-p trs-storage --test download`
+    failures:
+    test preallocate_option_reserves_full_files ... FAILED
+    test result: FAILED. 7 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+    thread 'preallocate_option_reserves_full_files' (7816) panicked at crates/storage/tests/download.rs:349:5:
+=== trs-dht: build+test
+RESULT trs-dht rc=0 passed=95 failed=0 ignored=1 build=ok secs=49
+=== trs-utp: build+test
+RESULT trs-utp rc=0 passed=65 failed=0 ignored=1 build=ok secs=12
+=== trs-http: build+test
+RESULT trs-http rc=101 passed=53 failed=1 ignored=0 build=ERRORS secs=27
+    error: 1 target failed:
+    error: test failed, to rerun pass `-p trs-http --test download`
+    failures:
+    test killed_task_resumes_from_sidecar_in_a_new_downloader ... FAILED
+    test result: FAILED. 32 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 19.11s
+    thread 'killed_task_resumes_from_sidecar_in_a_new_downloader' (12892) panicked at crates/http/tests/download.rs:158:34:
+=== trs-state: build+test
+RESULT trs-state rc=0 passed=134 failed=0 ignored=0 build=ok secs=37
+=== trs-classify: build+test
+RESULT trs-classify rc=0 passed=157 failed=0 ignored=0 build=ok secs=9
+=== trs-engine: build+test
+RESULT trs-engine rc=101 passed=198 failed=12 ignored=1 build=ERRORS secs=615
+    error: 5 targets failed:
+    error: test failed, to rerun pass `-p trs-engine --lib`
+    error: test failed, to rerun pass `-p trs-engine --test locations`
+    error: test failed, to rerun pass `-p trs-engine --test moves`
+    error: test failed, to rerun pass `-p trs-engine --test utp`
+    error: test failed, to rerun pass `-p trs-engine --test watch`
+    failures:
+    test a_category_can_stage_in_its_own_incomplete_folder ... FAILED
+    test a_category_change_moves_a_placed_torrent ... FAILED
+    test a_hardlink_torrent_moves_its_seeding_layout_and_the_links_stay_valid ... FAILED
+    test a_running_download_keeps_its_staging_folder_when_the_setting_changes ... FAILED
+    test an_unsure_category_asks_even_in_auto_mode ... FAILED
+    test ask_mode_emits_a_request_and_the_app_finishes_the_add ... FAILED
+    test finished_location_precedence_rule_then_category_then_default ... FAILED
+    test garbage_is_reported_once_and_other_files_are_ignored ... FAILED
+    test peers_that_spoke_utp_are_dialled_over_utp ... FAILED
+    test result: FAILED. 1 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 61.89s
+    test result: FAILED. 15 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 54.54s
+    test result: FAILED. 3 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 153.53s
+    test result: FAILED. 5 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out; finished in 54.00s
+=== trs-control: build+test
+RESULT trs-control rc=0 passed=85 failed=0 ignored=0 build=ok secs=70
+=== trs-cli: build+test
+RESULT trs-cli rc=0 passed=26 failed=0 ignored=0 build=ok secs=74
+=== trs-portmap: build+test
+RESULT trs-portmap rc=0 passed=71 failed=0 ignored=1 build=ok secs=18

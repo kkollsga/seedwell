@@ -1,0 +1,1040 @@
+# Seedwell — Spec Sheet (draft v0.1)
+
+> Status: **draft for discussion**. Items marked **[DECIDE]** are open questions.
+> Working name: Seedwell.
+
+## 0. Concept images
+
+Target look and feel. **Dark mode is the primary design**; light mode follows the system. Mockups live in `docs/concepts/src/*.html`; re-render with `docs/concepts/render.sh`.
+
+| | |
+|---|---|
+| ![Menu](docs/concepts/01-menu.png) **1 · Menu bar menu** (§8.2) | ![Downloads](docs/concepts/02-main-window.png) **2 · Main window: Downloads** (§8.3) |
+| ![Sharing](docs/concepts/03-sharing.png) **3 · Main window: Sharing** (§8.3) | ![Right-click](docs/concepts/04-right-click.png) **4 · Right-click menus** (§8.5) |
+| ![Rules](docs/concepts/05-rules.png) **5 · Tracker rules** (§7) | ![Add](docs/concepts/06-add-and-icon.png) **6 · Add panel & icon states** (§7A, §8.1) |
+| ![Folders](docs/concepts/07-organize.png) **7 · Settings: Folders** (§7A, §8.4) | ![Transfers](docs/concepts/08-transfers.png) **8 · Settings: Transfers** (§8.4) |
+| ![Agents](docs/concepts/09-agents.png) **9 · Settings: Agents** (§9A) | ![Choose](docs/concepts/10-choose.png) **10 · Choose what to download** (§7A.6) |
+
+## 1. Product statement
+
+A macOS menu bar BitTorrent client that downloads fast, seeds hundreds of torrents
+at near-zero cost, and decides what to do after a download finishes based on the
+torrent's tracker. It does one thing: move torrent data well.
+
+### Goals
+1. **Mac native.** Menu bar app (no Dock icon), AppKit/SwiftUI UI, system notifications, launch at login, `.torrent` and `magnet:` handling.
+2. **Fast to run.** Instant startup, ~0% CPU when idle, "Low" energy impact in Activity Monitor.
+3. **Fast to download.** Saturate a gigabit line on Apple Silicon.
+4. **Low memory.** 200 seeding torrents cost roughly the same as 2.
+5. **Downloads clearly visible; seeding in its own area.**
+6. **Tracker-based rules** decide seeding goals, priority and placement.
+7. **Private-tracker compliant out of the box.** Honest identity, exact stats, gentle announces; one release channel, correctness enforced by tests (§7B).
+8. **Agent-operable.** A local agent interface (the `seedwell` command line and an embedded Agent Skill) lets agents like Claude do anything the UI can, safely (§9A).
+9. **Direct downloads.** Large HTTP/HTTPS files get the same pause/resume/throttle/queue treatment as torrents (§7D).
+10. **Play while downloading.** A video can be watched in VLC, IINA or QuickTime before it finishes, with a working timeline; dragging it fetches that part first (§7F).
+
+### Non-goals (deliberately excluded)
+Spoofing another client's identity, stat/ratio manipulation, network-exposed remote control (agent access is local-only), RSS feeds, torrent search, a built-in media player (streaming to the user's own player is in scope, §7F), web UI, plugin system, built-in
+browser, torrent creation, skins/themes, statistics dashboards. Adding any of these
+needs a spec change.
+
+## 2. Performance budgets
+
+These are acceptance criteria. Every milestone is measured against them.
+
+| Metric | Target | How measured |
+|---|---|---|
+| Cold start to menu icon, 200 torrents loaded | < 300 ms, **no rehash** | launch timing |
+| Memory: 200 seeding, ~50 peers, window closed | **≤ 50 MB** total `phys_footprint` (engine ≤ 25 MB) | `footprint`, Activity Monitor |
+| Memory: cost of one more idle seeding torrent | ≤ 4 KB resident | 2 vs 200 torrent diff |
+| Memory: downloading at full speed | ≤ 150 MB incl. write cache (configurable) | `footprint` |
+| Download throughput | ≥ 1 Gbit/s sustained on M-series, < 1 CPU core | local swarm benchmark |
+| Idle CPU (seeding, no requests) | ~0%, ≤ 1 wakeup/s average | `powermetrics`, Activity Monitor |
+| Main window, 1,000 torrents | 60 fps scroll, opens < 150 ms | Instruments |
+| Main window closed | its memory is released | `footprint` before/after |
+| 30-day soak, 200+ torrents | memory flat (±5%), zero crashes, zero lost counters | soak rig (§5A) |
+| Cold → serving first block | < 50 ms | local swarm benchmark |
+
+## 3. Architecture
+
+```
+┌─────────────────────────── Seedwell.app ───────────────────────────┐
+│  Swift shell (AppKit + SwiftUI)                                     │
+│   • NSStatusItem + menu   • Main window   • Settings window         │
+│   • Notifications, login item, URL/file handlers                    │
+│                 ▲ snapshots / events      │ commands                │
+│                 │        (UniFFI bridge)  ▼                         │
+│  Rust core (static lib)                                             │
+│   session ─ torrents ─ peers ─ piece picker ─ choker                │
+│   storage (disk I/O pool, write cache, fd cache)                    │
+│   trackers (HTTP/UDP) ─ DHT ─ PEX ─ LSD ─ uTP ─ NAT-PMP/UPnP        │
+│   rules engine ─ queue manager ─ persistence                        │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### 3.1 Rust core + thin Swift shell (recommended)
+- **Core:** Rust, `tokio` runtime (kqueue). All torrent logic, state and persistence live here. The core has no UI knowledge.
+- **Shell:** Swift. AppKit `NSStatusItem`/`NSMenu` for the menu bar; SwiftUI (with AppKit `NSTableView` where SwiftUI's `Table` is too slow) for the windows.
+- **Bridge:** UniFFI, generating Swift bindings. The UI **pulls** compact snapshots only while something is visible (menu open, window open). When nothing is visible the UI costs nothing and the core sends only events (completed, error).
+- **One process.** No separate daemon in v1: lower memory and simpler. The core API is kept clean enough to split into a `launchd` agent later if remote/CLI control is ever wanted.
+- **One control API.** The menu, main window, `trs` CLI and agent interface (§9A) all use the same typed, versioned command API in the core. Anything one can do, the others can too. Nothing can change client identity or compliance behaviour (§7B).
+- **`trs` CLI** ships inside the app bundle. It also runs the core headless for benchmarks and tests.
+
+*Rejected alternatives:* Tauri/Electron (webview costs 50–150 MB and doesn't look native). Pure-Rust AppKit via `objc2` would work for the menu but makes the table window much harder for little gain.
+
+### 3.2 Engine source **[DECIDE]**
+- **A. Own engine from scratch** (recommended). We control the memory model ("parked" torrents, §5), the disk path and the scheduler. This is the most work. Small, well-defined crates (bencode, SHA, maybe DHT) are reused where they fit.
+- **B. Build on `librqbit`.** Faster to a first download, but we inherit its architecture, and the parked-torrent memory model may need deep changes.
+- Proposed: spend about a week in M1 reading librqbit's crates, then commit to A while borrowing pieces where they fit.
+
+### 3.3 Workspace layout
+```
+crates/
+  bencode/     zero-copy bencode
+  proto/       metainfo (v1/v2/hybrid), peer wire, extensions, tracker codecs
+  dht/         Kademlia DHT (BEP 5)
+  utp/         uTP / LEDBAT (BEP 29)
+  engine/      session, torrent, peer, picker, choker, storage, queue
+  rules/       rule matching + evaluation (pure, unit-testable)
+  ffi/         UniFFI surface
+  cli/         dev/benchmark harness
+app/           Xcode project (Swift shell)
+bench/         local swarm + memory benchmarks
+```
+
+## 4. Protocol scope
+
+**v1 (required):** BEP 3 (core), 5 (DHT), 6 (Fast), 7 (IPv6), 9 (magnet metadata),
+10 (extension protocol), 11 (PEX), 12 (multitracker), 14 (LSD), 15 (UDP tracker),
+23 (compact peers), 27 (private: DHT/PEX/LSD off), 29 (uTP), MSE/PE encryption
+(prefer/require/off), UPnP-IGD + NAT-PMP/PCP port mapping.
+
+**v1.x:** BEP 52 (v2 + hybrid torrents), BEP 47 (padding files), BEP 19 (web seeds).
+
+**Never:** super-seeding, tracker scraping of unrelated torrents, torrent creation.
+
+## 5. Low power mode for idle torrents
+
+The key idea: a seeding torrent nobody is downloading from goes into **low power mode**. There it is a few hundred bytes of state plus an announce timer. Memory, CPU, sockets and upload slots go to the torrents peers are actually asking for.
+
+### 5.1 Power tiers (demand-driven, automatic)
+| Tier | What's resident | Enters when | Leaves when |
+|---|---|---|---|
+| **Cold** (low power) | info-hash, name, save path, size, counters, tracker URLs + next announce, rule id | no peer interest for N min (default 10) | a peer connects and sends `interested` |
+| **Warm** | + file table (piece → file mapping), fds via shared LRU, a few peer connections | a peer is interested | interest stops → back to Cold after N min |
+| **Hot** | + piece bitfield, piece hashes, picker, full peer set | downloading, verifying, or high demand | done / demand falls |
+
+- A cold torrent still **announces at the tracker's required interval**. Skipping announces would drop it from the swarm, and private trackers would stop crediting seed time. Each announce is one small request, so this is cheap.
+- For public torrents, a cold torrent announces to the DHT on a slower cycle.
+- **Promotion is fast.** Cold → Warm happens in milliseconds, because it only loads the file table from the stored `.torrent`. A peer never notices that a torrent was asleep.
+- **Upload slots and bandwidth follow demand.** The choker spends upload capacity across the torrents with the most interested peers and real throughput, weighted by rule priority (§7.3). A popular torrent gets served first; 190 cold ones cost nothing.
+- Seeding torrents don't need piece hashes or a bitfield (they're complete), so neither is held outside the Hot tier.
+
+### 5.2 Memory mechanics
+- **Peer connections** are capped globally (default 200) and per torrent (default 50). Each peer has small fixed buffers; 16 KiB blocks come from a shared slab pool.
+- **Reads while seeding** go through `pread` and the OS unified buffer cache, which doesn't count against our footprint. There is no app-level read cache.
+- **Writes while downloading** go to a bounded write cache (default 32 MB) and are flushed per completed piece after hash verification.
+- **Worker threads exist only while there is work.** The disk I/O, hashing and maintenance pools start a thread when a job finds more queued work than idle workers (up to 4, one per performance core, and 3) and a thread that waits 30 s for a job exits; the three document watchers (config, rules, trackers) share one polling thread. A seeding engine nobody is reading from has none of them (each is about 30 KiB of resident stack). The write-cache default is 32 MB: with the 64 MB it had in the settings file, a full-speed local download peaked at about 88 MB; with 32 MB at about 55 MB and 16 MB at about 37 MB, at the same throughput. Existing settings files keep their value.
+- **The status item and the menu pop-up window are pinned to sRGB** like every other window: on a wide-gamut display macOS otherwise builds a set of ColorSync tone-curve tables (272 KB each, 15 at launch, 33 with the menu open) for them. Measured: 3 and 9. A bare AppKit status item app is itself about 10 MB; the engine adds almost nothing at idle (5.3 MB headless with 1 or 300 resumed torrents), and an opened-then-closed main window leaves about 12 MB of SwiftUI/AppKit framework state behind that no allocator call returns.
+- **File descriptors:** shared LRU cache (default 512). `RLIMIT_NOFILE` is raised at startup, because the macOS default of 256 is too low.
+- **Announces** are spread out, with jitter, so 200 torrents don't wake up at once. Timers use one hierarchical wheel and macOS timer coalescing.
+
+## 5A. Long-term stability: seed for years
+
+It must be safe to leave a torrent seeding for years, across app updates, reboots, sleeps, network changes and tracker outages.
+
+**No unbounded growth**
+- Every in-memory collection is size-capped: peer lists, the DHT table, the fd cache, logs and per-torrent history.
+- There are no caches without an eviction policy. A 30-day soak test must show a flat memory curve (§2).
+- Counters are 64-bit and persisted, so a ratio is never lost or overflows.
+
+**Crash safety and self-healing**
+- State lives in a transactional store (§10). A crash or power loss loses only seconds of counters, never torrents or seed time.
+- Each torrent runs in isolation: one malformed peer, bad tracker reply or I/O error stops that torrent's task, not the session. Errors are captured, the torrent goes to `Errors` with a readable reason, and it is retried with backoff.
+- If the app crashes, it relaunches itself (helper login item / `launchd` KeepAlive) and resumes without a rehash.
+
+**Outside conditions**
+- **Tracker down for days or months:** exponential backoff capped at e.g. 1 h. The torrent keeps seeding to known peers and via DHT/PEX where allowed. It never gives up permanently or removes itself.
+- **Files moved, deleted or the external drive unplugged:** the torrent goes to `Missing data`. Nothing is re-downloaded or overwritten. The app tells the engine whenever a volume is mounted or unmounted (`NSWorkspace` notifications → `volumes_changed`); the engine then looks at each distinct folder torrents save to, once, and in one pass marks every torrent on a missing one "Drive not connected" (finished Cold torrents included: no actor is started to find out, and their trackers get `stopped`) or, for a folder that came back, resumes them: finished ones simply return to Cold, unfinished ones come up through the start queue, and only what must be verified is, two torrents at a time (§10, verification gate). Without a notification (the headless daemon) a torrent with missing data is retried at 1, 5, 15, then every 60 minutes; a finished one only after its folder is there again. The user can also "Locate…" the files.
+- **Disk full, read-only volume, permission denied:** a write that fails like that does not fail the torrent for good. The torrent stops asking for blocks, keeps serving the pieces it has verified (libtorrent's "upload mode"), keeps announcing, and the row says why: "Disk full — retrying in 10 min" ("Disk is read-only", "Not allowed to write"). It tries again by itself at 10, 20, 40, then every 60 minutes: for a full disk only once the volume has room for a few pieces (a `statvfs`), otherwise the check just waits for the next step; a restart that fails again moves to the next step, one that holds for five minutes forgets the trouble. While it waits the torrent does not use up a download slot (§7.3). "Not enough space" found at start-up waits the same way (state Error with the reason and the same schedule). Other storage errors stay errors until the user acts.
+- **Files modified on disk:** detected by size/mtime check when a cold torrent wakes. That torrent is rechecked before it serves any data, so we never upload corrupt pieces.
+- **Bit rot:** an optional background **scrub** re-verifies cold torrents slowly (e.g. one torrent per day, I/O-throttled, only on AC power).
+- **Sleep/wake, network changes and outages:** the engine knows when the network is gone (the OS path monitor, wake notifications, or failures it sees on several trackers at once) and then sends almost nothing: no failure counts toward any backoff, and one useful announce per few minutes tests the network (§7C.4c). When the network is back, only the announces that came due are sent, spread over about a minute through the same host gate. Sockets and port mappings are refreshed once. A seed never stays silent for hours because the network was down.
+
+**Upgrades**
+- The state schema is versioned with forward migrations. Updating the app never loses torrents, counters or seed time.
+- Before each migration the previous state is backed up automatically.
+
+**Verification**
+- Fuzzing (`cargo fuzz`) for bencode, metainfo, peer wire, tracker and DHT parsers, since these handle untrusted input.
+- Fault-injection tests: kill -9 during writes, full disk, unplugged volume, tracker returning garbage.
+- A soak rig seeds 200+ torrents against a synthetic swarm for 30 days per release candidate.
+
+## 6. Download speed
+
+- Rarest-first picker with sequential-within-piece requests, endgame mode, and fast resume of partial pieces.
+- Request pipelining sized to each peer's bandwidth-delay product (adaptive queue depth).
+- Choker: tit-for-tat plus optimistic unchoke; upload slots auto-sized to the upload limit.
+- Redundant connections (libtorrent's `close_redundant_connections`): a torrent that wants nothing more (complete, or a partial seed holding every wanted piece) closes any peer that can never want anything from it (it has every piece, or every piece we have; also when a HAVE completes it, and right after we finish), as a plain local close with no strike, and does not dial those addresses again while upload-only. They are candidates again the moment more files are ticked or a recheck finds pieces missing. Downloading torrents and tracker announces are never affected.
+- Idle seeds (upload-only torrents): leechers find us, not the other way round. An incoming connection is never refused for want of a slot while the torrent is upload-only: at the per-torrent cap a redundant peer, else the longest-idle peer that is not interested in us (10 s or more) and has sent no HAVE for 5 minutes (a peer still downloading stays until it is done), is closed to admit it (a Cold torrent wakes for the handshake as before). Outgoing, an upload-only torrent dials nothing when the last tracker response reported zero leechers (`incomplete` = 0), and otherwise never dials an address remembered as a seed; with nothing to dial and no peers the actor sleeps. `numwant`, announce intervals, `left` and events are untouched (no scrapes, no extra announces). The global connection cap is not evicted against (redundant peers are dropped at once, so it rarely fills with them).
+- TCP and uTP in parallel; uTP yields to other traffic via LEDBAT.
+- Hardware SHA-1/SHA-256 (ARMv8 crypto extensions). Hashing runs on a worker pool, off the network threads.
+- Disk: sparse files by default (APFS), optional full preallocation. Writes are coalesced and `pwrite` runs on a dedicated I/O pool.
+- Fast reconnects: peer list persisted per torrent; DHT routing table persisted.
+- Watches network changes (`NWPathMonitor`) and sleep/wake: a new interface refreshes the port mapping and pulls failed announces in; a lost network holds all announces, dials and DHT traffic; a restored one releases what came due, spread (§7C.4c). Nothing is re-announced that is not due.
+
+## 7. Tracker rules
+
+Rules are the core of seeding control. The first matching rule wins and a default rule always applies. Rules are edited in Settings → Rules and stored in `rules.toml` (also hand-editable, hot-reloaded).
+
+### 7.1 Matching
+- `tracker`: hostname glob (`tracker-x.org`, `*.tracker-y.net`) matched against any of the torrent's announce URLs. Passkeys in the path are ignored.
+- `private`: true/false (BEP 27 flag).
+- `category`: detected content type (§7A.2): `movie`, `tv`, `music`, `audiobook`, `book`, `software`, `game`, `other`. Can be combined with `tracker`, e.g. "tracker Z **and** TV".
+- Rules are evaluated on add and re-evaluated live when edited. The editor previews the effect ("affects 48 torrents").
+
+### 7.2 Actions
+| Field | Values | Meaning |
+|---|---|---|
+| `on_complete` | `seed` (default) / `stop` | `stop` = never seed (tracker X) |
+| `stop_when` | `ratio`, `seed_time`, `mode = any\|all` | seeding goal (tracker Y: ratio 1.0) |
+| `stop_when_idle` | `{ below = "1 GB", hours = 150 }` / `false` | stop seeding a torrent that uploaded less than `below` in the last `hours` of seeding (§7.5). Absent = the global setting, `false` = off for this rule |
+| `min_seed_time` | duration | hard floor that overrides `stop_when` (hit-and-run protection). Unset = the global private floor below for private torrents |
+| `at_goal` | `stop` (default) / `remove` | `remove` removes the torrent but keeps the files |
+| `priority` | `high` / `normal` / `low` | see 7.3 (tracker Z) |
+| `finished_dir` | folder | overrides the finished location (§7A.4) for this rule; a plain folder, the torrent's own layout goes below it (§7A.3) |
+| `up_limit` / `down_limit` | rate | per-torrent caps. Only `up_limit` is enforced today (a torrent's upload); a download cap is set for a whole favorite tracker instead (§7E.4) |
+
+**Ratio** = uploaded ÷ the larger of downloaded and the verified bytes held (qBittorrent's rule, and how trackers count it). A partial selection is measured against its part (1.8 GB of 14 GB held, 3.7 GB up = 2.06), and a torrent added already complete (cross-seeding, downloaded = 0) against what it holds. Seeding goals use the same ratio.
+
+**Resuming a torrent stopped at its goal** keeps it sharing: its goal becomes the user's own "Seed forever" (the rule's floor stays), shown in Get Info; *Rule default* hands it back to the rule. Without this the next goal check would stop it again within a minute.
+
+**Global private floor.** `config.toml` `transfers.private_min_seed_secs` (seconds; default **10 days**, `0` = off; Settings ▸ Transfers ▸ Seeding ▸ "Private torrents") is a hit-and-run floor for every torrent with `info.private = 1`: its seeding goal cannot count as reached before it has seeded this long. It is resolved with the rule, in one place (`RuleSet::resolve_with_floor`), so the app and the CLI (`settings`) agree:
+- a rule's own `min_seed_time` wins (set = use it, even a shorter one); unset = the global floor, or the Default rule's `min_seed_time` if that is longer;
+- public torrents are unaffected (they keep the Default rule's floor, if any);
+- it holds back goal-based stopping and removal only: pause, stop and remove by hand work at any time;
+- it applies to private torrents that are already seeding as soon as the setting loads or changes (rules are re-evaluated); torrents already stopped at their goal stay as they are;
+- goal text names it: "Ratio 1.0 or 7 days, at least 10 days (private)", "Then seeds until ratio 1.0 or 7 days, at least 10 days (private)", in Get Info too.
+Config version 4 added the key; a version 3 file loads with the default and is rewritten once, with the usual backup, keeping all other settings and unknown keys.
+
+### 7.3 What "priority" means **[DECIDE: confirm]**
+`high` torrents:
+1. jump the download queue;
+2. get a larger bandwidth share when global limits are saturated (weights 4 : 2 : 1);
+3. get upload slots first while seeding;
+4. are never paused by "max active" queue limits.
+
+**Stalled downloads do not hold a slot** (qBittorrent's "slow torrents do not count"). A running download that moves under 2 KiB/s for 60 s is *stalled*: it stops counting toward "max active downloads", so the next queued download starts, and the row says "Stalled — not counted in the queue" (a tracker problem, if there is one, is shown instead). It counts again after moving at least 2 KiB/s for 60 s; a rate that flickers around the threshold never flips (hysteresis both ways). A torrent that is verifying is never judged, and one whose disk refuses writes counts as stalled until it recovers. To bound memory, at most twice "max active downloads" downloads run at once (stalled ones included; `high` priority and torrents someone is streaming are never held back and may exceed it). Active downloads always get their slots first; stalled ones use what is left of the cap, earliest in the queue first. The thresholds are constants of the engine (`stall_rate` 2048 B/s, `stall_after` 60 s), not settings.
+
+### 7.3a Speed limits: which cap applies
+Four caps can apply to the same bytes, each a token bucket charged with what a peer connection moved ("debt model": the connection pauses for as long as the debt takes to pay back), and the **strictest wins**, because a connection waits for the longest of the waits:
+1. the **global** download and upload limit (Settings ▸ Transfers, or *Limit Speed (alt.)* while that is on), shared by torrents and direct downloads, split 4 : 2 : 1 between priorities (§7.3);
+2. the favorite tracker's **shared** download / upload cap (§7E.4): one bucket for all of that tracker's torrents together;
+3. the torrent's **own** upload cap from its rule (`up_limit`, above).
+A cap that is not set costs nothing: a torrent with no limit anywhere makes no limiter call and takes no lock. Limits are bytes per second in the files (`0` or absent = unlimited); the app shows them as a number with a unit menu, **MB/s by default and KB/s optionally** (decimal, 1 MB/s = 1,000,000 B/s; an empty field is *Unlimited*; "2,5" and "2.5" both mean two and a half).
+
+### 7.4 Example
+```toml
+[[rule]]
+name = "X – download only"
+match = { tracker = "tracker-x.org" }
+on_complete = "stop"
+
+[[rule]]
+name = "Y – seed to 1.0"
+match = { tracker = "*.tracker-y.net" }
+stop_when = { ratio = 1.0 }
+
+[[rule]]
+name = "Z – priority, H&R safe"
+match = { tracker = "tracker-z.cc" }
+priority = "high"
+stop_when = { ratio = 2.0 }
+min_seed_time = "72h"
+
+[[rule]]
+name = "Public software – seed longer"
+match = { private = false, category = "software" }
+stop_when = { ratio = 3.0 }
+finished_dir = "~/Software"
+
+[default]
+stop_when = { ratio = 1.0, seed_time = "7d", mode = "any" }
+```
+
+### 7.5 Inactive seeds (`stop_when_idle`)
+A second, independent stop condition next to `stop_when`: **stop seeding a finished torrent that uploaded less than `below` during the last `hours` hours of seeding** (typical: 1 GB in 150 h). It makes cleaning up dead seeds automatic while busy ones keep going. Either condition may stop a torrent; off by default.
+- **Settings.** Global default: `config.toml` `transfers.idle_min_upload_bytes` (decimal bytes, `0` = off) and `transfers.idle_window_hours` (default 150, 1..=8760); Settings ▸ Transfers ▸ Seeding ▸ "Inactive seeds": "Stop seeding when less than [ 1 ] [GB] uploaded in [ 150 ] hours" (empty = off; MB/GB/TB menu, like the speed limits). A rule overrides it in `rules.toml`: `stop_when_idle = { below = "500 MB", hours = 72 }` (`below` is `"1 GB"`, `"500 MB"`, `"2 TiB"` or a number of bytes; `hours` defaults to 150) or `stop_when_idle = false` to switch it off for that rule's torrents (Rules editor: Same as Settings / Off / Custom). CLI: `seedwell settings set transfers.idle_min_upload_bytes=1000000000`.
+- **Hours of seeding, a running window.** Only time the torrent actually seeds counts (app running, torrent active and finished). A paused torrent, a closed app or a Mac that was off neither adds time nor ages old uploads out, so launching after a week away stops nothing. The window slides: at any moment it covers the last 150 hours of seeding.
+- **Never too early.** It cannot fire before the torrent has seeded one full window since it finished, since the condition was switched on (or its numbers changed), or since the user last resumed it by hand (a resume restarts the window, so it is not undone an hour later). The private floor and a rule's `min_seed_time` win: nothing stops before them.
+- **Stopping** is the same state as a reached goal (`Want::GoalReached`, Stopped group, `Stopped/` status folder, the rule's `at_goal` action). Words come from the engine: row "Ratio 0.4 · Stopped — 0.3 GB uploaded in the last 150 h"; goal text "Ratio 1.0 or 7 days, or less than 1 GB in 150 h" (or "Seed until less than 1 GB in 150 h"); Get Info "Inactive: Uploaded in the last 150 h: 0.3 GB (stops below 1 GB)"; CLI `info` prints the same.
+- **Memory.** A finished torrent that has the condition keeps a ring of 25 `u32` KiB counters (24 slots of window/24 seeding time plus the one being filled, so the sum always covers at least a full window) and a few counters: 127 bytes serialised, about 150 bytes in memory including the box; torrents without the condition keep an 8-byte `None`. It is updated on the existing goal check (no timer per torrent), saved at most every 5 minutes (and when it is created, stopped or reset) to `state/idle/<info-hash>.bin`; losing that file only restarts the window. After a restart, uploads made since the last save count but the unobserved seeding time does not age the ring.
+
+## 7A. Watch folders, content detection and locations
+
+Pipeline for every new torrent, whether it came from a watch folder, a drop, a double-click or a magnet link:
+
+```
+ .torrent / magnet ─▶ parse ─▶ detect category ─▶ match rule ─▶ choose location ─▶ download ─▶ seed per rule
+                                  (§7A.2)          (§7.1)        (§7A.3, §7A.4)
+```
+
+### 7A.1 Watch folders
+- Default: `~/Downloads`. Users can add more folders.
+- Folders are watched with **FSEvents**, with no polling and no idle wakeups.
+- A file counts as ready when its size has been stable for 1 s. This avoids partial browser downloads (`.crdownload`/`.download`) and Safari's `.download` bundles.
+- Duplicates (same info-hash) are ignored, with a notification. **Exception, public torrents only:** the announce URLs of the new `.torrent` or magnet (`tr=`) that the existing torrent does not have are merged into it (exact URL, its http/https twin and a second URL of a tracker profile it already has are skipped; each becomes a tier of its own; at most 8 added over the torrent's life, the ones it came with not counted) and the user is told "Added 2 trackers to <name>" instead of getting an error. The new trackers announce `started` through the normal per-host gate (§7B.3, §7C.2). Never when the existing torrent is private, or is a magnet whose metadata has not arrived yet (privacy unknown): that add keeps the plain "Already added" answer. The merged list is stored with the torrent.
+- Per-folder settings:
+  - **Mode:** add automatically, or ask first (shows the add panel).
+  - **After adding:** move the `.torrent` to Trash (default), move it to an archive folder, or leave it. The original is always kept internally in `torrents/<infohash>.torrent`.
+  - **Optional forced category or rule:** e.g. `~/Torrents/Books` means "always book".
+- Automatic adds post a notification, e.g. "Added *Night of the Living Dead (1968)* · Movie · tracker-y.net → ~/Media/Movies". Clicking it opens the torrent in the main window.
+
+### 7A.2 Content detection
+This runs **on-device, deterministic and fast** (< 1 ms per torrent), using only the metainfo:
+1. **File profile:** extensions and size distribution.
+   - Mostly `.mkv/.mp4/.avi` with one large file → movie candidate.
+   - Many video files → TV.
+   - `.flac/.mp3/.m4a` → music. `.m4b` → audiobook. `.epub/.pdf/.mobi/.azw3/.cbz` → book.
+   - `.dmg/.pkg/.iso/.zip` with installers → software. In the UI `software` is called **App**; the engine id stays `software`.
+   - **Games** (`game`, symbol `gamecontroller`) are decided *after* the rest and only out of a torrent that is Software or Other, so video, music and books are never turned into a game (a film called "The Game" stays a film). Evidence, one is enough: a bracketed repack tag (`[… Repack]`), or a `-GROUP` release suffix together with a game word (update, patch, DLC, GOTY, deluxe, campaign, early access) and no program words (macOS, x64, keygen, …), a console tag (`PS5`, `PS4`, `NSW`, `XBOX360`, `Wii U`, or `Switch` next to `NSP`/`XCI`), console files (`.nsp`, `.xci`, `eboot.bin`), `steam_api.dll`, a `setup.exe` with two or more `.bin` data discs, three or more engine archives (`.pak`, `.vpk`, `.bsa`, `.unity3d`, `.pck`), or a tracker category that says games. Words of ordinary programs (Adobe, Autodesk, Office, Ubuntu, VST, …) veto the weaker name evidence. Games have their own place in Settings ▸ Folders like every category (`[folders.categories.game]`).
+2. **Name parsing:**
+   - `S01E02` / `1x02` / `Season 1` → TV (show, season, episode).
+   - A year in brackets with resolution or codec tags → movie (title, year).
+   - Artist – Album (Year) with format tags → music.
+   - Version strings or `x64`/`arm64` → software.
+3. **Tracker hints:** a `source` field in the info dict that names a category (a bare tracker abbreviation is ignored), and any category mapping configured per tracker.
+
+The result is a **category plus confidence**, and the parsed fields (title, year, show, season, episode, artist, album, name). They name things in the interface (titles, smart add, icons) and match rules; they never name a folder or a file on disk (§7A.3).
+- Below the confidence threshold (default 80%), the torrent becomes `other` and the add panel asks, even in auto mode (setting).
+- A plain video, with nothing that marks a film or a show (no year, no episode, no release tags in the torrent name or the main file's name, and no tracker category), is `other` and decided: it is not asked about (2026-10-13; e.g. Big Buck Bunny from webtorrent.io, a talk, a home video).
+- Users can always change the category; this re-applies the rule and, where the category has a finished folder of its own, the location.
+- Junk files are skipped by default: `sample`, `.nfo`, `.txt` ads, `.exe` in a video torrent. They show as unchecked in the file list.
+- **Optional, off by default:** online metadata lookup (TMDB / MusicBrainz / Open Library) for canonical titles. This is network access beyond BitTorrent, so it's strictly opt-in. **[DECIDE]**
+
+### 7A.3 Placement: flat, with optional status folders
+*(User decision, 2026-10-14: "where a file goes based on its content is too complex; we don't want folders based on authors and titles. Keep a flat structure." This replaces the destination templates, "Place & rename" and "Hardlink" placement of earlier versions.)*
+
+**Flat.** A torrent keeps its own layout, unchanged, directly inside its finished location (§7A.4): a multi-file torrent in its top folder, a single-file torrent as the file, with the names the torrent gives. Nothing is renamed, nothing is filed under authors, titles, shows or seasons, and the content category never decides a folder name. `<finished>/<torrent name>` is where it is, whether detection ran or not. There is one placement and no setting for it.
+
+- **Write to a staging folder first:** files are downloaded to the incomplete location (`…/.incomplete/`, §7A.4) on the same volume and moved into place (an atomic `rename`) when complete, so nothing half-downloaded is ever visible in the finished location.
+- Name collisions are never overwritten: a move that finds the name taken gives the file a suffix (`name (2)`, §7A.5); a download whose own name is already taken by another file stops with "destination already exists" and leaves that file alone.
+- **Torrents placed by earlier versions** (destination templates, file-by-file placement) stay exactly where they are: their recorded paths are kept, nothing is moved automatically because of this change, and settings changes do not propose moving them.
+
+**Organize by seed status (optional, off by default).** *Settings ▸ Folders ▸ Organize by seed status* (`folders.by_status`). When on, finished torrents live in a subfolder of their finished location named after their sharing state (§8.3):
+
+| Folder | Torrents |
+|---|---|
+| `Active/` | Popular and Active |
+| `Dormant/` | Dormant (no upload and no interested peer for 24 hours) |
+| `Stopped/` | paused by the user, or stopped at the seeding goal |
+| `Dead/` | the error has lasted over 24 hours, or the tracker says the torrent is unregistered |
+
+- **Error** (a problem less than 24 hours old) is transient: a torrent in Error stays where it is.
+- **No churn.** The folders are re-evaluated at most once an hour. A torrent moves to another folder only when two evaluations in a row agree (Stopped and Dead do not wait for the second), and never while it is uploading at that moment (it is tried again at the next evaluation).
+- **Downloads in progress are never moved by this**: they are in the incomplete location, and a download that finishes lands in `Active/`. Torrents the user placed ("Move to…", a save path of their own) and torrents placed by earlier versions are left alone.
+- **Moves are the ordinary relocation of §7A.5**: sibling folders on one volume, so `renamex_np` renames, journaled and crash-safe, never an overwrite (collision suffix), seeding pauses for milliseconds (measured: 40 files, 20 MB, 31 ms; state stays Seeding, peers stay connected). The folders a move (or a removal with its files) empties are removed up to the save location; Finder's own litter (`.DS_Store`, `._*`) does not count as content and goes with its folder, anything else keeps the folder untouched.
+- **A move that cannot be done does not nag.** Before the first rename a preflight checks every source file for the lock flags (`uchg`/`schg`/append-only, Finder "Locked") and that the folders involved can be written. A failure is reported in words naming the file or folder: "“f22.bin” is locked (Finder › Get Info › Locked), so the torrent stays where it is", "No permission to change “Downloads”". The torrent keeps seeding where it is and gets no error state; the reason is remembered per torrent (`move_note` on its row, `seedwell debug health`). The automatic check re-runs only that preflight at each later evaluation, reports again only when the reason changes, and moves the torrent once the preflight passes. A move the user asked for ("Move to…", Move…) reports every failure.
+- **Turning the switch on** asks "Move the N existing torrents to the new location?" (§7A.5) and files the finished torrents into the folders; **turning it off** asks the same and moves them back up. Declining leaves them where they are, and the hourly evaluation does not file them behind the user's back.
+- The status folders sit inside the category, rule or app-default finished location, so a changed location moves a torrent with its status folder.
+
+### 7A.4 Locations: incomplete and finished, per category
+Every download has two locations:
+
+- **Incomplete location**: where data is written while downloading (staging).
+- **Finished location**: where the files live once complete. They are seeded from there; there is only ever one copy.
+
+**App-level defaults** are set in Settings ▸ Folders. **Each category may override either one, or both** (plain folders; the category decides *which folder*, never a name inside it). A rule may override the finished location for its torrents (precedence: rule > category > app default). With *Organize by seed status* (§7A.3) the status folder is added below whichever of the three applies.
+
+**Different-disk warning.** When an incomplete location and the finished location it feeds are on different volumes (compared by device id of the nearest existing folder), Settings shows a warning next to the pair: "On different disks: finishing a download copies the files instead of an instant move." The pair is allowed; the warning only explains the cost. The same check runs when a disk is mounted or unmounted.
+
+### 7A.5 Moving files after a location changes
+When a finished location changes (app default, category override, a torrent's category, "Move to…" on a torrent, or the *Organize by seed status* switch), Settings asks "Move the N existing torrents (X GB) to the new location?" and the files are relocated in the background:
+
+| Case | Method | Cost | Interruption |
+|---|---|---|---|
+| Same volume | `renamex_np(RENAME_EXCL)` per file, directories created first | Microseconds per file, no data copied | Seeding pauses for milliseconds while that torrent's file handles close and reopen |
+| Different volume | Stream copy with large unbuffered (`F_NOCACHE`) reads and writes, **hashing every piece as it passes** against the torrent's piece hashes; `fsync`; then switch the torrent to the new paths and delete the source | One sequential read and one write; the integrity check costs no extra I/O | **None for seeding**: seeding only reads, so it keeps serving from the source until the copy is verified, then switches over in milliseconds |
+| Torrent still downloading | Only the finalize target changes; data in the incomplete location is moved when the download finishes | Zero | None |
+| Incomplete location changes during a download | Same methods as above for the partial files; that torrent's writes pause while its files move (instant on the same volume) | As above | Download of that torrent pauses during a cross-volume copy |
+
+- **Crash safety:** every move is journaled (the finalize journal of trs-storage). After a crash it is resumed or rolled back; the source is deleted only after the destination is verified and the torrent's record points at it.
+- **Scheduling:** at most one cross-volume copy per destination volume at a time; the copy is unbuffered (`F_NOCACHE`), so seeding and the Mac stay responsive without a speed limit (`advanced.move_limit_mib`, default 0 = unlimited; settings before version 6 that still hold the old default 100 become 0). Measured, 1 GiB verified copy within one SSD: about 1.4 GB/s. Re-pointing a category with hundreds of torrents queues them; same-volume moves finish almost at once.
+- **Safety:** never overwrite (collisions get a suffix, §7A.3); refuse when the destination lacks free space for the largest pending torrent plus 1 GB; a failed or cancelled move leaves the torrent seeding from its original location.
+- **UI:** the row shows "Moving… 42%" in its grey status line; the menu bar icon shows the green move bar (§8.1).
+
+### 7A.6 Smart add: choose what to download (concept 10)
+Detection exists to remove decisions, so the app asks only when there is a real choice. A single movie, episode, album or book with a confident match starts silently with a notification. The chooser appears **before anything is downloaded or announced** when any of these holds:
+
+| Trigger | Detected from | Preselection |
+|---|---|---|
+| **Several items** | season pack, several seasons, complete series; movie collection (≥ 2 movies); discography (≥ 2 albums); book or audiobook bundle (≥ 3 titles) | everything the library does not already have |
+| **You have some** | an item's files already exist at their place in the torrent's own folder (§7A.3) with the same size (for example a torrent added again after "remove, keep files"), or the same episode/title identity is there at another quality | those items unticked, labelled "In library" |
+| **Platform variants** | software with several OS / CPU builds (`arm64`, `x86_64`, `win`, `linux`, `.dmg`, `.exe`, `.AppImage`…) | the build for this Mac only |
+| **Very large** | total over 50 GB (Settings ▸ Transfers), or more than the free space at the destination | everything |
+| **Unsure** | confidence below 80 % (§7A.2), or a watch folder set to Ask first | everything; the category picker is highlighted |
+
+- **Structure, not a file list.** Files are grouped into items: TV by season then episode, movie collections by title (year, quality), music by album, books by title, software by variant. Junk (samples, `.nfo`, screenshots, ads) is collected under **Extras**, unticked. Tri-state checkboxes per group; the raw file list is one disclosure away.
+- **Quick picks** for TV: All · What I don't have (default when something is in the library) · Latest season. For collections: All · What I don't have.
+- **Footer:** selected count and size, free space at the destination, and the primary button names the choice ("Download 3 Seasons").
+- **Engine:** a torrent that needs a choice is held in state **Awaiting choice**: a `.torrent` is not announced, not connected to peers and allocates nothing until confirmed; a magnet fetches metadata (that needs peers), then holds. Confirming sets file priorities (unticked = skip) and starts. Cancel removes it and leaves no files. There is no timeout: it waits for the user.
+- **In the notifier.** The choice does not need the main window: the notifier popover (§8.6) slides out for every torrent that awaits a choice, and the choice is made right in it, **compact first**: the block shows the title, "Category · size · folder" and two buttons on the bottom line, right-aligned, **Cancel** then **Start** (Start takes **every file** unless the list was changed, and starts the torrent through the normal path; see "One pair of actions" below) and **Cancel** (removes the held torrent and moves the `.torrent` file it came from to the Trash, see "Cancel and the .torrent file" below; nothing was downloaded, so there is no prompt). The **chevron** in front of the title (there is no Select Files… button; a 24 x 28 pt hit area) expands that block in place: the popover grows by a checklist of at most 220 pt that scrolls inside (same tree, tri-state boxes and sizes as the chooser, "Select all / none", the selected size; everything but the Extras starts ticked), then **Cancel** and **Start**. The popover never opens the chooser window; the title and its line are one link that opens the main window on the torrent (§8.6). The popover and the main-window chooser ("Choose…" on the row, the menu, Get Info ▸ Files) show the same selection: one model per torrent, a tick in one is a tick in the other, and Start or Cancel in either resolves both. In either checklist a group's chevron only folds or unfolds it (a real 28 pt hit area; a click beside the glyph never ticks); a row's title and its checkbox tick it.
+- **Watch folders and agents:** an auto-added torrent that needs a choice appears in the notifier, in Downloads and in the menu with an orange dot and "Choose what to download…". The notifier replaces the notification; only when it cannot be shown (no menu bar item) is there a notification that opens the chooser. Agents get `needs_choice` with the same structure and confirm through `choose_files` (Control level).
+- **One pair of actions, everywhere.** Whatever holds a torrent that is new or waiting (the notifier block, compact or expanded, an auto-start countdown block, the main window's row in selection mode, the chooser window, the context menu and the menu bar submenu of a held row) offers the same two actions: **Cancel** and **Start**, on the bottom line, right-aligned, Cancel first and Start (the prominent default) last; in a menu the items are *Start* and *Cancel*. **Start** applies the current ticks and starts the torrent; a torrent that waits for a choice begins with **every file ticked except the Extras group** (samples, featurettes, `.nfo`), so Start without opening the list downloads everything but extras and the list always shows what Start will do; nothing else is excluded by default (no "already in library" rule; the chooser's quick picks "What I don't have" and "Latest season" are one click away); the chooser's quick picks ("What I don't have", "Latest season") are one click away. Start is disabled while nothing is ticked. On an auto-start countdown Start means start now. The word is Start for every held torrent, never Download or OK; only the chooser of a torrent that already runs (Get Info ▸ Files) says **Download** for the files it adds. The count of the choice is a line of text ("1 season · 2.0 MB · 69 GB free"), not in the button. **Cancel** removes the torrent and, see below, moves its `.torrent` file to the Trash. Keys, where the block owns them (an expanded checklist, or the only block): **Return = Start, Escape = Cancel, ⇧Escape = Cancel keeping the file.** Pause and Start Now are gone from the notifier, the row and the menus: a countdown offers only Cancel and Start (the engine's pause-countdown API stays, unused by the UI).
+- **Selection mode in the main window.** A torrent that waits for a choice has a disclosure triangle in Downloads and, open, its file list under the row: the same tree, checkboxes, sizes and ticks as the popover, on the **same model** (one per torrent): a tick in the window shows in the popover and the chooser window and back. The row's actions are **Cancel** and **Start**. Nothing downloads, announces or connects until Start; the torrent stays held and silent. The row's old "Choose…" button is gone (the context menu has *Choose Files…*).
+- **Cancel and the .torrent file**. Cancel on a torrent that waits for a decision (a choice, or the countdown of §7A.7 turned into one by the chevron) removes the torrent **and moves its source `.torrent` file to the Trash** (`FileManager.trashItem`, never a permanent delete). **⇧-Cancel** removes the torrent and keeps the file where it is. The button always reads **Cancel**, a normal bordered button. While Shift is held a small caption, **Keep .torrent file** (11 pt, secondary), slides out just below it (0.18 s) and slides back when Shift is released; it hangs in the popover's own padding (a few points are reserved under the buttons of a block that has a file), so the popover never changes height. The hover text says both: "Remove this torrent and move its .torrent file to the Trash. Hold ⇧ to keep the file." With no file to trash there is no caption and no Shift variant: magnet links and web addresses (also a magnet link whose file list is being fetched), a file that is gone, or a file Seedwell does not own. Escape is Cancel and ⇧Escape is ⇧-Cancel wherever Escape cancels (the expanded block, the chooser window); the chooser window's Cancel for a held torrent asks "Remove …?" first and names what happens to the file.
+  - *Where the file is.* The engine remembers the path **in memory, only for torrents that are still held** (`EngineHandle::held_source`): set when a torrent is added from a `.torrent` path (Finder open, drag and drop, File ▸ Open, the add panel, a watch folder, the "ask first" answer) and forgotten when the torrent is released (OK, Download, Start Now, the countdown ends) or removed. It is the file that is **left** after the folder's "after adding" action: the original path for "leave", the archive copy for "archive", nothing for "trash" or "delete". Nothing stores paths for every torrent, and a restart forgets it (a torrent held across a restart has a plain Cancel). Adds that carry the bytes only (the control socket and CLI) have no file.
+  - *Safety.* Only a regular file (never a symlink or folder) whose name ends in `.torrent` and whose own info-hash is the cancelled torrent's is moved, and that is checked again, by reading the file, right before the move. Anything else is left alone and the torrent is still removed. If the Trash refuses, the torrent is still removed and a quiet notification says "Couldn't move <name>.torrent to the Trash".
+  - *QA.* `SEEDWELL_QA_TRASH_DIR` (a folder under a temp root) makes the app move the file there instead of to the real Trash; `starting cancel [name] keep` is ⇧-Cancel; `starting shift on|off` forces the Shift state of the button; `open-file <path>` opens a `.torrent` as Finder would.
+- **One engine text.** Titles ("Sintel (2010)"), the line "Rule … · Saves to … · Then seeds until ratio …" and seeding goals in words come from the engine (`trs_classify::torrent_title`, `SeedGoal::describe`, `ChoicePreview::summary`), so the app and the CLI show the same text. The title is stored with the torrent and recomputed only when the category changes. A row whose remaining bytes do not fit at its destination fails at resume or re-add with "Not enough space: …" instead of failing in the middle of a write.
+- **Later changes:** Get Info ▸ Files reopens the same chooser for a running torrent, so more seasons can be added at any time; newly ticked items download into the same locations.
+- **A finished torrent that gets more files is a download again**. The state is derived from the wanted pieces: a torrent whose wanted pieces are not all verified is downloading, whatever happened before. When files are ticked after it finished (Get Info ▸ Files, the file tree, the chooser, a skipped file streamed), or a recheck finds wanted pieces missing, the engine takes it out of Recent and Sharing (`finished_at` cleared and persisted, `seed_group` none), it takes a download slot like any download (queue rules apply) and shows progress over the wanted bytes, speed and time left. It keeps seeding the pieces it has. When the wanted pieces are complete again it is finished again with a new `finished_at` (Recently Finished for 15 h) and the "finished" notification is shown again. Seeding goals and the private floor never act on it while it downloads; the seed time it had earned stays counted.
+
+  **Progress and time left of a download again**. A download measures *wanted* bytes only: the engine keeps the verified bytes of the wanted pieces (`wanted_done`, one `u64` in the shared counters; Cold torrents get it from the resume data) and the row's time left is `(wanted − wanted_done) / rate`, so a skipped file never lengthens it. The tracker's `left` is unchanged (whole torrent). When a finished torrent becomes a download again, the engine records `session_base = wanted_done` (persisted in `torrent-session.bin`, cleared when it finishes); the row's progress, the "2.2 of 9.8 MB" text and the menu's `NN%` count `(wanted_done − base) / (wanted − base)` (`session_done` / `session_size` on the row), so the new file starts at 0 % and ends at 100 %. Ticking more files while it is still downloading keeps the base; a fresh download has base 0. Sharing's "X of Y downloaded" still counts the whole torrent.
+
+### 7A.7 A grace period before an auto-added torrent starts
+A torrent that Seedwell would start without asking (the classifier is confident, ask mode is "never", or the watch folder is set to auto-add) does not start at once. It is added **held** for N seconds (Settings ▸ Transfers ▸ "Wait before starting", default 10, `0` = start at once, max 600) so that a wrong catch can be stopped before a single packet leaves the Mac.
+
+- **Held, silent.** The same silent state as "awaiting a choice" (§7A.6) plus a countdown: no tracker announce, no DHT lookup or announce, no peer connection (incoming ones are turned away), no PEX, no metadata fetch for a magnet link, nothing allocated. The state is `pending`; the engine owns the deadline (a session job), so it holds with no window open, and the row, the FFI and the control layer report it with the deadline.
+- **Applies to** `.torrent` files and magnet links from every source: watch folders, opening files, drag and drop, the CLI and agents. **Does not apply** when the chooser is shown already (unsure classification, Ask mode: the user is deciding), to paused adds, or when the caller chose the files. A magnet link has no file list yet, so it is held first and, once started, fetches its metadata and may still end in the chooser; ask mode "always" skips the wait for it.
+- **Skip it.** `seedwell add --now` starts at once. The control layer's `add` answer carries `pending` (`starts_at_ms`, `starts_in_secs`, `paused`) and `list pending` finds the waiting torrents.
+- **The user can:** **Start** (now) or **Cancel** (§7A.6, the same two actions as everywhere), with nothing else (no Pause, no Start Now: the engine's pause-countdown API stays but the UI does not offer it), or the **chevron** or the **title** (the countdown ends and the torrent stays held for the choice exactly as in §7A.6; the chevron expands the block inside the notifier (§8.6) with its checklist, the title opens the main window in selection mode (§8.3); **Start** starts the torrent with that selection at once, **Cancel** removes it and moves its `.torrent` file to the Trash, ⇧-Cancel keeps the file (§7A.6); for a magnet link the metadata is fetched first, the block reads "Fetching file list…" and the checklist follows).
+- **Restart.** Quitting during the wait leaves the torrent held. On the next launch it is held again with a fresh countdown and the notifier comes back. Nothing ever starts without the countdown having run.
+- **At the deadline** the torrent starts as the add would have, the notifier closes itself when nothing waits any more.
+- **Notifications.** The notifier (§8.6) replaces the "Added …" notification of an auto-add that waits.
+
+## 7B. Private tracker compliance (out of the box)
+
+Private trackers ban clients that "report malformed stats" or "hammer our hardware". They also ban beta clients and forks or modified versions of mainstream clients. Seedwell has to be a model citizen with **no configuration**. Nothing below can be turned off in the UI.
+
+### 7B.1 Honest identity
+- A **unique peer-ID prefix** in Azureus style (`-XX1000-`), with a two-letter code nobody else uses (to be checked against the known client lists). The prefix carries the real version.
+- `User-Agent: Seedwell/1.0.0`, with the real version.
+- **Never spoof another client.** There is no option to change the peer ID or user agent. Pretending to be qBittorrent/Transmission is the "altered client" case trackers ban, and it would be deceptive. This is a hard non-goal.
+- A **stable `key`** per torrent and session, and a peer ID that stays the same for the whole session.
+
+### 7B.2 Correct stats: the #1 ban reason
+- `uploaded` / `downloaded` are payload bytes only. Protocol overhead and re-sent data don't count. Data that fails its hash check is reported the same way the mainstream clients (qBittorrent, Transmission) report it.
+- `left` is exact. A torrent added already complete (cross-seeding) announces `left=0` and **never** sends `event=completed`.
+- `left` counts every byte not yet verified, skipped files included (libtorrent's `bytes_left`), so a partial selection announces `left > 0` from the start and honestly follows the download.
+- A torrent that was finished and then downloads again (files ticked, a recheck) keeps its tracker session: no extra `started`, regular announces just carry the new `left`, and `completed` is never sent a second time (the flag is persisted). A partial selection that finished does not send `completed` (not every piece is there); it is sent once when the torrent is really complete.
+- Events follow the spec exactly:
+  - `started` once per session;
+  - `completed` exactly once, only when the download really finishes;
+  - `stopped` on pause, remove and quit. Quitting waits briefly (≤ 3 s) to send these.
+- Counters persist across restarts. The per-session reporting matches what trackers expect after a new `started`.
+- **Reference behaviour:** the announce sequence and counter semantics must match the mainstream clients (qBittorrent, Transmission) (qBittorrent/libtorrent, Transmission, Deluge) **byte for byte where it matters**. This is checked by packet-capture comparison tests, not assumed. (Transmission 4.0.6 got banned over an announce bug, which shows how strict this is.)
+
+### 7B.3 Don't hammer the tracker
+- Announce intervals:
+  - Always honour `interval` and `min interval`.
+  - Never announce early, except `started`/`stopped`/`completed`.
+  - "Force re-announce" in the UI is rate-limited to `min interval`.
+- **Startup and wake:**
+  - Announces are staggered with jitter.
+  - At most N concurrent requests per tracker host (default 2).
+  - Requests to the same host share one HTTP keep-alive connection.
+  - So 200 torrents on one tracker can never cause a burst.
+- **Quit** is the one exception, for `stopped` only: the process is leaving and a `stopped` has no use for pacing, so at quit all `stopped` announces go out together, up to 50 in flight over all trackers (the per-host cap and the token bucket do not apply to them), each given 3 s to connect and 2 s to answer once the request is written, and the whole quit (everything sent or given up) is bounded by 10 s. Same as libtorrent/qBittorrent (`max_concurrent_http_announces`, `stop_tracker_timeout`). A `stopped` caused by pause or remove while the app runs keeps the regular pacing. Never sent for a torrent that did not send `started`, or whose tracker halted it.
+- Failures:
+  - Exponential backoff.
+  - `failure reason` is shown to the user. One that looks permanent (unregistered torrent, banned client, bad passkey) stops re-announcing until the user acts; any other is retried slowly (30 min → 1 h → … → daily, §7C.4).
+  - `warning message` is shown.
+- `numwant` is moderate (default 50). Scrape only when the UI needs it, no more often than the announce interval.
+
+### 7B.4 Private torrent rules (BEP 27)
+- Private torrents use **only** the trackers in the `.torrent`.
+- DHT, PEX and LSD are off for them, and their info-hash never leaks to the DHT.
+- Trackers are never added or removed, and the announce URL is never rewritten (a duplicate add of a private torrent merges nothing, §7A.1).
+- Passkeys (which identify your account) are kept secret: never logged, and hidden in the UI and in copied magnet links.
+
+### 7B.4a Hit-and-run protection (on by default)
+Most private trackers ban accounts that stop a torrent before a minimum seeding time (often 48-72 hours, sometimes 10 days). Seedwell's global private floor (§7, `transfers.private_min_seed_secs`, default 10 days, Settings ▸ Transfers ▸ "Private torrents: seed at least") keeps every private torrent seeding at least that long before a ratio or time goal may stop or remove it, unless the rule that applies sets its own `min_seed_time`. It never blocks you: stopping, pausing or removing by hand is always possible.
+
+### 7B.5 No stat manipulation, ever
+No "report extra upload", no fake seeding, no ratio tricks, no super-seeding on private torrents.
+
+### 7B.6 Release discipline
+- Version numbers follow semver, and there is one release channel. There is no build-based gating: no build refuses a tracker, and there is no developer switch that changes what a build may announce to.
+- Correct behaviour is enforced by tests (§7B.8), not by refusing trackers. Every build treats a private torrent like any other and announces with the same honest identity (§7B.1); Seedwell is exercised against private-tracker rules on local mock trackers only.
+
+### 7B.8 Verification
+- **Mock tracker test suite.** It checks event order, counter semantics, intervals, concurrency caps and the private flag, and fails CI on any deviation.
+- **Capture comparison.** The same torrent goes through qBittorrent and Seedwell, and the announce sequences are diffed.
+- **Soak.** Announce counts per host per hour are logged and asserted under the 30-day soak (§5A).
+
+## 7C. Tracker communication: correct by construction
+
+Tracker traffic is the most safety-critical code in the product. One bug here can get every user's account banned. Goal: **hammering is impossible by construction, and protocol errors are caught by several independent test layers before release.** "Zero risk" can't honestly be promised; this design gets as close as engineering allows.
+
+### 7C.1 Standards we implement exactly
+| Spec | What it governs |
+|---|---|
+| BEP 3 | HTTP announce: parameters, events, `interval`, `failure reason`, `tracker id` echo |
+| BEP 23 | Compact peer lists (`compact=1`) |
+| BEP 7 | IPv6 peers (`peers6`) and the `ipv6=` parameter |
+| BEP 12 | Multitracker tiers: shuffle within a tier, promote the working tracker, fail over inside a tier. Every tier announces on its own schedule (§7C.4b) |
+| BEP 15 | UDP tracker: connection-ID reuse (60 s), transaction IDs, retransmit timeout `15·2ⁿ s` |
+| BEP 41 | UDP tracker URL path/options |
+| BEP 48 | Scrape (only when needed) |
+| BEP 24 | Tracker-reported external IP |
+| BEP 31 | `retry in` on failure |
+| BEP 27 | Private torrents |
+| RFC 3986 | Exact percent-encoding of binary `info_hash` / `peer_id`. This is a classic source of bugs. |
+| RFC 9110/9112 | HTTP semantics: redirects (max 3, same scheme or upgrade only), `Retry-After`, gzip, keep-alive, timeouts |
+| TLS | rustls with full certificate verification and no insecure fallback |
+
+The response parser is **strict but defensive**:
+- Bencode is parsed to spec.
+- Unknown keys are ignored.
+- Missing or invalid `interval` falls back to 30 min.
+- Absurd values are clamped:
+  - `interval` below 5 min is raised to 5 min, unless the tracker also sets `min interval`, in which case we respect it with a 60 s floor;
+  - `interval` above 24 h is capped at 24 h.
+- Peer lists larger than the cap are ignored.
+
+### 7C.2 Architecture: a pure state machine behind a single gate
+```
+ torrent events ─┐
+ timers ─────────┼─▶  AnnounceStateMachine  ──(Request intent)──▶  HostGate  ──▶  HTTP/UDP I/O
+ responses ──────┘    (pure, no I/O, no clock)                     (per host)
+```
+- **Sans-I/O state machine**, one per (torrent, tracker). Every policy lives here as a pure function `(state, input, now) → (state, intents)`: event order, intervals, backoff, counters. With no sockets and no real clock, it is deterministic and exhaustively testable.
+- **HostGate:** the *only* code that can send a tracker request. The request type has a private constructor, so nothing else can even build one.
+  - At most **1 in-flight request per (torrent, tracker)**.
+  - At most **2 concurrent requests per host**.
+  - A **token bucket per host** (default ≤ 1 request/s sustained, burst 3) as a **hard ceiling**. Even a logic bug elsewhere cannot exceed it.
+  - **Only at quit** (`begin_quit`), `stopped` announces are released outside those two limits, bounded by one global cap of 50 in flight; an open host breaker still holds a host back and quit-time `stopped` failures never feed the breaker. Everything else, and every `stopped` while the app runs, keeps the limits above.
+  - A **host circuit breaker:** if a host fails for many torrents at once, the *host* is paused with backoff. 200 torrents never retry independently.
+  - HTTP keep-alive: one connection per host.
+- **Persisted timing:** the last announce, the next allowed time and the `completed`-sent flag are stored transactionally per (torrent, tracker). Restarts and crashes cannot cause an early announce or a second `completed`.
+- **Crash-loop breaker:** after 3 launches within 10 minutes that each followed a crash (a launch after a clean quit does not count), all announces are delayed, apart from `stopped`.
+- **Fail closed:** if an invariant check fails at runtime, that host's announces stop and an error appears in the UI. Silence is safer than spam.
+
+### 7C.3 Invariants (checked in tests and at runtime)
+1. A non-event announce never happens before `max(interval, min interval)`. A manual re-announce never happens before `min interval`.
+2. Each tracker gets `started` before any other event in a session. `stopped` comes only after `started`, and nothing follows `stopped` except a new `started`.
+3. `completed` is sent at most once per torrent, ever, and never for torrents added already complete.
+4. Within a session, `uploaded`/`downloaded` never decrease, and `left` is never negative or larger than the torrent size.
+5. Per-host requests never exceed the token bucket (apart from quit-time `stopped`, capped at 50 in flight globally), and there is never more than one in-flight request per (torrent, tracker).
+6. The `key`, `peer_id` and `tracker id` echo stay the same for a session.
+7. Private torrents: no request goes to any host other than their own announce URLs.
+
+### 7C.4 Backoff and failure handling
+Retry pace depends on what the torrent is doing. A download needs peers soon; a seed does not, and hundreds of seeds retrying quickly would waste wake-ups and tracker goodwill.
+
+| Role | Transient failure schedule (+0–20 % jitter) | Cap |
+|---|---|---|
+| **Downloading** (incl. fetching metadata) | 1 min → 2 → 4 → 8 → 16 → 32 min | 1 h |
+| **Seeding** (Popular / Active) | 15 min → 30 min → 1 h → 2 h → 4 h | 6 h |
+| **Seeding, dormant** (§8.3) | 30 min → 1 h → 2 h → 4 h → 8 h | 12 h |
+
+- Transient failures are timeouts, DNS errors, 5xx and connection resets. The role is taken when each retry is scheduled, so a download that finishes moves to the seeding schedule and a dormant seed that becomes popular moves to the faster one (never earlier than the retry already scheduled).
+- `Retry-After` (429/503) and BEP 31 `retry in` are a floor: a downloading torrent waits exactly that long; a seeding torrent waits for whichever is later, the hint or its own schedule.
+- `failure reason` that looks permanent (unregistered or not-found torrent, banned client, invalid passkey) stops announcing to that tracker until the user acts. **Ask Tracker Again** (row button and context menu, Get Info ▸ Trackers, `seedwell reannounce` / `seedwell debug announce`) is the user's act: it announces once more, never sooner than a minute after the last attempt, so it cannot hammer a tracker that just said no; the answer says whether it went out or when it may. Nothing does this automatically. Any other `failure reason` (maintenance, "announce too frequently") is retried slowly: 30 min → 1 h → 2 h → 4 h → 8 h, then every 24 h. Seeding never silently ends for years because of one maintenance message.
+- `warning message` is shown, and announcing continues normally.
+- Sleep/wake and network changes only reschedule failed announces, spread across the same jittered scheduler. They never trigger a regular announce early, so no torrent ever announces twice in a burst.
+- **An outage is not the trackers' fault.** Failures that come from the network being gone do not escalate any backoff (§7C.4c): without that, a seed that was cut off for three hours would sit at the 6 h step for hours after the network returned.
+
+### 7C.4b Multiple tiers: every tier runs alone
+**Decision (2026-10, after a soak finding).** Each tier of `announce-list` is an independent announcer, as in Transmission. Inside a tier, BEP 12 applies: the first tracker that is not failing is the active one, a failing one is retried on its own backoff, a tracker that works is promoted to the front. Nothing that happens in one tier ever starts, stops, retires or reschedules a tracker of another tier.
+
+The first model followed libtorrent's default (`announce_to_all_tiers = false`: announce to the first working tier only and hand over between tiers). That hand-over is what the soak caught. On the Ubuntu torrent, tier 1 (`torrent.ubuntu.com`) answered 503 and tier 2 (`ipv6.torrent.ubuntu.com`) worked with `interval = 1800`. When tier 1 recovered, tier 2 was suspended with a `stopped` 675 s into its interval, and the next tier 1 failure started it again with a second `started`. Both are announces the tracker had not asked for. libtorrent avoids this because it has no per-tracker sessions; ours do.
+
+Rules (all covered by `crates/tracker/tests/multi_tier_independence.rs`):
+1. A tracker that is mid-interval after a success receives nothing because another tier failed, recovered, was retried, or changed health. Its next request is its own regular announce, `interval` after its own last success.
+2. A retry of tracker A never causes any request to tracker B in another tier. Inside a tier, a failing tracker that the set moves past (a later tracker took over and was promoted) is retired **without any request** if it never acknowledged `started`. A retired tracker that did acknowledge `started` gets one `stopped` and cannot be started again before its regular announce time (`Input::Retire`).
+3. Each tracker keeps the event rules: one `started` per session, `completed` at most once, one `stopped` at pause/remove/quit. At quit every tracker with an open session gets one `stopped` attempt, no retry.
+4. `http`/`https` spellings of one tracker (same host, path and query) in different tiers are one tracker: the later one becomes a failover in the earlier one's tier. Otherwise a private torrent that lists both would be announced to twice per interval.
+5. Different hostnames with no shared tracker profile (`torrent.ubuntu.com` and `ipv6.torrent.ubuntu.com`, which exist to collect v4 and v6 peers separately) are two trackers in separate tiers; each announces once per interval. The per-host gate still applies to each.
+   **Tracker profiles (§ trackers.toml):** tiers whose URLs the engine's profile matcher (`policy::match_profile`, the one that attributes a torrent to a profile) maps to the same profile are folded into ONE tier when the torrent is registered, so BEP 12 failover applies inside it and a tracker that is known under several domains is never announced to in parallel. A tier belongs to the profile of its first matching URL. The fold happens at registration; editing profiles later takes effect for torrents registered afterwards.
+6. `set_port`, `set_crypto`, network change and wake move no healthy tracker's schedule in any tier (a network change only pulls failed announces in, spread by the wake jitter).
+7. Dual-stack is handled inside one request by the transport (§7C.4a rule 1); it is never a reason to announce to another tracker.
+
+### 7C.4c Outages: detect, hold, probe, release
+**Decision (2026-10-15, after the qBittorrent comparison, `docs/qbittorrent-parity.md` area 3).** The tracker hub keeps one small piece of state beside its torrents: `Online`, or `Offline { since, reason, probe_at }`. Online it costs nothing but the handling of events. Offline it has exactly one timer, the next probe. Nothing is polled and no task exists per torrent.
+
+*Entering Offline* (any of):
+1. **The OS says so** (`NWPathMonitor`, debounced 3 s): reason `path`. No probe is made until the OS reports a usable path again.
+2. **Inference** (the headless daemon has no path monitor, and the OS can be wrong): announces failed to *reach* at least 2 distinct tracker hosts (DNS failure, connection refused or unreachable, connect timeout; not HTTP errors, not `failure reason`, not a slow tracker) within 2 minutes, with no sign of life elsewhere in that time (an answered announce, a peer handshake, a DHT datagram, an accepted inbound connection). With a single tracker host in use, 3 distinct torrents failing is the evidence. One tracker being down never makes Offline: that stays per-tracker backoff and the host breaker. Reason `inference`.
+3. **A wake from sleep** (workspace notification, or a wall-clock jump the monotonic clock did not see): a short check, not shown as an outage. The hub waits for the OS to report a path (or 5 s), then probes once.
+
+*While Offline:*
+- No announce, dial or DHT query is sent; the hub-wide `held` flag is one shared value, so a machine costs no extra memory. An announce that comes due is only marked due; a request still queued at the gate is withdrawn.
+- **Backoff is frozen.** A network failure while Offline is not counted and schedules no retry. The failures that revealed the outage (2 minutes back) are rolled back, and the host breakers they opened are closed. `stopped` is never held.
+- **The probe is a useful request, not a ping:** the next due announce of one torrent, preferring a tracker that answered recently, at +30 s, 1 min, 2 min, 5 min, then every 5 min (each ±20 %). Any answer of any kind (even `failure reason` or an HTTP error) proves the network. An OS "path satisfied" (after a loss), a wake, an accepted inbound connection or a DHT datagram triggers a probe right away, at most once per 10 s. If nothing is due, a probe has nothing to test with: when the OS or a sign of life vouches for the network the hub goes Online at once, otherwise it waits for the next step.
+- Dials wait (their addresses keep their place, without strikes), the DHT sends nothing and runs no timer. The UI shows a quiet "Offline" where it shows the transfer rates; nothing modal.
+
+*On recovery* (first answer): go Online; the announces that came due are released over 60 s with jitter (at least 3 s after the release) through the unchanged host gate (2 in flight and the token bucket per host, so 100 due announces on one host take about 100 s). A torrent whose announce did not come due keeps its schedule and sends nothing. Then, once: the DHT's bootstrap backoff starts over (it can sit at an hour) with one bootstrap, torrents with nobody connected forget their dial backoff, and the port mapping and listen sockets are refreshed. qBittorrent's "reannounce everything" is deliberately not copied: it breaks the per-host pacing and `min interval`.
+
+*Invariants and tests:* nothing in this section moves a regular announce earlier than §7C.3 #1 allows. `crates/tracker/tests/outage.rs` runs 300 torrents on 3 hosts through 5-minute and 3-hour outages, one dead tracker, an unsatisfied path, a 10 h sleep and a captive portal on a virtual clock; the oracle of the property tests knows the rule. `crates/engine/tests/outage.rs` covers the running engine.
+
+### 7C.4a Lessons from real client bans: regression suite
+Every known tracker-ban bug in a mainstream client becomes a permanent test. The first one:
+
+**Transmission 4.0.6, an HTTP announce spam bug (2024).** Many trackers banned this version.
+- Transmission sent each announce **twice, over IPv4 and IPv6**, to the same tracker.
+- On hosts without working IPv6, the IPv4 request succeeded and the IPv6 request failed. When both responses were processed in the same batch, the **failure overwrote the success**. The client then rescheduled "announcing in 20 seconds" instead of the tracker's interval of about 30 minutes.
+- The IPv4 success also reset the failure counter, so the retry never backed off. Reports show 1–2.5 announces/min against a ~35 min interval.
+- Transmission fixed it in 4.1.0 ("Fixed 4.0.6 bug where Transmission might spam HTTP tracker announces").
+
+Design rules this produces for Seedwell:
+1. **One announce per (torrent, tracker) per interval**, not one per address family. Dual-stack is handled by connection fallback (happy eyeballs), not by parallel announces.
+2. If per-family announcing is ever added, each family is a **separate state machine with its own failure counter**. A failure in one family can never shorten the other's schedule, and success in one never resets the other's backoff.
+3. **A success always wins over a concurrent failure** for the same logical announce, whatever the processing order.
+4. The re-announce time comes only from the latest *successful* response's `interval`/`min interval`, or from backoff after failure. It is never earlier than `min interval` after a success.
+
+Tests:
+- **Property test:** every interleaving and ordering of {success, failure, timeout} responses for concurrent requests, delivered one at a time or batched, across many torrents announcing at once after idle. Assert invariants 1 and 5 of §7C.3 and rules 2–4 above.
+- **Simulation:** a dual-stack host with IPv6 blackholed, 500 torrents, 24 simulated hours. Each (torrent, tracker) gets at most `ceil(24 h / interval)` + event announces.
+- **Positive control for the detector:** run the real **Transmission 4.0.6** binary against the local mock tracker only, with IPv6 refused. The probe's `analyze` must flag it as **announce spam** (more than one non-event announce per `min interval`), while Transmission 4.1.x and Seedwell must pass. This proves the detector catches real bans before our client ever meets a real tracker. The banned build never talks to a real tracker.
+
+Sources: transmission/transmission issue #7078 and PR #7086; 4.1.0 release notes; openwrt/packages issue #29085.
+
+### 7C.5 Verification: layered, each layer independent
+1. **Property tests** (`proptest`): random sequences of torrent events, responses, crashes and clock jumps. All 7C.3 invariants are asserted after every step.
+2. **Model checking** (e.g. `stateright`): exhaustive exploration of the state machine for small bounds, covering every interleaving of pause, resume, complete, crash, failure and wake.
+3. **Fuzzing** (`cargo fuzz`): bencode and response parsers, the UDP packet decoder and URL handling.
+4. **Deterministic simulation:** 1,000 torrents × 50 hosts over 90 simulated days with injected faults (timeouts, garbage, 5xx, DNS loss, sleep/wake, crash loops), on a virtual clock. Per-host request counts are asserted against budget. This runs in minutes in CI.
+5. **Real-tracker conformance in CI:** run against open-source tracker servers in containers, at least `opentracker`, `Ocelot` (the tracker behind many private sites), `XBT`, `Chihaya` and `Torrust`, over HTTP, HTTPS and UDP.
+6. **Reference capture diff (real swarms, real clients):**
+   - Install mainstream clients (qBittorrent, Transmission) side by side: Transmission, qBittorrent, Deluge, and optionally BitTorrent/µTorrent (note: adware).
+   - Take official Linux ISO torrents (Ubuntu, Debian, Fedora, Arch). Rewrite only the tracker URL to point at our local **tracker probe**, a logging proxy that forwards each request to the real tracker and returns its real response. The announce URL is outside the info dict, so the info-hash and swarm are unchanged.
+   - Every request and response is recorded over a scripted lifecycle: add → download → pause → resume → complete → seed → quit → relaunch → remove.
+   - Our client must produce a semantically equivalent sequence. Any difference is a documented, deliberate decision.
+   - Private-tracker passkeys are never used in these captures.
+7. **Release gate:** no release ships unless layers 1–6 are green. The tracker module has mandatory review and no unreviewed changes.
+8. **Runtime self-audit:** each host has local counters for requests per hour, errors and backoff state, visible in Advanced. If a host is ever over budget, the client self-throttles and records a diagnostic.
+
+## 7D. Direct downloads (HTTP/HTTPS)
+
+Large files from plain links get the same care as torrents: pause, resume, throttle and queue, and they go to their category's finished folder. **They never appear in Sharing**, because there is nothing to seed.
+
+- **Adding:** paste a link (main window **+**), drop a link on the icon or window, or use the agent interface/CLI. If a URL serves a `.torrent` (by `Content-Type` or extension), it is added as a torrent instead.
+- **Segmented download:** up to 4 parallel ranges per file (configurable), only when the server supports `Range` (`206`). Slow segments are split adaptively, with a single-connection fallback.
+- **Reliable resume:**
+  - The segment map is persisted.
+  - On resume, the client validates with `ETag`/`Last-Modified` via `If-Range`.
+  - If the file changed on the server, it restarts with a notice. It never stitches together corrupt data.
+- **Throttle and queue:**
+  - Downloads share the global download limit and the same queue as torrents ("max active downloads" counts both).
+  - Per-download limits are available.
+- **Integrity:** an optional expected checksum (SHA-256/SHA-1/MD5) can be pasted or passed by an agent. The client also auto-detects a matching `SHA256SUMS` next to the file. It is verified on completion and the result shown.
+- **Polite to servers:**
+  - At most 4 connections per host.
+  - Honours `429`/`503` + `Retry-After`, with exponential backoff.
+  - At most 10 redirects.
+  - Full TLS verification.
+- **Authenticated sources:**
+  - A download can carry headers (e.g. `Authorization`, `Cookie`) for links that need a login.
+  - They are stored in the Keychain and never logged.
+  - They are scoped to that download's host and **never** apply to tracker traffic. Tracker identity stays fixed (§7B.1).
+- **Same pipeline:** category detection (from filename and `Content-Type`), the category's finished folder (§7A.4), `.incomplete` staging, notifications and Recently Finished.
+- **UI:** a link glyph on the file icon, and the host shown in the subtitle, e.g. "releases.ubuntu.com — 2.1 of 5.9 GB — 3 minutes remaining".
+- **Out of scope:** browser extensions, video-site grabbing, FTP, and download "acceleration" tricks beyond honest range requests.
+
+## 7F. Streaming: play while downloading
+
+**Goal.** Press Play on a downloading video and watch it in the user's own player (VLC, IINA, QuickTime). Dragging the
+player's timeline jumps there: Seedwell fetches that part first and playback resumes on its own. No built-in player.
+
+### 7F.1 How it works (no player control channel needed)
+- **Local HTTP with ranges.** Seedwell serves the file at `http://127.0.0.1:<port>/<token>/<file name>`: loopback only,
+  a random 128-bit token per stream, `Accept-Ranges: bytes`, the full `Content-Length` and a content type from the
+  extension. The token dies when the stream is closed, the torrent removed, or the app quits.
+- **The request is the playhead.** A player seeking issues a new `Range: bytes=N-`; Seedwell moves the urgent window
+  to the pieces covering N. While playing, the player's reads advance, and the read offset (playhead + player
+  buffer) keeps the window moving. Several open ranges (players probe the index while playing) each get a window.
+- **Never send unverified or missing data.** A read waits for its piece to arrive and pass its hash, then streams
+  immediately; it never returns zeros or errors for "not yet". A read that waits longer than 60 s with no peer
+  progress ends the response cleanly (the player shows its own error/retry).
+- **The index first.** On Play, the first and last pieces of the file (at least 2 MB each, plus the MP4 `moov` or
+  MKV `Cues` location when the header points to it) are fetched before anything else, so the duration and the
+  timeline are right from the start.
+
+### 7F.2 Piece order while streaming
+- **Urgent window**: the next ~30 s of playback (estimated from the file's bitrate, at least 8 MB) after each live
+  read offset, with deadlines nearest-first. Urgent pieces are requested from several fast peers at once (endgame
+  style for just those blocks; duplicates cancelled on arrival) and from web seeds when present.
+- **Read-ahead**: the following ~2 min at high priority.
+- **Everything else follows the normal order** (rarest-first, after the first four pieces of a fresh download, which are picked at random so there is something to share quickly; libtorrent's `initial_picker_threshold`, same in streaming and plain mode), so the swarm keeps piece diversity. Pure sequential download is never
+  used (bad for swarms and frowned upon by private trackers); stats and announces are unaffected.
+- A seek far away drops the old urgent window at once (its outstanding requests become normal priority, not cancelled
+  unless they are duplicates).
+- Unselected files cannot be streamed; selecting a file for streaming selects it for download.
+
+### 7F.3 Where Play appears
+- On a downloading or finished video row (Movie and TV, and Other files with a video extension) once the start of
+  the file is present; in a season pack each episode has Play (Get Info › Files and the row's context menu); the
+  the menu bar's Recent rows have no Play (they reveal in Finder). Finished files open the file itself (no server needed).
+- **Players: any installed one.** Seedwell lists the video players on this Mac (LaunchServices: apps that open the
+  file's type, ranked by a known list) and launches each the way it accepts a URL:
+
+  | Player | Launch | Notes |
+  |---|---|---|
+  | IINA | `iina://weblink?url=<url>` (or open -a) | everything mpv plays |
+  | VLC | open -a VLC `<url>` | everything |
+  | QuickTime Player | open -a, `<url>` | MP4/M4V/MOV only; AVFoundation sends many small ranged requests |
+  | Infuse | `infuse://x-callback-url/play?url=<url>` | everything |
+  | mpv, Movist Pro, Elmedia | open -a / CLI | when installed |
+
+  "Play" uses the default player (Settings › General › "Play videos with": Automatic = IINA, VLC, Infuse, then
+  QuickTime; or a chosen app). "Play With ▸" in the row and Get Info menus lists every installed player that can play
+  this file's container; players that cannot (QuickTime for MKV) are left out, and with none left Play explains which
+  player to install. Apps whose executable cannot run on this Mac (no arm64 slice and no Rosetta, e.g. an Intel-only
+  VLC) are left out, and Play says to update that player. A player not in the table is offered when LaunchServices says it opens the type and is launched
+  with open -a and the URL.
+- **Several players at once.** Each Play makes its own stream (own token, own read cursors), so two episodes in two
+  players, or the same file in two players, work together. Urgent windows of all live streams share the urgent
+  bandwidth fairly; read-ahead is per stream.
+- Players on other devices (Apple TV, phones) would need the server outside loopback, which the local-only rule
+  forbids; not in scope.
+- **Agents**: `stream_url(id, file)` returns the local URL (permission `control`; `file` defaults to the largest video or audio file); `stop_stream(token)`. CLI: `seedwell stream <id> [--file N]` prints the URL, `seedwell stop-stream <token>`.
+
+### 7F.4 Budgets and tests
+- Start to first frame on a healthy swarm: ≤ 5 s. Seek to an unfetched point: playing again in ≤ 4 s (healthy swarm,
+  ≥ 5 MB/s, pieces ≤ 8 MiB). A seek must wait for one whole piece to be verified, so with larger pieces the budget is
+  4 s plus the time to fetch one piece at the swarm rate (never serve unverified data to go faster).
+- A stalled read means no growth in the awaited piece's received bytes for 60 s; a slow piece is never cut off.
+- Measured 2026-10-11 (fake swarm 6 MB/s, 4 MiB pieces, 296 MiB 1080p): VLC 3.0.21 first frame 4.1 s, seek 2.0 s;
+  AVFoundation (QuickTime) 1.0 s / 1.8 s; IINA 1.3.5 plays (first data past the index 1.4 s); libavformat (mpv/IINA
+  engine) seek 0.7 s. No extra memory beyond the existing piece cache; the server holds no file data of its own.
+- Measured 2026-10-12 with the real engine (`crates/engine/tests/streaming_players.rs`, release build): a throttled
+  seeder (6 MB/s), a Seedwell leecher streaming a 296 MiB 1080p H.264 file (600 s, 4 MiB pieces) over loopback HTTP.
+  First frame / seek to 70 % (about 7-15 % downloaded at the seek): AVFoundation (QuickTime) MP4 1.0 s / 2.1 s;
+  libavformat (mpv, IINA engine) MP4 1.5 s / 1.0 s, MKV 0.8 s / 1.0 s (a second seek to 35 %: 1.0-1.7 s); VLC 3.0.21
+  (universal build, headless, includes its own 1.8 s start-up on a local file) MP4 3.6 s / 2.3 s, MKV 3.6 s / 2.3 s
+  (the very first VLC launch after a reboot took 5.2 s while it built its plugin cache). All within the budgets; every
+  byte compared equal to the source. Web seeds (BEP 19) are not used for urgent pieces yet (the engine has no web seed client).
+- Tests: Range edge cases (open-ended, suffix, past end, multiple), seek storms (50 random seeks), slow swarm,
+  > 4 GB files, a stalled piece, the token refused from another host or with a wrong token, removal during play, and
+  real players: headless VLC (`--start-time`, recorded Range requests, time from seek to playing), IINA and
+  AVFoundation (QuickTime's engine: an AVPlayer test that loads the duration and seeks), plus two streams at once.
+
+## 7E. Tracker profiles and statistics
+
+### 7E.1 Trackers: automatic, and favorites
+**Trackers are identified automatically; nothing is set up**. Public or private, every torrent is grouped by its tracker at run time:
+- The group key is the **registrable domain of the torrent's primary announce host**: the first URL of the first tier (`announce` when there is no list). `tracker.example.org` → `example.org`, `bttracker.debian.org` → `debian.org`, `a.example.co.uk` → `example.co.uk`; an IP address or `localhost` is its own domain. Only the primary host counts: a public magnet that lists ten trackers stays in its first tracker's group and never merges groups together.
+- The name is the domain without its TLD, first letter capitalised ("Debian", "Example"; an IP or `localhost` names itself).
+- A torrent with no tracker at all (magnet or DHT only) is **Public**. A private torrent whose trackers cannot be parsed is **Other private**, shown only while it has something in it.
+- Nothing of this is stored: no entry in `trackers.toml`, no history of its own, never a passkey (announce URLs are masked everywhere they are shown).
+
+A **favorite** is a stored profile (`trackers.toml`) the user made with right-click → **Save as Favorite** on an automatic tracker. Only favorites have tracker-specific settings:
+- **Name**, custom (starts as the automatic name).
+- **Announce URLs:** a list of host or URL patterns, any number. "Save as Favorite" stores the bare primary hosts of the group's torrents; passkeys in the path or query are never stored (the same stripping for every pattern; a pasted full announce URL keeps only its address and the editor says "Passkey removed — only the tracker address is kept").
+- Optional **rule** link (§7: "tracker favorite → rule" is the normal way to set seeding behaviour), optional colour/icon.
+- Matching: each announce URL of a torrent is checked against the favorites' patterns; the best match wins (exact URL, then host and path, then host; earlier URL, earlier favorite). A favorite takes precedence over the automatic grouping, so a torrent moves into a favorite the moment one of its addresses matches and out again when the address is removed (live, no restart). Rules (§7) can still be written against a favorite's id or `public`.
+- Profiles that already exist in `trackers.toml` are favorites.
+- **Right-click, then edit in place**: the sidebar menu of a favorite has *Info*, *Rename* (the label becomes a field, Finder-style: Return commits, Escape cancels, losing focus commits) and *Remove from Favorites* (an inline strip under the top of the tracker's tab: "Remove “Name” from Favorites? 2 rules use it."; the torrents stay and regroup automatically). An automatic tracker has *Info* and *Save as Favorite*.
+- **Info** opens the tracker's **Info page** in the main window (not a popup): the tab's content switches from the torrent list to the page, the sidebar item stays selected, the title line reads "<name> · Info", and a small "‹ Torrents" link at the top returns. The page has the tracker's numbers (lifetime uploaded, downloaded, ratio, torrents completed and the 30-day upload sparkline for every tracker), how many torrents are sharing and downloading now, the busiest now, the tracker's state (Working, or the first failure text), the last successful announce and the mean announce interval (from the announce lines of up to four of its torrents; nothing new is tracked), and **Tracker URLs**: one row per address. A favorite's rows have a pen (the row becomes a field; Return saves, Escape cancels) and an x (removes at once; the only address asks first, since it removes the favorite), and a + under the list adds a focused empty row. Every button has hover text. A line is checked as typed: an invalid address keeps the field open with a short red hint, a duplicate says "Already in the list", and a pasted announce URL keeps only its address with the quiet note "Passkey removed — only the tracker address is kept". An automatic tracker's list is read-only with the hint "Save as Favorite to edit".
+- Not shown, because no cheap data exists: the busiest torrent *this week* (no per-torrent history), announce success rate, per-tracker seeder/leecher totals.
+- Settings → Rules → Trackers still lists the favorites for their rule link.
+
+### 7E.4 Speed limits per tracker (favorites only)
+A favorite can have its own **download limit** and **upload limit** (`down_limit` / `up_limit` in its `[[tracker]]` table of `trackers.toml`, bytes per second; absent or `0` = unlimited). Like every tracker-specific setting it needs a favorite (an automatic tracker's Info page says "Save as Favorite to set limits").
+- **One shared cap, not one per torrent.** All torrents of the tracker together never move more than the cap, in each direction: a rate-limit *group* in the engine. A favorite with a limit owns one token bucket per limited direction (`GroupLimits`, keyed by profile id); a favorite with no limit owns none, and a torrent that belongs to no limited favorite carries no group at all. Each peer connection of a torrent in a limited favorite charges what it moved to its torrent's group bucket as well as to the global limiter (§7.3a: the stricter of the two paces it). Measured with three 10 MB torrents of one tracker over local peers: a 1.0 MB/s cap held at 0.999 MB/s, 0.5 MB/s at 0.501 MB/s, a 0.8 MB/s download cap at 0.800 MB/s, and under a 0.6 MB/s global limit a 2 MB/s tracker cap left 0.60 MB/s (a 0.3 MB/s tracker cap under it gave 0.30 MB/s).
+- **Live.** Editing a cap, clearing it, or changing the favorite's addresses takes effect at once, no restart: the bucket keeps its identity and takes the new rate, a removed cap switches its bucket off and drops it, and a torrent that moves into or out of a favorite (an address added or removed, §7E.1) joins or leaves the group as it is re-matched. Changing a cap, a name, a colour or the rule link does not re-match the library (only ids and addresses do).
+- **Edited** on the favorite's Info page, in a small **Speed limits** section under the numbers: *Download* and *Upload*, each the same control as Settings (a number, an MB/s / KB/s menu, empty = Unlimited), applied while typing after a short pause and at once on Return or when the field loses focus, with the tracker's current rate beside it against the cap ("1.0 / 5 MB/s"), and one grey line: "One cap for all torrents on <name> together. The global limits still apply; the lower one wins." CLI: `seedwell tracker <favorite> limits [--down R] [--up R]`; `seedwell trackers` shows each favorite's caps.
+
+### 7E.2 Historical statistics
+Recorded **per automatic tracker, keyed by its domain** (§7E.1), for every torrent whether or not a favorite exists, and for "All", "Public" (no tracker) and "Other private". The same small counters as always, only the key differs; there is no per-torrent history. A favorite's history is the sum of the domains of its addresses (several addresses on one domain count once) plus whatever was recorded under its own id before statistics were keyed by domain, so saving a tracker as a favorite never resets its numbers, and removing the favorite keeps them under the domain. History recorded earlier under Public or Other private stays there (it cannot be split). Recorded:
+- **Bytes downloaded and uploaded:** payload only, exactly what is reported to trackers.
+- **Torrents added, completed and removed.** **Files downloaded:** count and bytes of wanted files completed.
+- **Seed time:** total, plus the number of torrents currently seeding and in low power.
+- **Ratio:** lifetime upload ÷ download.
+
+Storage:
+- **Daily buckets** in `state.redb`, plus lifetime totals. A bucket is about 64 bytes, so 10 years × 20 trackers is about 15 MB on disk and nothing in memory.
+- The current day is held in memory and flushed with the regular debounced state writes.
+- Counters are monotonic and survive restarts and crashes (§5A). Removing a torrent does not erase its history.
+
+Display:
+- In the main window, selecting a tracker in the sidebar shows a header above its torrents:
+  - lifetime **↓ / ↑ / ratio**, **torrents downloaded**, **files**;
+  - a quiet **30-day bar chart** of daily up/down;
+  - "this week", "this month" and "all time" summaries.
+- The sharing line in the menu bar menu stays one line. The stats live in the window.
+- Agents get the same data via `tracker_stats(tracker, range)` (§9A).
+- Export: CSV per tracker from the tracker's right-click menu.
+
+## 8. User interface
+
+Principle: **the menu is for glancing, the main window is for acting.** The menu shows status only. Adding, settings and every change happen in the main window.
+
+### 8.1 Menu bar icon
+- A down and an up arrow, no text (decided 2026-10-13). Each arrow is the menu bar's dimmed grey when nothing moves and shifts toward green (download) or red (upload) with the transfer rate: faintly tinted from 5 KB/s, full colour at 10 MB/s, logarithmic in 8 steps.
+- A subtle hairline under the arrows shows total download progress while downloading. While files are being moved (§7A.5) the hairline becomes a **green** bar with the aggregate progress of all moves (size-weighted); it appears only for a move still running after 0.4 s (a same-volume rename takes about 30 ms and would only flicker), is checked twice a second while a move runs and not at all otherwise, and gives the hairline back to the download progress (or nothing) when the moves end.
+- A small orange dot in the lower right corner asks for attention (a choice to make, an error).
+- The icon is redrawn only when its look changes; it refreshes every 5 s while something transfers and every 30 s otherwise.
+- Drop a `.torrent` file or a magnet link onto the icon to add it.
+
+### 8.2 Menu bar menu: plain native menu, as simple as possible
+A standard `NSMenu` in the same style as Plex, Dropbox and system menus. It uses only built-in menu features (macOS 14+): section headers, item subtitles, badges, checkmarks and images. There are no custom-drawn views, so it looks and behaves exactly like a native menu, with VoiceOver, keyboard navigation and Dark Mode for free. See concept 1.
+
+```
+ Downloading
+  ◔ ubuntu-26.04-desktop-arm64.iso
+    74% · 2 min left
+  ◔ Sprite Fright 4K
+    21% · 14 min left
+ Queued                                  (dimmed, next few only)
+    debian-13.2.0-amd64-DVD-1.iso
+    Common Voice Corpus 22
+    + 3 more
+ ───────────────────────────────────────
+ Recent                                  (last 3 finished)
+  ✓ Night of the Living Dead (1968)
+    Movie · 12 min ago
+  ✓ Frankenstein — Mary Shelley
+    Book · 1 h ago
+ ───────────────────────────────────────
+  ↑ Sharing 212 torrents        3.1 MB/s ▸
+ ───────────────────────────────────────
+  Open Seedwell…                     Quit     (⌘L, ⌘Q)
+```
+
+The menu is **status only**: four sections, then one row with "Open Seedwell…" on the left and "Quit" on the right, each highlighting on its own (⌘L and ⌘Q still work while the menu is open). There are no settings, add buttons, pause-all or speed toggles; those live in the main window.
+1. **Downloading:** each active download. The title is the name (cut in the middle past 44 characters: the name gives way, never the numbers) and the subtitle is `NN% · speed · time left`, for example `42% · 3.1 MB/s · 4 min left` (`Fmt.rate`, `Fmt.remaining(short:)`). With no speed, the engine's reason replaces the time instead of a stale estimate (`42% · Waiting for peers`, `42% · Tracker: Unregistered torrent`, the same `waiting_note` as the window row); with a speed but no estimate yet it reads `42% · 3.1 MB/s · calculating…`; a paused one `Paused · 42%`. The item image is a progress ring. Rows refresh once a second while the menu is open (title and subtitle updated in place, so the highlight stays) and never when it's closed.
+   **A new download is first**. A torrent that has just become a download (§8.3: added without a hold, or released from the popover by Start or the countdown running out) is listed at the top of Downloading, newest first, also while it only waits for a free slot (then its subtitle reads `Up next · waiting for a free slot` and it is not repeated under Queued; at most the 3 newest such arrivals are lifted). Torrents held for the user's choice or counting down stay ahead of it, the older downloads follow in the engine's queue order. This holds when the menu is reopened and while it is open (the structure is rebuilt as soon as the list changes, not only when a count changes). Before this the new row came last in the engine's queue order, below every older download, or under Queued with its "+ N more" when the active slots were full. The menu has no "current" section or submenu to switch.
+2. **Queued:** the next few (default 3), dimmed, then "+ N more". Not the whole queue.
+3. **Recent:** the last 3 finished downloads, with category and how long ago. Clicking one reveals it in Finder.
+4. **Sharing:** **one line** with the seeding count and, while uploading, the rate ("Sharing 2 torrents · 14 KB/s"; plain text, no badge). A click opens Sharing in the main window. No submenu; `general.menu_bar_split_by_tracker` is kept in the config but no longer shown or used.
+
+Empty sections are hidden. With nothing downloading or queued, the menu starts at Recent.
+
+A finished torrent that downloads again (more files ticked, a recheck) is listed under Downloading with `NN% · speed · time left`, not under Recent; it takes the window only when the user re-selected the files (not for a recheck at launch).
+
+- **Right-click any torrent** (downloading, queued or recent) for:
+  Pause/Resume · Move to Top of Queue · Show in Finder · Priority ▸ · Category ▸ · Rule ▸ · Files… · Copy Magnet Link · Remove… · Remove and Delete Files….
+  The same items also appear as a hover submenu, which is the standard macOS pattern, so nothing depends on right-click alone.
+  ⚠️ *Technical risk:* `NSMenu` has no built-in right-click per item. Catching it while the menu is tracking needs an event hook, to be proven in the M0 spike. If that's unreliable, the hover submenu is the fallback.
+- **File list under the row**. Every multi-file torrent row (Downloading, Queued / Up next and Recent; not one held for the user's choice, which has the chooser) has a small disclosure chevron at its left edge with a 24 pt hit area. Clicking it opens that torrent's checklist in one custom item right under the row, and the menu stays open (a plain item's action would close it). The rest of the row is as before: a Recent row still reveals in Finder on a click elsewhere, a download row keeps its ▸ submenu; the submenu has no "Files" item (one way to do it; "Files…" there still opens the chooser window). The row itself is a view item that draws like a native one (ring, name, grey line, ▸).
+  The list (no Select All / None: the window's file list and the chooser have those): the files with their folders collapsible inside the list (a lone wrapper folder such as `Show.S01/` is stepped into; folders first, then files, in the window's order; a small torrent, 14 nodes or fewer, starts with its folders open, a bigger one with them closed), then the grey footer `8 of 13 files · 16 MB of 17 MB`. Each row: fold chevron for a folder, check column (✓ on, − some files, empty = skipped, the name then dimmed), name cut in the middle, size on the right (`42% · 1.2 GB` for a wanted file that is partly downloaded). A click on a file or folder toggles it (a mixed or empty folder becomes fully checked, a full one skipped, as in the window). The list scrolls (about 220 pt of rows, so the menu never grows huge; a torrent of 2,000 files is fine); only an extreme archive stops at 500 visible rows with `Show All in Seedwell… (N more)`, which opens the window on Downloads (Sharing for a seeding row) with that file list expanded.
+  **One at a time:** expanding another torrent closes the first; every opening of the menu starts collapsed. Changes go through the window's own path (`FileTreeState`: the check shows at once, one `set_file_priorities` call after 250 ms of quiet on a timer that also runs while the menu tracks; ticking a file of a finished torrent counts as the user's re-selection, §8.3; the engine does the rest, a row can move between Recent and Downloading). **Lazy:** the list is fetched (a private `FilesStore`, never the window's) when it opens, nothing polls while it is open or closed, and it is freed shortly after it closes or the menu closes (kept only while an edit is still on its way to the engine). While a list is open the 1 s refresh updates the rows' texts but does not rebuild the menu's structure, so the list is never closed under the pointer (a torrent added meanwhile shows when it is closed). Progress in the list is as of the moment it opened.
+- **⌥ (Option) held:** subtitles add speed, peers and rule, using native alternate items.
+- **"Open Seedwell…"** opens the main window (§8.3) for everything that isn't a glance: adding torrents, settings, rules, pause/limits, bulk edits, file selection.
+
+### 8.3 Main window (on demand, "Open Seedwell…")
+Apple design language and dark first: hierarchy comes from type and spacing, not boxes and colours. See concepts 2 and 3.
+- **Sidebar** (floating glass panel): **Downloads · Sharing**, then **Trackers**: the **favorites** first (a small star, alphabetical), then the automatically identified trackers (§7E.1) by torrent count, then name, then **Public** last; counts as torrents. The list scrolls when it is long. A tracker is a place, selected like Downloads and Sharing (the same sidebar highlight); Downloads and Sharing always show every tracker. Right-click an automatic tracker → *Save as Favorite*; right-click a favorite → *Info*, *Rename*, *Remove from Favorites*; an automatic tracker → *Info*, *Save as Favorite* (§7E.1; all edits inline, no sheet or alert). A tracker's tab shows the stats summary (the tracker's recorded history, with the 30-day sparkline), then all its torrents as two collapsible blocks: **Downloads** (Downloading, Queued, Recently Finished) and **Sharing** (the Sharing groups below), styled like the Sharing groups (the blocks' headers a step stronger). Empty groups are hidden, a block with no rows is hidden, and a tracker with no torrents says "No torrents on <name>". Folds are remembered per Mac and shared by all trackers. The window title reads "<name> · N torrents". A torrent that just finished is listed once, under Recently Finished. ⇧-click selects from the last plainly or ⌘-clicked row to the clicked one across groups and blocks, skipping folded groups. Removing a favorite while its tab is open returns to Sharing. Small ↓/↑ totals sit at the bottom. Errors live in the Sharing groups (Error, Dead), not in extra sidebar items.
+- **A new download takes the window**. When a torrent becomes a download (added without a hold, or accepted from the add popover with Start or the countdown running out; a held torrent does not count until it is released, and nothing that was downloading at launch is new), the window switches to **Downloads** from whatever it shows (Sharing, a tracker tab, a tracker's Info page, a finished multi-file torrent selected), selects the new row, scrolls it into view and leaves Get Info closed. Only a torrent that becomes a download triggers it, not every row change; paused, checking and failed rows do not. It never takes the window from the user: in **Settings**, during an inline edit (a favorite's name or address, a favorite's removal question) or while a Remove… question is open, the window stays and Downloads in the sidebar gets a small accent dot until the user goes there. With the window **closed**, the next opening (Open Seedwell…, the Dock) is on Downloads with the newest such row selected, if it still downloads; an opening with an explicit target (a notification, Settings, a section from the menu) goes there instead.
+- **Toolbar:** app icon, "Seedwell" and one grey summary line, nothing else: no add or pause buttons and no search field. Adding is drag and drop, double-click, watch folders, *File ▸ Add Torrent File…* (⌘O) and *File ▸ Add Magnet Link or URL…* (⇧⌘O); *Transfers ▸ Pause All / Resume All* stay in the app menu. Settings is the gear and ⌘,. Speed limit is under *Transfers ▸ Limit Speed* (⌥⌘L), which carries a check mark while the alternative limits are on. **Small ↓/↑ totals** sit at the bottom of the sidebar; a limit in force shows quietly after the rate ("↓ 2.0 / 5 MB/s", "↑ 120 / 500 KB/s": the unit once when both share it; the global or, while *Limit Speed* is on, the alternative limit), and a small tortoise appears beside them while *Limit Speed* is on. The menu bar menu (§8.2) deliberately has no speed toggle.
+- **Every button has hover text** saying what it does.
+- **Launching from the Dock or Finder opens the window** (a login launch or a .torrent/magnet open does not). A Dock click while the previous run is still quitting (it lingers for the trackers' `stopped`) starts Seedwell again when that run has exited; a new launch waits quietly for it instead of reporting the state as in use.
+- **Downloads view:**
+  - **Downloading:** file-type icon, name, "4.6 of 6.2 GB — 2 minutes remaining", a thin progress bar, and a ring that is both progress and pause, like Safari's downloads. A download that is not moving says why instead of "Calculating time remaining…" (that only shows while something is connected but the speed is not known yet): with nobody connected and no speed the line is "0.0 of 1.9 GB — Waiting for peers", or, when every tracker of the torrent failed or halted, "0.0 of 1.9 GB — Tracker: Unregistered torrent" (or "Tracker unreachable · retrying in 2 h") with the reason in the error colour (red when the tracker halted for good, orange while it retries) and an **Ask Again** button. The words come from the engine (`TorrentRow::waiting_note`, `tracker_error`, `tracker_halted`), one text for the app and the CLI (`info` says `waiting`, JSON `waiting_note`). A finished torrent in this state is in the Error or Dead group of Sharing as before.
+  - An empty Downloads view says "No downloads", an empty Sharing view "Nothing is being shared": the same quiet grey line as a tracker tab's "No torrents on …".
+  - **Up Next:** the queue, dimmed, drag to reorder.
+  - **Recently Finished:** size, time, and where it went. The magnifier reveals it in Finder. Items stay 15 hours after finishing, or until "Clear" (menu bar Recent too).
+- **Sharing view:** five groups, each shown only when non-empty, in this order.
+  - **Popular:** in demand now: at least 3 peers downloading from it, or more than 250 KB/s averaged over 10 minutes. Sorted by upload rate; shows ↑ rate.
+  - **Active:** uploaded something or had an interested peer in the last 24 hours, but not popular. Shows ↑ rate or "last upload 2 h ago".
+  - **Dormant:** no upload and no interested peer for 24 hours. Resting in low power (§5), still announcing on schedule, wakes instantly when a peer asks.
+  - **Error:** a problem that started less than 24 hours ago: every tracker of the torrent failing, files missing or unreadable, disk errors. The row's grey line is the short reason ("Tracker unreachable · retrying in 2 h"). Tracker warnings alone are not errors.
+  - **Dead:** the error has lasted more than 24 hours, or the tracker says the torrent is unregistered. The row offers Remove…; nothing is ever removed automatically.
+  - **A Sharing row has two grey lines**, no bars. Line 2: `<upload rate or –> · N peer(s) · Ratio 0.27` (with the ratio goal when there is one: `Ratio 0.27 of 1.0`), e.g. "1.2 MB/s · 1 peer · Ratio 0.27 of 1.0", "– · 0 peers · Ratio 1.04" ("Moving… 42%" replaces it while the files move). The tracker, the seeding time and the swarm size are in Get Info (right-click › Get Info), not on the row. Line 3: `3 of 24 files · 1.8 GB of 14 GB downloaded · 3.0 GB uploaded`: the ticked files **fully downloaded** of all files (a single-file torrent leaves them out), the verified bytes held of the whole torrent, skipped files included ("14 GB downloaded" once every file is held), and the lifetime payload uploaded (lowercase "uploaded"). A Stopped row reads "Ratio 0.4 of 1.0 · Stopped" (plus the idle-stop reason when that stopped it) and has the same line 3; Error and Dead rows are unchanged.
+  - The same groups are used in each tracker's tab (inside its Sharing block). The menu's Sharing line adds "· 2 errors" when Error or Dead is non-empty.
+- **File lists (Downloads and Sharing):** a torrent with more than one file, and a torrent that waits for a choice (**selection mode**, with checkboxes and the row's **Cancel** / **Start**, on the model shared with the popover, §7A.6), has a disclosure triangle at its leading edge (Finder's list view); every row keeps the column, so icons and titles line up. Everything starts collapsed, also after a restart; the open ones are remembered while the app runs. Single-file torrents have no triangle.
+  - **Opening** (click, or → / ← on the selected row) fetches the file list from the engine once and builds the folder tree once; nothing is fetched for collapsed rows, and progress refreshes at most once a second for open lists only (none while the window is closed). Rows are lazy: 5,000+ files scroll smoothly. Padding files (BEP 47) are never shown. A skipped file's fill counts only the pieces it does not share with a wanted file, so the edge of a neighbour (pieces cross file boundaries) never looks like a download; a skipped episode the user had really downloaded keeps its fill (engine `FileInfo.done`, the same in the CLI). A single top folder starts open, other folders closed.
+  - **File row:** checkbox (download / skip), icon, name, size, progress (thin bar and percent, a check mark when complete), Priority menu (High / Normal / Low; Skip is the unchecked box) and, on every video file, an always-visible Play button (a plain `play.fill` triangle in the text colour, no circle, like the row's, so it never reads as the accent-coloured Resume): a finished file opens, an unfinished or skipped one streams (selecting a skipped one, §7F). Context menu: Show in Finder, Play / Play With, Priority.
+  - **Folder row:** tri-state checkbox over everything inside, wanted size and progress, and the same Priority menu (it changes the wanted files below; a folder with none wanted checks them all). The header line reads "N of M files · X of Y selected" with Select All / Select None, a filter field above about 20 files, and "Skipped files stay on disk".
+  - **Size capsule and activity**. The size of a file or folder sits in a subtle capsule (a 4 % track) that fills from the left (12 %) with how much is downloaded: all of it = a full capsule; a folder aggregates all its files (held bytes of its total). A skipped file with nothing on disk has plain text, no capsule. The widths are fixed and the digits monospaced, so nothing jitters. Left of the size a file shows its activity when there is any ("↓ 1.2 MB/s" for downloading, else "↑ 340 KB/s", under 1 KB/s nothing; a folder: the sum of its files). Rates come from the change between two once-a-second reads of the open list (smoothed); the upload count per file is the engine's: a live torrent adds each served block to the files it falls in (`FileInfo.uploaded`), allocated on the first block served and dropped when the torrent rests, so an idle or cold torrent costs nothing; nothing is read while the list is closed.
+  - **Edits apply at once** and rapid clicks go to the engine as one `set_file_priorities` call. Skipping a file never deletes it: it stops being wanted (and is no longer downloaded or seeded); a finished torrent whose file gets checked again downloads just that file. Space toggles the selected rows.
+  - A torrent that an earlier version placed file by file (destination templates, removed 2026-10-14) shows its placed files below the folder they share; files that were skipped before placement appear under their torrent folders.
+- **Get Info popover** (ⓘ, Space or ⌘I): **Saves to** (path), **Then** (seeding goal popup), **Files** (n of m, skipped), Show in Finder · Remove…. It is **460 pt wide, always**: nothing inside may be wider (the content is 420 pt; long names wrap or cut in the middle, a tracker URL is one line cut in the middle with the whole masked URL in its tooltip, the status line under it wraps, the seeding-goal popup is capped). It is as tall as its content up to what the screen shows (at most 900 pt) and scrolls beyond; it opens below its row, or above it when the screen has no room below (`PopoverPlacement`). **Trackers** lists each tracker with its status, and **Ask Tracker Again** when the trackers failed or halted.
+- **Group headers fold**: clicking Active, Dormant, Error, Dead, Stopped, Up Next or Recently Finished folds that group to its header (chevron, count kept); remembered per Mac. Folded rows leave the selection.
+- **Remove… asks inline, not in an alert**: a small strip slides down under the torrent's row ("Remove “name”? Files are kept." · Cancel · Remove; for Remove and Delete Files "…and move its files to the Trash?" · Delete). Several selected rows ask once, in the title bar (trailing the window's name), since a selection can run off screen. Escape, Cancel, the user choosing another section in the sidebar, or the torrent leaving the screen drops it; the window or the app losing and regaining focus never does, and Return only answers while the torrent's row is on screen. From the menu bar or Get Info the window opens on the row's section and asks there. Keys (window-wide, not while typing in a field, in Settings or with files selected): Delete asks to remove the selection, ⇧Delete to remove it and trash its files, Return answers yes, Escape no. Selection: click, ⌘-click toggles, ⇧-click extends; Control-click is the context menu (macOS), acting on the whole selection when the row is in it.
+- There is no status bar, no columns, and no technical stats in the main UI. Peers, memory and the tracker log live in Advanced.
+- Multi-select gives bulk actions through the same right-click menu (§8.5).
+- Closing the window frees its memory (§2).
+
+### 8.4 Settings window
+Opened from the main window or app menu (⌘,), never from the menu bar. The tabs follow System Settings style, dark first.
+
+| Tab | Settings |
+|---|---|
+| **General** | Launch at login · notifications (finished / errors / seeding goal reached) · menu bar: split sharing by tracker · prevent sleep while downloading · on battery: keep going / limit / pause downloads |
+| **Transfers** | **Download limit** and **upload limit** (global, default unlimited; each a number field with an **MB/s** (default) / **KB/s** menu, an empty field is "Unlimited", edits apply live; a favorite tracker can have its own, §7E.4) · **alternative limits** (the "Limit Speed" toggle; the same number-and-unit control for its download and upload values, stored in bytes per second like the others, so values written by earlier builds read back unchanged) with an optional **schedule** (days and hours) · max active downloads (torrents + direct, default 3) · max connections per host for direct downloads · default seeding goal (shortcut to the Default rule) · **Private torrents: seed at least** (`transfers.private_min_seed_secs`, the hit-and-run floor of §7 and §7B.4a; Off, 1, 3, 7, 10 (default), 14 or 30 days, a custom value from `config.toml` is shown as it is) · at goal: stop / remove (keep files) · **wait before starting** (seconds a new torrent is held before it starts, default 10, 0 = off, §7A.7) · ask before adding multi-file torrents |
+| **Folders** | **Default download folder** (the app-level finished location) · **incomplete folder** (staging; same volume recommended) · per-category overrides of both, plain folders (§7A.4) · **Organize by seed status** switch (§7A.3) · watch folders (concept 7) · `.torrent` after adding: Trash / archive folder / leave |
+| **Rules** | Ordered rule editor with live preview (concept 5) |
+| **Network** | Listening port (random on first launch) + test · UPnP / NAT-PMP · uTP (off is live, on applies after a restart) · encryption (off / prefer / require, live for new connections) · max connections (global / per torrent) · DHT, PEX for public torrents (always off for private). No toggle for LSD or IPv6 until the engine implements them (BEP 14; the engine has no IPv6 listener): their `network.lsd` / `network.ipv6` keys stay in `config.toml` and do nothing · network interface binding (open question 3) |
+| **Agents** | Agent access (off / read-only / control / full) · **Command line** (Copy CLI Path · Install Command-Line Tool… · Install Skill for Claude Code, §9A.4) · activity log of agent actions (§9A) |
+| **Advanced** | Write cache size · preallocation (sparse / full) · verify on completion · background scrub · fd limit · tracker diagnostics (per-host request counters, backoff state) · **Developer mode** (the tracker log, §8.7) · logs · reset |
+
+### 8.5 Right-click menus (menu bar and main window alike)
+The standard macOS order: actions, then reveal/info, then settings submenus, then destructive actions last. See concept 4.
+- **Downloading / queued:** Pause · Move to Top │ Show in Finder · Get Info ⌘I │ Priority ▸ · Category ▸ (with the detected type and confidence) · Rule ▸ │ Copy Magnet Link │ Remove… · Remove and Delete Files….
+- **Sharing:** Stop Sharing │ Show in Finder · Get Info ⌘I │ Seeding Goal ▸ (rule default ✓, Ratio 1.0/3.0, Seed Forever, Custom…) · Priority ▸ · Rule ▸ │ Verify Files · Copy Magnet Link │ Remove… · Remove and Delete Files….
+- **Ask Tracker Again** leads the menu of a torrent whose trackers failed or halted (§7C.4).
+- Copy Magnet Link never includes a passkey (§7B.4).
+
+### 8.6 The notifier: "Starting in 7 s" and "Choose what to download"
+While a torrent waits to start (§7A.7) or for the user's choice of files (§7A.6) a native popover (`NSPopover`) slides out of the menu bar item, anchored to it. It is shown, not activated: it never takes the focus from the app in front, only a click on it does. It closes by itself when nothing waits any more, and, while only countdowns are in it, when the user clicks elsewhere (the countdown goes on; the torrent's menu bar row and context menu have the same actions); opening the menu bar menu also closes it. Torrents that already wait for a choice when the app starts do not raise it again (they are in the menu and the window).
+- **A choice pending keeps it open.** While a block holds a checklist (or a magnet link's file list is coming) a click elsewhere does not close the popover: it stays until Start, Cancel, or the small × in its corner, which puts it away and leaves the torrents waiting (menu bar row, main-window row in selection mode). A torrent added later brings it back.
+- **Compact first, for every new torrent.** A block is its title, the "Category · size · folder" line ("Magnet link" until the files are known) and, for a countdown torrent, the ring with "Starting in 7 s". The buttons depend on what it waits for:
+  - *Awaiting a choice:* **Cancel** and **Start** (everything, or the ticks of the list; disabled while nothing is ticked), right-aligned on the bottom line, Start prominent (Cancel removes the held torrent and moves its `.torrent` file to the Trash; with Shift held the caption "Keep .torrent file" slides out under it and the click keeps the file; no caption when there is no file, §7A.6). The chevron in front of the title (24 x 28 pt hit area) opens and closes the checklist; it is the only way to it.
+  - *Counting down:* **Cancel** and **Start** (start now), the same pair and place, and the chevron (the countdown ends, the torrent is held for the choice and the block expands). Pause and Start Now are not offered here any more.
+  - *Magnet link after the chevron:* "Fetching file list…" with a plain Cancel (no file, no Shift variant); the block expands by itself when the metadata is in.
+- **The chevron expands the block in place, animated** (0.2 s ease): "Select all / none" with the selected size ("1.2 GB of 4.5 GB"); the tree (groups with disclosure, tri-state boxes, sizes, "In library" badges; everything but the Extras starts ticked) in a list of at most 220 pt that scrolls inside; **Cancel** (same Trash / Shift behaviour as the compact one) and the primary **Start** (disabled while nothing is ticked), right-aligned on the bottom line. The popover grows by that height and no more; the chevron collapses the block back to compact. Group chevrons have a 26 to 28 pt hit area and only fold; the row's title and checkbox tick it. There is no countdown in an expanded block: the engine holds the torrent for the user. It never opens the chooser window.
+- **The category pill**. Every block (compact, expanded, countdown, awaiting; not a magnet link that has no files yet) has a small capsule in its upper-right corner, left of the ×, with the category's symbol and short label (Movie, TV, Music, Audiobook, Book, App, Game, Other; one table for labels and symbols is used by the pill, the chooser's card and Settings). Hover text: "Category: TV — click to change". A click opens a native menu of all categories with the current one checked. Choosing one re-plans the torrent through the same core call as the chooser window's **Change** (`set_category`: destination, rule, title, structure, quick picks); the block's folder line takes the new destination at once and the shared checklist model is rebuilt in place, so the main window row, the chooser window and the popover agree. Ticks the user changed are kept where the same files are still there; ticks they never touched start again as "everything but the Extras" of the new plan. A countdown keeps counting: changing the category starts and stops nothing.
+- **The title is a link**. The title and the "Category · size · folder" line are one click target with a pointing-hand cursor, an underline on hover and the hover text "Open in Seedwell". A click opens the main window on **Downloads** with that torrent selected, scrolled into view and its file list expanded (the menu's "Show All in Seedwell…" path); the torrent stays held as it is. A magnet link that is still fetching opens its row. For a torrent that waits for a choice the list is the **selection mode** of §8.3. **For an auto-start (countdown) torrent the click first ends the countdown** (the same call as the chevron, `pendingChoose`): the torrent becomes one that waits for a choice, the popover block switches to its awaiting state and the window opens in selection mode. A magnet link whose metadata is still coming opens its row and gets the list when it arrives. The popover is 320 pt wide.
+- **One block open at a time.** Expanding one block collapses the others. The whole popover is at most 560 pt high; with many torrents waiting the blocks scroll.
+- **Keyboard.** Clicking the list makes it key without activating the app; then ↑/↓ move, Space ticks, Return is Start, Escape is Cancel and ⇧Escape is ⇧-Cancel (keeps the `.torrent` file) for the expanded block, or for the only block when there is just one (compact included). Nothing is bound while the popover is not key or several blocks are compact.
+- **Several torrents** share one popover, one block each, separated by a hairline, each with its own ring and number. Not one shared countdown: the engine owns every deadline, torrents added together have the same one to the second (their rows tick in step and read as one countdown) and a torrent added later must not be hurried or delayed by an earlier one. A shared clock would also hide which torrent a Cancel or Start belongs to.
+- **Elsewhere:** the menu bar menu lists a waiting torrent under Downloading with "Starting in 7 s" and the same actions in its submenu (*Start*, *Cancel*, *Choose Files…*); the main window row says "Starting in 7 s" with **Cancel** and **Start** and has no progress bar.
+
+### 8.7 Developer mode: the tracker log
+Settings > Advanced > **Developer mode** (`advanced.developer_mode`, off by default, one line of explanation under the switch) writes every tracker exchange to `<state dir>/logs/trackers.log` (`~/Library/Application Support/Seedwell/logs/trackers.log`; `<state-dir>/logs/` for QA and the daemon). `seedwell daemon --dev-mode` switches it on for a headless run whatever `config.toml` says. Turned off, logging stops at once (the next exchange finds the flag cleared); the file stays until **Clear Log**.
+- **One JSON line per entry** (`v`, `ts_ms`, `ts`, `kind`, `torrent`, `id`, `title`, `tracker`, `host`, `transport`, `event`, `request`, `response`, `duration_ms`, `family`, `ip`, `fallback`, `next`, `decision`, `note`). `kind` is `announce` (a request and its answer or error), `decision` (a decision that sent nothing), `gate` (the rate gate) or `quit`.
+  - *HTTP request:* the whole URL with every parameter (info_hash, peer_id, port, uploaded, downloaded, left, numwant, key, compact, supportcrypto, event ...), the request headers as sent, and the decoded parameters. *UDP request:* the connect and announce packet fields (connection id and whether it came from the cache, transaction id, action, info_hash, peer_id, counters, event code, ip, key, num_want, port).
+  - *Response:* HTTP status and the decoded fields (interval, min interval, complete, incomplete, downloaded, peers, warning message, failure reason, tracker id), or the error (timeout, DNS, connect, TLS, connection reset, redirect, "Retry-After", garbage), the duration, the address family and IP that were used, and whether the other family was tried (dual-stack fallback).
+  - *Schedule:* `next` = when the next announce is and why: `interval 1800 s`, `min interval ... the floor wins`, `backoff step N after failure (downloading|seeding|dormant seed pace)` with the server's `Retry-After` / `retry in`, halted until the user acts. The rate gate's delay is its own entry (`deferred` ... `released ... after waiting N ms`), as are breaker pauses and trips.
+  - *Decisions that send nothing:* `session_opened` (which tracker of which tier the walk reached), `retire` / `retire_silent` (BEP 12 failover passed a tracker over; whether a `stopped` was sent), `suspend` and `quit_begin` / `quit_done` (quit handling, stopped abandoned at the deadline), `skipped` (a network change or wake did not move a healthy tracker's regular announce), `retry_moved`, `manual_deferred` (a re-announce before the min interval), `halted`, `stop_abandoned`.
+  - *Connectivity (§7C.4c):* `path` (the OS reported a usable path or none), `will_sleep`, `did_wake`, `checking` (the wake check holds announces), `offline` (since when, reason `path` or `inference`, how many torrents' failures were taken back, how many announces are already due), `probe` (which torrent's announce tests the network), `probe_skipped` (nothing was due), `online` ("online after 3 h 12 min: 214 announces due, released over 60 s through the host gate").
+- **Secrets are never written.** The engine hands raw tracker URLs to `trs_devlog::DevLog::log`, which is the logging boundary: every URL goes through `trs_state::url::mask_secrets_for_log` (passkey / authkey / torrent_pass / pid / `key` ... values, 20+ alphanumeric, 32+ hex and base64-looking path segments, userinfo), every free text (tracker messages, headers, notes, field values) through `mask_text`, and the client `key` (UDP too) is masked in every field. Masking happens before the line reaches the channel, never in a viewer. `info_hash` and our `peer_id` are logged. Tests feed private-tracker URL shapes through the logging path and through a real engine, and `grep` the file for the passkey.
+- **Cost.** Off: one relaxed atomic load per pass of the tracker task, no formatting, no allocation, no thread. On: the line is formatted on the tracker task and written by a separate thread through a bounded channel (4096 lines) that drops, and counts, when full: it can never delay an announce. Rotation at 10 MB, three files (`trackers.log`, `.1`, `.2`).
+- **App.** When on, the Developer group shows **View Log…**, **Show Log in Finder** and **Clear Log**. The viewer is a sheet of the main window: a live tail (once a second; *Live* pauses it) with a filter for torrent or tracker, an event menu and *Errors only*; a row is one line (time, torrent, tracker host, transport and event, what happened), a click shows the request, the answer and the schedule in a monospaced, selectable block; failed exchanges are red.
+- **Agents.** `seedwell log trackers [--follow] [--torrent ID|TITLE] [--tracker HOST] [--event E] [--errors] [--limit N]` (human text, `--json` for the lines; control method `tracker_log`, permission `read_only`) read it; `seedwell dev on|off|status` switches Developer mode (§9A.5).
+
+## 9. macOS integration
+- `LSUIElement` app (no Dock icon). Launch at login via `SMAppService`.
+- Default handler for `.torrent` UTI and the `magnet:` URL scheme.
+- `UserNotifications`: download finished, errors. Optional "seeding goal reached".
+- `IOPMAssertion` blocks idle sleep while downloading (setting, on by default).
+- Logging through `os_log` (Console.app); no log files by default.
+- Distribution: Developer ID-signed, notarized DMG. Not sandboxed and not on the App Store, because the sandbox makes arbitrary download folders painful.
+- Target: Apple Silicon, macOS 15+ **[DECIDE: min version]**.
+
+## 9A. Agent interface (CLI + embedded skill)
+
+Agents like Claude should be able to operate Seedwell as easily as a person: "add this ISO, put it in Software, pause everything from tracker-y until tonight, tell me when it's done." There is **no MCP server**: one tailored command line, one Agent Skill inside the binary.
+
+### 9A.1 Shape
+- **CLI:** `seedwell <command> [--json]` ships in the app bundle (`Seedwell.app/Contents/MacOS/seedwell`). It is a thin client of the control socket; the same binary also runs `seedwell daemon` (headless engine for tests and CI).
+- **Transport to the app:**
+  - A Unix domain socket at `~/Library/Application Support/Seedwell/control.sock`, mode `0600`, same-user only (`getpeereid`), JSON lines, protocol version 1.
+  - **No TCP listener, ever.** Nothing is reachable from the network.
+- **Skill:** a `SKILL.md` + `REFERENCE.md` generated from the CLI's own command table (§9A.4).
+- **v1.x:** App Intents, so Shortcuts, Spotlight and Siri get "Add Download", "Pause All" and "Download Status".
+
+### 9A.2 Commands
+`seedwell help` lists them, `seedwell <command> --help` gives usage, 1-3 examples and the JSON shape; `seedwell help agents` is the compact guide for AI agents.
+
+| Group | Commands |
+|---|---|
+| Look | `status` · `list [state] [--tracker X --category C --text T --kind --limit --offset]` · `info <torrent>` |
+| Add and hold | `add <magnet\|url\|file.torrent>...` · `start <torrent>... [--suggested\|--files L\|--skip L]` · `cancel <torrent>... [--keep-file]` · `choice <torrent>` |
+| Control | `pause` / `resume <torrent>...\|--all` · `top` · `priority <torrent>... high\|normal\|low` · `category` · `files <torrent> [--want\|--skip\|--only\|--low\|--normal\|--high L]` · `goal` · `reannounce` · `recheck` · `remove <torrent>... [--delete-files] [-y]` · `remove-confirm <token>` |
+| Files on disk | `moves` · `move` · `cancel-move` · `stream` · `stop-stream` |
+| Speed and trackers | `limits [--down R --up R --alt-down R --alt-up R --alt on\|off]` · `trackers` · `tracker <name> limits [--down R] [--up R]` · `stats [tracker] [--days N]` · `rules` |
+| Settings | `settings get [key...]` · `settings set key=value...` |
+| Watch | `wait <torrent>... [--any] [--timeout S]` · `watch` · `activity` · `log trackers` |
+| Debug | `dev on\|off\|status` · `debug health\|trackers\|peers\|perf\|announce` (§9A.5) |
+| Test | `sim ...` (§9A.6) · `daemon ...` |
+| Agents | `skill show\|install\|uninstall` · `help [command\|agents]` |
+
+- **Held torrents use the app's words.** A new or waiting torrent is confirmed with **Start** and dismissed with **Cancel** (§7A.6). `seedwell start` begins with every file ticked, like Start in the app (`--suggested` is the engine's preselection, `--files`/`--skip` choose); on a torrent in its start delay it starts at once. `seedwell cancel` removes the torrent and moves its `.torrent` file to the Trash (the engine's `held_source`, verified by info-hash); `--keep-file` keeps it, like ⇧-Cancel. Magnet links and web addresses have no file.
+- **Selecting torrents.** Every command that acts on torrents takes `<torrent>`: an id prefix (6+ hex characters), part of the name (title or raw name, any case), or filters `--all`, `--tracker X`, `--state S`, `--category C`. A term that matches several torrents is an error (exit 3) that lists the candidates; nothing is guessed. `pause --all` / `resume --all` use the engine's one-pass call.
+- **Units.** Rates and sizes accept `5MB/s`, `500KB/s`, `1.5GB`, `unlimited`; durations `90s 15m 12h 7d 2w`; file numbers `0,3-5`. Human output prints units; `--json` prints bytes, bytes/s and Unix seconds.
+- **Output.** Human text by default (the engine's shared texts: titles, goal wording, waiting notes). `--json` on every command: one object with `"v":1` first (fields are only ever added within a version). Errors go to stderr, as text or `{"v":1,"error":{"code","message","exit",...}}`; an ambiguous selector adds `candidates`.
+- **Exit codes.** 0 ok · 1 error · 2 usage · 3 not found or ambiguous · 4 permission denied or agent access off · 5 Seedwell is not running · 6 timed out (`wait`).
+- **App not running.** The message says so and names `--launch`, which starts the installed app in the background (`open -g -b io.github.kkollsga.Seedwell`) and waits for the socket (never with `--socket`).
+
+### 9A.3 Guardrails
+- **Permission levels** (Settings → Agents), enforced by the control socket for every command:
+  - **Off** is the default until enabled.
+  - **Read-only** allows status, list, info, choice, trackers, stats, rules, wait, watch, `log trackers` and every `debug` read.
+  - **Control** adds add, start, cancel, pause, resume, priority, category, goals, files, limits, tracker caps, reannounce, recheck, removing without files, `debug announce`.
+  - **Full** adds removing with file deletion, moving files, changing settings (`dev on|off` included), the activity log and `sim`.
+- **Out of reach for every level:**
+  - client identity and the compliance behaviour of §7B;
+  - announce timing (manual re-announce still goes through the HostGate, §7C; `debug announce` never bypasses the gate: the answer says when the tracker may be asked again);
+  - passkeys and HTTP auth headers, which are never returned, in any command, text or JSON.
+- **Activity log:** every agent action is recorded with the client name, time and arguments, and shown in Settings → Agents. An optional notification can say "Claude paused 3 downloads".
+- Calls are rate-limited (default 20/s per client) to protect the UI and disk. Tracker traffic is protected separately by the HostGate.
+- **Removal is two steps** on the wire (plan and token, then confirm); the CLI asks `Proceed? [y/N]` on a terminal, `-y` confirms, and with `--json` and no `-y` it prints the plan and the token and removes nothing.
+
+### 9A.4 The embedded skill and the command-line tool
+- `seedwell skill show` prints `SKILL.md` (frontmatter `name: seedwell` and a description that says when to use it, the rules of thumb, recipes) and `REFERENCE.md` (every command, usage, examples, JSON shape, units, exit codes). Both are generated from `trs_cli::help::COMMANDS`, the table the parser tests walk, so a command in the skill exists and every example in it parses (tests).
+- `seedwell skill install [--dir PATH] [--force]` writes the two files to `~/.claude/skills/seedwell/` (or `--dir`), **only when the user runs it**; a file that differs from what Seedwell wrote earlier is only replaced after asking (or with `--force`). `seedwell skill uninstall` removes them.
+- **Settings → Agents → Command line:** "Copy CLI Path"; "Install Command-Line Tool…" (shown only while no `seedwell` is on the PATH or in `/usr/local/bin`, `~/.local/bin`; asks which of the two folders, then makes a symlink to the copy in the app, never silently, never overwriting a link that points elsewhere); "Install Skill for Claude Code" / "Update Skill" / "Remove Skill" (run the bundled CLI; ask before replacing changed files). Buttons are normal buttons, right-aligned, each with hover text, and nothing is written until one is pressed.
+
+### 9A.5 Debugging
+`seedwell dev on|off|status` is the Developer-mode switch of Settings → Advanced (`advanced.developer_mode`, permission full, applies live). Developer mode records every tracker exchange, secrets masked, in `<state dir>/logs/trackers.log` (§8.7); `dev status` shows whether it is on and the log's path and size. This is the only CLI way to toggle it (`debug trackers log` reads, it does not switch).
+
+`seedwell debug ...` (all read-only except `announce`; every one has `--json`; `--watch`/`-f` refreshes about once a second where it makes sense; computed on demand, no background cost):
+- `health` - one screen: offline, port not mapped or behind CGNAT, tracker trouble, disk errors, stalled downloads, limits, connection budget; each finding names the next command.
+- `trackers [<torrent>] [--tracker X]` - per torrent and tracker URL (passkeys masked): state (working / warning / backoff / halted / waiting), last announce and answer, seeders and leechers, next announce and why, failure count, the manual-announce gate (the tracker's minimum interval) and the circuit-breaker reason, plus the network state (online / offline-held).
+- `trackers log [--follow] [--torrent] [--tracker] [--event] [--errors] [--since 10m]` - the developer log.
+- `announce <torrent> [--tracker X]` - Ask Tracker Again, rate-limited exactly as in the app.
+- `peers <torrent> [--redact] [-f]` - address, client, TCP/uTP, direction, choke and interest flags, snubbed, upload-only, peer exchange, rates, requests in flight, pieces they have, time connected; totals for connected, handshaking, the connection budget and incoming accepted/refused.
+- `perf [-f]` - rates against limits (and whether a limiter is on), favorite-tracker caps, the verification gate, DHT state, port mapping (UPnP / NAT-PMP / PCP, external port, CGNAT), the process (memory, CPU, threads, open files), and the active torrents with their stalled flag and queue position.
+Not exposed by the engine (reported as unavailable, never guessed): the host gate's token buckets and breaker per host, a peer's source and encryption, disk queue depth and disk I/O rates.
+
+### 9A.6 Simulated torrents (`seedwell sim`)
+For testing without real swarms. `sim add <kind>` (movie, season-pack, album, audiobook, book, software, archive, single, magnet) creates a synthetic torrent whose data is **generated on the fly from a seed** (never stored), a swarm of seeders and a mock tracker on **127.0.0.1 only**, and adds it to the running app or daemon like any torrent, so the real tracker, peer wire, verify, picker, classification, popover, Recent and Sharing paths run. Options: `--size`, `--speed` (the swarm's upload cap), `--peers N`, `--private` (the torrent is private; its announce URL carries a made-up passkey that is never printed), `--tracker ok|unregistered|down|slow|fail503|interval=N`, `--stall-after 50%`, `--corrupt N`, `--extras`, `--name`, `--seasons/--episodes/--files`, `--hold` (leave the start delay), `--choose` (leave the chooser). Also `sim list`, `sim stop|resume [<sim>]`, `sim speed <sim> R`, `sim tracker <sim> MODE`, `sim clear`, `sim scenario redownload|outage|storm-300|private-unregistered`.
+- **Safety.** Needs Developer mode (`seedwell dev on`) or `--yes-i-know`; needs permission full (it sets the save path). Torrents carry the comment "Seedwell simulated torrent"; the downloaded data goes to a sim folder under the temp directory (`$TMPDIR/seedwell-sim/<hash of the socket>/simN/data`), never Downloads or a finished location. One small host process (`seedwell sim host`, started by the first `sim add`) serves the swarm; it ends when the app or daemon it serves is gone (checked every 2 s), on `sim clear`, and never listens on a non-loopback address. Memory is bounded: a piece request is answered with one block computed on the spot.
+- **Loopback trackers.** The engine refuses trackers on 127.0.0.1 for every torrent (§7C), Developer mode or not. Only torrents that `sim add` marks may announce there: the CLI calls the internal control method `sim_allow` (permission full, and it fails unless Developer mode is on) with the info-hash *before* adding, the engine keeps the marks in memory, and `sim clear` takes them back. A `.torrent` file's content can never set the mark. `seedwell daemon --allow-loopback-trackers` and the QA launch flag keep their global effect for tests. Without the mark a sim torrent still downloads through the direct peers given at add time, and its tracker row shows the refusal.
+- Not covered: `disk-full` (needs a disk image; use a small volume by hand).
+
+## 10. Persistence
+`~/Library/Application Support/Seedwell/`
+- `config.toml`, `rules.toml`: human-readable, hot-reloaded.
+- `torrents/<infohash>.torrent`: original metainfo, loaded lazily.
+- `state.redb`: resume data (bitfield for incomplete torrents only), counters, peer cache. Writes are debounced and transactional, so a crash loses at most a few seconds of counters and never corrupts data.
+- At startup, file size and mtime are checked against resume data. A rehash happens only on mismatch.
+- **Everything resumes on start, staggered.** A pause lasts until the app quits; the next start brings every torrent back, except one that stopped because it reached its seeding goal (that stays stopped until the user resumes it, which then means "keep sharing"). Finished torrents come up Cold at once (no actor, no memory). Torrents that need an actor (downloading, rechecking, fetching metadata) are brought up two per 200 ms tick, downloads first, then rechecks, then magnets, and no new batch starts while two torrents are verifying, so the launch footprint climbs to the settled value instead of overshooting it (measured: 54 MB peak against 40 MB settled before, 41 against 40 after, with 24 large paused downloads). A torrent the user acts on while it waits (resume, recheck) starts at once (except that a verification still waits for a free hashing slot, below); quitting during the stagger starts nothing more.
+- **One verification gate.** At most **2** torrents hash their files at the same time (`EngineConfig::verify_slots`, an engine constant, not a setting), whatever started it: a torrent added with data already on disk, Recheck, Recheck all, Resume all, a torrent whose drive came back, the launch stagger (which is the same queue). A torrent that must verify and finds both slots taken waits in the start queue with no actor and no buffers, and its row reads "Waiting to verify" (state Checking). A semaphore inside the actor is the hard backstop for verifications an actor decides on itself at start-up (stale resume data); it never waits while holding a start-up slot.
+- **Pause all / Resume all are one pass.** Both change every torrent first and plan the queue once (O(n), not a plan per torrent). Resume all brings the torrents that need an actor (unfinished, rechecking, fetching metadata) back through the same start queue as the launch, two per tick in queue order; finished torrents come back Cold at once. Tracker announces are untouched by this: the hub's per-host pacing and the intervals trackers allowed still apply (§7B.3, §7C).
+
+## 11. Milestones
+| # | Deliverable | Exit criterion |
+|---|---|---|
+| M0 | Workspace, Swift shell, UniFFI bridge, native menu spike | menu shows live rows from Rust; right-click on a menu item proven (or fallback chosen) |
+| M1 | bencode, metainfo, **tracker stack per §7C (state machine, HostGate, layers 1–5)**, TCP peer wire, picker, storage, resume | `trs` downloads a public Linux ISO; §7C invariants, simulation and real-tracker conformance green |
+| M2 | magnet + DHT, PEX, LSD, uTP, encryption, NAT-PMP/UPnP | magnet-only download at line rate |
+| M3 | parked torrents, rules engine, queue manager | **200-torrent memory benchmark meets §2** |
+| M4 | content detection + placement (§7A), watch folders, **direct downloads (§7D)** | ≥ 95% correct category on 500 real torrent names; HTTP resume survives kill -9 and server-side file changes |
+| M5 | live menu, main window, Settings (all tabs), **agent interface: control socket, `seedwell` CLI and embedded skill (§9A)** | daily-driver usable; Claude can add, monitor and manage transfers end-to-end |
+| M6 | notifications, file/URL handlers, import from other clients, signing/notarization, 30-day soak | shippable 1.0 |
+
+## 12. Decisions for the build (2026-10-11)
+These were taken by the build coordinator for the autonomous build. Each can be revisited.
+
+| # | Question | Decision |
+|---|---|---|
+| 1 | Engine | **Own Rust engine (A)**, borrowing small crates where they fit |
+| 3 | VPN binding / proxy | v1.x, not v1 |
+| 5 | Import from other clients | v1.x |
+| 6 | Priority semantics | As in §7.3 |
+| 8 | Minimum macOS | **macOS 15, Apple Silicon** |
+| 9 | Online metadata lookup | Not in v1 |
+| 10 | Placement | **Flat: the torrent's own layout in the finished location; optional status folders (§7A.3, user decision 2026-10-14)** |
+| 11 | Categories | As listed in §7A.2 |
+| 13 | Peer-ID code | To be verified against known client lists before 1.0. Dev builds use a clearly marked dev prefix |
+| 14 | Default agent permission | **Control** once enabled (off until enabled) |
+| 15 | Authenticated direct downloads | v1.x. Public links in v1 |
+| 16 | Quit with many torrents | **Linger hidden, short.** On Quit the menu bar icon and windows go away at once, and the process stays until every `stopped` announce has been sent and answered or given up, at most 10 s (the former 120 s linger is gone). Quit-time `stopped` announces are the exception to the per-host cap and the token bucket (§7B.3, §7C.2): all go out together, up to 50 in flight over all hosts, each with 3 s to connect and 2 s to answer once the request is written (libtorrent/qBittorrent do the same); one attempt per tracker, no retry. A request already in flight when the quit begins gets 3 s more. Port-mapping removal and the DHT's last save run beside the tracker wait, and state is written to disk before it. A dead tracker costs about 5 s, a slow one 2 s per wave of 50 (the developer log ends the quit with a line "quit: N stopped sent, M timed out"). On logout or shutdown the window is the 3 s best effort |
+| 17 | Recent rows in the menu | **Click reveals in Finder** (with a checkmark image; plain rows, no submenu, also for videos). Downloading and queued rows open their action submenu on hover. Right-click inside an `NSMenu` is not reliably deliverable (spike in `StatusMenuController`), so the hover submenu is the "right-click" |
+| 18 | Tracker wire format | Aligned with captured announces of mainstream clients: upper-case hex, Transmission-style parameter order, `numwant=0` on `stopped`, no `ip`/`ipv4`/`ipv6`, no `corrupt`/`redundant`/`no_peer_id`, per-process `key` and `peer_id`, per-`started` counters; encryption advertised after `compact` (2026-10-13): `network.encryption` prefer = `supportcrypto=1`, require = `supportcrypto=1&requirecrypto=1`, off = nothing (HTTP only, applied from the next announce) |
+| 19 | Distribution | **Developer ID signing, notarization, direct download with Sparkle updates, optional Homebrew cask.** No Mac App Store: Apple has historically refused general BitTorrent clients, and the sandbox would cut watch folders and the agent socket. A later App Store variant would have to describe BitTorrent openly |
+| 20 | Product name and identity | **Seedwell** (chosen 2026-10-11 over Dispatch, which was hard to search for). User-Agent `Seedwell/<ver>`, BEP 10 `v` = `Seedwell <ver>`, peer id `-SW<major><minor><patch>0-` (0.1.0 → `-SW0100-`) + 12 random alphanumerics for releases (built by `app/release-zip.sh`, which sets `SEEDWELL_RELEASE`), `-SX0001-` for every other build. `SW` and `SX` checked free in the libtorrent, WebTorrent and Transmission 4.0.6 client tables. App `Seedwell.app` (Swift target stays internal), bundle id `io.github.kkollsga.Seedwell` (2026-10-13; no domain, so the GitHub namespace; fixed from the first release on, since changing it resets settings), Application Support `Seedwell/`, CLI `seedwell`. Internal crates keep the `trs-` prefix. Replaces the working names TorrentRS and Dispatch everywhere users, trackers or peers can see them |
+| 21 | Streaming | **In scope (2026-10-11), §7F.** Play while downloading in the user's own player over loopback HTTP with ranges; the player's range requests are the playhead, so no control channel. Urgent window ahead of each read, rarest-first elsewhere; never pure sequential |
+
+## 13. Open questions (original list)
+1. **Engine:** build from scratch (A) or on librqbit (B)? (§3.2)
+2. ~~Menu style?~~ **Resolved:** the base view is extremely simple (§8.2), so a real `NSMenu` with custom row views is the right fit.
+3. **VPN / privacy:** bind to a network interface (e.g. VPN `utun`) with a kill switch in v1? SOCKS5 proxy?
+4. ~~Remote control?~~ **Resolved:** local agent interface (CLI + embedded skill) over a same-user socket. No network API (§9A).
+5. **Migration:** import existing torrents and stats from qBittorrent/Transmission/Deluge? Would matter if you're already seeding 200 torrents elsewhere.
+6. **Priority semantics** as defined in §7.3: right?
+7. ~~Rule matching beyond tracker?~~ **Resolved:** tracker + private flag + detected category (§7.1, §7A).
+8. **Minimum macOS version.**
+9. **Online metadata lookup** (TMDB/MusicBrainz) for canonical names: opt-in v1, later, or never? (§7A.2)
+10. ~~Default placement mode~~ **Resolved (2026-10-14):** no renaming and no destination templates; torrents keep their own layout (§7A.3).
+11. **Category set:** are movie / TV / music / audiobook / book / software / other the right buckets? Anything to add (e.g. games, podcasts) or merge?
+12. **Which private trackers do you use?** Their client rules (allowed clients, H&R and ratio requirements) set the compliance targets and the starter rule presets.
+13. **Peer-ID code:** pick a two-letter prefix and verify that no other client uses it.
+14. **Default agent permission** once enabled: Control (proposed) or Read-only?
+15. **Direct-download sources:** do you need authenticated links (headers/cookies) in v1, or are public links enough to start?

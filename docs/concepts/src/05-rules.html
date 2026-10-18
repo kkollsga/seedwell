@@ -1,0 +1,125 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Rules concept</title>
+<link rel="stylesheet" href="shared.css">
+<style>
+  body { width: 1200px; height: 900px; position: relative; color: #f5f5f7; }
+  .win {
+    position: absolute; left: 60px; top: 40px; width: 1080px; height: 780px;
+    border-radius: 14px; overflow: hidden; background: #1c1c1f;
+    box-shadow: 0 0 0 0.5px rgba(0,0,0,0.25), 0 30px 80px rgba(30,40,70,0.35);
+    display: flex; flex-direction: column;
+  }
+  .titlebar { height: 82px; flex: none; position: relative; border-bottom: 0.5px solid rgba(255,255,255,0.12); background: #252528; display: flex; justify-content: center; align-items: flex-end; gap: 6px; padding-bottom: 6px; }
+  .lights { position: absolute; top: 14px; left: 16px; display: flex; gap: 8px; }
+  .lights i { width: 12px; height: 12px; border-radius: 6px; display: block; }
+  .wtitle { position: absolute; top: 11px; left: 0; right: 0; text-align: center; font-weight: 600; font-size: 13px; color: rgba(255,255,255,0.75); }
+  .tab { width: 78px; height: 48px; border-radius: 8px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; font-size: 11px; color: rgba(255,255,255,0.65); }
+  .tab .g { font-size: 19px; color: rgba(255,255,255,0.55); }
+  .tab.sel { background: rgba(255,255,255,0.07); color: #0a84ff; } .tab.sel .g { color: #0a84ff; }
+  .body { flex: 1; display: flex; min-height: 0; padding: 16px 18px; gap: 18px; }
+  .list { width: 330px; flex: none; display: flex; flex-direction: column; }
+  .list .hint { font-size: 11.5px; color: rgba(235,235,245,0.6); margin-bottom: 8px; }
+  .rules { background: #2c2c30; border-radius: 10px; border: 0.5px solid rgba(255,255,255,0.12); overflow: hidden; }
+  .rule { display: flex; gap: 10px; padding: 10px 12px; border-bottom: 0.5px solid rgba(255,255,255,0.08); align-items: center; }
+  .rule: last-child { border-bottom: 0; }
+  .rule .grip { color: rgba(235,235,245,0.3); font-size: 14px; }
+  .rule .num { width: 18px; height: 18px; border-radius: 9px; background: rgba(255,255,255,0.07); font-size: 10.5px; font-weight: 600; display: flex; align-items: center; justify-content: center; flex: none; }
+  .rule .n { font-weight: 600; font-size: 13px; }
+  .rule .d { font-size: 11.5px; color: rgba(235,235,245,0.6); margin-top: 1px; }
+  .rule .cnt { margin-left: auto; font-size: 11.5px; color: rgba(235,235,245,0.55); }
+  .rule.sel { background: #0a84ff; color: #fff; }
+  .rule.sel .d, .rule.sel .cnt, .rule.sel .grip { color: rgba(255,255,255,0.8); }
+  .rule.sel .num { background: rgba(255,255,255,0.25); }
+  .rule.def { background: #26262a; }
+  .pm { display: flex; gap: 0; margin-top: 8px; }
+  .pm span { width: 26px; height: 22px; border: 0.5px solid rgba(255,255,255,0.18); background: #2c2c30; display: flex; align-items: center; justify-content: center; font-size: 14px; color: rgba(255,255,255,0.6); }
+  .pm span: first-child { border-radius: 5px 0 0 5px; } .pm span: last-child { border-radius: 0 5px 5px 0; border-left: 0; }
+  .editor { flex: 1; overflow: hidden; display: flex; flex-direction: column; gap: 12px; }
+  .group { background: #2c2c30; border-radius: 10px; border: 0.5px solid rgba(255,255,255,0.12); padding: 4px 14px; }
+  .gt { font-size: 11px; font-weight: 600; color: rgba(235,235,245,0.55); letter-spacing: 0.02em; margin: 0 0 4px 2px; }
+  .row { display: flex; align-items: center; min-height: 36px; gap: 10px; border-bottom: 0.5px solid rgba(255,255,255,0.07); }
+  .row: last-child { border-bottom: 0; }
+  .row .k { width: 170px; flex: none; }
+  .row .help { font-size: 11px; color: rgba(235,235,245,0.55); margin-left: auto; text-align: right; max-width: 230px; }
+  .field { height: 24px; border-radius: 6px; border: 0.5px solid rgba(255,255,255,0.2); background: #2c2c30; padding: 0 8px; display: inline-flex; align-items: center; font-size: 13px; box-shadow: inset 0 0.5px 1px rgba(0,0,0,0.06); font-variant-numeric: tabular-nums; }
+  .popup { height: 24px; border-radius: 6px; background: #2c2c30; border: 0.5px solid rgba(255,255,255,0.18); padding: 0 6px 0 9px; display: inline-flex; align-items: center; gap: 10px; font-size: 13px; box-shadow: 0 0.5px 1.5px rgba(0,0,0,0.12); }
+  .popup::after { content: "⌃⌄"; font-size: 8px; letter-spacing: -1px; writing-mode: vertical-lr; color: rgba(255,255,255,0.5); }
+  .segc { display: inline-flex; background: rgba(255,255,255,0.07); border-radius: 7px; padding: 2px; }
+  .segc span { padding: 3px 14px; border-radius: 5px; font-size: 12.5px; }
+  .segc span.on { background: #636366; box-shadow: 0 0.5px 2px rgba(0,0,0,0.2); font-weight: 500; }
+  .radio { display: inline-flex; align-items: center; gap: 6px; margin-right: 16px; }
+  .radio i { width: 14px; height: 14px; border-radius: 7px; border: 0.5px solid rgba(255,255,255,0.3); background: #2c2c30; display: inline-block; }
+  .radio i.on { border: 4px solid #0a84ff; }
+  .chk { width: 14px; height: 14px; border-radius: 4px; background: #0a84ff; color: #fff; font-size: 10px; display: inline-flex; align-items: center; justify-content: center; }
+  .preview {
+    border-radius: 10px; padding: 10px 14px; display: flex; align-items: center; gap: 10px;
+    background: rgba(10,108,240,0.08); border: 0.5px solid rgba(10,108,240,0.25); font-size: 12.5px;
+  }
+  .preview b { font-weight: 600; }
+  .btn { white-space: nowrap; height: 24px; padding: 0 12px; border-radius: 6px; display: inline-flex; align-items: center; font-size: 13px; background: #2c2c30; border: 0.5px solid rgba(255,255,255,0.18); box-shadow: 0 0.5px 1.5px rgba(0,0,0,0.12); }
+  .btn.pri { background: #0a84ff; color: #fff; border-color: #0a84ff; }
+  .caption { position: absolute; left: 64px; bottom: 30px; color: #f5f5f7; font-size: 12px; opacity: 0.8; }
+  .caption b { font-size: 15px; margin-right: 8px; }
+</style></head>
+<body class="wall-dark">
+<div class="win">
+  <div class="titlebar">
+    <div class="lights"><i style="background: #ff5f57"></i><i style="background: #febc2e"></i><i style="background: #28c840"></i></div>
+    <div class="wtitle">Rules</div>
+    <div class="tab"><span class="g">⚙︎</span>General</div>
+    <div class="tab"><span class="g">⇅</span>Transfers</div>
+    <div class="tab"><span class="g">▤</span>Folders</div>
+    <div class="tab sel"><span class="g">≡</span>Rules</div>
+    <div class="tab"><span class="g">◎</span>Network</div>
+    <div class="tab"><span class="g">✦</span>Agents</div>
+    <div class="tab"><span class="g">⌘</span>Advanced</div>
+      </div>
+  <div class="body">
+    <div class="list">
+      <div class="hint">Checked top to bottom. The first match wins.</div>
+      <div class="rules">
+        <div class="rule"><span class="grip">⋮⋮</span><span class="num">1</span><div><div class="n">X – download only</div><div class="d">tracker-x.org · stop when done</div></div><span class="cnt">6</span></div>
+        <div class="rule"><span class="grip">⋮⋮</span><span class="num">2</span><div><div class="n">Y – seed to 1.0</div><div class="d">*.tracker-y.net · ratio 1.0</div></div><span class="cnt">120</span></div>
+        <div class="rule sel"><span class="grip">⋮⋮</span><span class="num">3</span><div><div class="n">Z – priority, H&amp;R safe ★</div><div class="d">tracker-z.cc · ratio 2.0 · ≥ 72 h</div></div><span class="cnt">44</span></div>
+        <div class="rule"><span class="grip">⋮⋮</span><span class="num">4</span><div><div class="n">Public software</div><div class="d">public · Software · ratio 3.0</div></div><span class="cnt">31</span></div>
+        <div class="rule def"><span class="grip" style="opacity: 0">⋮⋮</span><span class="num">·</span><div><div class="n">Default</div><div class="d">everything else · ratio 1.0 or 7 days</div></div><span class="cnt">17</span></div>
+      </div>
+      <div class="pm"><span>+</span><span>−</span></div>
+    </div>
+
+    <div class="editor">
+      <div>
+        <div class="gt">MATCH</div>
+        <div class="group">
+          <div class="row"><span class="k">Tracker host</span><span class="field" style="width: 220px">tracker-z.cc</span><span class="help">Glob, e.g. *.tracker.net. Passkeys are ignored.</span></div>
+          <div class="row"><span class="k">Content type</span><span class="segc"><span class="on">Any</span><span>Movie</span><span>TV</span><span>Music</span><span>Books</span><span>Software</span></span></div>
+          <div class="row"><span class="k">Private torrents</span><span class="popup">Any</span></div>
+        </div>
+      </div>
+      <div>
+        <div class="gt">WHEN THE DOWNLOAD FINISHES</div>
+        <div class="group">
+          <div class="row"><span class="k">Then</span><span class="radio"><i class="on"></i>Seed</span><span class="radio"><i></i>Stop</span></div>
+          <div class="row"><span class="k">Stop seeding at</span><span>Ratio</span><span class="field" style="width: 56px">2.0</span><span class="popup">or</span><span>Seed time</span><span class="field" style="width: 70px;color: rgba(255,255,255,0.35)">never</span></div>
+          <div class="row"><span class="k">Minimum seed time</span><span class="field" style="width: 56px">72</span><span class="popup">hours</span><span class="help">Never stops earlier, even if the ratio is met. Hit-and-run protection.</span></div>
+          <div class="row"><span class="k">At goal</span><span class="popup">Stop, keep in list</span></div>
+        </div>
+      </div>
+      <div>
+        <div class="gt">PRIORITY &amp; LOCATION</div>
+        <div class="group">
+          <div class="row"><span class="k">Priority</span><span class="segc"><span>Low</span><span>Normal</span><span class="on">★ High</span></span><span class="help">Jumps the queue, gets bandwidth and upload slots first.</span></div>
+          <div class="row"><span class="k">Files go to</span><span class="popup">Default</span><span class="help">A folder, e.g. /Volumes/Seed. Empty = the Finished location</span></div>
+          <div class="row"><span class="k">Upload limit</span><span class="chk" style="background: #2c2c30;border: 0.5px solid rgba(255,255,255,0.3)"></span><span style="color: rgba(255,255,255,0.4)">Unlimited</span></div>
+        </div>
+      </div>
+      <div class="preview">
+        <span style="font-size: 16px;color: #0a84ff">ⓘ</span>
+        <span>Applies to <b>44 torrents</b>. Saving changes <b>3</b>: they stay seeding until ratio 2.0 instead of 1.0.</span>
+        <span style="margin-left: auto;display: flex;gap: 8px"><span class="btn">Revert</span><span class="btn pri">Save Rule</span></span>
+      </div>
+    </div>
+  </div>
+</div>
+<div class="caption"><b>Concept 5 — Tracker rules</b>Settings → Rules, opened from the main window. Same model as rules.toml, which you can also edit by hand.</div>
+</body></html>

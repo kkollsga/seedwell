@@ -1,0 +1,25 @@
+[package]
+name = "tracker-probe"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Observation-only logging proxy, mock tracker and analyzer for reference-client tracker traffic"
+
+[dependencies]
+# Each dependency is justified in README.md (this is a dev tool, not shipped).
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "net", "time", "signal", "io-util", "sync", "fs"] }
+hyper = { version = "1", default-features = false, features = ["http1", "server", "client"] }
+hyper-util = { version = "0.1", default-features = false, features = ["tokio", "client-legacy", "http1"] }
+http-body-util = "0.1"
+bytes = "1"
+hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "ring", "webpki-roots", "tls12", "native-tokio"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+clap = { version = "4", default-features = false, features = ["std", "derive", "help", "usage", "error-context"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha1 = { version = "0.11", default-features = false }
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+anyhow = "1"
+rand = "0.9"

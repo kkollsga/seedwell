@@ -1,0 +1,25 @@
+[package]
+name = "trs-storage"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+# SHA-1 / SHA-256. 0.11 has the ARMv8 SHA backends (runtime-detected via cpufeatures); 0.10 silently
+# uses the portable code on aarch64 (measured 1.28 GB/s vs 2.84 GB/s SHA-1 on M4).
+sha1 = { version = "0.11", default-features = false }
+sha2 = { version = "0.11", default-features = false }
+# Bounded MPMC queues for the I/O and hashing thread pools.
+crossbeam-channel = { version = "0.5", default-features = false, features = ["std"] }
+# setrlimit, fcntl(F_PREALLOCATE), sysctl, setpriority.
+libc = "0.2"
+
+[dev-dependencies]
+proptest = { version = "1", default-features = false, features = ["std"] }
+tempfile = "3"
+
+[[bench]]
+name = "storage_bench"
+harness = false

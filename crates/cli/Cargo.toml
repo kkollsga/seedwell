@@ -1,0 +1,40 @@
+[package]
+name = "trs-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "The `seedwell` command: CLI for the control socket, the embedded Agent Skill and the headless daemon (`seedwell daemon`)"
+
+[lib]
+name = "trs_cli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "seedwell"
+path = "src/main.rs"
+
+[features]
+default = ["daemon"]
+# `seedwell daemon`: the engine, persistence and the control socket in one headless process.
+daemon = ["dep:trs-engine", "dep:trs-storage", "dep:trs-state", "trs-control/engine", "tokio/signal", "tokio/rt-multi-thread"]
+
+[dependencies]
+trs-control = { path = "../control", default-features = false }
+# `seedwell log trackers`: the same renderer as the app's viewer, and the local-file fallback.
+trs-devlog = { path = "../devlog" }
+trs-engine = { path = "../engine", optional = true }
+# The daemon's global allocator (`MappedAlloc`); the thin client does not link it.
+trs-storage = { path = "../storage", optional = true }
+trs-state = { path = "../state", optional = true }
+serde = { version = "1", default-features = false, features = ["derive", "std"] }
+serde_json = { version = "1", default-features = false, features = ["std"] }
+# `net` for the sim swarm, `time` for timeouts and rate pacing.
+tokio = { version = "1", default-features = false, features = ["rt", "macros", "io-util", "time", "sync", "net"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "process", "time", "io-util"] }
+# Test torrents are hashed with the engine's own SHA-1.
+trs-storage = { path = "../storage" }

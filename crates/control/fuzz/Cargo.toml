@@ -1,0 +1,22 @@
+[package]
+name = "trs-control-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+trs-control = { path = "..", default-features = false }
+
+# Keeps this crate out of the root workspace.
+[workspace]
+
+[[bin]]
+name = "decode_request"
+path = "fuzz_targets/decode_request.rs"
+test = false
+doc = false
+bench = false
