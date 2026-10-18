@@ -28,7 +28,7 @@ flate2 = { version = "1", optional = true, default-features = false, features = 
 # The `Service` trait of hyper's connector/resolver layer (already in the tree via hyper-util).
 tower-service = { version = "0.3", optional = true }
 # UDP transaction ids come from the OS RNG (never from a seeded PRNG).
-getrandom = { version = "0.3", optional = true, default-features = false }
+getrandom = { version = "0.4", optional = true, default-features = false }
 
 [dev-dependencies]
 # Property tests, the model checker, and the (ignored) network test.

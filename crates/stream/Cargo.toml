@@ -10,7 +10,7 @@ description = "Seedwell streaming server: loopback HTTP range server over verifi
 [dependencies]
 tokio = { version = "1", default-features = false, features = ["rt", "net", "time", "sync", "macros", "io-util"] }
 # 128-bit stream tokens from the OS RNG (same as trs-control / trs-metainfo).
-getrandom = { version = "0.3", default-features = false }
+getrandom = { version = "0.4", default-features = false }
 
 [dev-dependencies]
 tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-thread", "net", "time", "sync", "macros", "io-util", "process"] }

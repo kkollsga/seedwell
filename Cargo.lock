@@ -1400,7 +1400,7 @@ dependencies = [
 name = "trs-control"
 version = "0.1.0"
 dependencies = [
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "serde",
  "serde_json",
  "tempfile",
@@ -1436,7 +1436,7 @@ name = "trs-engine"
 version = "0.1.0"
 dependencies = [
  "bytes",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "libc",
  "serde_json",
  "tempfile",
@@ -1492,7 +1492,7 @@ dependencies = [
 name = "trs-metainfo"
 version = "0.1.0"
 dependencies = [
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "proptest",
  "sha1",
  "sha2",
@@ -1534,7 +1534,7 @@ dependencies = [
 name = "trs-stream"
 version = "0.1.0"
 dependencies = [
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "tokio",
 ]
 
@@ -1544,7 +1544,7 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "flate2",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "http-body-util",
  "hyper",
  "hyper-rustls",
