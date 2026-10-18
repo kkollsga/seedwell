@@ -9,6 +9,7 @@ pub mod duration;
 pub mod error;
 pub mod fsutil;
 pub mod ids;
+mod legacy;
 pub mod record;
 pub mod rules;
 mod serde_util;

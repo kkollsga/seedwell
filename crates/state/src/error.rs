@@ -180,6 +180,8 @@ pub enum StateError {
     Invalid(&'static str),
     /// A deferred write failed; the batch is kept and retried.
     WriteFailed(String),
+    /// Converting a Seedwell 0.1 database failed; the original is unchanged and backed up.
+    Legacy(String),
 }
 
 impl fmt::Display for StateError {
@@ -208,6 +210,7 @@ impl fmt::Display for StateError {
             StateError::Closed => write!(f, "the state store is closed"),
             StateError::Invalid(m) => write!(f, "invalid argument: {m}"),
             StateError::WriteFailed(m) => write!(f, "state write failed: {m}"),
+            StateError::Legacy(m) => write!(f, "could not convert the database from Seedwell 0.1: {m}"),
         }
     }
 }

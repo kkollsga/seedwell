@@ -7,6 +7,7 @@ mod common;
 
 mod crash;
 mod docs;
+mod legacy;
 mod perf;
 mod props;
 mod store;

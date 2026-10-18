@@ -9,6 +9,8 @@ description = "Persistent state for Seedwell: config, rules, tracker profiles, r
 
 [dependencies]
 redb = "4"
+# Reads databases written by Seedwell 0.1 (redb 2 file format) once, to convert them (src/legacy.rs).
+redb2 = { package = "redb", version = "2.6" }
 serde = { version = "1", default-features = false, features = ["derive", "std"] }
 toml = { version = "1", default-features = false, features = ["std", "parse", "display", "serde", "preserve_order"] }
 # Only for `TimingStore`; the async transports are not needed here.
