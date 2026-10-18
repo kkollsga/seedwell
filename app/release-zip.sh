@@ -71,7 +71,8 @@ bash -n "$OUT/install.sh"
 [ -n "$MIN_MACOS" ] || { echo "no LSMinimumSystemVersion in the app" >&2; exit 1; }
 plutil -lint "$OUT/latest.json" >/dev/null 2>&1 || python3 -I -c 'import json,sys; json.load(open(sys.argv[1]))' "$OUT/latest.json"
 
-PREV="$(git -C "$REPO" describe --tags --abbrev=0 2>/dev/null || true)"
+# The tag before this commit (on a tagged commit, describe of HEAD would name the commit's own tag).
+PREV="$(git -C "$REPO" describe --tags --abbrev=0 "HEAD^" 2>/dev/null || true)"
 {
     echo "## Install"
     echo

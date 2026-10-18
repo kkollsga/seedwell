@@ -13,6 +13,29 @@ against the release's `SHA256SUMS`, verifies the code signature, quits a running
 `/Applications` (else `~/Applications`) and opens it. `--cli` links the `seedwell` command, `--version X` picks a release,
 `--uninstall` removes the app (and asks before deleting `~/Library/Application Support/Seedwell`).
 
+### Release with GitHub Actions (the usual way)
+
+`.github/workflows/ci.yml` runs clippy, the Rust tests, the app build and the Swift tests on every push to `main`
+and on pull requests. `.github/workflows/release.yml` runs when a `vX.Y.Z` tag is pushed: it checks that the tag
+matches `Cargo.toml`, builds the release (`app/release-zip.sh --draft`, build number 100 + the run number) and
+creates a **draft** release with the zip, `install.sh`, `SHA256SUMS` and `latest.json`. Publishing stays manual.
+
+```sh
+# on master: bump [workspace.package] version in Cargo.toml, commit, then publish the tree (see below) and tag it
+c=$(git commit-tree 'master^{tree}' -p public -m "Seedwell 0.2.0")
+git ls-tree -r --name-only "$c" | wc -l                 # same count as `git ls-files | wc -l`; see AGENTS.md
+git push origin "$c:refs/heads/main" && git update-ref refs/heads/public "$c"
+git tag v0.2.0 "$c" && git push origin v0.2.0           # starts the release workflow
+gh run watch                                            # wait for CI and the release build
+```
+
+Then read the draft on GitHub and press **Publish**. The release notes list the public commits since the previous
+tag, so give the public commit a message that says what changed.
+
+Dependabot (`.github/dependabot.yml`) opens weekly pull requests for Cargo and Actions updates; CI tests each one.
+
+### Release from this Mac (fallback)
+
 ```sh
 git status                                              # must be clean
 tools/sysguard/heavy.sh app/release-zip.sh              # full LTO build → app/build/release/

@@ -25,6 +25,8 @@ release procedure.
   `git status` first: it should list only the changes you meant to make.
 - **Outward-facing steps need the user's explicit go-ahead each time:** creating repos, pushing, tags, releases,
   publishing a draft. One approval does not cover the next step.
+- Releases are built by GitHub Actions when a `vX.Y.Z` tag is pushed (`docs/RELEASING.md`); the result is a draft
+  that a person publishes.
 - Agents do not commit unless the coordinator asks. Commit messages end with the attribution trailer the session
   specifies.
 
