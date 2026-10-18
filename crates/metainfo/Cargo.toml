@@ -14,7 +14,7 @@ trs-bencode = { path = "../bencode" }
 sha1 = { version = "0.11", default-features = false }
 sha2 = { version = "0.11", default-features = false }
 # OS entropy for PeerId::generate (getentropy on macOS); no rand stack needed.
-getrandom = { version = "0.3", default-features = false }
+getrandom = { version = "0.4", default-features = false }
 
 [dev-dependencies]
 sha1 = { version = "0.11", default-features = false }
