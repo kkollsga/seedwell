@@ -33,6 +33,6 @@ getrandom = { version = "0.3", optional = true, default-features = false }
 [dev-dependencies]
 # Property tests, the model checker, and the (ignored) network test.
 proptest = { version = "1", default-features = false, features = ["std"] }
-stateright = { version = "0.30", default-features = false }
+stateright = { version = "0.31", default-features = false }
 sha1 = { version = "0.11", default-features = false }
 tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-thread", "macros", "net", "time", "sync", "io-util"] }
