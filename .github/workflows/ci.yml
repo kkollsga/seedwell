@@ -44,7 +44,7 @@ jobs:
           tool: cargo-nextest
       - name: Rust tests
         run: cargo nextest run --workspace --locked --profile ci
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: app/.sparkle
           key: sparkle-${{ hashFiles('app/fetch-sparkle.sh') }}
