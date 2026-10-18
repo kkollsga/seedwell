@@ -572,11 +572,10 @@ impl PortMapper {
         // slot expiry bookkeeping
         if matches!(self.phase, Phase::Active(_)) {
             for s in &self.slots {
-                if let SlotState::Mapped { expires_at, .. } = s.state {
-                    if !s.busy {
+                if let SlotState::Mapped { expires_at, .. } = s.state
+                    && !s.busy {
                         min(expires_at);
                     }
-                }
             }
         }
         t
@@ -1578,11 +1577,10 @@ impl PortMapper {
 
     fn run_timers(&mut self, now: Millis, out: &mut Vec<Output>) {
         // discovery wait
-        if let Phase::Waiting { until } = self.phase {
-            if now >= until {
+        if let Phase::Waiting { until } = self.phase
+            && now >= until {
                 self.begin_discovery(now, out);
             }
-        }
         // SSDP rounds
         if let Phase::Discovering {
             idx,
@@ -1606,13 +1604,12 @@ impl PortMapper {
             _ => {}
         }
         // shutdown deadline
-        if let Phase::Stopping { deadline, .. } = self.phase {
-            if now >= deadline {
+        if let Phase::Stopping { deadline, .. } = self.phase
+            && now >= deadline {
                 self.txn = None;
                 self.phase = Phase::Done;
                 out.push(Output::Event(Event::ShutdownComplete));
             }
-        }
         // mappings that lapsed without a successful renewal
         if matches!(self.phase, Phase::Active(_)) {
             for i in 0..self.slots.len() {
@@ -1693,11 +1690,10 @@ impl PortMapper {
                         best = Some((due, Some(i)));
                     }
                 }
-                if let Some(at) = self.ext_refresh_at {
-                    if best.is_none_or(|(d, _)| at < d) {
+                if let Some(at) = self.ext_refresh_at
+                    && best.is_none_or(|(d, _)| at < d) {
                         best = Some((at, None));
                     }
-                }
                 let Some((due, which)) = best else { return };
                 if due > now {
                     return;

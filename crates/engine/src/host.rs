@@ -104,11 +104,10 @@ impl Host {
         let mut docs = Docs { cfg: lc.value, rules: lr.value, profiles: lp.value };
         // Watch folders only pick up files that arrive after they joined the list (SPEC 7A.1):
         // stamp the entries that have no baseline yet (first launch, upgrade) and remember it.
-        if docs.cfg.stamp_watch_baselines(None, baseline_now()) && lc.error.is_none() {
-            if let Err(e) = cfg_docs.save(&docs.cfg) {
+        if docs.cfg.stamp_watch_baselines(None, baseline_now()) && lc.error.is_none()
+            && let Err(e) = cfg_docs.save(&docs.cfg) {
                 warnings.push(format!("config.toml: cannot save the watch folder baselines: {e}"));
             }
-        }
         warnings.extend(msgs(&trs_state::cross_check(&docs.cfg, &docs.rules, &docs.profiles)));
 
         let mut base = EngineConfig::default();

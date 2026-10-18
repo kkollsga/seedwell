@@ -52,12 +52,11 @@ impl Torrent {
         if f.asm.is_none() {
             // Take the size most peers agree on (ties: the first seen).
             let best = f.votes.iter().max_by_key(|(s, c)| (**c, std::cmp::Reverse(**s))).map(|(s, _)| *s);
-            if let Some(s) = best {
-                if let Ok(a) = MetadataAssembler::new(self.id, s) {
+            if let Some(s) = best
+                && let Ok(a) = MetadataAssembler::new(self.id, s) {
                     f.size = s;
                     f.asm = Some(a);
                 }
-            }
         }
     }
 
@@ -135,11 +134,10 @@ impl Torrent {
     }
 
     pub(super) fn on_meta_reject(&mut self, key: PeerKey, piece: u32) {
-        if let Some(f) = self.meta_fetch.as_mut() {
-            if f.inflight.get(&piece).is_some_and(|(k, _)| *k == key) {
+        if let Some(f) = self.meta_fetch.as_mut()
+            && f.inflight.get(&piece).is_some_and(|(k, _)| *k == key) {
                 f.inflight.remove(&piece);
             }
-        }
         if let Some(p) = self.peers.get_mut(&key) {
             p.has_metadata = false;
         }

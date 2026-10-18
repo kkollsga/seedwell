@@ -119,11 +119,10 @@ pub fn local_utc_offset(unix: i64) -> i32 {
     let window = unix.div_euclid(1800);
     {
         let g = CACHE.lock().unwrap_or_else(|p| p.into_inner());
-        if let Some((w, off)) = *g {
-            if w == window {
+        if let Some((w, off)) = *g
+            && w == window {
                 return off;
             }
-        }
     }
     let off = std::process::Command::new("/bin/date")
         .args(["-r", &unix.to_string(), "+%z"])

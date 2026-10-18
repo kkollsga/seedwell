@@ -188,7 +188,7 @@ impl StateStore {
     fn load_extra(&self) -> HashMap<TorrentId, Extra> {
         let mut m = HashMap::new();
         if let Ok(Some(b)) = Self::read_side(&self.extra_path()) {
-            for c in b.chunks_exact(EXTRA_LEN) {
+            for c in b.as_chunks::<EXTRA_LEN>().0 {
                 let mut id = [0u8; 20];
                 id.copy_from_slice(&c[..20]);
                 let u = |i: usize| u32::from_le_bytes([c[i], c[i + 1], c[i + 2], c[i + 3]]);
@@ -298,7 +298,7 @@ impl StateStore {
     fn load_bases(&self) -> HashMap<TorrentId, u64> {
         let mut m = HashMap::new();
         if let Ok(Some(b)) = Self::read_side(&self.session_path()) {
-            for c in b.chunks_exact(28) {
+            for c in b.as_chunks::<28>().0 {
                 let mut id = [0u8; 20];
                 id.copy_from_slice(&c[..20]);
                 let mut v = [0u8; 8];
@@ -359,8 +359,8 @@ impl StateStore {
         let mut prios: Vec<u8> = Vec::new();
         let mut piece_prios: Option<Vec<u8>> = None;
         if has_meta {
-            if let Ok(bytes) = self.inner.read_torrent_file(&id) {
-                if let Ok(mi) = Metainfo::from_bytes(&bytes) {
+            if let Ok(bytes) = self.inner.read_torrent_file(&id)
+                && let Ok(mi) = Metainfo::from_bytes(&bytes) {
                     announce = Some(tiers_of(&mi));
                     piece_length = mi.piece_length;
                     nfiles = mi.file_count();
@@ -380,28 +380,25 @@ impl StateStore {
                         mi.files().map(|f| (f.offset, f.length, prios.get(f.index).copied().unwrap_or(2), f.is_padding())),
                     ));
                 }
-            }
         } else if let Some(m) = magnet.as_deref().and_then(|m| trs_metainfo::Magnet::parse(m).ok()) {
             announce = Some(m.trackers.iter().map(|t| vec![t.clone()]).collect());
         }
         let complete = f.has(E_COMPLETE);
-        if !complete {
-            if let Ok(mut p) = self.pieces.lock() {
+        if !complete
+            && let Ok(mut p) = self.pieces.lock() {
                 let n = if piece_length > 0 { rec.total_size.div_ceil(u64::from(piece_length)) as u32 } else { rec.piece_count };
                 p.insert(id, n);
             }
-        }
         let mut wanted_done = (complete || rec.completed_at.is_some()).then_some(wanted);
         let done_bytes = if complete {
             rec.total_size
         } else if piece_length > 0 {
             match self.inner.get_resume(id) {
                 Ok(Some(rd)) => {
-                    if wanted_done.is_none() {
-                        if let Some(pp) = &piece_prios {
+                    if wanted_done.is_none()
+                        && let Some(pp) = &piece_prios {
                             wanted_done = Some(wanted.saturating_sub(resume_wanted_missing(&rd, piece_length, rec.total_size, pp)));
                         }
-                    }
                     resume_done_bytes(&rd, piece_length, rec.total_size)
                 }
                 _ => 0,

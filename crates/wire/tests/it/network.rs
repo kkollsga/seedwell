@@ -88,7 +88,7 @@ fn compact_peers(resp: &[u8]) -> Vec<SocketAddr> {
     let data = &rest[colon + 1..];
     data.get(..n)
         .unwrap_or(data)
-        .chunks_exact(6)
+        .as_chunks::<6>().0.iter()
         .map(|c| SocketAddr::from(([c[0], c[1], c[2], c[3]], u16::from_be_bytes([c[4], c[5]]))))
         .collect()
 }

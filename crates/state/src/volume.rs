@@ -20,15 +20,14 @@ use crate::config::Config;
 
 /// `~` and `~/x` expanded with `$HOME`; other strings are used as they are.
 pub fn expand_tilde(s: &str) -> PathBuf {
-    if s == "~" || s.starts_with("~/") {
-        if let Some(home) = std::env::var_os("HOME") {
+    if (s == "~" || s.starts_with("~/"))
+        && let Some(home) = std::env::var_os("HOME") {
             let mut p = PathBuf::from(home);
             if let Some(rest) = s.strip_prefix("~/") {
                 p.push(rest);
             }
             return p;
         }
-    }
     PathBuf::from(s)
 }
 
@@ -37,13 +36,11 @@ pub fn expand_tilde(s: &str) -> PathBuf {
 /// Errors: `NotFound` when the path is below `/Volumes/<name>` and that volume is not mounted,
 /// or when no ancestor can be read at all.
 pub fn volume_id(path: &Path) -> io::Result<u64> {
-    if let Ok(rest) = path.strip_prefix("/Volumes") {
-        if let Some(first) = rest.components().next() {
-            if !Path::new("/Volumes").join(first).exists() {
+    if let Ok(rest) = path.strip_prefix("/Volumes")
+        && let Some(first) = rest.components().next()
+            && !Path::new("/Volumes").join(first).exists() {
                 return Err(io::Error::new(io::ErrorKind::NotFound, "volume is not mounted"));
             }
-        }
-    }
     let mut last = io::Error::new(io::ErrorKind::NotFound, "no existing folder");
     for dir in path.ancestors() {
         let probe = if dir.as_os_str().is_empty() { Path::new(".") } else { dir };

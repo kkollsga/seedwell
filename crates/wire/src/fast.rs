@@ -27,7 +27,7 @@ pub fn allowed_fast_set(info_hash: &[u8; 20], ip: IpAddr, num_pieces: u32, k: us
     x.extend_from_slice(info_hash);
     let mut h: [u8; 20] = Sha1::digest(&x).into();
     while out.len() < k {
-        for c in h.chunks_exact(4) {
+        for c in h.as_chunks::<4>().0 {
             if out.len() >= k {
                 break;
             }

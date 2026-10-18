@@ -148,22 +148,20 @@ impl Session {
         let now = Instant::now();
         match act {
             PendingAct::Pause => {
-                if let Some(c) = self.pending.get_mut(&id) {
-                    if c.stopped_with.is_none() {
+                if let Some(c) = self.pending.get_mut(&id)
+                    && c.stopped_with.is_none() {
                         c.stopped_with = Some(c.deadline.saturating_duration_since(now));
                         self.sh.emit(EngineEvent::Pending { id, change: PendingChange::Paused });
                     }
-                }
                 Ok(false)
             }
             PendingAct::Resume => {
                 let mut at = None;
-                if let Some(c) = self.pending.get_mut(&id) {
-                    if let Some(left) = c.stopped_with.take() {
+                if let Some(c) = self.pending.get_mut(&id)
+                    && let Some(left) = c.stopped_with.take() {
                         c.deadline = now + left.max(RESUME_FLOOR);
                         at = Some(c.deadline);
                     }
-                }
                 if let Some(at) = at {
                     self.schedule(at, Job::PendingDue(id));
                     self.sh.emit(EngineEvent::Pending { id, change: PendingChange::Resumed });

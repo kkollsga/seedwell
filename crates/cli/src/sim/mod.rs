@@ -511,8 +511,8 @@ async fn clear(g: &Global, dir: &Path) -> R {
     let manifest = load_manifest(dir);
     let _ = host_call(dir, json!({"op":"clear"})).await;
     let mut removed = 0usize;
-    if !manifest.sims.is_empty() {
-        if let Ok(mut c) = connect(g).await {
+    if !manifest.sims.is_empty()
+        && let Ok(mut c) = connect(g).await {
             let rows = fetch_rows(&mut c, ListParams::default()).await.unwrap_or_default();
             // Take back the loopback permission of every sim torrent first.
             let _ = c.call(&Request::SimAllow(SimAllowParams { ids: manifest.sims.iter().map(|m| m.torrent_id.clone()).collect(), allow: false })).await;
@@ -524,7 +524,6 @@ async fn clear(g: &Global, dir: &Path) -> R {
                 removed = r.removed.len();
             }
         }
-    }
     let mut folders = 0usize;
     for m in &manifest.sims {
         if m.dir.starts_with(std::env::temp_dir()) && std::fs::remove_dir_all(&m.dir).is_ok() {

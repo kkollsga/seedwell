@@ -316,8 +316,8 @@ mod tests {
             for b in buf.iter_mut() {
                 *b = rng.next_u64() as u8;
             }
-            buf[0] = (buf[0] & 0xf0) | if rng.next_u64() % 4 != 0 { 1 } else { buf[0] & 0x0f };
-            if rng.next_u64() % 2 == 0 {
+            buf[0] = (buf[0] & 0xf0) | if !rng.next_u64().is_multiple_of(4) { 1 } else { buf[0] & 0x0f };
+            if rng.next_u64().is_multiple_of(2) {
                 buf[1] = (rng.next_u64() % 4) as u8;
             }
             let _ = Packet::parse(&buf[..n]);

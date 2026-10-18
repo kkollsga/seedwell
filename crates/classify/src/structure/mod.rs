@@ -266,11 +266,10 @@ impl Structure {
         }
         let mut seen: Vec<(Os, Cpu)> = Vec::new();
         for (_, it) in self.items() {
-            if let Some(v) = it.variant.filter(|v| v.os != Os::Any) {
-                if !seen.contains(&(v.os, v.cpu)) {
+            if let Some(v) = it.variant.filter(|v| v.os != Os::Any)
+                && !seen.contains(&(v.os, v.cpu)) {
                     seen.push((v.os, v.cpu));
                 }
-            }
         }
         seen.len() >= 2
     }
@@ -702,12 +701,11 @@ pub(crate) fn strip_stack(s: &str) -> &str {
     }
     let w = d.trim_end_matches([' ', '.', '_', '-']);
     for m in ["cd", "disc", "disk", "part", "pt", "dvd"] {
-        if let Some(r) = w.strip_suffix(m) {
-            if r.is_empty() || !r.ends_with(|c: char| c.is_alphanumeric()) {
+        if let Some(r) = w.strip_suffix(m)
+            && (r.is_empty() || !r.ends_with(|c: char| c.is_alphanumeric())) {
                 let r = r.trim_end_matches([' ', '.', '_', '-']);
                 return if r.is_empty() { t } else { r };
             }
-        }
     }
     t
 }
@@ -720,11 +718,10 @@ pub(crate) fn is_disc_dir(name: &str) -> bool {
         .flat_map(char::to_lowercase)
         .collect();
     for p in ["cd", "disc", "disk", "dvd"] {
-        if let Some(r) = l.strip_prefix(p) {
-            if !r.is_empty() && r.len() <= 3 && r.bytes().all(|b| b.is_ascii_digit()) {
+        if let Some(r) = l.strip_prefix(p)
+            && !r.is_empty() && r.len() <= 3 && r.bytes().all(|b| b.is_ascii_digit()) {
                 return true;
             }
-        }
     }
     false
 }

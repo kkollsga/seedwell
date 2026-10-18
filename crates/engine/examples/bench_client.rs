@@ -51,7 +51,7 @@ mod heap {
     /// Allocation profiler (diagnostics): prints a backtrace for every 8th allocation whose size lies in
     /// `TRS_BENCH_PROF=lo-hi`.
     fn profile(size: usize) {
-        if size < PROF_LO.load(Relaxed) || size > PROF_HI.load(Relaxed) || PROF_N.fetch_add(1, Relaxed) % 8 != 0 {
+        if size < PROF_LO.load(Relaxed) || size > PROF_HI.load(Relaxed) || !PROF_N.fetch_add(1, Relaxed).is_multiple_of(8) {
             return;
         }
         if IN_PROF.with(|f| f.replace(true)) {

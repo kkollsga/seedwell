@@ -336,11 +336,10 @@ fn preallocate_option_reserves_full_files() {
     // Last piece verified-or-pending; the file must already have its full length.
     let len = loop {
         // The file appears (empty) a moment before preallocation sets its length.
-        if let Ok(m) = std::fs::metadata(path_of(dir.path(), &s, 0)) {
-            if m.len() > 0 {
+        if let Ok(m) = std::fs::metadata(path_of(dir.path(), &s, 0))
+            && m.len() > 0 {
                 break m.len();
             }
-        }
         std::thread::yield_now();
     };
     assert_eq!(len, 200_000);

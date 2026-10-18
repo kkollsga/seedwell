@@ -41,16 +41,14 @@ pub fn parse_description(xml_text: &str) -> Result<Description, xml::XmlError> {
             stack.push(n);
         }
         Event::Close(n) => {
-            if n == "service" {
-                if let (Some(service_type), Some(control_url)) = (st.take(), cu.take()) {
-                    if d.services.len() < MAX_SERVICES {
+            if n == "service"
+                && let (Some(service_type), Some(control_url)) = (st.take(), cu.take())
+                    && d.services.len() < MAX_SERVICES {
                         d.services.push(Service {
                             service_type,
                             control_url,
                         });
                     }
-                }
-            }
             stack.pop();
         }
         Event::Text(t) => {

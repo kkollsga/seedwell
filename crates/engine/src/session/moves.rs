@@ -282,11 +282,10 @@ impl Session {
     pub(super) fn propose_moves(&mut self, reply: oneshot::Sender<MoveProposal>) {
         let mut srcs = Vec::new();
         for id in self.table.keys().copied().collect::<Vec<_>>() {
-            if let Ok(s) = self.move_src(&id) {
-                if !s.pinned {
+            if let Ok(s) = self.move_src(&id)
+                && !s.pinned {
                     srcs.push(s);
                 }
-            }
         }
         let sh = self.sh.clone();
         tokio::task::spawn_blocking(move || {
@@ -317,11 +316,10 @@ impl Session {
         self.propose_moves(tx);
         let sh = self.sh.clone();
         tokio::spawn(async move {
-            if let Ok(p) = rx.await {
-                if !p.items.is_empty() {
+            if let Ok(p) = rx.await
+                && !p.items.is_empty() {
                     sh.emit(EngineEvent::LocationsChanged { torrents: p.items.len() as u32, bytes: p.total_bytes });
                 }
-            }
         });
     }
 
@@ -383,16 +381,14 @@ impl Session {
         tokio::task::spawn_blocking(move || {
             let mut result = plan_move(&sh, &src, &job.target).map(|o| o.map(Box::new));
             // The cheap preflight, before anything is announced or touched.
-            if job.auto {
-                if let Ok(Some(plan)) = &result {
-                    if let Err(e) = plan.preflight() {
+            if job.auto
+                && let Ok(Some(plan)) = &result
+                    && let Err(e) = plan.preflight() {
                         let dest = plan.dst.iter().flatten().next().and_then(|p| p.parent()).unwrap_or(&plan.to_save);
                         let why = fail_text(&e, dest, Some(&plan.layout_old));
                         crate::organize::release_paths(&sh.reserved, &plan.reserved);
                         result = Err(why);
                     }
-                }
-            }
             let _ = sh.session.blocking_send(SessionMsg::MovePlanned { job, result });
         });
     }
@@ -588,13 +584,11 @@ impl Session {
         };
         let placement = if e.cold.has2(G_PLACED) { self.sh.store.load_placement(&id).ok().flatten() } else { None };
         let sw = Switch::plain(layout, self.save_path(&e.cold), self.staging_for(&e.cold), placement, reply);
-        if let Err(err) = l.tx.try_send(TorrentMsg::Cmd(TorrentCmd::SwitchLocation(Box::new(sw)))) {
-            if let TorrentMsg::Cmd(TorrentCmd::SwitchLocation(sw)) = err.into_inner() {
-                if let Some(r) = sw.reply {
+        if let Err(err) = l.tx.try_send(TorrentMsg::Cmd(TorrentCmd::SwitchLocation(Box::new(sw))))
+            && let TorrentMsg::Cmd(TorrentCmd::SwitchLocation(sw)) = err.into_inner()
+                && let Some(r) = sw.reply {
                     let _ = r.send(Err("the torrent's queue is full".into()));
                 }
-            }
-        }
     }
 
     pub(super) fn on_move_done(&mut self, id: TorrentId, end: ExecEnd) {
@@ -644,11 +638,10 @@ impl Session {
         for e in rd.flatten() {
             let name = e.file_name().to_string_lossy().into_owned();
             let Some(hex) = name.strip_suffix(".journal") else { continue };
-            if let Some(id) = parse_hex_id(hex) {
-                if self.table.contains_key(&id) {
+            if let Some(id) = parse_hex_id(hex)
+                && self.table.contains_key(&id) {
                     self.mover.blocked.insert(id);
                 }
-            }
         }
     }
 
@@ -829,11 +822,10 @@ async fn exec(c: ExecCtx) -> ExecEnd {
     let mut end_handle: Option<trs_storage::TorrentHandle> = None;
     let mut hold: Option<WriteHold> = None;
     if relocating {
-        if let Some(dir) = journal.parent() {
-            if let Err(e) = std::fs::create_dir_all(dir) {
+        if let Some(dir) = journal.parent()
+            && let Err(e) = std::fs::create_dir_all(dir) {
                 return ExecEnd::Failed(format!("{}: {e}", dir.display()));
             }
-        }
         // The handle: a same-volume move of a running torrent uses the torrent's own, so that a
         // read that meets a file in transit waits for the switch instead of failing.
         let own: Option<trs_storage::TorrentHandle> = match (&live, plan.cross_volume) {
@@ -941,11 +933,10 @@ async fn exec(c: ExecCtx) -> ExecEnd {
         Err(_) => Err("the engine is shutting down".into()),
     };
     if let Err(reason) = switched {
-        if let Some(h) = &end_handle {
-            if let Ok(p) = h.relocate_rollback(journal.clone()) {
+        if let Some(h) = &end_handle
+            && let Ok(p) = h.relocate_rollback(journal.clone()) {
                 let _ = p.await;
             }
-        }
         return ExecEnd::Failed(reason);
     }
     if let Some(h) = end_handle {
@@ -963,13 +954,12 @@ async fn exec(c: ExecCtx) -> ExecEnd {
             return ExecEnd::Crashed;
         }
         // An abandoned finalize journal of the old staging folder is not needed any more.
-        if plan.kind == MoveKind::Incomplete {
-            if let Some(old) = &plan.from_stage_dir {
+        if plan.kind == MoveKind::Incomplete
+            && let Some(old) = &plan.from_stage_dir {
                 let hex = crate::util::hex(&id);
                 let _ = std::fs::remove_file(old.join(format!("{hex}.journal")));
                 let _ = std::fs::remove_file(old.join(format!("{hex}.p.journal")));
             }
-        }
         if let Ok(p) = h.relocate_commit(journal, Some(plan.stop_at.clone())) {
             // An error here leaves old files behind; the new place is in force and the journal
             // is resolved (the sources deleted) at the next start.
@@ -1144,13 +1134,11 @@ impl Session {
                 // Old folders left empty by the rename go away.
                 if let Ok(Some(old)) = self.sh.store.load_placement(&id) {
                     for (i, o) in old.files.iter().enumerate() {
-                        if let (Some(o), Some(n)) = (o, placement.files.get(i).and_then(Option::as_ref)) {
-                            if o != n {
-                                if let Some(parent) = o.parent() {
+                        if let (Some(o), Some(n)) = (o, placement.files.get(i).and_then(Option::as_ref))
+                            && o != n
+                                && let Some(parent) = o.parent() {
                                     let _ = trs_storage::remove_dir_if_empty(parent);
                                 }
-                            }
-                        }
                     }
                 }
                 let _ = self.commit_now(Batch { placements: vec![(id, Some(placement))], ..Batch::default() });

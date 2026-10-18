@@ -90,11 +90,10 @@ impl Magnet {
                 }
                 "so" => m.add_select(&percent_decode_str(value)?)?,
                 "x.pe" => {
-                    if let Ok(addr) = percent_decode_str(value).unwrap_or_default().parse() {
-                        if m.peers.len() < MAX_PEER_HINTS && !m.peers.contains(&addr) {
+                    if let Ok(addr) = percent_decode_str(value).unwrap_or_default().parse()
+                        && m.peers.len() < MAX_PEER_HINTS && !m.peers.contains(&addr) {
                             m.peers.push(addr);
                         }
-                    }
                 }
                 _ => {}
             }

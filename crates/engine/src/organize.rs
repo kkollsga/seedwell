@@ -84,15 +84,14 @@ pub(crate) fn junk_name(k: JunkKind) -> &'static str {
 
 /// `~` and `~/x` expanded with `$HOME`; other strings are used as they are.
 pub(crate) fn expand_tilde(s: &str) -> PathBuf {
-    if s == "~" || s.starts_with("~/") {
-        if let Some(home) = std::env::var_os("HOME") {
+    if (s == "~" || s.starts_with("~/"))
+        && let Some(home) = std::env::var_os("HOME") {
             let mut p = PathBuf::from(home);
             if let Some(rest) = s.strip_prefix("~/") {
                 p.push(rest);
             }
             return p;
         }
-    }
     PathBuf::from(s)
 }
 

@@ -348,13 +348,11 @@ impl UdpTransport {
         handshake_exponent: u32,
     ) -> Result<(u64, bool), AnnounceError> {
         let ttl = self.inner.cfg.connection_id_ttl;
-        if !force_new {
-            if let Some((id, at)) = lock(&self.inner.conn_ids).get(&addr).copied() {
-                if at.elapsed() < ttl {
+        if !force_new
+            && let Some((id, at)) = lock(&self.inner.conn_ids).get(&addr).copied()
+                && at.elapsed() < ttl {
                     return Ok((id, true));
                 }
-            }
-        }
         let tid = self.next_tid()?;
         let reply = match self
             .exchange(

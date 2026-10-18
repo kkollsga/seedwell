@@ -128,7 +128,7 @@ pub struct Response<'a> {
 impl<'a> Response<'a> {
     /// Iterates compact IPv4 nodes; a trailing partial entry is ignored.
     pub fn nodes(&self) -> impl Iterator<Item = (Id, SocketAddrV4)> + 'a {
-        self.nodes.chunks_exact(NODE_LEN).map(|c| {
+        self.nodes.as_chunks::<NODE_LEN>().0.iter().map(|c| {
             let mut id = [0u8; 20];
             id.copy_from_slice(&c[..20]);
             (id, decode_addr(&c[20..26]))

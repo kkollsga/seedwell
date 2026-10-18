@@ -163,11 +163,10 @@ impl Session {
         let mut tiers = st.record.announce.clone().unwrap_or_default();
         // What the torrent came with does not count against the cap.
         let mut original: std::collections::HashSet<String> = std::collections::HashSet::new();
-        if let Ok(Some(bytes)) = self.sh.store.load_torrent_file(&id) {
-            if let Ok(mi) = Metainfo::from_bytes(&bytes) {
+        if let Ok(Some(bytes)) = self.sh.store.load_torrent_file(&id)
+            && let Ok(mi) = Metainfo::from_bytes(&bytes) {
                 original.extend(mi.announce_tiers.iter().flatten().map(|u| key(u)));
             }
-        }
         if let Some(m) = st.record.magnet.as_deref().and_then(|u| Magnet::parse(u).ok()) {
             original.extend(m.trackers.iter().map(|u| key(u)));
         }
@@ -369,11 +368,10 @@ impl Session {
         let mut opts = opts;
         opts.peers = peers;
         self.table.insert(id, Entry { cold, live: None });
-        if policy.is_some() {
-            if let Some(p) = &policy {
+        if policy.is_some()
+            && let Some(p) = &policy {
                 self.apply_policy_to(id, p);
             }
-        }
         // Magnets announce right away (size 0 = metadata unknown).
         if cfg.trackers_enabled && !tiers.is_empty() {
             self.tracker_send(TrackerCmd::Add(TrackerTorrent {

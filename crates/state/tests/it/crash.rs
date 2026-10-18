@@ -43,21 +43,21 @@ fn crash_child_entry() {
         store
             .record_stats(&StatsScope::Profile("p".into()), Day(200 + (k % 5) as u32), &StatsBucket { downloaded: 2, uploaded: 1, torrents_added: 1, ..Default::default() })
             .unwrap();
-        if k % 7 == 0 {
+        if k.is_multiple_of(7) {
             let mut r = TorrentRecord::new(format!("torrent {k}"), k, k as i64);
             r.piece_count = 8;
             store.put_torrent(id(1000 + (k % 50) as u32), &r).unwrap();
         }
-        if k % 11 == 0 {
-            let rec = TimingRecord { completed_sent: true, session_open: k % 2 == 0, ..Default::default() };
+        if k.is_multiple_of(11) {
+            let rec = TimingRecord { completed_sent: true, session_open: k.is_multiple_of(2), ..Default::default() };
             if timing.save(&timing_key(k), &rec).is_ok() {
                 println!("timing {k}");
             }
         }
-        if k % 13 == 0 && store.flush_now().is_ok() {
+        if k.is_multiple_of(13) && store.flush_now().is_ok() {
             println!("flushed {k}");
         }
-        if k % 5 == 0 {
+        if k.is_multiple_of(5) {
             std::thread::sleep(Duration::from_micros(300));
         }
     }

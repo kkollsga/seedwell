@@ -205,7 +205,7 @@ pub fn decode(buf: &[u8], v6: bool) -> Result<Reply, DecodeError> {
         ACTION_SCRAPE => {
             let body = buf.get(8..).ok_or(DecodeError::TooShort)?;
             let entries = body
-                .chunks_exact(12)
+                .as_chunks::<12>().0.iter()
                 .take(MAX_SCRAPE_HASHES)
                 .map(|c| ScrapeEntry {
                     complete: u64::from(u32::from_be_bytes([c[0], c[1], c[2], c[3]])),

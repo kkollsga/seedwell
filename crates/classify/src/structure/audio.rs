@@ -221,19 +221,17 @@ fn album_of(cx: &Ctx<'_>, b: &Build, c: &Classification, single: bool, deep: boo
 /// `1998 - First Light` -> `(Some(1998), "First Light")`; anything else is returned unchanged.
 fn split_lead_year(name: &str) -> (Option<u16>, &str) {
     let b = name.as_bytes();
-    if b.len() > 7 && b[..4].iter().all(u8::is_ascii_digit) {
-        if let Ok(y) = name[..4].parse::<u16>() {
+    if b.len() > 7 && b[..4].iter().all(u8::is_ascii_digit)
+        && let Ok(y) = name[..4].parse::<u16>() {
             let rest = name[4..].trim_start_matches([' ', '.', '_']);
-            if (1900..=2100).contains(&y) && rest.len() < name.len() - 4 {
-                if let Some(r) = rest.strip_prefix(['-', '\u{2013}']) {
+            if (1900..=2100).contains(&y) && rest.len() < name.len() - 4
+                && let Some(r) = rest.strip_prefix(['-', '\u{2013}']) {
                     let r = r.trim_start();
                     if !r.is_empty() {
                         return (Some(y), r);
                     }
                 }
-            }
         }
-    }
     (None, name)
 }
 

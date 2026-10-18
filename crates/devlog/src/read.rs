@@ -50,21 +50,18 @@ impl Query {
                 return false;
             }
         }
-        if let Some(t) = self.tracker.as_deref().filter(|t| !t.is_empty()) {
-            if !(has(s(v, "host"), t) || has(s(v, "tracker"), t)) {
+        if let Some(t) = self.tracker.as_deref().filter(|t| !t.is_empty())
+            && !(has(s(v, "host"), t) || has(s(v, "tracker"), t)) {
                 return false;
             }
-        }
-        if let Some(e) = self.event.as_deref().filter(|e| !e.is_empty()) {
-            if s(v, "event") != e {
+        if let Some(e) = self.event.as_deref().filter(|e| !e.is_empty())
+            && s(v, "event") != e {
                 return false;
             }
-        }
-        if let Some(t) = self.text.as_deref().filter(|t| !t.is_empty()) {
-            if !(has(s(v, "torrent"), t) || has(s(v, "title"), t) || has(s(v, "host"), t)) {
+        if let Some(t) = self.text.as_deref().filter(|t| !t.is_empty())
+            && !(has(s(v, "torrent"), t) || has(s(v, "title"), t) || has(s(v, "host"), t)) {
                 return false;
             }
-        }
         !self.errors_only || is_error(v)
     }
 }
@@ -105,15 +102,14 @@ pub fn tail(dir: &Path, q: &Query) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for p in files(dir) {
         for line in tail_lines(&p, TAIL_BYTES).into_iter().rev() {
-            if let Ok(v) = serde_json::from_str::<Value>(&line) {
-                if q.matches(&v) {
+            if let Ok(v) = serde_json::from_str::<Value>(&line)
+                && q.matches(&v) {
                     out.push(line);
                     if out.len() >= limit {
                         out.reverse();
                         return out;
                     }
                 }
-            }
         }
     }
     out.reverse();

@@ -114,11 +114,10 @@ impl Choker {
             };
             self.rotated_at = Some(now);
         }
-        if let Some(k) = self.optimistic {
-            if !out.contains(&k) {
+        if let Some(k) = self.optimistic
+            && !out.contains(&k) {
                 out.push(k);
             }
-        }
         out
     }
 }

@@ -576,11 +576,10 @@ fn hub_loop() {
         if !due_now.is_empty() {
             drop(st);
             for poll in due_now {
-                if let Ok(mut f) = poll.lock() {
-                    if let Some(f) = f.as_mut() {
+                if let Ok(mut f) = poll.lock()
+                    && let Some(f) = f.as_mut() {
                         f();
                     }
-                }
             }
             let Ok(g) = hub.state.lock() else { return };
             st = g;

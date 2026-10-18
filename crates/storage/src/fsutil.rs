@@ -166,14 +166,13 @@ pub fn create_dirs_guarded(dir: &Path) -> io::Result<()> {
     if dir.is_dir() {
         return Ok(());
     }
-    if let Some(mp) = volume_mount_point(dir) {
-        if !mp.is_dir() {
+    if let Some(mp) = volume_mount_point(dir)
+        && !mp.is_dir() {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
                 "volume not mounted",
             ));
         }
-    }
     std::fs::create_dir_all(dir)
 }
 

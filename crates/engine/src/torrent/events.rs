@@ -202,11 +202,10 @@ impl Torrent {
                 self.attach_empty_set(key);
             }
             PeerEvent::AllowedFast(i) => {
-                if let Some(p) = self.peers.get_mut(&key) {
-                    if p.allowed_in.len() < MAX_ALLOWED_IN && !p.allowed_in.contains(&i) {
+                if let Some(p) = self.peers.get_mut(&key)
+                    && p.allowed_in.len() < MAX_ALLOWED_IN && !p.allowed_in.contains(&i) {
                         p.allowed_in.push(i);
                     }
-                }
                 self.fill_requests(key);
             }
             PeerEvent::Block { piece, begin, len, ack } => self.on_block(key, piece, begin, len, ack),
@@ -243,14 +242,13 @@ impl Torrent {
             _ => HaveSummary::Bitfield(bytes),
         };
         let mut allowed_fast = Vec::new();
-        if fast {
-            if let (Some(n), Some(p)) = (n, self.peers.get(&key)) {
+        if fast
+            && let (Some(n), Some(p)) = (n, self.peers.get(&key)) {
                 allowed_fast = allowed_fast_set(&self.id, p.addr.ip(), n, 4);
                 if let Some(d) = self.ctx.disk.get() {
                     allowed_fast.retain(|&i| d.have.get(i));
                 }
             }
-        }
         if let Some(p) = self.peers.get_mut(&key) {
             p.connected = true;
             p.utp = utp;
@@ -327,11 +325,10 @@ impl Torrent {
 
     fn attach_empty_set(&mut self, key: PeerKey) {
         let Some(m) = self.meta.as_ref() else { return };
-        if m.picker.is_some() {
-            if let Some(p) = self.peers.get_mut(&key) {
+        if m.picker.is_some()
+            && let Some(p) = self.peers.get_mut(&key) {
                 p.have = PeerHave::Set(Bitfield::new(m.piece_count));
             }
-        }
     }
 
     fn set_peer_have_all(&mut self, key: PeerKey) {
@@ -581,20 +578,18 @@ impl Torrent {
     }
 
     pub(super) fn unchoke(&mut self, key: PeerKey) {
-        if self.send(key, PeerCmd::Unchoke) {
-            if let Some(p) = self.peers.get_mut(&key) {
+        if self.send(key, PeerCmd::Unchoke)
+            && let Some(p) = self.peers.get_mut(&key) {
                 p.am_choking = false;
                 p.last_unchoked = Some(Instant::now());
             }
-        }
     }
 
     pub(super) fn choke(&mut self, key: PeerKey) {
-        if self.send(key, PeerCmd::Choke) {
-            if let Some(p) = self.peers.get_mut(&key) {
+        if self.send(key, PeerCmd::Choke)
+            && let Some(p) = self.peers.get_mut(&key) {
                 p.am_choking = true;
             }
-        }
     }
 
     /// Top up a peer's request queue.
@@ -685,11 +680,10 @@ impl Torrent {
             if let Some(pk) = self.meta.as_mut().and_then(|m| m.picker.as_mut()) {
                 let r = pk.block_received(piece, begin);
                 accepted_new = matches!(r, Received::Accepted { .. });
-                if accepted_new {
-                    if let Some(bus) = &self.stream {
+                if accepted_new
+                    && let Some(bus) = &self.stream {
                         bus.note_progress(piece, pk.received_blocks(piece));
                     }
-                }
                 // Endgame and urgent pieces of a stream both request a block more than once: the
                 // copies other peers still owe are cancelled the moment one arrives.
                 if matches!(r, Received::Accepted { .. }) && (pk.in_endgame() || pk.is_urgent_piece(piece)) {

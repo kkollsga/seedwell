@@ -260,11 +260,10 @@ impl Session {
             return;
         }
         let Some(e) = self.table.get(&id) else { return };
-        if let Some(l) = &e.live {
-            if !l.stopping {
+        if let Some(l) = &e.live
+            && !l.stopping {
                 let _ = l.tx.try_send(TorrentMsg::AddPeers(peers));
             }
-        }
     }
 
     // ---- shutdown -----------------------------------------------------------------------

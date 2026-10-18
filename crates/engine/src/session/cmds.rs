@@ -382,11 +382,10 @@ impl Session {
         if let Some(p) = self.paused_peers.remove(&id) {
             peers.extend(p);
         }
-        if !fresh {
-            if let Ok(p) = self.sh.store.load_peers(&id) {
+        if !fresh
+            && let Ok(p) = self.sh.store.load_peers(&id) {
                 peers.extend(p.into_iter().take(32));
             }
-        }
         let incomplete = !c.complete() && !c.has(F_WANTED_DONE);
         let tier = if incomplete || fresh { Tier::Hot } else { Tier::Warm };
         let stats = Arc::new(LiveStats::new(tier));
@@ -629,8 +628,8 @@ impl Session {
         e.cold.file_prios = (!p.iter().all(|x| *x == FilePriority::Normal)).then(|| raw.clone().into_boxed_slice());
         // "Wanted" is what the priorities leave: the torrent file knows the lengths.
         let mut all_present = None;
-        if let Ok(Some(bytes)) = self.sh.store.load_torrent_file(&id) {
-            if let Ok(mi) = Metainfo::from_bytes(&bytes) {
+        if let Ok(Some(bytes)) = self.sh.store.load_torrent_file(&id)
+            && let Ok(mi) = Metainfo::from_bytes(&bytes) {
                 if let Some(e) = self.table.get_mut(&id) {
                     e.cold.wanted_len = crate::organize::wanted_bytes(&mi, &raw);
                 }
@@ -645,7 +644,6 @@ impl Session {
                     }
                 }
             }
-        }
         let e = self.table.get_mut(&id).ok_or(EngineError::NotFound)?;
         if let Some(l) = &e.live {
             // The actor tells the session (`Unfinished`) when the wanted set grew.
@@ -720,8 +718,8 @@ impl Session {
         }
         let waits = self.remove_waits.remove(&id).unwrap_or_default();
         let mut deleting = false;
-        if delete_files && e.cold.has_metadata() {
-            if let Ok(Some(bytes)) = self.sh.store.load_torrent_file(&id) {
+        if delete_files && e.cold.has_metadata()
+            && let Ok(Some(bytes)) = self.sh.store.load_torrent_file(&id) {
                 let placed = e.cold.placed();
                 deleting = true;
                 let waits2 = waits.clone();
@@ -734,7 +732,6 @@ impl Session {
                     }
                 });
             }
-        }
         if !deleting {
             for w in waits {
                 w.done();

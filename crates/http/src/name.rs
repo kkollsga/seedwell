@@ -114,13 +114,12 @@ fn percent_decode(s: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(s.len());
     let mut i = 0;
     while i < s.len() {
-        if s[i] == b'%' && i + 2 < s.len() {
-            if let (Some(h), Some(l)) = (hex(s[i + 1]), hex(s[i + 2])) {
+        if s[i] == b'%' && i + 2 < s.len()
+            && let (Some(h), Some(l)) = (hex(s[i + 1]), hex(s[i + 2])) {
                 out.push(h << 4 | l);
                 i += 3;
                 continue;
             }
-        }
         out.push(s[i]);
         i += 1;
     }

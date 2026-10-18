@@ -635,11 +635,10 @@ impl Writer {
     /// Wait until everything submitted so far was committed.
     pub(crate) fn flush(&self) {
         let (tx, rx) = std::sync::mpsc::channel();
-        if let Some(t) = &self.tx {
-            if t.send(WriterMsg::Flush(tx)).is_ok() {
+        if let Some(t) = &self.tx
+            && t.send(WriterMsg::Flush(tx)).is_ok() {
                 let _ = rx.recv();
             }
-        }
     }
 }
 

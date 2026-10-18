@@ -297,19 +297,17 @@ impl Lab {
             let reqs = self.hub().tick(now);
             let reps = self.hub().take_reports();
             for r in &reps {
-                if let Report::InvariantViolation(why) = &r.report {
-                    if self.panic_on_trip {
+                if let Report::InvariantViolation(why) = &r.report
+                    && self.panic_on_trip {
                         panic!("machine tripped its self-audit: {why}");
                     }
-                }
             }
             self.reports.extend(reps);
             for ev in self.hub().take_gate_events() {
-                if let GateEvent::HostTripped { host, reason, .. } = &ev {
-                    if self.panic_on_trip {
+                if let GateEvent::HostTripped { host, reason, .. } = &ev
+                    && self.panic_on_trip {
                         panic!("gate tripped host {host}: {reason}");
                     }
-                }
                 self.gate_events.push(ev);
             }
             for r in reqs {

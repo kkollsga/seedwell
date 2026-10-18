@@ -236,11 +236,10 @@ fn spawn_dht_shared(
     // The DHT is IPv4 only; the pump drops anything else.
     tokio::spawn(async move {
         while let Some(d) = feed.recv().await {
-            if let SocketAddr::V4(from) = d.from {
-                if tx.send((from, d.data)).await.is_err() {
+            if let SocketAddr::V4(from) = d.from
+                && tx.send((from, d.data)).await.is_err() {
                     break;
                 }
-            }
         }
     });
     let out = sock.clone();
@@ -543,11 +542,10 @@ impl EngineHandle {
         let (p, trash) = (path.to_path_buf(), cfg.trash_dir.clone());
         let left = tokio::task::spawn_blocking(move || organize::finish_file(&p, &action, trash.as_deref())).await;
         // A torrent that waits for a decision keeps the file it came from, wherever it ended up.
-        if added.needs_choice || added.pending.is_some() {
-            if let Ok(Ok(Some(left))) = left {
+        if (added.needs_choice || added.pending.is_some())
+            && let Ok(Ok(Some(left))) = left {
                 self.sh.hold_source(added.id, left);
             }
-        }
         Ok(added)
     }
 

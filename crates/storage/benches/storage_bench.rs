@@ -33,7 +33,7 @@ impl Rng {
 /// Plain portable SHA-1, as the "no hardware instructions" reference point.
 fn sha1_portable(data: &[u8]) -> [u8; 20] {
     let mut h: [u32; 5] = [0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476, 0xC3D2E1F0];
-    let mut tail = data.chunks_exact(64);
+    let (blocks, rem) = data.as_chunks::<64>();
     let mut block = |b: &[u8]| {
         let mut w = [0u32; 80];
         for i in 0..16 {
@@ -68,16 +68,15 @@ fn sha1_portable(data: &[u8]) -> [u8; 20] {
         h[3] = h[3].wrapping_add(d);
         h[4] = h[4].wrapping_add(e);
     };
-    for b in tail.by_ref() {
+    for b in blocks {
         block(b);
     }
-    let rem = tail.remainder();
     let mut last = [0u8; 128];
     last[..rem.len()].copy_from_slice(rem);
     last[rem.len()] = 0x80;
     let n = if rem.len() < 56 { 64 } else { 128 };
     last[n - 8..n].copy_from_slice(&((data.len() as u64) * 8).to_be_bytes());
-    for b in last[..n].chunks_exact(64) {
+    for b in last[..n].as_chunks::<64>().0 {
         block(b);
     }
     let mut out = [0u8; 20];

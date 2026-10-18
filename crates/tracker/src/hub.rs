@@ -822,12 +822,11 @@ impl<S: TimingStore> TrackerHub<S> {
         let now = self.clock.norm(now);
         self.net.alive(now);
         let ready = now.since(self.net.last_probe) >= HINT_DEBOUNCE && !self.net.path_down;
-        if let Some(o) = self.net.off.as_mut() {
-            if ready && o.probe.is_none() {
+        if let Some(o) = self.net.off.as_mut()
+            && ready && o.probe.is_none() {
                 o.trusted = true;
                 o.probe_at = Some(o.probe_at.map_or(now, |p| p.min(now)));
             }
-        }
     }
 
     fn probe_wake(&self) -> Option<Millis> {
@@ -1256,12 +1255,11 @@ impl<S: TimingStore> TrackerHub<S> {
         for req in self.gate.poll(now) {
             if self.trace {
                 let (ih, slot) = req.ticket().key();
-                if let Some((at, deferred)) = self.submitted.remove(&(ih, slot)) {
-                    if deferred && now > at {
+                if let Some((at, deferred)) = self.submitted.remove(&(ih, slot))
+                    && deferred && now > at {
                         let waited = now.since(at).as_millis();
                         self.note(ih, slot, now, NoteKind::Released, None, format!("released by the gate after waiting {waited} ms"));
                     }
-                }
             }
             if self.mark_dispatched(&req, now) {
                 out.push(req);
@@ -1348,14 +1346,13 @@ impl<S: TimingStore> TrackerHub<S> {
         // Persist intents are applied first, in order, before anything else.
         let mut ok = true;
         for si in &out {
-            if let Intent::Persist(rec) = &si.intent {
-                if self.save_record(&ih, si.slot, rec).is_err()
+            if let Intent::Persist(rec) = &si.intent
+                && self.save_record(&ih, si.slot, rec).is_err()
                     && (req.event() == Some(Event::Completed)
                         || req.event() == Some(Event::Started))
                 {
                     ok = false;
                 }
-            }
         }
         out.retain(|si| !matches!(si.intent, Intent::Persist(_)));
         self.apply(&ih, &mut out, now);

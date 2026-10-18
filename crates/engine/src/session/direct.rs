@@ -275,11 +275,10 @@ impl Session {
                 }
                 None => self.direct_start(id),
             }
-        } else if let Some(t) = &e.task {
-            if !matches!(t.progress().state, State::Paused | State::Completed | State::Failed | State::Cancelled) {
+        } else if let Some(t) = &e.task
+            && !matches!(t.progress().state, State::Paused | State::Completed | State::Failed | State::Cancelled) {
                 t.pause();
             }
-        }
     }
 
     fn direct_start(&mut self, id: TorrentId) {
@@ -373,12 +372,11 @@ impl Session {
             }
             (_, false) => e.rec.state = DirectState::Paused,
         }
-        if let Some(t) = &e.task {
-            if active && t.progress().state == State::Failed {
+        if let Some(t) = &e.task
+            && active && t.progress().state == State::Failed {
                 // A failed task retries on `resume()`.
                 t.resume();
             }
-        }
         let rec = e.rec.clone();
         let st = e.state();
         self.dirty_direct(rec);
@@ -395,8 +393,8 @@ impl Session {
         let finished = e.rec.state == DirectState::Completed;
         let waits = self.remove_waits.remove(&id).unwrap_or_default();
         let mut async_done = false;
-        if delete_files && finished {
-            if let Some(p) = e.rec.final_path.clone() {
+        if delete_files && finished
+            && let Some(p) = e.rec.final_path.clone() {
                 async_done = true;
                 let waits = waits.clone();
                 tokio::task::spawn_blocking(move || {
@@ -406,7 +404,6 @@ impl Session {
                     }
                 });
             }
-        }
         if !finished {
             async_done = true;
             let waits = waits.clone();
@@ -505,11 +502,10 @@ impl Session {
 
     fn on_direct_changed(&mut self, id: TorrentId, p: Progress) {
         let Some(e) = self.directs.get_mut(&id) else { return };
-        if let Some(n) = p.file_name.clone().filter(|n| !n.is_empty()) {
-            if e.rec.name != n {
+        if let Some(n) = p.file_name.clone().filter(|n| !n.is_empty())
+            && e.rec.name != n {
                 e.rec.name = n;
             }
-        }
         if p.total.is_some() {
             e.rec.total = p.total;
         }

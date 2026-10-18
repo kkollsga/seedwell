@@ -187,11 +187,10 @@ impl Session {
 
     /// Forget the library paths reserved for `id`: its files are in place now (or it is gone).
     pub(crate) fn release_reservations(&mut self, id: TorrentId) {
-        if self.table.get(&id).is_some_and(|e| e.cold.has2(G_PLACED)) {
-            if let Ok(Some(p)) = self.sh.store.load_placement(&id) {
+        if self.table.get(&id).is_some_and(|e| e.cold.has2(G_PLACED))
+            && let Ok(Some(p)) = self.sh.store.load_placement(&id) {
                 organize::release(&self.sh.reserved, &p);
             }
-        }
     }
 }
 

@@ -489,11 +489,10 @@ impl HttpTransport {
             // IP literals skip the resolver, so they are vetted here, on every
             // hop. (Names, including odd spellings such as `127.1`, go through
             // the vetting resolver at connect time.)
-            if let Some(ip) = literal_ip(&uri) {
-                if self.cfg.policy.check(ip).is_err() {
+            if let Some(ip) = literal_ip(&uri)
+                && self.cfg.policy.check(ip).is_err() {
                     return Err(AnnounceError::Transport(TransportError::Forbidden));
                 }
-            }
             let response = self.send(&uri, may_retry, quit, trace).await?;
             let status = response.status();
             lock(trace).status = Some(status.as_u16());
@@ -841,11 +840,10 @@ fn host_header(uri: &Uri) -> String {
 /// instead of 200); everything else is transient.
 fn error_status(status: StatusCode, retry_after: Option<Duration>, body: &[u8]) -> AnnounceError {
     let code = status.as_u16();
-    if (400..500).contains(&code) && code != 408 && code != 429 {
-        if let Err(rej @ AnnounceError::Rejected { .. }) = parse_announce_response(body) {
+    if (400..500).contains(&code) && code != 408 && code != 429
+        && let Err(rej @ AnnounceError::Rejected { .. }) = parse_announce_response(body) {
             return rej;
         }
-    }
     AnnounceError::Http {
         status: code,
         retry_after,
@@ -917,11 +915,10 @@ fn classify(e: &hyper_util::client::legacy::Error) -> TransportError {
     while let Some(err) = cur {
         text.push_str(&err.to_string().to_ascii_lowercase());
         text.push('|');
-        if let Some(io) = err.downcast_ref::<std::io::Error>() {
-            if io.kind() == std::io::ErrorKind::TimedOut {
+        if let Some(io) = err.downcast_ref::<std::io::Error>()
+            && io.kind() == std::io::ErrorKind::TimedOut {
                 kind_timeout = true;
             }
-        }
         if let Some(r) = err.downcast_ref::<ResolveError>() {
             resolve = Some(r);
         }

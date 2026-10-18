@@ -117,7 +117,7 @@ impl Responder for SimNet {
         // outages
         if Self::in_window(&self.global_down, now) || Self::in_window(&self.outages[hi], now) {
             self.faults[0] += 1;
-            return if r % 3 == 0 {
+            return if r.is_multiple_of(3) {
                 Reply::new(secs(0), Err(AnnounceError::Transport(TransportError::Dns)))
             } else if r % 3 == 1 {
                 Reply::new(
@@ -212,17 +212,15 @@ impl Responder for SimNet {
         // than its min interval after the previous answered one (Transmission
         // 4.0.6 detector, SPEC 7C.4a).
         let key = (params.info_hash, hi);
-        if params.event.is_none() {
-            if let Some(prev) = self.last_ok.get(&key) {
-                if now.since(*prev) < p.min_eff() {
+        if params.event.is_none()
+            && let Some(prev) = self.last_ok.get(&key)
+                && now.since(*prev) < p.min_eff() {
                     self.spam += 1;
                 }
-            }
-        }
         self.last_ok.insert(key, now);
         self.answered_ok += 1;
         let mut resp = ok_response(p.interval, p.min);
-        if torrent_no % 3 == 0 {
+        if torrent_no.is_multiple_of(3) {
             resp.tracker_id = Some(format!("tid{hi}").into_bytes().into());
         }
         Reply::new(
@@ -350,7 +348,7 @@ fn ninety_days() {
             }
         };
         // ~2% of (torrent, first host) pairs are permanently rejected
-        if (r >> 50) % 50 == 0 {
+        if (r >> 50).is_multiple_of(50) {
             reject_pairs.insert((n, (h0 % u64::from(sc.hosts)) as usize));
         }
         seeds.push((n, private, tiers));
@@ -423,7 +421,7 @@ fn ninety_days() {
     for _ in 0..10 {
         script.push((
             rand_time(&mut rng, sc.days),
-            Act::Crash(rng.next_u64() % 2 == 0),
+            Act::Crash(rng.next_u64().is_multiple_of(2)),
         ));
     }
     let loop_at = Millis(sc.days * 86_400_000 * 4 / 9);

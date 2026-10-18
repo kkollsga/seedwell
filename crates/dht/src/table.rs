@@ -342,14 +342,13 @@ impl RoutingTable {
         if let Some(pos) = b.nodes.iter().position(|n| n.id == *id) {
             let n = &mut b.nodes[pos];
             n.fails = n.fails.saturating_add(by);
-            if n.fails >= BAD_FAILS {
-                if let Some(r) = b.repl.take() {
+            if n.fails >= BAD_FAILS
+                && let Some(r) = b.repl.take() {
                     // The candidate is dropped when the table took its id or IP meanwhile.
                     if self.fits(&r, Some(id)) {
                         self.buckets[idx].nodes[pos] = r;
                     }
                 }
-            }
         }
     }
 

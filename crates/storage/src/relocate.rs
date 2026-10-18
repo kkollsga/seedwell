@@ -383,11 +383,10 @@ struct Jw {
 impl Jw {
     /// New journal (truncating a leftover one that never got a plan) with header only.
     fn create(path: &Path, count: usize, digest: u64) -> Result<Self> {
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty() {
                 fsutil::create_dirs_guarded(parent).map_err(StorageError::io)?;
             }
-        }
         let mut file = OpenOptions::new()
             .write(true)
             .create(true)
@@ -444,11 +443,10 @@ fn sync_dir(p: &Path) {
 }
 
 fn sync_parent(p: &Path) {
-    if let Some(d) = p.parent() {
-        if !d.as_os_str().is_empty() {
+    if let Some(d) = p.parent()
+        && !d.as_os_str().is_empty() {
             sync_dir(d);
         }
-    }
 }
 
 fn exists(p: &Path) -> io::Result<bool> {
@@ -712,11 +710,10 @@ fn writer(
             }
             Msg::Data { buf, n, off } => {
                 ctx.step()?;
-                if let Some(c) = &cur {
-                    if !(sparse && is_zero(&buf[..n])) {
+                if let Some(c) = &cur
+                    && !(sparse && is_zero(&buf[..n])) {
                         c.f.write_all_at(&buf[..n], off).map_err(StorageError::io)?;
                     }
-                }
                 let _ = free.send(buf);
             }
             Msg::Close => {
@@ -924,12 +921,11 @@ fn copy_all(
                     }
                     off += n as u64;
                     done_bytes += n as u64;
-                    if let Some(p) = &opts.progress {
-                        if last_report.elapsed() >= Duration::from_millis(100) {
+                    if let Some(p) = &opts.progress
+                        && last_report.elapsed() >= Duration::from_millis(100) {
                             last_report = Instant::now();
                             p(done_bytes, total);
                         }
-                    }
                 }
                 if entry.is_some() {
                     send!(Item::Close);
@@ -1028,18 +1024,16 @@ pub fn preflight_move<'a>(pairs: impl IntoIterator<Item = (u32, &'a Path, &'a Pa
             if locked_flags(&m) {
                 return Err(StorageError::Locked { file, path: src.to_path_buf() });
             }
-            if let Some(p) = src.parent() {
-                if !dir_ok(p) {
+            if let Some(p) = src.parent()
+                && !dir_ok(p) {
                     return Err(StorageError::NoPermission { path: p.to_path_buf() });
                 }
-            }
         }
         // The nearest folder that exists above the destination is the one that gets a new entry.
-        if let Some(top) = dst.parent().and_then(|p| p.ancestors().find(|a| a.is_dir())) {
-            if !dir_ok(top) {
+        if let Some(top) = dst.parent().and_then(|p| p.ancestors().find(|a| a.is_dir()))
+            && !dir_ok(top) {
                 return Err(StorageError::NoPermission { path: top.to_path_buf() });
             }
-        }
     }
     Ok(())
 }
@@ -1054,11 +1048,10 @@ fn plan(
     if dst.len() != layout.file_count() {
         return Err(StorageError::OutOfRange);
     }
-    if let Some(h) = &opts.hashes {
-        if h.len() != layout.piece_count() as usize * 20 {
+    if let Some(h) = &opts.hashes
+        && h.len() != layout.piece_count() as usize * 20 {
             return Err(StorageError::NoHashes);
         }
-    }
     let mut entries: Vec<RelocateEntry> = Vec::new();
     let mut jobs: Vec<Job> = Vec::with_capacity(layout.file_count());
     let mut unchanged = 0u32;
@@ -1076,11 +1069,10 @@ fn plan(
             continue;
         }
         let (src, _) = t.resolve(layout, idx, t.location());
-        if let Some(d) = &dst[i] {
-            if !d.is_absolute() || has_parent_dir(d) {
+        if let Some(d) = &dst[i]
+            && (!d.is_absolute() || has_parent_dir(d)) {
                 return Err(StorageError::Layout(crate::layout::LayoutError::BadPath(idx)));
             }
-        }
         let meta = match fs::symlink_metadata(&src) {
             Ok(m) => Some(m),
             Err(e) if is_not_found(&e) => None,
@@ -1152,11 +1144,10 @@ fn plan(
             None if opts.have.is_some() => {
                 // A partial download that never wrote this file. Fine unless a piece we vouch
                 // for needs it.
-                if let Some(h) = &opts.have {
-                    if layout.pieces_of_file(i).any(|p| h.get(p)) {
+                if let Some(h) = &opts.have
+                    && layout.pieces_of_file(i).any(|p| h.get(p)) {
                         return Err(StorageError::MissingData { file: idx });
                     }
-                }
                 missing_skipped += 1;
                 jobs.push(Job::Nothing(len));
             }
@@ -1172,13 +1163,11 @@ fn plan(
         if exists(&e.dst).map_err(|er| StorageError::from_io(e.file, er))? {
             return Err(StorageError::DestinationExists { file: e.file });
         }
-        if let Some(parent) = e.dst.parent() {
-            if let Some(mp) = fsutil::volume_mount_point(parent) {
-                if !mp.is_dir() {
+        if let Some(parent) = e.dst.parent()
+            && let Some(mp) = fsutil::volume_mount_point(parent)
+                && !mp.is_dir() {
                     return Err(StorageError::MissingRoot);
                 }
-            }
-        }
     }
 
     // Before anything is touched: locked files and folders that cannot be changed.
@@ -1241,12 +1230,11 @@ fn plan(
     // Directories we are about to create (topmost missing ancestors, deduplicated).
     let mut dirs: Vec<PathBuf> = Vec::new();
     for e in &entries {
-        if let Some(top) = e.dst.parent().and_then(topmost_missing) {
-            if !dirs.iter().any(|d| top.starts_with(d)) {
+        if let Some(top) = e.dst.parent().and_then(topmost_missing)
+            && !dirs.iter().any(|d| top.starts_with(d)) {
                 dirs.retain(|d| !d.starts_with(&top));
                 dirs.push(top);
             }
-        }
     }
 
     let n = layout.file_count();
@@ -1276,11 +1264,10 @@ fn run_prepare(
     let count = layout.file_count();
     let digest = layout.structure_digest();
     // A journal that holds a plan belongs to an unfinished move: recover it first.
-    if let Some(p) = read_journal(journal_path, count, digest)? {
-        if p.method.is_some() {
+    if let Some(p) = read_journal(journal_path, count, digest)?
+        && p.method.is_some() {
             return Err(StorageError::InvalidState);
         }
-    }
     let Prepared {
         mut parsed,
         jobs,
@@ -1455,11 +1442,10 @@ fn rollback_parsed(t: &TorrentShared, p: &Parsed, journal_path: &Path) -> Result
             let io = |er: io::Error| StorageError::from_io(e.file, er);
             if e.create_empty {
                 // Ours: the precheck guarantees the destination did not exist before.
-                if let Ok(m) = fs::symlink_metadata(&e.dst) {
-                    if m.is_file() && m.len() == 0 {
+                if let Ok(m) = fs::symlink_metadata(&e.dst)
+                    && m.is_file() && m.len() == 0 {
                         remove_if_exists(&e.dst).map_err(io)?;
                     }
-                }
                 continue;
             }
             match method {

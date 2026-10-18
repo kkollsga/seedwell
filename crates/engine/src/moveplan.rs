@@ -237,11 +237,10 @@ pub(crate) fn plan_move(sh: &Shared, src: &MoveSrc, target: &MoveTarget) -> Resu
             return Ok(None);
         }
         for (i, slot) in per_file.iter_mut().enumerate() {
-            if let (Some(new), Some(cur)) = (slot.as_ref(), cur_final.get(i).and_then(Option::as_ref)) {
-                if new_placed == Placed::Renamed {
+            if let (Some(new), Some(cur)) = (slot.as_ref(), cur_final.get(i).and_then(Option::as_ref))
+                && new_placed == Placed::Renamed {
                     *slot = new.parent().map(|d| d.join(file_name_of(cur)));
                 }
-            }
         }
     }
 

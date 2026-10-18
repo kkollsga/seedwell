@@ -104,11 +104,10 @@ impl SharedHave {
 
 
     pub(crate) fn set(&self, i: u32) {
-        if i < self.count {
-            if let Some(w) = self.words.get((i / 64) as usize) {
+        if i < self.count
+            && let Some(w) = self.words.get((i / 64) as usize) {
                 w.fetch_or(1 << (i % 64), Ordering::Release);
             }
-        }
     }
 }
 
@@ -775,21 +774,18 @@ impl Peer {
                 if let Poll::Ready(c) = self.cmds.poll_recv(cx) {
                     return Poll::Ready(Wake::Cmd(c));
                 }
-                if want_read {
-                    if let Poll::Ready(r) = self.stream.poll_read_ready(cx) {
+                if want_read
+                    && let Poll::Ready(r) = self.stream.poll_read_ready(cx) {
                         return Poll::Ready(Wake::Readable(r));
                     }
-                }
-                if want_write {
-                    if let Poll::Ready(r) = self.stream.poll_write_ready(cx) {
+                if want_write
+                    && let Poll::Ready(r) = self.stream.poll_write_ready(cx) {
                         return Poll::Ready(Wake::Writable(r));
                     }
-                }
-                if can_pop {
-                    if let Poll::Ready(r) = poll_front(&self.reads, &mut self.runs, cx) {
+                if can_pop
+                    && let Poll::Ready(r) = poll_front(&self.reads, &mut self.runs, cx) {
                         return Poll::Ready(Wake::ReadDone(r));
                     }
-                }
                 if timer.as_mut().poll(cx).is_ready() {
                     return Poll::Ready(Wake::Timer);
                 }
@@ -975,11 +971,9 @@ impl Peer {
             .reads
             .iter()
             .position(|j| j.req == r)
-        {
-            if let Some(job) = self.reads.remove(pos) {
+            && let Some(job) = self.reads.remove(pos) {
                 self.release_job(&job);
             }
-        }
     }
 
     fn on_request(&mut self, r: BlockRequest) -> Result<(), Close> {
@@ -1075,11 +1069,10 @@ impl Peer {
         if job.run == NO_RUN {
             return;
         }
-        if let Some(i) = self.run_index(job.run) {
-            if let Some(r) = self.runs.get_mut(i) {
+        if let Some(i) = self.run_index(job.run)
+            && let Some(r) = self.runs.get_mut(i) {
                 r.users = r.users.saturating_sub(1);
             }
-        }
         self.trim_runs();
     }
 

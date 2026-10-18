@@ -195,15 +195,14 @@ impl Lookup {
                 token: None,
             },
         );
-        if self.cands.len() > MAX_CANDS {
-            if let Some(i) = self
+        if self.cands.len() > MAX_CANDS
+            && let Some(i) = self
                 .cands
                 .iter()
                 .rposition(|c| matches!(c.state, CandState::Fresh | CandState::Failed))
             {
                 self.cands.remove(i);
             }
-        }
         true
     }
 

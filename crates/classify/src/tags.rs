@@ -287,8 +287,8 @@ fn dynamic(l: &str) -> Option<Tag> {
     for p in [
         "ddp", "dd", "aac", "dts", "ac3", "eac3", "truehd", "flac", "opus",
     ] {
-        if let Some(rest) = l.strip_prefix(p) {
-            if !rest.is_empty()
+        if let Some(rest) = l.strip_prefix(p)
+            && !rest.is_empty()
                 && rest.bytes().all(|c| c.is_ascii_digit() || c == b'.')
                 && rest.bytes().any(|c| c.is_ascii_digit())
             {
@@ -302,15 +302,13 @@ fn dynamic(l: &str) -> Option<Tag> {
                     _ => None,
                 };
             }
-        }
     }
     // x64v2, amd64v3: microarchitecture levels glued to the arch
     for (p, v) in [("x64v", "x64"), ("amd64v", "x64")] {
-        if let Some(rest) = l.strip_prefix(p) {
-            if !rest.is_empty() && rest.bytes().all(|c| c.is_ascii_digit()) {
+        if let Some(rest) = l.strip_prefix(p)
+            && !rest.is_empty() && rest.bytes().all(|c| c.is_ascii_digit()) {
                 return s(Arch, v);
             }
-        }
     }
     None
 }

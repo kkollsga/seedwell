@@ -24,7 +24,7 @@ fn rec(n: u32) -> TorrentRecord {
     r.save_root = 1 + n % 3;
     r.category = Some(Category::Tv);
     r.tracker_profile = Some("example".into());
-    if n % 10 == 0 {
+    if n.is_multiple_of(10) {
         r.priority = Some(Priority::High);
         r.goal = Some(SeedingGoal::Forever);
     }

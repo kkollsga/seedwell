@@ -757,14 +757,13 @@ pub async fn serve_files(files: Vec<ServedFile>) -> FileServer {
                 let total = f.body.len();
                 let (mut start, mut end) = (0usize, total.saturating_sub(1));
                 let mut partial = false;
-                if f.ranges {
-                    if let Some(r) = range.as_deref().and_then(|r| r.strip_prefix("bytes=")) {
+                if f.ranges
+                    && let Some(r) = range.as_deref().and_then(|r| r.strip_prefix("bytes=")) {
                         let (a, b) = r.split_once('-').unwrap_or((r, ""));
                         start = a.parse().unwrap_or(0).min(total);
                         end = b.parse().unwrap_or(total.saturating_sub(1)).min(total.saturating_sub(1));
                         partial = true;
                     }
-                }
                 if start >= total && total > 0 {
                     let _ = s.write_all(b"HTTP/1.1 416 Range Not Satisfiable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await;
                     return;

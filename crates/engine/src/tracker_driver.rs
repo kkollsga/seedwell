@@ -381,12 +381,11 @@ async fn run(
             d.hub.set_trace(logging);
         }
         let mono = Instant::now();
-        if let Some((wall, then)) = last_pass {
-            if slept(wall, then, now.0, mono) {
+        if let Some((wall, then)) = last_pass
+            && slept(wall, then, now.0, mono) {
                 d.log_net("did_wake", "the clock jumped while the process was asleep: treated as a wake".into());
                 d.hub.did_wake(now);
             }
-        }
         last_pass = Some((now.0, mono));
         d.push_stats(now);
         // Signs of life from outside the tracker code (peers, DHT, inbound connections).
@@ -646,16 +645,15 @@ impl Driver {
                     Role::SeedingDormant => trs_tracker::TorrentRole::SeedingDormant,
                 };
                 for u in urls {
-                    if let Ok(url) = TrackerUrl::parse(&u) {
-                        if self.hub.add_tracker(&id, url, Some(stats), role, now) {
+                    if let Ok(url) = TrackerUrl::parse(&u)
+                        && self.hub.add_tracker(&id, url, Some(stats), role, now) {
                             t.tiers += 1;
                         }
-                    }
                 }
             }
             TrackerCmd::Start(id) => {
-                if let Some(t) = self.torrents.get_mut(&id) {
-                    if !t.active {
+                if let Some(t) = self.torrents.get_mut(&id)
+                    && !t.active {
                         // A new tracker session: the session counters restart from zero.
                         t.counters.begin_session();
                         t.active = true;
@@ -672,11 +670,10 @@ impl Driver {
                         );
                         self.hub.torrent_event(&id, TorrentEvent::Start, now);
                     }
-                }
             }
             TrackerCmd::Stop(id) => {
-                if let Some(t) = self.torrents.get_mut(&id) {
-                    if t.active {
+                if let Some(t) = self.torrents.get_mut(&id)
+                    && t.active {
                         t.active = false;
                         self.hub.set_stats(
                             &id,
@@ -690,7 +687,6 @@ impl Driver {
                         );
                         self.hub.torrent_event(&id, TorrentEvent::Stop, now);
                     }
-                }
             }
             TrackerCmd::Complete(id) => {
                 if let Some(t) = self.torrents.get(&id) {
@@ -709,12 +705,11 @@ impl Driver {
             }
             TrackerCmd::Remove(id) => {
                 // Removal waits for the `stopped` to be answered (or given up); retried by tick.
-                if let Some(t) = self.torrents.get_mut(&id) {
-                    if t.active {
+                if let Some(t) = self.torrents.get_mut(&id)
+                    && t.active {
                         t.active = false;
                         self.hub.torrent_event(&id, TorrentEvent::Stop, now);
                     }
-                }
                 self.pending_removal(id);
             }
             TrackerCmd::Reannounce(id, reply) => {

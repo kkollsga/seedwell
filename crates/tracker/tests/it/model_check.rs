@@ -378,9 +378,9 @@ impl Sys {
         if self.w.halted && p.event != Some(Event::Stopped) {
             self.violation("sent while halted by a failure reason".into());
         }
-        if p.event != Some(Event::Stopped) {
-            if let Some(lf) = self.w.last_fail {
-                if self.w.fails > 0 {
+        if p.event != Some(Event::Stopped)
+            && let Some(lf) = self.w.last_fail
+                && self.w.fails > 0 {
                     let mut earliest = lf + self.w.wait_after_fail;
                     if let Some(ne) = self.w.net_earliest {
                         earliest = earliest.min(ne);
@@ -392,8 +392,6 @@ impl Sys {
                         ));
                     }
                 }
-            }
-        }
         match p.event {
             Some(Event::Started) => {
                 if matches!(self.w.sess, Sess::Open { acked: true }) && !self.w.rejected_in_session
@@ -532,13 +530,11 @@ impl Sys {
             }
             // Provably undelivered `completed`: the tracker did not count it,
             // so exactly one more may follow.
-            if ev == Some(Event::Completed) {
-                if let Err(e) = &result {
-                    if e.never_reached_tracker() {
+            if ev == Some(Event::Completed)
+                && let Err(e) = &result
+                    && e.never_reached_tracker() {
                         self.w.completed_total = self.w.completed_total.saturating_sub(1);
                     }
-                }
-            }
             self.resolved = Some((id, ev, result.is_ok(), snapshot, !self.stop_requested));
         }
         self.feed(Input::Response { id, result });

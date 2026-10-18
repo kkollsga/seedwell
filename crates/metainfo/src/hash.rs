@@ -28,7 +28,7 @@ pub fn hex_decode<const N: usize>(s: &str) -> Option<[u8; N]> {
         _ => None,
     };
     let mut out = [0u8; N];
-    for (o, pair) in out.iter_mut().zip(s.chunks_exact(2)) {
+    for (o, pair) in out.iter_mut().zip(s.as_chunks::<2>().0) {
         *o = nibble(pair[0])? << 4 | nibble(pair[1])?;
     }
     Some(out)

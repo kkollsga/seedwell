@@ -1174,7 +1174,7 @@ fn apply(w: &WriteTransaction, b: &Batch) -> Result<(), StateError> {
 }
 
 fn commit(shared: &Shared, b: &Batch) -> Result<(), StateError> {
-    if shared.fail_next.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1)).is_ok() {
+    if shared.fail_next.try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1)).is_ok() {
         return Err(StateError::Io { context: "commit", source: io::Error::other("injected commit failure") });
     }
     let w = shared.db.begin_write()?;

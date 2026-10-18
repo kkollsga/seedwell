@@ -93,7 +93,7 @@ impl<'a> PexMessage<'a> {
 }
 
 fn iter_v4<'a>(list: &'a [u8], flags: &'a [u8]) -> impl Iterator<Item = PexPeer> + 'a {
-    list.chunks_exact(6)
+    list.as_chunks::<6>().0.iter()
         .take(MAX_PEX_RECV)
         .enumerate()
         .filter_map(move |(i, c)| {
@@ -106,7 +106,7 @@ fn iter_v4<'a>(list: &'a [u8], flags: &'a [u8]) -> impl Iterator<Item = PexPeer>
 }
 
 fn iter_v6<'a>(list: &'a [u8], flags: &'a [u8]) -> impl Iterator<Item = PexPeer> + 'a {
-    list.chunks_exact(18)
+    list.as_chunks::<18>().0.iter()
         .take(MAX_PEX_RECV)
         .enumerate()
         .filter_map(move |(i, c)| {

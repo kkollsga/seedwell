@@ -20,8 +20,8 @@ pub(crate) fn split_name(file_name: &str) -> (&str, &str) {
     if matches!(
         lower.as_str(),
         "srt" | "ass" | "ssa" | "vtt" | "sub" | "sup"
-    ) {
-        if let Some(d2) = stem.rfind('.') {
+    )
+        && let Some(d2) = stem.rfind('.') {
             let lang = &stem[d2 + 1..];
             let lang_l = lang.to_ascii_lowercase();
             let is_lang = (2..=3).contains(&lang.len())
@@ -34,7 +34,6 @@ pub(crate) fn split_name(file_name: &str) -> (&str, &str) {
                 return (&stem[..d2], &file_name[d2 + 1..]);
             }
         }
-    }
     (stem, ext)
 }
 
@@ -70,11 +69,10 @@ fn split_collision_ext(file: &str) -> (&str, &str) {
         {
             let stem = &file[..d];
             // keep `.tar.gz` together
-            if let Some(d2) = stem.rfind('.') {
-                if &stem[d2..] == ".tar" {
+            if let Some(d2) = stem.rfind('.')
+                && &stem[d2..] == ".tar" {
                     return (&file[..d2], &file[d2..]);
                 }
-            }
             (stem, &file[d..])
         }
         _ => (file, ""),

@@ -92,10 +92,10 @@ impl Responder for Faulty {
             _ => None,
         };
         let mut resp = ok_response(iv, min);
-        if self.changing_tracker_ids && self.next() % 3 == 0 {
+        if self.changing_tracker_ids && self.next().is_multiple_of(3) {
             resp.tracker_id = Some(format!("tid{}", self.next() % 5).into_bytes().into());
         }
-        if self.next() % 10 == 0 {
+        if self.next().is_multiple_of(10) {
             resp.warning = Some("slow down".into());
         }
         let _ = req;

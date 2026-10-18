@@ -972,8 +972,8 @@ impl HostGate {
             self.in_flight = FastMap::default();
         }
         self.deadlines.remove(&(f.deadline_at, ticket.key, f.seq));
-        if !f.is_scrape {
-            if let Some(a) = Self::aud_of(&mut self.registered, ticket.key) {
+        if !f.is_scrape
+            && let Some(a) = Self::aud_of(&mut self.registered, ticket.key) {
                 match outcome {
                     Outcome::Success { timing } => a.on_outcome(ticket.event, Some(timing), now),
                     Outcome::HostFailureUnsent | Outcome::Unsent
@@ -984,7 +984,6 @@ impl HostGate {
                     _ => {}
                 }
             }
-        }
         self.settle(f.host, ticket.key.0, outcome, f.quit, now);
         true
     }

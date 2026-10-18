@@ -1,6 +1,6 @@
 # One compiler for this Mac and CI. Upgrading Rust is a deliberate change: bump this, fix new lints, commit.
 [toolchain]
-channel = "1.98.0"
+channel = "1.99.1"
 components = ["clippy"]
 targets = ["aarch64-apple-darwin"]
 profile = "minimal"

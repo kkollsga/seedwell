@@ -206,12 +206,11 @@ impl NameInfo {
         }
         // "1999 - Album": leading year followed by a dash
         let mut lead_year = None;
-        if start + 2 < n && tk.is_dash(start + 1) && (start + 2..n).any(|j| tk.is_dash(j)) {
-            if let Some(y) = tags::year_of(tk.core(start)) {
+        if start + 2 < n && tk.is_dash(start + 1) && (start + 2..n).any(|j| tk.is_dash(j))
+            && let Some(y) = tags::year_of(tk.core(start)) {
                 lead_year = Some((start, y));
                 start += 2;
             }
-        }
 
         // ---- classify tokens
         let mut cls: Vec<Cls> = Vec::with_capacity(n);
@@ -228,12 +227,11 @@ impl NameInfo {
         // ---- first hard tag (not year)
         let mut first_hard: Option<usize> = None;
         for i in start..n {
-            if let Cls::Tag(t) = cls[i] {
-                if !matches!(t.kind, Kind::Lang) && (i > start || start > 0) {
+            if let Cls::Tag(t) = cls[i]
+                && !matches!(t.kind, Kind::Lang) && (i > start || start > 0) {
                     first_hard = Some(i);
                     break;
                 }
-            }
         }
 
         // ---- year
@@ -285,12 +283,11 @@ impl NameInfo {
         // a year flanked by dashes ("Artist - 2005 - Album") stays out of the title but does not end it
         let mut skip: Vec<usize> = Vec::new();
         let mut year_cuts = true;
-        if let Some(i) = year_idx {
-            if !year_bracketed && i > start && i + 1 < n && tk.is_dash(i - 1) && tk.is_dash(i + 1) {
+        if let Some(i) = year_idx
+            && !year_bracketed && i > start && i + 1 < n && tk.is_dash(i - 1) && tk.is_dash(i + 1) {
                 year_cuts = false;
                 skip.push(i);
             }
-        }
 
         // ---- editions
         let mut edition: Option<&'static str> = None;
@@ -298,12 +295,11 @@ impl NameInfo {
         let mut book_edition = None;
         for i in start..n {
             let a = tk.core(i);
-            if let Some((name, _len)) = tags::edition_at(a, (i + 1 < n).then(|| tk.core(i + 1))) {
-                if edition.is_none() {
+            if let Some((name, _len)) = tags::edition_at(a, (i + 1 < n).then(|| tk.core(i + 1)))
+                && edition.is_none() {
                     edition = Some(name);
                     edition_idx = Some(edition_idx.map_or(i, |e: usize| e.min(i)));
                 }
-            }
             if book_edition.is_none() && is_ordinal(a) {
                 let nx = tk.core(i + 1).to_ascii_lowercase();
                 let anniv = nx == "anniversary" && tk.core(i + 2).eq_ignore_ascii_case("edition");
@@ -332,13 +328,11 @@ impl NameInfo {
         if let Some(i) = first_hard {
             consider(i, CutReason::Tag);
         }
-        if year_cuts {
-            if let Some(i) = year_idx {
-                if i > start {
+        if year_cuts
+            && let Some(i) = year_idx
+                && i > start {
                     consider(i, CutReason::Year);
                 }
-            }
-        }
         if let Some(tv) = &tv {
             consider(tv.first_idx, CutReason::Tv);
         }
@@ -666,19 +660,16 @@ fn classify_token(tk: &Tokens, i: usize) -> Cls {
     }
     // old publication years only count as a lone bracketed token: "Emma (1815)"
     let t = tk.toks[i];
-    if t.bracket != 0 && t.first_in_group && t.last_in_group && core.len() == 4 {
-        if let Ok(y) = core.parse::<u16>() {
-            if (1400..1900).contains(&y) {
+    if t.bracket != 0 && t.first_in_group && t.last_in_group && core.len() == 4
+        && let Ok(y) = core.parse::<u16>()
+            && (1400..1900).contains(&y) {
                 return Cls::Year(y);
             }
-        }
-    }
     // year ranges: 1990-2010
-    if core.len() == 9 && core.as_bytes().get(4) == Some(&b'-') {
-        if let (Some(a), Some(_)) = (tags::year_of(&core[..4]), tags::year_of(&core[5..])) {
+    if core.len() == 9 && core.as_bytes().get(4) == Some(&b'-')
+        && let (Some(a), Some(_)) = (tags::year_of(&core[..4]), tags::year_of(&core[5..])) {
             return Cls::Year(a);
         }
-    }
     if let Some(t) = tags::lookup(core) {
         return Cls::Tag(t);
     }
@@ -692,17 +683,16 @@ fn classify_token(tk: &Tokens, i: usize) -> Cls {
     // hyphenated tag pairs: `CD-FLAC`, `WEB-FLAC`
     if core.contains('-') {
         let looked: Vec<Option<Tag>> = core.split('-').map(tags::lookup).collect();
-        if looked.len() >= 2 && looked.iter().all(Option::is_some) {
-            if let Some(t) = looked.iter().flatten().find(|t| !t.weak) {
+        if looked.len() >= 2 && looked.iter().all(Option::is_some)
+            && let Some(t) = looked.iter().flatten().find(|t| !t.weak) {
                 return Cls::Tag(*t);
             }
-        }
     }
     // hyphenated tag + group: `x264-GRP`, `DTS-HD.MA` handled by whole-token lookup first
-    if let Some((pre, suf)) = core.split_once('-') {
-        if !suf.is_empty() && suf.bytes().all(|c| c.is_ascii_alphanumeric()) {
-            if let Some(t) = tags::lookup(pre) {
-                if !t.weak
+    if let Some((pre, suf)) = core.split_once('-')
+        && !suf.is_empty() && suf.bytes().all(|c| c.is_ascii_alphanumeric()) {
+            if let Some(t) = tags::lookup(pre)
+                && !t.weak
                     && matches!(
                         t.kind,
                         Kind::Codec
@@ -716,19 +706,14 @@ fn classify_token(tk: &Tokens, i: usize) -> Cls {
                 {
                     return Cls::Tag(t);
                 }
-            }
             // FLAC-24, mp3-320, mp3-v0 ...
-            if let Some(t) = tags::lookup(suf) {
-                if !t.weak && matches!(t.kind, Kind::AudioFormat | Kind::AudioQuality) {
-                    if let Some(p) = tags::lookup(pre) {
-                        if !p.weak && matches!(p.kind, Kind::AudioFormat | Kind::AudioQuality) {
+            if let Some(t) = tags::lookup(suf)
+                && !t.weak && matches!(t.kind, Kind::AudioFormat | Kind::AudioQuality)
+                    && let Some(p) = tags::lookup(pre)
+                        && !p.weak && matches!(p.kind, Kind::AudioFormat | Kind::AudioQuality) {
                             return Cls::Tag(p);
                         }
-                    }
-                }
-            }
         }
-    }
     if version_value(core).is_some() {
         return Cls::Version;
     }
@@ -913,8 +898,8 @@ fn resolve_weak(tk: &Tokens, cls: &mut [Cls]) {
         }
     }
     for i in 0..n {
-        if let Cls::Tag(t) = cls[i] {
-            if t.weak {
+        if let Cls::Tag(t) = cls[i]
+            && t.weak {
                 let core = tk.core(i);
                 cls[i] = if let Some(y) = tags::year_of(core) {
                     Cls::Year(y)
@@ -922,7 +907,6 @@ fn resolve_weak(tk: &Tokens, cls: &mut [Cls]) {
                     Cls::Word
                 };
             }
-        }
     }
 }
 
@@ -1098,14 +1082,12 @@ pub(crate) fn parse_nxm(t: &str) -> Option<(u16, u32, Option<u32>)> {
         return None;
     }
     let mut end = None;
-    if matches!(b.get(j), Some(b'-')) {
-        if let Some((v, nj)) = digits(b, j + 1, 3) {
-            if nj == b.len() && v > e {
+    if matches!(b.get(j), Some(b'-'))
+        && let Some((v, nj)) = digits(b, j + 1, 3)
+            && nj == b.len() && v > e {
                 end = Some(v);
                 j = nj;
             }
-        }
-    }
     if j != b.len() && end.is_none() {
         // trailing junk like `1x02v2` is fine, `1x02p` is a resolution-ish thing
         if matches!(b.get(j), Some(c) if c.is_ascii_alphabetic() && !matches!(c, b'v' | b'V')) {
@@ -1220,8 +1202,8 @@ fn find_tv(tk: &Tokens, cls: &[Cls], start: usize, file_mode: bool) -> Option<Tv
                     }
                 }
             }
-            if let Some((s, e, end)) = parse_nxm(core) {
-                if i > 0 || file_mode {
+            if let Some((s, e, end)) = parse_nxm(core)
+                && (i > 0 || file_mode) {
                     let mut t = blank(TvKind::Episode, i);
                     t.season = Some(s);
                     t.episode = Some(e);
@@ -1229,9 +1211,8 @@ fn find_tv(tk: &Tokens, cls: &[Cls], start: usize, file_mode: bool) -> Option<Tv
                     best = Some(t);
                     break;
                 }
-            }
-            if let Some((s, end)) = parse_season_only(core) {
-                if best.is_none() {
+            if let Some((s, end)) = parse_season_only(core)
+                && best.is_none() {
                     let mut t = blank(TvKind::SeasonPack, i);
                     t.season = Some(s);
                     t.season_end = end;
@@ -1241,7 +1222,6 @@ fn find_tv(tk: &Tokens, cls: &[Cls], start: usize, file_mode: bool) -> Option<Tv
                     i += 1;
                     continue;
                 }
-            }
         }
         // --- Season N
         if season_word(&lower) && (i > 0 || file_mode) {
@@ -1287,13 +1267,12 @@ fn find_tv(tk: &Tokens, cls: &[Cls], start: usize, file_mode: bool) -> Option<Tv
                     } else {
                         tk.core(ep_idx).to_ascii_lowercase()
                     };
-                    if matches!(ep_word.as_str(), "episode" | "ep" | "e") {
-                        if let Some(e) = num_tok(tk.core(ep_idx + 1), 4) {
+                    if matches!(ep_word.as_str(), "episode" | "ep" | "e")
+                        && let Some(e) = num_tok(tk.core(ep_idx + 1), 4) {
                             t.kind = TvKind::Episode;
                             t.episode = Some(e);
                             t.season_pack = false;
                         }
-                    }
                     if best
                         .as_ref()
                         .is_none_or(|b| b.kind == TvKind::SeasonPack && t.kind == TvKind::Episode)
@@ -1314,14 +1293,12 @@ fn find_tv(tk: &Tokens, cls: &[Cls], start: usize, file_mode: bool) -> Option<Tv
                     TvKind::Anime | TvKind::EpisodeWord | TvKind::Complete
                 )
             })
-        {
-            if let Some(d) = date_at(tk, i) {
+            && let Some(d) = date_at(tk, i) {
                 let mut t = blank(TvKind::Daily, i);
                 t.air_date = Some(d);
                 t.season = Some(d.0);
                 best = Some(t);
             }
-        }
         // --- Episode N / E05
         if (i > 0 || file_mode) && best.is_none() {
             if matches!(
@@ -1348,13 +1325,10 @@ fn find_tv(tk: &Tokens, cls: &[Cls], start: usize, file_mode: bool) -> Option<Tv
     if best
         .as_ref()
         .is_none_or(|b| matches!(b.kind, TvKind::EpisodeWord))
-    {
-        if let Some(a) = find_anime(tk, cls, start, file_mode) {
-            if best.is_none() || a.kind == TvKind::Anime {
+        && let Some(a) = find_anime(tk, cls, start, file_mode)
+            && (best.is_none() || a.kind == TvKind::Anime) {
                 best = Some(a);
             }
-        }
-    }
     if complete_flag {
         match &mut best {
             Some(b) => {
@@ -1404,12 +1378,11 @@ fn parse_e_only(t: &str) -> Option<(u32, Option<u32>)> {
         if matches!(b.get(k), Some(b'e' | b'E')) {
             k += 1;
         }
-        if let Some((v, nk)) = digits(b, k, 4) {
-            if v > e {
+        if let Some((v, nk)) = digits(b, k, 4)
+            && v > e {
                 end = Some(v);
                 j = nk;
             }
-        }
     }
     if j != b.len() {
         return None;
@@ -1426,30 +1399,25 @@ fn date_at(tk: &Tokens, i: usize) -> Option<(u16, u8, u8)> {
             .get(4)
             .copied()
             .zip(c0.as_bytes().get(7).copied());
-        if let Some((b'-', b'-')) = seps {
-            if let (Some(y), Ok(m), Ok(d)) = (
+        if let Some((b'-', b'-')) = seps
+            && let (Some(y), Ok(m), Ok(d)) = (
                 tags::year_of(&c0[..4]),
                 c0[5..7].parse::<u8>(),
                 c0[8..10].parse::<u8>(),
-            ) {
-                if (1..=12).contains(&m) && (1..=31).contains(&d) {
+            )
+                && (1..=12).contains(&m) && (1..=31).contains(&d) {
                     return Some((y, m, d));
                 }
-            }
-        }
         if let (Some(b'-' | b'.'), Some(b'-' | b'.')) =
             (c0.as_bytes().get(2).copied(), c0.as_bytes().get(5).copied())
-        {
-            if let (Ok(d), Ok(m), Some(y)) = (
+            && let (Ok(d), Ok(m), Some(y)) = (
                 c0[..2].parse::<u8>(),
                 c0[3..5].parse::<u8>(),
                 tags::year_of(&c0[6..10]),
-            ) {
-                if (1..=12).contains(&m) && (1..=31).contains(&d) {
+            )
+                && (1..=12).contains(&m) && (1..=31).contains(&d) {
                     return Some((y, m, d));
                 }
-            }
-        }
     }
     let c1 = tk.core(i + 1);
     let c2 = tk.core(i + 2);
@@ -1458,18 +1426,15 @@ fn date_at(tk: &Tokens, i: usize) -> Option<(u16, u8, u8)> {
             .then(|| s.parse::<u8>().ok())
             .flatten()
     };
-    if let Some(y) = tags::year_of(c0) {
-        if let (Some(m), Some(d)) = (two(c1), two(c2)) {
-            if (1..=12).contains(&m) && (1..=31).contains(&d) {
+    if let Some(y) = tags::year_of(c0)
+        && let (Some(m), Some(d)) = (two(c1), two(c2))
+            && (1..=12).contains(&m) && (1..=31).contains(&d) {
                 return Some((y, m, d));
             }
-        }
-    }
-    if let (Some(d), Some(m), Some(y)) = (two(c0), two(c1), tags::year_of(c2)) {
-        if (1..=12).contains(&m) && (1..=31).contains(&d) {
+    if let (Some(d), Some(m), Some(y)) = (two(c0), two(c1), tags::year_of(c2))
+        && (1..=12).contains(&m) && (1..=31).contains(&d) {
             return Some((y, m, d));
         }
-    }
     None
 }
 
@@ -1552,9 +1517,9 @@ fn find_anime(tk: &Tokens, cls: &[Cls], start: usize, file_mode: bool) -> Option
         // `[Group] Show (01-12) (1080p)`: a bracketed episode range marks a batch
         for i in (start + 1)..n {
             let t = tk.toks[i];
-            if t.bracket != 0 && t.first_in_group && t.last_in_group {
-                if let Some((a, b)) = range_tok(tk.core(i), 3) {
-                    if b > a && tk.core(i).len() >= 4 {
+            if t.bracket != 0 && t.first_in_group && t.last_in_group
+                && let Some((a, b)) = range_tok(tk.core(i), 3)
+                    && b > a && tk.core(i).len() >= 4 {
                         return Some(TvInfo {
                             kind: TvKind::Anime,
                             season: Some(1),
@@ -1567,8 +1532,6 @@ fn find_anime(tk: &Tokens, cls: &[Cls], start: usize, file_mode: bool) -> Option
                             first_idx: i,
                         });
                     }
-                }
-            }
         }
         // `[Group] Show 07 [1080p]`: a bare number right before the first bracket group
         for i in (start + 1)..n {

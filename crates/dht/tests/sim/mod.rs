@@ -246,13 +246,11 @@ impl Sim {
     pub fn peers_found(&self, i: usize, ih: &Id, since_ms: u64) -> HashSet<SocketAddrV4> {
         let mut s = HashSet::new();
         for (t, n, e) in &self.events {
-            if *n == i && *t >= since_ms {
-                if let Event::Peers { info_hash, peers } = e {
-                    if info_hash == ih {
+            if *n == i && *t >= since_ms
+                && let Event::Peers { info_hash, peers } = e
+                    && info_hash == ih {
                         s.extend(peers.iter().copied());
                     }
-                }
-            }
         }
         s
     }

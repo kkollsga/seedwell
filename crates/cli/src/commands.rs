@@ -779,11 +779,10 @@ pub async fn log_trackers(g: &Global, a: LogArgs) -> R {
                 loop {
                     tokio::time::sleep(Duration::from_millis(500)).await;
                     for l in f.poll() {
-                        if let Ok(v) = serde_json::from_str::<Value>(&l) {
-                            if query.matches(&v) {
+                        if let Ok(v) = serde_json::from_str::<Value>(&l)
+                            && query.matches(&v) {
                                 print(&v);
                             }
-                        }
                     }
                 }
             }

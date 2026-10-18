@@ -377,11 +377,10 @@ proptest! {
     fn decode_never_panics_and_canonical_inputs_reencode_identically(
         data in prop::collection::vec(any::<u8>(), 0..256)
     ) {
-        if let Ok(v) = decode(&data) {
-            if v.is_canonical() {
+        if let Ok(v) = decode(&data)
+            && v.is_canonical() {
                 prop_assert_eq!(&encode(&v), &data);
             }
-        }
         let _ = decode_prefix(&data);
         let _ = raw_dict_entries(&data);
         let _ = raw_list_items(&data);

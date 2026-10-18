@@ -96,7 +96,7 @@ pub fn parse_bytes(s: &str) -> Result<u64, String> {
 /// `1000000000` -> `"1 GB"`; a size that is not a whole number of a unit stays in bytes.
 pub fn format_bytes(b: u64) -> String {
     for (f, u) in [(1_000_000_000_000u64, "TB"), (1_000_000_000, "GB"), (1_000_000, "MB"), (1_000, "KB")] {
-        if b >= f && b % f == 0 {
+        if b >= f && b.is_multiple_of(f) {
             return format!("{} {u}", b / f);
         }
     }

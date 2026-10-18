@@ -559,7 +559,7 @@ fn crash_every_step(force_copy: bool) -> u32 {
                     }
                     RecoverState::Prepared => {
                         // All verified and in place; the engine decides from its own record.
-                        if k % 2 == 0 {
+                        if k.is_multiple_of(2) {
                             h2.set_paths(f.dst.clone(), None);
                             h2.relocate_commit(f.journal(), Some(f.src.clone()))
                                 .unwrap()

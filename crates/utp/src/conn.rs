@@ -1080,8 +1080,8 @@ impl Connection {
             // retransmitted as it is, without DF (the network fragments it), exactly like libutp.
             let mut want = normal;
             let mut probe_d = None;
-            if !probing && cfg.mtu_discovery && normal == self.pay() {
-                if let Some(d) = self.next_probe(now) {
+            if !probing && cfg.mtu_discovery && normal == self.pay()
+                && let Some(d) = self.next_probe(now) {
                     // The probe datagram is exactly `d` bytes including the SACK extension it
                     // will carry, so what it proves is what a full later packet needs.
                     let mut tmp = [0u8; MAX_SACK_BYTES];
@@ -1091,7 +1091,6 @@ impl Connection {
                         probe_d = Some(d);
                     }
                 }
-            }
             if probing || self.cur_window as u64 + want as u64 <= limit {
                 self.persist_deadline = 0;
                 self.inflight.push_back(Sent {
@@ -1228,14 +1227,12 @@ impl Connection {
             }
             _ => {}
         }
-        if self.state == State::Connected {
-            if let Some(idle) = cfg.idle_timeout {
-                if now.saturating_sub(self.last_recv) >= micros(idle) {
+        if self.state == State::Connected
+            && let Some(idle) = cfg.idle_timeout
+                && now.saturating_sub(self.last_recv) >= micros(idle) {
                     self.fail(End::TimedOut);
                     return;
                 }
-            }
-        }
         if self.rto_deadline != 0 && now >= self.rto_deadline && !self.inflight.is_empty() {
             self.on_rto(cfg, now);
             if self.state == State::Closed {

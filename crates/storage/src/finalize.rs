@@ -107,7 +107,7 @@ impl Journal {
             return Err(StorageError::CorruptJournal);
         }
         let mut j = Self::new(count, digest);
-        for rec in bytes[HEADER_LEN..].chunks_exact(RECORD_LEN) {
+        for rec in bytes[HEADER_LEN..].as_chunks::<RECORD_LEN>().0 {
             let idx = u32::from_le_bytes([rec[0], rec[1], rec[2], rec[3]]) as usize;
             let st = rec[4];
             if idx >= count || !(ST_STARTED..=ST_DONE).contains(&st) {
@@ -293,11 +293,10 @@ fn move_one(
     }
 
     // Parent directories of the destination: never rebuild a vanished root/volume.
-    if let Some(b) = &base {
-        if !b.is_dir() {
+    if let Some(b) = &base
+        && !b.is_dir() {
             return Err(StorageError::MissingRoot);
         }
-    }
     if let Some(parent) = dst.parent() {
         ctx.step()?;
         fsutil::create_dirs_guarded(parent).map_err(|e| {

@@ -112,8 +112,8 @@ impl Session {
         }
         // Selecting a file for streaming selects it for download.
         let mut selected = false;
-        if let Some(p) = e.cold.file_prios.as_deref() {
-            if p.get(file) == Some(&0) {
+        if let Some(p) = e.cold.file_prios.as_deref()
+            && p.get(file) == Some(&0) {
                 let mut raw = p.to_vec();
                 raw[file] = FilePriority::Normal.to_u8();
                 self.set_file_priorities(id, raw.into_iter().map(FilePriority::from_u8).collect())?;
@@ -121,7 +121,6 @@ impl Session {
                 self.sh.emit(EngineEvent::FilesSelected { id, files: vec![file as u32] });
                 selected = true;
             }
-        }
         let e = self.table.get(&id).ok_or(EngineError::NotFound)?;
         if e.cold.complete() {
             return Ok(Prepared::Complete { selected });

@@ -93,11 +93,9 @@ async fn leech(addr: std::net::SocketAddr, t: &TestTorrent, peer_tag: u8, quiet:
             .await
             .expect("no unchoke within 20 s")
             .unwrap()
-        {
-            if id == 1 {
+            && id == 1 {
                 break asked.elapsed();
             }
-        }
     };
 
     // Expected stream for verification.

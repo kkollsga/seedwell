@@ -375,7 +375,7 @@ fn uint(v: Option<&Value<'_>>) -> Option<u64> {
 
 /// Append IPv4 compact peers (6 bytes each); trailing partial entries are ignored.
 pub fn push_compact_v4(out: &mut Vec<Peer>, data: &[u8]) {
-    for chunk in data.chunks_exact(6) {
+    for chunk in data.as_chunks::<6>().0 {
         if out.len() >= MAX_PEERS {
             return;
         }
@@ -392,7 +392,7 @@ pub fn push_compact_v4(out: &mut Vec<Peer>, data: &[u8]) {
 
 /// Append IPv6 compact peers (18 bytes each).
 pub fn push_compact_v6(out: &mut Vec<Peer>, data: &[u8]) {
-    for chunk in data.chunks_exact(18) {
+    for chunk in data.as_chunks::<18>().0 {
         if out.len() >= MAX_PEERS {
             return;
         }

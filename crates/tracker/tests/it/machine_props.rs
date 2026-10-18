@@ -228,11 +228,10 @@ proptest! {
                 }
             }
             for s in &sent_now {
-                if s.params.event.is_none() {
-                    if let Some(d) = model.deadline {
+                if s.params.event.is_none()
+                    && let Some(d) = model.deadline {
                         prop_assert!(r.now >= d, "non-event announce at {:?} before the interval deadline {:?}", r.now, d);
                     }
-                }
                 if let Some(nb) = model.retry_not_before {
                     prop_assert!(r.now >= nb, "announce at {:?} before backoff end {:?}", r.now, nb);
                 }

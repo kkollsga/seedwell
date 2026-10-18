@@ -410,11 +410,10 @@ async fn run(
     let alive = cfg.alive.clone();
     let mut paused = false;
 
-    if let Some(state) = &cfg.saved_state {
-        if let Ok(intents) = core.load_state(state, Instant::now()) {
+    if let Some(state) = &cfg.saved_state
+        && let Ok(intents) = core.load_state(state, Instant::now()) {
             dispatch(intents, &socket, &mut subs, &tx, &hosts).await;
         }
-    }
     let first = core.handle(Input::Tick, Instant::now());
     dispatch(first, &socket, &mut subs, &tx, &hosts).await;
 
@@ -547,12 +546,11 @@ fn answer_lookup(
     reply: oneshot::Sender<Result<PeerStream, Refused>>,
 ) {
     for i in intents {
-        if let Intent::Event(Event::Refused { info_hash, reason }) = i {
-            if *info_hash == ih {
+        if let Intent::Event(Event::Refused { info_hash, reason }) = i
+            && *info_hash == ih {
                 let _ = reply.send(Err(*reason));
                 return;
             }
-        }
     }
     let (stx, srx) = mpsc::channel(32);
     subs.entry(ih).or_default().push(stx);

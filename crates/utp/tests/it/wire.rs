@@ -365,7 +365,7 @@ fn random_garbage_and_mutations_never_panic() {
     ];
     let mut buf = vec![0u8; ep.transmit_buffer_len()];
     for i in 0..300_000u32 {
-        let mut d = if rng.next_u64() % 3 == 0 {
+        let mut d = if rng.next_u64().is_multiple_of(3) {
             let n = (rng.next_u64() % 100) as usize;
             let mut v: Vec<u8> = (0..n).map(|_| rng.next_u64() as u8).collect();
             if !v.is_empty() {
@@ -382,11 +382,11 @@ fn random_garbage_and_mutations_never_panic() {
             let k = (rng.next_u64() % d.len() as u64) as usize;
             d[k] = rng.next_u64() as u8;
         }
-        if rng.next_u64() % 8 == 0 {
+        if rng.next_u64().is_multiple_of(8) {
             d.truncate((rng.next_u64() % (d.len() as u64 + 1)) as usize);
         }
         now += 1 + rng.next_u64() % 3000;
-        let from = if rng.next_u64() % 4 == 0 { a(rng.next_u64() as u8, 2000) } else { peer };
+        let from = if rng.next_u64().is_multiple_of(4) { a(rng.next_u64() as u8, 2000) } else { peer };
         ep.handle_datagram(now, from, &d);
         if i % 16 == 0 {
             ep.handle_timeout(now);

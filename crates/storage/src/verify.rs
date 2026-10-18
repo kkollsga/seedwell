@@ -276,7 +276,7 @@ fn run_recheck(
                         }
                     }
                     let d = done.fetch_add(1, Ordering::Relaxed) + 1;
-                    if d % report_every == 0 {
+                    if d.is_multiple_of(report_every) {
                         report(d);
                     }
                 }

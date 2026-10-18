@@ -311,9 +311,9 @@ impl Oracle {
         let wake_at = self.wake_at;
         for ((deadline, seq), key) in due {
             self.expiries.remove(&(deadline, seq));
-            if let Some(ks) = self.keys.get_mut(&key) {
-                if let Some((s, _, ev)) = ks.in_flight {
-                    if s == seq {
+            if let Some(ks) = self.keys.get_mut(&key)
+                && let Some((s, _, ev)) = ks.in_flight
+                    && s == seq {
                         ks.in_flight = None;
                         // The hub declares a timeout at (or after) the deadline.
                         if ev != Some(Event::Stopped) && !offline {
@@ -325,8 +325,6 @@ impl Oracle {
                             ks.last_fail_seen = Some(seen_at(deadline, wake_at, now));
                         }
                     }
-                }
-            }
         }
     }
 
@@ -531,13 +529,12 @@ impl Oracle {
         let added_complete = self.added_complete.contains(&ih);
         let ks = self.keys.entry((ih, slot)).or_insert_with(KeyState::new);
         // inv 5: one in flight per (torrent, tracker)
-        if let Some((_, d, _)) = ks.in_flight {
-            if d > now {
+        if let Some((_, d, _)) = ks.in_flight
+            && d > now {
                 fail(format!(
                     "inv5: second request in flight for one (torrent, tracker) ({ctx})"
                 ));
             }
-        }
         ks.in_flight = Some((seq, deadline, p.event));
         ks.resolved = None;
         self.expiries.insert((deadline, seq), (ih, slot));
@@ -556,9 +553,9 @@ impl Oracle {
             fail(format!("failure reason did not halt announcing ({ctx})"));
         }
         // backoff rule (every send except stopped)
-        if p.event != Some(Event::Stopped) {
-            if let Some(lf) = ks.last_fail {
-                if ks.fails > 0 {
+        if p.event != Some(Event::Stopped)
+            && let Some(lf) = ks.last_fail
+                && ks.fails > 0 {
                     let mut earliest = lf + ks.wait_after_fail;
                     if let Some(ne) = ks.net_earliest {
                         earliest = earliest.min(ne);
@@ -572,8 +569,6 @@ impl Oracle {
                         ));
                     }
                 }
-            }
-        }
         // inv 2 / 3 / 1
         match p.event {
             Some(Event::Started) => {
@@ -735,8 +730,8 @@ impl Oracle {
         // A request that already expired (its failure was counted at the
         // deadline) or was superseded is stale: it cannot change anything.
         let mut current = ks.in_flight.is_some_and(|(s, _, _)| s == seq);
-        if let Some((s, deadline, ev)) = ks.in_flight {
-            if s == seq && due_at > deadline {
+        if let Some((s, deadline, ev)) = ks.in_flight
+            && s == seq && due_at > deadline {
                 // The answer was ready only after the gate's deadline: the hub
                 // has timed it out already (it ticks at every deadline).
                 ks.in_flight = None;
@@ -750,7 +745,6 @@ impl Oracle {
                 }
                 current = false;
             }
-        }
         if self.trace_on {
             trace(format!(
                 "{:>9.1}s DONE {:02x}/{slot} {:?} current={current} {:?}",
@@ -766,12 +760,11 @@ impl Oracle {
         if !current {
             // A further answer for a request that already resolved: a success
             // still wins while nothing newer has been sent (never for `stopped`).
-            if let (Ok(t), Some((rseq, undo))) = (result, ks.resolved.take()) {
-                if rseq == seq && event != Some(Event::Stopped) {
+            if let (Ok(t), Some((rseq, undo))) = (result, ks.resolved.take())
+                && rseq == seq && event != Some(Event::Stopped) {
                     undo.restore(ks);
                     Self::apply_success(ks, now, event, *t);
                 }
-            }
             return;
         }
         ks.in_flight = None;

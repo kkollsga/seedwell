@@ -56,8 +56,8 @@ fn a_path_that_drops_big_datagrams_settles_back_without_congestion_response() {
     let mut timeouts_seen = 0;
     let ok = sim.run_for(60_000_000, &mut |s| {
         let done = t.step(s);
-        if let Some(h) = t.a.handle {
-            if let Some(st) = s.a.conn_stats(h) {
+        if let Some(h) = t.a.handle
+            && let Some(st) = s.a.conn_stats(h) {
                 // The window may shrink for delay reasons only at LEDBAT's gentle pace; a loss
                 // response would halve it in one step.
                 if last > 20_000 && st.cwnd < last / 2 {
@@ -66,7 +66,6 @@ fn a_path_that_drops_big_datagrams_settles_back_without_congestion_response() {
                 last = st.cwnd;
                 timeouts_seen = st.timeouts;
             }
-        }
         done
     });
     assert!(ok);

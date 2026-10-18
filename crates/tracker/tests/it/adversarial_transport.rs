@@ -631,7 +631,7 @@ async fn udp_reply_flood_with_right_tid_from_the_wrong_source_never_wins() {
             c.extend(0xBADu64.to_be_bytes());
             let _ = e2.send_to(&c, ("127.0.0.1", port)).await;
             tid = tid.wrapping_add(1);
-            if tid % 64 == 0 {
+            if tid.is_multiple_of(64) {
                 tokio::task::yield_now().await;
             }
         }

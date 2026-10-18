@@ -194,11 +194,10 @@ impl Bitfield {
 
     fn mask_spare(&mut self) {
         let spare = (self.bits.len() * 8) as u32 - self.len;
-        if spare > 0 {
-            if let Some(last) = self.bits.last_mut() {
+        if spare > 0
+            && let Some(last) = self.bits.last_mut() {
                 *last &= !(((1u16 << spare) - 1) as u8);
             }
-        }
     }
 }
 

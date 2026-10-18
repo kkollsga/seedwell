@@ -45,11 +45,10 @@ impl Torrent {
         if self.ctx.disk.get().is_none() || self.meta.is_none() {
             // Still starting up: apply when the storage is attached. A newer switch replaces an
             // older one that never ran; its sender hears that nothing was done.
-            if let Some(old) = self.pending_switch.replace(Box::new(sw)) {
-                if let Some(r) = old.reply {
+            if let Some(old) = self.pending_switch.replace(Box::new(sw))
+                && let Some(r) = old.reply {
                     let _ = r.send(Err("superseded by a newer change of location".into()));
                 }
-            }
             return;
         }
         let super::Switch { layout, save_path, staging, placement, renames, absent, reply } = sw;
@@ -298,11 +297,10 @@ impl Torrent {
                 self.report(TorrentReport::Resume(r));
             }
         }
-        if let Some((at, _)) = &self.info_cache {
-            if now.saturating_duration_since(*at) > Duration::from_secs(60) {
+        if let Some((at, _)) = &self.info_cache
+            && now.saturating_duration_since(*at) > Duration::from_secs(60) {
                 self.info_cache = None;
             }
-        }
     }
 
     fn want_peers_tick(&mut self, now: Instant) {
@@ -624,11 +622,10 @@ impl Torrent {
             }
             .await
             .map_err(|e| e.to_string());
-            if r.is_err() {
-                if let Some(h) = &hold {
+            if r.is_err()
+                && let Some(h) = &hold {
                     h.resume_writes();
                 }
-            }
             let _ = tx.send(TorrentMsg::Finalized(r)).await;
         });
     }

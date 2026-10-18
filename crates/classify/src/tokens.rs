@@ -143,11 +143,10 @@ impl Tokens {
             i += 1;
         }
         // unterminated group: its last token closes it
-        if let Some((_, g)) = stack.last().copied() {
-            if let Some(idx) = toks.iter().rposition(|t| t.group == g) {
+        if let Some((_, g)) = stack.last().copied()
+            && let Some(idx) = toks.iter().rposition(|t| t.group == g) {
                 toks[idx].last_in_group = true;
             }
-        }
         let _ = last_closed_group;
         Tokens { text, toks }
     }
@@ -292,8 +291,8 @@ fn hyphen_is_separator(chars: &[char], i: usize, out: &str, dotted: bool) -> boo
         return true;
     }
     // "7z2406-x64", "Tool-arm64": the word after the hyphen is a strong architecture/format tag
-    if let Some(t) = super::tags::lookup(after_core) {
-        if !t.weak
+    if let Some(t) = super::tags::lookup(after_core)
+        && !t.weak
             && matches!(
                 t.kind,
                 super::tags::Kind::Arch | super::tags::Kind::Resolution | super::tags::Kind::Codec
@@ -301,7 +300,6 @@ fn hyphen_is_separator(chars: &[char], i: usize, out: &str, dotted: bool) -> boo
         {
             return true;
         }
-    }
     // trailing release group: "x264-GRP", "H.264-GRP", "DTS-HD.MA.5.1-GRP"
     let at_end = after_end >= rest.len();
     if at_end

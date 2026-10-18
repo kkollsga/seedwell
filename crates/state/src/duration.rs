@@ -90,7 +90,7 @@ impl fmt::Display for Secs {
         }
         // One unit when it divides evenly (the common hand-written case), else a compound.
         for (unit, ch) in [(86_400, 'd'), (3600, 'h'), (60, 'm')] {
-            if s % unit == 0 && s / unit < 10_000 {
+            if s.is_multiple_of(unit) && s / unit < 10_000 {
                 return write!(f, "{}{ch}", s / unit);
             }
         }

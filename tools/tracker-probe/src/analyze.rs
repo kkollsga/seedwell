@@ -145,13 +145,12 @@ pub fn detect(all: &[Record], opts: &CheckOpts) -> Vec<Finding> {
                 out.push(mk(Severity::Fail, r.ts_ms, "STARTED_FIRST", format!("first announce is event={ev}, not started")));
             }
             // R4: nothing after stopped except started
-            if let Some(p) = prev {
-                if event_of(p) == "stopped" && ev != "started" {
+            if let Some(p) = prev
+                && event_of(p) == "stopped" && ev != "started" {
                     out.push(mk(Severity::Fail, r.ts_ms, "AFTER_STOPPED", format!("event={ev} sent after stopped without a new started")));
                 }
-            }
-            if ev == "started" {
-                if let Some(p) = prev.filter(|p| event_of(p) == "started") {
+            if ev == "started"
+                && let Some(p) = prev.filter(|p| event_of(p) == "started") {
                     // A repeat after a *failed* started is a legitimate retry. A repeat after a
                     // successful one is the Transmission 4.0.6 pattern (a failure on the other
                     // address family overwrote the success): treat it like early announcing.
@@ -171,10 +170,9 @@ pub fn detect(all: &[Record], opts: &CheckOpts) -> Vec<Finding> {
                         out.push(mk(Severity::Warn, r.ts_ms, "REPEATED_STARTED", "started sent again without stopped in between".into()));
                     }
                 }
-            }
             // R1: spam / early re-announce
-            if ev == "none" {
-                if let Some(p) = last_ok {
+            if ev == "none"
+                && let Some(p) = last_ok {
                     let resp = p.response.as_ref();
                     let interval = resp.and_then(|x| x.interval).filter(|v| *v > 0);
                     let min = resp.and_then(|x| x.min_interval).filter(|v| *v > 0);
@@ -209,7 +207,6 @@ pub fn detect(all: &[Record], opts: &CheckOpts) -> Vec<Finding> {
                         }
                     }
                 }
-            }
             // R2: completed
             if ev == "completed" {
                 completed += 1;
@@ -251,8 +248,8 @@ pub fn detect(all: &[Record], opts: &CheckOpts) -> Vec<Finding> {
             }
             prev = Some(r);
         }
-        if spam_count > 0 {
-            if let Some((ts, gap)) = first_spam {
+        if spam_count > 0
+            && let Some((ts, gap)) = first_spam {
                 out.push(mk(
                     Severity::Fail,
                     ts,
@@ -260,7 +257,6 @@ pub fn detect(all: &[Record], opts: &CheckOpts) -> Vec<Finding> {
                     format!("{spam_count} of {} announces were sent early (first gap {:.1}s)", g.recs.len(), gap as f64 / 1000.0),
                 ));
             }
-        }
     }
     // R6: per (client, tracker id) request rate across all torrents.
     let mut by_host: BTreeMap<(String, String), Vec<u64>> = BTreeMap::new();
@@ -466,8 +462,8 @@ pub fn profile(g: &Group<'_>) -> Profile {
         // Sessions and handoffs.
         let counters = (num(r, "uploaded").unwrap_or(0), num(r, "downloaded").unwrap_or(0), num(r, "left").unwrap_or(0));
         if ev == "started" || p.sessions.is_empty() {
-            if ev == "started" {
-                if let Some(pr) = prev {
+            if ev == "started"
+                && let Some(pr) = prev {
                     p.handoffs.push(Handoff {
                         ended_with: if event_of(pr) == "stopped" { "stopped".into() } else { format!("<no stopped; last event={}>", event_of(pr)) },
                         before: (num(pr, "uploaded").unwrap_or(0), num(pr, "downloaded").unwrap_or(0), num(pr, "left").unwrap_or(0)),
@@ -475,32 +471,28 @@ pub fn profile(g: &Group<'_>) -> Profile {
                         gap_s: r.ts_ms.saturating_sub(pr.ts_ms) as f64 / 1000.0,
                     });
                 }
-            }
             p.sessions.push(Session { start_ms: r.ts_ms, ..Session::default() });
         }
         if let Some(s) = p.sessions.last_mut() {
             s.n += 1;
             s.events.push(ev.clone());
-            if let Some(k) = r.param("key") {
-                if !s.keys.iter().any(|x| x == k) {
+            if let Some(k) = r.param("key")
+                && !s.keys.iter().any(|x| x == k) {
                     s.keys.push(k.to_owned());
                 }
-            }
-            if let Some(pid) = &r.peer_id {
-                if !s.peer_ids.contains(pid) {
+            if let Some(pid) = &r.peer_id
+                && !s.peer_ids.contains(pid) {
                     s.peer_ids.push(pid.clone());
                 }
-            }
         }
-        if ev == "none" {
-            if let (Some(l), Some(pr)) = (last_ok, prev) {
+        if ev == "none"
+            && let (Some(l), Some(pr)) = (last_ok, prev) {
                 // Only count gaps between consecutive regular activity (prev must be the last success).
                 if std::ptr::eq(l, pr) {
                     let resp = l.response.as_ref();
                     p.gaps.push((r.ts_ms.saturating_sub(l.ts_ms) as f64 / 1000.0, resp.and_then(|x| x.interval), resp.and_then(|x| x.min_interval)));
                 }
             }
-        }
         p.events.push(ev);
         if r.succeeded() {
             last_ok = Some(r);

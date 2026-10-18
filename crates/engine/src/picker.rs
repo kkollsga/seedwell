@@ -277,22 +277,20 @@ impl Picker {
     /// A new peer's pieces (`None` = has everything).
     pub fn add_peer(&mut self, has: Option<&Bitfield>) {
         for i in 0..self.piece_count {
-            if has.is_none_or(|b| b.has(i)) {
-                if let Some(a) = self.avail.get_mut(i as usize) {
+            if has.is_none_or(|b| b.has(i))
+                && let Some(a) = self.avail.get_mut(i as usize) {
                     *a = a.saturating_add(1);
                 }
-            }
         }
     }
 
     /// A peer left; undo [`Picker::add_peer`] and its `peer_have` calls.
     pub fn remove_peer(&mut self, has: Option<&Bitfield>) {
         for i in 0..self.piece_count {
-            if has.is_none_or(|b| b.has(i)) {
-                if let Some(a) = self.avail.get_mut(i as usize) {
+            if has.is_none_or(|b| b.has(i))
+                && let Some(a) = self.avail.get_mut(i as usize) {
                     *a = a.saturating_sub(1);
                 }
-            }
         }
     }
 
@@ -428,11 +426,10 @@ impl Picker {
                     best = Some((d, p));
                 }
             }
-            if let Some((d, p)) = best {
-                if d <= now + DUP_HORIZON && !heads.contains(&p) {
+            if let Some((d, p)) = best
+                && d <= now + DUP_HORIZON && !heads.contains(&p) {
                     heads.push(p);
                 }
-            }
         }
         heads
     }
@@ -537,11 +534,10 @@ impl Picker {
                 free: n,
             },
         );
-        if let Some(o) = self.exclusive.get_mut(&piece) {
-            if *o == Owner::Pending {
+        if let Some(o) = self.exclusive.get_mut(&piece)
+            && *o == Owner::Pending {
                 *o = Owner::Peer(peer);
             }
-        }
     }
 
     fn take_from_partials(&mut self, c: &PickCtx<'_>, budget: &mut usize, out: &mut Vec<BlockRequest>) {

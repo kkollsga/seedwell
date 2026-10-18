@@ -50,7 +50,7 @@ fn prime() -> Limbs {
 
 fn from_be(bytes: &[u8; KEY_LEN]) -> Limbs {
     let mut l = [0u64; N];
-    for (i, chunk) in bytes.chunks_exact(8).enumerate() {
+    for (i, chunk) in bytes.as_chunks::<8>().0.iter().enumerate() {
         let mut w = [0u8; 8];
         w.copy_from_slice(chunk);
         l[N - 1 - i] = u64::from_be_bytes(w);

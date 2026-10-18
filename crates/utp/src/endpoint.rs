@@ -334,14 +334,12 @@ impl Endpoint {
     /// `settle` plus a transmit opportunity.
     fn after(&mut self, idx: u32, now: u64) {
         self.settle(idx, now);
-        if let Some(slot) = self.slots.get_mut(idx as usize) {
-            if let Some(conn) = slot.conn.as_ref() {
-                if slot.flags & S_TX_QUEUED == 0 && conn.wants_transmit(&self.cfg, now) {
+        if let Some(slot) = self.slots.get_mut(idx as usize)
+            && let Some(conn) = slot.conn.as_ref()
+                && slot.flags & S_TX_QUEUED == 0 && conn.wants_transmit(&self.cfg, now) {
                     slot.flags |= S_TX_QUEUED;
                     self.tx_queue.push_back(idx);
                 }
-            }
-        }
     }
 
     // ---- network input ------------------------------------------------------------------------

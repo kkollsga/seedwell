@@ -24,7 +24,7 @@ creates a **draft** release with the zip, `install.sh`, `SHA256SUMS` and `latest
 # on master: bump [workspace.package] version in Cargo.toml, commit, then publish the tree (see below) and tag it
 c=$(git commit-tree 'master^{tree}' -p public -m "Seedwell 0.2.0")
 git ls-tree -r --name-only "$c" | wc -l                 # same count as `git ls-files | wc -l`; see AGENTS.md
-git push origin "$c:refs/heads/main" && git update-ref refs/heads/public "$c"
+git push origin "${c}:refs/heads/main" && git update-ref refs/heads/public "$c"
 git tag v0.2.0 "$c" && git push origin v0.2.0           # starts the release workflow
 gh run watch                                            # wait for CI and the release build
 ```
@@ -57,11 +57,11 @@ commit is the current tree, and keep the full history only here:
 
 ```sh
 c=$(git commit-tree 'master^{tree}' -m "Seedwell 0.1.0")    # master's files, no history
-git push origin "$c:refs/heads/main" && git update-ref refs/heads/public "$c"
+git push origin "${c}:refs/heads/main" && git update-ref refs/heads/public "$c"
 ```
 
 Later releases: commit on `master` as usual, then publish its tree on top of the last public commit:
-`c=$(git commit-tree 'master^{tree}' -p public -m "Seedwell <version>") && git push origin "$c:refs/heads/main" && git update-ref refs/heads/public "$c"`.
+`c=$(git commit-tree 'master^{tree}' -p public -m "Seedwell <version>") && git push origin "${c}:refs/heads/main" && git update-ref refs/heads/public "$c"`.
 
 Never use `git switch --orphan` here: it removes the tracked files from the working folder, and a following
 `git add -A` commits only the ignored build output (`target/`, hundreds of GB).

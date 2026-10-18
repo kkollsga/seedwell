@@ -140,11 +140,10 @@ impl Client {
         loop {
             let m = self.read_message().await?;
             if m.event.is_some() {
-                if let Some(e) = m.data.and_then(|d| serde_json::from_value::<EventDto>(d).ok()) {
-                    if self.events.len() < 4096 {
+                if let Some(e) = m.data.and_then(|d| serde_json::from_value::<EventDto>(d).ok())
+                    && self.events.len() < 4096 {
                         self.events.push_back(e);
                     }
-                }
                 continue;
             }
             match (&m.id, m.error, m.result) {

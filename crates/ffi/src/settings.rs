@@ -950,15 +950,14 @@ impl SettingsStore {
 
 /// Expands `~` against `$HOME` (which `--home-root` redirects).
 pub fn expand_home(p: &str) -> PathBuf {
-    if p == "~" || p.starts_with("~/") {
-        if let Some(home) = std::env::var_os("HOME") {
+    if (p == "~" || p.starts_with("~/"))
+        && let Some(home) = std::env::var_os("HOME") {
             let mut b = PathBuf::from(home);
             if let Some(rest) = p.strip_prefix("~/") {
                 b.push(rest);
             }
             return b;
         }
-    }
     PathBuf::from(p)
 }
 

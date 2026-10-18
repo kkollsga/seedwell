@@ -417,11 +417,10 @@ pub(crate) fn build(mi: &Metainfo, b: &BuildIn<'_>) -> ChoicePreview {
     // Padding files (BEP 47) are never chosen or skipped: they stay `true` so that applying the
     // preselection as priorities leaves them alone.
     for f in mi.files() {
-        if f.is_padding() {
-            if let Some(slot) = files.get_mut(f.index) {
+        if f.is_padding()
+            && let Some(slot) = files.get_mut(f.index) {
                 *slot = true;
             }
-        }
     }
     let (mut sel_bytes, mut sel_files) = (0u64, 0u32);
     for f in mi.files() {
@@ -452,11 +451,10 @@ pub(crate) fn build(mi: &Metainfo, b: &BuildIn<'_>) -> ChoicePreview {
     if ss.large_bytes > 0 && total > ss.large_bytes {
         reasons.push(ChoiceReason::VeryLarge { bytes: total, limit: ss.large_bytes });
     }
-    if let Some(free) = out.free_bytes {
-        if sel_bytes > free {
+    if let Some(free) = out.free_bytes
+        && sel_bytes > free {
             reasons.push(ChoiceReason::NotEnoughSpace { needed: sel_bytes, free });
         }
-    }
     if uncertain && det.is_some_and(|d| d.ask_when_unsure) {
         reasons.push(ChoiceReason::Unsure { confidence: c.confidence });
     }

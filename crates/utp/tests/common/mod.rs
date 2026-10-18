@@ -308,13 +308,12 @@ impl Sim {
             let t = &mut self.tcp;
             if ack > t.snd_una {
                 let newly = (ack - t.snd_una) as f64;
-                if let Some(&st) = t.sent_at.get(&(ack - 1)) {
-                    if !t.retx.contains(&(ack - 1)) {
+                if let Some(&st) = t.sent_at.get(&(ack - 1))
+                    && !t.retx.contains(&(ack - 1)) {
                         let r = (now - st) as f64;
                         t.srtt = if t.srtt == 0.0 { r } else { 0.875 * t.srtt + 0.125 * r };
                         t.rto = ((t.srtt * 2.0) as u64).clamp(200_000, 60_000_000);
                     }
-                }
                 for s in t.snd_una..ack {
                     t.sent_at.remove(&s);
                     t.retx.remove(&s);
@@ -360,8 +359,8 @@ impl Sim {
 
     fn tcp_timer(&mut self) {
         let now = self.now;
-        if let Some(t) = self.tcp.rto_at {
-            if now >= t {
+        if let Some(t) = self.tcp.rto_at
+            && now >= t {
                 let tf = &mut self.tcp;
                 let flight = (tf.next_seq - tf.snd_una) as f64;
                 tf.ssthresh = (flight / 2.0).max(2.0);
@@ -376,7 +375,6 @@ impl Sim {
                 tf.next_seq = tf.snd_una; // go-back-N
                 self.tcp_fill();
             }
-        }
     }
 
     pub fn start_tcp(&mut self) {

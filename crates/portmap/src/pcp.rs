@@ -177,7 +177,7 @@ pub fn decode_response(d: &[u8]) -> Result<Response, DecodeError> {
     if d.len() < 24 {
         return Err(DecodeError::TooShort);
     }
-    if d.len() > MAX_RESPONSE || d.len() % 4 != 0 {
+    if d.len() > MAX_RESPONSE || !d.len().is_multiple_of(4) {
         return Err(DecodeError::BadLength);
     }
     if d[1] & 0x80 == 0 {

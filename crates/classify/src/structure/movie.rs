@@ -278,11 +278,10 @@ fn movie_item(cx: &Ctx<'_>, b: &Build, c: &Classification, single: bool) -> Item
 pub(super) fn book_meta(name: &str, file: &str, size: u64) -> (String, Option<String>) {
     let files = [FileEntry { path: file, size }];
     let c = classify(&Input::new(name, &files));
-    if matches!(c.category, Category::Book | Category::Audiobook) {
-        if let Some(t) = c.fields.title.filter(|t| !t.is_empty()) {
+    if matches!(c.category, Category::Book | Category::Audiobook)
+        && let Some(t) = c.fields.title.filter(|t| !t.is_empty()) {
             return (t, c.fields.author);
         }
-    }
     let ni = NameInfo::parse(name, true);
     let t = clean_title(&ni, ni.raw_title());
     (if t.is_empty() { plain_title(name) } else { t }, None)

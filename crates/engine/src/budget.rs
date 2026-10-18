@@ -46,7 +46,7 @@ impl ConnectionBudget {
 
     fn take(counter: &AtomicUsize, max: usize) -> bool {
         counter
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |v| (v < max).then_some(v + 1))
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |v| (v < max).then_some(v + 1))
             .is_ok()
     }
 

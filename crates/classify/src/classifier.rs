@@ -963,11 +963,10 @@ fn build_fields(
     // title text: name first, else the main file's name
     let base_title = |ni: &NameInfo| clean_title(ni, ni.raw_title());
     let mut title = base_title(ni);
-    if title.is_empty() {
-        if let Some(fni) = file_ni {
+    if title.is_empty()
+        && let Some(fni) = file_ni {
             title = base_title(fni);
         }
-    }
     if title.is_empty() {
         title = clean_title(ni, ni.tk.text.clone());
     }
@@ -1107,15 +1106,14 @@ fn build_music(f: &mut Fields, input: &Input<'_>, prof: &Profile, ni: &NameInfo,
     }
     let mut parts = ni.parts();
     // drop a leading bare track number: "01 - Song"
-    if let Some(&(a, b)) = parts.first() {
-        if b == a + 1
+    if let Some(&(a, b)) = parts.first()
+        && b == a + 1
             && ni.tk.core(a).bytes().all(|c| c.is_ascii_digit())
             && ni.tk.core(a).len() <= 3
             && parts.len() > 1
         {
             parts.remove(0);
         }
-    }
     let single_track = prof.audio_count == 1
         && matches!(
             ni.ext.as_deref(),
@@ -1399,27 +1397,24 @@ fn build_book(f: &mut Fields, cat: Category, ni: &NameInfo, title: String) {
     }
 
     // "[Author] Title"
-    if author.is_none() {
-        if let Some((ga, gb)) = ni.leading_group {
+    if author.is_none()
+        && let Some((ga, gb)) = ni.leading_group {
             let g = ni.tk.join(ga, gb, &[]);
             let g = g.trim_matches(['[', ']', '(', ')']);
             if looks_like_person_loose(g) {
                 author = Some(normalize_person(g));
             }
         }
-    }
     // "Title (First Last)"
-    if author.is_none() {
-        if let Some(t) = book_title.clone() {
-            if let Some(open) = t.rfind(['(', '[']) {
+    if author.is_none()
+        && let Some(t) = book_title.clone()
+            && let Some(open) = t.rfind(['(', '[']) {
                 let inner = t[open + 1..].trim_end_matches([')', ']']).trim();
                 if t.ends_with([')', ']']) && looks_like_person_loose(inner) && open > 0 {
                     author = Some(normalize_person(inner));
                     book_title = nonempty(t[..open].trim().to_owned());
                 }
             }
-        }
-    }
     // "Title, 3rd Edition (First Last)": a person-like bracket group behind the cut
     if author.is_none() {
         let n = ni.tk.len();
@@ -1446,8 +1441,8 @@ fn build_book(f: &mut Fields, cat: Category, ni: &NameInfo, title: String) {
         }
     }
     // "First Last Collection": the whole name is an author's bibliography
-    if author.is_none() {
-        if let Some(t) = &book_title {
+    if author.is_none()
+        && let Some(t) = &book_title {
             let lower = t.to_ascii_lowercase();
             for suffix in [
                 " complete works",
@@ -1467,18 +1462,14 @@ fn build_book(f: &mut Fields, cat: Category, ni: &NameInfo, title: String) {
                 }
             }
         }
-    }
     // "William Shakespeare (Folger)": a trailing publisher/edition note is not part of the name
-    if let Some(a) = &mut author {
-        if a.ends_with(')') {
-            if let Some(open) = a.rfind('(') {
-                if a[..open].split_whitespace().count() >= 2 {
+    if let Some(a) = &mut author
+        && a.ends_with(')')
+            && let Some(open) = a.rfind('(')
+                && a[..open].split_whitespace().count() >= 2 {
                     a.truncate(open);
                     *a = a.trim().to_owned();
                 }
-            }
-        }
-    }
     f.author = author;
     f.title = book_title.or_else(|| nonempty(title));
     f.format =

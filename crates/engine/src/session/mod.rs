@@ -598,11 +598,10 @@ impl Session {
             }
         }
         for id in b.torrents.iter().map(|r| r.id).collect::<Vec<_>>() {
-            if !b.counters.iter().any(|(i, _)| *i == id) {
-                if let Some(e) = self.table.get(&id) {
+            if !b.counters.iter().any(|(i, _)| *i == id)
+                && let Some(e) = self.table.get(&id) {
                     b.counters.push((id, lifetime(&e.cold, now)));
                 }
-            }
         }
         b.resume = self.dirty.resume.drain().collect();
         b.peers = self.dirty.peers.drain().collect();

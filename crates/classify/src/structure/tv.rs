@@ -240,11 +240,10 @@ pub(super) fn build(cx: &mut Ctx<'_>, c: &Classification) -> (StructureKind, Vec
                 }
                 None => None,
             };
-            if let Some(k) = key {
-                if let Some(e) = map.get_mut(&k) {
+            if let Some(k) = key
+                && let Some(e) = map.get_mut(&k) {
                     e.files.push(i as u32);
                 }
-            }
         }
     }
 

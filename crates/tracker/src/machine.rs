@@ -586,14 +586,13 @@ impl AnnounceMachine {
 
     /// Feed one input, appending intents to `out` (no allocation when `out` has room).
     pub fn handle_into(&mut self, input: Input, now: Millis, out: &mut Vec<Intent>) {
-        if let Some(s) = self.session.as_deref() {
-            if now < s.now {
+        if let Some(s) = self.session.as_deref()
+            && now < s.now {
                 // The clock went backwards: re-base every stored instant by the
                 // same amount so all remaining waits are unchanged (nothing
                 // becomes early, nothing is pinned in the future).
                 self.rebase(s.now.0 - now.0);
             }
-        }
         if let Some(s) = self.session.as_deref_mut() {
             s.now = now;
         }
@@ -1025,13 +1024,12 @@ impl AnnounceMachine {
             s.not_before = s.not_before.max(now + Duration::from_millis(jitter));
             s.jitter_armed_at = Some(now);
         }
-        if self.failures > 0 && self.last_failure_network {
-            if let Some(r) = self.retry_at.get() {
+        if self.failures > 0 && self.last_failure_network
+            && let Some(r) = self.retry_at.get() {
                 let quick = now + Duration::from_millis(1000 + self.rng_for(3, now).below(15_000));
                 let floor = self.fail_at.get().map_or(now, |t| t + NETWORK_RETRY_FLOOR);
                 self.retry_at.set(Some(r.min(quick.max(floor))));
             }
-        }
     }
 
     /// A generator for one jitter draw, seeded from the machine's identity, its
@@ -1080,12 +1078,11 @@ impl AnnounceMachine {
             .below(self.cfg.start_jitter.as_millis() as u64);
         let mut start_at = now + Duration::from_millis(jitter);
         let full = std::mem::take(&mut self.hold_full);
-        if std::mem::take(&mut self.unclean) {
-            if let Some(hold) = self.manual_ok_at.get() {
+        if std::mem::take(&mut self.unclean)
+            && let Some(hold) = self.manual_ok_at.get() {
                 let cap = if full { Duration::from_secs(24 * 3600) } else { MAX_UNCLEAN_HOLD };
                 start_at = start_at.max(hold.min(now + cap));
             }
-        }
         Session::new(now, start_at)
     }
 
@@ -1116,12 +1113,11 @@ impl AnnounceMachine {
 
     /// Withdraw a request that is queued but not yet on the wire.
     fn withdraw_queued(&mut self, s: &mut Session, out: &mut Vec<Intent>) {
-        if let Some(o) = s.outstanding {
-            if !o.dispatched {
+        if let Some(o) = s.outstanding
+            && !o.dispatched {
                 out.push(Intent::CancelRequest(o.id));
                 s.outstanding = None;
             }
-        }
     }
 
     fn on_dispatched(
@@ -1524,11 +1520,10 @@ impl AnnounceMachine {
         let before = s.wake;
         s.wake = None;
         self.drive_inner(s, now, out);
-        if s.wake != before {
-            if let Some(w) = s.wake {
+        if s.wake != before
+            && let Some(w) = s.wake {
                 out.push(Intent::ScheduleWake(w));
             }
-        }
     }
 
     fn drive_inner(&mut self, s: &mut Session, now: Millis, out: &mut Vec<Intent>) {

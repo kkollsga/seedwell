@@ -245,11 +245,10 @@ impl Session {
     /// drive cost one `stat`.
     pub(super) fn root_present(&mut self, idx: u32) -> bool {
         let now = Instant::now();
-        if let Some((ok, at)) = self.root_seen.get(&idx) {
-            if now.saturating_duration_since(*at) < Duration::from_secs(5) {
+        if let Some((ok, at)) = self.root_seen.get(&idx)
+            && now.saturating_duration_since(*at) < Duration::from_secs(5) {
                 return *ok;
             }
-        }
         let ok = self.roots.get(idx as usize).is_none_or(|p| path_present(p));
         self.root_seen.insert(idx, (ok, now));
         ok
@@ -379,12 +378,11 @@ impl Session {
     /// What holds a torrent that is not paused (engine text; `None` = nothing special).
     pub(super) fn hold_note(&self, id: &TorrentId, state: TorrentState, waiting_verify: bool) -> Option<String> {
         let e = self.table.get(id)?;
-        if let Some(r) = self.retries.get(id) {
-            if r.kind == RetryKind::Disk && e.cold.want == Want::Active && !r.probing {
+        if let Some(r) = self.retries.get(id)
+            && r.kind == RetryKind::Disk && e.cold.want == Want::Active && !r.probing {
                 let left = r.at.saturating_sub(unix_secs());
                 return Some(format!("{} — retrying in {}", r.label, wait_words(left)));
             }
-        }
         (state == TorrentState::Checking && waiting_verify).then(|| "Waiting to verify".to_owned())
     }
 

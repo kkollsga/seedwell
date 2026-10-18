@@ -736,13 +736,11 @@ impl DhtCore {
         match codec::parse(data) {
             Err(rej) => {
                 self.stats.malformed += 1;
-                if rej.was_query && !self.cfg.read_only {
-                    if let Some(tid) = rej.tid {
-                        if self.allow_response(&from) {
+                if rej.was_query && !self.cfg.read_only
+                    && let Some(tid) = rej.tid
+                        && self.allow_response(&from) {
                             self.respond_error(from, tid, 203, "Protocol Error");
                         }
-                    }
-                }
             }
             Ok(msg) => match msg.body {
                 Body::Query(q) => self.on_query(from, &msg, &q),
@@ -887,8 +885,8 @@ impl DhtCore {
         if id == self.id || (self.cfg.enforce_node_id && !is_valid_for_ip(&id, *addr.ip())) {
             return;
         }
-        if let Insert::Verify(stale) = self.table.insert(id, addr, self.secs()) {
-            if !self
+        if let Insert::Verify(stale) = self.table.insert(id, addr, self.secs())
+            && !self
                 .pending
                 .iter()
                 .any(|p| matches!(p.owner, Owner::Verify(v) if v == stale.id))
@@ -896,7 +894,6 @@ impl DhtCore {
             {
                 self.send_query(stale.addr, Some(stale.id), Owner::Verify(stale.id), Q::Ping);
             }
-        }
     }
 
     fn lookup_reply(&mut self, lid: u32, p: &Pending, from: SocketAddrV4, r: &Response<'_>) {
@@ -996,11 +993,10 @@ impl DhtCore {
                         lk.on_failure(&p.to);
                     }
                 }
-                if silent {
-                    if let Some(e) = p.expect {
+                if silent
+                    && let Some(e) = p.expect {
                         self.table.fail(&e);
                     }
-                }
             }
             Owner::Verify(id) => {
                 if silent {
@@ -1134,8 +1130,7 @@ impl DhtCore {
             .lookups
             .iter_mut()
             .find(|l| l.target == ih && matches!(l.purpose, Purpose::Peers { .. }))
-        {
-            if !l.announcing
+            && !l.announcing
                 && matches!(
                     l.purpose,
                     Purpose::Peers {
@@ -1148,7 +1143,6 @@ impl DhtCore {
                 };
                 upgraded = true;
             }
-        }
         let now = self.now_ms;
         if upgraded {
             if let Ok(c) = self.cooldown_entry(ih) {
@@ -1525,7 +1519,7 @@ impl DhtCore {
             64,
             self.cfg.lookup_timeout,
         );
-        for c in body.chunks_exact(NODE_LEN) {
+        for c in body.as_chunks::<NODE_LEN>().0 {
             let mut nid = [0u8; 20];
             nid.copy_from_slice(&c[..20]);
             let addr = SocketAddrV4::new(

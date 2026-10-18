@@ -563,12 +563,11 @@ impl Profile {
                     u64::from(p.count[idx(FClass::Subtitle)] + p.count[idx(FClass::Doc)]),
                 ),
             ];
-            if let Some(&(pr, n)) = counted.iter().max_by_key(|(_, n)| *n) {
-                if n > 0 {
+            if let Some(&(pr, n)) = counted.iter().max_by_key(|(_, n)| *n)
+                && n > 0 {
                     p.primary = pr;
                     p.primary_share = 1.0;
                 }
-            }
         } else if let Some(&(pr, b)) = groups.iter().max_by_key(|(_, b)| *b) {
             let share = b as f64 / p.content_bytes as f64;
             p.primary_share = share as f32;

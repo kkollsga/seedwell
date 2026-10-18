@@ -36,11 +36,10 @@ pub fn category_from_hint(hint: &str) -> Option<(Category, f32)> {
             "xxx" | "adult" | "porn" => Some((Category::Other, 6.0)),
             _ => None,
         };
-        if let Some(h) = hit {
-            if best.is_none_or(|b| h.1 > b.1) {
+        if let Some(h) = hit
+            && best.is_none_or(|b| h.1 > b.1) {
                 best = Some(h);
             }
-        }
     }
     best
 }

@@ -967,12 +967,11 @@ impl TorrentShared {
             let (path, base) = self.live_path(layout, i);
             // Never rebuild a vanished save root: that is how data silently ends up on the boot
             // volume when an external drive is unplugged.
-            if let Some(b) = &base {
-                if !b.is_dir() {
+            if let Some(b) = &base
+                && !b.is_dir() {
                     root_missing = true;
                     return Err(io::Error::from(io::ErrorKind::NotFound));
                 }
-            }
             if let Some(parent) = path.parent() {
                 fsutil::create_dirs_guarded(parent)?;
             }
@@ -1082,9 +1081,9 @@ impl TorrentShared {
             if let Some(er) = err {
                 e.error.get_or_insert(er);
             }
-            if e.received == e.nblocks && e.pending_writes == 0 {
-                if let Some(mut e) = map.remove(&piece) {
-                    if let Some(tx) = e.done.take() {
+            if e.received == e.nblocks && e.pending_writes == 0
+                && let Some(mut e) = map.remove(&piece)
+                    && let Some(tx) = e.done.take() {
                         match e.error.take() {
                             Some(er) => fail = Some((tx, er)),
                             None => match self.expected_hash(piece) {
@@ -1102,8 +1101,6 @@ impl TorrentShared {
                             },
                         }
                     }
-                }
-            }
         }
         if let Some((tx, er)) = fail {
             tx.send(Err(er));
@@ -1384,7 +1381,7 @@ impl TorrentHandle {
         if psize == 0 {
             return Err(StorageError::OutOfRange);
         }
-        if begin % BLOCK_SIZE != 0
+        if !begin.is_multiple_of(BLOCK_SIZE)
             || begin >= psize
             || data.len() != BLOCK_SIZE.min(psize - begin) as usize
         {
@@ -1475,8 +1472,8 @@ impl TorrentHandle {
                 let (tx, rx) = oneshot::channel();
                 ack = WriteAck::Complete(rx);
                 if e.buf.is_some() {
-                    if let Some(mut e) = map.remove(&piece) {
-                        if let Some(buf) = e.buf.take() {
+                    if let Some(mut e) = map.remove(&piece)
+                        && let Some(buf) = e.buf.take() {
                             t.inflight_writes.fetch_add(1, Ordering::AcqRel);
                             hash_job = Some(HashJob::Buffer {
                                 t: t.clone(),
@@ -1487,7 +1484,6 @@ impl TorrentHandle {
                                 tx,
                             });
                         }
-                    }
                 } else if e.pending_writes == 0 {
                     // Only reachable if every through-write already finished.
                     map.remove(&piece);

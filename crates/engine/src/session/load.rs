@@ -92,13 +92,11 @@ impl Session {
             // A file that exists under its clean name and its hidden one (builds before the
             // rename was made atomic could leave the real data hidden next to a mostly empty
             // visible file) must not be trusted from the resume data: check it against both.
-            if r.placed == Placed::Renamed && r.has_metadata {
-                if let Ok(Some(pl)) = self.sh.store.load_placement(&r.id) {
-                    if !crate::edgefix::reconcile(&pl).is_empty() {
+            if r.placed == Placed::Renamed && r.has_metadata
+                && let Ok(Some(pl)) = self.sh.store.load_placement(&r.id)
+                    && !crate::edgefix::reconcile(&pl).is_empty() {
                         c.set2(G_RECHECK, true);
                     }
-                }
-            }
             // Profile and rule come back as small integers; the strings live in the id table.
             if let Some(p) = r.tracker_profile.as_deref() {
                 c.tracker_profile = self.ids.intern(p).unwrap_or(NONE_U32);
@@ -120,12 +118,11 @@ impl Session {
                 c.tracker_profile = m.profile.as_deref().and_then(|p| self.ids.intern(p)).unwrap_or(NONE_U32);
             }
             // A placed torrent that is still being downloaded keeps its library paths reserved.
-            if r.placed == Placed::Renamed && !complete {
-                if let Ok(Some(pl)) = self.sh.store.load_placement(&r.id) {
+            if r.placed == Placed::Renamed && !complete
+                && let Ok(Some(pl)) = self.sh.store.load_placement(&r.id) {
                     let mut g = self.sh.reserved.lock().unwrap_or_else(|e| e.into_inner());
                     g.extend(pl.files.iter().flatten().cloned());
                 }
-            }
             let register = cfg.trackers_enabled && tiers.iter().any(|t| !t.is_empty());
             if register {
                 c.set(F_TRACKER_REG, true);

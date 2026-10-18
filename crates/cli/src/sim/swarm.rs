@@ -217,11 +217,10 @@ async fn serve_peer(mut sock: TcpStream, sim: &Arc<SimState>) -> std::io::Result
     }
     let pieces = sim.built.pieces as usize;
     let mut bitfield = vec![0xFFu8; pieces.div_ceil(8)];
-    if pieces % 8 != 0 {
-        if let Some(l) = bitfield.last_mut() {
+    if !pieces.is_multiple_of(8)
+        && let Some(l) = bitfield.last_mut() {
             *l = 0xFFu8 << (8 - pieces % 8);
         }
-    }
     send(&mut wr, 5, &[&bitfield]).await?;
     let mut their_meta_id: u8 = 0;
     let mut stop_rx = sim.stopped.subscribe();
@@ -266,12 +265,11 @@ async fn serve_peer(mut sock: TcpStream, sim: &Arc<SimState>) -> std::io::Result
                 fill(b.seed, piece_start + u64::from(begin), &mut data);
                 if begin == 0 {
                     let mut c = sim.corrupt.lock().unwrap_or_else(|e| e.into_inner());
-                    if let Some(left) = c.get_mut(&idx) {
-                        if *left > 0 {
+                    if let Some(left) = c.get_mut(&idx)
+                        && *left > 0 {
                             *left -= 1;
                             data[0] ^= 0xFF;
                         }
-                    }
                 }
                 sim.served.fetch_add(u64::from(want), Ordering::Relaxed);
                 send(&mut wr, 7, &[&msg[1..5], &msg[5..9], &data]).await?;
@@ -282,8 +280,8 @@ async fn serve_peer(mut sock: TcpStream, sim: &Arc<SimState>) -> std::io::Result
                     if let Some(p) = find_int(&msg[2..], b"ut_metadatai") {
                         their_meta_id = p as u8;
                     }
-                } else if msg[1] == 1 && their_meta_id != 0 {
-                    if let Some(piece) = find_int(&msg[2..], b"5:piecei") {
+                } else if msg[1] == 1 && their_meta_id != 0
+                    && let Some(piece) = find_int(&msg[2..], b"5:piecei") {
                         let info = &sim.built.info;
                         let start = piece as usize * 16384;
                         if start < info.len() {
@@ -295,7 +293,6 @@ async fn serve_peer(mut sock: TcpStream, sim: &Arc<SimState>) -> std::io::Result
                             send(&mut wr, 20, &[&[their_meta_id], &head]).await?;
                         }
                     }
-                }
             }
             _ => {}
         }

@@ -86,11 +86,10 @@ pub async fn run(argv: Vec<String>) -> i32 {
         Ok(c) => c,
         Err(u) => {
             let mut e = CliError::from(u);
-            if !json {
-                if let Some(c) = help::find(&first) {
+            if !json
+                && let Some(c) = help::find(&first) {
                     e.message.push_str(&format!("\nusage: seedwell {}   (seedwell {first} --help for examples)", c.usage.lines().next().unwrap_or("")));
                 }
-            }
             return finish(&g, &e);
         }
     };
