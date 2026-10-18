@@ -7,11 +7,8 @@ updates:
     groups:
       minor-and-patch:
         update-types: [minor, patch]
-    open-pull-requests-limit: 5
-    # Major versions change APIs; they are upgraded by hand, not by a weekly bot pull request.
-    ignore:
-      - dependency-name: "*"
-        update-types: ["version-update:semver-major"]
+    # Major versions come as one pull request per crate, so CI shows which one breaks the build.
+    open-pull-requests-limit: 10
   - package-ecosystem: github-actions
     directory: /
     schedule:
