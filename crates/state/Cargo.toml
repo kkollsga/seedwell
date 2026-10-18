@@ -8,7 +8,7 @@ publish = false
 description = "Persistent state for Seedwell: config, rules, tracker profiles, redb database, statistics"
 
 [dependencies]
-redb = "2"
+redb = "4"
 serde = { version = "1", default-features = false, features = ["derive", "std"] }
 toml = { version = "1", default-features = false, features = ["std", "parse", "display", "serde", "preserve_order"] }
 # Only for `TimingStore`; the async transports are not needed here.
