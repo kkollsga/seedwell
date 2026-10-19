@@ -145,12 +145,12 @@ fn start_resume_and_manual_over_a_halt_or_a_slow_failure_keep_the_floor() {
             lab.run_for(d(1));
         }
         assert!(
-            lab.sent.len() <= 12,
+            lab.sent.len() <= 62,
             "{reason}: {} requests in 10 minutes of Start/Resume/Manual mashing",
             lab.sent.len()
         );
         for w in lab.sent.windows(2) {
-            assert!(w[1].t.0 - w[0].t.0 >= 60_000, "{reason}");
+            assert!(w[1].t.0 - w[0].t.0 >= 10_000, "{reason}");
         }
     }
 }

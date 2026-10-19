@@ -182,6 +182,7 @@ impl Lab {
             Stats {
                 uploaded: up,
                 downloaded: down,
+                corrupt: 0,
                 left,
                 size,
             },
@@ -213,6 +214,12 @@ impl Lab {
     pub fn manual(&mut self, n: u32) {
         let now = self.now;
         self.hub().manual_reannounce(&ih(n), now);
+    }
+
+    /// "Announce anyway".
+    pub fn force(&mut self, n: u32) {
+        let now = self.now;
+        self.hub().manual_reannounce_forced(&ih(n), now);
     }
 
     pub fn network(&mut self) {

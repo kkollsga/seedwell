@@ -70,6 +70,8 @@ pub enum SetInput {
     Timer,
     /// User re-announce.
     Manual,
+    /// User re-announce that also overrides the tracker's minimum interval (rate limited).
+    ManualForce,
     /// Network path changed.
     NetworkChanged,
     /// Woke from sleep.
@@ -439,6 +441,11 @@ impl TrackerSet {
             SetInput::Manual => {
                 for i in 0..n {
                     self.feed(i, Input::ManualReannounce, now, out);
+                }
+            }
+            SetInput::ManualForce => {
+                for i in 0..n {
+                    self.feed(i, Input::ManualForce, now, out);
                 }
             }
             SetInput::NetworkChanged => {

@@ -22,10 +22,10 @@ private func row(state: TransferState = .seeding, seedSecs: UInt64 = 0, error: S
 struct RowTextTests {
     @Test func sharingRowsShowPeersAndRatioOnly() {
         // No rate (it stands out at the right of the name), tracker, goal, seeding time or swarm.
-        #expect(row(ratio: 0.27, goal: nil, peers: 1, swarm: 250, up: 1_200_000).statusLine(.active) == "1 peer · Ratio 0.27")
-        #expect(row(ratio: 0.27, goal: 1.0, peers: 1, up: 1_200_000).statusLine(.active) == "1 peer · Ratio 0.27 of 1.0")
-        #expect(row(seedSecs: 3 * 86_400, ratio: 1.04, goal: nil).statusLine(.dormant) == "0 peers · Ratio 1.04")
-        #expect(row(peers: 4, up: 45_000).statusLine(.popular) == "4 peers · Ratio 0.94 of 2.0")
+        #expect(row(ratio: 0.27, goal: nil, peers: 1, known: 250, up: 1_200_000).statusLine(.active) == "1 / 250 peers · Ratio 0.27")
+        #expect(row(ratio: 0.27, goal: 1.0, peers: 1, up: 1_200_000).statusLine(.active) == "1 / 1 peers · Ratio 0.27 of 1.0")
+        #expect(row(seedSecs: 3 * 86_400, ratio: 1.04, goal: nil).statusLine(.dormant) == "0 / 0 peers · Ratio 1.04")
+        #expect(row(peers: 4, up: 45_000).statusLine(.popular) == "4 / 4 peers · Ratio 0.94 of 2.0")
         // Moving wins.
         var r = row(); r.movingPercent = 42
         #expect(r.statusLine(.active) == "Moving… 42%")
@@ -92,32 +92,32 @@ struct RowTextTests {
     }
 
     @Test func downloadsEndWithThePeersAndLeaveTheRateToTheName() {
-        var r = row(state: .downloading, group: nil, peers: 12, swarm: 340, down: 2_100_000)
+        var r = row(state: .downloading, group: nil, peers: 12, known: 340, down: 2_100_000)
         r.doneBytes = 73_000_000; r.sizeBytes = 85_000_000; r.etaSecs = 120
-        #expect(r.statusLine(.download) == "73 of 85 MB — 2 minutes remaining · 12 of 340 peers")
+        #expect(r.statusLine(.download) == "73 of 85 MB — 2 minutes remaining · 12 / 340 peers")
     }
 
     @Test func downloadsFallBackToKnownPeersThenToTheBareCount() {
         func dl(peers: UInt32, known: UInt32 = 0, down: UInt64 = 0) -> TransferRow {
             row(state: .downloading, group: nil, peers: peers, known: known, down: down)
         }
-        #expect(dl(peers: 4, known: 90, down: 1_000).liveSuffix(.download) == "4 of 90 peers")
-        #expect(dl(peers: 4).liveSuffix(.download) == "4 peers")
-        #expect(dl(peers: 1).liveSuffix(.download) == "1 peer")
+        #expect(dl(peers: 4, known: 90, down: 1_000).liveSuffix(.download) == "4 / 90 peers")
+        #expect(dl(peers: 4).liveSuffix(.download) == "4 / 4 peers")
+        #expect(dl(peers: 0).liveSuffix(.download) == "0 / 0 peers")
     }
 
-    @Test func nothingConnectedAndNoRateShowsNothing() {
-        #expect(row(state: .downloading, group: nil, swarm: 250).liveSuffix(.download) == "")
+    @Test func aRunningDownloadAlwaysShowsBothPeerNumbers() {
+        #expect(row(state: .downloading, group: nil, swarm: 250).liveSuffix(.download) == "0 / 0 peers")
+        #expect(row(state: .paused, group: nil).liveSuffix(.download) == "")
         // Sharing rows have no live suffix; their line is `sharingLine`.
         #expect(row(peers: 4, up: 5_000_000).liveSuffix(.active) == "")
-        #expect(row(state: .downloading, group: nil, up: 5_000_000).liveSuffix(.download) == "")
     }
 
     // An engine note replaces "Calculating time remaining…" when nothing is connected.
     @Test func aDownloadWithoutPeersSaysWhy() {
         var r = row(state: .downloading, group: nil, waiting: "Waiting for peers")
         r.doneBytes = 0; r.sizeBytes = 1_900_000_000
-        #expect(r.statusLine(.download) == "0.0 of 1.9 GB — Waiting for peers")
+        #expect(r.statusLine(.download) == "0.0 of 1.9 GB — Waiting for peers · 0 / 0 peers")
         #expect(!r.statusLine(.download).contains("Calculating"))
         #expect(r.downloadWaiting?.note == "Waiting for peers")
     }
@@ -125,12 +125,15 @@ struct RowTextTests {
     @Test func aHaltedTrackerIsNamedInTheRowAndOffersAskingAgain() {
         var r = row(state: .downloading, group: nil, waiting: "Tracker: Unregistered torrent", waitingIsError: true, halted: true)
         r.doneBytes = 0; r.sizeBytes = 1_900_000_000
-        #expect(r.statusLine(.download) == "0.0 of 1.9 GB — Tracker: Unregistered torrent")
+        #expect(r.statusLine(.download) == "0.0 of 1.9 GB — Tracker: Unregistered torrent · 0 / 0 peers")
         #expect(r.canAskAgain)
-        // A failing (not halted) tracker also says when it retries.
-        var f = row(state: .downloading, group: nil, waiting: "Tracker unreachable", waitingIsError: true, retryIn: 7_200)
-        f.doneBytes = 0
-        #expect(f.statusLine(.download).hasSuffix("Tracker unreachable · retrying in 2 h"))
+        // A failing (not halted) tracker is calm and says when it retries, with the attempt.
+        var f = row(state: .downloading, group: nil, waiting: "Bad gateway", retryIn: 7_200)
+        f.doneBytes = 0; f.errorTransient = true; f.retryAttempt = 3
+        #expect(f.statusLine(.download).contains("Bad gateway · retrying in 2 h"))
+        #expect(f.canAskAgain)
+        f.retryInSecs = 0
+        #expect(f.retryNote == "retrying now…")
         #expect(!row(state: .downloading, group: nil).canAskAgain)
     }
 
@@ -203,5 +206,50 @@ struct MenuSubtitleTests {
         let n = Fmt.middleTruncated(String(repeating: "a", count: 30) + String(repeating: "b", count: 30), to: 20)
         #expect(n.count == 20 && n.contains("…") && n.hasPrefix("aaaa") && n.hasSuffix("bbbb"))
         #expect(Fmt.middleTruncated("short", to: 20) == "short")
+    }
+}
+
+@Suite("Tracker live status")
+struct TrackerLiveTests {
+    private func line(state: String, failures: UInt32 = 0, retryAt: UInt64? = nil, next: UInt64? = nil, manualOk: UInt64? = nil) -> TrackerLine {
+        TrackerLine(url: "https://tracker.example/announce", tier: 0, status: "", lastAnnounce: nil, nextAnnounce: next, seeders: nil, leechers: nil,
+                    state: state, failures: failures, retryAt: retryAt, lastSuccess: nil, manualOkAt: manualOk)
+    }
+
+    @Test func retryingCountsDownThenSaysNow() {
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        let t = line(state: "backoff", failures: 2, retryAt: 1_000_000 + 540)
+        #expect(TrackerLive.text(t, now: now) == "Retrying tracker in 9 min (attempt 3)")
+        #expect(TrackerLive.text(t, now: now.addingTimeInterval(600)) == "Retrying tracker now…")
+    }
+
+    @Test func aWorkingTrackerSaysWhenItIsAskedNext() {
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        #expect(TrackerLive.text(line(state: "working", next: 1_001_800), now: now).hasPrefix("Tracker OK · next announce"))
+        #expect(TrackerLive.text(line(state: "waiting"), now: now) == "Announcing to tracker.example…")
+    }
+
+    @Test func theTrackersMinimumIntervalOffersAnnounceAnyway() {
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        #expect(TrackerLive.allowedAt(line(state: "working", manualOk: 1_000_300), now: now) == 1_000_300)
+        #expect(TrackerLive.allowedAt(line(state: "working", manualOk: 999_000), now: now) == nil)
+    }
+}
+
+@Suite("Tracker words clear")
+struct TrackerWordsClearTests {
+    @Test func theRetryLineIsGoneOnceTheEngineReportsNoProblem() {
+        var r = TransferRow(
+            id: "a", name: "n", displayName: "n", kind: .torrent, category: .movie, sizeBytes: 10, doneBytes: 10, downRate: 0, upRate: 0, etaSecs: nil,
+            trackerId: "public", trackerName: "Public", ratio: 0, ratioGoal: nil, seedSecs: 0, state: .seeding, finishedAt: 1, savePath: "/x", fileExt: "",
+            seedGroup: .error, error: "Bad gateway", retryInSecs: 540, movingPercent: nil, awaitingChoice: false, pending: nil, peers: 0, swarm: nil,
+            knownPeers: 0, hasVideo: false, videoExt: "", fileCount: 1, lastActivity: nil, waitingNote: nil, waitingIsError: false, trackerHalted: false)
+        r.errorTransient = true
+        #expect(r.statusLine(.error) == "Public · Bad gateway · retrying in 9 min")
+        // The announce worked: the engine sends no error, no retry, a normal group.
+        r.error = nil; r.retryInSecs = nil; r.errorTransient = false; r.seedGroup = .active
+        #expect(!r.statusLine(.active).contains("retrying"))
+        #expect(!r.statusLine(.active).contains("Bad gateway"))
+        #expect(r.retryNote == nil)
     }
 }

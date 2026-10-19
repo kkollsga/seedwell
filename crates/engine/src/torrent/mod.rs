@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use tokio::sync::oneshot;
 use trs_storage::{Layout, PieceOutcome};
-use trs_wire::{Bitfield, BlockRequest, ExtPolicy, Handshake, Reserved};
+use trs_wire::{Bitfield, BlockRequest, Handshake, Reserved};
 
 use crate::api::{FileInfo, PeerInfo, Priority, TorrentId};
 use crate::budget::ConnPermit;
@@ -79,6 +79,8 @@ pub(crate) enum TorrentCmd {
     SetPriority(Priority),
     /// Per-torrent upload cap (rule `up_limit`), bytes/s.
     SetUpLimit(Option<u64>),
+    /// The torrent's tracker now allows (or forbids) peer exchange for private torrents.
+    SetTrackerPex(bool),
     /// Join or leave the shared caps of a favorite tracker.
     SetGroup(Option<Arc<crate::ratelimit::GroupBucket>>),
     ConfigChanged,
@@ -243,6 +245,8 @@ pub(crate) struct TorrentInit {
     pub epoch: u64,
     pub shared: Arc<Shared>,
     pub private: bool,
+    /// The torrent's tracker allows peer exchange for private torrents (`trackers.toml`).
+    pub tracker_pex: bool,
     pub has_metadata: bool,
     pub save_path: PathBuf,
     pub staged: bool,
@@ -503,6 +507,8 @@ pub(crate) struct Torrent {
     pub live: Arc<LiveStats>,
     pub counters: Arc<Counters>,
     pub private: bool,
+    /// The tracker's own setting (private torrents only); see `pex_allowed`.
+    pub tracker_pex: bool,
     pub save_path: PathBuf,
     pub staging: Option<PathBuf>,
     pub placement: Option<crate::persist::Placement>,
@@ -563,12 +569,12 @@ impl Torrent {
     fn new(init: TorrentInit) -> Self {
         let cfg = init.shared.cfg();
         let private = init.private;
-        let policy = ExtPolicy::for_torrent(private || !cfg.pex_enabled);
+        let pex = crate::policy::pex_allowed(cfg.pex_enabled, private, init.tracker_pex);
         let up_limit = init.up_limit;
         let ctx = Arc::new(PeerCtx {
             ih: init.id,
             our_id: init.shared.our_id,
-            policy,
+            pex: std::sync::atomic::AtomicBool::new(pex),
             reserved: Reserved::ours_with(private, cfg.dht_enabled && init.shared.dht_running.load(Ordering::Relaxed)),
             disk: std::sync::OnceLock::new(),
             counters: init.counters.clone(),
@@ -608,6 +614,7 @@ impl Torrent {
             live: init.live,
             counters: init.counters,
             private,
+            tracker_pex: init.tracker_pex,
             save_path: init.save_path,
             staging: init.staging,
             placement: init.placement,
@@ -801,8 +808,13 @@ impl Torrent {
             }
             TorrentCmd::SetUpLimit(l) => self.ctx.torrent_up.set(l),
             TorrentCmd::SetGroup(g) => self.ctx.group.assign(g),
+            TorrentCmd::SetTrackerPex(v) => {
+                self.tracker_pex = v;
+                self.refresh_pex();
+            }
             TorrentCmd::ConfigChanged => {
                 self.cfg = self.sh.cfg();
+                self.refresh_pex();
             }
             TorrentCmd::Detail(reply) => {
                 let _ = reply.send(self.detail());

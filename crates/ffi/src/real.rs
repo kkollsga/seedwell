@@ -398,7 +398,7 @@ impl RealBackend {
                                 }
                                 pending.get_or_insert(tokio::time::Instant::now());
                             }
-                            EngineEvent::MoveStarted { .. } | EngineEvent::MoveFinished { .. } => {
+                            EngineEvent::TrackerHealthChanged { .. } | EngineEvent::MoveStarted { .. } | EngineEvent::MoveFinished { .. } => {
                                 pending.get_or_insert(tokio::time::Instant::now());
                             }
                             EngineEvent::Pending { .. } => {
@@ -732,6 +732,7 @@ fn convert(r: &TorrentRow, pol: &Policy, now: u64) -> TransferRow {
         retry_in_secs: r.next_retry_ms.map(|ms| (ms / 1000).saturating_sub(now)),
         moving_percent: r.moving.map(|f| (f.clamp(0.0, 1.0) * 100.0) as u8),
         awaiting_choice: r.state == TorrentState::AwaitingChoice,
+        is_private: r.private,
         pending: r.pending.map(|p| PendingStart { starts_at_ms: p.deadline_ms, remaining_ms: p.remaining_ms, paused: p.paused }),
         peers: r.peers,
         swarm: match (r.swarm_seeds, r.swarm_leechers) {
@@ -747,6 +748,9 @@ fn convert(r: &TorrentRow, pol: &Policy, now: u64) -> TransferRow {
         idle_stopped: r.idle_reason(),
         waiting_is_error: note.as_ref().is_some_and(|n| n.error),
         tracker_halted: r.tracker_halted,
+        error_transient: r.error_transient,
+        retry_attempt: r.tracker_failures,
+        announcing_since_ms: r.announcing_since_ms,
         uploaded_bytes: r.uploaded_total,
         files_done: 0,
         total_bytes: r.total_bytes,
@@ -754,6 +758,27 @@ fn convert(r: &TorrentRow, pol: &Policy, now: u64) -> TransferRow {
         session_done: r.session_done.min(r.session_size),
         session_size: r.session_size,
     }
+}
+
+/// The tracker problem of Get Info, from the engine's own words.
+fn tracker_problem(r: &eng::TorrentRow) -> Option<TrackerProblem> {
+    let message = r.tracker_detail.clone().or_else(|| r.tracker_error.clone())?;
+    let temporary = !r.tracker_halted && r.error_transient;
+    // Verified in the engine: announcing and listening are separate. A tracker outage stops
+    // neither the peers we hold nor those who already know our address from connecting, and
+    // a complete torrent keeps uploading.
+    let complete = matches!(r.state, eng::TorrentState::Seeding | eng::TorrentState::LowPower);
+    let reassurance = (temporary && complete && r.disk_error.is_none()).then(|| {
+        "Your files are fine. Seeding to peers you're already connected to continues, and peers that already know about you can still connect. New peers can't find you through this tracker until it answers.".to_owned()
+    });
+    Some(TrackerProblem {
+        host: r.tracker_host.clone(),
+        message,
+        since: r.error_since,
+        next_try_ms: if r.tracker_halted { None } else { r.next_retry_ms },
+        temporary,
+        reassurance,
+    })
 }
 
 fn choice_info(id: &str, row: Option<&TransferRow>, c: &eng::ChoicePreview) -> ChoiceInfo {
@@ -977,7 +1002,8 @@ impl Backend for RealBackend {
             skipped_note,
             rule_name,
             tracker_name: row.tracker_name.clone(),
-            error: row.error.clone().or_else(|| d.row.tracker_error.clone()),
+            error: d.row.disk_error.clone(),
+            tracker_problem: tracker_problem(&d.row),
             tracker_halted: d.row.tracker_halted,
             goal_is_custom: d.row.seed_goal_user,
             state: row.state,
@@ -1005,6 +1031,11 @@ impl Backend for RealBackend {
                     next_announce: t.next_announce_ms.map(|m| m / 1000),
                     seeders: t.seeds.map(|n| n.min(u64::from(u32::MAX)) as u32),
                     leechers: t.leechers.map(|n| n.min(u64::from(u32::MAX)) as u32),
+                    state: t.state.as_str().to_owned(),
+                    failures: t.failures,
+                    retry_at: t.retry_at_ms.map(|m| m / 1000),
+                    last_success: t.last_success_ms.map(|m| m / 1000),
+                    manual_ok_at: t.manual_ok_ms.map(|m| m / 1000),
                 })
                 .collect(),
         })
@@ -1115,9 +1146,9 @@ impl Backend for RealBackend {
         self.engine.recheck(&ids(ids_));
     }
 
-    fn ask_tracker_again(&self, ids_: &[String]) -> AskAgainOutcome {
+    fn ask_tracker_again(&self, ids_: &[String], force: bool) -> AskAgainOutcome {
         let list = ids(ids_);
-        let results = self.rt.block_on(self.engine.reannounce(&list)).unwrap_or_default();
+        let results = self.rt.block_on(self.engine.reannounce_with(&list, force)).unwrap_or_default();
         *lock(&self.cache) = None;
         let now_ms = now_secs() * 1000;
         let sent = results.iter().filter(|r| r.sent).count() as u32;

@@ -23,6 +23,7 @@ mod dual_stack_transport;
 mod engine_compat;
 mod fixes;
 mod gate;
+mod host_recovery;
 mod hub_props;
 mod hub_trace;
 mod machine_props;

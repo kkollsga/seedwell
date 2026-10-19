@@ -88,6 +88,15 @@ impl Session {
             pending: self.pending_status(&c.id),
             tracker_error: terr.map(|t| t.reason.to_string()),
             tracker_halted: terr.is_some_and(|t| t.permanent),
+            tracker_detail: terr.map(|t| t.detail.to_string()),
+            announcing_since_ms: self.announcing.get(&c.id).copied(),
+            tracker_failures: terr.map_or(0, |t| t.failures),
+            disk_error: c.error.as_deref().map(str::to_owned),
+            error_transient: terr.is_some_and(|t| !t.permanent)
+                && c.error.is_none()
+                && c.want != Want::Error
+                && c.error_since != 0
+                && now.saturating_sub(u64::from(c.error_since)) <= super::sharing::DAY,
             stalled: self.stall.get(&c.id).is_some_and(|s| s.inactive()) && state == TorrentState::Downloading,
             hold_note: self.hold_note(&c.id, state, waiting_verify),
             idle: c.idle_status(),

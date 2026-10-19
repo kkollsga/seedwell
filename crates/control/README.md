@@ -101,7 +101,7 @@ Ids in params are the 40-hex transfer id or any unique prefix of at least 6 hex 
 | `status` | read_only | no | - | `server`, `protocol`, `permission`, `totals` (rates, connections, port, tiers), `counts` by state, `total`, `limits`, `summary` |
 | `list` | read_only | no | `filter?` (`all` `downloading` `queued` `seeding` `low-power` `paused` `error` `finished` `recent` `checking` `metadata` `awaiting-choice`), `tracker?` (profile id, `public`, `other-private` or host part), `category?`, `text?`, `kind?` (`torrent`/`direct`), `limit?` (50, max 500), `offset?` | `total`, `offset`, `transfers[]` (every field of a row, plus `human` strings) |
 | `info` | read_only | no | `id`, `files?`, `trackers?`, `peers?` (default true), `max_files?` (2000), `max_peers?` (100) | `transfer`, `files[]` (`index`, `path`, `length`, `done`, `priority`), `trackers[]` (redacted URL, tier, status, seeds, leechers, last/next announce as Unix s), `peers[]`, `*_truncated`, `piece_count`, `piece_length`, `comment` |
-| `trackers` | read_only | no | - | `profiles[]` (`id`, `name`, `urls`, `rule`, live `transfers`/`sharing`/rates), `public_transfers`, `other_private_transfers` |
+| `trackers` | read_only | no | - | `profiles[]` (`id`, `name`, `urls`, `rule`, `private`, `allow_pex`, live `transfers`/`sharing`/rates), `groups[]` (automatic trackers, same fields), `public_transfers`, `other_private_transfers`, `other_private_allow_pex`, `pex_enabled` |
 | `tracker_stats` | read_only | no | `tracker?` (profile id, `public`, `other-private`, `all`), `days?` (30, max 400) | `today`, `this_week`, `this_month`, `all_time` (bytes up/down, ratio, completed...), daily `series[]`, `summary` |
 | `rules` | read_only | no | - | the contents of `rules.toml` (`default`, `rule[]`) |
 | `settings_get` | full | no | `keys?` (dotted, allow-listed) | `settings` map |
@@ -117,8 +117,9 @@ Ids in params are the 40-hex transfer id or any unique prefix of at least 6 hex 
 | `set_category` | control | yes | `ids`, `category` (7 names, or null to detect again) | same |
 | `set_seed_goal` | control (`remove_and_delete`: full) | yes | `ids`, `ratio?`, `seed_secs?`, `min_seed_secs?`, `any?`, `at_goal?` (`stop` `remove` `remove_and_delete`), `stop_on_finish?`, `forever?` | same |
 | `set_tracker_limits` | control | yes | `id`, `down_limit?`, `up_limit?` (bytes/s, 0 = unlimited; favorites only; one cap for all the tracker's torrents together) | `id`, `down_limit`, `up_limit`; written to `trackers.toml` |
+| `set_tracker_pex` | full | yes | `id` (a favorite's id, an automatic tracker's domain or `other-private`), `allow` (bool) | `id`, `allow_pex`; written to `trackers.toml`. Peer exchange for a private tracker's torrents, off by default; `network.pex` (master switch) overrides it |
 | `set_limits` | control | yes | `down_limit?`, `up_limit?`, `alt_down_limit?`, `alt_up_limit?` (bytes/s, 0 = unlimited), `alt_speed?` | `limits` in effect; also written to `config.toml` |
-| `reannounce` | control | yes | `ids` | per transfer: trackers with `status` and `not_before` (Unix s), `note` |
+| `reannounce` | control | yes | `ids`, `force` (also past the tracker's minimum interval, once per tracker per 5 min), `wait` (up to 30 s for the answer) | per transfer: trackers with `url` (scheme and host only), `status` (sent / waiting: Seedwell is backing off after N failed tries / deferred: the tracker's minimum interval / forced limit), `not_before` (Unix s), `answer` (with `wait`), `note` |
 | `recheck` | control | yes | `ids` | action |
 | `remove` | control (`delete_files`: full) | yes | `ids`, `delete_files?` | `token`, `expires_in_secs`, `delete_files`, `items[]`, `summary`. **Removes nothing.** |
 | `remove_confirm` | control (full if the plan deletes files) | yes | `token` | `removed[]`, `missing[]`, `files_deleted` |

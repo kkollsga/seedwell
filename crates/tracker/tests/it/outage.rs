@@ -104,7 +104,7 @@ impl Sim {
     fn start_all(&mut self) {
         for ih in self.ihs.clone() {
             // A finished download: pure seeding.
-            self.hub.set_stats(&ih, Stats { uploaded: 0, downloaded: 0, left: 0, size: 1 << 20 }, self.now);
+            self.hub.set_stats(&ih, Stats { uploaded: 0, downloaded: 0, corrupt: 0, left: 0, size: 1 << 20 }, self.now);
             self.hub.set_role(&ih, TorrentRole::Seeding, self.now);
             self.hub.torrent_event(&ih, TorrentEvent::Start, self.now);
         }

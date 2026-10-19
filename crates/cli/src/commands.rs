@@ -324,10 +324,10 @@ pub async fn run(cmd: Cmd, g: &Global) -> R {
         }
         Cmd::Files { sel, set, only } => files(g, sel, set, only).await?,
         Cmd::Goal { sel, goal } => goal_cmd(g, sel, goal).await?,
-        Cmd::Reannounce { sel } => {
+        Cmd::Reannounce { sel, force, wait } => {
             let mut c = connect(g).await?;
             let rows = resolve(&mut c, &sel).await?;
-            reannounce(g, &mut c, &rows, None).await?;
+            reannounce(g, &mut c, &rows, None, force, wait).await?;
         }
         Cmd::Recheck { sel } => {
             let mut c = connect(g).await?;
@@ -394,6 +394,7 @@ pub async fn run(cmd: Cmd, g: &Global) -> R {
             show(g, &raw, || render::trackers(&t));
         }
         Cmd::TrackerLimits { name, down, up } => tracker_limits(g, name, down, up).await?,
+        Cmd::TrackerPex { name, set } => tracker_pex(g, name, set).await?,
         Cmd::Stats { tracker, days } => {
             let mut c = connect(g).await?;
             let (raw, s): (_, TrackerStatsDto) = ask(&mut c, Request::TrackerStats(TrackerStatsParams { tracker, days })).await?;
@@ -596,10 +597,10 @@ async fn goal_cmd(g: &Global, sel: Selection, goal: GoalArgs) -> R {
 }
 
 /// Ask the trackers again; `only_tracker` narrows what is printed (the engine's gate applies to the torrent's trackers together).
-pub async fn reannounce(g: &Global, c: &mut Client, rows: &[TransferDto], only_tracker: Option<&str>) -> R {
+pub async fn reannounce(g: &Global, c: &mut Client, rows: &[TransferDto], only_tracker: Option<&str>, force: bool, wait: bool) -> R {
     let mut v = json!({ "transfers": [] });
     for chunk in rows.chunks(MAX_IDS) {
-        let r = c.call(&Request::Reannounce(IdsParams { ids: ids(chunk) })).await?;
+        let r = c.call(&Request::Reannounce(ReannounceParams { ids: ids(chunk), force, wait })).await?;
         if let (Some(dst), Some(src)) = (v["transfers"].as_array_mut(), r["transfers"].as_array()) {
             dst.extend(src.iter().cloned());
         }
@@ -613,6 +614,43 @@ pub async fn reannounce(g: &Global, c: &mut Client, rows: &[TransferDto], only_t
         }
     }
     show(g, &v, || render::reannounce(&v));
+    Ok(())
+}
+
+/// Show or set peer exchange of a private tracker: a favorite, an automatic tracker (by its domain
+/// or name) or `other-private`.
+async fn tracker_pex(g: &Global, name: String, set: Option<bool>) -> R {
+    let mut c = connect(g).await?;
+    let (_, t): (_, TrackersDto) = ask(&mut c, Request::Trackers(Empty {})).await?;
+    let lower = name.to_lowercase();
+    let all: Vec<(String, String, bool, bool)> = t
+        .profiles
+        .iter()
+        .chain(&t.groups)
+        .map(|p| (p.id.clone(), p.name.clone(), p.private, p.allow_pex))
+        .chain((t.other_private_transfers > 0).then(|| ("other-private".to_owned(), "Other private".to_owned(), true, t.other_private_allow_pex)))
+        .collect();
+    let exact = all.iter().find(|p| p.0.to_lowercase() == lower || p.1.to_lowercase() == lower);
+    let hit = exact.or_else(|| {
+        let m: Vec<_> = all.iter().filter(|p| p.0.to_lowercase().contains(&lower) || p.1.to_lowercase().contains(&lower)).collect();
+        if m.len() == 1 { Some(m[0]) } else { None }
+    });
+    let Some((id, _, private, allowed)) = hit else {
+        let names: Vec<String> = all.iter().filter(|p| p.2).map(|p| format!("{} ({})", p.0, p.1)).collect();
+        return Err(SelectError::NotFound(format!("no private tracker matches `{name}`; private trackers: {}", if names.is_empty() { "none".into() } else { names.join(", ") })).into());
+    };
+    if !private {
+        return Err(SelectError::NotFound(format!("`{id}` is not a private tracker: peer exchange is a setting of private trackers")).into());
+    }
+    let v = match set {
+        None => json!({ "id": id, "private": true, "allow_pex": allowed, "pex_enabled": t.pex_enabled }),
+        Some(allow) => {
+            let mut v = c.call(&Request::SetTrackerPex(SetTrackerPexParams { id: id.clone(), allow })).await?;
+            v["pex_enabled"] = json!(t.pex_enabled);
+            v
+        }
+    };
+    show(g, &v, || render::tracker_pex(&v));
     Ok(())
 }
 

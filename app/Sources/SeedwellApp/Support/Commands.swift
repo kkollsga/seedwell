@@ -135,6 +135,16 @@ indirect enum MenuEntry {
         }
     }
 
+    /// "Announce anyway": also past the tracker's minimum interval (the engine allows one per tracker per 5 minutes).
+    func announceAnyway(_ rows: [TransferRow]) {
+        let out = core.announceAnyway(ids: rows.map(\.id))
+        if out.sent > 0 {
+            playNote("Asked the tracker again.", symbol: "arrow.clockwise")
+        } else if let w = out.waitSecs {
+            playNote("Announcing anyway is limited to once in 5 minutes; try again in \(Fmt.until(w)).", symbol: "clock")
+        }
+    }
+
     func copyMagnet(_ row: TransferRow) {
         guard let link = try? core.magnetLink(id: row.id) else { return }
         NSPasteboard.general.clearContents()

@@ -102,6 +102,8 @@ enum Act {
     Respond(Res),
     DupAnswer(Res),
     Manual,
+    /// "Announce anyway".
+    Force,
     Network,
     Suspend,
 }
@@ -124,10 +126,15 @@ struct Witness {
     wait_after_fail: Duration,
     fail_was_network: bool,
     fail_was_slow: bool,
+    /// The last failure carried a server hint (`Retry-After`, `retry in`): a user's ask respects it.
+    hinted: bool,
     net_earliest: Option<Millis>,
     halted: bool,
     rejected_in_session: bool,
     licence: bool,
+    /// A forced ask was granted (once per 5 min): one announce inside the min interval, 10 s after the last success.
+    force_licence: bool,
+    last_force: Option<Millis>,
     last_attempt: Option<Millis>,
     last_up: u64,
 }
@@ -143,10 +150,13 @@ impl Witness {
             wait_after_fail: Duration::ZERO,
             fail_was_network: false,
             fail_was_slow: false,
+            hinted: false,
             net_earliest: None,
             halted: false,
             rejected_in_session: false,
             licence: false,
+            force_licence: false,
+            last_force: None,
             last_attempt: None,
             last_up: 0,
         }
@@ -245,6 +255,7 @@ impl Sys {
             Input::Stats(Stats {
                 uploaded: 0,
                 downloaded: 0,
+                corrupt: 0,
                 left: if added_complete { 0 } else { 100 },
                 size: 100,
             }),
@@ -322,7 +333,9 @@ impl Sys {
         w.net_earliest = None;
         w.halted = false;
         w.fail_was_slow = false;
+        w.hinted = false;
         w.licence = false;
+        w.force_licence = false;
         match ev {
             Some(Event::Stopped) => {
                 if w.sess == Sess::Stopping {
@@ -441,8 +454,10 @@ impl Sys {
                         .min_interval
                         .unwrap_or(Duration::from_secs(300))
                         .min(t.interval);
-                    if now >= regular || (self.w.licence && now >= at + min_eff) {
+                    let forced = self.w.force_licence && self.w.last_attempt.is_none_or(|a| now >= a + Duration::from_secs(10));
+                    if now >= regular || (self.w.licence && now >= at + min_eff) || forced {
                         self.w.licence = false;
+                        self.w.force_licence = false;
                     } else {
                         self.violation(format!(
                             "non-event announce {}s after success, interval {}s (inv 1)",
@@ -524,6 +539,7 @@ impl Sys {
                         self.w.last_fail = Some(now);
                         self.w.fail_was_network = e.is_network();
                         self.w.fail_was_slow = false;
+                        self.w.hinted = hint.is_some();
                         self.w.net_earliest = None;
                     }
                 },
@@ -562,7 +578,7 @@ impl Model for Model1 {
             Act::Advance(61),
             Act::Advance(1801),
         ]);
-        out.extend([Act::Manual, Act::Network, Act::Suspend]);
+        out.extend([Act::Manual, Act::Force, Act::Network, Act::Suspend]);
         if s.queued.is_some() {
             out.push(Act::Dispatch);
         }
@@ -618,6 +634,7 @@ impl Model for Model1 {
                 s.feed(Input::Stats(Stats {
                     uploaded: s.uploaded,
                     downloaded: 100,
+                    corrupt: 0,
                     left: 0,
                     size: 100,
                 }));
@@ -630,6 +647,7 @@ impl Model for Model1 {
                     Input::Stats(Stats {
                         uploaded: 0,
                         downloaded: 0,
+                        corrupt: 0,
                         left,
                         size: 100,
                     }),
@@ -650,6 +668,8 @@ impl Model for Model1 {
                 s.w.net_earliest = None;
                 s.w.halted = false;
                 s.w.licence = false;
+                s.w.force_licence = false;
+                s.w.last_force = None;
                 s.w.last_up = 0;
                 s.w.rejected_in_session = false;
             }
@@ -680,14 +700,36 @@ impl Model for Model1 {
             Act::Manual => {
                 s.user_retry_reset();
                 s.w.licence = true;
+                // A user's ask beats Seedwell's own backoff, 10 s after the last attempt (a server hint stays).
+                if let (true, false, Some(lf)) = (s.w.fails > 0 && !s.w.fail_was_slow, s.w.hinted, s.w.last_fail) {
+                    let floor = s.w.last_attempt.map_or(lf, |t| t + Duration::from_secs(10));
+                    s.w.net_earliest = Some(floor.max(lf + Duration::from_secs(1)));
+                }
                 s.feed(Input::ManualReannounce);
+            }
+            Act::Force => {
+                // Only an open session grants it, and a halted or slow-failing tracker takes the ask as a plain retry.
+                let eligible = matches!(s.w.sess, Sess::Open { .. }) && !s.stop_requested && !(s.w.halted || s.w.fail_was_slow);
+                s.user_retry_reset();
+                s.w.licence = true;
+                if let (true, false, Some(lf)) = (s.w.fails > 0 && !s.w.fail_was_slow, s.w.hinted, s.w.last_fail) {
+                    let floor = s.w.last_attempt.map_or(lf, |t| t + Duration::from_secs(10));
+                    s.w.net_earliest = Some(floor.max(lf + Duration::from_secs(1)));
+                }
+                // Granted once per five minutes; a second ask inside that is an ordinary ask.
+                if eligible && s.w.last_force.is_none_or(|f| s.now >= f + Duration::from_secs(300)) {
+                    s.w.force_licence = true;
+                    s.w.last_force = Some(s.now);
+                }
+                s.feed(Input::ManualForce);
             }
             Act::Network => {
                 // a network change never licenses an early regular announce
                 if let (true, true, Some(lf)) = (s.w.fails > 0, s.w.fail_was_network, s.w.last_fail)
                 {
                     let floor = s.w.last_attempt.map_or(lf, |t| t + Duration::from_secs(30));
-                    s.w.net_earliest = Some(floor.max(lf + Duration::from_secs(1)));
+                    let at = floor.max(lf + Duration::from_secs(1));
+                    s.w.net_earliest = Some(s.w.net_earliest.map_or(at, |e| e.min(at)));
                 }
                 s.feed(Input::NetworkChanged);
             }

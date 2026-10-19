@@ -70,6 +70,9 @@ struct TrackerInfoPage: View {
     @State private var nowUp: UInt64 = 0
     /// The folders being edited, until saved or reverted (a path typed half way must not move anything).
     @State private var folderDraft: ProfileRecord?
+    /// Peer exchange for this private tracker (SPEC 7B.4) and the master switch in Settings > Network.
+    @State private var pexOn = false
+    @State private var pexMaster = true
 
     var body: some View {
         let e = commands.favorites
@@ -95,6 +98,7 @@ struct TrackerInfoPage: View {
                     TrackerHeader(tracker: tracker, stats: stats, daily: model.daily, down: nowDown, up: nowUp).padding(.horizontal, -10)
                 }
                 factsBlock
+                peerExchange
                 speedLimits(e)
                 downloadLocation(e)
                 addresses(e)
@@ -146,6 +150,39 @@ struct TrackerInfoPage: View {
 
     private func section(_ t: String) -> some View {
         Text(t).font(.system(size: 11, weight: .semibold)).foregroundStyle(.tertiary).textCase(.uppercase)
+    }
+
+    // MARK: Peer exchange
+
+    /// Peer exchange (BEP 11) for a private tracker's torrents: off unless the user allows it, since most private
+    /// trackers forbid it (SPEC 7B.4). The master switch in Settings > Network overrides it.
+    @ViewBuilder private var peerExchange: some View {
+        if tracker.private {
+            let on = Binding<Bool>(get: { pexOn }, set: { setPex($0) })
+            VStack(alignment: .leading, spacing: 7) {
+                section("Peer exchange")
+                HStack(alignment: .firstTextBaseline, spacing: 10) {
+                    Text("Peer exchange (PEX)").font(.system(size: 13))
+                    Spacer(minLength: 12)
+                    Toggle("", isOn: on).labelsHidden().toggleStyle(.switch)
+                        .disabled(!pexMaster)
+                        .help(!pexMaster ? "Peer exchange is off in Settings › Network" : (pexOn ? "On, click to turn off" : "Off, click to turn on"))
+                }
+                if pexMaster {
+                    Text("Only turn this on if the tracker's rules allow peer exchange. Most private trackers forbid it.")
+                        .font(.system(size: 11)).foregroundStyle(.tertiary).fixedSize(horizontal: false, vertical: true)
+                } else {
+                    Text("Peer exchange is off in Settings › Network")
+                        .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+    }
+
+    private func setPex(_ allow: Bool) {
+        let before = pexOn
+        pexOn = allow
+        do { try commands.core.trackerPexSet(trackerId: tracker.id, allow: allow) } catch { pexOn = before }
     }
 
     // MARK: Speed limits
@@ -248,6 +285,8 @@ struct TrackerInfoPage: View {
 
     private func load() {
         commands.favorites.reload()
+        pexOn = commands.core.trackerPexAllowed(trackerId: tracker.id)
+        pexMaster = commands.core.settingsLoad().network.pex
         if !tracker.favorite { hosts = commands.core.trackerHosts(groupId: tracker.id) }
         tally()
         let rows = model.snapshot.allDownloading + model.snapshot.allQueued

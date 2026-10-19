@@ -365,7 +365,7 @@ import os
         refreshHover()
     }
 
-    /// "Sharing 2 torrents · 14 KB/s" (the rate only while uploading), plus "· 1 error" in orange. No badge.
+    /// "Sharing 2 torrents · 14 KB/s" (the rate only while uploading), plus "· 1 error" in the secondary colour (only problems that need the user count). No badge.
     private static func sharingTitle(_ s: Snapshot) -> NSAttributedString {
         var text = "Sharing \(Fmt.count(s.sharingTotal, "torrent"))"
         if s.online, s.upRate > 0 { text += " · \(Fmt.rate(s.upRate))" }
@@ -375,7 +375,7 @@ import os
         }
         if s.errorCount > 0 {
             t.append(NSAttributedString(string: " · \(s.errorCount) error\(s.errorCount == 1 ? "" : "s")",
-                                        attributes: [.foregroundColor: NSColor.systemOrange, .font: NSFont.menuFont(ofSize: 0)]))
+                                        attributes: [.foregroundColor: NSColor.secondaryLabelColor, .font: NSFont.menuFont(ofSize: 0)]))
         }
         return t
     }

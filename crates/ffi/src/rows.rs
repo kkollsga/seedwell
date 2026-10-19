@@ -170,18 +170,21 @@ pub(crate) fn snapshot(
 
     let mut trackers: Vec<TrackerSummary> = favorites
         .iter()
-        .map(|f| TrackerSummary { id: f.id.clone(), name: f.name.clone(), count: 0, favorite: true, hidden: f.hidden, hide_only_seeding: f.hidden && f.hide_only_seeding })
+        .map(|f| TrackerSummary { id: f.id.clone(), name: f.name.clone(), count: 0, favorite: true, hidden: f.hidden, hide_only_seeding: f.hidden && f.hide_only_seeding, private: false })
         .collect();
-    let mut public = TrackerSummary { id: "public".into(), name: "Public".into(), count: 0, favorite: false, hidden: false, hide_only_seeding: false };
-    let mut other_private = TrackerSummary { id: "other-private".into(), name: "Other private".into(), count: 0, favorite: false, hidden: false, hide_only_seeding: false };
+    let mut public = TrackerSummary { id: "public".into(), name: "Public".into(), count: 0, favorite: false, hidden: false, hide_only_seeding: false, private: false };
+    let mut other_private = TrackerSummary { id: "other-private".into(), name: "Other private".into(), count: 0, favorite: false, hidden: false, hide_only_seeding: false, private: true };
     for r in all.iter().filter(|r| r.kind == TransferKind::Torrent) {
         match r.tracker_id.as_str() {
             "public" => public.count += 1,
             "other-private" => other_private.count += 1,
             id => match trackers.iter_mut().find(|t| t.id == id) {
-                Some(t) => t.count += 1,
+                Some(t) => {
+                    t.count += 1;
+                    t.private |= r.is_private;
+                }
                 // An automatically identified tracker exists while it has torrents.
-                None => trackers.push(TrackerSummary { id: id.to_owned(), name: r.tracker_name.clone(), count: 1, favorite: false, hidden: false, hide_only_seeding: false }),
+                None => trackers.push(TrackerSummary { id: id.to_owned(), name: r.tracker_name.clone(), count: 1, favorite: false, hidden: false, hide_only_seeding: false, private: r.is_private }),
             },
         }
     }
@@ -201,7 +204,15 @@ pub(crate) fn snapshot(
         }
     }
     let moving_percent = moving_any.then(|| (moving_done / moving_total).min(100) as u8);
-    let error_count = sharing.error + sharing.dead;
+    // A temporary tracker outage sits in the Error group but waits for nobody: it is not counted.
+    let error_count = all
+        .iter()
+        .filter(|r| is_sharing(r) && !hide.sharing(r) && match r.seed_group {
+            Some(SeedGroup::Dead) => true,
+            Some(SeedGroup::Error) => !r.error_transient,
+            _ => false,
+        })
+        .count() as u32;
     let attention = error_count > 0 || downloading.iter().any(|r| r.awaiting_choice);
     Snapshot {
         down_rate: t.down_rate,
@@ -260,6 +271,7 @@ mod tests {
             retry_in_secs: None,
             moving_percent: None,
             awaiting_choice: false,
+            is_private: false,
             pending: None,
             peers: 0,
             swarm: None,
@@ -271,6 +283,9 @@ mod tests {
             waiting_note: None,
             waiting_is_error: false,
             tracker_halted: false,
+            error_transient: false,
+            retry_attempt: 0,
+            announcing_since_ms: None,
             uploaded_bytes: 0,
             files_done: 0,
             idle_stopped: None,
@@ -358,5 +373,28 @@ mod tests {
         assert_eq!(ids(&s.downloading), ["pub-dl", "h-dl"]);
         assert_eq!(s.sharing_total, 2);
         assert!(s.hidden_downloading.is_empty() && !s.trackers.iter().any(|t| t.hidden));
+    }
+
+    #[test]
+    fn a_temporary_tracker_outage_is_neither_counted_nor_a_reason_for_the_dot() {
+        let mut calm = row("calm", "public", TransferState::Seeding, Some(SeedGroup::Error));
+        calm.error_transient = true;
+        let s = snapshot(&[calm.clone()], Vec::new(), &[], totals());
+        assert_eq!((s.error_count, s.attention), (0, false));
+        assert_eq!(s.sharing.error, 1, "it still sits in the Error group");
+
+        // A disk error, a permanent refusal and a day-old outage (Dead) need the user.
+        let disk = row("disk", "public", TransferState::Seeding, Some(SeedGroup::Error));
+        let dead = row("dead", "public", TransferState::Seeding, Some(SeedGroup::Dead));
+        let s = snapshot(&[calm.clone(), disk], Vec::new(), &[], totals());
+        assert_eq!((s.error_count, s.attention), (1, true));
+        let s = snapshot(&[calm.clone(), dead], Vec::new(), &[], totals());
+        assert_eq!((s.error_count, s.attention), (1, true));
+
+        // A torrent waiting for a choice still asks for attention.
+        let mut held = row("held", "public", TransferState::Queued, None);
+        held.awaiting_choice = true;
+        let s = snapshot(&[calm, held], Vec::new(), &[], totals());
+        assert_eq!((s.error_count, s.attention), (0, true));
     }
 }

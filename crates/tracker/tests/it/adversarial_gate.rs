@@ -25,6 +25,7 @@ fn params(n: u32, ev: Option<Event>) -> AnnounceParams {
         port: 1,
         uploaded: 0,
         downloaded: 0,
+        corrupt: 0,
         left: 5,
         key: 7,
         event: ev,

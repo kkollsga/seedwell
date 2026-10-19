@@ -1,4 +1,5 @@
-//! BEP 11 peer exchange. Never used for private torrents (BEP 27).
+//! BEP 11 peer exchange. Follows one rule (`policy::pex_allowed`): the global switch, and for a
+//! private torrent (BEP 27) also its tracker's `allow_pex`, off by default.
 
 use std::collections::VecDeque;
 use std::net::SocketAddr;
@@ -62,8 +63,24 @@ impl PexLog {
 }
 
 impl Torrent {
+    /// The one PEX rule (`policy::pex_allowed`), as last applied.
     pub(super) fn pex_allowed(&self) -> bool {
-        !self.private && self.cfg.pex_enabled
+        self.ctx.pex.load(Ordering::Relaxed)
+    }
+
+    /// The global switch or the tracker's setting changed: apply the rule at once. Turning it
+    /// off stops sending and using PEX on every connection immediately; turning it on tells the
+    /// connected peers (a new extended handshake) and lets them start receiving ours.
+    pub(super) fn refresh_pex(&mut self) {
+        let now = crate::policy::pex_allowed(self.cfg.pex_enabled, self.private, self.tracker_pex);
+        if self.ctx.pex.swap(now, Ordering::Relaxed) == now {
+            return;
+        }
+        if now {
+            for p in self.peers.values().filter(|p| p.connected) {
+                let _ = p.tx.try_send(PeerCmd::ReadvertiseExt);
+            }
+        }
     }
 
     /// A peer's listening address became known.

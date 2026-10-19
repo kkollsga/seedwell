@@ -202,6 +202,7 @@ fn params(event: Option<Event>) -> AnnounceParams {
         port: 6881,
         uploaded: 0,
         downloaded: 0,
+        corrupt: 0,
         left: 3,
         key: 0xDEADBEEF,
         event,

@@ -114,10 +114,10 @@ pub fn info(d: &DetailDto) -> String {
     }
     let _ = writeln!(
         o,
-        "  speed     down {}, up {}   {} peers ({} seeds){}",
+        "  speed     down {}, up {}   {} ({} seeds){}",
         human::rate(t.down_rate),
         human::rate(t.up_rate),
-        t.peers,
+        peers_text(t.peers, t.peers_known),
         t.seeds,
         t.eta_secs.map_or(String::new(), |e| format!("   eta {}", human::duration(e)))
     );
@@ -259,6 +259,11 @@ pub fn files(d: &DetailDto) -> String {
     o.trim_end().to_owned()
 }
 
+/// `8 / 57 peers`: connected over the peer addresses known; always both numbers.
+pub fn peers_text(connected: u32, known: u32) -> String {
+    format!("{connected} / {} peers", known.max(connected))
+}
+
 /// `seedwell reannounce` / `debug announce`.
 pub fn reannounce(v: &serde_json::Value) -> String {
     let mut s = String::new();
@@ -266,10 +271,11 @@ pub fn reannounce(v: &serde_json::Value) -> String {
         s.push_str(&format!("{}: {}\n", t["name"].as_str().unwrap_or("?"), t["note"].as_str().unwrap_or("")));
         for tr in t["trackers"].as_array().into_iter().flatten() {
             s.push_str(&format!(
-                "  {}  {}{}\n",
+                "  {}  {}{}{}\n",
                 tr["url"].as_str().unwrap_or(""),
                 tr["status"].as_str().unwrap_or(""),
-                tr["not_before"].as_u64().map_or(String::new(), |t| format!("  (not before {})", clock(t)))
+                tr["not_before"].as_u64().map_or(String::new(), |t| format!("  (next allowed {})", clock(t))),
+                tr["answer"].as_str().map_or(String::new(), |a| format!("\n    answer: {a}"))
             ));
         }
     }
@@ -374,15 +380,54 @@ pub fn trackers(t: &TrackersDto) -> String {
             p.sharing,
             human::rate(p.up_rate),
             human::rate(p.down_rate),
-            match (p.down_limit, p.up_limit) {
-                (None, None) => String::new(),
-                (d, u) => format!("  [cap down {}, up {}]", limit(d), limit(u)),
-            },
+            caps_and_pex(p, t.pex_enabled),
             "",
             p.urls.join(", ")
         );
     }
-    let _ = write!(o, "public (no tracker): {}   other private: {}", t.public_transfers, t.other_private_transfers);
+    let _ = write!(
+        o,
+        "public (no tracker): {}   other private: {}{}",
+        t.public_transfers,
+        t.other_private_transfers,
+        pex_tag(t.other_private_transfers > 0, t.other_private_allow_pex, t.pex_enabled)
+    );
+    if !t.pex_enabled {
+        let _ = write!(o, "\nPeer exchange is off in Settings > Network: no torrent uses it, whatever the trackers allow.");
+    }
+    o
+}
+
+fn caps_and_pex(p: &ProfileDto, master: bool) -> String {
+    let caps = match (p.down_limit, p.up_limit) {
+        (None, None) => String::new(),
+        (d, u) => format!("  [cap down {}, up {}]", limit(d), limit(u)),
+    };
+    format!("{caps}{}", pex_tag(p.private, p.allow_pex, master))
+}
+
+/// The peer exchange marker of a private tracker (nothing for a public one).
+fn pex_tag(private: bool, allowed: bool, master: bool) -> String {
+    match (private, allowed, master) {
+        (false, ..) => String::new(),
+        (true, false, _) => "  [peer exchange off]".into(),
+        (true, true, true) => "  [peer exchange allowed]".into(),
+        (true, true, false) => "  [peer exchange allowed, but off in Settings > Network]".into(),
+    }
+}
+
+/// `seedwell tracker <name> pex`.
+pub fn tracker_pex(v: &serde_json::Value) -> String {
+    let id = v["id"].as_str().unwrap_or("?");
+    let allowed = v["allow_pex"].as_bool().unwrap_or(false);
+    let master = v["pex_enabled"].as_bool().unwrap_or(true);
+    let mut o = format!("{id}: peer exchange {}", if allowed { "allowed" } else { "off" });
+    if allowed && !master {
+        o.push_str(" (but off in Settings > Network, so not used)");
+    }
+    if !allowed {
+        o.push_str("\nMost private trackers forbid peer exchange; turn it on only if this tracker's rules allow it.");
+    }
     o
 }
 
@@ -589,4 +634,16 @@ mod common_dir_tests {
 fn lower_first(s: &str) -> String {
     let mut c = s.chars();
     c.next().map_or_else(String::new, |f| f.to_lowercase().chain(c).collect())
+}
+
+#[cfg(test)]
+mod peers_tests {
+    use super::peers_text;
+
+    #[test]
+    fn connected_over_swarm() {
+        assert_eq!(peers_text(8, 57), "8 / 57 peers");
+        assert_eq!(peers_text(0, 0), "0 / 0 peers");
+        assert_eq!(peers_text(5, 3), "5 / 5 peers");
+    }
 }

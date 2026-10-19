@@ -5,8 +5,8 @@
 #   tools/sysguard/heavy.sh cargo test --release -p trs-engine
 #
 # Waits (printing why) while another heavy job holds the lock or memory is at or below MIN_FREE
-# (default 40 %, from kern.memorystatus_level), then runs the command with CARGO_BUILD_JOBS=4 unless
-# the caller set it. The lock is a directory, released when the command exits, even on Ctrl-C.
+# (default 40 %, from kern.memorystatus_level), then runs the command with CARGO_BUILD_JOBS=8 (of 10 cores; the memory gate
+# above is the safety, not a low job count) unless the caller set it. The lock is a directory, released when the command exits, even on Ctrl-C.
 set -uo pipefail
 MIN_FREE="${MIN_FREE:-40}"
 # Machine-specific settings (untracked, optional): HEAVY_LOCK, SYSGUARD_LOG, SYSGUARD_EXTRA.
@@ -14,7 +14,7 @@ LOCAL_ENV="$(dirname "$0")/local.env"
 # shellcheck source=/dev/null
 [ -f "$LOCAL_ENV" ] && . "$LOCAL_ENV"
 LOCK="${HEAVY_LOCK:-${TMPDIR:-/tmp}/seedwell-heavy.lock}"
-export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-4}"
+export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-8}"
 [ $# -gt 0 ] || { echo "usage: heavy.sh <command...>" >&2; exit 2; }
 
 said=""

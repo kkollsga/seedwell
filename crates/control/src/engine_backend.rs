@@ -150,6 +150,7 @@ fn row_dto(r: &TorrentRow) -> TransferDto {
         up_rate: r.up_rate,
         peers: r.peers,
         seeds: r.seeds,
+        peers_known: r.known_peers.max(r.peers),
         eta_secs: r.eta_secs,
         ratio: r.ratio,
         tracker_host: r.tracker_host.clone(),
@@ -158,7 +159,8 @@ fn row_dto(r: &TorrentRow) -> TransferDto {
         private: r.private,
         added_at: r.added_at,
         finished_at: r.finished_at,
-        error: r.error.clone(),
+        // A tracker problem reads as the engine's plain sentence; a disk error stays as it is.
+        error: if r.disk_error.is_none() && r.error.is_some() { r.tracker_detail.clone().or_else(|| r.error.clone()) } else { r.error.clone() },
         save_path: r.save_path.display().to_string(),
         priority: priority_dto(r.priority).into(),
         queue_pos: r.queue_pos,
@@ -593,40 +595,76 @@ impl Backend for EngineBackend {
         self.limits().await
     }
 
-    async fn reannounce(&self, ids: Vec<TransferId>) -> Result<Vec<ReannounceDto>, ApiError> {
-        // The engine answers per tracker from the real min-interval gate: `sent` now, or the
-        // earliest time the tracker may be asked.
-        // What the gate said before this call: a second Ask Again while the first still waits is not sent either.
-        let mut held: Vec<(TransferId, String, u64)> = Vec::new();
+    async fn reannounce(&self, ids: Vec<TransferId>, force: bool, wait: bool) -> Result<Vec<ReannounceDto>, ApiError> {
+        // The engine answers per tracker: `sent` now, or the earliest time the tracker may be asked
+        // and why (Seedwell's own backoff never holds a user's ask back; the tracker's minimum
+        // interval does unless `force`, which is rate limited).
         let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
-        for id in &ids {
-            if let Ok(d) = self.engine.torrent_detail(*id).await {
-                held.extend(d.trackers.iter().filter_map(|t| t.manual_ok_ms.filter(|m| *m > now_ms).map(|m| (*id, t.url.clone(), m))));
-            }
-        }
-        let results = self.engine.reannounce(&ids).await.map_err(err)?;
+        let results = self.engine.reannounce_with(&ids, force).await.map_err(err)?;
         let mut out = Vec::new();
         for id in ids {
-            let d = self.engine.torrent_detail(id).await.map_err(err)?;
-            let trackers: Vec<ReannounceTracker> = results
+            let mut trackers: Vec<ReannounceTracker> = results
                 .iter()
                 .filter(|r| r.id == id)
                 .map(|r| {
-                    let held_until = held.iter().find(|h| h.0 == id && h.1 == r.url_redacted).map(|h| h.2);
-                    let not_before = if r.sent { held_until } else { r.not_before_ms };
+                    // A second ask while the first still waits for its answer is not sent either: the
+                    // tracker's minimum interval (which the first ask started) holds it.
+                    let held = if force { None } else { r.min_interval_until_ms.filter(|_| r.sent) };
+                    let out_now = r.sent && held.is_none();
                     ReannounceTracker {
                         url: r.url_redacted.clone(),
-                        status: if not_before.is_none() { "sent".to_owned() } else { "deferred by the tracker's minimum interval".to_owned() },
-                        not_before: not_before.map(|m| m / 1000),
+                        status: if out_now {
+                            if force { "sent (forced past the tracker's minimum interval)".to_owned() } else { "sent".to_owned() }
+                        } else if let Some(t) = r.force_limited_until_ms {
+                            format!("deferred: forced announces are limited to one per tracker per 5 minutes; allowed at {}", t / 1000)
+                        } else if let Some(n) = r.waiting_after_failures {
+                            format!("waiting: Seedwell is backing off after {n} failed {}", if n == 1 { "try" } else { "tries" })
+                        } else {
+                            "deferred: the tracker asked for a minimum time between announces (--force overrides)".to_owned()
+                        },
+                        not_before: if out_now { None } else { held.or(r.not_before_ms).map(|m| m / 1000) },
+                        answer: None,
                     }
                 })
                 .collect();
+            if wait {
+                // Up to 30 s for the tracker's answer to what was just sent.
+                let urls: Vec<String> = results.iter().filter(|r| r.id == id && r.sent).map(|r| r.url_redacted.clone()).collect();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                let mut answers: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+                while answers.len() < urls.len() && std::time::Instant::now() < deadline {
+                    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                    let Ok(d) = self.engine.torrent_detail(id).await else { break };
+                    for t in &d.trackers {
+                        if !urls.contains(&t.url) || answers.contains_key(&t.url) {
+                            continue;
+                        }
+                        if t.last_success_ms.is_some_and(|m| m >= now_ms) {
+                            let swarm = match (t.seeds, t.leechers) {
+                                (Some(s), Some(l)) => format!(": {s} seeders, {l} leechers"),
+                                _ => String::new(),
+                            };
+                            answers.insert(t.url.clone(), format!("ok{swarm}"));
+                        } else if t.last_announce_ms.is_some_and(|m| m >= now_ms) && t.problem.is_some() {
+                            answers.insert(t.url.clone(), t.problem.clone().unwrap_or_default());
+                        }
+                    }
+                }
+                for tr in &mut trackers {
+                    if let Some(a) = answers.get(&tr.url) {
+                        tr.answer = Some(a.clone());
+                    } else if urls.contains(&tr.url) {
+                        tr.answer = Some("no answer yet (still waiting)".to_owned());
+                    }
+                }
+            }
+            let d = self.engine.torrent_detail(id).await.map_err(err)?;
             let note = if trackers.is_empty() {
                 "no trackers to ask (DHT and peer exchange still run for public torrents)".to_owned()
-            } else if trackers.iter().all(|t| t.not_before.is_none()) {
+            } else if trackers.iter().all(|t| t.status.starts_with("sent")) {
                 "asked every tracker now".to_owned()
             } else {
-                "some trackers were asked recently; the engine asks them again at not_before, never earlier".to_owned()
+                "some trackers could not be asked yet; see each tracker's status and not_before".to_owned()
             };
             out.push(ReannounceDto { id: id_hex(&id), name: d.row.name.clone(), trackers, note });
         }

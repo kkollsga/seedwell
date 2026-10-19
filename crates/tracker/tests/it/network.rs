@@ -149,6 +149,7 @@ async fn debian_netinst_started_then_stopped() {
         Stats {
             uploaded: 0,
             downloaded: 0,
+            corrupt: 0,
             left: meta.size,
             size: meta.size,
         },

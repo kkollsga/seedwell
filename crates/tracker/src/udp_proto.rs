@@ -235,6 +235,7 @@ mod tests {
             port: 6881,
             uploaded: 7,
             downloaded: 8,
+            corrupt: 0,
             left: 9,
             key: 0xCAFEBABE,
             event: Some(Event::Started),

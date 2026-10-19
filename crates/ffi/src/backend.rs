@@ -64,9 +64,10 @@ pub trait Backend: Send + Sync {
     fn set_seeding_goal(&self, ids: &[String], goal: SeedingGoal);
     fn set_rule(&self, ids: &[String], rule: Option<String>);
     fn verify(&self, ids: &[String]);
-    /// Asks the trackers again now (manual re-announce); each tracker's minimum interval still
-    /// applies, so this is never a way to hammer one.
-    fn ask_tracker_again(&self, ids: &[String]) -> crate::types::AskAgainOutcome;
+    /// Asks the trackers again now (manual re-announce). Seedwell's own failure backoff never holds it
+    /// back; each tracker's minimum interval does unless `force` ("Announce anyway", one per tracker
+    /// per 5 minutes), so this is never a way to hammer one.
+    fn ask_tracker_again(&self, ids: &[String], force: bool) -> crate::types::AskAgainOutcome;
     fn pause_all(&self);
     fn resume_all(&self);
     fn clear_recent(&self);

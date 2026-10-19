@@ -83,6 +83,7 @@ async fn permission_matrix_every_method_every_level() {
             Method::SetSeedGoal => json!({"ids": ["aaaaaa"], "ratio": 2.0}),
             Method::SetLimits => json!({"down_limit": 1000}),
             Method::SetTrackerLimits => json!({"id": "nope", "down_limit": 1000}),
+            Method::SetTrackerPex => json!({"id": "nope", "allow": true}),
             Method::Remove => json!({"ids": ["aaaaaa"]}),
             Method::RemoveConfirm => json!({"token": "nope"}),
             Method::TrackerStats => json!({"tracker": "all"}),
@@ -310,6 +311,39 @@ async fn add_validation_and_sources() {
         let e = call(&mut c, "add", bad.clone()).await.unwrap_err();
         assert!(matches!(e.code, ErrorCode::InvalidParams | ErrorCode::Invalid), "{bad}: {e}");
     }
+}
+
+#[tokio::test]
+async fn peer_exchange_is_set_per_private_tracker_and_needs_permission_full() {
+    let mut private = row(0xaa, "Alpha", "seeding");
+    private.private = true;
+    private.tracker_host = "tracker.example.org".into();
+    let public = row(0xbb, "Beta", "seeding");
+    let rig = Rig::with(Permission::Full, ServerOptions::default(), vec![private, public]).await;
+    let mut c = rig.client("claude").await;
+    let t: TrackersDto = serde_json::from_value(call(&mut c, "trackers", json!({})).await.unwrap()).unwrap();
+    let g = t.groups.iter().find(|g| g.id == "example.org").unwrap();
+    assert!((g.private, g.allow_pex) == (true, false), "off by default: {g:?}");
+    assert!(!t.groups.iter().find(|g| g.id == "test").is_some_and(|g| g.private), "the public tracker has no setting");
+    assert!(t.pex_enabled, "the master switch is on by default");
+
+    let v = call(&mut c, "set_tracker_pex", json!({"id": "example.org", "allow": true})).await.unwrap();
+    assert_eq!((v["id"].as_str(), v["allow_pex"].as_bool()), (Some("example.org"), Some(true)));
+    let text = std::fs::read_to_string(rig.state_dir().join("trackers.toml")).unwrap();
+    assert!(text.contains("pex_trackers") && text.contains("example.org"), "{text}");
+    let t: TrackersDto = serde_json::from_value(call(&mut c, "trackers", json!({})).await.unwrap()).unwrap();
+    assert!(t.groups.iter().find(|g| g.id == "example.org").unwrap().allow_pex);
+    call(&mut c, "set_tracker_pex", json!({"id": "example.org", "allow": false})).await.unwrap();
+    let t: TrackersDto = serde_json::from_value(call(&mut c, "trackers", json!({})).await.unwrap()).unwrap();
+    assert!(!t.groups.iter().find(|g| g.id == "example.org").unwrap().allow_pex);
+    // Only private trackers have the setting.
+    for id in ["test", "public", "nope.example", "other-private"] {
+        assert_eq!(call(&mut c, "set_tracker_pex", json!({"id": id, "allow": true})).await.unwrap_err().code, ErrorCode::InvalidParams, "{id}");
+    }
+    // `control` is not enough.
+    let rig = Rig::new(Permission::Control).await;
+    let mut c = rig.client("claude").await;
+    assert_eq!(call(&mut c, "set_tracker_pex", json!({"id": "example.org", "allow": true})).await.unwrap_err().code, ErrorCode::PermissionDenied);
 }
 
 #[tokio::test]

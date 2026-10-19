@@ -129,6 +129,7 @@ fn heap_for(n: usize, shape: Shape, seeding: bool) -> isize {
                 Stats {
                     uploaded: 0,
                     downloaded: 0,
+                    corrupt: 0,
                     left: 0,
                     size: 1 << 20,
                 },
@@ -189,12 +190,12 @@ fn heap_cost_per_torrent_tracker_pair() {
     eprintln!("[memory] seeding pair, shared URL:     {seeding:.0} B");
     eprintln!("[memory] seeding pair, passkey URL:    {seeding_passkey:.0} B");
     assert!(
-        idle <= 260.0,
-        "an idle (torrent, tracker) pair costs {idle:.0} B, budget 260 B"
+        idle <= 268.0,
+        "an idle (torrent, tracker) pair costs {idle:.0} B, budget 268 B"
     );
     assert!(
-        idle3 <= 256.0,
-        "an idle pair of a 3-tracker torrent costs {idle3:.0} B, budget 256 B"
+        idle3 <= 264.0,
+        "an idle pair of a 3-tracker torrent costs {idle3:.0} B, budget 264 B"
     );
     // the passkey URL text (~110 B) is the only thing a distinct URL adds
     assert!(

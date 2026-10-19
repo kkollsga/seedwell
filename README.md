@@ -90,8 +90,8 @@ bash tools/install-local.sh      # installs that build into /Applications and re
 Tests:
 
 ```sh
-cargo test --workspace
-swift test --package-path app
+tools/check.sh           # clippy + tests for the crates a change affects (cargo nextest), the app when needed
+tools/check.sh --full    # everything, as GitHub CI runs it
 ```
 
 Each crate's integration tests build into one binary (`tests/it/`). Only tests that measure the process

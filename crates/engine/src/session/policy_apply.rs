@@ -14,7 +14,21 @@ use crate::organize;
 use crate::policy::{self, PolicyData, ProfileMatch};
 use crate::torrent::{TorrentCmd, TorrentMsg};
 
+/// Whether the tracker of a private torrent allows peer exchange (`trackers.toml`): its
+/// favorite's `allow_pex`, else the automatic tracker's entry (by the primary host's domain, or
+/// "Other private" when there is none).
+fn tracker_allows_pex(pol: &PolicyData, ids: &crate::policy::IdTable, hosts: &[Box<str>], c: &ColdTorrent) -> bool {
+    let profile = ColdTorrent::opt(c.tracker_profile).and_then(|i| ids.get(i));
+    let domain = hosts.get(usize::from(c.host)).filter(|h| !h.is_empty()).map(|h| trs_state::trackers::registrable_domain(h));
+    pol.profiles.allows_pex(profile, domain.as_deref())
+}
+
 impl Session {
+    /// The tracker half of the PEX rule for `c` under the policy now in force.
+    pub(crate) fn tracker_pex_of(&self, c: &ColdTorrent) -> bool {
+        self.sh.policy().is_some_and(|pol| tracker_allows_pex(&pol, &self.ids, &self.hosts, c))
+    }
+
     /// Recompute the rule-derived fields of one torrent. Returns true if anything changed.
     pub(crate) fn apply_policy_to(&mut self, id: TorrentId, pol: &PolicyData) -> bool {
         let Some(e) = self.table.get_mut(&id) else { return false };
@@ -54,6 +68,12 @@ impl Session {
                 let _ = l.tx.try_send(TorrentMsg::Cmd(TorrentCmd::SetUpLimit(c.up_limit())));
             }
             changed = true;
+        }
+        // The tracker's peer exchange setting (private torrents; public ones ignore it).
+        if c.private()
+            && let Some(l) = &e.live
+        {
+            let _ = l.tx.try_send(TorrentMsg::Cmd(TorrentCmd::SetTrackerPex(tracker_allows_pex(pol, &self.ids, &self.hosts, c))));
         }
         // The tracker's shared caps: a live torrent joins, changes or leaves its group.
         if let Some(l) = &e.live {

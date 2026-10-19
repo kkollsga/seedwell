@@ -88,7 +88,7 @@ pub trait Backend: Send + Sync + 'static {
     fn set_limits(&self, patch: SetLimitsParams) -> impl Future<Output = Result<LimitsDto, ApiError>> + Send;
     /// Ask trackers for peers now; the engine's tracker gate enforces the minimum interval and the
     /// answer says when the next announce may happen.
-    fn reannounce(&self, ids: Vec<TransferId>) -> impl Future<Output = Result<Vec<ReannounceDto>, ApiError>> + Send;
+    fn reannounce(&self, ids: Vec<TransferId>, force: bool, wait: bool) -> impl Future<Output = Result<Vec<ReannounceDto>, ApiError>> + Send;
     /// Verify files again.
     fn recheck(&self, ids: Vec<TransferId>) -> impl Future<Output = Result<(), ApiError>> + Send;
     /// Remove transfers, optionally deleting their files.

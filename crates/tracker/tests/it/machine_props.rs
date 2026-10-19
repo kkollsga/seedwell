@@ -154,7 +154,7 @@ proptest! {
             (proptest::collection::vec(res(), 1..5), 0u64..200_000), 1..12),
     ) {
         let mut r = Rig::new();
-        r.input(Input::Stats(Stats { uploaded: 0, downloaded: 0, left: 10, size: 10 }));
+        r.input(Input::Stats(Stats { uploaded: 0, downloaded: 0, corrupt: 0, left: 10, size: 10 }));
         let mut pending = r.input(Input::Torrent(TorrentEvent::Start));
         let mut model = Model::default();
         for (results, wait) in rounds {
@@ -245,7 +245,7 @@ proptest! {
     #[test]
     fn late_success_wins_only_while_nothing_newer_was_sent(delay in 0u64..400, iv in 300u64..5000) {
         let mut r = Rig::new();
-        r.input(Input::Stats(Stats { uploaded: 0, downloaded: 0, left: 10, size: 10 }));
+        r.input(Input::Stats(Stats { uploaded: 0, downloaded: 0, corrupt: 0, left: 10, size: 10 }));
         let first = r.input(Input::Torrent(TorrentEvent::Start)).remove(0);
         r.input(Input::Response { id: first.id, result: Res::Timeout.build() });
         let retry_at = r.m.retry_at().unwrap();
@@ -293,7 +293,7 @@ proptest! {
                 Op::Net => r.input(Input::NetworkChanged),
                 Op::Wake => r.input(Input::Wake),
                 Op::Timer(dt) => { r.now = r.now + Duration::from_secs(dt); r.input(Input::Timer) }
-                Op::Stats(u, d, l, s) => r.input(Input::Stats(Stats { uploaded: u, downloaded: d, left: l, size: s })),
+                Op::Stats(u, d, l, s) => r.input(Input::Stats(Stats { uploaded: u, downloaded: d, corrupt: 0, left: l, size: s })),
                 Op::Respond(k, x) => {
                     let id = outstanding.get(k % outstanding.len().max(1)).copied().unwrap_or(RequestId(k as u64));
                     r.input(Input::Response { id, result: x.build() })

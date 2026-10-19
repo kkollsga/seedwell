@@ -5,10 +5,18 @@ exclude = ["tools/sysguard"]
 
 [workspace.package]
 # The one version of Seedwell: app/build.sh reads it for Info.plist, trs-cli and trs-ffi inherit it (--version, peer id, User-Agent).
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
 rust-version = "1.99"
 license = "MIT OR Apache-2.0"
+
+# Debug and test builds: line tables keep panic locations and backtraces readable; full debug info
+# made every test binary several times larger and every link slow. Dependencies carry none.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
 
 [profile.release]
 lto = "fat"

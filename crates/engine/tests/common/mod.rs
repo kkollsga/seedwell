@@ -1,6 +1,8 @@
 //! Shared test helpers: synthetic torrents, an in-test HTTP tracker, engine launchers.
 #![allow(dead_code)]
 
+pub mod scripted;
+
 use std::collections::HashMap;
 use std::future::Future;
 use std::net::SocketAddr;
@@ -367,6 +369,10 @@ pub struct Announce {
     pub uploaded: u64,
     pub downloaded: u64,
     pub left: u64,
+    /// `corrupt=` when the client sent it (it only does when above zero).
+    pub corrupt: Option<u64>,
+    /// 200, or 503 while the tracker is set to fail (see `MockTracker::set_failing`).
+    pub status: u16,
     pub event: Option<String>,
     pub numwant: Option<u32>,
     pub key: Option<String>,
@@ -375,6 +381,7 @@ pub struct Announce {
 
 #[derive(Default)]
 struct TrackerState {
+    failing: bool,
     log: Vec<Announce>,
     peers: HashMap<Vec<u8>, HashMap<u16, (bool, Instant)>>,
 }
@@ -445,11 +452,20 @@ impl MockTracker {
                         uploaded: q.get("uploaded").and_then(|p| p.parse().ok()).unwrap_or(0),
                         downloaded: q.get("downloaded").and_then(|p| p.parse().ok()).unwrap_or(0),
                         left: q.get("left").and_then(|p| p.parse().ok()).unwrap_or(0),
+                        corrupt: q.get("corrupt").and_then(|p| p.parse().ok()),
+                        status: 200,
                         event: q.get("event").cloned(),
                         numwant: q.get("numwant").and_then(|p| p.parse().ok()),
                         key: q.get("key").cloned(),
                         raw_query: query.clone(),
                     };
+                    let mut a = a;
+                    if st.lock().unwrap().failing {
+                        a.status = 503;
+                        st.lock().unwrap().log.push(a);
+                        let _ = s.write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n").await;
+                        return;
+                    }
                     let (seeds, leech, compact) = {
                         let mut g = st.lock().unwrap();
                         let entry = g.peers.entry(ih.clone()).or_default();
@@ -488,6 +504,11 @@ impl MockTracker {
 
     pub fn url(&self) -> String {
         format!("http://{}/announce", self.addr)
+    }
+
+    /// Answer every announce with `503` (and log it with that status) until set back.
+    pub fn set_failing(&self, failing: bool) {
+        self.state.lock().unwrap().failing = failing;
     }
 
     pub fn log(&self) -> Vec<Announce> {

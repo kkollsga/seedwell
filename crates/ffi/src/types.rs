@@ -104,6 +104,9 @@ pub struct TransferRow {
     pub moving_percent: Option<u8>,
     /// Held until the user chooses what to download (SPEC §7A.6).
     pub awaiting_choice: bool,
+    /// A private torrent (BEP 27).
+    #[uniffi(default = false)]
+    pub is_private: bool,
     /// Held for the grace period before an auto-add starts (SPEC §7A.7): silent on the network, the
     /// countdown belongs to the engine. `state` is `Queued` meanwhile.
     pub pending: Option<PendingStart>,
@@ -127,6 +130,16 @@ pub struct TransferRow {
     pub waiting_is_error: bool,
     /// Every tracker halted on a permanent-looking reason: "Ask Tracker Again" is the way out.
     pub tracker_halted: bool,
+    /// `error` is only a temporary tracker outage (not permanent, younger than a day): shown in the
+    /// secondary colour, no attention dot, not counted in the menu's errors.
+    #[uniffi(default = false)]
+    pub error_transient: bool,
+    /// An announce has been in flight since this unix ms; rows show "Announcing…" after half a second.
+    #[uniffi(default = None)]
+    pub announcing_since_ms: Option<u64>,
+    /// Failed tries in a row while `error_transient` ("retrying in 9 min (attempt 3)").
+    #[uniffi(default = 0)]
+    pub retry_attempt: u32,
     /// Lifetime payload bytes uploaded (the Sharing row's "3 GB uploaded").
     #[uniffi(default = 0)]
     pub uploaded_bytes: u64,
@@ -194,6 +207,10 @@ pub struct TrackerSummary {
     /// With `hidden`: only the sharing side is hidden (downloads, and their notifications, show as usual).
     #[uniffi(default = false)]
     pub hide_only_seeding: bool,
+    /// At least one of its torrents is private: only then does it have a peer exchange setting
+    /// (SPEC §7B.4). Always true for Other private, never for Public.
+    #[uniffi(default = false)]
+    pub private: bool,
 }
 
 /// Lifetime totals of one tracker (SPEC §7E.2); read when its header is shown, not every second.
@@ -300,12 +317,14 @@ pub struct Snapshot {
     pub down_limit: Option<u64>,
     /// The upload limit in effect, bytes/s; `None` = unlimited.
     pub up_limit: Option<u64>,
-    /// Error and Dead torrents (the menu's "· 2 errors").
+    /// Torrents with a problem that needs the user (the menu's "· 2 errors"): Dead, and Error other than a
+    /// temporary tracker outage.
     pub error_count: u32,
     /// Aggregate progress (0..=100) of the moves under way, weighted by size; `None` when no
     /// torrent is being moved (the menu bar icon's green bar).
     pub moving_percent: Option<u8>,
-    /// Something needs the user: an error, a torrent awaiting a choice.
+    /// Something needs the user: an error that needs action, a torrent awaiting a choice (a temporary
+    /// tracker outage does not count).
     pub attention: bool,
     pub listen_port: u16,
     pub connections: u32,
@@ -339,6 +358,23 @@ pub struct RowQuery {
     pub limit: u32,
 }
 
+/// A tracker problem as Get Info explains it. Words from the engine; never an announce URL.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct TrackerProblem {
+    /// The tracker's host ("tracker-z.cc"), empty when not known.
+    pub host: String,
+    /// What is wrong, in a sentence a non-expert understands.
+    pub message: String,
+    /// Unix seconds when it began.
+    pub since: Option<u64>,
+    /// Unix milliseconds of the next try; `None` when Seedwell will not try by itself.
+    pub next_try_ms: Option<u64>,
+    /// Passing (not permanent, under a day): nothing to do.
+    pub temporary: bool,
+    /// A reassuring line when it applies ("Your files are fine. ...").
+    pub reassurance: Option<String>,
+}
+
 /// Details shown in the Get Info popover.
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct TorrentInfo {
@@ -363,7 +399,11 @@ pub struct TorrentInfo {
     pub skipped_note: String,
     pub rule_name: String,
     pub tracker_name: String,
+    /// A disk problem (missing files, a failed write), in words.
     pub error: Option<String>,
+    /// What the trackers said, when they fail or refused (`None` otherwise).
+    #[uniffi(default = None)]
+    pub tracker_problem: Option<TrackerProblem>,
     /// Every tracker halted on a permanent-looking reason ("Ask Tracker Again" applies).
     pub tracker_halted: bool,
     /// The goal is the user's own choice, not the rule's.
@@ -403,6 +443,21 @@ pub struct TrackerLine {
     pub next_announce: Option<u64>,
     pub seeders: Option<u32>,
     pub leechers: Option<u32>,
+    /// How the tracker is doing: `waiting`, `working`, `warning`, `backoff`, `halted`.
+    #[uniffi(default = "waiting")]
+    pub state: String,
+    /// Failed tries in a row.
+    #[uniffi(default = 0)]
+    pub failures: u32,
+    /// Unix seconds at which a failed announce is tried again.
+    #[uniffi(default = None)]
+    pub retry_at: Option<u64>,
+    /// Unix seconds of the last announce the tracker answered.
+    #[uniffi(default = None)]
+    pub last_success: Option<u64>,
+    /// Unix seconds before which an Ask Tracker Again waits (the tracker's minimum interval).
+    #[uniffi(default = None)]
+    pub manual_ok_at: Option<u64>,
 }
 
 /// Seeding goal choices offered in the UI.

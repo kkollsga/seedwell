@@ -314,7 +314,7 @@ struct NetworkTab: View {
             }
             SettingsGroup(title: "Peers") {
                 SettingsRow(label: "DHT", hint: "Public torrents only; always off for private ones") { sw(n.dht) }
-                SettingsRow(label: "Peer exchange", hint: "Public torrents only") { sw(n.pex) }
+                SettingsRow(label: "Peer exchange (PEX)", hint: "Public torrents. Private trackers: off unless allowed on the tracker's page.") { sw(n.pex) }
                 SettingsRow(label: "Encryption", hint: "Peer connections. Require refuses peers that cannot encrypt.") {
                     Picker("", selection: n.encryption) {
                         Text("Off (plain only)").tag(EncryptionSetting.off)

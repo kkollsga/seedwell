@@ -256,7 +256,8 @@ pub struct EngineConfig {
     pub dht_bootstrap: Vec<String>,
     /// Accept loopback/private DHT nodes (tests only).
     pub dht_allow_local: bool,
-    /// Exchange peers with `ut_pex` on public torrents.
+    /// The master switch for `ut_pex` (SPEC 7B.4): public torrents use it when on; private torrents
+    /// additionally need their tracker to allow it (`trackers.toml`). Off = no PEX at all.
     pub pex_enabled: bool,
     /// Peer-wire encryption (`network.encryption`).
     pub encryption: EncryptionPolicy,

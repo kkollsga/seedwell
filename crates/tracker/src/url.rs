@@ -311,9 +311,9 @@ pub fn percent_encode_into(out: &mut String, bytes: &[u8]) {
 }
 
 /// One announce parameter we may send. There is deliberately no variant for
-/// `corrupt`, `redundant`, `no_peer_id`, `supportcrypto` or `ip`: we do not
-/// implement MSE/PE encryption (claiming it would be a lie), and the others are
-/// optional extras the mainstream clients (qBittorrent, Transmission) either omit or trackers ignore.
+/// `redundant`, `no_peer_id` or `ip`: they are optional extras that trackers ignore and
+/// Transmission does not send either. `corrupt` is sent (as Transmission does) only when it is
+/// above zero.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Param {
     /// `info_hash`
@@ -336,6 +336,8 @@ pub enum Param {
     Compact,
     /// `supportcrypto` and, when required, `requirecrypto` (absent when encryption is off)
     Crypto,
+    /// `corrupt`: bytes of pieces that failed their hash check this session (absent when zero)
+    Corrupt,
     /// `event` (absent on regular announces)
     Event,
     /// `trackerid` (only after the tracker sent one)
@@ -357,7 +359,7 @@ pub enum Param {
 /// capture; libtransmission's `announce_url_new` (announcer-http.cc, 4.0.x) writes
 /// `...&compact=1&supportcrypto=1`, then `&requirecrypto=1` when its encryption mode is
 /// "required", then `corrupt`, `event` and `trackerid`, so it sits right after `supportcrypto`.
-pub const PARAM_ORDER: [Param; 14] = [
+pub const PARAM_ORDER: [Param; 15] = [
     Param::InfoHash,
     Param::PeerId,
     Param::Port,
@@ -368,6 +370,7 @@ pub const PARAM_ORDER: [Param; 14] = [
     Param::Key,
     Param::Compact,
     Param::Crypto,
+    Param::Corrupt,
     Param::Event,
     Param::TrackerId,
     Param::Ipv4,
@@ -450,6 +453,13 @@ pub fn build_announce_url(base: &TrackerUrl, p: &AnnounceParams) -> String {
                     push_param(&mut out, first, "requirecrypto", |o| o.push('1'));
                 }
             }
+            Param::Corrupt => {
+                if p.corrupt > 0 {
+                    push_param(&mut out, first, "corrupt", |o| {
+                        let _ = write!(o, "{}", p.corrupt);
+                    });
+                }
+            }
             Param::Event => {
                 if let Some(e) = p.event {
                     push_param(&mut out, first, "event", |o| o.push_str(e.as_str()));
@@ -495,6 +505,7 @@ mod tests {
             port: 6881,
             uploaded: 1,
             downloaded: 2,
+            corrupt: 0,
             left: 3,
             key: 0xDEAD_BEEF,
             event: None,
@@ -691,6 +702,19 @@ mod tests {
     }
 
     #[test]
+    fn corrupt_is_sent_only_when_non_zero_after_crypto_and_before_event() {
+        let base = TrackerUrl::parse("http://t.example/a").unwrap();
+        let mut p = params();
+        p.crypto = Crypto::Require;
+        p.event = Some(Event::Stopped);
+        p.corrupt = 0;
+        assert!(!build_announce_url(&base, &p).contains("corrupt"));
+        p.corrupt = 4_194_304;
+        let url = build_announce_url(&base, &p);
+        assert!(url.contains("&compact=1&supportcrypto=1&requirecrypto=1&corrupt=4194304&event=stopped"), "{url}");
+    }
+
+    #[test]
     fn regular_announce_has_no_event_and_nothing_we_dropped() {
         let base = TrackerUrl::parse("http://t.example/a").unwrap();
         let url = build_announce_url(&base, &params());
@@ -776,6 +800,7 @@ mod tests {
                     port: 6881,
                     uploaded: 0,
                     downloaded: down,
+                    corrupt: 0,
                     left,
                     key: 0x0A1B_2C3D,
                     event: Some(event),

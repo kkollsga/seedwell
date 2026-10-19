@@ -13,7 +13,7 @@ enum Drawing {
     /// Menu bar icon: a down and an up arrow, no text. Each arrow goes from the menu bar's dimmed
     /// grey to green (download) or red (upload) with its transfer rate (`down`/`up` from
     /// [`intensity`]); a faint hairline shows total download progress (`progress`, nil = none); a
-    /// small orange dot in the lower right corner asks for attention. While files are being moved
+    /// small, soft dot (3 pt, a muted orange) in the lower right corner says something waits for the user. While files are being moved
     /// (`moving`, 0...1, aggregate over all moves) the hairline is a green bar instead and shows that. Drawn with dynamic
     /// colours at draw time, so it follows the light/dark menu bar.
     static func statusIcon(down: Double, up: Double, progress: Double?, moving: Double? = nil, attention: Bool) -> NSImage {
@@ -56,11 +56,11 @@ enum Drawing {
             if attention {
                 // Lower right, clear of the arrows; a ring of clear pixels ends the progress hairline
                 // short of it.
-                let dot = NSRect(x: 16, y: 0, width: 4, height: 4)
+                let dot = NSRect(x: 16.5, y: 0.5, width: 3, height: 3)
                 NSGraphicsContext.current?.compositingOperation = .clear
-                NSBezierPath(ovalIn: dot.insetBy(dx: -1.2, dy: -1.2)).fill()
+                NSBezierPath(ovalIn: dot.insetBy(dx: -1, dy: -1)).fill()
                 NSGraphicsContext.current?.compositingOperation = .sourceOver
-                NSColor.systemOrange.setFill()
+                NSColor.systemOrange.withAlphaComponent(0.75).setFill()
                 NSBezierPath(ovalIn: dot).fill()
             }
             return true

@@ -24,6 +24,7 @@ fn params() -> AnnounceParams {
         port: 6881,
         uploaded: 1,
         downloaded: 2,
+        corrupt: 0,
         left: 3,
         key: 0xDEADBEEF,
         event: Some(Event::Started),

@@ -211,6 +211,7 @@ impl<R: Responder> World<R> {
         let mut st = Stats {
             uploaded: t.up,
             downloaded: t.down,
+            corrupt: 0,
             left: t.left,
             size: t.size,
         };

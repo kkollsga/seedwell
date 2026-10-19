@@ -147,15 +147,15 @@ fn manual_reannounce_cannot_shorten_a_backoff() {
         lab.manual(1);
         lab.run_for(d(1));
     }
-    // 30 s after a failure nothing may have been sent (backoff is 60 s+)
+    // A user's ask beats the backoff, but not within 10 s of the last attempt (a double click).
     assert!(
-        lab.sent.len() == n0 || lab.sent[n0].t.0 - last_fail.0 >= 60_000,
-        "manual announce during backoff"
+        lab.sent.len() == n0 || lab.sent[n0].t.0 - last_fail.0 >= 10_000,
+        "manual announce within 10 s of the last attempt"
     );
 }
 
 #[test]
-fn halted_tracker_is_retried_by_manual_at_most_once_a_minute() {
+fn halted_tracker_is_retried_by_manual_at_most_once_in_ten_seconds() {
     let mut lab = Lab::new(always(|| reject("torrent not registered")));
     lab.add(spec(1, &[&[A]]));
     lab.stats(1, 0, 0, 10, 10);
@@ -167,12 +167,12 @@ fn halted_tracker_is_retried_by_manual_at_most_once_a_minute() {
         lab.run_for(d(1));
     }
     assert!(
-        lab.sent.len() <= 12,
+        lab.sent.len() <= 62,
         "{} requests in 10 min of manual mashing",
         lab.sent.len()
     );
     for w in lab.sent.windows(2) {
-        assert!(w[1].t.0 - w[0].t.0 >= 60_000);
+        assert!(w[1].t.0 - w[0].t.0 >= 10_000);
     }
 }
 
@@ -379,6 +379,7 @@ fn bug_gate_bucket_starves_after_forward_excursion() {
         port: 1,
         uploaded: 0,
         downloaded: 0,
+        corrupt: 0,
         left: 5,
         key: 7,
         event: Some(Event::Started),
@@ -471,6 +472,7 @@ fn persisted_hold_from_another_clock_is_capped_to_one_hour() {
             trs_tracker::Stats {
                 uploaded: 0,
                 downloaded: 0,
+                corrupt: 0,
                 left: 5,
                 size: 5,
             },
@@ -513,4 +515,66 @@ fn restart_after_crash_never_starts_before_persisted_min_allowed() {
             (first.t.0 - success_at) / 1000
         );
     }
+}
+
+/// A torrent whose `completed` fails with a 5xx right after `started` succeeded with a 600 s min interval.
+fn failed_completed_lab() -> Lab {
+    let mut failed_once = false;
+    let mut lab = Lab::new(Box::new(move |sent| match sent.p.event {
+        Some(Event::Started) => vec![(d(1), ok(1800, Some(600)))],
+        Some(Event::Completed) if !failed_once => {
+            failed_once = true;
+            vec![(d(1), http_status(503))]
+        }
+        _ => vec![(d(1), ok(1800, Some(600)))],
+    }));
+    lab.add(spec(1, &[&[A]]));
+    lab.stats(1, 0, 0, 10, 10);
+    lab.ev(1, TorrentEvent::Start);
+    lab.run_for(d(5));
+    lab.stats(1, 5, 10, 0, 10);
+    lab.ev(1, TorrentEvent::Complete);
+    lab.run_for(d(5)); // `completed` fails at about t=6
+    lab
+}
+
+#[test]
+fn a_forced_announce_inside_the_min_interval_after_a_failed_completed_does_not_trip_the_audit() {
+    let mut lab = failed_completed_lab();
+    assert_eq!(lab.count_event(1, Some(Event::Completed)), 1);
+    let before = lab.count_event(1, None);
+    lab.run_for(d(20));
+    lab.force(1); // t is about 30 s, the min interval (600 s) is far from over
+    lab.run_for(d(30));
+    // (`Lab` panics when the machine or the gate trips.)
+    assert_eq!(lab.count_event(1, None), before + 1, "the forced announce went out");
+    let last = lab.sent_for(1).into_iter().rfind(|s| s.event().is_none()).unwrap();
+    assert!(last.t.0 < 600_000, "inside the min interval: {:?}", last.t);
+    assert_eq!((last.p.downloaded, last.p.left), (10, 0));
+    // And the tracker keeps working: the regular schedule goes on.
+    lab.run_for(d(2000));
+    assert!(lab.count_event(1, None) >= before + 2, "regular announces continue");
+}
+
+#[test]
+fn a_second_forced_announce_within_five_minutes_is_deferred_not_sent_and_not_tripping() {
+    let mut lab = failed_completed_lab();
+    lab.run_for(d(20));
+    lab.force(1);
+    lab.run_for(d(30));
+    let n = lab.count_event(1, None);
+    for _ in 0..120 {
+        lab.force(1); // two minutes of mashing "Announce anyway"
+        lab.run_for(d(1));
+    }
+    assert_eq!(lab.count_event(1, None), n, "no second early announce inside five minutes (and none by the min interval)");
+    // The ordinary ask is bound by the min interval too.
+    lab.manual(1);
+    lab.run_for(d(10));
+    assert_eq!(lab.count_event(1, None), n);
+    // After the 5 minutes a new forced one is allowed again, still inside the 600 s min interval of the last success.
+    lab.run_for(d(200));
+    lab.force(1);
+    lab.run_for(d(30));
+    assert!(lab.count_event(1, None) <= n + 1);
 }

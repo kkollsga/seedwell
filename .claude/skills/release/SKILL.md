@@ -84,9 +84,9 @@ gh pr list --state open --json number,title,author,headRefName,statusCheckRollup
 1. **Bump** `Cargo.toml` (`Cargo.lock` follows on the next cargo command) and commit on master: `Seedwell X.Y.Z`,
    with the session's attribution trailer.
 2. **Clean tree:** `git status --short` must be empty.
-3. **Clippy locally** (CI runs the full test suite, so don't duplicate it here):
+3. **Check locally** what changed since the last release (GitHub CI runs the full suite, so don't duplicate it):
    ```sh
-   tools/sysguard/heavy.sh cargo clippy --workspace --all-targets --locked -- -D warnings
+   tools/check.sh --base public
    ```
 4. **Build the public commit.** Its message becomes the release notes, so write what changed for users: a title
    plus a short bullet list.

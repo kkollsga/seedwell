@@ -35,7 +35,7 @@ if [ "${SEEDWELL_FAST:-0}" = "1" ]; then
     export CARGO_PROFILE_RELEASE_LTO=off CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16
     echo "    SEEDWELL_FAST: no LTO"
 fi
-export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-4}"
+export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-8}"
 
 echo "==> Rust core (trs-ffi, ${SEEDWELL_PROFILE:-release})"
 (cd "$REPO" && cargo build -p trs-ffi ${CARGO_PROFILE_ARGS[@]+"${CARGO_PROFILE_ARGS[@]}"})

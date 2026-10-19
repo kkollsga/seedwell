@@ -78,11 +78,29 @@ struct InfoCard: View {
 
     // MARK: Sections
 
+    /// What the trackers said, in plain words: what is wrong, which tracker, since when, when Seedwell tries
+    /// again, and (for a passing outage on a finished torrent) that the files are fine. A passing outage
+    /// is plain text; only a refusal that needs the user is red.
+    @ViewBuilder private func trackerProblem(_ p: TrackerProblem) -> some View {
+        InfoRow("Problem") { Text(p.message).foregroundStyle(p.temporary ? Color.primary : Color.red) }
+        if !p.host.isEmpty { InfoRow("Tracker") { Text(p.host) } }
+        if let since = p.since { InfoRow("Since") { Text(Fmt.clockAt(since)) } }
+        if let next = p.nextTryMs {
+            InfoRow("Next try") { Text(Fmt.clockAt(next / 1000)) }
+        } else if !p.temporary {
+            InfoRow("Next try") { Text("Not until you ask the tracker again").foregroundStyle(.secondary) }
+        }
+        if let note = p.reassurance {
+            InfoRow("") { Text(note).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true) }
+        }
+    }
+
     private func general(_ i: TorrentInfo) -> some View {
         InfoSection("General") {
             InfoRow("Title") { Text(row.displayName) }
             if row.name != row.displayName { InfoRow("Release") { Text(row.name).lineLimit(3).truncationMode(.middle) } }
-            if let problem = i.error { InfoRow("Problem") { Text(problem).foregroundStyle(i.trackerHalted ? Color.red : Color.orange) } }
+            if let disk = i.error { InfoRow("Problem") { Text(disk).foregroundStyle(Color.red) } }
+            if let p = i.trackerProblem { trackerProblem(p) }
             InfoRow("Category") { Text(i.category.label) }
             InfoRow("Size") { Text(Fmt.bytes(i.sizeBytes)) }
             InfoRow("State") { Text(Self.stateLabel(i.state)) }
@@ -127,9 +145,10 @@ struct InfoCard: View {
         InfoSection("Peers") {
             InfoRow("Connected") {
                 let leechers = i.peers > i.seedsConnected ? i.peers - i.seedsConnected : 0
-                Text("\(i.peers)") + Text(i.peers > 0 ? " · \(i.seedsConnected) seeds, \(leechers) leechers" : "").foregroundStyle(.secondary)
+                (Text(Fmt.peers(connected: i.peers, known: row.knownPeers)) + Text(i.peers > 0 ? " · \(i.seedsConnected) seeds, \(leechers) leechers" : "").foregroundStyle(.secondary))
+                    .help(Fmt.peersHelp)
             }
-            InfoRow("Tracker swarm") {
+            InfoRow("Swarm (tracker)") {
                 if i.swarmSeeders != nil || i.swarmLeechers != nil {
                     Text("\(i.swarmSeeders.map(String.init) ?? "?") seeders · \(i.swarmLeechers.map(String.init) ?? "?") leechers")
                 } else {
@@ -155,7 +174,8 @@ struct InfoCard: View {
                 }
                 VStack(alignment: .leading, spacing: 12) {
                     ForEach(Array(i.trackers.enumerated()), id: \.offset) { n, t in
-                        TrackerLineView(line: t) { commands.copyTrackerURL(id: row.id, index: UInt32(n)) }
+                        TrackerLineView(line: t, copy: { commands.copyTrackerURL(id: row.id, index: UInt32(n)) },
+                                        announceAnyway: { commands.announceAnyway([row]); reload() })
                     }
                 }
                 .padding(.top, 2)
@@ -289,6 +309,7 @@ private struct InfoRow<Value: View>: View {
 private struct TrackerLineView: View {
     let line: TrackerLine
     let copy: () -> Void
+    let announceAnyway: () -> Void
     @State private var hovering = false
 
     var body: some View {
@@ -307,6 +328,20 @@ private struct TrackerLineView: View {
                     .opacity(hovering ? 1 : 0)
                     .help("Copy URL")
                     .accessibilityLabel("Copy URL")
+            }
+            TimelineView(.periodic(from: .now, by: 1)) { ctx in
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(TrackerLive.text(line, now: ctx.date))
+                    if let ok = TrackerLive.allowedAt(line, now: ctx.date) {
+                        HStack(spacing: 6) {
+                            Text("Tracker allows the next announce at \(Fmt.clockAt(ok, now: ctx.date))")
+                            Button("Announce anyway", action: announceAnyway).buttonStyle(.link).controlSize(.small)
+                                .help("Ask now, ignoring the wait the tracker set. Allowed once per tracker per 5 minutes.")
+                        }
+                    }
+                }
+                .font(.system(size: 11.5)).foregroundStyle(.secondary).monospacedDigit()
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
             Text(detail).font(.system(size: 11.5)).foregroundStyle(.secondary).monospacedDigit()
                 .fixedSize(horizontal: false, vertical: true)

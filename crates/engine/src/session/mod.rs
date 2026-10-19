@@ -55,6 +55,8 @@ pub(crate) enum SessionMsg {
     Exited { id: TorrentId, epoch: u64, info: Option<torrent::ShutdownInfo> },
     TrackerPeers { id: TorrentId, peers: Vec<SocketAddr>, incomplete: Option<u64> },
     /// Seeders and leechers from the tracker's last announce response (for the row's "(4 of 250)").
+    /// An announce left (`Some(since_ms)`) or the last one in flight was answered (`None`).
+    TrackerBusy { id: TorrentId, since_ms: Option<u64> },
     TrackerSwarm { id: TorrentId, seeders: Option<u64>, leechers: Option<u64> },
     DhtPeers { id: TorrentId, peers: Vec<SocketAddr> },
     DetailReady(Box<DetailJob>),
@@ -157,7 +159,7 @@ pub(crate) enum Cmd {
     /// A volume was mounted or unmounted (the app's observers).
     VolumesChanged,
     UpdateConfig(Box<dyn FnOnce(&mut crate::config::EngineConfig) + Send>),
-    Reannounce(Vec<TorrentId>, oneshot::Sender<Vec<ReannounceResult>>),
+    Reannounce(Vec<TorrentId>, bool, oneshot::Sender<Vec<ReannounceResult>>),
     AddPeers(TorrentId, Vec<SocketAddr>),
     NetworkChanged,
     /// The OS path monitor (SPEC 7C.4c).
@@ -295,6 +297,8 @@ pub(crate) struct Session {
     pub tracker_errs: HashMap<TorrentId, TrackerErr>,
     /// Seeders / leechers of each torrent's last tracker response.
     pub swarm: HashMap<TorrentId, (Option<u32>, Option<u32>)>,
+    /// Torrents with an announce in flight, and since when (unix ms).
+    pub announcing: HashMap<TorrentId, u64>,
     pub activity_tick: Option<Instant>,
     /// Peers of torrents the user paused, so that resume redials them at once (bounded; the
     /// persisted cache is written with a delay and is only the fallback after a restart).
@@ -370,6 +374,7 @@ impl Session {
             edge_busy: HashMap::new(),
             tracker_errs: HashMap::new(),
             swarm: HashMap::new(),
+            announcing: HashMap::new(),
             remove_waits: HashMap::new(),
             paused_peers: HashMap::new(),
             activity_tick: None,
@@ -521,6 +526,13 @@ impl Session {
             SessionMsg::Incoming { stream, hs, addr, permit } => self.on_incoming(stream, hs, addr, permit),
             SessionMsg::Torrent { id, epoch, report } => self.on_report(id, epoch, report),
             SessionMsg::Exited { id, epoch, info } => self.on_exited(id, epoch, info),
+            SessionMsg::TrackerBusy { id, since_ms } => {
+                match since_ms {
+                    Some(t) => self.announcing.insert(id, t),
+                    None => self.announcing.remove(&id),
+                };
+                self.sh.emit(EngineEvent::TrackerHealthChanged { id });
+            }
             SessionMsg::TrackerSwarm { id, seeders, leechers } => {
                 let cap = |n: Option<u64>| n.map(|n| n.min(u64::from(u32::MAX)) as u32);
                 self.swarm.insert(id, (cap(seeders), cap(leechers)));

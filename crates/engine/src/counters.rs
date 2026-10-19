@@ -2,11 +2,20 @@
 //!
 //! * **Lifetime** counters never reset; they feed ratio and statistics and are persisted.
 //! * **Session** counters are the lifetime counters minus a base captured at each tracker
-//!   `started` (pause/resume included). That is what `uploaded=`/`downloaded=` carry.
+//!   `started` (pause/resume included). That is what `uploaded=`/`downloaded=`/`corrupt=` carry.
 //! * `left` is exact and independent of `downloaded` (it counts verified bytes only).
 //!
-//! `downloaded` counts every payload byte received, including blocks of pieces that later failed
-//! their hash, as the mainstream clients (qBittorrent, Transmission) do. That rule lives in [`Counters::add_down`] only.
+//! What each counter counts (Transmission's rule, SPEC 7B.2):
+//!
+//! * `downloaded` ([`Counters::add_down`]): the size of a piece that came from peers and passed
+//!   its hash check, added when it passes. Hash-failed data, duplicate blocks and pieces still in
+//!   progress are never in it. It is both what announces carry and the lifetime total behind the
+//!   ratio and the statistics. Rates (the speed shown) are a separate, block-based measure kept by
+//!   the peer tasks and never read from here.
+//! * `corrupt` ([`Counters::add_corrupt`]): the size of a piece whose hash check failed, per
+//!   session (not persisted). Sent on HTTP announces as `corrupt=` when above zero.
+//! * `uploaded` ([`Counters::add_up`]): piece payload bytes the connection actually took from our
+//!   send queue (written to the transport); protocol overhead never counts.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -18,8 +27,9 @@ pub struct Counters {
     down_total: AtomicU64,
     up_base: AtomicU64,
     down_base: AtomicU64,
-    /// Bytes that failed their hash check (lifetime).
+    /// Bytes of pieces that failed their hash check (since the process started).
     corrupt: AtomicU64,
+    corrupt_base: AtomicU64,
     /// Bytes of the torrent not yet verified.
     left: AtomicU64,
     /// Verified bytes of the files the user wants (what the progress of a download measures).
@@ -37,6 +47,10 @@ pub struct CounterSnapshot {
     pub up_base: u64,
     /// Lifetime downloaded at the last `started`.
     pub down_base: u64,
+    /// Corrupt bytes counted since the process started.
+    pub corrupt_total: u64,
+    /// `corrupt_total` at the last `started`.
+    pub corrupt_base: u64,
 }
 
 impl Counters {
@@ -56,20 +70,22 @@ impl Counters {
         let c = Self::restore(s.up_total, s.down_total, left);
         c.up_base.store(s.up_base, Ordering::Relaxed);
         c.down_base.store(s.down_base, Ordering::Relaxed);
+        c.corrupt.store(s.corrupt_total, Ordering::Relaxed);
+        c.corrupt_base.store(s.corrupt_base, Ordering::Relaxed);
         c
     }
 
-    /// Payload bytes received in `piece` messages (hash-failed bytes included).
+    /// A piece from peers passed its hash check: its size is downloaded payload.
     pub fn add_down(&self, n: u64) {
         self.down_total.fetch_add(n, Ordering::Relaxed);
     }
 
-    /// Payload bytes sent in `piece` messages.
+    /// Piece payload bytes written to a peer's connection.
     pub fn add_up(&self, n: u64) {
         self.up_total.fetch_add(n, Ordering::Relaxed);
     }
 
-    /// A piece failed verification.
+    /// A piece failed verification: its size is corrupt payload.
     pub fn add_corrupt(&self, n: u64) {
         self.corrupt.fetch_add(n, Ordering::Relaxed);
     }
@@ -80,6 +96,15 @@ impl Counters {
             .store(self.up_total.load(Ordering::Relaxed), Ordering::Relaxed);
         self.down_base
             .store(self.down_total.load(Ordering::Relaxed), Ordering::Relaxed);
+        self.corrupt_base
+            .store(self.corrupt.load(Ordering::Relaxed), Ordering::Relaxed);
+    }
+
+    /// Corrupt bytes this tracker session.
+    pub fn session_corrupt(&self) -> u64 {
+        self.corrupt
+            .load(Ordering::Relaxed)
+            .saturating_sub(self.corrupt_base.load(Ordering::Relaxed))
     }
 
     /// Verified bytes of the wanted files (never announced; `left` stays the tracker's figure).
@@ -126,7 +151,7 @@ impl Counters {
         self.left.load(Ordering::Relaxed)
     }
 
-    /// Lifetime corrupt bytes.
+    /// Corrupt bytes since the process started.
     pub fn corrupt(&self) -> u64 {
         self.corrupt.load(Ordering::Relaxed)
     }
@@ -138,6 +163,8 @@ impl Counters {
             down_total: self.down_total(),
             up_base: self.up_base.load(Ordering::Relaxed),
             down_base: self.down_base.load(Ordering::Relaxed),
+            corrupt_total: self.corrupt(),
+            corrupt_base: self.corrupt_base.load(Ordering::Relaxed),
         }
     }
 }
@@ -165,12 +192,16 @@ mod tests {
     #[test]
     fn left_is_independent_of_downloaded() {
         let c = Counters::restore(0, 0, 1000);
-        c.add_down(400); // includes 150 bytes of a piece that failed its hash
-        c.add_corrupt(150);
+        c.add_down(250); // one verified piece
+        c.add_corrupt(150); // one piece that failed its hash: not downloaded, not progress
         c.set_left(1000 - 250);
-        assert_eq!(c.session_down(), 400);
+        assert_eq!(c.session_down(), 250);
         assert_eq!(c.left(), 750);
-        assert_eq!(c.corrupt(), 150);
+        assert_eq!((c.corrupt(), c.session_corrupt()), (150, 150));
+        c.begin_session();
+        assert_eq!((c.corrupt(), c.session_corrupt()), (150, 0), "corrupt restarts with each started");
+        c.add_corrupt(5);
+        assert_eq!(c.session_corrupt(), 5);
     }
 
     #[test]

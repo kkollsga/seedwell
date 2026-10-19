@@ -171,6 +171,59 @@ async fn failing_tracker(body: &'static str) -> std::net::SocketAddr {
     addr
 }
 
+/// A tracker that answers 502 until `up` is set, then a normal announce answer.
+async fn flaky_tracker(up: std::sync::Arc<std::sync::atomic::AtomicBool>) -> std::net::SocketAddr {
+    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut s, _)) = l.accept().await else { break };
+            let up = up.clone();
+            tokio::spawn(async move {
+                let mut buf = [0u8; 4096];
+                let _ = s.read(&mut buf).await;
+                let resp = if up.load(std::sync::atomic::Ordering::SeqCst) {
+                    let body = "d8:completei1e10:incompletei0e8:intervali1800e5:peers0:e";
+                    format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
+                } else {
+                    "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_owned()
+                };
+                let _ = s.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+    addr
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_bad_gateway_is_calm_and_its_words_vanish_after_a_successful_retry() {
+    let up = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let addr = flaky_tracker(up.clone()).await;
+    let t = standard_torrent(0, Some(format!("http://{addr}/announce")), false, 861);
+    let n = node(|c| c.trackers_enabled = true).await;
+    t.write_to(n.dir.path());
+    n.h.add_torrent_file(t.bytes.clone(), AddOptions::default()).await.unwrap();
+    let r = wait_for("bad gateway", 30, || async {
+        let r = row_h(&n.h, &t.id).await?;
+        (r.error.as_deref() == Some("Bad gateway")).then_some(r)
+    })
+    .await;
+    assert_eq!(r.tracker_detail.as_deref(), Some("The tracker's server is down or overloaded (it answered 502 Bad Gateway)."));
+    assert!(r.error_transient, "temporary: no attention, no error count");
+    assert!(r.tracker_failures >= 1 && r.next_retry_ms.is_some());
+    // The tracker recovers; the user asks again (a seed would otherwise wait 15 minutes).
+    up.store(true, std::sync::atomic::Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_secs(11)).await;
+    let asked = n.h.reannounce(&[t.id]).await.unwrap();
+    assert!(asked.iter().all(|a| a.sent), "{asked:?}");
+    let r = wait_for("the problem is gone", 30, || async {
+        let r = row_h(&n.h, &t.id).await?;
+        (r.tracker_error.is_none() && r.error.is_none()).then_some(r)
+    })
+    .await;
+    assert!(!r.error_transient && r.tracker_detail.is_none() && r.error_since.is_none(), "nothing tracker-related lingers: {r:?}");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn unreachable_trackers_are_an_error_with_a_retry_time() {
     // Nothing listens on port 1: connection refused is a transport failure.
@@ -183,9 +236,16 @@ async fn unreachable_trackers_are_an_error_with_a_retry_time() {
         (r.seed_group == Some(SeedGroup::Error)).then_some(r)
     })
     .await;
-    assert_eq!(r.error.as_deref(), Some("Tracker unreachable"));
+    assert_eq!(r.error.as_deref(), Some("Can't connect"));
+    assert_eq!(r.tracker_detail.as_deref(), Some("The tracker can't be reached (the connection was refused or failed)."));
+    assert!(r.error_transient, "a passing outage is calm");
     assert!(r.next_retry_ms.is_some_and(|ms| ms > now() * 1000), "a retry is scheduled: {:?}", r.next_retry_ms);
     assert!(r.error_since.is_some());
+    // A user's ask is held by the ten second double-click floor at most, not by the backoff (a seed waits 15 minutes).
+    let asked = n.h.reannounce(&[t.id]).await.unwrap();
+    assert_eq!(asked.len(), 1);
+    assert!(asked[0].waiting_after_failures.is_some(), "labelled as Seedwell's own wait: {asked:?}");
+    assert!(asked[0].not_before_ms.is_some_and(|ms| ms <= now() * 1000 + 11_000), "{asked:?}");
     // Still seeding: the files are fine, so it keeps serving.
     assert!(matches!(r.state, TorrentState::LowPower | TorrentState::Seeding));
     // Pausing and resuming opens a new tracker session and clears the old verdict until it fails again.
@@ -234,8 +294,10 @@ async fn a_download_whose_trackers_halted_says_why_and_may_ask_again_only_once_i
     })
     .await;
     assert_eq!(r.state, TorrentState::Downloading);
-    assert_eq!(r.tracker_error.as_deref(), Some("Tracker: Unregistered torrent"));
-    assert_eq!(r.waiting_note(), Some(RowNote { text: "Tracker: Unregistered torrent".into(), error: true }));
+    assert_eq!(r.tracker_error.as_deref(), Some("Rejected: “Unregistered torrent”"));
+    assert_eq!(r.waiting_note(), Some(RowNote { text: "Rejected: “Unregistered torrent”".into(), error: true }));
+    assert_eq!(r.tracker_detail.as_deref(), Some("The tracker refused this torrent: “Unregistered torrent”."));
+    assert!(!r.error_transient);
 
     // Asking again is allowed, but never twice in a row: the second answer is deferred.
     let _ = n.h.reannounce(&[t.id]).await.unwrap();

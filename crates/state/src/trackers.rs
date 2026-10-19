@@ -36,7 +36,10 @@ use crate::url::{AnnounceUrl, looks_secret, split, strip_default_port};
 pub const TRACKERS_VERSION: u32 = 1;
 /// Ids that stats and rules use for non-profile buckets.
 pub const RESERVED_IDS: [&str; 3] = ["public", "other-private", "all"];
+/// Key of "Other private" (private torrents without a parseable tracker) in `pex_trackers`.
+pub const PEX_OTHER_PRIVATE: &str = "@other-private";
 const MAX_PROFILES: usize = 256;
+const MAX_PEX_TRACKERS: usize = 4096;
 const MAX_URLS: usize = 32;
 const HEADER: &str = "# Tracker profiles. Announce URLs here never contain passkeys: only the host and\n\
 # path pattern are kept (`*` matches one path segment).\n\n";
@@ -254,6 +257,10 @@ pub struct Profile {
     /// downloads show as usual.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub hide_only_seeding: bool,
+    /// Peer exchange (BEP 11) is allowed for this tracker's private torrents (SPEC §7B.4). Off by
+    /// default and absent from the file while off; public torrents are not affected by it.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub allow_pex: bool,
 }
 
 impl Profile {
@@ -441,6 +448,11 @@ pub struct TrackerProfiles {
     /// Profiles in priority order (earlier wins ties).
     #[serde(rename = "tracker", skip_serializing_if = "Vec::is_empty")]
     pub profiles: Vec<Profile>,
+    /// Automatic private trackers (registrable domains, or [`PEX_OTHER_PRIVATE`]) whose private
+    /// torrents may use peer exchange. Favorites carry their own `allow_pex`; a domain a favorite
+    /// covers never stays in this list (the favorite owns the setting).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub pex_trackers: Vec<String>,
     /// Keys this build does not know, preserved when saving.
     #[serde(skip)]
     pub unknown: toml::Table,
@@ -448,7 +460,7 @@ pub struct TrackerProfiles {
 
 impl Default for TrackerProfiles {
     fn default() -> Self {
-        TrackerProfiles { version: TRACKERS_VERSION, profiles: Vec::new(), unknown: toml::Table::new() }
+        TrackerProfiles { version: TRACKERS_VERSION, profiles: Vec::new(), pex_trackers: Vec::new(), unknown: toml::Table::new() }
     }
 }
 
@@ -514,6 +526,11 @@ impl TrackerProfiles {
         }
         if self.profiles.len() > MAX_PROFILES {
             e.push(FieldError::new("tracker", format!("more than {MAX_PROFILES} profiles")));
+        }
+        if self.pex_trackers.len() > MAX_PEX_TRACKERS
+            || self.pex_trackers.iter().any(|k| k.is_empty() || k.len() > 253 || k.chars().any(char::is_control))
+        {
+            e.push(FieldError::new("pex_trackers", "must be domains (1-253 printable characters)"));
         }
         for (i, p) in self.profiles.iter().enumerate() {
             validate_profile(p, &format!("tracker[{i}]"), &mut e);
@@ -682,8 +699,51 @@ impl TrackerProfiles {
             .map(|h| UrlPattern::parse(&host_text(h)).map_err(|e| vec![FieldError::new("urls", e)]))
             .collect::<Result<_, _>>()?;
         let name = if name.trim().is_empty() { auto_name(&uniq[0]) } else { name.trim().chars().take(64).collect() };
-        self.add(Profile { id: id.clone(), name, urls, ..Profile::default() })?;
+        // The automatic tracker's peer exchange setting moves into the favorite.
+        let allow_pex = uniq.iter().any(|h| self.pex_trackers.contains(&registrable_domain(h)));
+        self.add(Profile { id: id.clone(), name, urls, allow_pex, ..Profile::default() })?;
+        self.prune_pex();
         Ok(id)
+    }
+
+    /// Whether peer exchange is allowed for the private torrents of a tracker: the matched
+    /// favorite's `allow_pex`, else the automatic tracker's `domain` (`None` = "Other private")
+    /// listed in `pex_trackers`. The tracker half of the one PEX rule (SPEC §7B.4).
+    pub fn allows_pex(&self, profile: Option<&str>, domain: Option<&str>) -> bool {
+        match profile.and_then(|p| self.get(p)) {
+            Some(p) => p.allow_pex,
+            None => {
+                let key = domain.filter(|d| !d.is_empty()).unwrap_or(PEX_OTHER_PRIVATE);
+                self.pex_trackers.iter().any(|k| k == key)
+            }
+        }
+    }
+
+    /// Allow or forbid peer exchange for a tracker given by its id as the app knows it: a
+    /// favorite's id, an automatic tracker's registrable domain, or `other-private`.
+    pub fn set_pex(&mut self, tracker: &str, allow: bool) -> Result<(), Vec<FieldError>> {
+        if let Some(p) = self.profiles.iter_mut().find(|p| p.id == tracker) {
+            p.allow_pex = allow;
+            return Ok(());
+        }
+        if tracker == "public" || tracker == "all" || tracker == "direct" || tracker.is_empty() {
+            return Err(vec![FieldError::new("tracker", "peer exchange is a setting of private trackers")]);
+        }
+        let key = if tracker == "other-private" { PEX_OTHER_PRIVATE.to_owned() } else { tracker.trim().to_ascii_lowercase() };
+        self.pex_trackers.retain(|k| *k != key);
+        if allow {
+            self.pex_trackers.push(key);
+            self.pex_trackers.sort();
+        }
+        let errs = self.validate();
+        if errs.is_empty() { Ok(()) } else { Err(errs) }
+    }
+
+    /// Drop the automatic-tracker entries of domains a favorite covers: the favorite owns the
+    /// setting (call after the favorites changed).
+    pub fn prune_pex(&mut self) {
+        let owned: Vec<String> = self.profiles.iter().flat_map(|p| p.urls.iter().filter_map(UrlPattern::domain)).collect();
+        self.pex_trackers.retain(|k| !owned.contains(k));
     }
 
     /// Statistics bucket for a torrent.
@@ -1007,6 +1067,49 @@ nickname = "tl!"
         let bad = "[[tracker]]\nid=\"a\"\nname=\"A\"\nurls=[\"x.org\"]\n[tracker.categories.tv]\nfinished_dir=\"relative\"\n";
         let Err(DocError::Invalid { errors, .. }) = TrackerProfiles::parse_str(bad) else { panic!() };
         assert!(errors.iter().any(|e| e.path == "tracker[0].categories.tv.finished_dir"), "{errors:?}");
+    }
+
+    #[test]
+    fn pex_setting_is_off_by_default_and_old_files_load_false() {
+        let old = "[[tracker]]\nid=\"a\"\nname=\"A\"\nurls=[\"x.org\"]\n";
+        let p = TrackerProfiles::parse_str(old).unwrap().value;
+        assert!(!p.get("a").unwrap().allow_pex && p.pex_trackers.is_empty());
+        assert!(!p.allows_pex(Some("a"), Some("x.org")) && !p.allows_pex(None, Some("y.org")) && !p.allows_pex(None, None));
+        let out = p.render().unwrap();
+        assert!(!out.contains("pex"), "off is not written: {out}");
+    }
+
+    #[test]
+    fn pex_setting_round_trips_for_favorites_automatic_and_other_private() {
+        let mut t = set(vec![profile("a", &["tracker.a.org"])]);
+        t.set_pex("a", true).unwrap();
+        t.set_pex("b.org", true).unwrap();
+        t.set_pex("other-private", true).unwrap();
+        assert!(t.set_pex("public", true).is_err());
+        let out = t.render().unwrap();
+        let back = TrackerProfiles::parse_str(&out).unwrap().value;
+        assert_eq!(back, t, "{out}");
+        assert!(back.allows_pex(Some("a"), None));
+        assert!(back.allows_pex(None, Some("b.org")) && !back.allows_pex(None, Some("c.org")));
+        assert!(back.allows_pex(None, None), "other private");
+        // A matched favorite decides alone, whatever the domain list says.
+        let mut t2 = back.clone();
+        t2.set_pex("a", false).unwrap();
+        t2.pex_trackers.push("a.org".into());
+        assert!(!t2.allows_pex(Some("a"), Some("a.org")));
+        t2.set_pex("b.org", false).unwrap();
+        assert!(!t2.allows_pex(None, Some("b.org")));
+    }
+
+    #[test]
+    fn saving_a_favorite_takes_the_automatic_setting_along() {
+        let mut t = TrackerProfiles::default();
+        t.set_pex("example.org", true).unwrap();
+        let id = t.add_favorite("", &["tracker.example.org".to_string()]).unwrap();
+        assert!(t.get(&id).unwrap().allow_pex);
+        assert!(t.pex_trackers.is_empty(), "the favorite owns it now");
+        t.remove(&id);
+        assert!(!t.allows_pex(None, Some("example.org")), "removing the favorite leaves PEX off");
     }
 
     #[test]

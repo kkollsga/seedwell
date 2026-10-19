@@ -72,9 +72,10 @@ pub(crate) enum Health {
     /// At least one tracker answers, or nothing has failed (yet).
     Ok,
     /// Every tracker is failing (not a mere `warning message` or maintenance reason).
-    Failing { reason: String, retry_at_ms: Option<u64> },
+    /// `reason` is the short row text, `detail` the plain sentence (see [`describe_failure`]).
+    Failing { reason: String, detail: String, retry_at_ms: Option<u64>, failures: u32 },
     /// Every tracker halted on a permanent-looking reason (unregistered, banned, bad passkey).
-    Dead { reason: String },
+    Dead { reason: String, detail: String },
 }
 
 /// Commands from the session.
@@ -90,7 +91,7 @@ pub(crate) enum TrackerCmd {
     Complete(TorrentId),
     Remove(TorrentId),
     /// Re-announce now; the reply says, per tracker, what the min-interval gate made of it.
-    Reannounce(TorrentId, oneshot::Sender<Vec<ReannounceResult>>),
+    Reannounce(TorrentId, bool, oneshot::Sender<Vec<ReannounceResult>>),
     SetSize(TorrentId, u64),
     Info(TorrentId, oneshot::Sender<Vec<TrackerInfo>>),
     NetworkChanged,
@@ -136,7 +137,7 @@ enum SlotState {
     Ok,
     /// A warning or a non-permanent `failure reason`: shown, but not an error.
     Warn,
-    Failed { reason: String, retry_at_ms: u64 },
+    Failed { reason: String, detail: String, retry_at_ms: u64, transport: bool },
     Halted(String),
 }
 
@@ -221,6 +222,9 @@ struct Driver {
     traced: bool,
     /// Titles for the log lines.
     titles: HashMap<TorrentId, String>,
+    /// Announces in flight (not `stopped`): ticket -> torrent, and how many per torrent.
+    flight: HashMap<trs_tracker::gate::Ticket, TorrentId>,
+    busy: HashMap<TorrentId, u32>,
 }
 
 /// How long start-up waits for the port mapper before trackers are told the listen port.
@@ -277,6 +281,8 @@ pub(crate) fn spawn(
         numwant,
         crypto: crypto_of(cfg.encryption),
         removing: Vec::new(),
+        flight: HashMap::new(),
+        busy: HashMap::new(),
         stash: Vec::new(),
         ann_port: None,
         settling,
@@ -392,6 +398,11 @@ async fn run(
         d.hub.note_alive(Millis(d.sh.net.alive_ms()));
         let quitting = shutdown.is_some();
         for req in d.hub.tick(now) {
+            if req.event() != Some(trs_tracker::Event::Stopped)
+                && let Some(p) = req.announce_params()
+            {
+                d.flight_started(req.ticket(), p.info_hash, now);
+            }
             let simulated = req.announce_params().is_some_and(|p| d.sh.simulated.lock().unwrap_or_else(|e| e.into_inner()).contains(&p.info_hash));
             let (http, udp, tx, extra) = (if simulated { http_sim.clone() } else { http.clone() }, udp.clone(), done_tx.clone(), extra_tx.clone());
             let ts_ms = now.0;
@@ -506,6 +517,7 @@ async fn run(
             },
             Some((ticket, result, fin)) = done_rx.recv() => {
                 d.hub.complete(ticket, result, clock());
+                d.flight_ended(ticket);
                 if let Some(f) = fin {
                     d.log_finished(ticket, *f);
                 }
@@ -519,6 +531,28 @@ async fn run(
 }
 
 impl Driver {
+    /// An announce left: the torrent's row shows "Announcing…" (the app waits half a second before it does).
+    fn flight_started(&mut self, ticket: trs_tracker::gate::Ticket, id: TorrentId, now: Millis) {
+        self.flight.insert(ticket, id);
+        let n = self.busy.entry(id).or_insert(0);
+        *n += 1;
+        if *n == 1 {
+            let _ = self.sh.session.try_send(SessionMsg::TrackerBusy { id, since_ms: Some(now.0) });
+        }
+    }
+
+    /// Its answer (or failure) arrived; the row's own state follows through `TrackerHealth`.
+    fn flight_ended(&mut self, ticket: trs_tracker::gate::Ticket) {
+        let Some(id) = self.flight.remove(&ticket) else { return };
+        if let Some(n) = self.busy.get_mut(&id) {
+            *n -= 1;
+            if *n == 0 {
+                self.busy.remove(&id);
+                let _ = self.sh.session.try_send(SessionMsg::TrackerBusy { id, since_ms: None });
+            }
+        }
+    }
+
     fn push_stats(&mut self, now: Millis) {
         for (id, t) in &self.torrents {
             if !t.active {
@@ -529,6 +563,7 @@ impl Driver {
                 Stats {
                     uploaded: t.counters.session_up(),
                     downloaded: t.counters.session_down(),
+                corrupt: t.counters.session_corrupt(),
                     left: t.counters.left(),
                     size: t.size,
                 },
@@ -636,6 +671,7 @@ impl Driver {
                 let stats = Stats {
                     uploaded: t.counters.session_up(),
                     downloaded: t.counters.session_down(),
+                corrupt: t.counters.session_corrupt(),
                     left: t.counters.left(),
                     size: t.size,
                 };
@@ -665,7 +701,7 @@ impl Driver {
                         }
                         self.hub.set_stats(
                             &id,
-                            Stats { uploaded: 0, downloaded: 0, left: t.counters.left(), size: t.size },
+                            Stats { uploaded: 0, downloaded: 0, corrupt: 0, left: t.counters.left(), size: t.size },
                             now,
                         );
                         self.hub.torrent_event(&id, TorrentEvent::Start, now);
@@ -680,6 +716,7 @@ impl Driver {
                             Stats {
                                 uploaded: t.counters.session_up(),
                                 downloaded: t.counters.session_down(),
+                corrupt: t.counters.session_corrupt(),
                                 left: t.counters.left(),
                                 size: t.size,
                             },
@@ -695,6 +732,7 @@ impl Driver {
                         Stats {
                             uploaded: t.counters.session_up(),
                             downloaded: t.counters.session_down(),
+                corrupt: t.counters.session_corrupt(),
                             left: 0,
                             size: t.size,
                         },
@@ -712,8 +750,8 @@ impl Driver {
                     }
                 self.pending_removal(id);
             }
-            TrackerCmd::Reannounce(id, reply) => {
-                let _ = reply.send(self.reannounce(id, now));
+            TrackerCmd::Reannounce(id, force, reply) => {
+                let _ = reply.send(self.reannounce(id, force, now));
             }
             TrackerCmd::SetSize(id, size) => {
                 if let Some(t) = self.torrents.get_mut(&id) {
@@ -751,6 +789,7 @@ impl Driver {
                             Stats {
                                 uploaded: t.counters.session_up(),
                                 downloaded: t.counters.session_down(),
+                corrupt: t.counters.session_corrupt(),
                                 left: t.counters.left(),
                                 size: t.size,
                             },
@@ -809,7 +848,7 @@ impl Driver {
                     for (id, t) in self.torrents.iter_mut() {
                         let mut touched = false;
                         for s in t.slots.values_mut() {
-                            if matches!(&s.state, SlotState::Failed { reason, .. } if reason == "Tracker unreachable") {
+                            if matches!(&s.state, SlotState::Failed { transport: true, .. }) {
                                 s.state = SlotState::Unknown;
                                 s.status = "waiting for the network".into();
                                 touched = true;
@@ -999,11 +1038,11 @@ impl Driver {
                         slot.status = format!("announced (warning: {w})");
                     }
                     if response.complete.is_some() || response.incomplete.is_some() {
-                        let _ = self
-                            .sh
-                            .session
-                            .send(SessionMsg::TrackerSwarm { id: r.torrent, seeders: response.complete, leechers: response.incomplete })
-                            .await;
+                        // Several trackers describe one swarm: the largest answer, never the sum.
+                        let (seeders, leechers) = self.torrents.get(&r.torrent).map_or((response.complete, response.incomplete), |t| {
+                            (t.slots.values().filter_map(|s| s.seeds).max(), t.slots.values().filter_map(|s| s.leechers).max())
+                        });
+                        let _ = self.sh.session.send(SessionMsg::TrackerSwarm { id: r.torrent, seeders, leechers }).await;
                     }
                     let peers: Vec<SocketAddr> = response.peers.iter().map(|p| p.addr).collect();
                     if !peers.is_empty() {
@@ -1020,15 +1059,12 @@ impl Driver {
                     slot.state = match &error {
                         // The tracker answered and said something: that is a message, not an outage.
                         trs_tracker::AnnounceError::Rejected { .. } => SlotState::Warn,
-                        trs_tracker::AnnounceError::Transport(_) => {
-                            SlotState::Failed { reason: "Tracker unreachable".into(), retry_at_ms: retry_at.0 }
-                        }
-                        trs_tracker::AnnounceError::Http { status, .. } => {
-                            SlotState::Failed { reason: format!("Tracker answered {status}"), retry_at_ms: retry_at.0 }
-                        }
-                        trs_tracker::AnnounceError::Garbage(_) => {
-                            SlotState::Failed { reason: "Tracker sent an unreadable answer".into(), retry_at_ms: retry_at.0 }
-                        }
+                        _ => SlotState::Failed {
+                            reason: short_failure(&error),
+                            detail: describe_failure(&error),
+                            retry_at_ms: retry_at.0,
+                            transport: matches!(error, trs_tracker::AnnounceError::Transport(_)),
+                        },
                     };
                 }
                 Report::Halted { reason } => {
@@ -1053,8 +1089,21 @@ impl Driver {
 
     /// Ask the hub for a manual re-announce and report, per tracker, whether the gate lets it
     /// through now or defers it (`ManualDeferred`: min interval, backoff).
-    fn reannounce(&mut self, id: TorrentId, now: Millis) -> Vec<ReannounceResult> {
-        self.hub.manual_reannounce(&id, now);
+    fn reannounce(&mut self, id: TorrentId, force: bool, now: Millis) -> Vec<ReannounceResult> {
+        // Slots where a forced announce is rate limited (asked less than 5 minutes ago).
+        let limited: HashMap<u16, u64> = if force {
+            self.hub
+                .set(&id)
+                .map(|set| (0..set.len() as u16).filter_map(|i| set.machine(i)?.force_allowed_at().filter(|t| t.0 > now.0).map(|t| (i, t.0))).collect())
+                .unwrap_or_default()
+        } else {
+            HashMap::new()
+        };
+        if force {
+            self.hub.manual_reannounce_forced(&id, now);
+        } else {
+            self.hub.manual_reannounce(&id, now);
+        }
         let mut deferred: HashMap<u16, u64> = HashMap::new();
         for r in self.hub.take_reports() {
             match (&r.report, r.torrent == id) {
@@ -1078,7 +1127,20 @@ impl Driver {
                     .get(&slot)
                     .copied()
                     .or_else(|| set.machine(slot).and_then(|m| m.retry_at()).map(|t| t.0).filter(|t| *t > now.0));
-                out.push(ReannounceResult { id, url_redacted: url.to_string(), sent: until.is_none(), not_before_ms: until });
+                // Our own backoff, not the tracker's minimum interval, when the retry is what holds it.
+                let backoff = set
+                    .machine(slot)
+                    .filter(|m| m.failures() > 0 && m.retry_at().is_some_and(|t| t.0 > now.0 && Some(t.0) == until))
+                    .map(|m| m.failures());
+                out.push(ReannounceResult {
+                    id,
+                    url_redacted: url.to_string(),
+                    sent: until.is_none(),
+                    not_before_ms: until,
+                    waiting_after_failures: backoff,
+                    force_limited_until_ms: limited.get(&slot).copied().filter(|_| until.is_some()),
+                    min_interval_until_ms: set.machine(slot).and_then(|m| m.manual_ok_at()).map(|t| t.0).filter(|t| *t > now.0),
+                });
             }
         }
         out
@@ -1096,16 +1158,24 @@ impl Driver {
             Health::Ok
         } else if states.iter().all(|s| matches!(s, SlotState::Halted(_))) {
             match states.first() {
-                Some(SlotState::Halted(r)) => Health::Dead { reason: format!("Tracker: {}", sentence_case(r)) },
+                Some(SlotState::Halted(r)) => Health::Dead { reason: short_refused(r), detail: tracker_refused(r) },
                 _ => Health::Ok,
             }
         } else {
             let retry = states.iter().filter_map(|s| if let SlotState::Failed { retry_at_ms, .. } = s { Some(*retry_at_ms) } else { None }).min();
+            let detail = states
+                .iter()
+                .find_map(|s| if let SlotState::Failed { detail, .. } = s { Some(detail.clone()) } else { None })
+                .unwrap_or_else(|| describe_failure(&trs_tracker::AnnounceError::Transport(trs_tracker::TransportError::Io)));
             let reason = states
                 .iter()
                 .find_map(|s| if let SlotState::Failed { reason, .. } = s { Some(reason.clone()) } else { None })
-                .unwrap_or_else(|| "Tracker unreachable".into());
-            Health::Failing { reason, retry_at_ms: retry }
+                .unwrap_or_else(|| FAILING_SHORT.to_owned());
+            let failures = self
+                .hub
+                .set(&id)
+                .map_or(0, |set| (0..set.len() as u16).filter_map(|i| set.machine(i)).map(|m| m.failures()).max().unwrap_or(0));
+            Health::Failing { reason, detail, retry_at_ms: retry, failures }
         };
         if health != t.health {
             t.health = health.clone();
@@ -1156,6 +1226,11 @@ impl Driver {
                     },
                     manual_ok_ms: manual_ok.map(|m| m.0),
                     tripped,
+                    problem: match &st.state {
+                        SlotState::Failed { detail, .. } => Some(detail.clone()),
+                        SlotState::Halted(r) => Some(tracker_refused(r)),
+                        _ => None,
+                    },
                 });
             }
         }
@@ -1221,6 +1296,100 @@ mod fold_tests {
     }
 }
 
+/// The short row text of a tracker outage ("Tracker not responding · next try 22:29").
+pub(crate) const FAILING_SHORT: &str = "Tracker not responding";
+
+/// The short cause a row shows before "· retrying in 9 min": "Bad gateway", "Timed out", "Can't connect".
+pub(crate) fn short_failure(e: &trs_tracker::AnnounceError) -> String {
+    use trs_tracker::{AnnounceError as A, TransportError as T};
+    match e {
+        A::Rejected { reason, .. } => short_refused(reason),
+        A::Http { status, .. } => match *status {
+            502 => "Bad gateway".into(),
+            503 => "Service unavailable".into(),
+            504 => "Gateway timeout".into(),
+            429 => "Too many requests".into(),
+            500..=599 => format!("Server error {status}"),
+            s => format!("Tracker answered {s}"),
+        },
+        A::Garbage(_) => "Unreadable answer".into(),
+        A::Transport(t) => match t {
+            T::Timeout | T::ConnectTimeout => "Timed out".into(),
+            T::Dns => "Can't find the tracker".into(),
+            T::Tls => "Secure connection failed".into(),
+            T::Io => "Connection dropped".into(),
+            T::TooLarge => "Answer too big".into(),
+            T::Connect | T::Forbidden | T::NotSent | T::Redirect => "Can't connect".into(),
+        },
+    }
+}
+
+/// `Rejected: “Unregistered torrent”`: the tracker's own words on a row.
+pub(crate) fn short_refused(reason: &str) -> String {
+    let r = sentence_case(reason);
+    format!("Rejected: “{}”", r.trim_end_matches(['.', '!']))
+}
+
+/// A tracker that refused the torrent, in its own words: `The tracker refused this torrent:
+/// “Unregistered torrent”.` The reason is what the tracker sent (never the announce URL).
+pub(crate) fn tracker_refused(reason: &str) -> String {
+    let r = sentence_case(reason);
+    let r = r.trim_end_matches(['.', '!']);
+    format!("The tracker refused this torrent: “{r}”.")
+}
+
+/// The standard phrase of an HTTP status ("Bad Gateway").
+fn status_phrase(status: u16) -> &'static str {
+    match status {
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
+        404 => "Not Found",
+        410 => "Gone",
+        429 => "Too Many Requests",
+        500 => "Internal Server Error",
+        501 => "Not Implemented",
+        502 => "Bad Gateway",
+        503 => "Service Unavailable",
+        504 => "Gateway Timeout",
+        520..=527 => "Web Server Error",
+        _ => "",
+    }
+}
+
+/// What went wrong with an announce, in plain language for a person who does not know what a
+/// tracker is: one sentence, with the short technical cause in brackets. The one place these
+/// words are made (the app and the CLI both show them). Never contains the announce URL or the
+/// passkey: only the status and the tracker's own `failure reason`.
+pub(crate) fn describe_failure(e: &trs_tracker::AnnounceError) -> String {
+    use trs_tracker::{AnnounceError as A, TransportError as T};
+    match e {
+        A::Rejected { reason, .. } => tracker_refused(reason),
+        A::Http { status, .. } => {
+            let phrase = status_phrase(*status);
+            let answered = if phrase.is_empty() { format!("it answered {status}") } else { format!("it answered {status} {phrase}") };
+            match *status {
+                429 => format!("The tracker asks Seedwell to slow down ({answered})."),
+                500..=599 => format!("The tracker's server is down or overloaded ({answered})."),
+                400..=499 => format!("The tracker turned the request down ({answered})."),
+                _ => format!("The tracker answered in a way Seedwell doesn't expect ({answered})."),
+            }
+        }
+        A::Garbage(_) => "The tracker sent an answer Seedwell couldn't read.".into(),
+        A::Transport(t) => match t {
+            T::Timeout | T::ConnectTimeout => "The tracker can't be reached (it didn't answer in time).".into(),
+            T::Dns => "The tracker can't be reached (its address couldn't be looked up).".into(),
+            T::Connect => "The tracker can't be reached (the connection was refused or failed).".into(),
+            T::Tls => "The tracker can't be reached (a secure connection couldn't be set up).".into(),
+            T::Forbidden => "The tracker can't be reached (Seedwell isn't allowed to contact that address).".into(),
+            T::NotSent => "The tracker can't be reached (Seedwell couldn't send the request).".into(),
+            T::Io => "The tracker can't be reached (the connection broke).".into(),
+            T::Redirect => "The tracker can't be reached (it sent Seedwell somewhere it won't follow).".into(),
+            T::TooLarge => "The tracker sent an answer that was too big to use.".into(),
+        },
+    }
+}
+
 /// "unregistered torrent" -> "Unregistered torrent" (trackers write their reasons in lower case).
 fn sentence_case(s: &str) -> String {
     let s = s.trim();
@@ -1228,5 +1397,51 @@ fn sentence_case(s: &str) -> String {
     match c.next() {
         Some(f) => f.to_uppercase().chain(c).collect(),
         None => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod words_tests {
+    use super::*;
+    use trs_tracker::{AnnounceError as A, TransportError as T};
+
+    #[test]
+    fn a_server_error_says_the_server_is_down() {
+        let m = describe_failure(&A::Http { status: 502, retry_after: None });
+        assert_eq!(m, "The tracker's server is down or overloaded (it answered 502 Bad Gateway).");
+        assert!(describe_failure(&A::Http { status: 503, retry_after: None }).contains("503 Service Unavailable"));
+        assert!(describe_failure(&A::Http { status: 599, retry_after: None }).starts_with("The tracker's server is down"));
+    }
+
+    #[test]
+    fn a_client_error_says_the_tracker_turned_the_request_down() {
+        assert_eq!(describe_failure(&A::Http { status: 403, retry_after: None }), "The tracker turned the request down (it answered 403 Forbidden).");
+        assert!(describe_failure(&A::Http { status: 429, retry_after: None }).starts_with("The tracker asks Seedwell to slow down"));
+    }
+
+    #[test]
+    fn unreachable_trackers_say_so_with_the_short_cause() {
+        assert_eq!(describe_failure(&A::Transport(T::Timeout)), "The tracker can't be reached (it didn't answer in time).");
+        assert_eq!(describe_failure(&A::Transport(T::Connect)), "The tracker can't be reached (the connection was refused or failed).");
+        assert_eq!(describe_failure(&A::Transport(T::Dns)), "The tracker can't be reached (its address couldn't be looked up).");
+        assert_eq!(describe_failure(&A::Garbage(trs_tracker::response::ParseError::NotBencode)), "The tracker sent an answer Seedwell couldn't read.");
+    }
+
+    #[test]
+    fn rows_get_a_short_cause() {
+        assert_eq!(short_failure(&A::Http { status: 502, retry_after: None }), "Bad gateway");
+        assert_eq!(short_failure(&A::Http { status: 503, retry_after: None }), "Service unavailable");
+        assert_eq!(short_failure(&A::Http { status: 504, retry_after: None }), "Gateway timeout");
+        assert_eq!(short_failure(&A::Http { status: 500, retry_after: None }), "Server error 500");
+        assert_eq!(short_failure(&A::Transport(T::Timeout)), "Timed out");
+        assert_eq!(short_failure(&A::Transport(T::Connect)), "Can't connect");
+        assert_eq!(short_refused("unregistered torrent"), "Rejected: “Unregistered torrent”");
+    }
+
+    #[test]
+    fn the_trackers_own_words_are_quoted() {
+        let reject = A::Rejected { reason: "unregistered torrent".into(), retry_in: None };
+        assert_eq!(describe_failure(&reject), "The tracker refused this torrent: “Unregistered torrent”.");
+        assert_eq!(tracker_refused("Banned client!"), "The tracker refused this torrent: “Banned client”.");
     }
 }

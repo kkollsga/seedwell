@@ -464,6 +464,20 @@ pub struct IdsParams {
     pub ids: Vec<String>,
 }
 
+/// `reannounce`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReannounceParams {
+    /// Ids (40 hex characters, or unique prefixes of at least 6).
+    pub ids: Vec<String>,
+    /// Also override the tracker's minimum interval (once per tracker per 5 minutes).
+    #[serde(default)]
+    pub force: bool,
+    /// Wait up to 30 s for the tracker's answer and report it.
+    #[serde(default)]
+    pub wait: bool,
+}
+
 /// `set_priority`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -573,6 +587,17 @@ pub struct SetLimitsParams {
     /// Switch alternative ("Limit Speed") limits on or off.
     #[serde(default)]
     pub alt_speed: Option<bool>,
+}
+
+/// `set_tracker_pex`: allow or forbid peer exchange (BEP 11) for the private torrents of a tracker.
+/// Off by default; the master switch (Settings > Network, `network.pex`) overrides it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetTrackerPexParams {
+    /// A favorite's id, an automatic tracker's domain, or `other-private` (`trackers` lists them).
+    pub id: String,
+    /// Allow (`true`) or forbid (`false`).
+    pub allow: bool,
 }
 
 /// `set_tracker_limits`: the shared speed caps of a favorite tracker; absent fields are
@@ -936,8 +961,10 @@ methods! {
     SetLimits(SetLimitsParams) = "set_limits", Control, true;
     /// Shared download / upload caps of a favorite tracker.
     SetTrackerLimits(SetTrackerLimitsParams) = "set_tracker_limits", Control, true;
+    /// Peer exchange for a private tracker's torrents.
+    SetTrackerPex(SetTrackerPexParams) = "set_tracker_pex", Full, true;
     /// Ask the trackers for peers now (the engine enforces the tracker's minimum interval).
-    Reannounce(IdsParams) = "reannounce", Control, true;
+    Reannounce(ReannounceParams) = "reannounce", Control, true;
     /// Verify files again.
     Recheck(IdsParams) = "recheck", Control, true;
     /// Step 1 of removal: returns a plan and a confirmation token.

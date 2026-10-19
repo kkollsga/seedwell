@@ -66,8 +66,8 @@ the epoch sender and the hint channel. A torrent without metadata or not yet `Ho
 * Reuse the endgame cancel code for the arrival: generalise the condition at `events.rs:577` from
   `pk.in_endgame()` to `pk.in_endgame() || pk.is_urgent_piece(piece)` so the other peers' in-flight copies
   of that block are cancelled the moment one copy arrives.
-* Hash-failed bytes still count as downloaded (ENGINE.md 6); duplicates that arrive before the cancel are
-  counted as received payload like endgame duplicates today (stats rules unchanged).
+* `downloaded` counts verified pieces only (SPEC 7B.2), so duplicates that arrive before the cancel and
+  hash-failed bytes never reach the tracker's counters (they show in the speed only).
 * Keep the total duplicate overhead bounded: only blocks of pieces within the urgent window of a live
   stream, so at 6 MB/s it is a few MB per seek, not a permanent 2x.
 

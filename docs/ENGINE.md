@@ -66,7 +66,7 @@ Transitions:
 
 ## 6. Correct stats (SPEC §7B.2)
 - `uploaded`/`downloaded` count payload bytes only: piece message payloads.
-- Hash-failed bytes count as downloaded, matching the reference clients. Confirm this against a packet capture of the reference clients and keep it in one place.
+- `downloaded` is the size of each piece that passed its hash check (Transmission's rule, verified against its source); hash-failed bytes go to `corrupt=` instead (HTTP, only when non-zero); `uploaded` is piece payload written to the socket. One place each: `piece_verified`, `piece_failed`, `credit_written`.
 - `left` = bytes of the whole torrent not yet verified. Data for unwanted files still counts as left, matching reference clients; confirm against the captures.
 - Session counters reset on each new `started`, as the tracker expects. Lifetime counters (for ratio and stats) are separate and persisted.
 

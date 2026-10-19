@@ -29,6 +29,8 @@ struct KeyState {
     last_success: Option<(Millis, Timing)>,
     manual_licence: bool,
     net_earliest: Option<Millis>,
+    /// The host of the last request (a sibling's success on it may pull a retry forward).
+    host: Option<String>,
     fails: u32,
     /// The failure state before each of the latest failures (newest last), so that an outage can
     /// take back exactly the failures inside its window. An entry is valid only while
@@ -58,6 +60,7 @@ impl KeyState {
         KeyState {
             sess: Sess::Closed,
             completed: 0,
+            host: None,
             last_up: 0,
             last_down: 0,
             ident: None,
@@ -421,6 +424,11 @@ impl Oracle {
                         ks.last_fail_slow = false;
                     }
                     ks.halted = false;
+                    // A user's ask beats Seedwell's own backoff: 10 s after the last attempt.
+                    if let (true, Some(lf)) = (ks.fails > 0 && !ks.last_fail_slow, ks.last_fail) {
+                        let floor = ks.last_attempt.map_or(lf, |t| t + Duration::from_secs(10));
+                        ks.net_earliest = Some(floor.max(lf + Duration::from_secs(1)));
+                    }
                     // a user retry after a halt waits at least the floor; the
                     // machine tracks that itself, the wire rule below covers it
                 }
@@ -432,8 +440,10 @@ impl Oracle {
                     {
                         // A network change may shorten a network-class backoff,
                         // but never below 30 s after the previous attempt.
+                        // (A user's earlier ask may already have licensed an earlier retry; that stays.)
                         let floor = ks.last_attempt.map_or(lf, |t| t + Duration::from_secs(30));
-                        ks.net_earliest = Some(floor.max(lf + Duration::from_secs(1)));
+                        let at = floor.max(lf + Duration::from_secs(1));
+                        ks.net_earliest = Some(ks.net_earliest.map_or(at, |e| e.min(at)));
                     }
                 }
                 User::StartOrResume => {
@@ -528,6 +538,7 @@ impl Oracle {
         let size = self.sizes.get(&ih).copied().unwrap_or(u64::MAX);
         let added_complete = self.added_complete.contains(&ih);
         let ks = self.keys.entry((ih, slot)).or_insert_with(KeyState::new);
+        ks.host = Some(host.to_owned());
         // inv 5: one in flight per (torrent, tracker)
         if let Some((_, d, _)) = ks.in_flight
             && d > now {
@@ -764,6 +775,8 @@ impl Oracle {
                 && rseq == seq && event != Some(Event::Stopped) {
                     undo.restore(ks);
                     Self::apply_success(ks, now, event, *t);
+                    let h = ks.host.clone();
+                    self.license_siblings(h, ih, slot);
                 }
             return;
         }
@@ -779,6 +792,7 @@ impl Oracle {
                 ks.completed = ks.completed.saturating_sub(1);
             }
         }
+        let recovered_host = if result.is_ok() && event != Some(Event::Stopped) { ks.host.clone() } else { None };
         match result {
             Ok(t) => Self::apply_success(ks, now, event, *t),
             Err(e) => {
@@ -787,6 +801,22 @@ impl Oracle {
                 if !already_resolved && event != Some(Event::Stopped) && !(offline && e.is_network()) {
                     Self::record_failure(ks, now, e);
                 }
+            }
+        }
+        // A success on a host pulls forward the siblings waiting after a failure on it: 5 s at the
+        // earliest, and never within 30 s of their own failure.
+        self.license_siblings(recovered_host, ih, slot);
+    }
+
+    /// A success on a host may pull the retries of its siblings forward (never within 30 s of their failure).
+    fn license_siblings(&mut self, host: Option<String>, ih: InfoHash20, slot: u16) {
+        let Some(h) = host else { return };
+        for ((i, s), other) in self.keys.iter_mut() {
+            if (*i, *s) != (ih, slot) && other.host.as_deref() == Some(&h) && other.fails > 0 && !other.last_fail_slow && !other.halted
+                && let Some(lf) = other.last_fail
+            {
+                let t = lf + Duration::from_secs(30);
+                other.net_earliest = Some(other.net_earliest.map_or(t, |e| e.min(t)));
             }
         }
     }

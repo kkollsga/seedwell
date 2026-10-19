@@ -213,7 +213,8 @@ pub struct DirectRecord {
 pub struct LifetimeCounters {
     /// Payload bytes uploaded, ever.
     pub uploaded: u64,
-    /// Payload bytes downloaded, ever (hash-failed bytes included).
+    /// Payload bytes downloaded, ever: verified pieces only. Totals stored by earlier builds also
+    /// include hash-failed bytes (the format is unchanged; old figures stay as they were).
     pub downloaded: u64,
     /// Seconds spent seeding, ever.
     pub seeded_secs: u64,

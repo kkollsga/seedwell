@@ -20,6 +20,7 @@ fn announce_params() -> AnnounceParams {
         port: 1,
         uploaded: 0,
         downloaded: 0,
+        corrupt: 0,
         left: 10,
         key: 5,
         event: Some(Event::Started),
@@ -227,6 +228,7 @@ fn hub_gate_and_report_debug_output_never_contain_the_passkey() {
         trs_tracker::Stats {
             uploaded: 0,
             downloaded: 0,
+            corrupt: 0,
             left: 1,
             size: 1,
         },

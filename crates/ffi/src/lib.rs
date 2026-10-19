@@ -176,9 +176,15 @@ impl Core {
         self.backend.verify(&ids);
     }
 
-    /// "Ask Tracker Again": a manual re-announce, allowed once per tracker minimum interval.
+    /// "Ask Tracker Again": a manual re-announce. Seedwell's own backoff never delays it; the tracker's
+    /// minimum interval does.
     pub fn ask_tracker_again(&self, ids: Vec<String>) -> AskAgainOutcome {
-        self.backend.ask_tracker_again(&ids)
+        self.backend.ask_tracker_again(&ids, false)
+    }
+
+    /// "Announce anyway": also past the tracker's minimum interval (one per tracker per 5 minutes).
+    pub fn announce_anyway(&self, ids: Vec<String>) -> AskAgainOutcome {
+        self.backend.ask_tracker_again(&ids, true)
     }
 
     /// Stops sharing (pauses a seeding torrent).

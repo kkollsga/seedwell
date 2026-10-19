@@ -148,6 +148,11 @@ pub struct TransferDto {
     pub peers: u32,
     /// Connected seeds.
     pub seeds: u32,
+    /// Peer addresses known for the torrent: tracker and incoming connections (private torrents; plus
+    /// PEX when the tracker allows it); plus DHT and PEX for public ones. The pool the connection
+    /// manager draws from. Shown as `peers / peers_known`.
+    #[serde(default)]
+    pub peers_known: u32,
     /// Seconds to completion, when estimable.
     #[serde(default)]
     pub eta_secs: Option<u64>,
@@ -684,6 +689,9 @@ pub struct ReannounceTracker {
     /// Unix seconds before which this tracker will not be asked again, when known.
     #[serde(default)]
     pub not_before: Option<u64>,
+    /// With `wait`: what the tracker answered ("ok: 12 seeders, 3 leechers") or the plain failure.
+    #[serde(default)]
+    pub answer: Option<String>,
 }
 
 /// `reannounce` result for one transfer.
@@ -790,6 +798,12 @@ pub struct ProfileDto {
     /// Shared upload cap of a favorite, bytes/s; null = unlimited.
     #[serde(default)]
     pub up_limit: Option<u64>,
+    /// At least one of its transfers is private: only then is there a peer exchange setting.
+    #[serde(default)]
+    pub private: bool,
+    /// Peer exchange (BEP 11) is allowed for its private torrents (`set_tracker_pex`). Off by default.
+    #[serde(default)]
+    pub allow_pex: bool,
     /// Transfers currently in this profile.
     pub transfers: u32,
     /// Of which sharing now.
@@ -813,6 +827,13 @@ pub struct TrackersDto {
     pub public_transfers: u32,
     /// Transfers without a profile that are private.
     pub other_private_transfers: u32,
+    /// Peer exchange is allowed for those (the `other-private` tracker).
+    #[serde(default)]
+    pub other_private_allow_pex: bool,
+    /// The master switch (`network.pex`): off means no peer exchange for any torrent, whatever
+    /// the trackers allow.
+    #[serde(default)]
+    pub pex_enabled: bool,
 }
 
 /// Counters of one day or a period.

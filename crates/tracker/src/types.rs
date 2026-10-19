@@ -44,7 +44,7 @@ impl Event {
 
 /// Payload byte counters as the engine knows them right now.
 ///
-/// `uploaded`/`downloaded` are payload bytes of the *current session*;
+/// `uploaded`/`downloaded`/`corrupt` are payload bytes of the *current session*;
 /// `left` is exact; `size` is the torrent's total length. The machines
 /// sanitise these (see invariant 4), so a sloppy caller cannot make us report
 /// decreasing counters or `left > size`.
@@ -52,8 +52,10 @@ impl Event {
 pub struct Stats {
     /// Payload bytes uploaded this session.
     pub uploaded: u64,
-    /// Payload bytes downloaded this session.
+    /// Payload bytes downloaded this session: the size of each piece that passed its hash check.
     pub downloaded: u64,
+    /// Bytes of pieces that failed their hash check this session (HTTP `corrupt=`).
+    pub corrupt: u64,
     /// Bytes still missing.
     pub left: u64,
     /// Total torrent length.
@@ -87,8 +89,11 @@ pub struct AnnounceParams {
     pub port: u16,
     /// Uploaded payload bytes (session).
     pub uploaded: u64,
-    /// Downloaded payload bytes (session).
+    /// Downloaded payload bytes (session): verified pieces only.
     pub downloaded: u64,
+    /// Bytes of pieces that failed their hash check (session). HTTP sends `corrupt=` only when
+    /// this is above zero; UDP has no such field.
+    pub corrupt: u64,
     /// Bytes left.
     pub left: u64,
     /// 32-bit `key` identifying us across IP changes.

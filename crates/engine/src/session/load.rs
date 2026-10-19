@@ -86,7 +86,13 @@ impl Session {
             c.set2(G_TRACKER_ERR, r.error_tracker);
             if r.error_tracker {
                 // Until a tracker answers, the failure from the last run stands.
-                self.tracker_errs.insert(r.id, TrackerErr { reason: "Tracker unreachable".into(), retry_at_ms: None, permanent: false });
+                self.tracker_errs.insert(r.id, TrackerErr {
+                        reason: crate::tracker_driver::FAILING_SHORT.into(),
+                        detail: "The tracker wasn't answering when Seedwell last ran. It is tried again as soon as the torrent starts.".into(),
+                        retry_at_ms: None,
+                        failures: 0,
+                        permanent: false,
+                    });
             }
             c.set_placed(r.placed);
             // A file that exists under its clean name and its hidden one (builds before the

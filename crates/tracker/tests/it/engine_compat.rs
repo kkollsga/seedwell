@@ -46,6 +46,7 @@ fn the_engine_driver_compiles_against_this_api_and_works() {
         Stats {
             uploaded: 0,
             downloaded: 0,
+            corrupt: 0,
             left: 10,
             size: 10,
         },

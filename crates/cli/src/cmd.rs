@@ -149,7 +149,7 @@ pub enum Cmd {
     /// `goal`
     Goal { sel: Selection, goal: GoalArgs },
     /// `reannounce`
-    Reannounce { sel: Selection },
+    Reannounce { sel: Selection, force: bool, wait: bool },
     /// `recheck`
     Recheck { sel: Selection },
     /// `remove`
@@ -172,6 +172,8 @@ pub enum Cmd {
     Trackers,
     /// `tracker <name> limits`
     TrackerLimits { name: String, down: Option<u64>, up: Option<u64> },
+    /// `tracker <name> pex [on|off]`: show or set peer exchange for a private tracker.
+    TrackerPex { name: String, set: Option<bool> },
     /// `stats`
     Stats { tracker: Option<String>, days: Option<u32> },
     /// `rules`
@@ -369,7 +371,11 @@ pub fn parse(args: Vec<String>) -> Result<Cmd, Usage> {
             };
             Cmd::Goal { sel: sel_cmd(o, "goal")?, goal: g }
         }
-        "reannounce" => Cmd::Reannounce { sel: sel_cmd(o, "reannounce")? },
+        "reannounce" => {
+            let force = o.flag(&["--force"]);
+            let wait = o.flag(&["--wait"]);
+            Cmd::Reannounce { sel: sel_cmd(o, "reannounce")?, force, wait }
+        }
         "recheck" | "verify" => Cmd::Recheck { sel: sel_cmd(o, "recheck")? },
         "remove" | "rm" => {
             let delete_files = o.flag(&["--delete-files", "--delete"]);
@@ -424,10 +430,24 @@ pub fn parse(args: Vec<String>) -> Result<Cmd, Usage> {
             let down = o.value(&["--down"])?.map(|v| parse_rate(&v)).transpose()?;
             let up = o.value(&["--up"])?.map(|v| parse_rate(&v)).transpose()?;
             let mut pos = o.finish()?;
+            if name == "tracker" && pos.len() >= 2 && pos[1] == "pex" {
+                // `tracker <name> pex [on|off]`
+                let usage = "usage: seedwell tracker <name> pex [on|off]";
+                if down.is_some() || up.is_some() || pos.len() > 3 {
+                    return Err(Usage(usage.into()));
+                }
+                let set = match pos.get(2).map(String::as_str) {
+                    None => None,
+                    Some("on" | "yes" | "true" | "allow") => Some(true),
+                    Some("off" | "no" | "false" | "forbid") => Some(false),
+                    Some(_) => return Err(Usage(usage.into())),
+                };
+                return Ok(Cmd::TrackerPex { name: pos.swap_remove(0), set });
+            }
             if name == "tracker" {
                 // `tracker <name> limits`
                 if pos.len() != 2 || pos[1] != "limits" {
-                    return Err(Usage("usage: seedwell tracker <name> limits [--down R] [--up R]".into()));
+                    return Err(Usage("usage: seedwell tracker <name> limits [--down R] [--up R] | seedwell tracker <name> pex [on|off]".into()));
                 }
                 pos.pop();
             }
@@ -595,6 +615,10 @@ mod tests {
         assert!(matches!(p("seedwell limits --down 5MB/s --up unlimited").unwrap(), Cmd::Limits(l) if l.down_limit == Some(5_000_000) && l.up_limit == Some(0)));
         assert_eq!(p("seedwell trackers").unwrap(), Cmd::Trackers);
         assert!(matches!(p("seedwell tracker tl limits --down 5MB/s --up 500KB/s").unwrap(), Cmd::TrackerLimits { down: Some(5_000_000), up: Some(500_000), .. }));
+        assert!(matches!(p("seedwell tracker tl pex").unwrap(), Cmd::TrackerPex { set: None, .. }));
+        assert!(matches!(p("seedwell tracker tl pex on").unwrap(), Cmd::TrackerPex { set: Some(true), .. }));
+        assert!(matches!(p("seedwell tracker tl pex off").unwrap(), Cmd::TrackerPex { set: Some(false), .. }));
+        assert!(p("seedwell tracker tl pex maybe").is_err());
         assert!(matches!(p("seedwell stats tl --days 14").unwrap(), Cmd::Stats { days: Some(14), .. }));
         assert_eq!(p("seedwell rules").unwrap(), Cmd::Rules);
         assert!(matches!(p("seedwell settings get a.b").unwrap(), Cmd::SettingsGet { keys } if keys == vec!["a.b"]));

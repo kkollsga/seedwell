@@ -76,6 +76,14 @@ pub struct ReannounceResult {
     pub sent: bool,
     /// When a deferred announce is allowed (unix milliseconds).
     pub not_before_ms: Option<u64>,
+    /// `Some(n)` when the wait is Seedwell's own backoff after `n` failed tries (not the tracker's
+    /// minimum interval).
+    pub waiting_after_failures: Option<u32>,
+    /// A forced announce was asked but is rate limited (one per tracker per 5 min): unix ms it is allowed.
+    pub force_limited_until_ms: Option<u64>,
+    /// The tracker's own minimum interval holds the announce until this unix ms (a normal ask waits;
+    /// "Announce anyway" overrides it).
+    pub min_interval_until_ms: Option<u64>,
 }
 
 /// Group of a seeding torrent in the Sharing view (SPEC 8.3), computed for every snapshot row.
@@ -627,7 +635,9 @@ pub struct TorrentRow {
     pub swarm_seeds: Option<u32>,
     /// Leechers the tracker reported at its last announce (`incomplete`), if it said.
     pub swarm_leechers: Option<u32>,
-    /// Peer addresses known for this torrent (connected or still to try).
+    /// Peer addresses known for this torrent (connected or still to try): tracker and incoming
+    /// connections (private torrents; plus PEX when the tracker allows it); plus DHT and PEX for
+    /// public ones.
     pub known_peers: u32,
     /// Estimated seconds to completion.
     pub eta_secs: Option<u64>,
@@ -705,6 +715,20 @@ pub struct TorrentRow {
     /// `tracker_error` is permanent-looking (unregistered, banned, bad passkey): the trackers
     /// stopped announcing until the user asks again ("Ask Tracker Again", `reannounce`).
     pub tracker_halted: bool,
+    /// What `tracker_error` means, in a plain sentence for Get Info ("The tracker's server is down
+    /// or overloaded (it answered 502 Bad Gateway)."). Never contains the announce URL.
+    pub tracker_detail: Option<String>,
+    /// An announce is in flight since this unix ms (any announce but `stopped`); the row shows
+    /// "Announcing…" once it has lasted half a second.
+    pub announcing_since_ms: Option<u64>,
+    /// Consecutive failed tries of the failing trackers ("attempt 3"); 0 when none fail.
+    pub tracker_failures: u32,
+    /// The disk problem (missing files, a failed write), when there is one; `error` is this or the
+    /// short tracker reason.
+    pub disk_error: Option<String>,
+    /// The only problem is a temporary tracker outage: not permanent and younger than a day. It is
+    /// shown calmly (no attention dot, not counted as an error); anything else needs the user.
+    pub error_transient: bool,
     /// A running download that moves (almost) nothing and so does not count toward
     /// `max_active_downloads` (SPEC 7.3: below 2 KiB/s for 60 s).
     pub stalled: bool,
@@ -744,12 +768,12 @@ impl IdleStatus {
 pub const STALLED_TEXT: &str = "Stalled — not counted in the queue";
 
 /// The rule behind [`TorrentRow::waiting_note`].
-pub fn waiting_note_of(state: TorrentState, peers: u32, down_rate: u64, tracker_error: Option<&str>) -> Option<RowNote> {
+pub fn waiting_note_of(state: TorrentState, peers: u32, down_rate: u64, tracker_error: Option<&str>, halted: bool) -> Option<RowNote> {
     if !matches!(state, TorrentState::Downloading | TorrentState::FetchingMetadata) || peers > 0 || down_rate > 0 {
         return None;
     }
     Some(match tracker_error {
-        Some(t) => RowNote { text: t.to_owned(), error: true },
+        Some(t) => RowNote { text: t.to_owned(), error: halted },
         None => RowNote { text: "Waiting for peers".into(), error: false },
     })
 }
@@ -760,10 +784,11 @@ mod waiting_tests {
 
     #[test]
     fn nobody_connected_says_why() {
-        let w = |s, p, d, e| waiting_note_of(s, p, d, e);
+        let w = |s, p, d, e: Option<&str>| waiting_note_of(s, p, d, e, e.is_some_and(|t| t.starts_with("Rejected")));
         let dl = TorrentState::Downloading;
         assert_eq!(w(dl, 0, 0, None), Some(RowNote { text: "Waiting for peers".into(), error: false }));
-        assert_eq!(w(dl, 0, 0, Some("Tracker: Unregistered torrent")), Some(RowNote { text: "Tracker: Unregistered torrent".into(), error: true }));
+        assert_eq!(w(dl, 0, 0, Some("Rejected: “Unregistered torrent”")), Some(RowNote { text: "Rejected: “Unregistered torrent”".into(), error: true }));
+        assert_eq!(w(dl, 0, 0, Some("Bad gateway")), Some(RowNote { text: "Bad gateway".into(), error: false }), "a temporary outage is not an error");
         assert_eq!(w(dl, 2, 0, Some("Tracker unreachable")), None, "anything connected: the row shows its progress");
         assert_eq!(w(dl, 0, 1, None), None);
         assert_eq!(w(TorrentState::Seeding, 0, 0, Some("Tracker unreachable")), None, "only downloads");
@@ -776,7 +801,7 @@ mod waiting_tests {
 pub struct RowNote {
     /// The words ("Tracker: Unregistered torrent", "Waiting for peers").
     pub text: String,
-    /// Shown in the error colour.
+    /// Shown in the error colour: the tracker refused for good. A passing outage stays grey.
     pub error: bool,
 }
 
@@ -792,7 +817,7 @@ impl TorrentRow {
         if let Some(t) = &self.hold_note {
             return Some(RowNote { text: t.clone(), error: false });
         }
-        let base = waiting_note_of(self.state, self.peers, self.down_rate, self.tracker_error.as_deref());
+        let base = waiting_note_of(self.state, self.peers, self.down_rate, self.tracker_error.as_deref(), self.tracker_halted);
         // A stalled download says so, unless a tracker problem explains more.
         if self.stalled && self.state == TorrentState::Downloading && !base.as_ref().is_some_and(|n| n.error) {
             return Some(RowNote { text: STALLED_TEXT.into(), error: false });
@@ -1082,6 +1107,8 @@ pub struct TrackerInfo {
     pub manual_ok_ms: Option<u64>,
     /// Why the circuit breaker holds the tracker back, if it does.
     pub tripped: Option<&'static str>,
+    /// What is wrong, in a plain sentence (see `describe_failure`); `None` while it works. No URL.
+    pub problem: Option<String>,
 }
 
 /// How one tracker of one torrent is doing.
@@ -1205,6 +1232,12 @@ pub enum EngineEvent {
     },
     /// The seeding goal was reached.
     SeedingGoalReached {
+        /// Id.
+        id: TorrentId,
+    },
+    /// What the trackers say about the torrent changed (a failure began, its retry count or time
+    /// moved, or an announce worked and the problem is gone): rows refresh at once.
+    TrackerHealthChanged {
         /// Id.
         id: TorrentId,
     },

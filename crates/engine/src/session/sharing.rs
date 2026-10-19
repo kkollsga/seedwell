@@ -12,7 +12,7 @@ use crate::tracker_driver::{Health, Role, TrackerCmd};
 use crate::util::unix_secs;
 
 /// "Dormant" and "dead" thresholds (SPEC 8.3).
-const DAY: u64 = 86_400;
+pub(super) const DAY: u64 = 86_400;
 /// Popular: this many peers downloading from the torrent right now ...
 const POPULAR_PEERS: u32 = 3;
 /// ... or this upload rate (bytes/s) averaged over ten minutes.
@@ -25,8 +25,13 @@ const PERSIST_EVERY: u64 = 600;
 /// What the trackers of a failing torrent last said (only kept while failing).
 #[derive(Debug)]
 pub(crate) struct TrackerErr {
+    /// The short row text ("Bad gateway", "Rejected: “Unregistered torrent”").
     pub reason: Box<str>,
+    /// The plain sentence for Get Info.
+    pub detail: Box<str>,
     pub retry_at_ms: Option<u64>,
+    /// Consecutive failed tries (the worst tracker).
+    pub failures: u32,
     /// Unregistered / banned / bad passkey: nothing will fix this by waiting.
     pub permanent: bool,
 }
@@ -120,14 +125,15 @@ impl Session {
             Health::Ok => {
                 self.tracker_errs.remove(&id);
             }
-            Health::Failing { reason, retry_at_ms } => {
-                self.tracker_errs.insert(id, TrackerErr { reason: reason.into(), retry_at_ms, permanent: false });
+            Health::Failing { reason, detail, retry_at_ms, failures } => {
+                self.tracker_errs.insert(id, TrackerErr { reason: reason.into(), detail: detail.into(), retry_at_ms, failures, permanent: false });
             }
-            Health::Dead { reason } => {
-                self.tracker_errs.insert(id, TrackerErr { reason: reason.into(), retry_at_ms: None, permanent: true });
+            Health::Dead { reason, detail } => {
+                self.tracker_errs.insert(id, TrackerErr { reason: reason.into(), detail: detail.into(), retry_at_ms: None, failures: 0, permanent: true });
             }
         }
         self.update_error(id);
+        self.sh.emit(EngineEvent::TrackerHealthChanged { id });
     }
 
     /// Hand the torrent's role to the tracker driver if it changed (SPEC 7C.4 retry pace).

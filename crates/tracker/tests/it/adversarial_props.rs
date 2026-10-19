@@ -333,14 +333,19 @@ fn check_outcome(o: &Outcome) -> Result<(), String> {
     struct KeyTrace {
         last_ok: Option<(u64, u64, Option<u64>)>, // deliver ms, interval s, min s
         fail_until: u64,                          // earliest ms for the next non-stopped send
+        /// Failure time (ms) of a host-level failure with no server hint: a sibling's success on the
+        /// host may pull the retry forward to 30 s after it.
+        pullable: Option<u64>,
     }
     let mut keys: HashMap<(InfoHash20, u16), KeyTrace> = HashMap::new();
+    let mut succ: HashMap<String, Vec<u64>> = HashMap::new();
     let mut inflight: HashMap<&str, Vec<(u64, u64)>> = HashMap::new();
     for (idx, x) in sent.iter().enumerate() {
         while crash_iter.peek().is_some_and(|m| **m == idx) {
             crash_iter.next();
             view.crash();
             keys.clear();
+            succ.clear();
             inflight.clear();
         }
         let info = sh.info.get(&x.n).ok_or("no info")?;
@@ -351,6 +356,7 @@ fn check_outcome(o: &Outcome) -> Result<(), String> {
         let kt = keys.entry((x.ih, x.slot)).or_insert(KeyTrace {
             last_ok: None,
             fail_until: 0,
+            pullable: None,
         });
         // interval rule
         if x.p.event.is_none() {
@@ -371,12 +377,15 @@ fn check_outcome(o: &Outcome) -> Result<(), String> {
             }
         }
         // backoff rule (rejections are halts, handled by the user-action rule)
-        if x.p.event != Some(Event::Stopped) && x.t.0 < kt.fail_until {
+        // A success on the host after this failure (delivered before this send) may have pulled it forward.
+        let pulled = kt.pullable.is_some_and(|f| succ.get(&x.host).is_some_and(|v| v.iter().any(|t| *t >= f && *t < x.t.0)));
+        let until = if pulled { kt.fail_until.min(kt.pullable.unwrap_or(0) + 30_000) } else { kt.fail_until };
+        if x.p.event != Some(Event::Stopped) && x.t.0 < until {
             return Err(format!(
                 "#{} {:?} sent {} ms before the backoff ended",
                 x.n,
                 x.p.event,
-                kt.fail_until - x.t.0
+                until - x.t.0
             ));
         }
         if let Some((iv, min)) = info.ok {
@@ -384,6 +393,7 @@ fn check_outcome(o: &Outcome) -> Result<(), String> {
                 kt.last_ok = Some((x.t.0 + info.latency.as_millis() as u64, iv, min));
             }
             kt.fail_until = 0;
+            kt.pullable = None;
         } else if !info.rejected {
             let deliver = x.t.0
                 + if info.hang {
@@ -405,9 +415,18 @@ fn check_outcome(o: &Outcome) -> Result<(), String> {
                 if o.relaxed && network_class {
                     kt.fail_until = x.t.0 + 30_000;
                 }
+                // A user's ask (relaxed runs) beats Seedwell's own backoff, 10 s after the attempt, but
+                // never what the tracker itself demanded (a hint).
+                if o.relaxed && info.min_wait == Duration::ZERO {
+                    kt.fail_until = kt.fail_until.min(x.t.0 + 10_000);
+                }
+                kt.pullable = (info.min_wait == Duration::ZERO && (network_class || info.http_status.is_some_and(|s| s >= 500))).then_some(deliver);
             }
         } else {
             kt.fail_until = 0;
+        }
+        if info.ok.is_some() && x.p.event != Some(Event::Stopped) {
+            succ.entry(x.host.clone()).or_default().push(x.t.0 + info.latency.as_millis() as u64);
         }
         // concurrency per host: at most 2 unfinished requests
         let end = x.t.0
@@ -522,6 +541,7 @@ fn the_tracker_side_checker_flags_known_bad_sequences() {
             port: 1,
             uploaded: 0,
             downloaded: 0,
+            corrupt: 0,
             left,
             key: 1,
             event: ev,

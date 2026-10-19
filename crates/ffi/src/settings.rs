@@ -779,6 +779,9 @@ pub struct ProfileRecord {
     /// With `hidden`: only the seeding torrents are hidden.
     #[uniffi(default = false)]
     pub hide_only_seeding: bool,
+    /// Peer exchange (BEP 11) is allowed for this tracker's private torrents (SPEC §7B.4). Off by default.
+    #[uniffi(default = false)]
+    pub allow_pex: bool,
 }
 
 pub(crate) fn profile_to(p: &Profile) -> ProfileRecord {
@@ -807,6 +810,7 @@ pub(crate) fn profile_to(p: &Profile) -> ProfileRecord {
             .collect(),
         hidden: p.hidden,
         hide_only_seeding: p.hide_only_seeding,
+        allow_pex: p.allow_pex,
     }
 }
 
@@ -965,15 +969,39 @@ impl SettingsStore {
                 categories,
                 hidden: p.hidden,
                 hide_only_seeding: p.hidden && p.hide_only_seeding,
+                allow_pex: p.allow_pex,
             });
         }
         set.profiles = out;
+        // A favorite owns the setting of the domains it covers.
+        set.prune_pex();
         let errs = set.validate();
         if !errs.is_empty() {
             return Err(problems(&errs));
         }
         self.profiles.save(&set).map_err(|e| doc_err(&e))?;
         Ok(set.profiles.iter().map(profile_to).collect())
+    }
+
+    /// Whether peer exchange is allowed for the private torrents of a tracker, by the id the app
+    /// knows it by: a favorite's id, an automatic tracker's domain, or `other-private`.
+    pub fn tracker_pex(&self, tracker_id: &str) -> bool {
+        let set = self.load_profiles_set();
+        if set.get(tracker_id).is_some() {
+            return set.allows_pex(Some(tracker_id), None);
+        }
+        match tracker_id {
+            "other-private" => set.allows_pex(None, None),
+            id => set.allows_pex(None, Some(id)),
+        }
+    }
+
+    /// Allow or forbid peer exchange for a tracker's private torrents.
+    pub fn set_tracker_pex(&self, tracker_id: &str, allow: bool) -> Result<(), CoreError> {
+        let mut set = self.load_profiles_set();
+        set.set_pex(tracker_id, allow).map_err(|e| problems(&e))?;
+        self.profiles.save(&set).map_err(|e| doc_err(&e))?;
+        Ok(())
     }
 
     /// A ready-to-save profile named after an announce URL's host ("Create tracker profile…").
@@ -1193,10 +1221,36 @@ mod tests {
                 categories: vec![],
                 hidden: false,
                 hide_only_seeding: false,
+                allow_pex: false,
             }])
             .unwrap();
         assert_eq!(saved[0].id, "tracker-z");
         assert!(!saved[0].urls[0].contains("0123456789abcdef"));
+    }
+
+    #[test]
+    fn peer_exchange_per_tracker_is_stored_for_favorites_and_automatic_trackers() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SettingsStore::new(dir.path());
+        assert!(!store.tracker_pex("example.org") && !store.tracker_pex("other-private"), "off by default");
+        store.set_tracker_pex("example.org", true).unwrap();
+        store.set_tracker_pex("other-private", true).unwrap();
+        assert!(store.set_tracker_pex("public", true).is_err());
+        let again = SettingsStore::new(dir.path());
+        assert!(again.tracker_pex("example.org") && again.tracker_pex("other-private") && !again.tracker_pex("debian.org"));
+        // Saving the automatic tracker as a favorite takes the setting along; saving records keeps it.
+        let mut set = again.load_profiles_set();
+        let id = set.add_favorite("", &["tracker.example.org".to_string()]).unwrap();
+        let recs: Vec<ProfileRecord> = set.profiles.iter().map(profile_to).collect();
+        assert!(recs.iter().find(|r| r.id == id).unwrap().allow_pex);
+        let saved = again.save_profiles(&recs).unwrap();
+        assert!(saved[0].allow_pex);
+        assert!(again.tracker_pex(&id) && again.tracker_pex("other-private"));
+        let text = std::fs::read_to_string(dir.path().join("trackers.toml")).unwrap();
+        assert!(text.contains("pex_trackers = [\"@other-private\"]"), "the domain entry gave way to the favorite: {text}");
+        // Off again, through the same call.
+        again.set_tracker_pex(&id, false).unwrap();
+        assert!(!again.tracker_pex(&id));
     }
 
     #[test]
@@ -1220,6 +1274,7 @@ mod tests {
             ],
             hidden: true,
             hide_only_seeding: true,
+            allow_pex: false,
         };
         let saved = store.save_profiles(&[rec]).unwrap();
         assert_eq!(saved[0].incomplete_dir, None, "a blank folder is \"same as Settings\"");
@@ -1252,6 +1307,7 @@ mod tests {
             categories: vec![],
             hidden: false,
             hide_only_seeding: false,
+            allow_pex: false,
         };
         let saved = store.save_profiles(&[rec(Some(5_000_000), Some(0))]).unwrap();
         // 0 is "unlimited", stored as no key at all.

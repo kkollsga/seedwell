@@ -20,9 +20,6 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
-  # Line tables keep panic locations and backtraces readable at a fraction of full debug info.
-  CARGO_PROFILE_DEV_DEBUG: line-tables-only
-  CARGO_PROFILE_TEST_DEBUG: line-tables-only
   # Tests refuse to touch the real home folder.
   TRS_FORBID_REAL_HOME: "1"
 

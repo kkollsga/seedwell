@@ -937,7 +937,14 @@ impl EngineHandle {
 
     /// Re-announce now (the tracker gate still enforces `min interval`).
     pub async fn reannounce(&self, ids: &[TorrentId]) -> Result<Vec<ReannounceResult>, EngineError> {
-        self.call(|reply| Cmd::Reannounce(ids.to_vec(), reply)).await
+        self.reannounce_with(ids, false).await
+    }
+
+    /// Re-announce now. Seedwell's own failure backoff never holds this back (only a ten second
+    /// double-click floor); the tracker's `min interval` does unless `force`, which is allowed once
+    /// per tracker per five minutes.
+    pub async fn reannounce_with(&self, ids: &[TorrentId], force: bool) -> Result<Vec<ReannounceResult>, EngineError> {
+        self.call(|reply| Cmd::Reannounce(ids.to_vec(), force, reply)).await
     }
 
     /// Offer peer addresses.

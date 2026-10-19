@@ -30,7 +30,7 @@ pub enum Cmd {
     /// `debug trackers log …`
     TrackersLog { log: LogArgs },
     /// `debug announce <torrent> [--tracker X]`
-    Announce { sel: Selection, tracker: Option<String> },
+    Announce { sel: Selection, tracker: Option<String>, force: bool, wait: bool },
     /// `debug peers <torrent>`
     Peers { torrent: String, redact: bool, watch: bool },
     /// `debug perf`
@@ -73,15 +73,17 @@ pub fn parse(args: Vec<String>) -> Result<Cmd, Usage> {
             Cmd::Trackers { torrent: pos.into_iter().next(), tracker, watch: watch || log.follow }
         }
         "announce" | "reannounce" => {
+            let force = o.flag(&["--force"]);
+            let wait = o.flag(&["--wait"]);
             let sel = Selection::take(&mut o)?;
             let tracker = sel.tracker.clone();
             let mut sel = sel;
             sel.tracker = None;
             let sel = sel.with_terms(o.finish()?);
             if sel.terms.is_empty() && !sel.has_filter() {
-                return Err(Usage("usage: seedwell debug announce <torrent> [--tracker X]".into()));
+                return Err(Usage("usage: seedwell debug announce <torrent> [--tracker X] [--force] [--wait]".into()));
             }
-            Cmd::Announce { sel, tracker }
+            Cmd::Announce { sel, tracker, force, wait }
         }
         "peers" => {
             let redact = o.flag(&["--redact"]);
@@ -150,10 +152,10 @@ pub async fn run(cmd: Cmd, g: &Global) -> R {
             poll(g, watch, &mut c, || Request::DebugTrackers(DebugTrackersParams { id: id.clone(), tracker: tracker.clone() }), |raw| decode::<DebugTrackersDto>(raw, trackers)).await
         }
         Cmd::TrackersLog { log } => log_trackers(g, log).await,
-        Cmd::Announce { sel, tracker } => {
+        Cmd::Announce { sel, tracker, force, wait } => {
             let mut c = connect(g).await?;
             let rows = resolve(&mut c, &sel).await?;
-            reannounce(g, &mut c, &rows, tracker.as_deref()).await
+            reannounce(g, &mut c, &rows, tracker.as_deref(), force, wait).await
         }
         Cmd::Peers { torrent, redact, watch } => {
             let mut c = connect(g).await?;

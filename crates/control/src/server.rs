@@ -784,12 +784,51 @@ async fn dispatch<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &mut Conn, req: Request) 
             r.note = Some(format!("{}: down={:?} up={:?}", p.id, saved.0, saved.1));
             Ok(r)
         }
+        Request::SetTrackerPex(p) => {
+            let (rows, _) = rows(ctx).await?;
+            let st = ctx.state.clone();
+            let id = p.id.trim().to_ascii_lowercase();
+            let id2 = id.clone();
+            let known = blocking(move || -> Result<(), String> {
+                let set = st.profiles();
+                // The tracker must exist (a favorite, an automatic tracker with torrents, or Other private)
+                // and be private: peer exchange is a setting of private trackers only.
+                let private = if set.get(&id2).is_some() {
+                    rows.iter().any(|r| r.private && r.tracker_profile.as_deref() == Some(id2.as_str()))
+                } else if id2 == "other-private" {
+                    rows.iter().any(|r| r.private && r.tracker_profile.is_none() && trs_state::trackers::group_of_host(&r.tracker_host).is_none())
+                } else {
+                    rows.iter().any(|r| {
+                        r.private && r.tracker_profile.is_none() && trs_state::trackers::group_of_host(&r.tracker_host).is_some_and(|g| g.key == id2)
+                    })
+                };
+                if !private {
+                    return Err(format!("`{id2}` is not a private tracker with transfers (see `trackers`); peer exchange is a setting of private trackers"));
+                }
+                Ok(())
+            })
+            .await?;
+            known.map_err(|m| ApiError::params(&m))?;
+            let st = ctx.state.clone();
+            let allow = p.allow;
+            let id3 = id.clone();
+            blocking(move || -> Result<(), String> {
+                let mut set = st.profiles();
+                set.set_pex(&id3, allow).map_err(|e| e.iter().map(ToString::to_string).collect::<Vec<_>>().join("; "))?;
+                st.save_profiles(&set).map_err(|e| e.to_string())
+            })
+            .await?
+            .map_err(|m| ApiError::params(&m))?;
+            let mut r = reply(&json!({ "id": id, "allow_pex": allow }))?;
+            r.note = Some(format!("{id}: peer exchange {}", if allow { "allowed" } else { "forbidden" }));
+            Ok(r)
+        }
         Request::Reannounce(p) => {
             let picked = pick(ctx, &p.ids).await?;
-            let mut out = b.reannounce(ids_of(&picked)).await?;
+            let mut out = b.reannounce(ids_of(&picked), p.force, p.wait).await?;
             for r in &mut out {
                 for t in &mut r.trackers {
-                    t.url = trs_state::url::redact_url(&t.url);
+                    t.url = host_only(&t.url);
                     t.status = clip(&scrub_urls(&t.status), 300);
                 }
             }
@@ -1260,8 +1299,8 @@ async fn remove_confirm<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &Conn, p: RemoveCon
 async fn trackers<B: Backend>(ctx: &Arc<Ctx<B>>) -> Result<Reply, ApiError> {
     let (rows, _) = rows(ctx).await?;
     let st = ctx.state.clone();
-    let profiles = blocking(move || st.profiles()).await?;
-    let mut out = TrackersDto::default();
+    let (profiles, pex_enabled) = blocking(move || (st.profiles(), st.config().network.pex)).await?;
+    let mut out = TrackersDto { pex_enabled, other_private_allow_pex: profiles.allows_pex(None, None), ..Default::default() };
     for p in &profiles.profiles {
         let mine = rows.iter().filter(|r| r.tracker_profile.as_deref() == Some(p.id.as_str()));
         let mut d = ProfileDto {
@@ -1272,9 +1311,11 @@ async fn trackers<B: Backend>(ctx: &Arc<Ctx<B>>) -> Result<Reply, ApiError> {
             rule: p.rule.clone(),
             down_limit: p.down_cap(),
             up_limit: p.up_cap(),
+            allow_pex: p.allow_pex,
             ..Default::default()
         };
         for r in mine {
+            d.private |= r.private;
             d.transfers += 1;
             d.sharing += u32::from(r.is_sharing());
             d.up_rate += r.up_rate;
@@ -1288,7 +1329,8 @@ async fn trackers<B: Backend>(ctx: &Arc<Ctx<B>>) -> Result<Reply, ApiError> {
                 let i = match out.groups.iter().position(|d| d.id == g.key) {
                     Some(i) => i,
                     None => {
-                        out.groups.push(ProfileDto { id: g.key, name: g.name, ..Default::default() });
+                        let allow_pex = profiles.allows_pex(None, Some(&g.key));
+                        out.groups.push(ProfileDto { id: g.key, name: g.name, allow_pex, ..Default::default() });
                         out.groups.len() - 1
                     }
                 };
@@ -1296,6 +1338,7 @@ async fn trackers<B: Backend>(ctx: &Arc<Ctx<B>>) -> Result<Reply, ApiError> {
                 if !d.urls.contains(&r.tracker_host) && d.urls.len() < 32 {
                     d.urls.push(r.tracker_host.clone());
                 }
+                d.private |= r.private;
                 d.transfers += 1;
                 d.sharing += u32::from(r.is_sharing());
                 d.up_rate += r.up_rate;
@@ -1477,7 +1520,7 @@ async fn debug_trackers<B: Backend>(ctx: &Arc<Ctx<B>>, p: DebugTrackersParams) -
         let mut d = ctx.backend.detail(hex).await?;
         let mut trackers = Vec::new();
         for t in &mut d.trackers {
-            t.url = trs_state::url::redact_url(&t.url);
+            t.url = host_only(&t.url);
             t.status = clip(&scrub_urls(&t.status), 300);
             if needle.as_deref().is_some_and(|n| !t.url.to_ascii_lowercase().contains(n)) {
                 continue;
@@ -1593,4 +1636,26 @@ async fn debug_perf<B: Backend>(ctx: &Arc<Ctx<B>>) -> Result<Reply, ApiError> {
         process,
         torrents,
     })
+}
+
+/// `https://tracker.example` for any announce URL: scheme, host and port, nothing else (no path, no query,
+/// so no passkey in any spelling).
+pub(crate) fn host_only(raw: &str) -> String {
+    let Some((scheme, rest)) = raw.split_once("://") else { return "<tracker>".into() };
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let host = host.rsplit('@').next().unwrap_or(host);
+    format!("{scheme}://{host}")
+}
+
+#[cfg(test)]
+mod host_only_tests {
+    use super::host_only;
+
+    #[test]
+    fn announce_urls_keep_only_scheme_and_host() {
+        assert_eq!(host_only("https://tracker.norbits.net/announce.php?passkey=abcdef0123456789abcdef0123456789"), "https://tracker.norbits.net");
+        assert_eq!(host_only("http://u:p@t.org:8080/0123456789abcdef0123456789abcdef/announce"), "http://t.org:8080");
+        assert_eq!(host_only("udp://t.org:6969"), "udp://t.org:6969");
+        assert_eq!(host_only("garbage"), "<tracker>");
+    }
 }

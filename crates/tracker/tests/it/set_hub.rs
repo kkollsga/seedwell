@@ -295,6 +295,7 @@ fn completed_flag_is_durable_before_the_request_is_released() {
         Stats {
             uploaded: 0,
             downloaded: 0,
+            corrupt: 0,
             left: 100,
             size: 100,
         },
@@ -319,6 +320,7 @@ fn completed_flag_is_durable_before_the_request_is_released() {
         Stats {
             uploaded: 0,
             downloaded: 100,
+            corrupt: 0,
             left: 0,
             size: 100,
         },
@@ -354,6 +356,7 @@ fn failed_persist_of_completed_is_never_released_but_retried_once_the_store_reco
         Stats {
             uploaded: 0,
             downloaded: 0,
+            corrupt: 0,
             left: 100,
             size: 100,
         },
@@ -375,6 +378,7 @@ fn failed_persist_of_completed_is_never_released_but_retried_once_the_store_reco
         Stats {
             uploaded: 0,
             downloaded: 100,
+            corrupt: 0,
             left: 0,
             size: 100,
         },
@@ -521,6 +525,7 @@ fn set_input_enum_is_usable_directly() {
         SetInput::Stats(Stats {
             uploaded: 0,
             downloaded: 0,
+            corrupt: 0,
             left: 5,
             size: 5,
         }),
@@ -558,6 +563,7 @@ fn scrape_through_the_hub_is_explicit_gated_and_independent_of_announces() {
         Stats {
             uploaded: 0,
             downloaded: 0,
+            corrupt: 0,
             left: 100,
             size: 100,
         },

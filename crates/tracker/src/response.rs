@@ -242,6 +242,13 @@ impl AnnounceError {
         )
     }
 
+    /// True when the failure says the tracker's host is in trouble (a 5xx, a timeout, a refused or
+    /// reset connection), so another torrent's success on the same host is good news for this one.
+    /// A `failure reason` or a 4xx is about the torrent and never counts.
+    pub fn is_host_level(&self) -> bool {
+        self.is_network() || matches!(self, AnnounceError::Http { status, .. } if *status >= 500)
+    }
+
     /// True when the request could not even reach the tracker's network: DNS failure, connect
     /// refused or unreachable, connect timeout. This is the evidence the outage detector counts
     /// (SPEC 7C.4c); a slow or resetting tracker (`Timeout`, `Io`) and HTTP errors are not.

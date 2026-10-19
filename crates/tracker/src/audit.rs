@@ -5,7 +5,7 @@
 //! and on every outcome. Two implementations that must agree make a silent
 //! logic bug much less likely. On a violation the gate fails closed.
 
-use crate::machine::{MANUAL_FLOOR, SendKind};
+use crate::machine::{FORCE_INTERVAL, MANUAL_FLOOR, MANUAL_RETRY_FLOOR, SendKind};
 use crate::response::Timing;
 use crate::time::Millis;
 use crate::types::{AnnounceParams, Event, PeerId20};
@@ -23,8 +23,13 @@ enum Session {
 struct Detail {
     last_up: u64,
     last_down: u64,
+    last_corrupt: u64,
     tracker_id: Option<Box<[u8]>>,
     last_success: Option<(Millis, Timing)>,
+    /// When the last forced announce was released (at most one per `FORCE_INTERVAL`).
+    last_forced: Option<Millis>,
+    /// When the previous request was released (the double-click floor of a forced announce).
+    last_release: Option<Millis>,
 }
 
 /// Per-(torrent, tracker) audit state.
@@ -138,16 +143,29 @@ impl Auditor {
                 let manual = at + t.min_interval.unwrap_or(MANUAL_FLOOR).min(t.interval);
                 let ok = now >= regular || (kind == SendKind::Manual && now >= manual);
                 if !ok {
-                    return Err("announce earlier than interval/min interval");
+                    // "Announce anyway" is licensed inside the min interval, exactly as the machine
+                    // allows it: not within the double-click floor of the last success and once per
+                    // FORCE_INTERVAL. Anything else early is still a violation.
+                    let forced = kind == SendKind::Forced
+                        && self.detail.as_deref().and_then(|d| d.last_release).is_none_or(|r| now >= r + MANUAL_RETRY_FLOOR)
+                        && self.detail.as_deref().and_then(|d| d.last_forced).is_none_or(|f| now >= f + FORCE_INTERVAL);
+                    if !forced {
+                        return Err("announce earlier than interval/min interval");
+                    }
+                }
+                if kind == SendKind::Forced {
+                    self.detail.get_or_insert_with(Box::default).last_forced = Some(now);
                 }
             }
         }
         let d = self.detail.get_or_insert_with(Box::default);
-        if p.uploaded < d.last_up || p.downloaded < d.last_down {
-            return Err("uploaded/downloaded decreased within a session");
+        if p.uploaded < d.last_up || p.downloaded < d.last_down || p.corrupt < d.last_corrupt {
+            return Err("uploaded/downloaded/corrupt decreased within a session");
         }
         d.last_up = p.uploaded;
         d.last_down = p.downloaded;
+        d.last_corrupt = p.corrupt;
+        d.last_release = Some(now);
         match (&d.tracker_id, &p.tracker_id) {
             (Some(a), Some(b)) if a != b => return Err("tracker id changed within a session"),
             (Some(_), None) => return Err("tracker id dropped within a session"),

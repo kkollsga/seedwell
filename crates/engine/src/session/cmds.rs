@@ -142,12 +142,12 @@ impl Session {
             Cmd::ResumeAll => self.resume_all(),
             Cmd::VolumesChanged => self.volumes_changed(),
             Cmd::UpdateConfig(f) => self.on_update_config(f),
-            Cmd::Reannounce(ids, reply) => {
+            Cmd::Reannounce(ids, force, reply) => {
                 let mut waits = Vec::new();
                 for id in ids {
                     let (tx, rx) = oneshot::channel();
                     if self.tracker.is_some() && self.table.contains_key(&id) {
-                        self.tracker_send(TrackerCmd::Reannounce(id, tx));
+                        self.tracker_send(TrackerCmd::Reannounce(id, force, tx));
                         waits.push(rx);
                     }
                 }
@@ -364,6 +364,7 @@ impl Session {
         let cfg = self.sh.cfg();
         let epoch = self.next_epoch();
         let staging = self.table.get(&id).and_then(|e| self.staging_for(&e.cold));
+        let tracker_pex = self.table.get(&id).is_some_and(|e| e.cold.private() && self.tracker_pex_of(&e.cold));
         let Some(e) = self.table.get_mut(&id) else { return };
         if e.live.is_some() {
             return;
@@ -397,6 +398,7 @@ impl Session {
             epoch,
             shared: self.sh.clone(),
             private: c.private(),
+            tracker_pex,
             has_metadata: c.has_metadata(),
             save_path: self.roots.get(c.save_root as usize).cloned().unwrap_or_default(),
             staged: c.has(F_STAGED),

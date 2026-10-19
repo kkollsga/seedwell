@@ -48,6 +48,14 @@ impl PolicyData {
     }
 }
 
+/// The one rule for peer exchange (SPEC 7B.4): the global switch (Settings > Network) is the
+/// master; a private torrent additionally needs its tracker to allow it. Public torrents ignore
+/// the tracker half. DHT and local discovery have no such rule: they stay off for private
+/// torrents whatever this says.
+pub(crate) const fn pex_allowed(global: bool, private: bool, tracker_allows: bool) -> bool {
+    global && (!private || tracker_allows)
+}
+
 /// Most distinct profile and rule ids interned (ids come from our own files; the cap only guards
 /// against a runaway editor).
 const MAX_IDS: usize = 4096;

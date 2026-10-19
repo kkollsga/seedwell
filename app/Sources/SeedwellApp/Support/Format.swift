@@ -77,6 +77,18 @@ enum Fmt {
         return "\(max(1, (secs + 59) / 60)) min"
     }
 
+    /// "22:29": the time of day that is `secs` from now (in the user's own clock style).
+    static func clock(in secs: UInt64, now: Date = .now) -> String {
+        now.addingTimeInterval(TimeInterval(secs)).formatted(date: .omitted, time: .shortened)
+    }
+
+    /// "22:29" or "Mon 22:29" for a unix time (seconds): when something began or will happen.
+    static func clockAt(_ unix: UInt64, now: Date = .now) -> String {
+        let d = Date(timeIntervalSince1970: TimeInterval(unix))
+        if Calendar.current.isDate(d, inSameDayAs: now) { return d.formatted(date: .omitted, time: .shortened) }
+        return d.formatted(.dateTime.weekday(.abbreviated).hour().minute())
+    }
+
     /// "in 28 min", "due now": when a unix time (seconds) is ahead.
     static func inFuture(_ unix: UInt64, now: Date = .now) -> String {
         let secs = Int64(unix) - Int64(now.timeIntervalSince1970)
@@ -84,11 +96,13 @@ enum Fmt {
         return "in " + until(UInt64(secs))
     }
 
-    /// "(4 of 250)" with a swarm size, "(4 peers)" without.
-    static func peers(connected: UInt32, swarm: UInt32?) -> String {
-        guard let swarm else { return "(\(connected) peer\(connected == 1 ? "" : "s"))" }
-        return "(\(connected) of \(max(swarm, connected)))"
+    /// "8 / 57 peers": connected over the peer addresses known (always both numbers).
+    static func peers(connected: UInt32, known: UInt32) -> String {
+        "\(connected) / \(max(known, connected)) peers"
     }
+
+    /// Where the known peers come from (hover text of the peers figure).
+    static let peersHelp = "Connected peers / peer addresses known. Known peers come from the tracker and incoming connections (private torrents; plus PEX when the tracker allows it); plus DHT and PEX for public ones."
 
     /// "1 torrent", "3 torrents".
     static func count(_ n: some BinaryInteger, _ noun: String) -> String { "\(n) \(noun)\(n == 1 ? "" : "s")" }

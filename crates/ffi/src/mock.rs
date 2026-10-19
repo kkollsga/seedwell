@@ -10,7 +10,7 @@ use crate::backend::{AttrRow, Backend, ShutdownInfo};
 use crate::rows::{self, Totals};
 use crate::types::{
     AskAgainOutcome,
-    TrackerLine,
+    TrackerLine, TrackerProblem,
     AgentActivity, Category, ChoiceInfo, CoreError, DiagnosticsInfo, MoveProposalInfo, MoveResult, CoreListener, DailyStat, Priority, RowQuery, SeedGroup,
     FilePriority, FilePriorityChange, SeedingGoal, SharingCounts, Snapshot, StreamInfo, TorrentFile, TorrentInfo, TrackerStats, TransferKind, TransferRow,
     TransferState,
@@ -260,6 +260,7 @@ impl State {
             retry_in_secs: it.err.as_ref().filter(|e| !e.0).map(|e| e.2),
             moving_percent: it.moving,
             awaiting_choice: false,
+            is_private: false,
             pending: None,
             peers: if it.state == TransferState::Downloading { (it.down_rate / (130 * KB)) as u32 } else { 0 },
             swarm: (it.state == TransferState::Downloading).then_some(340),
@@ -272,6 +273,9 @@ impl State {
             idle_stopped: None,
             waiting_is_error: false,
             tracker_halted: false,
+            retry_attempt: 3,
+            announcing_since_ms: None,
+            error_transient: it.err.as_ref().is_some_and(|e| !e.0 && e.1.starts_with("Bad gateway")),
             uploaded_bytes: (it.ratio * it.size as f64) as u64,
             total_bytes: it.size,
             held_bytes: it.done,
@@ -667,10 +671,10 @@ fn initial_items() -> Vec<Item> {
     }
     // Problem rows (SPEC 8.3 Error and Dead groups).
     let problems = [
-        (Seed("Hidden Rivers (2016)", "mkv", Category::Movie, 5_600 * MB, 1.8, Some(2.0), 40, 0), false, "Tracker unreachable", 7_200),
+        (Seed("Hidden Rivers (2016)", "mkv", Category::Movie, 5_600 * MB, 1.8, Some(2.0), 40, 0), false, "Bad gateway", 7_200),
         (Seed("Ubuntu MATE 24.04 amd64", "iso", Category::Software, 3_100 * MB, 0.7, Some(1.0), 12, 1), false, "Files missing: drive not connected", 0),
-        (Seed("Common Crawl Sample 2019", "", Category::Other, 12 * GB, 0.2, None, 90, 1), true, "Tracker: Unregistered torrent", 0),
-        (Seed("Old Radio Shows 1948", "", Category::Audiobook, 2_000 * MB, 3.3, Some(2.0), 300, 0), true, "Tracker unreachable for 3 days", 0),
+        (Seed("Common Crawl Sample 2019", "", Category::Other, 12 * GB, 0.2, None, 90, 1), true, "Rejected: “Unregistered torrent”", 0),
+        (Seed("Old Radio Shows 1948", "", Category::Audiobook, 2_000 * MB, 3.3, Some(2.0), 300, 0), true, "Bad gateway for 3 days", 0),
     ];
     for (seed, dead, reason, retry) in &problems {
         let mut it = seeding(seed, None, next());
@@ -931,7 +935,15 @@ impl Backend for MockBackend {
                 "Custom".into()
             },
             tracker_name: TRACKERS[it.tracker].1.to_string(),
-            error: it.err.as_ref().map(|e| e.1.clone()),
+            error: it.err.as_ref().filter(|e| !(e.1.starts_with("Bad gateway") || e.1.starts_with("Rejected"))).map(|e| e.1.clone()),
+            tracker_problem: it.err.as_ref().filter(|e| e.1.starts_with("Bad gateway") || e.1.starts_with("Rejected")).map(|e| TrackerProblem {
+                host: TRACKERS[it.tracker].1.to_string(),
+                message: if e.0 { format!("The tracker refused this torrent: “{}”.", e.1.trim_start_matches("Rejected: ").trim_matches(['“','”'])) } else { "The tracker's server is down or overloaded (it answered 502 Bad Gateway).".into() },
+                since: Some(now().saturating_sub(40 * 60)),
+                next_try_ms: (!e.0).then(|| (now() + e.2) * 1000),
+                temporary: !e.0,
+                reassurance: (!e.0).then(|| "Your files are fine. Seeding to peers you're already connected to continues, and peers that already know about you can still connect. New peers can't find you through this tracker until it answers.".to_owned()),
+            }),
             tracker_halted: it.err.as_ref().is_some_and(|e| e.0),
             goal_is_custom: !it.goal_is_default,
             state: it.state,
@@ -956,6 +968,11 @@ impl Backend for MockBackend {
                 next_announce: None,
                 seeders: Some(120),
                 leechers: Some(30),
+                state: "working".into(),
+                failures: 0,
+                retry_at: None,
+                last_success: None,
+                manual_ok_at: None,
             }],
         })
     }
@@ -1168,7 +1185,7 @@ impl Backend for MockBackend {
 
     fn verify(&self, _ids: &[String]) {}
 
-    fn ask_tracker_again(&self, _ids: &[String]) -> AskAgainOutcome {
+    fn ask_tracker_again(&self, _ids: &[String], _force: bool) -> AskAgainOutcome {
         AskAgainOutcome { sent: 1, deferred: 0, wait_secs: None }
     }
 

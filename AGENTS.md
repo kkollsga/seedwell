@@ -35,9 +35,15 @@ release procedure.
 
 - Run builds, tests and benches through `tools/sysguard/heavy.sh`, one at a time and never nested.
   Machine-specific settings go in the untracked `tools/sysguard/local.env`.
-- Tests: `TRS_FORBID_REAL_HOME=1 tools/sysguard/heavy.sh cargo test --workspace -q`. Each crate's
-  integration tests are one binary (`tests/it/`). A fresh test binary can wait about 50 s for a macOS security scan
-  on its first run; that is not a hang.
+- **Check with `tools/check.sh`.** It runs clippy and the tests (cargo nextest) for the crates a change touches
+  plus the crates that depend on them, and the app build and Swift tests only when `app/` or `trs-ffi` is affected.
+  It takes the heavy lock itself (do not wrap it in `heavy.sh`).
+  - While iterating, narrow it further: `tools/check.sh -p trs-tracker -- -E 'test(/host_recovery/)'`.
+  - Run the plain `tools/check.sh` once when the work is done, before handing it back.
+  - `tools/check.sh --full` is the whole workspace, which is what GitHub CI runs on every push to `main`. Do not run
+    it locally unless the coordinator asks; never run the whole suite more than once per task.
+- Each crate's integration tests are one binary (`tests/it/`). A fresh test binary can wait for a macOS security
+  scan on its first run; that is not a hang.
 
 ## Safety
 

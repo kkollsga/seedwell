@@ -37,30 +37,42 @@ extension TransferRow {
 
     /// The tracker said no or cannot be reached: Ask Tracker Again is offered.
     var canAskAgain: Bool {
-        kind == .torrent && (trackerHalted || (waitingIsError && state == .downloading) || seedGroup == .error || seedGroup == .dead)
+        kind == .torrent && (trackerHalted || (errorTransient && state == .downloading) || seedGroup == .error || seedGroup == .dead)
     }
 
     /// A download that is not moving, in the engine's words ("Tracker: Unregistered torrent",
     /// "Waiting for peers"): the progress, then why. `nil` while data flows or for anything but a download.
     var downloadWaiting: (lead: String, note: String, tail: String)? {
-        guard let note = waitingNote, state == .downloading || waitingIsError, error == nil else { return nil }
+        guard let note = waitingNote, state == .downloading || waitingIsError || errorTransient, error == nil else { return nil }
         let lead = "\(Fmt.progress(done: progressDone, total: progressSize)) — "
-        let tail = waitingIsError && !trackerHalted ? retryInSecs.map { " · retrying in \(Fmt.until($0))" } ?? "" : ""
+        let tail = errorTransient && !trackerHalted ? retryNote.map { " · " + $0 } ?? "" : ""
         return (lead, note, tail)
+    }
+
+    /// What the tracker side is doing after a failure, quietly: "retrying in 9 min", then "retrying now…" (Get Info adds the attempt). Nil when no retry is planned.
+    var retryNote: String? { retryNote(now: Date()) }
+
+    func retryNote(now: Date) -> String? {
+        guard let secs = retryInSecs else { return nil }
+        if secs == 0 || isAnnouncing(now: now) { return "retrying now…" }
+        return "retrying in \(Fmt.until(secs))"
+    }
+
+    /// An announce has been in flight for over half a second (shorter ones never show, so nothing flickers).
+    func isAnnouncing(now: Date) -> Bool {
+        guard let since = announcingSinceMs else { return false }
+        return now.timeIntervalSince1970 * 1000 - Double(since) > 500
     }
 
     /// What to do about a download that stopped with an error (not enough space, a disk problem).
     static let retryHint = " · Resume to try again"
 
-    /// "4 of 250 peers": the connected peers against the swarm (the tracker's last seeders + leechers, else
-    /// the peers known), else just "4 peers". Empty when nothing is connected. Downloads only: a Sharing row
+    /// "8 / 57 peers": the connected peers against the peer addresses known (always both numbers, "0 / 0 peers"
+    /// included) while a download runs. Empty otherwise. Downloads only: a Sharing row
     /// has its own short line (`sharingLine`). The rate is not here: it has its own slot (`rateSlot`).
     func liveSuffix(_ style: RowStyle) -> String {
-        guard style == .download, peers > 0 || (state == .downloading && downRate > 0) else { return "" }
-        guard let swarm = swarm.flatMap({ $0 > 0 ? $0 : nil }) ?? (knownPeers > 0 ? knownPeers : nil) else {
-            return "\(peers) peer\(peers == 1 ? "" : "s")"
-        }
-        return "\(peers) of \(max(swarm, peers)) peers"
+        guard style == .download, state == .downloading else { return "" }
+        return Fmt.peers(connected: peers, known: knownPeers)
     }
 
     /// The live rate a row shows at the right of its name, big and in the primary colour: "↓ 2.1 MB/s" while a
@@ -91,7 +103,7 @@ extension TransferRow {
     var sharingLine: String {
         if let p = movingPercent { return "Moving… \(p)%" }
         let goal = ratioGoal.map { " of \(Fmt.goal($0))" } ?? ""
-        return "\(Fmt.count(peers, "peer")) · Ratio \(Fmt.ratio(ratio))\(goal)"
+        return "\(Fmt.peers(connected: peers, known: knownPeers)) · Ratio \(Fmt.ratio(ratio))\(goal)"
     }
 
     /// Third line of a Sharing row: "3 of 24 files · 1.8 GB of 14 GB downloaded · 3 GB uploaded". The
@@ -113,7 +125,13 @@ extension TransferRow {
     func statusLine(_ style: RowStyle, showTracker: Bool = true, now: Date = Date()) -> String {
         let line = baseLine(style, showTracker: showTracker, now: now)
         let live = liveSuffix(style)
-        return live.isEmpty ? line : line + " · " + live
+        var out = live.isEmpty ? line : line + " · " + live
+        // One rule for every torrent: a quiet "Announcing…" while an announce is in flight, nothing otherwise.
+        // After a failure the retry text says "retrying now…" instead, so it is not doubled.
+        if isAnnouncing(now: now), retryInSecs == nil, style != .recent, style != .queued, style != .error, style != .dead {
+            out += " · Announcing…"
+        }
+        return out
     }
 
     private func baseLine(_ style: RowStyle, showTracker: Bool, now: Date) -> String {
@@ -148,7 +166,7 @@ extension TransferRow {
             return sharingLine
         case .error:
             var parts = (showTracker ? [trackerName] : []) + [error ?? "Problem"]
-            if let r = retryInSecs { parts.append("retrying in \(Fmt.until(r))") }
+            if let note = retryNote(now: now) { parts.append(note) }
             return parts.joined(separator: " · ")
         case .dead:
             return ((showTracker ? [trackerName] : []) + [error ?? "Gone"]).joined(separator: " · ")
@@ -319,19 +337,21 @@ struct TransferRowView: View {
         }
     }
 
-    /// Errors and dead torrents colour only the reason: "tracker-z.cc · **Tracker unreachable** · retrying in 2 h".
+    /// Problems that need the user (a dead tracker, a disk error) colour the reason red; a temporary tracker
+    /// outage stays in the secondary colour: "tracker-z.cc · Bad gateway · retrying in 9 min".
     private var statusText: Text {
         switch style {
         case .error, .dead:
+            let calm = style == .error && row.errorTransient
             let reason = Text(row.error ?? (style == .dead ? "Gone" : "Problem"))
-                .foregroundStyle(style == .dead ? Color.red : Color.orange)
+                .foregroundStyle(calm ? Color.secondary : Color.red)
             var t = Text(showTracker ? row.trackerName + " · " : "") + reason
-            if style == .error, let r = row.retryInSecs { t = t + Text(" · retrying in \(Fmt.until(r))") }
+            if style == .error, let note = row.retryNote { t = t + Text(" · " + note) }
             return t
         case .download where row.downloadWaiting != nil && row.waitingIsError:
             // The reason alone takes the error colour: "0.0 of 1.9 GB — **Tracker: Unregistered torrent**"
             let w = row.downloadWaiting!
-            return Text(w.lead) + Text(w.note).foregroundStyle(row.trackerHalted ? Color.red : Color.orange) + Text(w.tail)
+            return Text(w.lead) + Text(w.note).foregroundStyle(Color.red) + Text(w.tail)
         default:
             return Text(row.statusLine(style, showTracker: showTracker))
         }

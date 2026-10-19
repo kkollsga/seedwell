@@ -33,6 +33,11 @@ pub const MANUAL_FLOOR: Duration = secs(300);
 /// to `Start`/`Resume` alike, so an engine that re-sends `Start` on every UI
 /// refresh cannot hammer a tracker that just said no.
 pub const HALT_RETRY_FLOOR: Duration = secs(60);
+/// A user's "Ask Tracker Again" overrides Seedwell's own backoff but not a double click: this long
+/// after the last attempt on the tracker.
+pub const MANUAL_RETRY_FLOOR: Duration = secs(10);
+/// A forced announce (past the tracker's minimum interval) is allowed once per tracker per this long.
+pub const FORCE_INTERVAL: Duration = secs(300);
 /// Network change never retries a failed announce sooner than this after the
 /// previous attempt. A network change or wake never makes a *regular* announce
 /// earlier: it only reschedules announces that already failed.
@@ -163,10 +168,16 @@ pub enum Input {
     GateRefused(RequestId),
     /// The user pressed "re-announce". Also clears a `failure reason` halt.
     ManualReannounce,
+    /// "Announce anyway": like [`Input::ManualReannounce`] but also past the tracker's minimum
+    /// interval, at most once per [`FORCE_INTERVAL`].
+    ManualForce,
     /// The network path changed.
     NetworkChanged,
     /// The machine woke from sleep.
     Wake,
+    /// Another announce to this tracker's host just succeeded. A retry waiting after a host-level
+    /// failure (5xx, timeout, connection refused or reset) is pulled forward, once per recovery.
+    HostRecovered,
     /// A user action (start/resume): forget a `failure reason` halt (or the slow
     /// retry schedule), but not sooner than [`HALT_RETRY_FLOOR`] after the last
     /// attempt.
@@ -229,6 +240,10 @@ pub enum SendKind {
     Retry,
     /// User/network-change triggered, no earlier than the min interval.
     Manual,
+    /// "Announce anyway": a user's forced announce, allowed inside the tracker's min interval
+    /// (at most once per [`FORCE_INTERVAL`], never within [`MANUAL_RETRY_FLOOR`] of the last
+    /// success). The audits license exactly this and nothing else.
+    Forced,
 }
 
 /// A request to send.
@@ -409,6 +424,8 @@ struct Session {
     down: u64,
     hw_up: u64,
     hw_down: u64,
+    corrupt: u64,
+    hw_corrupt: u64,
     last_sent_up: u64,
     last_sent_down: u64,
     tracker_id: Option<Box<[u8]>>,
@@ -418,6 +435,8 @@ struct Session {
     want_stop: bool,
     restart_pending: bool,
     manual_requested: bool,
+    /// The pending manual announce was forced (see [`SendKind::Forced`]).
+    forced: bool,
     stop_max_attempts: u8,
     stop_attempts: u8,
     stop_retry_at: Option<Millis>,
@@ -446,6 +465,8 @@ impl Session {
             down: 0,
             hw_up: 0,
             hw_down: 0,
+            corrupt: 0,
+            hw_corrupt: 0,
             last_sent_up: 0,
             last_sent_down: 0,
             tracker_id: None,
@@ -455,6 +476,7 @@ impl Session {
             want_stop: false,
             restart_pending: false,
             manual_requested: false,
+            forced: false,
             stop_max_attempts: MAX_STOP_ATTEMPTS,
             stop_attempts: 0,
             stop_retry_at: None,
@@ -474,7 +496,7 @@ impl Session {
 
 /// The per-(torrent, tracker) announce state machine.
 ///
-/// size: 104 bytes while idle (checked by a test), plus the session state
+/// size: 112 bytes while idle (checked by a test), plus the session state
 /// (~250 bytes, one allocation) while a session is open. The immutable
 /// [`MachineConfig`] is shared between the machines of a torrent.
 #[derive(Debug, Clone)]
@@ -495,6 +517,8 @@ pub struct AnnounceMachine {
     last_announce_at: T8,
     retry_at: T8,
     manual_ok_at: T8,
+    /// Seconds + 1 at which the last forced announce was asked, 0 = never (not persisted).
+    force_s: u32,
     /// When the last failure answer arrived (any class). Floors for user
     /// retries and network-change retries count from here; with `hint_secs`
     /// (the server hint that failure carried) it also lets `SetRole` pull a
@@ -523,6 +547,10 @@ pub struct AnnounceMachine {
     halted: bool,
     last_failure_network: bool,
     last_failure_slow: bool,
+    /// The latest failure was the host's, not the torrent's (5xx, timeout, refused, reset).
+    last_failure_host: bool,
+    /// The retry was pulled forward because the host recovered; not again until an announce works.
+    recovery_pulled: bool,
     role: TorrentRole,
     /// 0 = fine, n = `TRIP_REASONS[n - 1]`.
     tripped: u8,
@@ -562,6 +590,7 @@ impl AnnounceMachine {
             size: 0,
             retry_at: T8::NONE,
             manual_ok_at,
+            force_s: 0,
             fail_at: T8::NONE,
             hint_2s: 0,
             prev_gap_s: NO_GAP,
@@ -571,6 +600,8 @@ impl AnnounceMachine {
             halted: false,
             last_failure_network: false,
             last_failure_slow: false,
+            last_failure_host: false,
+            recovery_pulled: false,
             role: TorrentRole::Downloading,
             tripped: 0,
             session: None,
@@ -652,7 +683,9 @@ impl AnnounceMachine {
             Input::Timer
             | Input::GateRefused(_)
             | Input::ManualReannounce
+            | Input::ManualForce
             | Input::NetworkChanged
+            | Input::HostRecovered
             | Input::Wake => {}
         }
     }
@@ -676,6 +709,7 @@ impl AnnounceMachine {
                 self.size = st.size;
                 s.up = st.uploaded;
                 s.down = st.downloaded;
+                s.corrupt = st.corrupt;
                 if !s.started_dispatched {
                     // `started` is not built yet: it will carry these numbers.
                     self.leech_seen |= self.effective_left() > 0;
@@ -697,8 +731,10 @@ impl AnnounceMachine {
                 now,
                 out,
             ),
-            Input::ManualReannounce => self.on_manual(s, now, out),
+            Input::ManualReannounce => self.on_manual(s, now, out, false),
+            Input::ManualForce => self.on_manual(s, now, out, true),
             Input::NetworkChanged | Input::Wake => self.on_network(s, now),
+            Input::HostRecovered => self.on_host_recovered(s, now),
             Input::Suspend => self.on_stop(s, 1, out),
             Input::Retire => {
                 self.on_stop(s, 1, out);
@@ -737,6 +773,9 @@ impl AnnounceMachine {
         t8(&mut self.last_announce_at);
         t8(&mut self.retry_at);
         t8(&mut self.manual_ok_at);
+        if self.force_s > 0 {
+            self.force_s = ((u64::from(self.force_s) - 1).saturating_sub(back / 1000) + 1) as u32;
+        }
         t8(&mut self.fail_at);
         if let Some(s) = self.session.as_deref_mut() {
             s.now = m(s.now);
@@ -815,6 +854,16 @@ impl AnnounceMachine {
     pub fn retry_at(&self) -> Option<Millis> {
         self.retry_at.get()
     }
+    /// When "Announce anyway" is next allowed (`None` = now).
+    pub fn force_allowed_at(&self) -> Option<Millis> {
+        (self.force_s > 0).then(|| Millis(u64::from(self.force_s - 1) * 1000) + FORCE_INTERVAL)
+    }
+
+    /// Until when the tracker's own minimum interval holds a manual announce.
+    pub fn manual_ok_at(&self) -> Option<Millis> {
+        self.manual_ok_at.get()
+    }
+
     /// `completed` was dispatched (or must never be sent).
     pub fn completed_sent(&self) -> bool {
         self.completed_sent
@@ -969,22 +1018,49 @@ impl AnnounceMachine {
     /// Retry after a halt / slow failure at the user's request, never sooner
     /// than [`HALT_RETRY_FLOOR`] after the last attempt.
     fn user_retry(&mut self, now: Millis) {
+        self.user_retry_after(now, HALT_RETRY_FLOOR);
+    }
+
+    fn user_retry_after(&mut self, now: Millis, floor_after: Duration) {
         self.halted = false;
         self.failures = 0;
         self.last_failure_slow = false;
         self.last_failure_network = false;
-        let floor = self.fail_at.get().map_or(now, |t| t + HALT_RETRY_FLOOR);
+        self.last_failure_host = false;
+        self.recovery_pulled = false;
+        let floor = self.fail_at.get().map_or(now, |t| t + floor_after);
         self.retry_at.set(Some(now.max(floor)));
     }
 
-    fn on_manual(&mut self, s: &mut Session, now: Millis, out: &mut Vec<Intent>) {
+    fn on_manual(&mut self, s: &mut Session, now: Millis, out: &mut Vec<Intent>, force: bool) {
         if s.want_stop {
             return;
         }
         if self.halted || self.last_failure_slow {
-            // A user action: try again, but never faster than the floor.
-            self.user_retry(now);
+            // A user action: try again, but never faster than the double-click floor.
+            self.user_retry_after(now, MANUAL_RETRY_FLOOR);
             return;
+        }
+        // Seedwell's own backoff never makes a user wait: the retry comes forward to a short floor after
+        // the last attempt. The tracker's minimum interval still applies below, unless forced.
+        if self.failures > 0
+            && let (Some(r), Some(failed)) = (self.retry_at.get(), self.fail_at.get())
+        {
+            let mut at = (failed + MANUAL_RETRY_FLOOR).max(now);
+            // What the tracker itself demanded (Retry-After, `retry in`) stays respected.
+            if self.hint_2s > 0 {
+                at = at.max(failed + Duration::from_secs(u64::from(self.hint_2s) * 2));
+            }
+            if at < r {
+                self.retry_at.set(Some(at));
+            }
+        }
+        let granted = force && self.force_allowed_at().is_none_or(|t| now >= t);
+        if granted {
+            self.force_s = (now.0 / 1000).min(u64::from(u32::MAX) - 1) as u32 + 1;
+            // Never within the double-click floor of the last announce, forced or not.
+            let at = self.last_announce_at.get().map_or(now, |t| (t + MANUAL_RETRY_FLOOR).max(now));
+            self.manual_ok_at.set(Some(at));
         }
         // A request already outstanding will carry fresh state anyway.
         if s.started_acked && !s.manual_requested && s.outstanding.is_none() {
@@ -997,6 +1073,10 @@ impl AnnounceMachine {
             if until > now {
                 out.push(Intent::Report(Report::ManualDeferred { until }));
             }
+        }
+        // A forced ask joins a pending manual one too (it may have been waiting for the min interval).
+        if s.manual_requested {
+            s.forced |= granted;
         }
     }
 
@@ -1030,6 +1110,30 @@ impl AnnounceMachine {
                 let floor = self.fail_at.get().map_or(now, |t| t + NETWORK_RETRY_FLOOR);
                 self.retry_at.set(Some(r.min(quick.max(floor))));
             }
+    }
+
+    /// Another torrent's announce to this host succeeded. If this machine waits in backoff after a
+    /// failure that was the host's (not a tracker `failure reason` or a 4xx, which are about this
+    /// torrent), its retry comes forward to 5-60 s from now, once per recovery: if the retry fails
+    /// again the normal backoff goes on. Never before the failure's own floor or the server's
+    /// retry hint; the regular interval and `not_before` still apply in `send_due_at`.
+    fn on_host_recovered(&mut self, s: &mut Session, now: Millis) {
+        if s.want_stop || self.halted || self.failures == 0 || self.last_failure_slow || !self.last_failure_host || self.recovery_pulled {
+            return;
+        }
+        let Some(cur) = self.retry_at.get() else { return };
+        let jitter = 5_000 + self.rng_for(8, now).below(55_000);
+        let mut at = now + Duration::from_millis(jitter);
+        if let Some(failed) = self.fail_at.get() {
+            at = at.max(failed + NETWORK_RETRY_FLOOR);
+            if self.hint_2s > 0 {
+                at = at.max(failed + Duration::from_secs(u64::from(self.hint_2s) * 2));
+            }
+        }
+        if at < cur {
+            self.retry_at.set(Some(at));
+            self.recovery_pulled = true;
+        }
     }
 
     /// A generator for one jitter draw, seeded from the machine's identity, its
@@ -1103,6 +1207,7 @@ impl AnnounceMachine {
         s.started_dispatched = false;
         s.regular_at = None;
         s.manual_requested = false;
+        s.forced = false;
         s.wake = None;
         out.push(Intent::Report(Report::SessionClosed));
         if s.restart_pending {
@@ -1140,6 +1245,7 @@ impl AnnounceMachine {
         let event = o.event;
         // Any announce satisfies a pending "re-announce now" request.
         s.manual_requested = false;
+        s.forced = false;
         self.last_announce_at.set(Some(now));
         match event {
             Some(Event::Started) => s.started_dispatched = true,
@@ -1366,6 +1472,8 @@ impl AnnounceMachine {
         self.retry_at = T8::NONE;
         self.last_failure_network = false;
         self.last_failure_slow = false;
+        self.last_failure_host = false;
+        self.recovery_pulled = false;
         self.halted = false;
         if let Some(id) = &resp.tracker_id {
             // Latched for the rest of the session (invariant 6).
@@ -1470,6 +1578,7 @@ impl AnnounceMachine {
                 self.fail_at.set(Some(now));
                 self.last_failure_network = false;
                 self.last_failure_slow = true;
+                self.last_failure_host = false;
                 if let AnnounceError::Rejected { reason, .. } = &err {
                     out.push(Intent::Report(Report::Warning(format!(
                         "tracker said: {reason} (will retry in about {} min)",
@@ -1495,6 +1604,7 @@ impl AnnounceMachine {
                 });
                 self.last_failure_network = err.is_network();
                 self.last_failure_slow = false;
+                self.last_failure_host = err.is_host_level();
                 out.push(Intent::Report(Report::Failed {
                     error: err,
                     consecutive: u32::from(self.failures),
@@ -1633,9 +1743,10 @@ impl AnnounceMachine {
         }
     }
 
-    fn effective_stats(&mut self, s: &mut Session, event: Option<Event>) -> (u64, u64, u64) {
+    fn effective_stats(&mut self, s: &mut Session, event: Option<Event>) -> (u64, u64, u64, u64) {
         s.hw_up = s.hw_up.max(s.up);
         s.hw_down = s.hw_down.max(s.down);
+        s.hw_corrupt = s.hw_corrupt.max(s.corrupt);
         let mut left = self.effective_left();
         if event == Some(Event::Completed) {
             left = 0;
@@ -1645,17 +1756,18 @@ impl AnnounceMachine {
             // `Complete` is real news for it.
             self.leech_seen = true;
         }
-        (s.hw_up, s.hw_down, left)
+        (s.hw_up, s.hw_down, s.hw_corrupt, left)
     }
 
     fn build_params(&mut self, s: &mut Session, event: Option<Event>) -> AnnounceParams {
-        let (uploaded, downloaded, left) = self.effective_stats(s, event);
+        let (uploaded, downloaded, corrupt, left) = self.effective_stats(s, event);
         AnnounceParams {
             info_hash: self.info_hash,
             peer_id: self.cfg.peer_id,
             port: self.cfg.port,
             uploaded,
             downloaded,
+            corrupt,
             left,
             key: self.cfg.key,
             event,
@@ -1718,7 +1830,7 @@ impl AnnounceMachine {
                 }
                 let ok_regular = s.regular_at.is_some_and(|t| now >= t);
                 let ok_manual =
-                    kind == SendKind::Manual && self.manual_ok_at.get().is_some_and(|t| now >= t);
+                    matches!(kind, SendKind::Manual | SendKind::Forced) && self.manual_ok_at.get().is_some_and(|t| now >= t);
                 if !ok_regular && !ok_manual {
                     return Err("announce before interval");
                 }
@@ -1738,6 +1850,8 @@ impl AnnounceMachine {
         now: Millis,
         out: &mut Vec<Intent>,
     ) {
+        let forced = std::mem::take(&mut s.forced);
+        let kind = if kind == SendKind::Manual && forced { SendKind::Forced } else { kind };
         let params = self.build_params(s, event);
         if let Err(why) = self.audit(s, &params, kind, now) {
             self.trip(why, out);
@@ -1842,10 +1956,20 @@ mod tests {
                 result: r,
             })
         }
+        fn stats_corrupt(&mut self, up: u64, down: u64, corrupt: u64, left: u64, size: u64) {
+            self.input(Input::Stats(Stats {
+                uploaded: up,
+                downloaded: down,
+                corrupt,
+                left,
+                size,
+            }));
+        }
         fn stats(&mut self, up: u64, down: u64, left: u64, size: u64) {
             self.input(Input::Stats(Stats {
                 uploaded: up,
                 downloaded: down,
+                corrupt: 0,
                 left,
                 size,
             }));
@@ -1869,6 +1993,29 @@ mod tests {
         assert_eq!(s.len(), 1);
         assert_eq!(s[0].params.event, None);
         assert_eq!(s[0].kind, SendKind::Regular);
+    }
+
+    /// The counters of a session are cumulative since `started`: a failed announce loses nothing (the
+    /// next one that goes out carries everything so far) and a sloppy caller cannot make them decrease.
+    #[test]
+    fn counters_stay_cumulative_across_failures_and_never_decrease() {
+        let mut r = Rig::new();
+        r.stats_corrupt(0, 0, 0, 100, 100);
+        let s = r.ev(TorrentEvent::Start);
+        assert_eq!((s[0].params.uploaded, s[0].params.downloaded, s[0].params.corrupt), (0, 0, 0));
+        r.respond(&s[0], Ok(ok(1800, None)));
+        r.now = Millis::from_secs(100);
+        r.stats_corrupt(10, 50, 20, 40, 100);
+        let s = r.at(1800);
+        assert_eq!((s[0].params.uploaded, s[0].params.downloaded, s[0].params.corrupt, s[0].params.left), (10, 50, 20, 40));
+        assert!(r.respond(&s[0], Err(timeout())).is_empty());
+        // More happens during the outage; the caller even reports a smaller corrupt figure.
+        r.stats_corrupt(30, 80, 5, 20, 100);
+        let s = r.at(2400);
+        assert_eq!(s.len(), 1, "the retry went out");
+        let p = &s[0].params;
+        assert_eq!((p.uploaded, p.downloaded, p.corrupt, p.left), (30, 80, 20, 20), "everything so far, nothing lower");
+        assert_eq!(p.event, None);
     }
 
     #[test]
@@ -2414,6 +2561,71 @@ mod tests {
     }
 
     #[test]
+    fn host_recovery_pulls_a_host_level_failure_forward_once() {
+        let fail = |e: AnnounceError| {
+            let mut r = Rig::new();
+            r.stats(0, 0, 0, 100);
+            r.m.handle(Input::SetRole(TorrentRole::Seeding), r.now);
+            let s = r.ev(TorrentEvent::Start);
+            r.respond(&s[0], Err(e));
+            r
+        };
+        let http = |status| AnnounceError::Http { status, retry_after: None };
+        // 502: pulled to 5-60 s from now (never within the 30 s network floor of the failure).
+        let mut r = fail(http(502));
+        let before = r.m.retry_at().unwrap();
+        r.now = Millis::from_secs(600);
+        r.input(Input::HostRecovered);
+        let pulled = r.m.retry_at().unwrap();
+        assert!(pulled < before && pulled >= Millis::from_secs(605) && pulled <= Millis::from_secs(660), "{pulled:?}");
+        // Not again, even when it is pushed back by a second failure and the host answers again.
+        r.input(Input::HostRecovered);
+        assert_eq!(r.m.retry_at(), Some(pulled), "once per recovery");
+        // 4xx and a tracker's own words are about the torrent.
+        for e in [http(403), AnnounceError::Rejected { reason: "busy".into(), retry_in: None }] {
+            let mut q = fail(e);
+            let before = q.m.retry_at();
+            q.now = Millis::from_secs(600);
+            q.input(Input::HostRecovered);
+            assert_eq!(q.m.retry_at(), before);
+        }
+        // Timeouts and refused connections are the host's.
+        let mut t = fail(timeout());
+        t.now = Millis::from_secs(600);
+        let before = t.m.retry_at().unwrap();
+        t.input(Input::HostRecovered);
+        assert!(t.m.retry_at().unwrap() <= before);
+    }
+
+    #[test]
+    fn a_users_ask_beats_the_backoff_but_not_the_minimum_interval_unless_forced() {
+        // Backoff: after a 502 a seed waits 15 min, a user does not.
+        let mut r = Rig::new();
+        r.stats(0, 0, 0, 100);
+        let s = r.ev(TorrentEvent::Start);
+        r.m.handle(Input::SetRole(TorrentRole::Seeding), r.now);
+        r.respond(&s[0], Err(AnnounceError::Http { status: 502, retry_after: None }));
+        r.now = Millis::from_secs(3);
+        assert!(r.input(Input::ManualReannounce).is_empty(), "the ten second double-click floor");
+        let at = r.m.retry_at().unwrap();
+        assert!(at <= Millis::from_secs(11), "{at:?}");
+        assert!(!r.at(12).is_empty(), "sent");
+        // Minimum interval: a success with min interval 600 s holds a normal ask, a forced one goes, once per 5 min.
+        let mut q = Rig::new();
+        q.stats(0, 0, 0, 100);
+        let s = q.ev(TorrentEvent::Start);
+        q.respond(&s[0], Ok(ok(1800, Some(600))));
+        q.now = Millis::from_secs(100);
+        q.input(Input::ManualReannounce);
+        assert!(q.reports.iter().any(|r| matches!(r, Report::ManualDeferred { .. })), "deferred by the tracker's minimum interval");
+        assert!(q.at(101).is_empty());
+        q.reports.clear();
+        let sent = q.input(Input::ManualForce);
+        assert!(!sent.is_empty() || !q.at(101).is_empty(), "forced goes past the minimum interval");
+        assert!(q.m.force_allowed_at().is_some_and(|t| t >= Millis::from_secs(100 + 299)));
+    }
+
+    #[test]
     fn network_change_shortens_network_backoff_only() {
         let mut r = Rig::new();
         r.stats(0, 0, 100, 100);
@@ -2517,7 +2729,7 @@ mod size_tests {
             "AnnounceMachine {m} B, Session {s} B, Auditor {a} B, TimingRecord {r} B, TrackerUrl {u} B"
         );
         assert!(
-            m <= 104,
+            m <= 112,
             "AnnounceMachine grew to {m} bytes; update its doc comment"
         );
         assert!(s <= 320, "Session grew to {s} bytes");

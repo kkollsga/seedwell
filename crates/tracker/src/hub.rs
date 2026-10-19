@@ -711,6 +711,12 @@ impl<S: TimingStore> TrackerHub<S> {
         self.dispatch(ih, SetInput::Manual, now);
     }
 
+    /// User "Announce anyway": also past the tracker's minimum interval (once per tracker per 5 min).
+    pub fn manual_reannounce_forced(&mut self, ih: &InfoHash20, now: Millis) {
+        let now = self.clock.norm(now);
+        self.dispatch(ih, SetInput::ManualForce, now);
+    }
+
     /// Network path changed: applies to every torrent. Only announces that
     /// already failed (or are in backoff) are rescheduled; a regular announce is
     /// never made earlier by this (SPEC 7C.3 #1).
@@ -1029,6 +1035,7 @@ impl<S: TimingStore> TrackerHub<S> {
         result: Result<AnnounceResponse, AnnounceError>,
         now: Millis,
     ) -> bool {
+        let ok = result.is_ok();
         let (answered, unreachable, network) = match &result {
             Ok(_) => (true, false, false),
             Err(e) => (e.answered(), e.is_unreachable(), e.is_network()),
@@ -1040,6 +1047,9 @@ impl<S: TimingStore> TrackerHub<S> {
         };
         self.saw_failed = false;
         let applied = self.feed_slot(&ih, slot, input, now);
+        if ok && applied && event != Some(Event::Stopped) && self.net.off.is_none() {
+            self.host_recovered(ih, slot, now);
+        }
         if event != Some(Event::Stopped) {
             // A failure the machine did not count (it came after a success for the same
             // request) is no evidence of anything.
@@ -1047,6 +1057,32 @@ impl<S: TimingStore> TrackerHub<S> {
             self.after_result(ih, slot, answered, unreachable, now);
         }
         applied
+    }
+
+    /// An announce to this host worked: every other (torrent, tracker) waiting in backoff on the
+    /// same host after a host-level failure gets its retry pulled forward (once, jittered; the
+    /// gate and the machines' floors still apply). Cheap: only machines with failures are looked at.
+    fn host_recovered(&mut self, ih: InfoHash20, slot: u16, now: Millis) {
+        let Some(host) = self.torrents.get(&ih).and_then(|t| t.set.url(slot)).map(|u| u.host().to_owned()) else {
+            return;
+        };
+        let mut hits: Vec<(InfoHash20, u16)> = Vec::new();
+        for (k, t) in &self.torrents {
+            for sl in 0..t.set.len() as u16 {
+                if (*k, sl) == (ih, slot) {
+                    continue;
+                }
+                if t.set.machine(sl).is_some_and(|m| m.failures() > 0)
+                    && t.set.url(sl).is_some_and(|u| u.host() == host)
+                {
+                    hits.push((*k, sl));
+                }
+            }
+        }
+        hits.sort_unstable();
+        for (k, sl) in hits {
+            self.feed_slot(&k, sl, Input::HostRecovered, now);
+        }
     }
 
     fn after_result(&mut self, ih: InfoHash20, slot: u16, answered: bool, unreachable: bool, now: Millis) {

@@ -29,8 +29,9 @@ pub const MAX_REMOTE_CLIENT_LEN: usize = 32;
 
 /// Which optional extensions this torrent may use.
 ///
-/// The engine builds this once per torrent. PEX is **never** allowed on private
-/// torrents (BEP 27, SPEC 7B.4): we neither advertise it nor accept it.
+/// The engine builds this from its PEX rule (`pex = global && (!private || tracker allows it)`,
+/// SPEC 7B.4). PEX is off for private torrents unless the user allowed it for their tracker
+/// (BEP 27 says off; most private trackers forbid it); when it is off we neither advertise nor accept it.
 // size: 2 bytes
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ExtPolicy {
@@ -41,7 +42,7 @@ pub struct ExtPolicy {
 }
 
 impl ExtPolicy {
-    /// Policy for a torrent: PEX off when `private`.
+    /// Policy for a torrent: PEX off when `private` (the engine turns it on again per tracker).
     pub const fn for_torrent(private: bool) -> Self {
         Self {
             allow_pex: !private,

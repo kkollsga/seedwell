@@ -416,6 +416,8 @@ impl Torrent {
         if pk.have().has(piece) {
             return;
         }
+        // A piece that came from peers and passed its hash check is downloaded payload (SPEC 7B.2).
+        self.counters.add_down(u64::from(pk.piece_size(piece)));
         pk.piece_verified(piece);
         if let Some(d) = self.ctx.disk.get() {
             // The bit first, then the epoch: a stream that saw "missing" and then awaits the epoch
@@ -768,7 +770,7 @@ impl Torrent {
                 connected_secs: p.connected_at.elapsed().as_secs(),
                 snubbed: p.snubbed_at.is_some(),
                 upload_only: p.upload_only,
-                has_pex: p.has_pex,
+                has_pex: p.has_pex && self.pex_allowed(),
             })
             .collect();
         DetailParts { files, peers, piece_count, piece_length: piece_len, comment }

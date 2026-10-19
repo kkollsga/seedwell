@@ -156,7 +156,7 @@ struct RowList<Header: View>: View {
                 HStack(spacing: 5) {
                     Text(title).fontWeight(.semibold)
                         .font(.system(size: g.isBlock ? 13 : 12))
-                        .foregroundStyle(g.isBlock ? Color.primary : g.style == .error ? Color.orange : g.style == .dead ? Color.red : .secondary)
+                        .foregroundStyle(g.isBlock ? Color.primary : g.style == .dead ? Color.red : .secondary)
                     Image(systemName: "chevron.down")
                         .font(.system(size: 9, weight: .semibold))
                         .foregroundStyle(.tertiary)

@@ -190,7 +190,9 @@ pub(crate) struct Diag {
 pub(crate) struct PeerCtx {
     pub ih: [u8; 20],
     pub our_id: [u8; 20],
-    pub policy: ExtPolicy,
+    /// `ut_pex` may be advertised, sent and used (the one rule: `policy::pex_allowed`). Live: the
+    /// torrent flips it when the global switch or its tracker's setting changes.
+    pub pex: AtomicBool,
     pub reserved: Reserved,
     pub disk: OnceLock<DiskCtx>,
     pub counters: Arc<Counters>,
@@ -222,6 +224,11 @@ pub(crate) struct PeerCtx {
 }
 
 impl PeerCtx {
+    /// The extensions this torrent may use right now.
+    pub(crate) fn policy(&self) -> ExtPolicy {
+        ExtPolicy { allow_pex: self.pex.load(Ordering::Relaxed), ..ExtPolicy::for_torrent(false) }
+    }
+
     fn prio(&self) -> Priority {
         Priority::from_u8(self.priority.load(Ordering::Relaxed))
     }
@@ -260,6 +267,8 @@ pub(crate) enum PeerCmd {
     Requests(Vec<BlockRequest>),
     Cancel(BlockRequest),
     Pex(Vec<u8>),
+    /// Send a fresh extended handshake (the extensions we offer changed).
+    ReadvertiseExt,
     Metadata(Box<MetaOut>),
     Disconnect,
 }
@@ -585,6 +594,13 @@ struct Peer {
     read_pause_until: Option<Instant>,
     up_pause_until: Option<Instant>,
     misbehaviour: u32,
+    /// Our extended handshake to this peer listed `ut_pex` (so it may send us PEX).
+    advertised_pex: bool,
+    /// Bytes of the encoder's stream handed to the transport so far.
+    enc_written: u64,
+    /// Piece payload inside the encoder's queue, as `(start, end)` offsets in the same stream, in
+    /// order. Uploaded bytes are counted when the transport takes them (SPEC 7B.2), not when queued.
+    payload_marks: VecDeque<(u64, u64)>,
 }
 
 /// Peers may queue this many outstanding requests with us (twice our advertised `reqq`, for requests that
@@ -689,6 +705,9 @@ impl Peer {
             read_pause_until: None,
             up_pause_until: None,
             misbehaviour: 0,
+            advertised_pex: false,
+            enc_written: 0,
+            payload_marks: VecDeque::new(),
         });
         if ext {
             peer.send_ext_handshake();
@@ -711,7 +730,9 @@ impl Peer {
     }
 
     fn send_ext_handshake(&mut self) {
-        let mut h = LocalExtendedHandshake::new(&self.ctx.version, self.ctx.policy);
+        let policy = self.ctx.policy();
+        self.advertised_pex |= policy.allow_pex;
+        let mut h = LocalExtendedHandshake::new(&self.ctx.version, policy);
         let lp = self.ctx.listen_port.load(Ordering::Relaxed);
         h.listen_port = u16::try_from(lp).ok().filter(|&p| p != 0);
         let ms = self.ctx.metadata_size.load(Ordering::Relaxed);
@@ -842,6 +863,7 @@ impl Peer {
         match self.stream.try_write(self.enc.pending()) {
             Ok(n) => {
                 self.enc.advance(n);
+                self.credit_written(n as u64);
                 self.last_tx = Instant::now();
                 self.last_data = Instant::now();
                 self.bufs_dirty = true;
@@ -849,6 +871,29 @@ impl Peer {
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(()),
             Err(e) => Err(Close::Io(e.to_string())),
+        }
+    }
+
+    /// `n` more bytes of the queue went to the transport: the piece payload among them is what
+    /// we uploaded. Protocol overhead (headers, other messages) never counts, and a block that is
+    /// still queued when the connection ends is never counted.
+    fn credit_written(&mut self, n: u64) {
+        let (from, to) = (self.enc_written, self.enc_written + n);
+        self.enc_written = to;
+        let mut sent = 0u64;
+        while let Some(&(s, e)) = self.payload_marks.front() {
+            if s >= to {
+                break;
+            }
+            sent += e.min(to) - s.max(from);
+            if e <= to {
+                self.payload_marks.pop_front();
+            } else {
+                break;
+            }
+        }
+        if sent > 0 {
+            self.ctx.counters.add_up(sent);
         }
     }
 
@@ -1136,12 +1181,13 @@ impl Peer {
             let Some(chunk) = bytes.get(off..off.saturating_add(req.length as usize)) else {
                 return Err(Close::Storage("short read".into()));
             };
+            let at = self.enc_written + self.enc.pending().len() as u64 + 13;
+            self.payload_marks.push_back((at, at + chunk.len() as u64));
             self.enc.push_piece(req.index, req.begin, chunk);
             run.users = run.users.saturating_sub(1);
             self.reads.pop_front();
             self.trim_runs();
             let n = u64::from(req.length);
-            self.ctx.counters.add_up(n);
             if let Some(d) = self.ctx.disk.get() {
                 self.ctx.file_up.add(&d.layout, req.index, req.begin, req.length);
             }
@@ -1211,17 +1257,19 @@ impl Peer {
             WriteAck::Complete(p) => BlockAck::Complete(p),
         };
         if !matches!(ack, BlockAck::Duplicate) {
-            // Payload bytes that reached storage count, including pieces that later fail their
-            // hash (matches the mainstream clients (qBittorrent, Transmission)); duplicates and unsolicited data do not.
-            self.ctx.counters.add_down(want as u64);
+            // Rates only. `downloaded` (announced, ratio) is credited when the piece passes its hash
+            // check (`Torrent::piece_verified`), so hash-failed data and pieces in progress never
+            // count; duplicates and unsolicited data never reach here.
             self.shared.down.fetch_add(want as u64, Ordering::Relaxed);
         }
         self.emit(PeerEvent::Block { piece: index, begin, len: want as u32, ack }).await
     }
 
     async fn on_extended(&mut self, id: u8, payload: &[u8]) -> Result<(), Close> {
-        let parsed = match ExtendedMessage::parse(id, payload, self.ctx.policy) {
+        let parsed = match ExtendedMessage::parse(id, payload, self.ctx.policy()) {
             Ok(m) => m,
+            // PEX switched off after we advertised it: the peer is only late to notice.
+            Err(trs_wire::Error::ExtensionDisabled(_)) if self.advertised_pex && id == trs_wire::extended::LOCAL_UT_PEX_ID => return Ok(()),
             Err(trs_wire::Error::ExtensionDisabled(_)) => {
                 // e.g. PEX on a private torrent: ignore, but a peer that keeps doing it goes.
                 self.misbehaviour += 8;
@@ -1242,7 +1290,8 @@ impl Peer {
                     reqq: h.reqq,
                     metadata_size: h.metadata_size,
                     has_metadata: h.ut_metadata.is_some(),
-                    has_pex: h.ut_pex.is_some() && self.ctx.policy.allow_pex,
+                    // What the peer offers; whether we use it is the torrent's call (it can change).
+                    has_pex: h.ut_pex.is_some(),
                     upload_only: h.upload_only.unwrap_or(false),
                 };
                 self.emit(PeerEvent::Ext(info)).await
@@ -1261,7 +1310,7 @@ impl Peer {
                 MetadataMessage::Unknown { .. } => Ok(()),
             },
             ExtendedMessage::Pex(m) => {
-                if !self.ctx.policy.allow_pex {
+                if !self.ctx.pex.load(Ordering::Relaxed) {
                     return Ok(());
                 }
                 let addrs: Vec<(SocketAddr, bool)> =
@@ -1322,8 +1371,14 @@ impl Peer {
                 self.requested.retain(|&(i, b)| !(i == r.index && b == r.begin));
                 self.enc.push(&Message::<&[u8]>::Cancel(r));
             }
+            // PEX was switched on after the handshake: tell the peer (BEP 10 allows a new handshake).
+            PeerCmd::ReadvertiseExt => {
+                if !self.advertised_pex && self.ctx.pex.load(Ordering::Relaxed) {
+                    self.send_ext_handshake();
+                }
+            }
             PeerCmd::Pex(payload) => {
-                if self.st.remote_ut_pex != 0 && self.ctx.policy.allow_pex {
+                if self.st.remote_ut_pex != 0 && self.ctx.pex.load(Ordering::Relaxed) {
                     self.enc.push_extended(self.st.remote_ut_pex, |b| {
                         bytes::BufMut::put_slice(b, &payload);
                     });

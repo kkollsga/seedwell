@@ -139,6 +139,10 @@ fn params_fields(p: &AnnounceParams) -> Vec<(String, String)> {
     if p.crypto == Crypto::Require {
         f.push(("requirecrypto".into(), "1".into()));
     }
+    // As on the wire: only when above zero, between the crypto flags and `event` (UDP has no field).
+    if p.corrupt > 0 {
+        f.push(("corrupt".into(), p.corrupt.to_string()));
+    }
     if let Some(e) = p.event {
         f.push(("event".into(), e.as_str().into()));
     }
@@ -189,7 +193,7 @@ pub(crate) fn finished(
             }
             rq.fields.push(("announce.action".into(), "1 (announce)".into()));
             let mut f = params_fields(p);
-            f.retain(|(k, _)| !matches!(k.as_str(), "compact" | "supportcrypto" | "requirecrypto" | "event" | "trackerid"));
+            f.retain(|(k, _)| !matches!(k.as_str(), "compact" | "supportcrypto" | "requirecrypto" | "corrupt" | "event" | "trackerid"));
             for (k, v) in f {
                 let k = if k == "numwant" { "num_want".to_string() } else { k };
                 rq.fields.push((format!("announce.{k}"), v));

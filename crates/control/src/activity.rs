@@ -121,6 +121,7 @@ pub fn describe(r: &Request) -> String {
             p.down_limit,
             p.up_limit
         ),
+        Request::SetTrackerPex(p) => format!("{} peer exchange on tracker {}", if p.allow { "allow" } else { "forbid" }, clip(&p.id, 64)),
         Request::Reannounce(p) => format!("reannounce {}", ids(&p.ids)),
         Request::Recheck(p) => format!("recheck {}", ids(&p.ids)),
         Request::Remove(p) => format!("remove {}{} (step 1, asks for confirmation)", ids(&p.ids), if p.delete_files { " and delete files" } else { "" }),

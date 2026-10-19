@@ -206,8 +206,8 @@ rate averaged over ~10 min above 250 KB/s while active in the last 10 min), Acti
 "unregistered"). Cold carries 12 bytes for it: `last_activity`, `error_since` (both unix seconds, persisted; the activity at
 most every 10 minutes) and `avg_up`; everything else is computed. Errors are: files missing/unreadable or a disk fault
 (`want == Error`), and *every* tracker of the torrent failing at the transport level (timeouts, DNS, 5xx, garbage). A tracker's
-`warning message` or non-permanent `failure reason` is not an error. `error` carries the short reason ("Tracker unreachable",
-"Tracker: Unregistered torrent", the disk text) and `next_retry_ms` the next announce attempt of a failing tracker.
+`warning message` or non-permanent `failure reason` is not an error. `error` carries the short reason ("Bad gateway",
+"Rejected: “Unregistered torrent”", the disk text) and `next_retry_ms` the next announce attempt of a failing tracker.
 `tracker_driver` aggregates the per-slot reports into `Health` and tells the session only when it changes; the session keeps a
 map entry only for torrents that are failing right now. `Role` (Downloading / Seeding / SeedingDormant) is sent to the driver
 whenever it changes (finish, group drift, checked every 10 minutes); the driver stores it and hands it to the hub, which
@@ -438,14 +438,17 @@ with the mapped port; torrents added later use it too. A mapping that changes wh
 ## Counters and the tracker
 
 `Counters` keeps lifetime totals and a per-`started` base. `uploaded`/`downloaded` in announces are
-session deltas that restart at every `started` (also on resume). `downloaded` counts payload bytes
-accepted by storage, hash-failed pieces included, duplicates and unsolicited data excluded (one
-place: `peer.rs`, `on_piece`). `left` is exact, from the verified bitfield. `key` and `peer_id` are
+session deltas that restart at every `started` (also on resume). `downloaded` is the size of each
+piece from peers that passed its hash check, added when it passes (one place: `torrent/maintenance.rs`,
+`piece_verified`); hash-failed pieces, duplicates and pieces in progress never count. A failed piece adds
+its size to `corrupt`, sent as `corrupt=` on HTTP announces when above zero. `uploaded` is the piece
+payload the connection took from its send queue (`peer.rs`, `credit_written`). `left` is exact, from the
+verified bitfield. `key` and `peer_id` are
 generated once per process.
 
 ## Control-API behaviour worth knowing
 
-* `reannounce(ids)` is async and answers per tracker (`ReannounceResult { id, url_redacted, sent, not_before_ms }`) from the hub's
+* `reannounce(ids)` is async and answers per tracker (`ReannounceResult { id, url_redacted, sent, not_before_ms, waiting_after_failures, force_limited_until_ms, min_interval_until_ms }`; `reannounce_with(ids, force)` also goes past the tracker's minimum interval (once per tracker per 5 min); Seedwell's own backoff never holds a user's ask back) from the hub's
   real min-interval gate. `remove(ids, delete_files)` replies when the torrents are stopped and the files are deleted.
 * `set_file_priorities` updates `wanted_bytes`; a Cold torrent's `torrent_detail` shows its real file priorities.
 * Pausing remembers the connected peers (bounded) so that resume redials them at once.

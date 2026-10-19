@@ -73,6 +73,20 @@ impl Core {
         self.backend.tracker_hosts(&group_id)
     }
 
+    /// Whether peer exchange is allowed for the private torrents of this tracker (a favorite's id, an
+    /// automatic tracker's domain, or `other-private`). Off unless the user turned it on (SPEC §7B.4).
+    pub fn tracker_pex_allowed(&self, tracker_id: String) -> bool {
+        self.settings.tracker_pex(&tracker_id)
+    }
+
+    /// Allow or forbid peer exchange for this tracker's private torrents. Takes effect at once, also
+    /// for torrents that are running.
+    pub fn tracker_pex_set(&self, tracker_id: String, allow: bool) -> Result<(), CoreError> {
+        self.settings.set_tracker_pex(&tracker_id, allow)?;
+        self.backend.settings_saved();
+        Ok(())
+    }
+
     /// Validate one line of the inline URL editor.
     pub fn url_check(&self, raw: String) -> UrlCheck {
         check_url(&raw)

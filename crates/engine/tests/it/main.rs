@@ -5,6 +5,7 @@
 #[path = "../common/mod.rs"]
 mod common;
 
+mod accuracy;
 mod basic;
 mod boot;
 mod devlog;
@@ -21,6 +22,7 @@ mod network;
 mod organize;
 mod outage;
 mod pending_start;
+mod pex_policy;
 mod policy;
 mod portmap;
 mod private_wire;

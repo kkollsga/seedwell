@@ -230,12 +230,12 @@ impl Backend for Mock {
         g.calls.push("limits".into());
         Ok(l)
     }
-    async fn reannounce(&self, ids: Vec<TransferId>) -> Result<Vec<ReannounceDto>, ApiError> {
+    async fn reannounce(&self, ids: Vec<TransferId>, _force: bool, _wait: bool) -> Result<Vec<ReannounceDto>, ApiError> {
         self.log(format!("reannounce {}", ids.len()));
         Ok(vec![ReannounceDto {
             id: id_hex(&ids[0]),
             name: "x".into(),
-            trackers: vec![ReannounceTracker { url: "https://t.org/a/***/announce?***".into(), status: "ok".into(), not_before: Some(2_000_000_000) }],
+            trackers: vec![ReannounceTracker { url: "https://t.org/a/***/announce?***".into(), status: "ok".into(), not_before: Some(2_000_000_000), answer: None }],
             note: "requested".into(),
         }])
     }

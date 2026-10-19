@@ -20,6 +20,7 @@ fuzz_target!(|data: &[u8]| {
             port: 1,
             uploaded: 0,
             downloaded: 0,
+            corrupt: 0,
             left: 0,
             key: 1,
             event: None,
