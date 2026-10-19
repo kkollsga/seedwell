@@ -445,6 +445,12 @@ impl Core {
         self.backend.volumes_changed();
     }
 
+    /// The port the engine listens on now: the manual one, or the random one picked at this start. It changes
+    /// when the setting is applied (live, no restart).
+    pub fn listen_port(&self) -> u16 {
+        self.backend.listen_port()
+    }
+
     /// Present when the configured listening port was in use by another app at start and the engine
     /// listens on another one for now.
     pub fn port_fallback(&self) -> Option<PortFallbackInfo> {
@@ -720,7 +726,8 @@ mod tests {
         assert!(s.trackers.iter().any(|t| t.id == "public"));
         assert!(core.control_socket().is_some());
         let st = core.settings_load();
-        assert!(st.network.listen_port > 0, "the first launch writes the port back");
+        assert_eq!(st.network.listen_port, 0, "an automatic port is not written back");
+        assert!(s.listen_port > 0, "the engine listens on a random port");
         assert!(core.add_source("garbage".into()).is_err());
 
         // File priorities through the FFI: a three-file torrent (hashes are not checked until data arrives).

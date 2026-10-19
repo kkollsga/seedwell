@@ -584,7 +584,7 @@ impl Torrent {
             group: crate::ratelimit::GroupSlot::default(),
             priority: AtomicU8::new(init.priority.to_u8()),
             pool: init.shared.pool.clone(),
-            listen_port: AtomicU32::new(u32::from(init.shared.port())),
+            listen_port: init.shared.listen_port.clone(),
             version: cfg.client_version.clone(),
             metadata_size: AtomicU32::new(0),
             complete: AtomicBool::new(false),
@@ -594,7 +594,7 @@ impl Torrent {
             diag: init.shared.diag.clone(),
             encryption: cfg.encryption,
             plain_peers: init.shared.plain_peers.clone(),
-            utp: init.shared.utp.get().cloned(),
+            utp: init.shared.utp.clone(),
             utp_probe_timeout: cfg.utp_probe_timeout,
         });
         ctx.torrent_up.set(up_limit);

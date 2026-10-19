@@ -13,3 +13,6 @@ __pycache__/
 *.pyc
 /app/.sparkle
 /tools/sysguard/local.env
+
+# Local working notes and ideas (never published)
+dev-docs/

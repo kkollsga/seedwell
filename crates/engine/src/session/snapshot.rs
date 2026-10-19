@@ -183,7 +183,7 @@ impl Session {
             connections: self.sh.budget.established() as u32,
             connecting: self.sh.budget.half_open() as u32,
             listen_port: self.sh.port(),
-            port_fallback: self.sh.port_fallback.get().cloned(),
+            port_fallback: self.sh.fallback(),
             online: self.sh.net.offline_since().is_none(),
             offline_since_ms: self.sh.net.offline_since(),
         }

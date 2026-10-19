@@ -31,15 +31,13 @@ pub struct HostOptions {
     pub hot_reload: bool,
     /// How often (tests use a short one).
     pub poll_interval: Duration,
-    /// Write a random listen port back to `config.toml` on the first launch.
-    pub persist_listen_port: bool,
     /// Developer mode forced on for this process, whatever `config.toml` says (`seedwell daemon --dev-mode`).
     pub developer_mode: bool,
 }
 
 impl Default for HostOptions {
     fn default() -> Self {
-        Self { tweak: None, time_zone: None, hot_reload: true, poll_interval: POLL_INTERVAL, persist_listen_port: true, developer_mode: false }
+        Self { tweak: None, time_zone: None, hot_reload: true, poll_interval: POLL_INTERVAL, developer_mode: false }
     }
 }
 
@@ -141,13 +139,7 @@ impl Host {
         .await?;
         let h = engine.handle();
 
-        // First launch: remember the port the system gave us.
-        if opts.persist_listen_port && docs.cfg.network.listen_port == 0 {
-            docs.cfg.network.listen_port = h.listen_port();
-            if let Err(e) = cfg_docs.save(&docs.cfg) {
-                warnings.push(format!("config.toml: cannot save the listen port: {e}"));
-            }
-        }
+        // `network.listen_port = 0` means a random port at every start: it is never written back.
 
         let mut watchers = Vec::new();
         if opts.hot_reload {

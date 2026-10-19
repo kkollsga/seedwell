@@ -102,7 +102,6 @@ pub async fn run(mut o: Opts, g: &Global) -> Result<(), CliError> {
                 ec.tracker_destinations.allow_loopback = true;
             }
         })),
-        persist_listen_port: false,
         developer_mode: dev_mode,
         ..HostOptions::default()
     };

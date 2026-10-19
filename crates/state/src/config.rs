@@ -564,7 +564,8 @@ impl Default for Detection {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Network {
-    /// TCP/uTP listen port; 0 = pick a random port on first launch (the engine writes it back).
+    /// TCP/uTP listen port; 0 (or absent) = a random port at every start, never written back. Only a
+    /// manual choice stores a number (a number stored by an older version counts as a manual choice).
     pub listen_port: u16,
     /// DHT for public torrents.
     pub dht: bool,
@@ -1156,6 +1157,20 @@ mod tests {
     #[test]
     fn empty_file_is_all_defaults() {
         assert_eq!(Config::parse_str("").unwrap().value, Config::default());
+    }
+
+    #[test]
+    fn the_listen_port_is_automatic_unless_a_number_is_stored() {
+        // Absent and 0 both mean "random at every start"; the default is that.
+        assert_eq!(Config::default().network.listen_port, 0);
+        assert_eq!(Config::parse_str("[network]\ndht = true\n").unwrap().value.network.listen_port, 0);
+        assert_eq!(Config::parse_str("[network]\nlisten_port = 0\n").unwrap().value.network.listen_port, 0);
+        // A port stored by an older version (auto pick or manual, indistinguishable) is a manual port.
+        let old = Config::parse_str("version = 1\n[network]\nlisten_port = 55252\n").unwrap().value;
+        assert_eq!(old.network.listen_port, 55252);
+        assert!(old.validate().is_empty());
+        // Range as before: 1024..=65535, or 0.
+        assert!(Config::parse_str("[network]\nlisten_port = 1023\n").is_err());
     }
 
     #[test]

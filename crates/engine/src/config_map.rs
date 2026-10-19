@@ -126,9 +126,6 @@ pub fn engine_config(cfg: &Config, base: &EngineConfig) -> EngineConfig {
 /// Settings of `new` that differ from `old` and only take effect after a restart.
 pub fn restart_required(old: &EngineConfig, new: &EngineConfig) -> Vec<String> {
     let mut v = Vec::new();
-    if old.listen_port != new.listen_port && new.listen_port != 0 {
-        v.push("network.listen_port".to_owned());
-    }
     if !old.utp && new.utp {
         v.push("network.utp".to_owned());
     }
@@ -187,8 +184,9 @@ mod tests {
         let mut b = a.clone();
         b.max_active_downloads = 9;
         assert!(restart_required(&a, &b).is_empty());
-        b.listen_port = 51413;
+        b.listen_port = 51413; // live: no restart
+        assert!(restart_required(&a, &b).is_empty());
         b.fd_cache = 77;
-        assert_eq!(restart_required(&a, &b), ["network.listen_port", "advanced.fd_limit"]);
+        assert_eq!(restart_required(&a, &b), ["advanced.fd_limit"]);
     }
 }

@@ -159,10 +159,10 @@ async fn first_launch_remembers_its_port_and_config_edits_apply_live() {
     assert!(host.warnings.is_empty(), "{:?}", host.warnings);
     let h = host.handle();
     let mut ev = h.subscribe();
-    // The random port was written back to config.toml.
+    // An automatic port (0) is never written back to config.toml.
     let saved = docs.read_strict().unwrap();
-    assert_eq!(saved.value.network.listen_port, h.listen_port());
-    assert!(saved.value.network.listen_port >= 1024);
+    assert_eq!(saved.value.network.listen_port, 0);
+    assert!(h.listen_port() >= 1024);
 
     // An edit is applied within a poll or two.
     let mut c = docs.read_strict().unwrap().value;
@@ -173,14 +173,16 @@ async fn first_launch_remembers_its_port_and_config_edits_apply_live() {
     let cfg = h.config().await.unwrap();
     assert_eq!((cfg.up_limit, cfg.max_active_downloads), (Some(123_456), 7));
 
-    // A listen-port change needs a restart and says so; limits do not.
+    // A listen-port change is live: no restart, the engine moves to the port.
     let mut c = docs.read_strict().unwrap().value;
-    c.network.listen_port = if h.listen_port() == 50_000 { 50_001 } else { 50_000 };
+    let new_port = free_port();
+    c.network.listen_port = new_port;
     c.transfers.upload_limit = 0;
     docs.save(&c).unwrap();
     let e1 = wait_event(&mut ev, 10, |e| matches!(e, EngineEvent::ConfigReloaded { file, .. } if file == "config.toml")).await;
     let EngineEvent::ConfigReloaded { restart_required, .. } = e1 else { unreachable!() };
-    assert_eq!(restart_required, ["network.listen_port"]);
+    assert!(restart_required.is_empty(), "{restart_required:?}");
+    wait_for("the new port", 10, || async { (h.listen_port() == new_port).then_some(()) }).await;
     assert_eq!(h.config().await.unwrap().up_limit, None);
 
     // A broken edit changes nothing and is reported.
@@ -257,7 +259,8 @@ async fn a_host_restarts_from_its_directory() {
 
     let host2 = host(&e).await;
     assert!(host2.open_report.recovered.is_none() && !host2.open_report.created);
-    assert_eq!(host2.handle().listen_port(), port, "the remembered port is used again");
+    let _ = port; // an automatic port is random at every start; nothing was remembered
+    assert_eq!(DocStore::<Config>::new(e.state.path()).read_strict().unwrap().value.network.listen_port, 0);
     let row = wait_for("row", 10, || async { row_h(&host2.handle(), &t.id).await }).await;
     assert_eq!((row.priority, row.tier), (Priority::Low, Tier::Cold));
     assert_eq!(row.done_bytes, t.total());

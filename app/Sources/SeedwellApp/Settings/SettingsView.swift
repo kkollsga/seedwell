@@ -271,41 +271,85 @@ struct TransfersTab: View {
 
 // MARK: Network
 
-/// One line under the listening port on the first launch: Transmission is installed and uses a
-/// port the router may already forward. A suggestion, not a dialog.
-struct TransmissionPortSuggestion: View {
-    let port: UInt16
-    let use: () -> Void
+/// What a typed listening port means.
+enum PortEntry: Equatable {
+    /// Empty field: a random port at every start.
+    case automatic
+    case manual(UInt16)
+    /// Not a number, or outside 1024-65535.
+    case invalid
+
+    static func parse(_ text: String) -> PortEntry {
+        let t = text.trimmingCharacters(in: .whitespaces)
+        if t.isEmpty { return .automatic }
+        guard let v = UInt16(t), v >= 1024 else { return .invalid }
+        return .manual(v)
+    }
+
+    static func text(_ port: UInt16) -> String { port == 0 ? "" : String(port) }
+}
+
+/// The field for a manual listening port. Empty = Automatic. Committed on Return or when it loses focus.
+struct PortField: View {
+    @Binding var port: UInt16
+    @Binding var invalid: Bool
+    @State private var text = ""
+    @FocusState private var focused: Bool
 
     var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "arrow.triangle.2.circlepath").foregroundStyle(.secondary)
-            Text("Transmission uses port \(String(port))").foregroundStyle(.secondary)
-            Button("Use it", action: use).buttonStyle(.link)
-                .help("Use Transmission's port for Seedwell")
-            Spacer(minLength: 0)
+        TextField("Automatic", text: $text)
+            .textFieldStyle(.roundedBorder).frame(width: 90)
+            .focused($focused)
+            .onAppear { text = PortEntry.text(port) }
+            .onChange(of: port) { if !focused { text = PortEntry.text(port) } }
+            .onChange(of: focused) { if !focused { commit() } }
+            .onSubmit { commit() }
+            .accessibilityIdentifier("listen-port-field")
+    }
+
+    private func commit() {
+        switch PortEntry.parse(text) {
+        case .automatic: port = 0; invalid = false
+        case .manual(let v): port = v; invalid = false; text = String(v)
+        case .invalid: invalid = true; text = PortEntry.text(port)
         }
-        .font(.system(size: 12.5))
-        .padding(.horizontal, 14).padding(.vertical, 8)
-        .accessibilityElement(children: .combine)
+    }
+}
+
+/// To the right of the port field: the port in use, or why it is another one than the manual port.
+struct ActivePortLabel: View {
+    let active: UInt16
+    let manual: UInt16
+    let fallback: PortFallbackInfo?
+
+    /// Plain words for a manual port that could not be bound.
+    static func conflict(_ f: PortFallbackInfo) -> String { "Port \(f.wanted) is in use; using \(f.using)" }
+
+    var body: some View {
+        if let f = fallback, f.wanted == manual, manual != 0 {
+            Label(Self.conflict(f), systemImage: "exclamationmark.triangle.fill")
+                .font(.system(size: 12)).foregroundStyle(Color.orange)
+                .accessibilityIdentifier("port-fallback-warning")
+        } else if active != 0 {
+            Text("Active: \(String(active))").font(.system(size: 12)).foregroundStyle(.secondary)
+                .accessibilityIdentifier("active-port")
+        }
     }
 }
 
 struct NetworkTab: View {
     @Bindable var model: SettingsModel
+    @State private var portInvalid = false
 
     var body: some View {
         let n = $model.app.network
         SettingsPage {
             SettingsGroup(title: "Connection") {
-                SettingsRow(label: "Listening port", hint: "Random on first launch") {
-                    TextField("", value: n.listenPort, format: .number.grouping(.never)).textFieldStyle(.roundedBorder).frame(width: 80)
-                }
-                if let port = model.transmissionPortOffer {
-                    TransmissionPortSuggestion(port: port) { model.useTransmissionPort() }
-                }
-                if let f = model.portFallback, f.wanted == model.app.network.listenPort {
-                    PortFallbackWarning(message: f.message)
+                SettingsRow(label: "Listening port", hint: portInvalid ? "Use a port from 1024 to 65535, or leave it empty." : "Leave empty for Automatic: a random port at every start.") {
+                    HStack(spacing: 10) {
+                        PortField(port: n.listenPort, invalid: $portInvalid)
+                        ActivePortLabel(active: model.activePort, manual: model.app.network.listenPort, fallback: model.portFallback)
+                    }
                 }
                 SettingsRow(label: "Port mapping", hint: "PCP, NAT-PMP or UPnP on your router") { sw(n.portMapping) }
                 SettingsRow(label: "Allow trackers on local network", hint: "For a tracker on your LAN or VPN. Off by default: trackers must be on the Internet.") {
@@ -333,6 +377,7 @@ struct NetworkTab: View {
                 }
             }
         }
+        .onAppear { model.refreshPort() }
     }
 }
 
@@ -380,21 +425,6 @@ struct AdvancedTab: View {
         }
     }
 }
-
-/// Under the port field: the configured port is taken by another app, another one is used for now.
-struct PortFallbackWarning: View {
-    let message: String
-
-    var body: some View {
-        Label(message, systemImage: "exclamationmark.triangle.fill")
-            .font(.system(size: 12))
-            .foregroundStyle(Color.orange)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 14).padding(.bottom, 9)
-            .accessibilityIdentifier("port-fallback-warning")
-    }
-}
-
 
 /// "Private torrents: seed at least [10 days]": the hit-and-run floor (SPEC §7, §7B.4a). Off and the
 /// usual choices; a custom value from `config.toml` is shown as it is.

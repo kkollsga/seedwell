@@ -37,8 +37,9 @@ enum SettingsTab: String, CaseIterable, Identifiable {
     /// Set when the configured listening port was taken at start and the engine listens elsewhere for now.
     private(set) var portFallback: PortFallbackInfo?
     private(set) var activity: [AgentActivity] = []
-    /// First launch only: the port Transmission uses, offered as ours (Settings > Network).
-    private(set) var transmissionPortOffer: UInt16?
+    /// The port the engine listens on now: the manual one, or the random one picked at this start.
+    private(set) var activePort: UInt16 = 0
+    @ObservationIgnored private var portWatch: Task<Void, Never>?
     /// Called after a save changed the finished location: the old and new value.
     @ObservationIgnored var finishedLocationChanged: ((_ old: String, _ new: String, _ category: Category?) -> Void)?
     /// Set by the app delegate; reacts to settings the shell itself implements (launch at login, ...).
@@ -55,7 +56,7 @@ enum SettingsTab: String, CaseIterable, Identifiable {
         rulesDoc = core.rulesLoad()
         profiles = core.profilesLoad()
         volumeWarnings = core.volumeWarnings()
-        portFallback = core.portFallback()
+        refreshPort()
     }
 
     /// Re-reads everything from disk (a file was edited or the engine wrote a value back).
@@ -68,6 +69,7 @@ enum SettingsTab: String, CaseIterable, Identifiable {
         rulesDoc = core.rulesLoad()
         profiles = core.profilesLoad()
         volumeWarnings = core.volumeWarnings()
+        refreshPort()
         applied?(s)
     }
 
@@ -103,24 +105,32 @@ enum SettingsTab: String, CaseIterable, Identifiable {
     /// The different-disk warnings of a tracker's folders as the editor has them (SPEC 7A.4).
     func trackerVolumeWarnings(_ p: ProfileRecord) -> [VolumeWarning] { core.trackerVolumeWarnings(profile: p) }
 
-    /// Reads the remembered offer; it is dropped once the listening port already is that port.
-    func refreshTransmissionOffer() {
-        let dir = core.stateDir()
-        guard let port = TransmissionPort.pending(stateDir: dir) else { transmissionPortOffer = nil; return }
-        if app.network.listenPort == port {
-            TransmissionPort.clear(stateDir: dir)
-            transmissionPortOffer = nil
-        } else {
-            transmissionPortOffer = port
+    /// Reads the port in use now and whether the manual one could not be bound. A change of the
+    /// setting is applied by the engine within a moment (it rebinds live), so this asks again for a
+    /// few seconds after a save; it stops as soon as the answer matches the setting.
+    func refreshPort() {
+        activePort = core.listenPort()
+        portFallback = core.portFallback()
+    }
+
+    /// The setting was saved: watch the engine move to it.
+    func watchPortChange() {
+        portWatch?.cancel()
+        portWatch = Task { [weak self] in
+            for _ in 0..<20 {
+                try? await Task.sleep(for: .milliseconds(300))
+                guard !Task.isCancelled, let self else { return }
+                self.refreshPort()
+                if self.portSettled { return }
+            }
         }
     }
 
-    /// "Use it": Transmission's port becomes ours (saved with the other settings).
-    func useTransmissionPort() {
-        guard let port = transmissionPortOffer else { return }
-        app.network.listenPort = port
-        TransmissionPort.clear(stateDir: core.stateDir())
-        transmissionPortOffer = nil
+    /// True when the engine runs what the setting asks for: the manual port, or (automatic) any port with no complaint.
+    var portSettled: Bool {
+        let want = app.network.listenPort
+        if want == 0 { return portFallback == nil && activePort != 0 }
+        return activePort == want || (portFallback?.wanted == want)
     }
 
     func reloadActivity() { activity = core.agentActivity(limit: 40) }
@@ -152,7 +162,8 @@ enum SettingsTab: String, CaseIterable, Identifiable {
             let old = lastSaved
             lastSaved = s
             volumeWarnings = core.volumeWarnings()
-                applied?(s)
+            applied?(s)
+            if old.network.listenPort != s.network.listenPort { watchPortChange() }
             if old.folders.downloadDir != s.folders.downloadDir {
                 finishedLocationChanged?(old.folders.downloadDir, s.folders.downloadDir, nil)
             }

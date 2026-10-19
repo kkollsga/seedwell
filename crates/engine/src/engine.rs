@@ -119,18 +119,16 @@ impl Engine {
         sh.set_policy(policy);
 
         // Listener first: announces carry the port.
-        let Bound { listener, port, utp, fallback } = bind_ports(&cfg_copy).await?;
+        let Bound { listener, port, utp, fallback } = bind_ports(&cfg_copy, cfg_copy.listen_port, false).await?;
         sh.listen_port.store(u32::from(port), Ordering::Relaxed);
-        if let Some(f) = fallback {
-            let _ = sh.port_fallback.set(f);
-        }
+        sh.set_fallback(fallback);
         let accept = tokio::spawn(accept_loop(listener, sh.clone()));
 
         // The UDP socket on the listen port serves uTP and (below) the DHT.
         let mut dht_feed = None;
         let mut utp_accept = None;
         if let Some((sock, frx)) = utp {
-            let _ = sh.utp.set(sock.clone());
+            *sh.utp.write().unwrap_or_else(|e| e.into_inner()) = Some(sock.clone());
             utp_accept = Some(tokio::spawn(utp_accept_loop(sock, sh.clone())));
             dht_feed = Some(frx);
         }
@@ -140,9 +138,14 @@ impl Engine {
             .then(|| crate::tracker_driver::spawn(sh.clone(), store.timing_store(), key, hold));
 
         let share = |bind: std::net::SocketAddrV4| bind.port() == 0 || bind.port() == port || bind.port() == cfg_copy.listen_port;
+        let mut dht_shared = false;
+        let current_utp = sh.utp.read().unwrap_or_else(|e| e.into_inner()).clone();
         let dht = if cfg_copy.dht_enabled {
-            match (&sh.utp.get(), dht_feed) {
-                (Some(sock), Some(feed)) if share(cfg_copy.dht_bind) => Some(spawn_dht_shared(&cfg_copy, &*store, (*sock).clone(), feed, alive_of(&sh))),
+            match (current_utp, dht_feed) {
+                (Some(sock), Some(feed)) if share(cfg_copy.dht_bind) => {
+                    dht_shared = true;
+                    Some(spawn_dht_shared(&cfg_copy, &*store, sock, feed, alive_of(&sh), None))
+                }
                 _ => spawn_dht(&cfg_copy, &*store, alive_of(&sh)).await,
             }
         } else {
@@ -156,6 +159,7 @@ impl Engine {
         let mut session = Session::new(sh.clone(), srx, tracker, dht);
         session.listener = Some(accept);
         session.utp_listener = utp_accept;
+        session.dht_shared = dht_shared;
         session.load(stored);
         session.load_directs(directs);
         session.start_services();
@@ -200,15 +204,15 @@ impl Engine {
 }
 
 /// Every DHT datagram is a sign that the network works (SPEC 7C.4c).
-fn alive_of(sh: &Arc<Shared>) -> trs_dht::Alive {
+pub(crate) fn alive_of(sh: &Arc<Shared>) -> trs_dht::Alive {
     let sh = sh.clone();
     trs_dht::Alive(Arc::new(move || sh.net.alive()))
 }
 
-fn dht_config(cfg: &EngineConfig, store: &dyn Store, alive: trs_dht::Alive) -> trs_dht::DriverConfig {
+fn dht_config(cfg: &EngineConfig, store: &dyn Store, alive: trs_dht::Alive, state: Option<Vec<u8>>) -> trs_dht::DriverConfig {
     let mut dc = trs_dht::DriverConfig {
         bind: cfg.dht_bind,
-        saved_state: store.load_dht_state().ok().flatten(),
+        saved_state: state.or_else(|| store.load_dht_state().ok().flatten()),
         alive: Some(alive),
         ..trs_dht::DriverConfig::default()
     };
@@ -220,17 +224,18 @@ fn dht_config(cfg: &EngineConfig, store: &dyn Store, alive: trs_dht::Alive) -> t
 }
 
 async fn spawn_dht(cfg: &EngineConfig, store: &dyn Store, alive: trs_dht::Alive) -> Option<trs_dht::DhtHandle> {
-    trs_dht::spawn(dht_config(cfg, store, alive)).await.ok()
+    trs_dht::spawn(dht_config(cfg, store, alive, None)).await.ok()
 }
 
 /// The DHT on the uTP socket: every datagram that is not uTP arrives on `feed` and the node
 /// answers from the same port, so uTP, the DHT and port mapping all use one UDP port.
-fn spawn_dht_shared(
+pub(crate) fn spawn_dht_shared(
     cfg: &EngineConfig,
     store: &dyn Store,
     sock: trs_utp::UtpSocket,
     mut feed: mpsc::Receiver<trs_utp::ForeignDatagram>,
     alive: trs_dht::Alive,
+    state: Option<Vec<u8>>,
 ) -> trs_dht::DhtHandle {
     let (tx, rx) = mpsc::channel(256);
     // The DHT is IPv4 only; the pump drops anything else.
@@ -247,14 +252,14 @@ fn spawn_dht_shared(
         let _ = out.try_send_foreign(SocketAddr::V4(to), data);
     });
     let io = trs_dht::SharedIo { incoming: rx, send, local: sock.local_addr() };
-    trs_dht::spawn_shared(dht_config(cfg, store, alive), io)
+    trs_dht::spawn_shared(dht_config(cfg, store, alive, state), io)
 }
 
-struct Bound {
-    listener: TcpListener,
-    port: u16,
-    utp: Option<(trs_utp::UtpSocket, mpsc::Receiver<trs_utp::ForeignDatagram>)>,
-    fallback: Option<PortFallback>,
+pub(crate) struct Bound {
+    pub listener: TcpListener,
+    pub port: u16,
+    pub utp: Option<(trs_utp::UtpSocket, mpsc::Receiver<trs_utp::ForeignDatagram>)>,
+    pub fallback: Option<PortFallback>,
 }
 
 /// Bind the TCP listener and, with `network.utp`, the UDP socket of the same number.
@@ -262,8 +267,10 @@ struct Bound {
 /// A configured port that is taken (another client still running on it) does not stop the engine:
 /// it listens on a free one and says so ([`PortFallback`]); the configuration keeps the user's
 /// choice. When the port is chosen by the OS and its UDP twin is taken, another number is tried.
-async fn bind_ports(cfg: &EngineConfig) -> Result<Bound, EngineError> {
-    let wanted = cfg.listen_port;
+///
+/// `wanted` is the port asked for (0 = any free one). `strict` is the live change: a fixed port that
+/// cannot be bound (TCP or UDP) is an error and the caller keeps what it has, instead of a fallback.
+pub(crate) async fn bind_ports(cfg: &EngineConfig, wanted: u16, strict: bool) -> Result<Bound, EngineError> {
     let mut want = wanted;
     let mut last = String::new();
     for attempt in 0..8 {
@@ -271,7 +278,7 @@ async fn bind_ports(cfg: &EngineConfig) -> Result<Bound, EngineError> {
             Ok(l) => l,
             Err(e) => {
                 last = e.to_string();
-                if want == 0 {
+                if want == 0 || strict {
                     break;
                 }
                 want = 0;
@@ -298,6 +305,10 @@ async fn bind_ports(cfg: &EngineConfig) -> Result<Bound, EngineError> {
             // The OS chose the TCP port and somebody has the same UDP port: choose again.
             Err(_) if want == 0 && attempt < 7 => continue,
             // A fixed port whose UDP side is taken: run on TCP only rather than not at all.
+            Err(e) if strict => {
+                last = format!("UDP {bind}: {e}");
+                break;
+            }
             Err(e) => {
                 eprintln!("trs-engine: uTP disabled, cannot bind UDP {bind}: {e}");
                 return Ok(Bound { listener, port, utp: None, fallback });
@@ -308,7 +319,7 @@ async fn bind_ports(cfg: &EngineConfig) -> Result<Bound, EngineError> {
 }
 
 /// Accept TCP peers.
-async fn accept_loop(listener: TcpListener, sh: Arc<Shared>) {
+pub(crate) async fn accept_loop(listener: TcpListener, sh: Arc<Shared>) {
     loop {
         let (stream, addr) = match listener.accept().await {
             Ok(x) => x,
@@ -323,7 +334,7 @@ async fn accept_loop(listener: TcpListener, sh: Arc<Shared>) {
 }
 
 /// Accept uTP peers from the shared UDP socket (when `network.utp` is off they are dropped).
-async fn utp_accept_loop(sock: trs_utp::UtpSocket, sh: Arc<Shared>) {
+pub(crate) async fn utp_accept_loop(sock: trs_utp::UtpSocket, sh: Arc<Shared>) {
     loop {
         match sock.accept().await {
             Ok((stream, addr)) => {
@@ -994,7 +1005,7 @@ impl EngineHandle {
 
     /// Set when the configured listen port was taken and another one is in use.
     pub fn port_fallback(&self) -> Option<PortFallback> {
-        self.sh.port_fallback.get().cloned()
+        self.sh.fallback()
     }
 
     /// Play while downloading (SPEC 7F): serve `file_index` of the torrent over loopback HTTP with

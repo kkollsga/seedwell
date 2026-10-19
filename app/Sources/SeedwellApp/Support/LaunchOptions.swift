@@ -15,8 +15,6 @@ struct LaunchOptions {
     var qaControl: String?
     /// QA only: allow trackers on loopback (a local mock tracker).
     var allowLoopbackTrackers = false
-    /// QA only: a fixture to read instead of Transmission's real preferences (read-only).
-    var transmissionPrefs: String?
     var showWindowSize: CGSize?
 
     init(_ args: [String]) {
@@ -32,7 +30,6 @@ struct LaunchOptions {
         showSettings = args.contains("--show-settings") ? (value("--show-settings") ?? "") : nil
         qaControl = value("--qa-control")
         allowLoopbackTrackers = args.contains("--qa-loopback-trackers")
-        transmissionPrefs = value("--qa-transmission-prefs")
         if let s = value("--window-size") {
             let p = s.split(separator: "x").compactMap { Double($0) }
             if p.count == 2 { showWindowSize = CGSize(width: p[0], height: p[1]) }
@@ -49,7 +46,6 @@ struct LaunchOptions {
         if (stateDir == nil) != (homeRoot == nil) {
             return "--state-dir and --home-root must be given together."
         }
-        if transmissionPrefs != nil && !isolated { return "--qa-transmission-prefs needs --state-dir and --home-root." }
         if allowLoopbackTrackers && !isolated { return "--qa-loopback-trackers needs --state-dir and --home-root." }
         return nil
     }

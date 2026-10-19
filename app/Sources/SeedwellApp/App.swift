@@ -76,8 +76,6 @@ import os
     private func startCore(waitedSecs: Int) {
         let dir = options.resolvedStateDir()
         try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
-        // First launch only: look at Transmission's port (read-only) before the engine picks a random one.
-        if !options.mock || options.transmissionPrefs != nil { TransmissionPort.prepare(stateDir: dir, prefs: options.transmissionPrefs.map { URL(fileURLWithPath: $0) }) }
         do {
             core = try Core(options: CoreOptions(
                 configDir: dir,
@@ -98,7 +96,6 @@ import os
         }
         commands = Commands(core: core)
         settings = SettingsModel(core: core)
-        settings.refreshTransmissionOffer()
         if let snapshotDir = options.renderSnapshots {
             Task { @MainActor in
                 await SnapshotRenderer(core: core, commands: commands, settings: settings, dir: snapshotDir).renderAll()

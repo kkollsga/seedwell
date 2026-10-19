@@ -820,6 +820,10 @@ fn percent_encode(s: &str) -> String {
 }
 
 impl Backend for MockBackend {
+    fn listen_port(&self) -> u16 {
+        51413
+    }
+
     fn network_path_changed(&self, satisfied: bool) {
         self.offline.store(!satisfied, std::sync::atomic::Ordering::Relaxed);
     }

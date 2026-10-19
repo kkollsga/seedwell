@@ -830,3 +830,8 @@ pub fn pattern_bytes(n: usize, seed: u64) -> Vec<u8> {
     Rng(seed | 1).fill(&mut v);
     v
 }
+
+/// A TCP port that is free right now (bound and released again).
+pub fn free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+}

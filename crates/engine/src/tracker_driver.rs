@@ -111,6 +111,9 @@ pub(crate) enum TrackerCmd {
     /// commands held back meanwhile. Torrents already registered carry it from their next regular
     /// announce on.
     PortKnown(Option<u16>),
+    /// The listen port changed live. The mapped external port of the old mapping no longer holds;
+    /// every torrent announces the new port with its next regular announce (no extra request).
+    ListenPort(u16),
     /// `network.encryption` changed: announce `supportcrypto` / `requirecrypto` accordingly from
     /// each torrent's next announce (no extra request, no schedule change).
     Crypto(crate::config::EncryptionPolicy),
@@ -586,6 +589,7 @@ impl Driver {
             && !matches!(
                 c,
                 TrackerCmd::PortKnown(_)
+                    | TrackerCmd::ListenPort(_)
                     | TrackerCmd::Shutdown { .. }
                     | TrackerCmd::NetworkChanged
                     | TrackerCmd::Path(_)
@@ -612,6 +616,10 @@ impl Driver {
                     }
                 }
                 return out;
+            }
+            TrackerCmd::ListenPort(p) => {
+                self.ann_port = None;
+                self.hub.set_port(p);
             }
             TrackerCmd::Crypto(p) => {
                 self.crypto = crypto_of(p);

@@ -400,6 +400,12 @@ port (the same number for UDP, for uTP and the DHT), keeps the configured value 
 show ("Port 55252 is in use by another app; using 61234 for now"). Port mapping and tracker announces use the port in force.
 Only when no port at all can be bound does start-up fail.
 
+`network.listen_port = 0` (or absent) means a random free port at every start; the engine never writes it back. Only a number
+entered by the user is stored. A change at runtime (`update_config` / `apply_settings`) rebinds live: the new TCP+UDP pair is
+bound first and only then swapped in (a taken port keeps the old one and sets `port_fallback`; `0` picks a fresh random port).
+TCP peers stay connected, uTP peers drain on the old socket, the DHT restarts on the new socket with its saved state, port
+mapping is redone and every tracker hears the new port with its next regular announce.
+
 ## Settings at runtime
 
 `config_map::engine_config` maps `config.toml`; `EngineHandle::apply_settings` applies it. Limits, alt limits, the

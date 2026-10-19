@@ -4,7 +4,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::{Job, Session};
+use std::sync::atomic::Ordering;
+
+use super::{Job, Session, SessionMsg};
 use crate::api::*;
 use crate::config::EngineConfig;
 use crate::torrent::{TorrentCmd, TorrentMsg};
@@ -103,6 +105,9 @@ impl Session {
         if watch_changed {
             self.restart_watcher();
         }
+        if cfg.listen_port != old.listen_port {
+            self.rebind(cfg.listen_port);
+        }
         if portmap_changed {
             self.restart_portmap();
         }
@@ -171,6 +176,100 @@ impl Session {
             return;
         }
         self.watcher = Some(crate::watch::spawn(crate::engine::EngineHandle::from_shared(self.sh.clone()), folders));
+    }
+
+    /// Live change of `network.listen_port` (`wanted`; 0 = a fresh random port). The new TCP+UDP pair
+    /// is bound first, off the actor; only a successful bind swaps (see [`Self::on_rebound`]).
+    fn rebind(&mut self, wanted: u16) {
+        if self.shutting_down {
+            return;
+        }
+        self.rebind_gen += 1;
+        let serial = self.rebind_gen;
+        let current = self.sh.port();
+        if wanted != 0 && wanted == current {
+            // Already listening there (a fallback that now matches the wish): nothing to bind.
+            self.sh.set_fallback(None);
+            return;
+        }
+        let mut cfg = (*self.sh.cfg()).clone();
+        // A shared socket stays a socket, even if `network.utp` was switched off meanwhile.
+        cfg.utp |= self.sh.utp.read().unwrap_or_else(|e| e.into_inner()).is_some();
+        let tx = self.sh.session.clone();
+        tokio::spawn(async move {
+            let result = crate::engine::bind_ports(&cfg, wanted, true).await.map(Box::new).map_err(|e| e.to_string());
+            let _ = tx.send(SessionMsg::Rebound { serial, wanted, result }).await;
+        });
+    }
+
+    /// The new sockets are bound (or not). Failure keeps everything as it was and reports a fallback
+    /// naming the port still in use. Success: stop the old accept loops, start the new ones, move
+    /// the DHT onto the new UDP socket, point the trackers and the port mapping at the new port.
+    /// TCP peers are separate sockets and stay; uTP peers stay on the old socket until they end.
+    pub(super) fn on_rebound(&mut self, serial: u64, wanted: u16, result: Result<Box<crate::engine::Bound>, String>) {
+        if serial != self.rebind_gen || self.shutting_down {
+            return; // superseded (the bound sockets close as they drop)
+        }
+        let using = self.sh.port();
+        let b = match result {
+            Ok(b) => *b,
+            Err(_) => {
+                self.sh.set_fallback(Some(PortFallback {
+                    wanted,
+                    using,
+                    message: format!("Port {wanted} is in use by another app; using {using} for now"),
+                }));
+                return;
+            }
+        };
+        let crate::engine::Bound { listener, port, utp, fallback } = b;
+        if let Some(l) = self.listener.take() {
+            l.abort();
+        }
+        if let Some(l) = self.utp_listener.take() {
+            l.abort();
+        }
+        let old_utp = self.sh.utp.write().unwrap_or_else(|e| e.into_inner()).take();
+        self.sh.listen_port.store(u32::from(port), Ordering::Relaxed);
+        self.sh.set_fallback(fallback);
+        self.listener = Some(tokio::spawn(crate::engine::accept_loop(listener, self.sh.clone())));
+        let mut feed = None;
+        if let Some((sock, frx)) = utp {
+            *self.sh.utp.write().unwrap_or_else(|e| e.into_inner()) = Some(sock.clone());
+            self.utp_listener = Some(tokio::spawn(crate::engine::utp_accept_loop(sock, self.sh.clone())));
+            feed = Some(frx);
+        }
+        if let Some(o) = old_utp {
+            // Refuse new connections and let go of the datagram feed; open uTP streams drain on it.
+            o.set_accepting(false);
+            o.set_foreign_sink(None);
+        }
+        // The DHT: save its state, stop it, start it again on the new socket with that state.
+        let new_utp = self.sh.utp.read().unwrap_or_else(|e| e.into_inner()).clone();
+        if self.dht_shared
+            && let (Some(old), Some(sock), Some(feed)) = (self.dht.clone(), new_utp, feed)
+        {
+            let sh = self.sh.clone();
+            let tx = sh.session.clone();
+            tokio::spawn(async move {
+                let state = tokio::time::timeout(Duration::from_secs(1), old.shutdown()).await.ok().and_then(Result::ok);
+                let cfg = sh.cfg();
+                let dht = crate::engine::spawn_dht_shared(&cfg, &*sh.store, sock, feed, crate::engine::alive_of(&sh), state);
+                let _ = tx.send(SessionMsg::DhtMoved { serial, dht }).await;
+            });
+        }
+        // Trackers hear the new port with their next regular announce (no extra announce).
+        self.tracker_send(crate::tracker_driver::TrackerCmd::ListenPort(port));
+        *self.sh.portmap_status.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        self.restart_portmap();
+    }
+
+    pub(super) fn on_dht_moved(&mut self, serial: u64, dht: trs_dht::DhtHandle) {
+        if self.shutting_down || serial != self.rebind_gen {
+            tokio::spawn(async move { dht.shutdown().await });
+            return;
+        }
+        self.dht = Some(dht);
     }
 
     pub(super) fn restart_portmap(&mut self) {

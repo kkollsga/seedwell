@@ -214,7 +214,6 @@ async fn run(a: Args) -> Result<(), String> {
         &a.state_dir,
         HostOptions {
             hot_reload: false,
-            persist_listen_port: false,
             tweak: Some(Box::new(move |c: &mut EngineConfig| {
                 c.listen_port = port;
                 c.dht_bind = std::net::SocketAddrV4::new(std::net::Ipv4Addr::UNSPECIFIED, port);

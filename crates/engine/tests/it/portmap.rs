@@ -123,6 +123,26 @@ async fn nothing_is_sent_to_the_gateway_unless_enabled_and_it_follows_the_settin
     wait_for("mappings removed", 10, || async { gw.lock().unwrap().table.is_empty().then_some(()) }).await;
 }
 
+/// A live port change moves the mapping: the old one is deleted, the new one added.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_mapping_follows_a_live_port_change() {
+    let (gw_addr, gw) = gateway().await;
+    let n = node(|c| {
+        c.portmap = PortmapConfig { enabled: true, upnp: false, natpmp: true, test_gateway: Some(gw_addr) };
+    })
+    .await;
+    let old = n.h.listen_port();
+    wait_for("mapped", 20, || async { (gw.lock().unwrap().table.len() == 2).then_some(()) }).await;
+    let new = free_port();
+    n.h.update_config(move |c| c.listen_port = new);
+    wait_for("moved", 20, || async {
+        let g = gw.lock().unwrap();
+        (g.table.get(&(2, new)) == Some(&new) && g.table.get(&(1, new)) == Some(&new) && !g.table.contains_key(&(2, old))).then_some(())
+    })
+    .await;
+    assert_eq!(gw.lock().unwrap().table.len(), 2, "{:?}", gw.lock().unwrap().table);
+}
+
 /// A router that grants another external port than the one asked for: the trackers must be told
 /// the external one (the listen port is useless to peers on the Internet), including for the
 /// torrents loaded at start-up, which are registered before the mapping is known.

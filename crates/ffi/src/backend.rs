@@ -130,6 +130,10 @@ pub trait Backend: Send + Sync {
     fn port_fallback(&self) -> Option<crate::types::PortFallbackInfo> {
         None
     }
+    /// The port the engine listens on now (0 when unknown).
+    fn listen_port(&self) -> u16 {
+        0
+    }
     /// Settings, rules or profiles were saved by the app: let the engine pick them up now.
     fn settings_saved(&self) {}
     /// Deletes the developer tracker log (the engine's writer starts a fresh file).

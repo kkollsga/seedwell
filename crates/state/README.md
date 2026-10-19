@@ -142,7 +142,7 @@ rule = "books"                          # forced rule id (optional)
 [detection]
 confidence_threshold = 0.8
 [network]            # Network tab
-listen_port = 0                         # 0 = random on first launch; the engine writes the choice back
+listen_port = 0                         # 0 = a random port at every start (never written back); a number = manual choice
 dht = true  pex = true  lsd = true      # (one per line in the real file) public torrents only
 upnp = true  natpmp = true  utp = true  ipv6 = true
 encryption = "prefer"                   # off | prefer | require

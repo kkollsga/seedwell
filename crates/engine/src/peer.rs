@@ -205,7 +205,7 @@ pub(crate) struct PeerCtx {
     pub group: crate::ratelimit::GroupSlot,
     pub priority: AtomicU8,
     pub pool: Arc<BufPool>,
-    pub listen_port: AtomicU32,
+    pub listen_port: Arc<AtomicU32>,
     pub version: String,
     pub metadata_size: AtomicU32,
     pub complete: AtomicBool,
@@ -217,13 +217,18 @@ pub(crate) struct PeerCtx {
     /// Encryption policy and the peers that turned out not to speak it.
     pub encryption: crate::config::EncryptionPolicy,
     pub plain_peers: Arc<Mutex<crate::net::AddrSet>>,
-    /// The shared uTP socket, when uTP is on.
-    pub utp: Option<UtpSocket>,
+    /// The shared uTP socket slot (the socket is replaced by a live port change).
+    pub utp: Arc<std::sync::RwLock<Option<UtpSocket>>>,
     /// Connect timeout of the uTP leg when TCP is the fallback (a peer that speaks uTP answers fast).
     pub utp_probe_timeout: Duration,
 }
 
 impl PeerCtx {
+    /// The current shared UDP socket (uTP), when uTP is on.
+    pub(crate) fn utp(&self) -> Option<UtpSocket> {
+        self.utp.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
     /// The extensions this torrent may use right now.
     pub(crate) fn policy(&self) -> ExtPolicy {
         ExtPolicy { allow_pex: self.pex.load(Ordering::Relaxed), ..ExtPolicy::for_torrent(false) }
@@ -384,7 +389,7 @@ async fn connect_transport(ctx: &PeerCtx, addr: SocketAddr, dial: Dial) -> Resul
         Ok(PeerIo::Tcp(s))
     }
     async fn utp(ctx: &PeerCtx, addr: SocketAddr, limit: Duration) -> Result<PeerIo, Close> {
-        let Some(sock) = &ctx.utp else { return Err(Close::Io("uTP is off".into())) };
+        let Some(sock) = ctx.utp() else { return Err(Close::Io("uTP is off".into())) };
         let s = tokio::time::timeout(limit, sock.connect(addr))
             .await
             .map_err(|_| Close::Timeout)?

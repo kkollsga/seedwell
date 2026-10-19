@@ -146,7 +146,7 @@ impl Torrent {
     /// Which transport to try for an outgoing connection (libtorrent-style: TCP unless the peer
     /// is known to speak uTP, with the other transport as the fallback).
     fn dial_for(&self, addr: SocketAddr) -> Dial {
-        if self.ctx.utp.is_none() || !self.cfg.utp {
+        if self.ctx.utp().is_none() || !self.cfg.utp {
             return Dial::Tcp;
         }
         if !self.cfg.outgoing_tcp {

@@ -68,6 +68,10 @@ pub(crate) enum SessionMsg {
     Titled(Vec<(TorrentId, Option<trs_classify::Category>, String)>),
     /// Something happened to a direct download.
     Direct(direct::DirectMsg),
+    /// A live listen-port change finished binding (`gen` tells a stale answer from the current one).
+    Rebound { serial: u64, wanted: u16, result: Result<Box<crate::engine::Bound>, String> },
+    /// The DHT node was moved to the new UDP socket after a live port change.
+    DhtMoved { serial: u64, dht: trs_dht::DhtHandle },
     /// The listen port was mapped (or not).
     PortMap(crate::api::PortMapStatus),
     /// Which of the folders torrents save to are there (`volumes_changed`).
@@ -326,6 +330,10 @@ pub(crate) struct Session {
     pub listener: Option<tokio::task::JoinHandle<()>>,
     /// Accepts uTP connections on the shared UDP socket.
     pub utp_listener: Option<tokio::task::JoinHandle<()>>,
+    /// The DHT node runs on the shared UDP socket (and so moves with it on a live port change).
+    pub dht_shared: bool,
+    /// Counts live port changes; an answer for an older one is dropped.
+    pub rebind_gen: u64,
     /// When the first request of the pending memory trim was made (see `request_trim`).
     trim_since: Option<Instant>,
     /// Follow-up trims still to run after the last burst (see `trim_memory`).
@@ -391,6 +399,8 @@ impl Session {
             hint_peers: HashMap::new(),
             listener: None,
             utp_listener: None,
+            dht_shared: false,
+            rebind_gen: 0,
             trim_since: None,
             trim_followups: 0,
             mover: moves::Mover::default(),
@@ -546,6 +556,8 @@ impl Session {
             SessionMsg::Rematched(v) => self.on_rematched(v),
             SessionMsg::Titled(v) => self.on_titled(v),
             SessionMsg::Direct(m) => self.on_direct(m),
+            SessionMsg::Rebound { serial, wanted, result } => self.on_rebound(serial, wanted, result),
+            SessionMsg::DhtMoved { serial, dht } => self.on_dht_moved(serial, dht),
             SessionMsg::PortMap(s) => self.on_portmap(s),
             SessionMsg::TrackerHealth { id, health } => self.on_tracker_health(id, health),
             SessionMsg::Net { held } => self.on_net(held),

@@ -216,7 +216,8 @@ impl std::fmt::Debug for ClockFn {
 pub struct EngineConfig {
     /// Address the TCP listener binds to.
     pub listen_addr: Ipv4Addr,
-    /// TCP listen port; 0 picks a free port (read it back with `EngineHandle::listen_port`).
+    /// TCP listen port; 0 picks a free port (read it back with `EngineHandle::listen_port`). Changing it
+    /// at runtime rebinds live (`0` = a fresh random port).
     pub listen_port: u16,
     /// Default save directory for torrents added without one.
     pub default_save_dir: PathBuf,

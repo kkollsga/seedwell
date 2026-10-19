@@ -34,7 +34,8 @@ pub(crate) struct Shared {
     pub diag: Arc<Diag>,
     /// Our peer id: one per process, the same for every torrent and across pause/resume.
     pub our_id: [u8; 20],
-    pub listen_port: AtomicU32,
+    /// The port in use now; shared with every torrent (the extended handshake reads it at send time).
+    pub listen_port: Arc<AtomicU32>,
     /// Torrents loading their metadata and checking their resume data at the same time. A seeder
     /// with hundreds of torrents wakes them all at start-up; without a bound that many parses, layouts
     /// and blocking-pool threads exist at once, and the allocator keeps the scatter they leave behind.
@@ -46,8 +47,8 @@ pub(crate) struct Shared {
     pub verify_slots: Arc<tokio::sync::Semaphore>,
     /// A DHT node runs (the handshake advertises the DHT bit only then).
     pub dht_running: std::sync::atomic::AtomicBool,
-    /// Set once at start when the configured port was taken.
-    pub port_fallback: std::sync::OnceLock<crate::api::PortFallback>,
+    /// Set when the wanted port was taken (at start, or by a live change that could not bind).
+    pub port_fallback: std::sync::Mutex<Option<crate::api::PortFallback>>,
     /// The last port-mapping answer (`seedwell debug perf`); written when the mapper reports.
     pub portmap_status: std::sync::Mutex<Option<crate::api::PortMapStatus>>,
     /// Torrents added by `seedwell sim`: only these may announce to a tracker on 127.0.0.1. Set through one
@@ -56,8 +57,9 @@ pub(crate) struct Shared {
     /// The loopback streaming server (SPEC 7F), started by the first `stream_url`: until then no
     /// listener and no task exist. Closed at shutdown.
     pub streams: tokio::sync::OnceCell<Arc<trs_stream::StreamServer>>,
-    /// The UDP socket shared by uTP and the DHT; set once at start when `utp` is on and it bound.
-    pub utp: std::sync::OnceLock<trs_utp::UtpSocket>,
+    /// The UDP socket shared by uTP and the DHT (`None` when uTP is off or it did not bind). Replaced
+    /// by a live port change; torrents hold the same slot and dial through the current socket.
+    pub utp: Arc<RwLock<Option<trs_utp::UtpSocket>>>,
     /// Concurrent encrypted handshakes (each costs two modular exponentiations).
     pub mse_slots: tokio::sync::Semaphore,
     /// Peers that did not answer an encrypted handshake but did answer a plain one.
@@ -103,15 +105,15 @@ impl Shared {
             pool: Arc::new(BufPool::new(16)),
             alloc: Arc::new(UploadAllocator::new()),
             diag: Arc::new(Diag::default()),
-            listen_port: AtomicU32::new(0),
+            listen_port: Arc::new(AtomicU32::new(0)),
             startup_slots: Arc::new(tokio::sync::Semaphore::new(STARTUP_SLOTS)),
             verify_slots: Arc::new(tokio::sync::Semaphore::new(cfg.verify_slots.max(1))),
             dht_running: std::sync::atomic::AtomicBool::new(false),
-            port_fallback: std::sync::OnceLock::new(),
+            port_fallback: std::sync::Mutex::new(None),
             portmap_status: std::sync::Mutex::new(None),
             simulated: std::sync::Mutex::new(std::collections::HashSet::new()),
             streams: tokio::sync::OnceCell::const_new(),
-            utp: std::sync::OnceLock::new(),
+            utp: Arc::new(RwLock::new(None)),
             mse_slots: tokio::sync::Semaphore::new(4),
             plain_peers: Arc::new(std::sync::Mutex::new(crate::net::AddrSet::default())),
             utp_peers: std::sync::Mutex::new(crate::net::AddrSet::default()),
@@ -177,6 +179,14 @@ impl Shared {
     pub(crate) fn verify_slot(&self) -> impl std::future::Future<Output = Option<tokio::sync::OwnedSemaphorePermit>> + use<> {
         let s = self.verify_slots.clone();
         async move { s.acquire_owned().await.ok() }
+    }
+
+    pub(crate) fn fallback(&self) -> Option<crate::api::PortFallback> {
+        self.port_fallback.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    pub(crate) fn set_fallback(&self, f: Option<crate::api::PortFallback>) {
+        *self.port_fallback.lock().unwrap_or_else(|e| e.into_inner()) = f;
     }
 
     pub(crate) fn port(&self) -> u16 {

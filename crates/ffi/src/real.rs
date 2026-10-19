@@ -1384,6 +1384,10 @@ impl Backend for RealBackend {
         self.engine.volumes_changed();
     }
 
+    fn listen_port(&self) -> u16 {
+        self.engine.listen_port()
+    }
+
     fn port_fallback(&self) -> Option<PortFallbackInfo> {
         self.engine.port_fallback().map(|f| PortFallbackInfo { wanted: f.wanted, using: f.using, message: f.message })
     }
