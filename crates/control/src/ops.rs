@@ -374,6 +374,35 @@ pub fn parse_sha256(s: &str) -> Result<[u8; 32], ApiError> {
     Ok(out)
 }
 
+/// Fill in `state` and `summary` of a [`ReachabilityDto`] from its facts. A peer that connected in
+/// is proof and wins; otherwise the router's answer is the best sign there is.
+pub fn reachability(mut r: ReachabilityDto) -> ReachabilityDto {
+    let (state, summary) = if r.incoming > 0 {
+        let peers = if r.incoming == 1 { "1 peer".to_owned() } else { format!("{} peers", r.incoming) };
+        ("open", format!("Open: {peers} from the Internet connected in"))
+    } else if !r.mapping {
+        ("unknown", format!("Port mapping is off: forward port {} on your router, or switch port mapping on", r.port))
+    } else if r.behind_cgnat {
+        ("closed", "Closed: your provider shares one Internet address between customers (CGNAT); no router can open a port".to_owned())
+    } else if r.router_unavailable {
+        ("closed", format!("Closed: the router answered neither PCP, NAT-PMP nor UPnP; forward port {} on it by hand", r.port))
+    } else if let Some(ext) = r.external_port {
+        let via = match r.method.as_deref() {
+            Some("pcp") => " with PCP",
+            Some("nat-pmp") => " with NAT-PMP",
+            Some("upnp") => " with UPnP",
+            _ => "",
+        };
+        let port = if ext == r.port { String::new() } else { format!(" as port {ext}") };
+        ("mapped", format!("Opened on the router{via}{port}; no peer from the Internet has connected in yet"))
+    } else {
+        ("checking", format!("Asking the router to open port {}", r.port))
+    };
+    r.state = state.to_owned();
+    r.summary = summary;
+    r
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -523,5 +552,21 @@ mod tests {
         sanitize_transfer(&mut t);
         let j = serde_json::to_string(&t).unwrap();
         assert!(!j.contains("SECRET") && !j.contains("0123456789abcdef"), "{j}");
+    }
+
+    #[test]
+    fn reachability_prefers_proof_then_the_router() {
+        let base = ReachabilityDto { port: 55252, mapping: true, ..Default::default() };
+        let st = |r: ReachabilityDto| reachability(r).state;
+        assert_eq!(st(base.clone()), "checking");
+        assert_eq!(st(ReachabilityDto { method: Some("nat-pmp".into()), external_port: Some(55252), ..base.clone() }), "mapped");
+        assert_eq!(st(ReachabilityDto { behind_cgnat: true, external_port: Some(55252), ..base.clone() }), "closed");
+        assert_eq!(st(ReachabilityDto { router_unavailable: true, ..base.clone() }), "closed");
+        assert_eq!(st(ReachabilityDto { mapping: false, ..base.clone() }), "unknown");
+        // A peer that connected in is proof, whatever the router said (a port forwarded by hand).
+        let open = reachability(ReachabilityDto { mapping: false, incoming: 3, last_incoming_at: Some(1), ..base.clone() });
+        assert_eq!((open.state.as_str(), open.summary.as_str()), ("open", "Open: 3 peers from the Internet connected in"));
+        let m = reachability(ReachabilityDto { method: Some("upnp".into()), external_port: Some(61000), ..base });
+        assert_eq!(m.summary, "Opened on the router with UPnP as port 61000; no peer from the Internet has connected in yet");
     }
 }

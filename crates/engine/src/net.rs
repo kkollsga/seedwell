@@ -290,6 +290,17 @@ impl AddrSet {
     }
 }
 
+/// A public IPv4 address (also written IPv4-mapped): a peer that connects in from one proves the
+/// port is open to the Internet, as a tracker's "connectable" check would. LAN, CGNAT and loopback
+/// addresses prove nothing.
+pub(crate) fn is_internet_v4(addr: SocketAddr) -> bool {
+    let v4 = match addr.ip() {
+        std::net::IpAddr::V4(ip) => Some(ip),
+        std::net::IpAddr::V6(ip) => ip.to_ipv4_mapped(),
+    };
+    v4.is_some_and(trs_portmap::is_public_ipv4)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -306,5 +317,17 @@ mod tests {
         assert!(p.contains(&last));
         p.forget(&last);
         assert!(!p.contains(&last));
+    }
+
+    #[test]
+    fn only_public_ipv4_peers_prove_the_port_is_open() {
+        let yes = ["203.0.113.9:6881", "[::ffff:84.20.1.2]:6881"];
+        let no = ["127.0.0.1:6881", "192.168.68.20:6881", "10.1.2.3:6881", "100.64.0.1:6881", "169.254.1.1:6881", "[2001:db8::1]:6881", "[::1]:6881"];
+        for a in yes {
+            assert!(is_internet_v4(a.parse().unwrap()), "{a}");
+        }
+        for a in no {
+            assert!(!is_internet_v4(a.parse().unwrap()), "{a}");
+        }
     }
 }

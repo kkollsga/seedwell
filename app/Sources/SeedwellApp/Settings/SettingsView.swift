@@ -316,6 +316,28 @@ struct PortField: View {
     }
 }
 
+/// Whether peers on the Internet can reach the port, in one word (the row's hint says why).
+struct ReachabilityLabel: View {
+    let state: String
+
+    /// Word, symbol and colour for a `ReachabilityInfo.state`.
+    static func look(_ state: String) -> (String, String, Color) {
+        switch state {
+        case "open": ("Open", "checkmark.circle.fill", .green)
+        case "mapped": ("Opened on the router", "arrow.down.circle", .secondary)
+        case "checking": ("Checking", "ellipsis.circle", .secondary)
+        case "closed": ("Closed", "xmark.circle.fill", .orange)
+        default: ("Not known", "questionmark.circle", .secondary)
+        }
+    }
+
+    var body: some View {
+        let (word, symbol, color) = Self.look(state)
+        Label(word, systemImage: symbol).font(.system(size: 12)).foregroundStyle(color)
+            .accessibilityIdentifier("reachability")
+    }
+}
+
 /// To the right of the port field: the port in use, or why it is another one than the manual port.
 struct ActivePortLabel: View {
     let active: UInt16
@@ -352,6 +374,9 @@ struct NetworkTab: View {
                     }
                 }
                 SettingsRow(label: "Port mapping", hint: "PCP, NAT-PMP or UPnP on your router") { sw(n.portMapping) }
+                if let r = model.reachability {
+                    SettingsRow(label: "From the Internet", hint: r.summary) { ReachabilityLabel(state: r.state) }
+                }
                 SettingsRow(label: "Allow trackers on local network", hint: "For a tracker on your LAN or VPN. Off by default: trackers must be on the Internet.") {
                     sw(Binding(get: { model.app.network.allowLanTrackers }, set: { model.app.network.allowLanTrackers = $0 }))
                 }
@@ -378,6 +403,7 @@ struct NetworkTab: View {
             }
         }
         .onAppear { model.refreshPort() }
+        .task { await model.watchReachability() }
     }
 }
 

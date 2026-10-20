@@ -1754,6 +1754,24 @@ pub struct PortMapStatus {
     pub unavailable: bool,
 }
 
+/// Can peers on the Internet reach the listening port (Settings › Network, `seedwell status`)?
+/// Two signs, neither needing an outside service: what the router said to the port mapping, and
+/// whether a peer from a public IPv4 address has connected in over TCP (what a tracker's
+/// "connectable" check tries) since the port was opened.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct Reachability {
+    /// The TCP port we listen on.
+    pub port: u16,
+    /// Port mapping is switched on.
+    pub mapping_enabled: bool,
+    /// The router's last answer; `None` while it is being asked, or with mapping off.
+    pub portmap: Option<PortMapStatus>,
+    /// Incoming TCP connections from public IPv4 addresses on this port.
+    pub incoming: u64,
+    /// When the last of them came in (Unix seconds).
+    pub last_incoming_at: Option<u64>,
+}
+
 /// What [`crate::EngineHandle::shutdown`] achieved.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ShutdownReport {

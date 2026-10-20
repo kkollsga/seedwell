@@ -24,4 +24,13 @@ struct ListenPortTests {
         let f = PortFallbackInfo(wanted: 55252, using: 53781, message: "ignored")
         #expect(ActivePortLabel.conflict(f) == "Port 55252 is in use; using 53781")
     }
+
+    @Test func reachabilityIsOneWordPerState() {
+        #expect(ReachabilityLabel.look("open").0 == "Open")
+        #expect(ReachabilityLabel.look("mapped").0 == "Opened on the router")
+        #expect(ReachabilityLabel.look("checking").0 == "Checking")
+        #expect(ReachabilityLabel.look("closed").0 == "Closed")
+        #expect(ReachabilityLabel.look("unknown").0 == "Not known")
+        #expect(ReachabilityLabel.look("something new").0 == "Not known")
+    }
 }

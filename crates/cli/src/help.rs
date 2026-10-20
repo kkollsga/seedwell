@@ -47,8 +47,8 @@ macro_rules! c {
 
 /// Every command, in the order of the overview.
 pub const COMMANDS: &[CmdHelp] = &[
-    c!("status", "Look", "status", "speeds, counts, limits and your permission level", "", ["seedwell status", "seedwell status --json"],
-        r#"{"v","server","protocol","permission","totals":{"down_rate","up_rate","connections","listen_port","hot","warm","cold"},"counts":{"<state>":n},"total","limits":{"down_limit","up_limit","alt_active","alt_scheduled","alt_down_limit","alt_up_limit"},"summary"}"#, "read"),
+    c!("status", "Look", "status", "speeds, counts, limits, whether the port is open, and your permission level", "", ["seedwell status", "seedwell status --json"],
+        r#"{"v","server","protocol","permission","totals":{"down_rate","up_rate","connections","listen_port","hot","warm","cold"},"counts":{"<state>":n},"total","limits":{"down_limit","up_limit","alt_active","alt_scheduled","alt_down_limit","alt_up_limit"},"summary","reachability":{"state" (open|mapped|checking|closed|unknown),"summary","port","mapping","method","external_port","behind_cgnat","router_unavailable","incoming","last_incoming_at"}}"#, "read"),
     c!("list", "Look", "list [state] [--state S] [--tracker X] [--category C] [--text T] [--kind torrent|direct] [--limit N] [--offset N]",
         "the torrents, filtered by state, tracker, category or name",
         "States: downloading queued seeding low-power paused error finished recent checking metadata awaiting-choice pending.",

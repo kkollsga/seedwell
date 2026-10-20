@@ -1,6 +1,6 @@
 //! State shared by the session and every torrent actor.
 
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use tokio::sync::{broadcast, mpsc};
@@ -51,6 +51,10 @@ pub(crate) struct Shared {
     pub port_fallback: std::sync::Mutex<Option<crate::api::PortFallback>>,
     /// The last port-mapping answer (`seedwell debug perf`); written when the mapper reports.
     pub portmap_status: std::sync::Mutex<Option<crate::api::PortMapStatus>>,
+    /// Incoming TCP connections from public IPv4 addresses on the current port, and the Unix
+    /// second of the last one ([`crate::api::Reachability`]). A port change starts them over.
+    pub incoming_public: AtomicU64,
+    pub last_incoming_public: AtomicU64,
     /// Torrents added by `seedwell sim`: only these may announce to a tracker on 127.0.0.1. Set through one
     /// internal control method (permission full plus Developer mode); a `.torrent` file cannot set it.
     pub simulated: std::sync::Mutex<std::collections::HashSet<crate::api::TorrentId>>,
@@ -111,6 +115,8 @@ impl Shared {
             dht_running: std::sync::atomic::AtomicBool::new(false),
             port_fallback: std::sync::Mutex::new(None),
             portmap_status: std::sync::Mutex::new(None),
+            incoming_public: AtomicU64::new(0),
+            last_incoming_public: AtomicU64::new(0),
             simulated: std::sync::Mutex::new(std::collections::HashSet::new()),
             streams: tokio::sync::OnceCell::const_new(),
             utp: Arc::new(RwLock::new(None)),

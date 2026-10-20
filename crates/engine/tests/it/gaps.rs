@@ -112,6 +112,12 @@ async fn reannounce_reports_each_tracker_and_the_gate() {
         tracker.log_for(&t.id).iter().any(|a| a.event.as_deref() == Some("started")).then_some(())
     })
     .await;
+    // The engine has the answer too (the tracker logs the request before it replies).
+    wait_for("answer seen", 20, || async {
+        let d = n.h.torrent_detail(t.id).await.ok()?;
+        d.trackers.iter().any(|x| x.status.starts_with("announced")).then_some(())
+    })
+    .await;
     // The session is open and the min interval (1800 s) is running: the answer says so.
     let r = n.h.reannounce(&[t.id]).await.unwrap();
     assert_eq!(r.len(), 1);

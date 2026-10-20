@@ -451,6 +451,12 @@ impl Core {
         self.backend.listen_port()
     }
 
+    /// Whether peers on the Internet can reach the listening port: a peer that connected in, or else
+    /// what the router said to the port mapping. Cheap; the Network settings poll it.
+    pub fn reachability(&self) -> Option<ReachabilityInfo> {
+        self.backend.reachability()
+    }
+
     /// Present when the configured listening port was in use by another app at start and the engine
     /// listens on another one for now.
     pub fn port_fallback(&self) -> Option<PortFallbackInfo> {

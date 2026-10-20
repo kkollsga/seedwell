@@ -72,8 +72,9 @@ pub(crate) enum SessionMsg {
     Rebound { serial: u64, wanted: u16, result: Result<Box<crate::engine::Bound>, String> },
     /// The DHT node was moved to the new UDP socket after a live port change.
     DhtMoved { serial: u64, dht: trs_dht::DhtHandle },
-    /// The listen port was mapped (or not).
-    PortMap(crate::api::PortMapStatus),
+    /// The listen port was mapped (or not). `serial` tells a stopped mapper's last word from the
+    /// current one's.
+    PortMap { serial: u64, status: crate::api::PortMapStatus },
     /// Which of the folders torrents save to are there (`volumes_changed`).
     Volumes(Vec<(u32, bool)>),
     /// The outage state changed (SPEC 7C.4c): `held` while the hub holds everything.
@@ -293,6 +294,8 @@ pub(crate) struct Session {
     pub downloader: Option<trs_http::Downloader>,
     pub watcher: Option<tokio::task::JoinHandle<()>>,
     pub portmap: Option<crate::portmap::PortMapRunner>,
+    /// Bumped at every mapper (re)start; answers of an older one are dropped.
+    pub portmap_gen: u64,
     /// The policy the table was last evaluated against.
     pub applied_policy: Option<Arc<PolicyData>>,
     /// Magnet torrents whose metadata is being classified right now.
@@ -377,6 +380,7 @@ impl Session {
             downloader: None,
             watcher: None,
             portmap: None,
+            portmap_gen: 0,
             planning: HashSet::new(),
             status_seen: HashMap::new(),
             edge_busy: HashMap::new(),
@@ -558,7 +562,7 @@ impl Session {
             SessionMsg::Direct(m) => self.on_direct(m),
             SessionMsg::Rebound { serial, wanted, result } => self.on_rebound(serial, wanted, result),
             SessionMsg::DhtMoved { serial, dht } => self.on_dht_moved(serial, dht),
-            SessionMsg::PortMap(s) => self.on_portmap(s),
+            SessionMsg::PortMap { serial, status } => self.on_portmap(serial, status),
             SessionMsg::TrackerHealth { id, health } => self.on_tracker_health(id, health),
             SessionMsg::Net { held } => self.on_net(held),
             SessionMsg::Volumes(res) => self.on_volumes(res),

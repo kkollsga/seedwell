@@ -40,6 +40,9 @@ pub fn status(s: &StatusDto) -> String {
         limit(s.limits.up_limit),
         if s.limits.alt_active { "  (alternative speed ON)" } else { "" }
     );
+    if let Some(r) = &s.reachability {
+        let _ = writeln!(o, "port {}: {}", r.port, r.summary);
+    }
     if s.total == 0 {
         o.push_str("no transfers");
     } else {

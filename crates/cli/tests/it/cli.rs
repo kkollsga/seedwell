@@ -64,7 +64,10 @@ fn exit_codes_json_version_and_ambiguous_selectors() {
     let o = d.cli(&["status"]);
     assert!(o.stdout.trim_start().starts_with("{\n  \"v\": 1"), "{}", o.stdout);
     let st = out_json(&o);
-    assert_eq!(keys(&st), ["counts", "limits", "permission", "protocol", "server", "summary", "total", "totals", "v"]);
+    assert_eq!(keys(&st), ["counts", "limits", "permission", "protocol", "reachability", "server", "summary", "total", "totals", "v"]);
+    // Loopback daemon without port mapping: nothing has connected in, mapping off.
+    assert_eq!(keys(&st["reachability"]), ["behind_cgnat", "incoming", "mapping", "port", "router_unavailable", "state", "summary"]);
+    assert_eq!(st["reachability"]["state"], "unknown");
     assert_eq!(keys(&st["totals"]), ["cold", "connections", "down_rate", "hot", "listen_port", "up_rate", "warm"]);
     let l = d.json(&["list"]);
     assert_eq!(keys(&l), ["offset", "total", "transfers", "v"]);

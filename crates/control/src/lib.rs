@@ -44,4 +44,4 @@ pub use socket::default_socket_path;
 pub use state::StateAccess;
 
 #[cfg(feature = "engine")]
-pub use engine_backend::{AppServerConfig, EngineBackend, serve, serve_with, start_for_app};
+pub use engine_backend::{AppServerConfig, EngineBackend, reachability_dto, serve, serve_with, start_for_app};

@@ -723,6 +723,15 @@ pub struct PortFallbackInfo {
     pub message: String,
 }
 
+/// Can peers on the Internet reach the listening port (Settings › Network, beside Port mapping).
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct ReachabilityInfo {
+    /// `open`, `mapped`, `checking`, `closed` or `unknown` (as `seedwell status --json`).
+    pub state: String,
+    /// Ready to show: "Open: 3 peers from the Internet connected in".
+    pub summary: String,
+}
+
 /// A loopback stream of a downloading file (SPEC §7F.1): open `url` in a player.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct StreamInfo {

@@ -260,7 +260,8 @@ impl Session {
         }
         // Trackers hear the new port with their next regular announce (no extra announce).
         self.tracker_send(crate::tracker_driver::TrackerCmd::ListenPort(port));
-        *self.sh.portmap_status.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        self.sh.incoming_public.store(0, Ordering::Relaxed);
+        self.sh.last_incoming_public.store(0, Ordering::Relaxed);
         self.restart_portmap();
     }
 
@@ -277,13 +278,19 @@ impl Session {
             // Mappings of the old runner are deleted in the background.
             tokio::spawn(async move { pm.shutdown().await });
         }
+        // Until the new mapper answers (or for good, with mapping off) there is no status.
+        self.portmap_gen += 1;
+        *self.sh.portmap_status.lock().unwrap_or_else(|e| e.into_inner()) = None;
         if self.shutting_down {
             return;
         }
-        self.portmap = crate::portmap::PortMapRunner::start(&self.sh);
+        self.portmap = crate::portmap::PortMapRunner::start(&self.sh, self.portmap_gen);
     }
 
-    pub(super) fn on_portmap(&mut self, s: PortMapStatus) {
+    pub(super) fn on_portmap(&mut self, serial: u64, s: PortMapStatus) {
+        if serial != self.portmap_gen {
+            return;
+        }
         // Trackers must be given the port peers can reach: the mapped external TCP port when the
         // router granted another one than we asked for. Start-up waits for this (bounded).
         if s.external_tcp_port.is_some() || s.unavailable {

@@ -129,6 +129,10 @@ pub trait Backend: Send + Sync + 'static {
     fn sim_allow(&self, _ids: Vec<TransferId>, _allow: bool) -> impl Future<Output = Result<(), ApiError>> + Send {
         async { Err(ApiError::new(crate::proto::ErrorCode::Unsupported, "this backend has no simulated torrents")) }
     }
+    /// Can peers on the Internet reach the listening port (`seedwell status`); `None` without an engine.
+    fn reachability(&self) -> impl Future<Output = Option<ReachabilityDto>> + Send {
+        async { None }
+    }
     /// Gates, budgets, port mapping and counters, read on demand (`seedwell debug`).
     fn probe(&self) -> impl Future<Output = Result<ProbeDto, ApiError>> + Send {
         async { Err(ApiError::new(crate::proto::ErrorCode::Unsupported, "this backend has no diagnostics")) }

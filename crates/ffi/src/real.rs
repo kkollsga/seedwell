@@ -1388,6 +1388,11 @@ impl Backend for RealBackend {
         self.engine.listen_port()
     }
 
+    fn reachability(&self) -> Option<ReachabilityInfo> {
+        let r = trs_control::reachability_dto(&self.engine.reachability());
+        Some(ReachabilityInfo { state: r.state, summary: r.summary })
+    }
+
     fn port_fallback(&self) -> Option<PortFallbackInfo> {
         self.engine.port_fallback().map(|f| PortFallbackInfo { wanted: f.wanted, using: f.using, message: f.message })
     }

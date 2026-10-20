@@ -600,7 +600,9 @@ async fn dispatch<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &mut Conn, req: Request) 
                 crate::human::rate(totals.up_rate),
                 ops::state_summary(&counts)
             );
+            let reachability = b.reachability().await;
             reply(&StatusDto {
+                reachability,
                 server: ctx.opts.server_name.clone(),
                 protocol: PROTOCOL_VERSION,
                 permission: ctx.perm.get().as_str().to_owned(),

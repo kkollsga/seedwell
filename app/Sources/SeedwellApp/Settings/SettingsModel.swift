@@ -39,6 +39,8 @@ enum SettingsTab: String, CaseIterable, Identifiable {
     private(set) var activity: [AgentActivity] = []
     /// The port the engine listens on now: the manual one, or the random one picked at this start.
     private(set) var activePort: UInt16 = 0
+    /// Whether peers on the Internet can reach the port: a peer that connected in, or the router's answer.
+    private(set) var reachability: ReachabilityInfo?
     @ObservationIgnored private var portWatch: Task<Void, Never>?
     /// Called after a save changed the finished location: the old and new value.
     @ObservationIgnored var finishedLocationChanged: ((_ old: String, _ new: String, _ category: Category?) -> Void)?
@@ -111,6 +113,16 @@ enum SettingsTab: String, CaseIterable, Identifiable {
     func refreshPort() {
         activePort = core.listenPort()
         portFallback = core.portFallback()
+        reachability = core.reachability()
+    }
+
+    /// While the Network tab is open: the router's answer and the first peer that connects in can
+    /// come at any moment, so the status is read again every two seconds.
+    func watchReachability() async {
+        while !Task.isCancelled {
+            reachability = core.reachability()
+            try? await Task.sleep(for: .seconds(2))
+        }
     }
 
     /// The setting was saved: watch the engine move to it.

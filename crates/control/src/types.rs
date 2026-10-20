@@ -341,6 +341,39 @@ pub struct StatusDto {
     pub limits: LimitsDto,
     /// `1.2 MB/s down, 300 KB/s up, 3 downloading, 40 sharing`.
     pub summary: String,
+    /// Can peers on the Internet reach the listening port (absent from a backend without an engine).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reachability: Option<ReachabilityDto>,
+}
+
+/// Can peers on the Internet reach the listening port? Built by [`crate::ops::reachability`].
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReachabilityDto {
+    /// `open` (a peer from the Internet connected in), `mapped` (the router opened the port; no
+    /// peer has connected in yet), `checking` (the router is being asked), `closed` (the router
+    /// cannot open it) or `unknown` (port mapping is off and no peer has connected in).
+    pub state: String,
+    /// One line for people: "Open: 3 peers from the Internet connected in".
+    pub summary: String,
+    /// The TCP port we listen on.
+    pub port: u16,
+    /// Port mapping is switched on.
+    pub mapping: bool,
+    /// `pcp`, `nat-pmp` or `upnp` once the router answered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub method: Option<String>,
+    /// The TCP port the router opened (can differ from `port`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_port: Option<u16>,
+    /// The router's own address is not on the Internet (CGNAT): no port can be opened there.
+    pub behind_cgnat: bool,
+    /// The router answered none of PCP, NAT-PMP and UPnP.
+    pub router_unavailable: bool,
+    /// Incoming TCP connections from public IPv4 addresses since the port was opened.
+    pub incoming: u64,
+    /// When the last of them came in (Unix seconds).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_incoming_at: Option<u64>,
 }
 
 /// `list` result.

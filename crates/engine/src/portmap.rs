@@ -44,7 +44,7 @@ fn status(s: &Snapshot, public: Option<bool>, unavailable: bool) -> PortMapStatu
 
 impl PortMapRunner {
     /// Start mapping the current listen port, if the configuration asks for it.
-    pub(crate) fn start(sh: &Arc<Shared>) -> Option<Self> {
+    pub(crate) fn start(sh: &Arc<Shared>, serial: u64) -> Option<Self> {
         let cfg = sh.cfg();
         let pc = cfg.portmap;
         let port = sh.port();
@@ -83,7 +83,7 @@ impl PortMapRunner {
                 let now = status(&watch.borrow(), public, unavailable);
                 if now != last {
                     last = now.clone();
-                    if tx.send(SessionMsg::PortMap(now)).await.is_err() {
+                    if tx.send(SessionMsg::PortMap { serial, status: now }).await.is_err() {
                         break;
                     }
                 }

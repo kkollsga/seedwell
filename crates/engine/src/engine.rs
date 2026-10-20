@@ -1137,6 +1137,21 @@ impl EngineHandle {
         self.sh.port()
     }
 
+    /// Can peers on the Internet reach the listening port: the router's answer to the port mapping
+    /// and the incoming connections from public addresses since the port was opened.
+    pub fn reachability(&self) -> Reachability {
+        let cfg = self.sh.cfg();
+        let pm = cfg.portmap;
+        let last = self.sh.last_incoming_public.load(Ordering::Relaxed);
+        Reachability {
+            port: self.sh.port(),
+            mapping_enabled: pm.enabled && (pm.upnp || pm.natpmp),
+            portmap: self.sh.portmap_status.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+            incoming: self.sh.incoming_public.load(Ordering::Relaxed),
+            last_incoming_at: (last != 0).then_some(last),
+        }
+    }
+
     /// Our peer id (one per process).
     pub fn peer_id(&self) -> [u8; 20] {
         self.sh.our_id

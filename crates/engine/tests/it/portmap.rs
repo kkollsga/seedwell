@@ -183,3 +183,35 @@ async fn trackers_are_told_the_mapped_external_port() {
     let started = log[seen..].iter().find(|a| a.event.as_deref() == Some("started")).unwrap();
     assert_eq!(started.port, port.wrapping_add(1000), "announced port {} vs listen {port}", started.port);
 }
+
+/// `reachability` shows what the router answered, forgets it when mapping is switched off, and
+/// counts no incoming connection from loopback (only Internet peers prove the port is open).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reachability_reports_the_mapping_and_clears_it_when_switched_off() {
+    let (gw_addr, _gw) = gateway().await;
+    let n = node(|c| {
+        c.portmap = PortmapConfig { enabled: true, upnp: false, natpmp: true, test_gateway: Some(gw_addr) };
+    })
+    .await;
+    let port = n.h.listen_port();
+    let r = wait_for("mapped", 20, || async {
+        let r = n.h.reachability();
+        r.portmap.as_ref().is_some_and(|s| s.external_tcp_port.is_some()).then_some(r)
+    })
+    .await;
+    assert!(r.mapping_enabled);
+    assert_eq!(r.port, port);
+    let s = r.portmap.unwrap();
+    assert_eq!((s.method, s.external_tcp_port, s.external_ip), (Some("nat-pmp"), Some(port), Some("203.0.113.9".parse().unwrap())));
+    assert_eq!((r.incoming, r.last_incoming_at), (0, None));
+
+    n.h.update_config(move |c| c.portmap = PortmapConfig { enabled: false, upnp: false, natpmp: false, test_gateway: Some(gw_addr) });
+    wait_for("status cleared", 10, || async {
+        let r = n.h.reachability();
+        (!r.mapping_enabled && r.portmap.is_none()).then_some(())
+    })
+    .await;
+    // The stopped mapper's last word (its mappings deleted) must not bring a status back.
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert_eq!(n.h.reachability().portmap, None);
+}

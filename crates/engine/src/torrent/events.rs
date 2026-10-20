@@ -43,6 +43,11 @@ impl Torrent {
     }
 
     pub(super) fn accept_incoming(&mut self, stream: PeerIo, hs: Handshake, addr: SocketAddr, permit: ConnPermit) {
+        // Proof the port is reachable from the Internet, even when this one is refused below.
+        if !stream.is_utp() && crate::net::is_internet_v4(addr) {
+            self.sh.incoming_public.fetch_add(1, Ordering::Relaxed);
+            self.sh.last_incoming_public.store(crate::util::unix_secs(), Ordering::Relaxed);
+        }
         let d = &self.sh.diag;
         if self.shutting_down
             || self.checking

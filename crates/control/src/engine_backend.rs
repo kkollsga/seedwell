@@ -449,6 +449,23 @@ pub fn event_dto(e: &EngineEvent) -> Option<EventDto> {
     })
 }
 
+/// The engine's [`trs_engine::api::Reachability`] in protocol form, with its state and wording
+/// (also what the app's Network settings show).
+pub fn reachability_dto(r: &trs_engine::api::Reachability) -> ReachabilityDto {
+    let pm = r.portmap.clone().unwrap_or_default();
+    crate::ops::reachability(ReachabilityDto {
+        port: r.port,
+        mapping: r.mapping_enabled,
+        method: pm.method.map(str::to_owned),
+        external_port: pm.external_tcp_port,
+        behind_cgnat: pm.behind_cgnat,
+        router_unavailable: pm.unavailable,
+        incoming: r.incoming,
+        last_incoming_at: r.last_incoming_at,
+        ..Default::default()
+    })
+}
+
 impl Backend for EngineBackend {
     async fn snapshot(&self) -> Result<SnapshotDto, ApiError> {
         let s = self.engine.snapshot().await.map_err(err)?;
@@ -714,6 +731,10 @@ impl Backend for EngineBackend {
     async fn sim_allow(&self, ids: Vec<TransferId>, allow: bool) -> Result<(), ApiError> {
         ids.into_iter().for_each(|id| self.engine.set_simulated(id, allow));
         Ok(())
+    }
+
+    async fn reachability(&self) -> Option<ReachabilityDto> {
+        Some(reachability_dto(&self.engine.reachability()))
     }
 
     async fn probe(&self) -> Result<ProbeDto, ApiError> {

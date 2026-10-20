@@ -406,6 +406,11 @@ bound first and only then swapped in (a taken port keeps the old one and sets `p
 TCP peers stay connected, uTP peers drain on the old socket, the DHT restarts on the new socket with its saved state, port
 mapping is redone and every tracker hears the new port with its next regular announce.
 
+`EngineHandle::reachability()` = `Reachability { port, mapping_enabled, portmap, incoming, last_incoming_at }`: whether peers on
+the Internet can reach the port, without an outside service. `incoming` counts TCP connections from public IPv4 addresses since
+the port was opened (refused ones too; a port change starts over); `portmap` is the router's last answer, `None` while it is
+asked and with mapping off. `trs_control::reachability_dto` turns it into a state and a sentence.
+
 ## Settings at runtime
 
 `config_map::engine_config` maps `config.toml`; `EngineHandle::apply_settings` applies it. Limits, alt limits, the
