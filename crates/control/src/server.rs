@@ -21,7 +21,7 @@ use tokio::task::JoinSet;
 
 use crate::activity::{ActivityLog, describe};
 use crate::backend::{AddArgs, AddSource, Backend};
-use crate::confirm::{Confirmations, Plan, TokenError};
+use crate::confirm::{Confirmations, Plan, SyncPlan, TokenError};
 use crate::limits::{LineRead, RateLimiter, read_line};
 use crate::ops::{self, Picked, SourceKind};
 use crate::perm::{Permission, PermissionSource};
@@ -156,6 +156,9 @@ struct Ctx<B> {
     opts: ServerOptions,
     activity: ActivityLog,
     confirms: Mutex<Confirmations>,
+    /// `sync.remove` plans (their tokens never remove a torrent, and the other way round).
+    #[cfg_attr(not(feature = "sync"), allow(dead_code))]
+    sync_confirms: Mutex<Confirmations<SyncPlan>>,
     hub: EventHub,
     connections: AtomicUsize,
     calls: AtomicU64,
@@ -239,6 +242,7 @@ pub async fn serve_backend<B: Backend>(
         perm,
         activity: activity.clone(),
         confirms: Mutex::new(Confirmations::new(opts.confirm_ttl)),
+        sync_confirms: Mutex::new(Confirmations::new(opts.confirm_ttl)),
         hub: EventHub::new(),
         connections: AtomicUsize::new(0),
         calls: AtomicU64::new(0),
@@ -491,7 +495,8 @@ async fn handle_line<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &mut Conn, limiter: &m
             at: now_ms(),
             client: who,
             method: method.name().to_owned(),
-            summary: clip(&summary, 600),
+            // Folder keys never reach the log, whatever field they were pasted into.
+            summary: clip(&crate::redact::scrub_keys(&summary), 600),
             outcome,
         });
     }
@@ -957,6 +962,24 @@ async fn dispatch<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &mut Conn, req: Request) 
         }
         Request::Remove(p) => remove_plan(ctx, conn, p).await,
         Request::RemoveConfirm(p) => remove_confirm(ctx, conn, p).await,
+        r @ (Request::SyncList(_)
+        | Request::SyncStatus(_)
+        | Request::SyncAdd(_)
+        | Request::SyncJoin(_)
+        | Request::SyncShare(_)
+        | Request::SyncRename(_)
+        | Request::SyncMove(_)
+        | Request::SyncPause(_)
+        | Request::SyncResume(_)
+        | Request::SyncRescan(_)
+        | Request::SyncSetLanOnly(_)
+        | Request::SyncConflicts(_)
+        | Request::SyncResolve(_)
+        | Request::SyncAddAddress(_)
+        | Request::SyncRemove(_)
+        | Request::SyncRemoveConfirm(_)
+        | Request::SyncSettings(_)
+        | Request::SyncSetSettings(_)) => sync_call(ctx, conn, r).await,
         Request::SettingsSet(p) => {
             let st = ctx.state.clone();
             let changes = p.changes;
@@ -976,6 +999,21 @@ async fn dispatch<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &mut Conn, req: Request) 
             Ok(r)
         }
     }
+}
+
+#[cfg(feature = "sync")]
+#[path = "server_sync.rs"]
+mod sync_methods;
+
+#[cfg(feature = "sync")]
+async fn sync_call<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &Conn, r: Request) -> Result<Reply, ApiError> {
+    sync_methods::call(ctx, conn, r).await
+}
+
+/// Built without folder sync: every `sync.*` method says so.
+#[cfg(not(feature = "sync"))]
+async fn sync_call<B: Backend>(_ctx: &Arc<Ctx<B>>, _conn: &Conn, _r: Request) -> Result<Reply, ApiError> {
+    Err(ApiError::new(ErrorCode::Unsupported, "folder sync is not running (this build has no folder sync)"))
 }
 
 async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> Result<T, ApiError> {

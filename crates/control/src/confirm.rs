@@ -1,5 +1,6 @@
 //! Two-step removal tokens (SPEC 9A.2): `remove` stores a plan and returns an unguessable token;
-//! `remove_confirm` redeems it once, within the TTL, by the same client.
+//! `remove_confirm` redeems it once, within the TTL, by the same client. `sync.remove` and
+//! `sync.remove_confirm` do the same with a [`SyncPlan`] in their own [`Confirmations`].
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -20,6 +21,35 @@ pub struct Plan {
     pub client: String,
 }
 
+/// A plan stored behind a token: it knows the client that asked for it.
+pub trait Owned: Clone {
+    /// The client that may redeem it.
+    fn owner(&self) -> &str;
+}
+
+impl Owned for Plan {
+    fn owner(&self) -> &str {
+        &self.client
+    }
+}
+
+/// What a `sync.remove` token stands for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SyncPlan {
+    /// The folder id, as text.
+    pub folder: String,
+    /// Move the folder to the Trash too.
+    pub delete_files: bool,
+    /// The client that asked.
+    pub client: String,
+}
+
+impl Owned for SyncPlan {
+    fn owner(&self) -> &str {
+        &self.client
+    }
+}
+
 /// Why a token was refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TokenError {
@@ -31,12 +61,12 @@ pub enum TokenError {
 
 /// Outstanding plans.
 #[derive(Debug)]
-pub struct Confirmations {
+pub struct Confirmations<P = Plan> {
     ttl: Duration,
-    pending: HashMap<String, (Instant, Plan)>,
+    pending: HashMap<String, (Instant, P)>,
 }
 
-impl Confirmations {
+impl<P: Owned> Confirmations<P> {
     /// Tokens live `ttl` (60 s in the product).
     pub fn new(ttl: Duration) -> Self {
         Self { ttl, pending: HashMap::new() }
@@ -48,7 +78,7 @@ impl Confirmations {
     }
 
     /// Store a plan and return its token (128 random bits, hex).
-    pub fn issue(&mut self, now: Instant, plan: Plan) -> String {
+    pub fn issue(&mut self, now: Instant, plan: P) -> String {
         // Forget what has been dead for a while; keep recent expired ones so the error can say
         // "expired" instead of "unknown".
         let keep = self.ttl * 5;
@@ -69,11 +99,11 @@ impl Confirmations {
 
     /// Redeem a token. It is consumed on success and when expired; a token presented by a
     /// different client is refused and stays valid for the right one.
-    pub fn redeem(&mut self, now: Instant, token: &str, client: &str) -> Result<Plan, TokenError> {
+    pub fn redeem(&mut self, now: Instant, token: &str, client: &str) -> Result<P, TokenError> {
         let Some((issued, plan)) = self.pending.get(token) else {
             return Err(TokenError::Unknown);
         };
-        if plan.client != client {
+        if plan.owner() != client {
             return Err(TokenError::Unknown);
         }
         let expired = now.saturating_duration_since(*issued) > self.ttl;
@@ -146,6 +176,18 @@ mod tests {
         let tok = c.issue(t0, plan("a"));
         assert_eq!(c.redeem(t0, &tok, "b"), Err(TokenError::Unknown));
         assert!(c.redeem(t0, &tok, "a").is_ok(), "the owner can still use it");
+    }
+
+    #[test]
+    fn sync_plans_have_their_own_tokens() {
+        let mut torrents: Confirmations = Confirmations::new(Duration::from_secs(60));
+        let mut folders: Confirmations<SyncPlan> = Confirmations::new(Duration::from_secs(60));
+        let t0 = Instant::now();
+        let p = SyncPlan { folder: "F".into(), delete_files: true, client: "a".into() };
+        let tok = folders.issue(t0, p.clone());
+        assert_eq!(torrents.redeem(t0, &tok, "a"), Err(TokenError::Unknown), "a folder token removes no torrent");
+        assert_eq!(folders.redeem(t0, &tok, "b"), Err(TokenError::Unknown));
+        assert_eq!(folders.redeem(t0, &tok, "a"), Ok(p));
     }
 
     #[test]

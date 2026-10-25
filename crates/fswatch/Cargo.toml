@@ -1,0 +1,16 @@
+[package]
+name = "trs-fswatch"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Recursive folder watcher (FSEvents, inotify, polling) with resume tokens, plus a pure event aggregator for the sync scanner"
+
+[dependencies]
+# Each dependency is justified in README.md.
+libc = "0.2"
+
+[dev-dependencies]
+proptest = { version = "1", default-features = false, features = ["std"] }
+tempfile = "3"

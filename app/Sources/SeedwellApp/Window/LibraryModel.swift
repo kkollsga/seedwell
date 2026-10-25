@@ -7,7 +7,7 @@ import Observation
 /// Sidebar: Downloads, Sharing and each tracker are places (sections). A tracker tab shows every
 /// torrent of that tracker, downloads and seeds, as collapsible groups (SPEC §8.3).
 @MainActor @Observable final class LibraryModel {
-    enum Section: Hashable { case downloads, sharing, settings, tracker(String) }
+    enum Section: Hashable { case downloads, sharing, folderSync, settings, tracker(String) }
 
     let core: Core
     var section: Section
@@ -41,6 +41,16 @@ import Observation
     @ObservationIgnored var isBusy: () -> Bool = { false }
     /// Every snapshot the model polls, for the app's new-download watcher.
     @ObservationIgnored var onSnapshot: (Snapshot) -> Void = { _ in }
+    /// Folder sync (SPEC 7G.5): every folder and device, read with each refresh (cheap).
+    var sync: SyncSnapshot
+    /// The folder whose page is shown on Folder Sync.
+    var syncSelection: String? { didSet { if syncSelection != oldValue { syncAskRemove = nil; loadConflicts() } } }
+    /// The conflict copies of the selected folder (read when it is selected, then every 10 s, off the main
+    /// thread: the core reads the folder's whole index).
+    private(set) var syncConflicts: [SyncConflict] = []
+    /// The folder whose "Stop syncing" question is open under its page header, and its Trash choice.
+    var syncAskRemove: String?
+    var syncTrash = false
     /// Sharing rows per group, newest page only.
     private(set) var groups: [SeedGroup: [TransferRow]] = [:]
     private(set) var counts = SharingCounts(popular: 0, active: 0, dormant: 0, error: 0, dead: 0, stopped: 0)
@@ -57,6 +67,7 @@ import Observation
         self.core = core
         self.section = section
         snapshot = core.snapshot()
+        sync = core.syncSnapshot()
         FilesStore.shared.core = core
         FilesStore.shared.onEdited = { [weak self] in self?.refresh() }
         refresh()
@@ -82,8 +93,13 @@ import Observation
 
     func refresh() {
         snapshot = core.snapshot()
+        sync = core.syncSnapshot()
         onSnapshot(snapshot)
         ticks += 1
+        if section == .folderSync {
+            if syncSelection.map({ id in !sync.folders.contains { $0.id == id } }) ?? true { syncSelection = sync.folders.first?.id }
+            else if ticks % 10 == 0 { loadConflicts() }
+        }
         FilesStore.shared.tick()
         if let id = trackerID, !snapshot.trackers.contains(where: { $0.id == id }) {
             select(.sharing)  // the profile was deleted while its tab was open
@@ -108,6 +124,26 @@ import Observation
             statsFor = nil
             trackerStats = nil
         }
+    }
+
+    /// The selected folder of the Folder Sync page.
+    var syncFolder: SyncFolder? { syncSelection.flatMap { id in sync.folders.first { $0.id == id } } }
+
+    func loadConflicts() {
+        guard let id = syncSelection else { syncConflicts = []; return }
+        let core = self.core
+        Task {
+            let list = await Task.detached(priority: .utility) { core.syncConflicts(id: id) }.value
+            if syncSelection == id { syncConflicts = list }
+        }
+    }
+
+    /// Opens the Folder Sync page on a folder, optionally with its remove question open.
+    func showSyncFolder(_ id: String?, askRemove: Bool) {
+        if section != .folderSync { select(.folderSync) }
+        if let id { syncSelection = id }
+        syncTrash = false
+        syncAskRemove = askRemove ? id : nil
     }
 
     func showMore(_ g: SeedGroup) {
@@ -206,6 +242,7 @@ import Observation
         case .tracker: tracker?.name ?? "Tracker"
         case .downloads: "Downloads"
         case .sharing: "Sharing"
+        case .folderSync: "Folder Sync"
         case .settings: "Settings"
         }
     }
@@ -231,6 +268,8 @@ import Observation
             return parts.joined(separator: " · ")
         case .sharing:
             return "\(Fmt.count(snapshot.sharingTotal, "torrent")) · \(Self.rates(snapshot))"
+        case .folderSync:
+            return SyncText.summary(sync) + (sync.deviceName.isEmpty ? "" : " · This Mac: \(sync.deviceName)")
         case .settings:
             return "Settings"
         }
@@ -279,7 +318,7 @@ import Observation
             // As the tab lists them: a finished torrent is in Sharing; only a finished direct download stays under Recently Finished.
             let top = (s.allDownloading + s.allQueued + s.allRecent.filter { $0.kind != .torrent && !seeding.contains($0.id) }).filter(matches)
             return top + seeds
-        case .settings: return []
+        case .settings, .folderSync: return []
         }
     }
 

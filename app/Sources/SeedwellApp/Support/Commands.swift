@@ -42,10 +42,13 @@ indirect enum MenuEntry {
     let favorites: FavoriteEditing
     /// Which torrents just became downloads: the window switches to them, the menu lists them first.
     let arrivals = DownloadWatcher()
+    /// Folder sync (SPEC 7G): its commands and the modals.
+    let sync: SyncActions
     private let log = Logger(subsystem: "io.github.kkollsga.Seedwell", category: "commands")
 
     init(core: Core) {
         self.core = core
+        sync = SyncActions(core: core)
         favorites = FavoriteEditing(store: core)
         favorites.openTab = { [weak self] id in self?.showMain(.tracker(id), nil) }
         favorites.openInfo = { [weak self] id in self?.showTrackerInfo(id) }

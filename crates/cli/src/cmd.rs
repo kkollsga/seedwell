@@ -7,7 +7,7 @@ use trs_control::proto::{AtGoalParam, FilePriorityParam, KindFilter, ListFilter,
 
 use crate::args::{Opts, Usage, parse_duration, parse_index_list, parse_rate};
 use crate::select::{Selection, parse_state};
-use crate::{debug, sim, skill};
+use crate::{debug, sim, skill, sync};
 
 /// What `start` does with the files.
 #[derive(Clone, Debug, PartialEq)]
@@ -198,6 +198,10 @@ pub enum Cmd {
     Sim(sim::Cmd),
     /// `skill …`
     Skill(skill::Cmd),
+    /// `sync …` (folder sync)
+    Sync(sync::Cmd),
+    /// `relay [--port N] [--bind ADDR] [--key-file PATH]`
+    Relay(sync::RelayArgs),
     /// `help [x]`
     Help(Option<String>),
     /// `daemon …` (parsed by the daemon itself)
@@ -522,6 +526,8 @@ pub fn parse(args: Vec<String>) -> Result<Cmd, Usage> {
         "debug" => Cmd::Debug(debug::parse(rest)?),
         "sim" => Cmd::Sim(sim::parse(rest)?),
         "skill" => Cmd::Skill(skill::parse(rest)?),
+        "sync" => Cmd::Sync(sync::parse(rest)?),
+        "relay" => Cmd::Relay(sync::parse_relay(rest)?),
         "help" => {
             let pos = o.finish()?;
             Cmd::Help(pos.into_iter().next())
@@ -633,6 +639,26 @@ mod tests {
         assert!(p("seedwell dev maybe").is_err());
         assert!(matches!(p("seedwell help agents").unwrap(), Cmd::Help(Some(_))));
         assert!(matches!(p("seedwell daemon --state-dir x").unwrap(), Cmd::Daemon(_)));
+        assert_eq!(p("seedwell sync list").unwrap(), Cmd::Sync(sync::Cmd::List));
+        assert!(matches!(p("seedwell sync status MFZWI3D").unwrap(), Cmd::Sync(sync::Cmd::Status { .. })));
+        assert!(matches!(p("seedwell sync add ~/Shared").unwrap(), Cmd::Sync(sync::Cmd::Add { .. })));
+        assert!(matches!(p("seedwell sync join SWR-ABCDEF --to ~/Seedwell/Docs").unwrap(), Cmd::Sync(sync::Cmd::Join { to: Some(_), .. })));
+        assert!(matches!(p("seedwell sync share Docs").unwrap(), Cmd::Sync(sync::Cmd::Share { .. })));
+        assert!(matches!(p("seedwell sync rename Docs Papers").unwrap(), Cmd::Sync(sync::Cmd::Rename { .. })));
+        assert!(matches!(p("seedwell sync move Docs /tmp/Docs").unwrap(), Cmd::Sync(sync::Cmd::Move { .. })));
+        assert!(matches!(p("seedwell sync pause Docs").unwrap(), Cmd::Sync(sync::Cmd::Pause { .. })));
+        assert!(matches!(p("seedwell sync resume Docs").unwrap(), Cmd::Sync(sync::Cmd::Resume { .. })));
+        assert!(matches!(p("seedwell sync rescan Docs").unwrap(), Cmd::Sync(sync::Cmd::Rescan { .. })));
+        assert!(matches!(p("seedwell sync lan-only Docs on").unwrap(), Cmd::Sync(sync::Cmd::LanOnly { on: true, .. })));
+        assert!(matches!(p("seedwell sync conflicts Docs").unwrap(), Cmd::Sync(sync::Cmd::Conflicts { .. })));
+        assert!(matches!(p("seedwell sync resolve Docs x.txt --keep copy").unwrap(), Cmd::Sync(sync::Cmd::Resolve { .. })));
+        assert!(matches!(p("seedwell sync address Docs nas.local:22000").unwrap(), Cmd::Sync(sync::Cmd::Address { .. })));
+        assert!(matches!(p("seedwell sync remove Docs --delete-files").unwrap(), Cmd::Sync(sync::Cmd::Remove { delete_files: true, yes: false, .. })));
+        assert!(matches!(p("seedwell sync remove-confirm tok").unwrap(), Cmd::Sync(sync::Cmd::RemoveConfirm { .. })));
+        assert_eq!(p("seedwell sync settings").unwrap(), Cmd::Sync(sync::Cmd::Settings));
+        assert!(matches!(p("seedwell sync settings --device-name Studio").unwrap(), Cmd::Sync(sync::Cmd::SetSettings(_))));
+        assert!(matches!(p("seedwell relay --port 22067").unwrap(), Cmd::Relay(a) if a.port == Some(22067)));
+        assert_eq!(p("seedwell relay").unwrap(), Cmd::Relay(sync::RelayArgs::default()));
     }
 
     #[test]
@@ -651,6 +677,9 @@ mod tests {
             "seedwell status extra",
             "seedwell settings set noequals",
             "seedwell move sintel",
+            "seedwell sync",
+            "seedwell sync status",
+            "seedwell relay --port nope",
         ] {
             let words = shell_words(bad);
             assert!(parse(words[1..].to_vec()).is_err(), "{bad} should be a usage error");

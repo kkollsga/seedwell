@@ -2,9 +2,9 @@ import Foundation
 import Observation
 
 enum SettingsTab: String, CaseIterable, Identifiable {
-    case general, transfers, folders, rules, network, agents, advanced
+    case general, transfers, folders, rules, network, folderSync, agents, advanced
     var id: String { rawValue }
-    var title: String { rawValue.capitalized }
+    var title: String { self == .folderSync ? "Folder Sync" : rawValue.capitalized }
     var symbol: String {
         switch self {
         case .general: "gearshape"
@@ -12,6 +12,7 @@ enum SettingsTab: String, CaseIterable, Identifiable {
         case .folders: "folder"
         case .rules: "list.bullet"
         case .network: "network"
+        case .folderSync: "arrow.triangle.2.circlepath"
         case .agents: "sparkle"
         case .advanced: "command"
         }
@@ -186,6 +187,35 @@ enum SettingsTab: String, CaseIterable, Identifiable {
             self.problems = problems
         } catch {
             problems = ["\(error)"]
+        }
+    }
+
+    // MARK: Folder sync (its own settings, in sync.toml)
+
+    /// Settings › Folder Sync, as the sync service has them; edits are saved a moment after the last one.
+    var sync: SyncSettings? {
+        didSet { if !loading, let s = sync, s != oldValue { scheduleSyncSave() } }
+    }
+    @ObservationIgnored private var syncSaveTask: Task<Void, Never>?
+
+    func reloadSync() {
+        loading = true
+        sync = core.syncSettings()
+        loading = false
+    }
+
+    private func scheduleSyncSave() {
+        syncSaveTask?.cancel()
+        syncSaveTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(450))
+            guard !Task.isCancelled, let self, let s = self.sync else { return }
+            do {
+                try self.core.setSyncSettings(settings: s)
+                self.problems = []
+            } catch {
+                self.problems = [SyncText.message(error)]
+                self.reloadSync()
+            }
         }
     }
 

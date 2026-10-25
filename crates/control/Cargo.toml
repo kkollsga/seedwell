@@ -8,10 +8,13 @@ publish = false
 description = "Seedwell agent interface: versioned JSON-lines control protocol and the local control-socket server"
 
 [features]
-default = ["engine"]
+default = ["engine", "sync"]
 # The adapter from `trs_engine::EngineHandle` to the protocol (`serve`, `start_for_app`). Without
 # it the crate is protocol, client and server generic over a `Backend`; the CLI client needs no engine.
 engine = ["dep:trs-engine"]
+# Folder sync (SPEC 7G): the `sync.*` methods over a `trs_sync_net::SyncHandle`, and the glue that lends
+# it the engine's DHT and port mapping. Wherever the engine is, sync is too.
+sync = ["engine", "dep:trs-sync-net", "dep:trs-sync", "dep:trs-sync-proto", "dep:trs-dht"]
 
 [dependencies]
 trs-state = { path = "../state" }
@@ -19,6 +22,12 @@ trs-classify = { path = "../classify" }
 # `tracker_log`: reads the developer-mode log (masked JSON lines).
 trs-devlog = { path = "../devlog" }
 trs-engine = { path = "../engine", optional = true }
+trs-sync-net = { path = "../sync-net", optional = true }
+trs-sync = { path = "../sync", optional = true }
+# Folder ids and keys (parsing a link's name hint for the default place of a joined folder).
+trs-sync-proto = { path = "../sync-proto", optional = true }
+# `PublicInfoHash` and the lookup stream, for the DHT the engine lends to sync.
+trs-dht = { path = "../dht", optional = true }
 serde = { version = "1", default-features = false, features = ["derive", "std"] }
 serde_json = { version = "1", default-features = false, features = ["std"] }
 # `net` for the Unix socket (and `peer_cred`), `fs` for reading .torrent paths and socket files.

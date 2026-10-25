@@ -848,6 +848,141 @@ pub struct TrackerLogParams {
     pub since_ms: Option<u64>,
 }
 
+// ----------------------------------------------------------------------------- folder sync (SPEC 7G)
+
+/// A folder: its id (`MFZWI3D-BONSGYC-…`), an unambiguous prefix of it (the first group is enough), or its
+/// name on this Mac (any case).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SyncFolderParams {
+    /// The folder.
+    pub folder: String,
+}
+
+/// `sync.add`: share a folder of this Mac (a new Read & write key is made).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SyncAddParams {
+    /// Absolute path (or `~/...`) of an existing folder.
+    pub path: String,
+}
+
+/// `sync.join`: sync a folder shared with you.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SyncJoinParams {
+    /// A folder key (`SWW-…`, `SWR-…`) or a `seedwell://sync/…` link. A secret: it is never logged.
+    pub key_or_link: String,
+    /// Where the folder goes (absolute or `~/...`; created when missing). Absent: the default location
+    /// for joined folders (Settings › Folder Sync, else `~/Seedwell`) and the link's name.
+    #[serde(default)]
+    pub path: Option<String>,
+}
+
+/// `sync.rename`: rename a folder on this Mac (other devices keep their names).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SyncRenameParams {
+    /// The folder.
+    pub folder: String,
+    /// Its new name (one path component).
+    pub name: String,
+}
+
+/// `sync.move`: move a folder on this Mac.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SyncMoveParams {
+    /// The folder.
+    pub folder: String,
+    /// The new path of the folder itself (absolute or `~/...`; must not exist yet).
+    pub path: String,
+}
+
+/// `sync.set_lan_only`: only sync a folder with devices on the local network (or everywhere again).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SyncLanOnlyParams {
+    /// The folder.
+    pub folder: String,
+    /// True: only devices on the local network.
+    pub lan_only: bool,
+}
+
+/// `sync.resolve`: settle one conflict copy. Nothing is deleted: the version not kept goes to the folder's archive.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SyncResolveParams {
+    /// The folder.
+    pub folder: String,
+    /// The conflict copy, relative to the folder (as `sync.conflicts` lists it).
+    pub copy: String,
+    /// `original` (keep the file, archive the copy), `copy` (the copy replaces the file, which is archived) or
+    /// `both` (the copy gets a plain name of its own).
+    pub keep: String,
+}
+
+/// `sync.add_address`: where devices of this folder can be reached, typed in by hand.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SyncAddAddressParams {
+    /// The folder.
+    pub folder: String,
+    /// `ip:port` or `host:port`.
+    pub address: String,
+}
+
+/// `sync.remove` (step 1): stop syncing a folder on this Mac.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SyncRemoveParams {
+    /// The folder.
+    pub folder: String,
+    /// Also move the folder to the Trash (needs permission `full`). Otherwise the files stay.
+    #[serde(default)]
+    pub delete_files: bool,
+}
+
+/// `sync.set_settings`: absent fields are unchanged; give at least one (`sync.settings` reads them).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SyncSettingsParams {
+    /// The name other devices see (empty = the computer's name).
+    #[serde(default)]
+    pub device_name: Option<String>,
+    /// The sync port (0 = choose one); applies at the next start.
+    #[serde(default)]
+    pub port: Option<u16>,
+    /// Find devices on the local network.
+    #[serde(default)]
+    pub lan_discovery: Option<bool>,
+    /// Find devices over the Internet (the Mainline DHT, daily rotating topics).
+    #[serde(default)]
+    pub dht_discovery: Option<bool>,
+    /// Relay between this user's own devices.
+    #[serde(default)]
+    pub relay_own_devices: Option<bool>,
+    /// Also relay between other members of shared folders.
+    #[serde(default)]
+    pub relay_everyone: Option<bool>,
+    /// Internet upload limit, bytes per second (0 = none). The LAN is never limited.
+    #[serde(default)]
+    pub up_limit: Option<u64>,
+    /// Internet download limit, bytes per second (0 = none).
+    #[serde(default)]
+    pub down_limit: Option<u64>,
+    /// Where joined folders go by default (absolute or `~/...`; empty = `~/Seedwell`).
+    #[serde(default)]
+    pub default_location: Option<String>,
+}
+
+impl SyncSettingsParams {
+    /// Nothing to change.
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 // ----------------------------------------------------------------------------- the method table
 
 macro_rules! methods {
@@ -1003,6 +1138,42 @@ methods! {
     StreamUrl(StreamUrlParams) = "stream_url", Control, true;
     /// Close a stream.
     StopStream(StopStreamParams) = "stop_stream", Control, true;
+    /// Folder sync: this device, every folder and the connected devices.
+    SyncList(Empty) = "sync.list", ReadOnly, false;
+    /// Folder sync: one folder.
+    SyncStatus(SyncFolderParams) = "sync.status", ReadOnly, false;
+    /// Folder sync: share a folder of this Mac (makes a new Read & write key).
+    SyncAdd(SyncAddParams) = "sync.add", Control, true;
+    /// Folder sync: sync a folder shared with you, by key or link.
+    SyncJoin(SyncJoinParams) = "sync.join", Control, true;
+    /// Folder sync: the keys and links this Mac may give out for a folder. Always logged; the keys never are.
+    SyncShare(SyncFolderParams) = "sync.share", Full, true;
+    /// Folder sync: rename a folder on this Mac (moves files on disk).
+    SyncRename(SyncRenameParams) = "sync.rename", Full, true;
+    /// Folder sync: move a folder on this Mac (moves files on disk).
+    SyncMove(SyncMoveParams) = "sync.move", Full, true;
+    /// Folder sync: pause a folder.
+    SyncPause(SyncFolderParams) = "sync.pause", Control, true;
+    /// Folder sync: resume a folder.
+    SyncResume(SyncFolderParams) = "sync.resume", Control, true;
+    /// Folder sync: scan a folder now.
+    SyncRescan(SyncFolderParams) = "sync.rescan", Control, true;
+    /// Folder sync: only sync a folder with devices on the local network, or everywhere again.
+    SyncSetLanOnly(SyncLanOnlyParams) = "sync.set_lan_only", Control, true;
+    /// Folder sync: the unresolved conflict copies of a folder.
+    SyncConflicts(SyncFolderParams) = "sync.conflicts", ReadOnly, false;
+    /// Folder sync: settle a conflict copy (the version not kept is archived, never deleted).
+    SyncResolve(SyncResolveParams) = "sync.resolve", Control, true;
+    /// Folder sync: an address where devices of a folder can be reached.
+    SyncAddAddress(SyncAddAddressParams) = "sync.add_address", Control, true;
+    /// Folder sync, step 1 of removal: returns a plan and a confirmation token.
+    SyncRemove(SyncRemoveParams) = "sync.remove", Control, true;
+    /// Folder sync, step 2 of removal: stop syncing (and with `delete_files`, move the folder to the Trash).
+    SyncRemoveConfirm(RemoveConfirmParams) = "sync.remove_confirm", Control, true;
+    /// Folder sync: the device-wide settings.
+    SyncSettings(Empty) = "sync.settings", ReadOnly, false;
+    /// Folder sync: change the device-wide settings.
+    SyncSetSettings(SyncSettingsParams) = "sync.set_settings", Full, true;
 }
 
 fn short_serde_error(e: &serde_json::Error) -> String {

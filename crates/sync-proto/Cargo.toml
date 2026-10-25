@@ -1,0 +1,15 @@
+[package]
+name = "trs-sync-proto"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Seedwell Sync v1: folder keys and their derivation, device ids, the signed file model and the wire messages (sans-I/O)"
+
+[dependencies]
+# Each dependency is justified in README.md.
+ring = { version = "0.17", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+proptest = { version = "1", default-features = false, features = ["std"] }

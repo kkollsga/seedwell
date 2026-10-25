@@ -40,6 +40,7 @@ struct SettingsView: View {
             case .folders: FoldersTab(model: model)
             case .rules: RulesTab(model: model, nav: nav)
             case .network: NetworkTab(model: model)
+            case .folderSync: SyncTab(model: model)
             case .agents: AgentsTab(model: model)
             case .advanced: AdvancedTab(model: model, nav: nav)
             }

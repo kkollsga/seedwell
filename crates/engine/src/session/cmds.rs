@@ -198,6 +198,11 @@ impl Session {
             }
             Cmd::Shutdown { .. } => {}
             c @ (Cmd::StreamOpen { .. } | Cmd::StreamsClosed) => self.on_stream_cmd(c),
+            Cmd::PublicDht(reply) => {
+                let dht = self.dht.clone().filter(|_| self.sh.cfg().dht_enabled);
+                let _ = reply.send(dht);
+            }
+            Cmd::SetExtraMappedPort(port) => self.set_extra_mapped_port(port),
         }
     }
 

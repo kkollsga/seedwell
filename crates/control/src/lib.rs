@@ -5,6 +5,8 @@
 //! * [`types`]: result types. [`ops`], [`settings`], [`redact`]: pure logic.
 //! * [`server`]: [`serve_backend`] over any [`Backend`]; with feature `engine`, [`serve`] and
 //!   [`start_for_app`] wire it to `trs_engine::EngineHandle`.
+//! * `sync` (feature `sync`): the folder sync service next to the engine (`start_sync`, the DHT
+//!   discovery it borrows, `SyncSlot`) and what the `sync.*` methods need.
 //! * [`client`]: connect, handshake, request, events.
 //!
 //! Security model: Unix domain socket only (never TCP), mode 0600 in a 0700 directory, same-uid
@@ -33,6 +35,8 @@ pub mod types;
 
 #[cfg(feature = "engine")]
 mod engine_backend;
+#[cfg(feature = "sync")]
+pub mod sync;
 
 pub use activity::ActivityLog;
 pub use backend::{AddArgs, AddSource, Backend};
@@ -45,3 +49,5 @@ pub use state::StateAccess;
 
 #[cfg(feature = "engine")]
 pub use engine_backend::{AppServerConfig, EngineBackend, reachability_dto, serve, serve_with, start_for_app};
+#[cfg(feature = "sync")]
+pub use engine_backend::start_for_app_with_sync;

@@ -157,3 +157,45 @@ async fn the_dht_follows_the_port() {
     wait_done(&leech, &t.id, 120).await;
     t.verify(leech.dir.path(), &[]);
 }
+
+/// `public_dht` lends the DHT node to another service (folder sync, SPEC 7G): `None` with the DHT off, and
+/// with it on an announce on a public topic from one node is found by a lookup from another, also after
+/// the node moved to a new port.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_dht_is_lent_for_public_topics() {
+    let off = node(|c| c.dht_enabled = false).await;
+    assert!(off.h.public_dht().await.is_none(), "no DHT, nothing to lend");
+    let dht = |bootstrap: String| {
+        move |c: &mut EngineConfig| {
+            c.dht_enabled = true;
+            c.dht_allow_local = true;
+            c.dht_bind = "127.0.0.1:0".parse().unwrap();
+            c.dht_bootstrap = vec![bootstrap.clone()];
+            c.pex_enabled = false;
+        }
+    };
+    let router = node(dht("127.0.0.1:9".into())).await;
+    let router_addr = format!("127.0.0.1:{}", router.h.listen_port());
+    let a = node(dht(router_addr.clone())).await;
+    let b = node(dht(router_addr)).await;
+    move_to(&a, free_port()).await;
+    let topic = [0x5a; 20];
+    let topic = trs_dht::PublicInfoHash::new(topic, false).unwrap();
+    let found = wait_for("the announced port is found", 60, || async {
+        let dht_a = a.h.public_dht().await?;
+        if let Ok(Ok(mut s)) = dht_a.announce(topic, 4242).await {
+            while s.next().await.is_some() {}
+        }
+        let dht_b = b.h.public_dht().await?;
+        let Ok(Ok(mut s)) = dht_b.get_peers(topic).await else { return None };
+        let mut peers = Vec::new();
+        while let Some(u) = s.next().await {
+            if let trs_dht::LookupUpdate::Peers(v) = u {
+                peers.extend(v);
+            }
+        }
+        peers.into_iter().find(|p| p.port() == 4242)
+    })
+    .await;
+    assert_eq!(found.ip(), &std::net::Ipv4Addr::LOCALHOST);
+}

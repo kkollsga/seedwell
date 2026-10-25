@@ -42,6 +42,10 @@ struct SidebarView: View {
                 .badge(Int(s.sharingTotal))
                 .help("Torrents you are seeding")
                 .tag(LibraryModel.Section.sharing)
+            Label("Folder Sync", systemImage: "arrow.triangle.2.circlepath")
+                .badge(model.sync.folders.count)
+                .help("Folders kept the same on your devices")
+                .tag(LibraryModel.Section.folderSync)
             let shownTrackers = TrackerOrder.visible(s.trackers, selected: model.trackerID)
             if !shownTrackers.isEmpty {
             Section("Trackers") {
@@ -134,6 +138,8 @@ struct DetailView: View {
         switch model.section {
         case .settings:
             SettingsView(model: settings, nav: nav)
+        case .folderSync:
+            SyncPage(model: model, actions: commands.sync)
         case .downloads:
             let groups = Lists.downloads(model, commands: commands)
             RowList(model: model, commands: commands, groups: groups) {

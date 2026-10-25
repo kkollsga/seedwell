@@ -215,3 +215,70 @@ async fn reachability_reports_the_mapping_and_clears_it_when_switched_off() {
     tokio::time::sleep(Duration::from_millis(800)).await;
     assert_eq!(n.h.reachability().portmap, None);
 }
+
+/// Folder sync's port (SPEC 7G) is mapped, TCP and UDP, by the same mapper as the listen port. Setting the
+/// same port again sends nothing; clearing it deletes its mapping and keeps the listen port's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_extra_port_is_mapped_next_to_the_listen_port() {
+    let (gw_addr, gw) = gateway().await;
+    let n = node(|c| {
+        c.portmap = PortmapConfig { enabled: true, upnp: false, natpmp: true, test_gateway: Some(gw_addr) };
+    })
+    .await;
+    let port = n.h.listen_port();
+    wait_for("listen port mapped", 20, || async { (gw.lock().unwrap().table.len() == 2).then_some(()) }).await;
+    let extra = free_port();
+    n.h.set_extra_mapped_port(Some(extra));
+    let s = wait_for("extra port mapped", 20, || async {
+        let s = n.h.reachability().portmap?;
+        let all = [s.extra_external_tcp_port, s.extra_external_udp_port, s.external_tcp_port, s.external_udp_port];
+        all.iter().all(Option::is_some).then_some(s)
+    })
+    .await;
+    assert_eq!((s.external_tcp_port, s.external_udp_port), (Some(port), Some(port)));
+    assert_eq!((s.extra_external_tcp_port, s.extra_external_udp_port), (Some(extra), Some(extra)));
+    {
+        let g = gw.lock().unwrap();
+        assert_eq!(g.table.get(&(2, extra)), Some(&extra), "TCP for the extra port");
+        assert_eq!(g.table.get(&(1, extra)), Some(&extra), "UDP for the extra port");
+        assert_eq!(g.table.get(&(2, port)), Some(&port), "the listen port's TCP survives the restart");
+        assert_eq!(g.table.get(&(1, port)), Some(&port), "and its UDP");
+        assert_eq!(g.table.len(), 4);
+    }
+    let before = gw.lock().unwrap().requests;
+    n.h.set_extra_mapped_port(Some(extra));
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert_eq!(gw.lock().unwrap().requests, before, "the same port again asks the router nothing");
+
+    n.h.set_extra_mapped_port(None);
+    wait_for("extra port unmapped", 20, || async {
+        let g = gw.lock().unwrap();
+        (g.table.len() == 2 && g.table.contains_key(&(2, port)) && g.table.contains_key(&(1, port))).then_some(())
+    })
+    .await;
+    wait_for("status without the extra port", 20, || async {
+        let s = n.h.reachability().portmap?;
+        (s.external_tcp_port.is_some() && s.extra_external_tcp_port.is_none() && s.extra_external_udp_port.is_none()).then_some(())
+    })
+    .await;
+}
+
+/// With mapping off the extra port is only remembered; switching mapping on maps it too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_extra_port_waits_for_mapping_to_be_switched_on() {
+    let (gw_addr, gw) = gateway().await;
+    let n = node(|c| {
+        c.portmap = PortmapConfig { enabled: false, upnp: false, natpmp: true, test_gateway: Some(gw_addr) };
+    })
+    .await;
+    let extra = free_port();
+    n.h.set_extra_mapped_port(Some(extra));
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert_eq!(gw.lock().unwrap().requests, 0);
+    n.h.update_config(move |c| c.portmap = PortmapConfig { enabled: true, upnp: false, natpmp: true, test_gateway: Some(gw_addr) });
+    wait_for("all four mapped", 20, || async {
+        let g = gw.lock().unwrap();
+        (g.table.get(&(2, extra)) == Some(&extra) && g.table.get(&(1, extra)) == Some(&extra) && g.table.len() == 4).then_some(())
+    })
+    .await;
+}

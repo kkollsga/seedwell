@@ -1,0 +1,218 @@
+//! Every message survives encode → frame → decode unchanged, on random contents.
+
+use proptest::collection::vec;
+use proptest::prelude::*;
+use trs_sync_proto::codec::Frame;
+use trs_sync_proto::ids::{DeviceId, FolderId, ShortId};
+use trs_sync_proto::keys::Proof;
+use trs_sync_proto::model::{ChunkRef, Counter, FileInfo, FileKind, IndexEntry, MAX_CHUNK, SignedFile, Version};
+use trs_sync_proto::msg::*;
+use trs_sync_proto::sign::Writer;
+
+fn cases() -> u32 {
+    std::env::var("PROPTEST_CASES").ok().and_then(|v| v.parse().ok()).unwrap_or(256)
+}
+
+fn bytes<const N: usize>() -> impl Strategy<Value = [u8; N]> {
+    vec(any::<u8>(), N).prop_map(|v| <[u8; N]>::try_from(v).unwrap_or([0; N]))
+}
+
+fn text(max: usize) -> impl Strategy<Value = String> {
+    vec(any::<char>(), 0..=max).prop_map(String::from_iter)
+}
+
+fn folder_id() -> impl Strategy<Value = FolderId> {
+    bytes::<32>().prop_map(FolderId)
+}
+
+fn device_id() -> impl Strategy<Value = DeviceId> {
+    bytes::<32>().prop_map(DeviceId)
+}
+
+fn version() -> impl Strategy<Value = Version> {
+    proptest::collection::btree_map(any::<u64>(), 1..=u64::MAX, 0..6).prop_map(|m| {
+        let counters = m.into_iter().map(|(id, value)| Counter { id: ShortId(id), value }).collect();
+        Version::from_counters(counters).unwrap_or_default()
+    })
+}
+
+fn proof() -> impl Strategy<Value = Proof> {
+    prop_oneof![
+        bytes::<64>().prop_map(Proof::Writer),
+        bytes::<32>().prop_map(Proof::Read),
+        bytes::<32>().prop_map(Proof::Storage),
+        (4..=255u8, vec(any::<u8>(), 0..40)).prop_map(|(kind, data)| Proof::Unknown { kind, data }),
+    ]
+}
+
+fn kind() -> impl Strategy<Value = FileKind> {
+    prop_oneof![Just(FileKind::File), Just(FileKind::Dir), Just(FileKind::Symlink)]
+}
+
+prop_compose! {
+    fn file_info()(
+        path in text(40), kind in kind(), size in any::<u64>(), mtime_ns in any::<i64>(), exec in any::<bool>(),
+        deleted in any::<bool>(), version in version(), modified_by in any::<u64>(), file_id in bytes::<16>(),
+        symlink_target in text(20), conflict_of in proptest::option::of(text(20)),
+        chunks in vec((0..=MAX_CHUNK, bytes::<32>()).prop_map(|(len, hash)| ChunkRef { len, hash }), 0..8),
+    ) -> FileInfo {
+        FileInfo {
+            path, kind, size, mtime_ns, exec, deleted, version, modified_by: ShortId(modified_by), file_id,
+            symlink_target, conflict_of, chunks,
+        }
+    }
+}
+
+prop_compose! {
+    fn index_entry()(sequence in any::<u64>(), invalid in any::<bool>(), info in file_info(), sig in bytes::<64>())
+        -> IndexEntry {
+        IndexEntry { sequence, invalid, file: SignedFile { info, sig } }
+    }
+}
+
+fn hello() -> impl Strategy<Value = Message> {
+    (any::<u32>(), text(30), text(MAX_DEVICE_NAME))
+        .prop_map(|(protocol, client, device_name)| Message::Hello(Hello { protocol, client, device_name }))
+}
+
+fn join() -> impl Strategy<Value = Message> {
+    let folder = (folder_id(), vec(proof(), 0..=MAX_PROOFS), any::<u64>(), any::<u64>(), any::<u64>()).prop_map(
+        |(folder_id, proofs, my_index_id, your_index_id, your_max_seq)| JoinFolder {
+            folder_id,
+            proofs,
+            my_index_id,
+            your_index_id,
+            your_max_seq,
+        },
+    );
+    vec(folder, 0..5).prop_map(|folders| Message::Join(Join { folders }))
+}
+
+fn writers() -> impl Strategy<Value = Message> {
+    let writer = (bytes::<32>(), bytes::<64>()).prop_map(|(device_pk, cert)| Writer { device_pk, cert });
+    (folder_id(), vec(writer, 0..5)).prop_map(|(folder_id, writers)| Message::Writers(Writers { folder_id, writers }))
+}
+
+fn index() -> impl Strategy<Value = Message> {
+    (folder_id(), any::<u64>(), any::<bool>(), vec(index_entry(), 0..5), any::<bool>()).prop_map(
+        |(folder_id, index_id, full, entries, done)| Message::Index(Index { folder_id, index_id, full, entries, done }),
+    )
+}
+
+fn request() -> impl Strategy<Value = Message> {
+    (any::<u32>(), folder_id(), text(40), any::<u64>(), any::<u32>(), bytes::<32>(), any::<bool>()).prop_map(
+        |(id, folder_id, path, offset, len, hash, from_temp)| {
+            Message::Request(Request { id, folder_id, path, offset, len, hash, from_temp })
+        },
+    )
+}
+
+fn response() -> impl Strategy<Value = Message> {
+    let code = prop_oneof![
+        Just(ResponseCode::Ok),
+        Just(ResponseCode::Generic),
+        Just(ResponseCode::NoSuchFile),
+        Just(ResponseCode::Invalid),
+        Just(ResponseCode::Busy),
+    ];
+    (any::<u32>(), code, vec(any::<u8>(), 0..300))
+        .prop_map(|(id, code, data)| Message::Response(Response { id, code, data }))
+}
+
+fn progress() -> impl Strategy<Value = Message> {
+    let update = (text(30), version(), vec(any::<u32>(), 0..10))
+        .prop_map(|(path, version, have)| ProgressUpdate { path, version, have });
+    (folder_id(), vec(update, 0..5)).prop_map(|(folder_id, updates)| Message::Progress(Progress { folder_id, updates }))
+}
+
+fn addresses() -> impl Strategy<Value = Message> {
+    let record = (bytes::<32>(), vec(text(30), 0..4), text(30), any::<u64>(), bytes::<64>()).prop_map(
+        |(device_pk, addrs, relay, issued_s, sig)| AddressRecord { device_pk, addrs, relay, issued_s, sig },
+    );
+    vec(record, 0..4).prop_map(|records| Message::Addresses(Addresses { records }))
+}
+
+fn the_rest() -> impl Strategy<Value = Message> {
+    prop_oneof![
+        Just(Message::Ping),
+        text(60).prop_map(|reason| Message::Close(Close { reason })),
+        (device_id(), vec(text(30), 0..5))
+            .prop_map(|(target, candidates)| Message::Rendezvous(Rendezvous { target, candidates })),
+        (device_id(), vec(text(30), 0..5), any::<u64>()).prop_map(|(from, candidates, punch_at_ms)| {
+            Message::Introduce(Introduce { from, candidates, punch_at_ms })
+        }),
+        (device_id(), any::<u64>()).prop_map(|(target, session)| Message::RelayOpen(RelayOpen { target, session })),
+        (any::<u64>(), vec(any::<u8>(), 0..300))
+            .prop_map(|(session, data)| Message::RelayData(RelayData { session, data })),
+        any::<u64>().prop_map(|session| Message::RelayClose(RelayClose { session })),
+    ]
+}
+
+/// Every message type, for the properties below and for the garbage tests.
+pub fn message() -> impl Strategy<Value = Message> {
+    prop_oneof![hello(), join(), writers(), index(), request(), response(), progress(), addresses(), the_rest()]
+}
+
+fn roundtrip(m: &Message) -> Message {
+    let mut out = Vec::new();
+    m.encode(&mut out);
+    let (frame, used) = Frame::split(&out).unwrap().unwrap();
+    assert_eq!(used, out.len(), "one frame, all of it");
+    assert_eq!(frame.kind, m.kind());
+    Message::decode(frame).unwrap()
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(cases()))]
+
+    #[test]
+    fn hello_roundtrips(m in hello()) { prop_assert_eq!(roundtrip(&m), m); }
+
+    #[test]
+    fn join_roundtrips(m in join()) { prop_assert_eq!(roundtrip(&m), m); }
+
+    #[test]
+    fn writers_roundtrip(m in writers()) { prop_assert_eq!(roundtrip(&m), m); }
+
+    #[test]
+    fn index_roundtrips(m in index()) { prop_assert_eq!(roundtrip(&m), m); }
+
+    #[test]
+    fn request_roundtrips(m in request()) { prop_assert_eq!(roundtrip(&m), m); }
+
+    #[test]
+    fn response_roundtrips(m in response()) { prop_assert_eq!(roundtrip(&m), m); }
+
+    #[test]
+    fn progress_roundtrips(m in progress()) { prop_assert_eq!(roundtrip(&m), m); }
+
+    #[test]
+    fn addresses_roundtrip(m in addresses()) { prop_assert_eq!(roundtrip(&m), m); }
+
+    #[test]
+    fn the_small_messages_roundtrip(m in the_rest()) { prop_assert_eq!(roundtrip(&m), m); }
+
+    /// The payload-only path (for compression) gives the same bytes as the framed one.
+    #[test]
+    fn payload_and_frame_agree(m in message()) {
+        let (mut framed, mut payload, mut manual) = (Vec::new(), Vec::new(), Vec::new());
+        m.encode(&mut framed);
+        m.encode_payload(&mut payload);
+        Frame::write(m.kind(), 0, &payload, &mut manual);
+        prop_assert_eq!(framed, manual);
+    }
+
+    /// Frames back to back split exactly where they were joined.
+    #[test]
+    fn a_stream_of_frames_splits_back(ms in vec(message(), 1..6)) {
+        let mut stream = Vec::new();
+        ms.iter().for_each(|m| m.encode(&mut stream));
+        let mut rest = &stream[..];
+        for m in &ms {
+            let (frame, used) = Frame::split(rest).unwrap().unwrap();
+            prop_assert_eq!(&Message::decode(frame).unwrap(), m);
+            rest = &rest[used..];
+        }
+        prop_assert!(rest.is_empty());
+    }
+}

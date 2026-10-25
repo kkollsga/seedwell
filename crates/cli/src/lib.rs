@@ -15,6 +15,7 @@ pub mod render;
 pub mod select;
 pub mod sim;
 pub mod skill;
+pub mod sync;
 
 use std::path::PathBuf;
 

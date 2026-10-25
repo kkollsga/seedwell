@@ -32,6 +32,27 @@ if [ -d "$FW" ]; then
     [ -e "$V/Updater.app" ] && codesign "${COMMON[@]}" "$V/Updater.app"
     codesign "${COMMON[@]}" "$FW"
 fi
+# The Finder extension: sandboxed (app extensions must be), reading only the folder the app writes its status to.
+EXT="$APP/Contents/PlugIns/SeedwellFinderSync.appex"
+if [ -d "$EXT" ]; then
+    DIR="$(/usr/libexec/PlistBuddy -c 'Print :SeedwellStatusDir' "$EXT/Contents/Info.plist")"
+    case "$DIR" in
+        "~/"*) KEY=com.apple.security.temporary-exception.files.home-relative-path.read-only; DIR="${DIR#\~}" ;;
+        /*) KEY=com.apple.security.temporary-exception.files.absolute-path.read-only ;;
+        *) echo "SeedwellStatusDir must start with ~/ or /: $DIR" >&2; exit 1 ;;
+    esac
+    EXT_ENT="$(mktemp -t seedwell-ext-ent).plist"
+    cat > "$EXT_ENT" <<ENT
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+    <key>com.apple.security.app-sandbox</key><true/>
+    <key>$KEY</key><array><string>${DIR%/}/</string></array>
+</dict></plist>
+ENT
+    codesign "${COMMON[@]}" --identifier "$BUNDLE_ID.FinderSync" --entitlements "$EXT_ENT" "$EXT"
+    rm -f "$EXT_ENT"
+fi
 # The CLI runs on its own (agents and terminals launch `seedwell`), so it carries its own identifier.
 codesign "${COMMON[@]}" --identifier "$BUNDLE_ID.cli" "$APP/Contents/MacOS/seedwell"
 codesign "${COMMON[@]}" --identifier "$BUNDLE_ID" --entitlements "$ENT" "$APP"

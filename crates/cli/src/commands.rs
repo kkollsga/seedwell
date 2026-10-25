@@ -15,7 +15,7 @@ use trs_control::types::*;
 use crate::args::Usage;
 use crate::cmd::{AddArgs, Cmd, DevAction, GoalArgs, ListArgs, LogArgs, StartMode};
 use crate::select::{SelectError, Selection, match_term, need_one};
-use crate::{debug, render, sim, skill};
+use crate::{debug, render, sim, skill, sync};
 
 /// The version of the JSON shapes. Fields are added, never changed or removed, within a version.
 pub const JSON_VERSION: u32 = 1;
@@ -428,6 +428,8 @@ pub async fn run(cmd: Cmd, g: &Global) -> R {
         Cmd::Debug(d) => debug::run(d, g).await?,
         Cmd::Sim(s) => sim::run(s, g).await?,
         Cmd::Skill(s) => skill::run(s, g)?,
+        Cmd::Sync(s) => sync::run(s, g).await?,
+        Cmd::Relay(a) => sync::relay(a).await?,
         Cmd::Help(topic) => crate::print_help(topic.as_deref())?,
         Cmd::Daemon(_) => unreachable!("handled in lib.rs"),
     }

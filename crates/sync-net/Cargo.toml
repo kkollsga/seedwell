@@ -1,0 +1,27 @@
+[package]
+name = "trs-sync-net"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Folder sync driver: TLS sessions between devices, discovery, relays and the folder runtime over trs-sync (SPEC 7G)"
+
+[dependencies]
+# Each dependency is justified in README.md.
+trs-sync = { path = "../sync" }
+trs-sync-proto = { path = "../sync-proto" }
+trs-fswatch = { path = "../fswatch" }
+trs-utp = { path = "../utp" }
+tokio = { version = "1", default-features = false, features = ["rt", "net", "time", "sync", "io-util", "macros"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+ring = { version = "0.17", default-features = false, features = ["std"] }
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+serde = { version = "1", default-features = false, features = ["derive", "std"] }
+toml = { version = "1", default-features = false, features = ["std", "parse", "display", "serde"] }
+socket2 = { version = "0.6", default-features = false, features = ["all"] }
+
+[dev-dependencies]
+tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-thread", "net", "time", "sync", "io-util", "macros"] }
+tempfile = "3"

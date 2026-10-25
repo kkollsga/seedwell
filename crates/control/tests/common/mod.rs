@@ -43,6 +43,11 @@ pub struct MockInner {
 pub struct Mock {
     pub inner: Mutex<MockInner>,
     pub events: broadcast::Sender<EventDto>,
+    /// A real folder sync service, when a test runs one.
+    #[cfg(feature = "sync")]
+    pub sync: Mutex<Option<trs_sync_net::SyncHandle>>,
+    /// The Trash folder `sync.remove` uses.
+    pub trash: Mutex<Option<std::path::PathBuf>>,
 }
 
 impl Mock {
@@ -51,7 +56,13 @@ impl Mock {
         let files = (0..3)
             .map(|i| FileDto { index: i, path: format!("f{i}.bin"), length: 10, done: 0, priority: "normal".into(), padding: false })
             .collect();
-        Arc::new(Mock { inner: Mutex::new(MockInner { rows, files, ..Default::default() }), events })
+        Arc::new(Mock {
+            inner: Mutex::new(MockInner { rows, files, ..Default::default() }),
+            events,
+            #[cfg(feature = "sync")]
+            sync: Mutex::new(None),
+            trash: Mutex::new(None),
+        })
     }
 
     pub fn calls(&self) -> Vec<String> {
@@ -293,6 +304,13 @@ impl Backend for Mock {
     async fn cancel_moves(&self, ids: Vec<TransferId>) -> Result<(), ApiError> {
         self.log(format!("cancel_moves {}", ids.len()));
         Ok(())
+    }
+    async fn trash_dir(&self) -> Option<std::path::PathBuf> {
+        self.trash.lock().unwrap().clone()
+    }
+    #[cfg(feature = "sync")]
+    fn sync(&self) -> Option<trs_sync_net::SyncHandle> {
+        self.sync.lock().unwrap().clone()
     }
     fn subscribe(&self) -> broadcast::Receiver<EventDto> {
         self.events.subscribe()

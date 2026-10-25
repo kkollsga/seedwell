@@ -284,7 +284,35 @@ impl Session {
         if self.shutting_down {
             return;
         }
-        self.portmap = crate::portmap::PortMapRunner::start(&self.sh, self.portmap_gen);
+        self.portmap = crate::portmap::PortMapRunner::start(&self.sh, self.portmap_gen, self.extra_mapped_port);
+    }
+
+    /// Folder sync's port, mapped next to the listen port (or no longer). Only a change restarts the
+    /// mapper. The new one starts once the old one has deleted its mappings: both ask for the listen
+    /// port, and a late delete from the old one must not undo the new one's mapping.
+    pub(super) fn set_extra_mapped_port(&mut self, port: Option<u16>) {
+        let port = port.filter(|&p| p != 0);
+        if port == self.extra_mapped_port {
+            return;
+        }
+        self.extra_mapped_port = port;
+        let Some(old) = self.portmap.take() else { return };
+        self.portmap_gen += 1;
+        let serial = self.portmap_gen;
+        *self.sh.portmap_status.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        let tx = self.sh.session.clone();
+        tokio::spawn(async move {
+            old.shutdown().await;
+            let _ = tx.send(SessionMsg::PortMapRestart { serial }).await;
+        });
+    }
+
+    pub(super) fn on_portmap_restart(&mut self, serial: u64) {
+        // A newer (re)start or a shutdown came in meanwhile: that one decides.
+        if serial != self.portmap_gen || self.shutting_down || self.portmap.is_some() {
+            return;
+        }
+        self.portmap = crate::portmap::PortMapRunner::start(&self.sh, self.portmap_gen, self.extra_mapped_port);
     }
 
     pub(super) fn on_portmap(&mut self, serial: u64, s: PortMapStatus) {

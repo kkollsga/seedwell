@@ -13,6 +13,7 @@ mod play;
 mod real;
 mod rows;
 mod settings;
+mod sync;
 mod types;
 
 use std::path::PathBuf;
@@ -20,6 +21,7 @@ use std::sync::Arc;
 
 pub use backend::{AttrRow, Backend, ShutdownInfo};
 pub use settings::*;
+pub use sync::*;
 pub use types::*;
 
 use trs_state::rules::TorrentAttrs;
@@ -63,11 +65,10 @@ pub struct Core {
     dir: PathBuf,
 }
 
-#[uniffi::export]
 impl Core {
-    /// Opens (or creates) the state in `options.config_dir` and starts the engine.
-    #[uniffi::constructor]
-    pub fn new(options: CoreOptions) -> Result<Arc<Self>, CoreError> {
+    /// Opens the state and starts the engine (or the mock), and folder sync with its keys in `vault`
+    /// (`None`: a 0600 file in the state folder).
+    fn open(options: CoreOptions, vault: Option<Arc<dyn SecretVault>>) -> Result<Arc<Self>, CoreError> {
         let dir = PathBuf::from(&options.config_dir);
         let backend: Arc<dyn Backend> = if options.mock {
             let _ = std::fs::create_dir_all(&dir);
@@ -78,9 +79,20 @@ impl Core {
                 dir: dir.clone(),
                 allow_loopback_trackers: options.allow_loopback_trackers,
                 forbidden_root: options.forbidden_root.clone().map(PathBuf::from),
+                secret_vault: vault,
             })?
         };
         Ok(Arc::new(Self { backend, settings: SettingsStore::new(&dir), dir }))
+    }
+
+}
+
+#[uniffi::export]
+impl Core {
+    /// Opens (or creates) the state in `options.config_dir` and starts the engine.
+    #[uniffi::constructor]
+    pub fn new(options: CoreOptions) -> Result<Arc<Self>, CoreError> {
+        Self::open(options, None)
     }
 
     /// Cheap; the shell calls it about once a second while something is visible.

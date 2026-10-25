@@ -165,6 +165,15 @@ pub trait Backend: Send + Sync + 'static {
     fn stop_stream(&self, _token: &str) -> impl Future<Output = Result<bool, ApiError>> + Send {
         async { Err(ApiError::new(crate::proto::ErrorCode::Unsupported, "this backend cannot stream")) }
     }
+    /// The Trash folder (`None` = `~/.Trash`): where `sync.remove` with `delete_files` puts a folder.
+    fn trash_dir(&self) -> impl Future<Output = Option<PathBuf>> + Send {
+        async { None }
+    }
+    /// The folder sync service, while it runs (`None`: the `sync.*` methods say it is not running).
+    #[cfg(feature = "sync")]
+    fn sync(&self) -> Option<trs_sync_net::SyncHandle> {
+        None
+    }
     /// Engine events, already mapped (the server assigns `seq` and `at`).
     fn subscribe(&self) -> broadcast::Receiver<EventDto>;
 }

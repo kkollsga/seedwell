@@ -26,16 +26,23 @@ use crate::types::*;
 pub struct EngineBackend {
     engine: EngineHandle,
     events: broadcast::Sender<EventDto>,
+    #[cfg(feature = "sync")]
+    sync: crate::sync::SyncSlot,
 }
 
 impl EngineBackend {
     /// Wrap a handle. Starts a small task that maps engine events to protocol events; it needs
     /// the tokio runtime that is current (or use [`start_for_app`], which takes the runtime).
     pub fn new(engine: EngineHandle) -> Self {
+        Self::new_on(&tokio::runtime::Handle::current(), engine)
+    }
+
+    /// [`Self::new`] with the mapping task on `rt`.
+    fn new_on(rt: &tokio::runtime::Handle, engine: EngineHandle) -> Self {
         let (tx, _) = broadcast::channel(512);
         let mut rx = engine.subscribe();
         let tx2 = tx.clone();
-        tokio::spawn(async move {
+        rt.spawn(async move {
             loop {
                 match rx.recv().await {
                     Ok(e) => {
@@ -50,7 +57,19 @@ impl EngineBackend {
                 }
             }
         });
-        Self { engine, events: tx }
+        Self {
+            engine,
+            events: tx,
+            #[cfg(feature = "sync")]
+            sync: crate::sync::SyncSlot::new(),
+        }
+    }
+
+    /// Serve the folder sync service found in `slot` (set it once the service runs).
+    #[cfg(feature = "sync")]
+    pub fn with_sync(mut self, slot: crate::sync::SyncSlot) -> Self {
+        self.sync = slot;
+        self
     }
 }
 
@@ -462,6 +481,8 @@ pub fn reachability_dto(r: &trs_engine::api::Reachability) -> ReachabilityDto {
         router_unavailable: pm.unavailable,
         incoming: r.incoming,
         last_incoming_at: r.last_incoming_at,
+        sync_external_port: pm.extra_external_tcp_port,
+        sync_external_udp_port: pm.extra_external_udp_port,
         ..Default::default()
     })
 }
@@ -849,6 +870,15 @@ impl Backend for EngineBackend {
         Ok(self.engine.stop_stream(token))
     }
 
+    async fn trash_dir(&self) -> Option<PathBuf> {
+        self.engine.config().await.ok().and_then(|c| c.trash_dir)
+    }
+
+    #[cfg(feature = "sync")]
+    fn sync(&self) -> Option<trs_sync_net::SyncHandle> {
+        self.sync.get()
+    }
+
     fn subscribe(&self) -> broadcast::Receiver<EventDto> {
         self.events.subscribe()
     }
@@ -896,18 +926,37 @@ pub struct AppServerConfig {
 /// handle for the life of the app (dropping it closes the socket); `handle.activity()` is the
 /// activity log for Settings -> Agents.
 pub fn start_for_app(rt: &tokio::runtime::Handle, engine: EngineHandle, cfg: AppServerConfig) -> io::Result<ServerHandle> {
+    outside_runtime()?;
+    start_for_app_inner(rt, EngineBackend::new_on(rt, engine), cfg)
+}
+
+fn outside_runtime() -> io::Result<()> {
     if tokio::runtime::Handle::try_current().is_ok() {
         return Err(io::Error::other("start_for_app blocks: call it from outside the runtime, or use `serve(..).await`"));
     }
+    Ok(())
+}
+
+/// [`start_for_app`] serving folder sync too: the `sync.*` methods use the service in `slot` (put it in
+/// once [`crate::sync::start_sync`] has started it; until then they say sync is not running).
+#[cfg(feature = "sync")]
+pub fn start_for_app_with_sync(
+    rt: &tokio::runtime::Handle,
+    engine: EngineHandle,
+    cfg: AppServerConfig,
+    slot: crate::sync::SyncSlot,
+) -> io::Result<ServerHandle> {
+    outside_runtime()?;
+    start_for_app_inner(rt, EngineBackend::new_on(rt, engine).with_sync(slot), cfg)
+}
+
+fn start_for_app_inner(rt: &tokio::runtime::Handle, backend: EngineBackend, cfg: AppServerConfig) -> io::Result<ServerHandle> {
     let path = cfg.socket_path.unwrap_or_else(crate::socket::default_socket_path);
     let mut state = StateAccess::new(cfg.state_dir, cfg.store);
     if let Some(tz) = cfg.tz_offset {
         state = state.with_tz_offset(move || tz());
     }
-    rt.block_on(async move {
-        let backend = Arc::new(EngineBackend::new(engine));
-        serve_backend(backend, state, path, cfg.permission, cfg.options).await
-    })
+    rt.block_on(async move { serve_backend(Arc::new(backend), state, path, cfg.permission, cfg.options).await })
 }
 
 impl StoreRef for trs_engine::StateStore {

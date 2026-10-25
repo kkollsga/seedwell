@@ -78,6 +78,8 @@ pub struct MockBackend {
     state: Mutex<State>,
     /// The path monitor said the network is gone (the mock shows the quiet "Offline").
     offline: std::sync::atomic::AtomicBool,
+    /// Fake synced folders (SPEC 7G), for design work.
+    sync: Arc<crate::sync::MockSync>,
 }
 
 fn now() -> u64 {
@@ -750,6 +752,7 @@ impl MockBackend {
                 ],
             }),
             offline: std::sync::atomic::AtomicBool::new(false),
+            sync: crate::sync::MockSync::new(),
         });
         {
             // Prime rates so the first snapshot already shows speeds and ETAs.
@@ -820,6 +823,10 @@ fn percent_encode(s: &str) -> String {
 }
 
 impl Backend for MockBackend {
+    fn sync(&self) -> Arc<dyn crate::sync::SyncBackend> {
+        self.sync.clone()
+    }
+
     fn listen_port(&self) -> u16 {
         51413
     }

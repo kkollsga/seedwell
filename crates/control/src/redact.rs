@@ -1,5 +1,5 @@
 //! Keeping secrets out of everything an agent can read or the activity log keeps: passkeys in
-//! tracker URLs and magnet links, query strings of direct-download URLs.
+//! tracker URLs and magnet links, query strings of direct-download URLs, folder-sync keys.
 
 use trs_state::url::redact_url;
 
@@ -66,9 +66,56 @@ pub fn redact_source(src: &str) -> String {
     }
 }
 
+/// Replace every folder-sync key (`SWW-…`, `SWR-…`, `SWE-…`, any case) and every `seedwell://sync/…`
+/// link inside free text by a mask. Holding a key is the permission to a folder (SPEC 7G.1): keys are
+/// returned by `sync.share` only and never reach the activity log or any other text.
+pub fn scrub_keys(text: &str) -> String {
+    let lower = text.to_ascii_lowercase();
+    let b = text.as_bytes();
+    let key_char = |c: u8| c.is_ascii_alphanumeric() || c == b'-' || c == b'=';
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    let mut copied = 0;
+    while i < b.len() {
+        let rest = &lower[i..];
+        let boundary = i == 0 || !(b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'-');
+        let (mask, end) = if boundary && rest.starts_with("seedwell://sync/") {
+            let end = text[i..].find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '<' | '>' | ')' | ']' | '`')).map_or(text.len(), |e| i + e);
+            ("seedwell://sync/***", end)
+        } else if boundary && (rest.starts_with("sww-") || rest.starts_with("swr-") || rest.starts_with("swe-")) && b.get(i + 4).is_some_and(|c| c.is_ascii_alphanumeric()) {
+            let mut end = i + 4;
+            while end < b.len() && key_char(b[end]) {
+                end += 1;
+            }
+            (&text[i..i + 4], end)
+        } else {
+            i += text[i..].chars().next().map_or(1, char::len_utf8);
+            continue;
+        };
+        out.push_str(&text[copied..i]);
+        out.push_str(mask);
+        if !mask.ends_with("***") {
+            out.push_str("***");
+        }
+        i = end;
+        copied = end;
+    }
+    out.push_str(&text[copied..]);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn folder_keys_and_links_are_masked() {
+        let t = scrub_keys("join SWW-ABCDEFGH-IJKLMNOP2345 now, or swr-qrstuvwx234567 (or <seedwell://sync/SWR-ABC?name=My%20Docs>).");
+        assert!(!t.contains("ABCDEFGH") && !t.contains("qrstuvwx") && !t.contains("ABC?name"), "{t}");
+        assert_eq!(t, "join SWW-*** now, or swr-*** (or <seedwell://sync/***>).");
+        assert_eq!(scrub_keys("nothing secret: sww- and answer-sww-x"), "nothing secret: sww- and answer-sww-x");
+        assert_eq!(scrub_keys("åäö SWE-AAAA"), "åäö SWE-***");
+    }
 
     #[test]
     fn urls_in_text_lose_secrets() {

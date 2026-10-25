@@ -1186,6 +1186,22 @@ impl EngineHandle {
         }
     }
 
+    /// The DHT node, for lookups on public topics by another service (folder sync, SPEC 7G: the engine
+    /// lends it DHT lookups and a port mapping, nothing else). `None` while the DHT is off or the
+    /// engine is shutting down. The handle may go stale after a live port change (the node moves to
+    /// the new socket): ask again for each lookup.
+    pub async fn public_dht(&self) -> Option<trs_dht::DhtHandle> {
+        self.call(Cmd::PublicDht).await.ok().flatten()
+    }
+
+    /// Map `port` (TCP and UDP) on the router next to the listen port, with the same mapper (or stop
+    /// mapping it with `None`). Only a change restarts the mapper. The answer shows in
+    /// [`PortMapStatus::extra_external_tcp_port`] and [`PortMapStatus::extra_external_udp_port`]. Mapping must be on in the settings, as for the
+    /// listen port.
+    pub fn set_extra_mapped_port(&self, port: Option<u16>) {
+        self.send(Cmd::SetExtraMappedPort(port));
+    }
+
     /// Write pending state to the store now (tests, "quit soon").
     pub async fn flush(&self) -> Result<(), EngineError> {
         self.call(Cmd::Flush).await

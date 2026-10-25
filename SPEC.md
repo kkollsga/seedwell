@@ -32,6 +32,7 @@ torrent's tracker. It does one thing: move torrent data well.
 8. **Agent-operable.** A local agent interface (the `seedwell` command line and an embedded Agent Skill) lets agents like Claude do anything the UI can, safely (§9A).
 9. **Direct downloads.** Large HTTP/HTTPS files get the same pause/resume/throttle/queue treatment as torrents (§7D).
 10. **Play while downloading.** A video can be watched in VLC, IINA or QuickTime before it finishes, with a working timeline; dragging it fetches that part first (§7F).
+11. **Folder sync.** Folders kept the same on the user's devices and shared by key or link, peer to peer over the LAN and the Internet, with no account and no servers (§7G).
 
 ### Non-goals (deliberately excluded)
 Spoofing another client's identity, stat/ratio manipulation, network-exposed remote control (agent access is local-only), RSS feeds, torrent search, a built-in media player (streaming to the user's own player is in scope, §7F), web UI, plugin system, built-in
@@ -108,6 +109,8 @@ bench/         local swarm + memory benchmarks
 10 (extension protocol), 11 (PEX), 12 (multitracker), 14 (LSD), 15 (UDP tracker),
 23 (compact peers), 27 (private: DHT/PEX/LSD off), 29 (uTP), MSE/PE encryption
 (prefer/require/off), UPnP-IGD + NAT-PMP/PCP port mapping.
+
+**Folder sync (§7G):** Seedwell Sync v1, our own protocol with Syncthing's sync rules (index exchange by sequence, version vectors, content-defined chunks), over TLS 1.3 on TCP and uTP; discovery on the LAN, the Mainline DHT (rotating topics) and peer exchange. Not wire-compatible with Syncthing or Resilio.
 
 **v1.x:** BEP 52 (v2 + hybrid torrents), BEP 47 (padding files), BEP 19 (web seeds).
 
@@ -773,6 +776,196 @@ Display:
 - Agents get the same data via `tracker_stats(tracker, range)` (§9A).
 - Export: CSV per tracker from the tracker's right-click menu.
 
+## 7G. Folder sync
+
+Keep folders the same on several devices, peer to peer, with no account and no cloud in between: what BitTorrent
+Sync (now Resilio Sync) did, with Syncthing's proven sync rules. Holding a folder's key is the permission. The
+design notes, with the research behind them, are in `dev-docs/` (local).
+
+**Separate from torrents by construction.**
+- Sync lives in its own crates: `trs-sync-proto`, `trs-sync`, `trs-sync-net` and `trs-fswatch`.
+- It has its own port, its own state file (`sync.redb`) and its own speed limits and counters. Sync bytes never
+  appear in torrent stats or ratios (§7B.2).
+- The engine lends it two things only: DHT lookups on public topics, and a port mapping.
+- A sync failure never stops a torrent; a panic in sync restarts the sync service alone.
+
+### 7G.1 Keys, devices and trust
+
+- **Device:** each install has an Ed25519 key pair. The **device ID** is SHA-256 of the public key, shown in base32
+  with check characters (`MFZWI3D-BONSGYC-…`, as Syncthing writes them).
+- **Folder keys:** a folder has a 32-byte secret `S`. Each key is derived one way from the one above it, and the
+  derivation is published (HKDF-SHA256 with fixed labels):
+
+  | Key | Text form | Can |
+  |---|---|---|
+  | Read & write | `SWW-` + base32(S) | change files; derive the keys below |
+  | Read only | `SWR-` + base32(R ‖ pk) | receive and pass on changes, never send its own |
+  | Encrypted | `SWE-` + base32(A ‖ pk) | store and pass on data it cannot read (v1.x) |
+
+  `pk` is the public half of the folder signing key derived from `S`; the folder ID is SHA-256(pk).
+  - A link is `seedwell://sync/<key>?name=<name>`, where the name is only a hint for the joining device.
+  - A key is never sent over the network.
+- **Proof:** after TLS 1.3 (mutual, with device keys as raw public keys), each side proves its permission level,
+  bound to the session.
+  - A writer shows a writer certificate signed with the folder key.
+  - A reader or encrypted member shows an HMAC with its access secret over the TLS exporter value.
+  - A peer that fails the proof is dropped.
+- **Signed versions:** every file version is signed by the writer device that made it. Every device checks every
+  entry, and every chunk against the hashes in signed entries. A dishonest member can pass data on but cannot change
+  it.
+- **Secrets:** folder keys are stored in the Keychain on macOS and in a 0600 file for the Linux daemon. They are
+  never written into the synced folder, never logged, and returned through the agent interface only with Full
+  permission (logged).
+- **Revoking:** a shared key cannot be taken back from one person.
+  - *Rotate Keys* makes a new secret for the same files; devices without the new key stop receiving.
+  - *Ask before new devices join* (per folder, off by default) makes a key only enough to ask; a writer approves
+    each new device once.
+
+### 7G.2 The sync model
+
+- **Index:** every device keeps an index per folder.
+  - An entry holds the path (NFC on the wire), kind, size, mtime, the exec bit, the chunk list, a deleted flag, a
+    **version vector** and a sequence number.
+  - Devices exchange only the changes since the last sequence they saw from each other. A reset database announces
+    a new index ID and sends everything.
+- **Chunks:** content-defined (FastCDC), SHA-256 per chunk.
+  - Sizes scale with the file: average = 64 KiB to 4 MiB; a file keeps its size tier until it has halved or
+    doubled.
+  - A chunk that exists in any local file is copied, not downloaded, so renames, moves and copies send no data.
+  - A file being synced is passed on from its partial copy (download progress), so a big file spreads between
+    devices as it arrives.
+- **Conflicts:** edits on two devices that did not see each other's version are concurrent.
+  - The winner, in this order, so every device picks the same one without talking: **a change beats a delete**
+    (the file comes back); a directory beats a file or link; the newer mtime; the higher device ID.
+  - The other version is kept as `Name (conflict, <device>, YYYY-MM-DD HH.MM).ext`, which syncs like any file and
+    is listed under Conflicts until resolved. Every device that keeps the same losing version makes the same copy
+    (the loser's version vector and mtime, a file ID derived from the loser's), so two devices resolving at once
+    give one copy, not two.
+  - A delete that lost is absorbed: a writer holding the winning change records a new version of it that has seen
+    the delete, so a version the delete had replaced cannot come back through a device that has not caught up.
+  - A directory that a file replaced elsewhere, but that gained files here meanwhile, stays; the file comes in as
+    a conflict copy beside it.
+  - Equal content is never a conflict.
+  - A name that differs only in case from an existing one is refused with an issue, never overwritten.
+  - **Resolving** (folder page, agent interface): keep the current version, keep the copy (it replaces the
+    file), or keep both (the copy gets a plain name). The version not kept goes to the archive on this device.
+- **Deletes** are versioned tombstones, kept one year. A device back after longer offers its unknown files as new;
+  nothing deleted comes back silently.
+- **Archive:** a file replaced or deleted by another device is first moved to `.seedwell/Archive/` (a hard link or
+  rename, so it costs no space until the file is gone). Kept 30 days, staggered (hourly for a day, daily after), and
+  at most 10 % of the folder's size, oldest first. Local edits are not archived.
+- **Writing safely:**
+  - A file is built in `.seedwell.<name>.tmp` in its own directory, as a clone of the old version where possible,
+    with every chunk verified, then fsynced.
+  - Just before the rename the target is checked again: if it changed since the last scan, that is a conflict, not
+    an overwrite.
+  - Index records of finished files are committed in batches (every 64 files and at the end of a round), each
+    after the directories they changed are fsynced, so the index is never ahead of the disk.
+  - Interrupted temp files are kept 24 h to resume.
+- **Folder marker:** `<root>/.seedwell/` must exist. Without it (an unmounted disk, a deleted folder) the folder
+  stops with *Folder missing* and nothing is deleted anywhere.
+- **Not synced:**
+  - `.DS_Store`, `._*`, `Icon\r`, `.Spotlight-V100`, `.Trashes`, `.fseventsd`, `.TemporaryItems`,
+    `.DocumentRevisions-V100`, Office lock files and the quarantine attribute.
+  - Patterns in a synced `.seedwellignore` (`**`, `!`, `(?i)`, `//` comments), plus local-only patterns per folder.
+    Ignored files are left alone on disk.
+  - Symlinks are synced as links, never followed.
+  - Roots inside iCloud Drive or `~/Library/CloudStorage` are refused, and dataless (not downloaded) files are never
+    read.
+- **Watching:** FSEvents (inotify for the Linux daemon), started before a stat-only full scan at each start, 2 s of
+  quiet before a path is scanned, a jittered hourly stat-only scan as a safety net. An unchanged file (size, mtime, inode,
+  ctime) is never hashed again.
+
+### 7G.3 Finding and reaching devices
+
+- **LAN:** a multicast and broadcast announcement on the sync port every 30–60 s and on every network change.
+  Folders appear in it only as tags that change every hour. It needs the macOS Local Network permission
+  (`NSLocalNetworkUsageDescription`).
+- **Internet:** Mainline DHT announce and lookup on a topic that changes every day, `SHA-1(label ‖ pk ‖ UTC day)`.
+  Only members can work it out, and one day's swarm cannot be linked to the next without the key. Plus peer
+  exchange between members, and addresses typed in by hand.
+- **Transports:** TCP, plus uTP on the Internet (LEDBAT gives way to other traffic). Up to two connections per peer
+  on the LAN (index and data).
+- **NAT:**
+  1. NAT-PMP/UPnP map the sync port.
+  2. Devices that both reach a third member punch a hole through it.
+  3. **Relay:** a member with an open port relays between the user's own devices (on by default, capped), or
+     between all members of a shared folder (opt-in). `seedwell relay` runs a self-hosted relay.
+
+  Relays carry only end-to-end-encrypted bytes. Seedwell runs no servers.
+- **Limits:** LAN unlimited by default; the Internet has its own up and down limits, separate from torrent limits.
+
+### 7G.4 Budgets
+
+| Metric | Target |
+|---|---|
+| LAN, 1 GbE between Apple Silicon Macs | wire speed (≥ 110 MB/s) |
+| Idle, everything up to date | 0 % CPU, ≤ 1 wakeup/s for all of sync |
+| Small change seen on a LAN peer | < 3 s |
+| Initial hashing | ≥ 1.5 GB/s from an SSD |
+| Rescan of 100k unchanged files | < 2 s |
+| Memory | ≤ 10 MB plus bounded caches; the index lives on disk |
+| Rename or move of any size | metadata only |
+
+### 7G.5 Where it shows
+
+- **Menu (§8.2):** a *Folder Sync* line under Sharing with a submenu:
+  - the folders, each with status and a subtitle;
+  - an edit and a delete button on hover;
+  - a delete confirmation that slides out under the row;
+  - an *Add Folder…* row at the bottom.
+- **Add Folder…** opens a modal with *From this Mac* (choose a folder) or *Shared with me* (paste a key or link,
+  choose where it goes), then **Cancel** and **Start**. After Start a shared folder shows its keys to copy.
+  Opening a `seedwell://sync/…` link opens the same modal, filled in.
+- **Edit** opens a modal with the name (renames the folder on this Mac only), the location (*Move…*), the keys and
+  links this Mac may share, and options (pause, only sync on the local network, rescan now), then **Cancel** and
+  **Save**.
+- **Main window:** *Folder Sync* in the sidebar under Sharing. A folder page shows devices (LAN / Internet /
+  relay, client, bytes each way), conflicts (*Show in Finder*, and *Keep* ▸ *Current Version* / *<device>'s
+  Version* / *Both*), and issues with their reason.
+- **Settings › Folder Sync:** device name, sync port, finding devices on the LAN and over the Internet, relaying,
+  Internet speed limits, default location for joined folders, and *Sync status in Finder* (*Turn On…*, or *On* with
+  *Manage…*).
+- **Finder:** a Finder Sync extension inside the app badges each synced folder and its items.
+  - **The folder's badge:**
+    - green tick: up to date, with a device online;
+    - blue: downloading, uploading, or both / scanning;
+    - grey: paused, or no device online;
+    - orange: a conflict to resolve;
+    - red: the folder is missing or failed.
+    - When Seedwell is not running, every folder shows grey.
+  - **Badges inside a folder:**
+    - pending paths show downloading, and so do the folders above them (grey while the folder waits or is paused);
+    - conflict copies show orange, and paths that cannot be synced show red;
+    - everything else gets a tick, except the default ignores;
+    - nothing gets a tick when the folder has ignore patterns of its own, or more than 1,000 pending paths (it
+      could be wrong); paused or failed folders badge their items no further.
+  - **Right-click** offers *Show in Seedwell* (`seedwell://folder/<id>`).
+  - **How it gets its data:** the extension is sandboxed and reads only `Finder/status.json` in the app's state
+    folder. The app rewrites that file when something changes (checked every 2 s), and marks it "not running" on
+    quit; the extension also checks that the app runs. The core keeps the first 1,000 pending paths per folder
+    where it holds the folder's lock anyway, so asking never waits for a pull.
+  - **Turning it on:** macOS lets only the user switch the extension on. With a synced folder and the extension
+    off, the app shows *Show Sync Status in Finder* once ever:
+    - what the badges mean;
+    - three steps, then **Cancel** and **Open System Settings**, which opens the extension list;
+    - it notices the switch by itself and says *Finder Shows Sync Status*, then **Done**.
+    - Later, Settings has the way in.
+- **Agents (§9A):** the `sync.*` methods and `seedwell sync …` commands. Sharing a key needs Full permission;
+  *Remove and delete files* takes two steps.
+
+### 7G.6 Later (v1.x)
+
+- Encrypted members: names encrypted with AES-SIV, chunks with XChaCha20-Poly1305 (Syncthing's untrusted-device
+  scheme).
+- Selective sync with File Provider placeholders.
+- Renaming a folder on every device.
+- One-time invite links, and asking before a new device joins (an option; off by default).
+- Device records in the DHT (BEP 44).
+- On the folder page: recent changes, and the archive with *Restore*. In the edit modal: archive length and local
+  ignore patterns (the config file has both already).
+- The Linux daemon as a peer (`seedwell daemon` runs sync already; packaging and inotify testing are left).
+
 ## 8. User interface
 
 Principle: **the menu is for glancing, the main window is for acting.** The menu shows status only. Adding, settings and every change happen in the main window.
@@ -805,16 +998,26 @@ Torrents of trackers in hidden mode (§7E.7) are left out of every list and coun
     Book · 1 h ago
  ───────────────────────────────────────
   ↑ Sharing 212 torrents        3.1 MB/s ▸
+  ⟳ Folder Sync · 3 folders              ▸   (only once a folder is synced or the feature is on)
  ───────────────────────────────────────
   Open Seedwell…                     Quit     (⌘L, ⌘Q)
 ```
 
-The menu is **status only**: four sections, then one row with "Open Seedwell…" on the left and "Quit" on the right, each highlighting on its own (⌘L and ⌘Q still work while the menu is open). There are no settings, add buttons, pause-all or speed toggles; those live in the main window.
+The menu is **status only**, with one exception, the Folder Sync submenu (5. below): four sections, then one row with "Open Seedwell…" on the left and "Quit" on the right, each highlighting on its own (⌘L and ⌘Q still work while the menu is open). There are no settings, add buttons, pause-all or speed toggles; those live in the main window.
 1. **Downloading:** each active download. The title is the name (cut in the middle past 44 characters: the name gives way, never the numbers) and the subtitle is `NN% · speed · time left`, for example `42% · 3.1 MB/s · 4 min left` (`Fmt.rate`, `Fmt.remaining(short:)`). With no speed, the engine's reason replaces the time instead of a stale estimate (`42% · Waiting for peers`, `42% · Tracker: Unregistered torrent`, the same `waiting_note` as the window row); with a speed but no estimate yet it reads `42% · 3.1 MB/s · calculating…`; a paused one `Paused · 42%`. The item image is a progress ring. Rows refresh once a second while the menu is open (title and subtitle updated in place, so the highlight stays) and never when it's closed.
    **A new download is first**. A torrent that has just become a download (§8.3: added without a hold, or released from the popover by Start or the countdown running out) is listed at the top of Downloading, newest first, also while it only waits for a free slot (then its subtitle reads `Up next · waiting for a free slot` and it is not repeated under Queued; at most the 3 newest such arrivals are lifted). Torrents held for the user's choice or counting down stay ahead of it, the older downloads follow in the engine's queue order. This holds when the menu is reopened and while it is open (the structure is rebuilt as soon as the list changes, not only when a count changes). Before this the new row came last in the engine's queue order, below every older download, or under Queued with its "+ N more" when the active slots were full. The menu has no "current" section or submenu to switch.
 2. **Queued:** the next few (default 3), dimmed, then "+ N more". Not the whole queue.
 3. **Recent:** the last 3 finished downloads, with category and how long ago. Clicking one reveals it in Finder.
 4. **Sharing:** **one line** with the seeding count and, while uploading, the rate ("Sharing 2 torrents · 14 KB/s"; plain text, no badge). A click opens Sharing in the main window. No submenu; `general.menu_bar_split_by_tracker` is kept in the config but no longer shown or used.
+5. **Folder Sync (§7G):** one line under Sharing, `Folder Sync` with a subtitle (`3 folders · Up to date`, `Syncing 2 · 12 MB/s`, `1 conflict`, `1 folder missing`), and the one submenu in this menu, approved as an exception on 2026-10-25. The submenu is the folder list:
+   - **Rows:** status image (up to date, syncing as a progress ring, paused, conflict or error, folder missing), name cut in the middle, subtitle (`Up to date · 3 devices`, `Syncing · 42% · 12 MB/s`, `Waiting for devices`, `Folder missing`). A click reveals the folder in Finder.
+   - **Hover buttons:** two buttons at the right edge, **Edit** (pencil) and **Delete** (trash), show while the pointer is over the row; the keyboard reaches them too.
+   - **Edit** closes the menu and opens the edit modal (§7G.5).
+   - **Delete** slides a confirmation out right under the row, in the menu, which stays open (the same mechanism as the file list): "Stop syncing "Photos" on this Mac? Other devices keep their copy.", a checkbox *Also move the files to the Trash*, then **Cancel** and **Remove**. Only one is open at a time, and every opening of the menu starts closed.
+   - **Add row:** *Add Folder…* is the last row and opens the add modal.
+   - **Empty:** with no folders the submenu shows a grey line *Keep folders the same on your devices* and *Add Folder…*.
+
+   It refreshes like the rest of the menu: rebuilt on open, ticked once a second while open, nothing while closed.
 
 Empty sections are hidden. With nothing downloading or queued, the menu starts at Recent.
 
@@ -953,6 +1156,7 @@ Agents like Claude should be able to operate Seedwell as easily as a person: "ad
 | Settings | `settings get [key...]` · `settings set key=value...` |
 | Watch | `wait <torrent>... [--any] [--timeout S]` · `watch` · `activity` · `log trackers` |
 | Debug | `dev on\|off\|status` · `debug health\|trackers\|peers\|perf\|announce` (§9A.5) |
+| Folder sync | `sync list\|status\|add\|join\|share\|rename\|move\|pause\|resume\|rescan\|address\|remove\|settings` (§7G.5) · `relay [--port N]`. Read-only: `list`, `status`, `settings`; full: `share`, `rename`, `move`, changing `settings`, `remove --delete-files`; control: the rest |
 | Test | `sim ...` (§9A.6) · `daemon ...` |
 | Agents | `skill show\|install\|uninstall` · `help [command\|agents]` |
 

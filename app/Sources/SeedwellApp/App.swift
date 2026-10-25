@@ -17,6 +17,10 @@ import os
     func closeChoosers() { chooserWindows.closeAll() }
     func qaChooserChange(to c: Category) { chooserWindows.qaChange(to: c) }
     private var chooserWindows = ChooserPresenter()
+    /// Folder sync's add and edit modals.
+    private(set) var syncWindows = SyncWindows()
+    /// The Finder extension's status file.
+    private var finderStatus: FinderStatusWriter?
     var qaChooserWindow: NSWindow? { chooserWindows.qaWindow }
     private var qa: QAControl?
     private let realHome: String
@@ -77,11 +81,18 @@ import os
         let dir = options.resolvedStateDir()
         try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
         do {
-            core = try Core(options: CoreOptions(
+            let coreOptions = CoreOptions(
                 configDir: dir,
                 mock: options.mock,
                 allowLoopbackTrackers: options.allowLoopbackTrackers,
-                forbiddenRoot: options.isolated ? realHome : nil))
+                forbiddenRoot: options.isolated ? realHome : nil)
+            // Folder sync's keys go in the Keychain for the app's own state only; a mock, QA or other isolated
+            // run keeps them in a 0600 file in its state folder and never touches the user's Keychain.
+            if options.mock || options.stateDir != nil {
+                core = try Core(options: coreOptions)
+            } else {
+                core = try Core.withSecretVault(options: coreOptions, vault: KeychainVault())
+            }
         } catch {
             // The control socket says "another instance"; the state database, opened first, says it is locked.
             let busy = ["another instance", "Database already open", "Cannot acquire lock"].contains { "\(error)".contains($0) }
@@ -132,6 +143,15 @@ import os
         commands.createTracker = { host in main.show(settings: .rules, newTrackerHost: host) }
         commands.showTorrent = { id in main.showTorrent(id) }
         commands.showChooser = { [weak self] id in self?.chooserWindows.show(id: id, commands: self?.commands) }
+        let sync = commands.sync
+        sync.showAdd = { [weak self, sync] prefill in self?.syncWindows.showAdd(prefill: prefill, actions: sync) }
+        sync.showEdit = { [weak self, sync] id in self?.syncWindows.showEdit(id: id, actions: sync) }
+        sync.showFolder = { id, ask in main.show(section: .folderSync); main.libraryModel?.showSyncFolder(id, askRemove: ask) }
+        FinderSetup.show = { [weak self] in self?.syncWindows.showFinderSetup() }
+        let finder = FinderStatusWriter(core: core)
+        finder.onFirstFolder = { [weak self] in self?.offerFinderBadges() }
+        finder.start()
+        finderStatus = finder
         ChoiceStore.shared.engine = ChoiceEngine(
             load: { [core = self.core] id, reopen in try core.choice(id: id, reopen: reopen) },
             confirm: { [core = self.core] id, files in try core.confirmChoice(id: id, files: files) },
@@ -193,6 +213,16 @@ import os
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in MainActor.assumeIsolated { self?.startingNotifier?.refresh(launch: true) } }
         if options.showWindow || userLaunch { main.show() }
         if let tab = options.showSettings { main.show(settings: SettingsTab(rawValue: tab), openSettings: true) }
+    }
+
+    /// Finder badges are offered once ever, when there is a synced folder and the extension is off (macOS lets only
+    /// the user switch it on). Later, Settings › Folder Sync has the way in. Not for mock, QA or other isolated runs.
+    private func offerFinderBadges() {
+        let marker = URL(fileURLWithPath: core.stateDir()).appendingPathComponent("finder-badges-offered")
+        guard !options.mock, options.stateDir == nil, !FileManager.default.fileExists(atPath: marker.path),
+              !FinderStatusWriter.extensionEnabled else { return }
+        try? "offered".write(to: marker, atomically: true, encoding: .utf8)
+        syncWindows.showFinderSetup()
     }
 
     /// Watch folders pick up only new files. The `.torrent` files that were already there when a
@@ -323,7 +353,15 @@ import os
 
     /// Double-clicked .torrent files and clicked magnet: links both arrive here.
     func application(_ application: NSApplication, open urls: [URL]) {
-        commands.add(urls: urls)
+        // A folder sync link (`seedwell://sync/<key>?name=…`) opens the add modal, filled in (SPEC 7G.5).
+        let links = urls.filter { $0.scheme?.lowercased() == "seedwell" }
+        for link in links where link.host?.lowercased() == "sync" { commands.sync.showAdd(link.absoluteString) }
+        // `seedwell://folder/<id>`: the Finder extension's Show in Seedwell.
+        for link in links where link.host?.lowercased() == "folder" {
+            let id = link.lastPathComponent
+            if commands.sync.snapshot().folders.contains(where: { $0.id == id }) { commands.sync.showFolder(id, false) }
+        }
+        commands.add(urls: urls.filter { $0.scheme?.lowercased() != "seedwell" })
     }
 
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
@@ -398,6 +436,7 @@ import os
     private func closeWindowsKeepRunning() {
         mainWindow?.closeForQuit()
         chooserWindows.closeAll()
+        syncWindows.closeAll()
         refreshActivationPolicy()
     }
 
@@ -443,11 +482,13 @@ import os
             return .terminateCancel
         }
         quitting = true
+        finderStatus?.stop()
         settings.save()
         startingNotifier?.close()
         statusMenu?.hide()
         mainWindow?.closeForQuit()
         chooserWindows.closeAll()
+        syncWindows.closeAll()
         NSApp.setActivationPolicy(.prohibited)
         let secs: UInt32 = powerOff ? 3 : (options.mock ? 1 : 120)
         let core = self.core!

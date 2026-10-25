@@ -26,7 +26,7 @@ import SwiftUI
         await render("downloads-filter-dark", size: mainSize) { MainWindowView(model: model(.tracker("tracker-y.net"), select: nil), commands: commands, settings: settings, nav: SettingsNavigation()) }
 
         for tab in SettingsTab.allCases {
-            let h: CGFloat = tab == .folders ? 1180 : tab == .transfers ? 860 : tab == .rules ? 860 : 700
+            let h: CGFloat = tab == .folders ? 1180 : tab == .transfers ? 860 : tab == .rules ? 860 : tab == .folderSync ? 760 : 700
             await render("settings-\(tab.rawValue)-dark", size: NSSize(width: 860, height: h), settings: true) {
                 SettingsView(model: settings, nav: nav(tab))
             }
@@ -35,7 +35,55 @@ import SwiftUI
             SettingsView(model: settings, nav: nav(.transfers))
         }
         await render("chooser-dark", size: NSSize(width: 640, height: 640), settings: true) { ChooserView(model: ChooserModel.sample()) }
+        await renderSync()
         await render("chooser-light", size: NSSize(width: 640, height: 640), dark: false, settings: true) { ChooserView(model: ChooserModel.sample()) }
+    }
+
+    /// Folder sync (SPEC 7G.5): the window page, the menu's submenu (a stand-in: a real menu cannot be drawn
+    /// offscreen), the add and edit modals, and turning on Finder badges.
+    private func renderSync() async {
+        let sync = commands.sync
+        let folders = core.syncSnapshot().folders
+        let projects = folders.first { $0.conflicts > 0 }?.id
+        for dark in [true, false] {
+            let suffix = dark ? "dark" : "light"
+            await render("sync-window-\(suffix)", size: NSSize(width: 1180, height: 760), dark: dark) {
+                let m = model(.folderSync, select: nil)
+                m.syncSelection = projects
+                return MainWindowView(model: m, commands: commands, settings: settings, nav: SettingsNavigation())
+            }
+            await render("sync-menu-\(suffix)", size: NSSize(width: 330, height: 420), dark: dark, settings: true) {
+                SyncMenuPreview(folders: folders, hovered: 1, confirm: 2)
+            }
+            await render("sync-add-local-\(suffix)", size: NSSize(width: 480, height: 250), dark: dark, settings: true) {
+                let m = SyncAddModel(core: core)
+                m.form.folder = NSHomeDirectory() + "/Documents/Novel"
+                return SyncAddView(model: m)
+            }
+            await render("sync-add-shared-\(suffix)", size: NSSize(width: 480, height: 290), dark: dark, settings: true) {
+                let link = (try? core.syncShares(id: folders[0].id))?.readOnlyLink ?? ""
+                return SyncAddView(model: SyncAddModel(core: core, prefill: link))
+            }
+            await render("sync-add-bad-\(suffix)", size: NSSize(width: 480, height: 290), dark: dark, settings: true) {
+                let m = SyncAddModel(core: core, prefill: "SWW-NOTAKEY")
+                m.error = "Folders in iCloud Drive or other cloud storage cannot be synced."
+                return SyncAddView(model: m)
+            }
+            await render("sync-edit-\(suffix)", size: NSSize(width: 500, height: 560), dark: dark, settings: true) {
+                let m = SyncEditModel(core: core, id: folders[0].id)
+                m.optionsOpen = true
+                m.copied = "Read only link"
+                return SyncEditView(model: m, actions: sync)
+            }
+            for on in [false, true] {
+                await render("finder-setup-\(on ? "on" : "off")-\(suffix)", size: NSSize(width: 440, height: on ? 230 : 330), dark: dark, settings: true) {
+                    FinderSetupView(model: FinderSetupModel(isEnabled: { on }))
+                }
+            }
+        }
+        await render("settings-folderSync-light", size: NSSize(width: 860, height: 900), dark: false, settings: true) {
+            SettingsView(model: settings, nav: nav(.folderSync))
+        }
     }
 
     private func nav(_ tab: SettingsTab) -> SettingsNavigation {
@@ -95,4 +143,47 @@ import SwiftUI
 /// A window that may be larger than the screen, so snapshots are not clipped on small displays.
 private final class FreeWindow: NSWindow {
     override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect { frameRect }
+}
+
+/// The Folder Sync submenu drawn from its real row views on the menu's material (QA: a real NSMenu cannot be
+/// captured offscreen). Row `hovered` shows the hover buttons; a confirmation is open under row `confirm`.
+private struct SyncMenuPreview: NSViewRepresentable {
+    let folders: [SyncFolder]
+    var hovered: Int?
+    var confirm: Int?
+
+    func makeNSView(context: Context) -> NSView {
+        let width: CGFloat = 330
+        var views: [NSView] = []
+        let top = NSView(frame: NSRect(x: 0, y: 0, width: width, height: 5))
+        views.append(top)
+        for (i, f) in folders.enumerated() {
+            let row = MenuSyncRow(folder: f)
+            // A row drops its hover when it joins a window: light it once it is there.
+            if i == hovered { DispatchQueue.main.async { row.hovered = true } }
+            row.confirming = i == confirm
+            views.append(row)
+            if i == confirm { views.append(SyncConfirmPanel(name: f.name, trashOn: false, width: width)) }
+        }
+        let sep = NSBox(frame: NSRect(x: 14, y: 0, width: width - 28, height: 11))
+        sep.boxType = .separator
+        let sepWrap = NSView(frame: NSRect(x: 0, y: 0, width: width, height: 11))
+        sep.frame = NSRect(x: 14, y: 5, width: width - 28, height: 1)
+        sepWrap.addSubview(sep)
+        views.append(sepWrap)
+        views.append(MenuCheckRow(content: .init(title: "Add Folder…"), width: width) {})
+        let total = views.reduce(0) { $0 + $1.frame.height } + 5
+        let root = NSVisualEffectView(frame: NSRect(x: 0, y: 0, width: width, height: total))
+        root.material = .menu
+        root.state = .active
+        var y = total
+        for v in views {
+            y -= v.frame.height
+            v.frame = NSRect(x: 0, y: y, width: width, height: v.frame.height)
+            root.addSubview(v)
+        }
+        return root
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {}
 }

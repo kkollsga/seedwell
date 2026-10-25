@@ -75,6 +75,8 @@ pub(crate) enum SessionMsg {
     /// The listen port was mapped (or not). `serial` tells a stopped mapper's last word from the
     /// current one's.
     PortMap { serial: u64, status: crate::api::PortMapStatus },
+    /// The previous mapper has deleted its mappings: start the one for mapper generation `serial`.
+    PortMapRestart { serial: u64 },
     /// Which of the folders torrents save to are there (`volumes_changed`).
     Volumes(Vec<(u32, bool)>),
     /// The outage state changed (SPEC 7C.4c): `held` while the hub holds everything.
@@ -186,6 +188,10 @@ pub(crate) enum Cmd {
     },
     /// A stream was closed by the caller: torrents nobody streams any more may go back to the queue.
     StreamsClosed,
+    /// The DHT node, for public lookups by other services (folder sync); `None` while the DHT is off.
+    PublicDht(oneshot::Sender<Option<trs_dht::DhtHandle>>),
+    /// Map one more port (TCP and UDP) with the listen port's mapper (folder sync's port), or stop mapping it.
+    SetExtraMappedPort(Option<u16>),
 }
 
 /// Timed work. Ordered so a `BTreeSet<(Instant, Job)>` is the scheduler.
@@ -337,6 +343,8 @@ pub(crate) struct Session {
     pub dht_shared: bool,
     /// Counts live port changes; an answer for an older one is dropped.
     pub rebind_gen: u64,
+    /// A second port the port mapper maps (TCP and UDP): folder sync's (`EngineHandle::set_extra_mapped_port`).
+    pub extra_mapped_port: Option<u16>,
     /// When the first request of the pending memory trim was made (see `request_trim`).
     trim_since: Option<Instant>,
     /// Follow-up trims still to run after the last burst (see `trim_memory`).
@@ -405,6 +413,7 @@ impl Session {
             utp_listener: None,
             dht_shared: false,
             rebind_gen: 0,
+            extra_mapped_port: None,
             trim_since: None,
             trim_followups: 0,
             mover: moves::Mover::default(),
@@ -563,6 +572,7 @@ impl Session {
             SessionMsg::Rebound { serial, wanted, result } => self.on_rebound(serial, wanted, result),
             SessionMsg::DhtMoved { serial, dht } => self.on_dht_moved(serial, dht),
             SessionMsg::PortMap { serial, status } => self.on_portmap(serial, status),
+            SessionMsg::PortMapRestart { serial } => self.on_portmap_restart(serial),
             SessionMsg::TrackerHealth { id, health } => self.on_tracker_health(id, health),
             SessionMsg::Net { held } => self.on_net(held),
             SessionMsg::Volumes(res) => self.on_volumes(res),

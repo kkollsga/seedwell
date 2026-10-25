@@ -374,6 +374,12 @@ pub struct ReachabilityDto {
     /// When the last of them came in (Unix seconds).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_incoming_at: Option<u64>,
+    /// Folder sync's TCP port as the router opened it (when sync runs and mapping is on).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync_external_port: Option<u16>,
+    /// Folder sync's UDP port (uTP) as the router opened it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync_external_udp_port: Option<u16>,
 }
 
 /// `list` result.
@@ -1322,4 +1328,206 @@ pub struct DebugHealthDto {
     pub issues: Vec<HealthIssue>,
     /// One line.
     pub summary: String,
+}
+
+// ----------------------------------------------------------------------------- folder sync (SPEC 7G)
+
+/// A path that cannot be synced, with the reason.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct SyncIssueDto {
+    /// The path inside the folder.
+    pub path: String,
+    /// Why, in words.
+    pub reason: String,
+}
+
+/// One synced folder (`sync.list`, `sync.status`).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct SyncFolderDto {
+    /// The folder id (`MFZWI3D-BONSGYC-…`); its first group identifies it in commands.
+    pub id: String,
+    /// Its name on this Mac.
+    pub name: String,
+    /// Where it is.
+    pub path: String,
+    /// What this Mac may do: `read_write`, `read_only` or `encrypted`.
+    pub access: String,
+    /// `starting`, `up-to-date`, `scanning`, `syncing`, `waiting-for-devices`, `paused`, `missing`, `error`.
+    pub state: String,
+    /// Files and folders in it (as last scanned).
+    pub files: u64,
+    /// Their size.
+    pub bytes: u64,
+    /// Paths still to fetch.
+    pub need_files: u64,
+    /// Bytes still to fetch.
+    pub need_bytes: u64,
+    /// Bytes per second fetched.
+    pub rate_in: u64,
+    /// Bytes per second served.
+    pub rate_out: u64,
+    /// Devices connected for this folder.
+    pub connected: u32,
+    /// Devices known in this folder.
+    pub members: u32,
+    /// Conflict copies not yet resolved.
+    pub conflicts: u32,
+    /// Only synced with devices on the local network.
+    #[serde(default)]
+    pub lan_only: bool,
+    /// Paths that cannot be synced.
+    #[serde(default)]
+    pub issues: Vec<SyncIssueDto>,
+    /// The last error, when the state is `error`.
+    #[serde(default)]
+    pub error: Option<String>,
+    /// When the folder last had nothing left to do (Unix seconds).
+    #[serde(default)]
+    pub last_synced_at: Option<u64>,
+}
+
+/// One unresolved conflict copy (`sync.conflicts`).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct SyncConflictDto {
+    /// The copy, relative to the folder (`/`-separated).
+    pub copy: String,
+    /// The path it is a copy of.
+    pub original: String,
+    /// The device that made the losing version (empty when the name does not say).
+    pub device: String,
+    /// When, as the copy's name says it (`2026-10-25 14.32`; empty when it does not).
+    pub when: String,
+}
+
+/// `sync.conflicts` result: the unresolved conflict copies of a folder.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct SyncConflictsDto {
+    /// The folder id.
+    pub id: String,
+    /// Its name.
+    pub name: String,
+    /// The copies.
+    pub conflicts: Vec<SyncConflictDto>,
+}
+
+/// A connected device.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct SyncDeviceDto {
+    /// Its device id.
+    pub id: String,
+    /// Its name.
+    pub name: String,
+    /// Its client (`Seedwell 0.1.5`).
+    pub client: String,
+    /// Where the connection goes.
+    pub address: String,
+    /// `LAN`, `Internet` or `Relay`.
+    pub via: String,
+    /// The folders shared with it (ids).
+    pub folders: Vec<String>,
+    /// Bytes received from it in this session.
+    pub rx_bytes: u64,
+    /// Bytes sent to it.
+    pub tx_bytes: u64,
+}
+
+/// `sync.list` result.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct SyncListDto {
+    /// This device's id.
+    pub device_id: String,
+    /// This device's name.
+    pub device_name: String,
+    /// The TCP port sync listens on.
+    pub port: u16,
+    /// The port as mapped on the router, when port mapping is on and the router answered.
+    #[serde(default)]
+    pub external_port: Option<u16>,
+    /// The folders.
+    pub folders: Vec<SyncFolderDto>,
+    /// The connected devices.
+    pub devices: Vec<SyncDeviceDto>,
+}
+
+/// `sync.share` result: the keys and links this Mac may give out. Secrets: anyone who has one has the folder.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct SyncSharesDto {
+    /// The folder id.
+    pub id: String,
+    /// Its name.
+    pub name: String,
+    /// The Read & write key (only on a device that has it).
+    #[serde(default)]
+    pub read_write: Option<String>,
+    /// Its link.
+    #[serde(default)]
+    pub read_write_link: Option<String>,
+    /// The Read only key.
+    #[serde(default)]
+    pub read_only: Option<String>,
+    /// Its link.
+    #[serde(default)]
+    pub read_only_link: Option<String>,
+}
+
+/// `sync.settings` and `sync.set_settings` result.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct SyncSettingsDto {
+    /// The name other devices see (empty = the computer's name).
+    pub device_name: String,
+    /// The configured sync port (0 = chosen at first start).
+    pub port: u16,
+    /// Find devices on the local network.
+    pub lan_discovery: bool,
+    /// Find devices over the Internet.
+    pub dht_discovery: bool,
+    /// Relay between this user's own devices.
+    pub relay_own_devices: bool,
+    /// Also relay between other members of shared folders.
+    pub relay_everyone: bool,
+    /// Internet upload limit, bytes per second (`None` = unlimited).
+    #[serde(default)]
+    pub up_limit: Option<u64>,
+    /// Internet download limit, bytes per second (`None` = unlimited).
+    #[serde(default)]
+    pub down_limit: Option<u64>,
+    /// Where joined folders go by default (empty = `~/Seedwell`).
+    pub default_location: String,
+    /// The settings that were changed by this call.
+    #[serde(default)]
+    pub changed: Vec<String>,
+    /// What to know (a port change applies at the next start).
+    #[serde(default)]
+    pub note: String,
+}
+
+/// `sync.remove` result (step 1).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct SyncRemovePlanDto {
+    /// Pass this to `sync.remove_confirm`.
+    pub token: String,
+    /// Seconds the token stays valid.
+    pub expires_in_secs: u64,
+    /// Whether the folder goes to the Trash.
+    pub delete_files: bool,
+    /// The folder.
+    pub folder: SyncFolderDto,
+    /// Plain-language summary to show a person.
+    pub summary: String,
+}
+
+/// `sync.remove_confirm` result.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct SyncRemovedDto {
+    /// The folder id.
+    pub id: String,
+    /// Its name.
+    pub name: String,
+    /// Where it was.
+    pub path: String,
+    /// `kept` (the files stay where they are) or `trashed`.
+    pub files: String,
+    /// Where in the Trash it went.
+    #[serde(default)]
+    pub trashed_to: Option<String>,
 }

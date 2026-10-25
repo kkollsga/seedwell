@@ -7,3 +7,5 @@ mod common;
 
 mod decoder;
 mod server;
+#[cfg(feature = "sync")]
+mod sync;

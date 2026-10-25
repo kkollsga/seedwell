@@ -18,7 +18,7 @@ path = "src/main.rs"
 [features]
 default = ["daemon"]
 # `seedwell daemon`: the engine, persistence and the control socket in one headless process.
-daemon = ["dep:trs-engine", "dep:trs-storage", "dep:trs-state", "trs-control/engine", "tokio/signal", "tokio/rt-multi-thread"]
+daemon = ["dep:trs-engine", "dep:trs-storage", "dep:trs-state", "dep:trs-sync-net", "dep:trs-sync-proto", "trs-control/engine", "trs-control/sync", "tokio/signal", "tokio/rt-multi-thread"]
 
 [dependencies]
 trs-control = { path = "../control", default-features = false }
@@ -28,6 +28,10 @@ trs-engine = { path = "../engine", optional = true }
 # The daemon's global allocator (`MappedAlloc`); the thin client does not link it.
 trs-storage = { path = "../storage", optional = true }
 trs-state = { path = "../state", optional = true }
+# The daemon runs the folder sync service next to the engine (and `seedwell relay`).
+trs-sync-net = { path = "../sync-net", optional = true }
+# The relay's device key (`seedwell relay`).
+trs-sync-proto = { path = "../sync-proto", optional = true }
 serde = { version = "1", default-features = false, features = ["derive", "std"] }
 serde_json = { version = "1", default-features = false, features = ["std"] }
 # `net` for the sim swarm, `time` for timeouts and rate pacing.

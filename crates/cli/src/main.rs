@@ -9,8 +9,8 @@ static ALLOC: trs_storage::MappedAlloc = trs_storage::MappedAlloc;
 
 fn main() {
     let argv: Vec<String> = std::env::args().skip(1).collect();
-    let daemon = argv.iter().any(|a| a == "daemon");
-    // The daemon wants the engine's multi-thread runtime; every other command is one round trip.
+    let daemon = argv.iter().any(|a| a == "daemon" || a == "relay");
+    // The daemon (and the sync relay) want the engine's multi-thread runtime; every other command is one round trip.
     let code = if daemon && cfg!(feature = "daemon") {
         match trs_cli::runtime() {
             Ok(rt) => {

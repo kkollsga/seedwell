@@ -127,13 +127,43 @@ pub fn describe(r: &Request) -> String {
         Request::Remove(p) => format!("remove {}{} (step 1, asks for confirmation)", ids(&p.ids), if p.delete_files { " and delete files" } else { "" }),
         Request::RemoveConfirm(_) => "confirm removal".into(),
         Request::SettingsSet(p) => format!("change settings: {}", p.changes.keys().map(|k| clip(k, 64)).collect::<Vec<_>>().join(", ")),
+        Request::SyncAdd(p) => format!("share the folder {}", clip(&p.path, 200)),
+        // The key is the permission to the folder: never in the log.
+        Request::SyncJoin(p) => format!("join a shared folder (key not logged) at {}", p.path.as_deref().map_or("the default location".into(), |d| clip(d, 200))),
+        Request::SyncShare(p) => format!("show the keys of folder {} (keys not logged)", folder(&p.folder)),
+        Request::SyncRename(p) => format!("rename folder {} to {}", folder(&p.folder), clip(&p.name, 100)),
+        Request::SyncMove(p) => format!("move folder {} to {}", folder(&p.folder), clip(&p.path, 200)),
+        Request::SyncPause(p) => format!("pause folder {}", folder(&p.folder)),
+        Request::SyncResume(p) => format!("resume folder {}", folder(&p.folder)),
+        Request::SyncRescan(p) => format!("rescan folder {}", folder(&p.folder)),
+        Request::SyncSetLanOnly(p) => format!("{} for folder {}", if p.lan_only { "sync only on the local network" } else { "sync everywhere" }, folder(&p.folder)),
+        Request::SyncConflicts(p) => format!("list conflicts of folder {}", folder(&p.folder)),
+        Request::SyncResolve(p) => format!("resolve conflict {} in folder {}, keep {}", clip(&p.copy, 200), folder(&p.folder), clip(&p.keep, 20)),
+        Request::SyncAddAddress(p) => format!("add address {} to folder {}", clip(&p.address, 100), folder(&p.folder)),
+        Request::SyncRemove(p) => format!(
+            "remove folder {}{} (step 1, asks for confirmation)",
+            folder(&p.folder),
+            if p.delete_files { " and move it to the Trash" } else { "" }
+        ),
+        Request::SyncRemoveConfirm(_) => "confirm folder removal".into(),
+        Request::SyncSetSettings(p) => {
+            let v = serde_json::to_value(p).unwrap_or_default();
+            let keys: Vec<String> = v.as_object().into_iter().flatten().filter(|(_, v)| !v.is_null()).map(|(k, _)| k.clone()).collect();
+            format!("change folder sync settings: {}", keys.join(", "))
+        }
         other => other.method().name().to_owned(),
     };
-    clip(&s, 400)
+    // A key pasted into any field (a name, a path) is masked too.
+    clip(&crate::redact::scrub_keys(&s), 400)
 }
 
 fn short(id: &str) -> String {
     clip(id, 8)
+}
+
+/// A folder as the caller named it (an id, a prefix or a name), shortened.
+fn folder(f: &str) -> String {
+    clip(f, 80)
 }
 
 #[cfg(test)]
@@ -174,5 +204,10 @@ mod tests {
         assert!(!describe(&r).contains("SECRET"));
         let r = Request::Pause(Targets { ids: vec!["a".into(), "b".into(), "c".into()], all: false });
         assert_eq!(describe(&r), "pause 3 transfers");
+        let r = Request::SyncJoin(SyncJoinParams { key_or_link: "seedwell://sync/SWW-SECRETSECRET?name=x".into(), path: Some("/tmp/x".into()) });
+        let d = describe(&r);
+        assert!(!d.contains("SECRET") && d.contains("/tmp/x"), "{d}");
+        let r = Request::SyncRename(SyncRenameParams { folder: "Docs".into(), name: "SWR-SECRETSECRET".into() });
+        assert!(!describe(&r).contains("SECRET"), "{}", describe(&r));
     }
 }

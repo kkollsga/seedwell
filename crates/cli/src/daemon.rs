@@ -7,8 +7,13 @@
 //! seedwell daemon --state-dir D --download-dir X [--listen-port P] [--bind 127.0.0.1]
 //!     [--socket PATH] [--permission off|read_only|control|full|config] [--no-dht] [--no-trackers]
 //!     [--portmap] [--ask] [--max-active N] [--shutdown-secs S] [--allow-lan-trackers]
-//!     [--dev-mode] [--allow-loopback-trackers]
+//!     [--dev-mode] [--allow-loopback-trackers] [--no-sync]
 //! ```
+//!
+//! **Folder sync** (SPEC 7G) runs next to the engine unless `--no-sync`: `sync.toml` and `sync/` in the
+//! state directory, keys in `<state-dir>/sync/secrets` (0600), devices found over the engine's DHT, the
+//! sync port mapped by its port mapper, bound to `--bind` (LAN discovery is off on a loopback bind). It
+//! stops before the engine.
 //!
 //! `--dev-mode` switches developer mode on for the run (whatever `config.toml` says): every tracker
 //! exchange is written, secrets masked, to `<state-dir>/logs/trackers.log` (`seedwell log trackers`).
@@ -25,15 +30,17 @@
 //! a LAN or VPN tracker); loopback, link-local and cloud-metadata addresses stay refused. Default: strict.
 //!
 //! It prints one line on stdout when it is ready, then runs until SIGINT/SIGTERM:
-//! `seedwell daemon ready socket=<path> port=<tcp port> pid=<pid>`.
+//! `seedwell daemon ready socket=<path> port=<tcp port> pid=<pid> sync_port=<port, 0 without sync>`.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::signal::unix::{SignalKind, signal};
-use trs_control::{Permission, PermissionSource, StateAccess, serve_with as serve_backend_with};
+use trs_control::sync::{SyncSlot, start_sync_with};
+use trs_control::{EngineBackend, Permission, PermissionSource, StateAccess, serve_backend};
 use trs_engine::{Host, HostOptions};
+use trs_sync_net::secrets::FileSecrets;
 
 use crate::args::{Opts, Usage};
 use crate::commands::{CliError, Global};
@@ -71,6 +78,7 @@ pub async fn run(mut o: Opts, g: &Global) -> Result<(), CliError> {
     // Developer mode for this process: every tracker exchange goes to <state-dir>/logs/trackers.log.
     let dev_mode = o.flag(&["--dev-mode"]);
     let shutdown_secs = o.number::<u64>(&["--shutdown-secs"])?.unwrap_or(10);
+    let no_sync = o.flag(&["--no-sync"]);
     let permission = o.value(&["--permission"])?.unwrap_or_else(|| "control".into());
     let extra = o.finish()?;
     if let Some(x) = extra.first() {
@@ -114,11 +122,21 @@ pub async fn run(mut o: Opts, g: &Global) -> Result<(), CliError> {
     let state = StateAccess::new(&state_dir, Some(store))
         .with_tz_offset(|| trs_engine::util::local_utc_offset(trs_engine::util::unix_secs() as i64));
     let options = trs_control::ServerOptions::default().with_config(&state.config());
-    let server = serve_backend_with(engine.clone(), state, &socket, perm, options).await.map_err(|e| fail(format!("cannot serve {}: {e}", socket.display())))?;
+    let slot = SyncSlot::new();
+    let sync = if no_sync { None } else { start_folder_sync(&state_dir, &engine, bind).await };
+    slot.set(sync.clone());
+    let backend = Arc::new(EngineBackend::new(engine.clone()).with_sync(slot.clone()));
+    let server = serve_backend(backend, state, &socket, perm, options).await.map_err(|e| fail(format!("cannot serve {}: {e}", socket.display())))?;
     for w in server.warnings() {
         eprintln!("seedwell daemon: {w}");
     }
-    println!("seedwell daemon ready socket={} port={} pid={}", socket.display(), engine.listen_port(), std::process::id());
+    println!(
+        "seedwell daemon ready socket={} port={} pid={} sync_port={}",
+        socket.display(),
+        engine.listen_port(),
+        std::process::id(),
+        sync.as_ref().map_or(0, |h| h.port())
+    );
     {
         use std::io::Write as _;
         let _ = std::io::stdout().flush();
@@ -132,9 +150,33 @@ pub async fn run(mut o: Opts, g: &Global) -> Result<(), CliError> {
     }
     eprintln!("seedwell daemon: shutting down");
     server.shutdown().await;
+    slot.set(None);
+    if let Some(h) = sync {
+        h.shutdown().await;
+    }
     let r = host.shutdown(Duration::from_secs(shutdown_secs)).await;
     eprintln!("seedwell daemon: stopped (trackers confirmed {}, abandoned {})", r.stopped_confirmed, r.stopped_abandoned);
     Ok(())
+}
+
+/// The folder sync service next to the engine. A failure is reported and the daemon runs on without
+/// it: a sync problem never stops torrents (SPEC 7G).
+async fn start_folder_sync(state_dir: &std::path::Path, engine: &trs_engine::EngineHandle, bind: std::net::Ipv4Addr) -> Option<trs_sync_net::SyncHandle> {
+    let secrets = Arc::new(FileSecrets::new(state_dir.join("sync").join("secrets")));
+    let client = format!("Seedwell {}", env!("CARGO_PKG_VERSION"));
+    let started = start_sync_with(state_dir, client, secrets, Some(engine), |o| {
+        o.bind = std::net::IpAddr::V4(bind);
+        // Announcing test daemons on the real LAN would only add noise.
+        o.lan_discovery = !bind.is_loopback();
+    })
+    .await;
+    match started {
+        Ok(h) => Some(h),
+        Err(e) => {
+            eprintln!("seedwell daemon: folder sync did not start: {e}");
+            None
+        }
+    }
 }
 
 /// The daemon's flags that end up in `config.toml`.

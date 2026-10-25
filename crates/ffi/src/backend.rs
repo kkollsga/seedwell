@@ -150,4 +150,8 @@ pub trait Backend: Send + Sync {
     fn tracker_log_dropped(&self) -> u64 {
         0
     }
+    /// Folder sync (SPEC 7G): the service next to the engine, or the mock's fake folders.
+    fn sync(&self) -> Arc<dyn crate::sync::SyncBackend> {
+        Arc::new(crate::sync::NoSync)
+    }
 }

@@ -1,0 +1,1402 @@
+//! The sync service: folders, the listener, dialing, discovery, and the API the app, the CLI and agents
+//! use ([`SyncHandle`]).
+
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::future::Future;
+use std::io;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::path::{Path, PathBuf};
+use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, Instant};
+
+use tokio::net::TcpListener;
+use tokio::sync::{Notify, mpsc, watch};
+use tokio::task::JoinHandle;
+use trs_sync::archive::Retention;
+use trs_sync::clock::SystemClock;
+use trs_sync::folder::{FolderConfig, FolderCore};
+use trs_sync::fs::{Fs, StdFs};
+use trs_sync::ignore::Ignore;
+use trs_sync::store_redb::RedbStore;
+use trs_sync_proto::device::DeviceKey;
+use trs_sync_proto::ids::{DeviceId, FolderId};
+use trs_sync_proto::keys::{Access, FolderKey, FolderSecret, Link};
+use trs_sync_proto::model::STATE_DIR;
+use trs_sync_proto::msg::{AddressRecord, Addresses, Message};
+
+use crate::config::{FolderEntry, Settings, SyncConfig};
+use crate::secrets::SecretStore;
+use crate::session::{self, Accepted, Via};
+use crate::shared::{Ctx, FolderShared, HubMsg, Live, Registry, lock};
+use crate::status::{DeviceStatus, FolderState, FolderStatus, Snapshot};
+use crate::tls::Tls;
+
+/// A boxed future (the DHT adapter's answers).
+pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+/// Public peer discovery, lent by the torrent engine (its Mainline DHT). Topics are public and carry
+/// nothing but a hash, so this never touches private torrents.
+pub trait PublicDiscovery: Send + Sync {
+    /// Announces `port` under `topic` and returns the peers found there.
+    fn announce(&self, topic: [u8; 20], port: u16) -> BoxFuture<'_, Vec<SocketAddr>>;
+    /// Looks up `topic` without announcing.
+    fn lookup(&self, topic: [u8; 20]) -> BoxFuture<'_, Vec<SocketAddr>>;
+}
+
+/// How to start the service.
+pub struct Options {
+    /// Seedwell's state directory; sync keeps `sync.toml` and `sync/` in it.
+    pub state_dir: PathBuf,
+    /// `Seedwell <version>`.
+    pub client: String,
+    /// The device name when none is set (the computer's name).
+    pub default_device_name: String,
+    /// Where keys are kept.
+    pub secrets: Arc<dyn SecretStore>,
+    /// The DHT, when the engine runs one.
+    pub discovery: Option<Arc<dyn PublicDiscovery>>,
+    /// Listen on this address (tests use loopback; the app all interfaces).
+    pub bind: IpAddr,
+    /// Run LAN discovery (off in tests that run several devices on one machine).
+    pub lan_discovery: bool,
+    /// LAN discovery's UDP port ([`crate::lan::PORT`]; tests pick their own).
+    pub lan_port: u16,
+    /// Where every LAN announcement also goes, by unicast (tests: the other services on loopback). With
+    /// `bind` on one address these are the only destinations; broadcast and multicast need all interfaces.
+    pub lan_targets: Vec<SocketAddr>,
+    /// Run uTP on the sync port's UDP twin (dialed with TCP for Internet addresses; hole punching).
+    pub utp: bool,
+    /// Dial over TCP (tests turn it off to force uTP).
+    pub dial_tcp: bool,
+    /// Seconds east of UTC at a Unix time (daylight saving included), for the names of conflict copies.
+    /// `None`: read once per folder start from `date +%z`.
+    pub utc_offset: Option<UtcOffset>,
+}
+
+/// The local UTC offset at a Unix time, in seconds (the app passes the engine's).
+pub type UtcOffset = Arc<dyn Fn(i64) -> i32 + Send + Sync>;
+
+impl Options {
+    /// The defaults for a state directory.
+    pub fn new(state_dir: PathBuf, client: String, secrets: Arc<dyn SecretStore>) -> Self {
+        Options {
+            state_dir,
+            client,
+            default_device_name: "Mac".into(),
+            secrets,
+            discovery: None,
+            bind: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            lan_discovery: true,
+            lan_port: crate::lan::PORT,
+            lan_targets: Vec::new(),
+            utp: true,
+            dial_tcp: true,
+            utc_offset: None,
+        }
+    }
+}
+
+/// Why a request was refused.
+#[derive(Debug)]
+pub enum SyncError {
+    /// No such folder.
+    NotFound,
+    /// The request is not acceptable (a bad key, a path in use, …), with the reason.
+    Invalid(String),
+    /// Reading or writing failed.
+    Io(io::Error),
+}
+
+impl std::fmt::Display for SyncError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SyncError::NotFound => f.write_str("no such folder"),
+            SyncError::Invalid(why) => f.write_str(why),
+            SyncError::Io(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for SyncError {}
+
+impl From<io::Error> for SyncError {
+    fn from(e: io::Error) -> Self {
+        SyncError::Io(e)
+    }
+}
+
+fn invalid(why: impl Into<String>) -> SyncError {
+    SyncError::Invalid(why.into())
+}
+
+/// Which version of a conflict to keep.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Keep {
+    /// The file at the original path (the conflict copy goes to the archive).
+    Original,
+    /// The conflict copy (it replaces the original, which goes to the archive).
+    Copy,
+    /// Both: the copy becomes an ordinary file under a plain name.
+    Both,
+}
+
+/// Which paths of a folder are busy, for Finder's badges. Cheap: read from what the folder keeps anyway.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Activity {
+    /// Paths still to fetch (or delete), the first in path order, wire form.
+    pub pending: Vec<String>,
+    /// More paths are pending than listed.
+    pub pending_more: bool,
+    /// Conflict copies not yet resolved, wire form.
+    pub conflicts: Vec<String>,
+    /// The folder has ignore patterns of its own (`.seedwellignore`, or local ones in the config): a path
+    /// that is not pending is not necessarily synced.
+    pub own_ignores: bool,
+}
+
+/// The keys and links of a folder this device may share.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Shares {
+    /// The Read & write key (only on a device that has it).
+    pub read_write: Option<String>,
+    /// Its link.
+    pub read_write_link: Option<String>,
+    /// The Read only key.
+    pub read_only: Option<String>,
+    /// Its link.
+    pub read_only_link: Option<String>,
+}
+
+struct Runner {
+    stop: watch::Sender<bool>,
+    task: JoinHandle<()>,
+}
+
+/// Where a device was reached or said it can be reached.
+#[derive(Default)]
+struct AddressBook {
+    by_device: HashMap<DeviceId, BTreeSet<SocketAddr>>,
+    /// Addresses found for a folder whose device we do not know yet (the DHT gives no ids).
+    hints: HashMap<FolderId, BTreeSet<SocketAddr>>,
+    /// Last dial attempt per address, for backoff.
+    tried: HashMap<SocketAddr, (Instant, u32)>,
+    /// The newest signed address record of each device (passed on to other members).
+    records: HashMap<DeviceId, AddressRecord>,
+}
+
+struct Inner {
+    ctx: Arc<Ctx>,
+    dir: PathBuf,
+    cfg_path: PathBuf,
+    cfg: Mutex<SyncConfig>,
+    secrets: Arc<dyn SecretStore>,
+    port: u16,
+    discovery: Option<Arc<dyn PublicDiscovery>>,
+    runners: Mutex<HashMap<FolderId, Runner>>,
+    book: Mutex<AddressBook>,
+    tasks: Mutex<Vec<JoinHandle<()>>>,
+    stopping: AtomicBool,
+    wake_dialer: Notify,
+    lan: crate::lan::Lan,
+    /// uTP on the sync port's UDP twin.
+    utp: Option<trs_utp::UtpSocket>,
+    /// Dial over TCP (off in tests that force uTP).
+    dial_tcp: bool,
+    /// Relays and hole punching.
+    net: crate::relay::Net,
+    /// Test switch: devices we neither dial nor accept directly (relayed sessions still work).
+    refuse_direct: Mutex<BTreeSet<DeviceId>>,
+    /// The local UTC offset, when the caller gave one.
+    utc_offset: Option<UtcOffset>,
+}
+
+/// The running service. Cheap to clone.
+#[derive(Clone)]
+pub struct SyncHandle {
+    inner: Arc<Inner>,
+}
+
+const DEVICE_KEY: &str = "device";
+
+fn folder_secret_name(id: &FolderId) -> String {
+    format!("folder-{id}")
+}
+
+fn random_u64() -> u64 {
+    let mut b = [0u8; 8];
+    let _ = ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut b);
+    u64::from_be_bytes(b)
+}
+
+fn random_id() -> [u8; 16] {
+    let mut b = [0u8; 16];
+    let _ = ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut b);
+    b
+}
+
+/// The UTC offset in seconds, read from `date` once a start (Rust has no local time without `unsafe`;
+/// the value only names conflict copies).
+fn local_offset_s() -> i32 {
+    let out = std::process::Command::new("date").arg("+%z").output();
+    let Ok(out) = out else { return 0 };
+    let s = String::from_utf8_lossy(&out.stdout);
+    let s = s.trim();
+    if s.len() != 5 {
+        return 0;
+    }
+    let sign = if s.starts_with('-') { -1 } else { 1 };
+    let h: i32 = s[1..3].parse().unwrap_or(0);
+    let m: i32 = s[3..5].parse().unwrap_or(0);
+    sign * (h * 3600 + m * 60)
+}
+
+/// The system clock with the caller's time zone (the offset follows daylight saving).
+struct ZonedClock(UtcOffset);
+
+impl trs_sync::clock::Clock for ZonedClock {
+    fn now_ns(&self) -> i64 {
+        trs_sync::clock::Clock::now_ns(&SystemClock::default())
+    }
+
+    fn local_offset_s(&self, unix_ns: i64) -> i32 {
+        (self.0)(unix_ns.div_euclid(1_000_000_000))
+    }
+}
+
+impl SyncHandle {
+    /// Starts the service: loads the device key (made on first start), the folders, binds the port.
+    pub async fn start(opts: Options) -> io::Result<SyncHandle> {
+        let dir = opts.state_dir.join("sync");
+        std::fs::create_dir_all(&dir)?;
+        let cfg_path = opts.state_dir.join("sync.toml");
+        let mut cfg = SyncConfig::load(&cfg_path)?;
+
+        let key = match opts.secrets.get(DEVICE_KEY)? {
+            Some(pkcs8) => DeviceKey::from_pkcs8(&pkcs8).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("device key: {e:?}")))?,
+            None => {
+                let k = DeviceKey::generate(&mut ring::rand::SystemRandom::new()).map_err(io::Error::other)?;
+                opts.secrets.put(DEVICE_KEY, &k.to_pkcs8())?;
+                k
+            }
+        };
+        let key = Arc::new(key);
+        let tls = Tls::new(&key).map_err(io::Error::other)?;
+
+        let (listener, utp, foreign_rx) = bind_port(opts.bind, cfg.settings.port, opts.utp).await?;
+        let port = listener.local_addr()?.port();
+        if cfg.settings.port != port {
+            cfg.settings.port = port;
+            cfg.save(&cfg_path)?;
+        }
+        let name = if cfg.settings.device_name.is_empty() { opts.default_device_name.clone() } else { cfg.settings.device_name.clone() };
+
+        let (hub_tx, hub_rx) = mpsc::unbounded_channel();
+        let ctx = Arc::new(Ctx {
+            me: key.device_id(),
+            key,
+            client: opts.client.clone(),
+            device_name: Mutex::new(name),
+            tls,
+            registry: Registry::default(),
+            hub: hub_tx,
+            limits: crate::limit::Limits::default(),
+        });
+        ctx.limits.set_kib(cfg.settings.up_kib, cfg.settings.down_kib);
+        let lan = crate::lan::Lan::new(ctx.clone(), opts.bind, opts.lan_port, opts.lan_targets);
+        let inner = Arc::new(Inner {
+            ctx,
+            dir,
+            cfg_path,
+            cfg: Mutex::new(cfg),
+            secrets: opts.secrets,
+            port,
+            discovery: opts.discovery,
+            runners: Mutex::new(HashMap::new()),
+            book: Mutex::new(AddressBook::default()),
+            tasks: Mutex::new(Vec::new()),
+            stopping: AtomicBool::new(false),
+            wake_dialer: Notify::new(),
+            lan,
+            utp,
+            dial_tcp: opts.dial_tcp,
+            net: crate::relay::Net::default(),
+            refuse_direct: Mutex::new(BTreeSet::new()),
+            utc_offset: opts.utc_offset,
+        });
+        let h = SyncHandle { inner };
+
+        let entries = lock(&h.inner.cfg).folders.clone();
+        for e in entries {
+            if let Err(err) = h.open_folder(&e).await {
+                // A folder that cannot open (its key is gone, its disk is missing) stays in the list
+                // with the reason, so the user can fix or remove it.
+                eprintln!("seedwell sync: folder {}: {err}", e.id);
+            }
+        }
+
+        let mut tasks = Vec::new();
+        tasks.push(tokio::spawn(accept_loop(h.clone(), listener)));
+        tasks.push(tokio::spawn(hub_loop(h.clone(), hub_rx)));
+        tasks.push(tokio::spawn(dial_loop(h.clone())));
+        if h.inner.discovery.is_some() {
+            tasks.push(tokio::spawn(dht_loop(h.clone())));
+        }
+        if opts.lan_discovery && lock(&h.inner.cfg).settings.lan_discovery {
+            tasks.push(tokio::spawn(crate::lan::run(h.clone())));
+        }
+        if let Some(u) = h.inner.utp.clone() {
+            tasks.push(tokio::spawn(utp_accept_loop(h.clone(), u)));
+        }
+        if let Some(rx) = foreign_rx {
+            tasks.push(tokio::spawn(foreign_loop(h.clone(), rx)));
+        }
+        *lock(&h.inner.tasks) = tasks;
+        for url in h.relay_urls() {
+            crate::relay_server::ensure_registered(&h, &url);
+        }
+        Ok(h)
+    }
+
+    /// This device's id.
+    pub fn device_id(&self) -> DeviceId {
+        self.inner.ctx.me
+    }
+
+    /// The port sync listens on.
+    pub fn port(&self) -> u16 {
+        self.inner.port
+    }
+
+    /// Stops everything: folder runtimes, sessions, the listener.
+    pub async fn shutdown(&self) {
+        self.inner.stopping.store(true, Ordering::SeqCst);
+        let runners: Vec<Runner> = lock(&self.inner.runners).drain().map(|(_, r)| r).collect();
+        for r in &runners {
+            let _ = r.stop.send(true);
+        }
+        for r in runners {
+            let _ = tokio::time::timeout(Duration::from_secs(5), r.task).await;
+        }
+        for p in self.inner.ctx.registry.peers() {
+            p.close();
+        }
+        for t in lock(&self.inner.tasks).drain(..) {
+            t.abort();
+        }
+    }
+
+    fn save_config(&self) -> io::Result<()> {
+        lock(&self.inner.cfg).save(&self.inner.cfg_path)
+    }
+
+    fn index_path(&self, id: &FolderId) -> PathBuf {
+        self.inner.dir.join(format!("{id}.redb"))
+    }
+
+    /// Opens a configured folder and starts its runtime.
+    async fn open_folder(&self, e: &FolderEntry) -> Result<(), SyncError> {
+        let id: FolderId = e.id.parse().map_err(|_| invalid("bad folder id"))?;
+        let secret = self.inner.secrets.get(&folder_secret_name(&id))?.ok_or_else(|| invalid("the folder's key is missing"))?;
+        let text = String::from_utf8(secret).map_err(|_| invalid("the folder's key is damaged"))?;
+        let key = FolderKey::parse(&text).map_err(|e| invalid(format!("the folder's key is damaged: {e:?}")))?;
+        let root = e.path.clone();
+        let index = self.index_path(&id);
+        let ctx = self.inner.ctx.clone();
+        let entry = e.clone();
+        let key2 = key.clone();
+        let tz = self.inner.utc_offset.clone();
+        let core = tokio::task::spawn_blocking(move || -> Result<FolderCore, SyncError> {
+            let fs = StdFs::new(root.clone());
+            let case_insensitive = match fs.lstat(STATE_DIR) {
+                Ok(Some(_)) => trs_sync::path::probe_case_insensitive(&fs).unwrap_or(true),
+                _ => cfg!(target_os = "macos"),
+            };
+            let store = RedbStore::open(&index, random_u64())?;
+            let cfg = FolderConfig {
+                me: ctx.me,
+                folder_pk: *key2.public_key(),
+                access: key2.access(),
+                case_insensitive,
+                byte_exact_names: !cfg!(target_os = "macos"),
+                archive: entry.archive,
+            };
+            let ignore = load_ignore(&fs, &entry.ignore);
+            let device = key2.writer_cert(ctx.key.public_key()).map(|c| (ctx.key.clone(), c));
+            let clock: Arc<dyn trs_sync::clock::Clock> = match tz {
+                Some(tz) => Arc::new(ZonedClock(tz)),
+                None => Arc::new(SystemClock { offset_s: local_offset_s() }),
+            };
+            FolderCore::new(cfg, Box::new(store), Arc::new(fs), device, clock, Arc::new(random_id), ignore)
+                .map_err(|e| invalid(e.to_string()))
+        })
+        .await
+        .map_err(io::Error::other)??;
+
+        let (seq_tx, _) = watch::channel(core.index_state().map(|(_, s)| s).unwrap_or(0));
+        let name = e.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let shared = Arc::new(FolderShared {
+            id,
+            key,
+            root: e.path.clone(),
+            core: Mutex::new(core),
+            local_seq: seq_tx,
+            remote_changed: Notify::new(),
+            paused: AtomicBool::new(e.paused),
+            members: RwLock::new(BTreeSet::new()),
+            name: Mutex::new(name),
+            live: Mutex::new(Live::default()),
+            rescan: Notify::new(),
+            lan_only: AtomicBool::new(e.lan_only),
+            retention: Retention { max_age_s: i64::from(e.archive_days) * 86_400, ..Retention::default() },
+            fetched: crate::limit::Meter::default(),
+            served: crate::limit::Meter::default(),
+        });
+        // Devices met in this folder before are members to dial, at the addresses they had.
+        {
+            let cfg = lock(&self.inner.cfg);
+            let mut members = shared.members.write().unwrap_or_else(|e| e.into_inner());
+            let mut book = lock(&self.inner.book);
+            for d in cfg.devices.iter().filter(|d| d.folders.contains(&e.id)) {
+                let Ok(dev) = d.id.parse::<DeviceId>() else { continue };
+                members.insert(dev);
+                for a in &d.addresses {
+                    if let Ok(sa) = a.parse::<SocketAddr>() {
+                        book.by_device.entry(dev).or_default().insert(sa);
+                    }
+                }
+            }
+            for a in &e.addresses {
+                if let Ok(sa) = a.parse::<SocketAddr>() {
+                    book.hints.entry(id).or_default().insert(sa);
+                }
+            }
+        }
+        self.inner.ctx.registry.add_folder(shared.clone());
+        let (stop, rx) = watch::channel(false);
+        let task = tokio::spawn(crate::runtime::run(self.inner.ctx.clone(), shared, rx));
+        lock(&self.inner.runners).insert(id, Runner { stop, task });
+        self.inner.wake_dialer.notify_one();
+        // Announced on the LAN now, not at the next round.
+        self.inner.lan.wake.notify_one();
+        // Peers already connected learn about the new folder.
+        self.offer_folder(id).await;
+        Ok(())
+    }
+
+    /// Offers a newly opened folder to every connected device: each is already a member of some folder
+    /// with us, and a device that does not hold this folder's key learns only its id. Those that hold it
+    /// answer with their own Join, and the folder starts syncing over the existing session.
+    async fn offer_folder(&self, folder: FolderId) {
+        for p in self.inner.ctx.registry.peers() {
+            if p.access(&folder).is_some() {
+                continue;
+            }
+            let join = crate::peer::own_join(&self.inner.ctx, &[folder], &p.exporter, p.device, p.lan).await;
+            if !join.folders.is_empty() {
+                let _ = p.control.send(Message::Join(join)).await;
+            }
+        }
+    }
+
+    /// Starts sharing a folder on this Mac: makes a new Read & write key.
+    pub async fn add_folder(&self, path: PathBuf) -> Result<FolderStatus, SyncError> {
+        let path = absolute(&path)?;
+        let meta = std::fs::metadata(&path).map_err(|_| invalid(format!("{} does not exist", path.display())))?;
+        if !meta.is_dir() {
+            return Err(invalid(format!("{} is not a folder", path.display())));
+        }
+        refuse_cloud_root(&path)?;
+        self.refuse_overlap(&path)?;
+        let secret = FolderSecret::generate(&mut ring::rand::SystemRandom::new()).map_err(io::Error::other)?;
+        let key = FolderKey::ReadWrite(secret);
+        self.install(key, path).await
+    }
+
+    /// Joins a shared folder with a key or a link, at `path` (created when missing).
+    pub async fn join_folder(&self, key_or_link: &str, path: PathBuf) -> Result<FolderStatus, SyncError> {
+        let link = Link::parse(key_or_link).map_err(|e| invalid(format!("not a folder key or link: {e:?}")))?;
+        if link.key.access() < Access::Read {
+            return Err(invalid("encrypted keys are not supported yet"));
+        }
+        let path = absolute(&path)?;
+        refuse_cloud_root(&path)?;
+        self.refuse_overlap(&path)?;
+        if self.inner.ctx.registry.folder(&link.key.folder_id()).is_some() {
+            return Err(invalid("this folder is already synced on this Mac"));
+        }
+        std::fs::create_dir_all(&path)?;
+        self.install(link.key, path).await
+    }
+
+    async fn install(&self, key: FolderKey, path: PathBuf) -> Result<FolderStatus, SyncError> {
+        let id = key.folder_id();
+        std::fs::create_dir_all(path.join(STATE_DIR))?;
+        self.inner.secrets.put(&folder_secret_name(&id), key.to_text().as_bytes())?;
+        let entry = FolderEntry::new(id.to_string(), path);
+        {
+            let mut cfg = lock(&self.inner.cfg);
+            cfg.folders.retain(|f| f.id != entry.id);
+            cfg.folders.push(entry.clone());
+        }
+        self.save_config()?;
+        self.open_folder(&entry).await?;
+        self.folder_status(&id).ok_or(SyncError::NotFound)
+    }
+
+    /// Stops syncing a folder on this device. The files stay; its index and `.seedwell` go. (Moving the
+    /// files to the Trash is the app's job, which knows the user's Trash.)
+    pub async fn remove_folder(&self, id: &FolderId) -> Result<PathBuf, SyncError> {
+        let path = self.stop_folder(id).await?;
+        {
+            let mut cfg = lock(&self.inner.cfg);
+            cfg.folders.retain(|f| f.id != id.to_string());
+        }
+        self.save_config()?;
+        self.inner.secrets.delete(&folder_secret_name(id))?;
+        let _ = std::fs::remove_file(self.index_path(id));
+        let state = path.join(STATE_DIR);
+        // The archive may hold the only copy of something: keep it, only the marker's other parts go.
+        if state.join("Archive").exists() {
+            let _ = std::fs::remove_file(state.join("case-probe.tmp"));
+        } else {
+            let _ = std::fs::remove_dir_all(&state);
+        }
+        Ok(path)
+    }
+
+    async fn stop_folder(&self, id: &FolderId) -> Result<PathBuf, SyncError> {
+        let f = self.inner.ctx.registry.remove_folder(id).ok_or(SyncError::NotFound)?;
+        let runner = lock(&self.inner.runners).remove(id);
+        if let Some(r) = runner {
+            let _ = r.stop.send(true);
+            let _ = tokio::time::timeout(Duration::from_secs(10), r.task).await;
+        }
+        for p in self.inner.ctx.registry.peers() {
+            p.folders.write().unwrap_or_else(|e| e.into_inner()).remove(id);
+        }
+        Ok(f.root.clone())
+    }
+
+    /// Moves a folder on this Mac to `new_path` (a rename when only the last name changes). Sync stops for
+    /// the move and starts again at the new place; other devices are not affected.
+    pub async fn move_folder(&self, id: &FolderId, new_path: PathBuf) -> Result<FolderStatus, SyncError> {
+        let new_path = absolute(&new_path)?;
+        if new_path.exists() {
+            return Err(invalid(format!("{} already exists", new_path.display())));
+        }
+        refuse_cloud_root(&new_path)?;
+        let entry = lock(&self.inner.cfg).folder(&id.to_string()).cloned().ok_or(SyncError::NotFound)?;
+        if new_path.starts_with(&entry.path) {
+            return Err(invalid("a folder cannot move into itself"));
+        }
+        self.stop_folder(id).await?;
+        let from = entry.path.clone();
+        let to = new_path.clone();
+        let moved = tokio::task::spawn_blocking(move || move_tree(&from, &to)).await.map_err(io::Error::other)?;
+        let mut entry2 = entry.clone();
+        if moved.is_ok() {
+            entry2.path = new_path;
+            if let Some(e) = lock(&self.inner.cfg).folder_mut(&id.to_string()) {
+                e.path = entry2.path.clone();
+            }
+            self.save_config()?;
+        }
+        // Back to syncing, at the new place or (if the move failed) the old one.
+        self.open_folder(&entry2).await?;
+        moved?;
+        self.folder_status(id).ok_or(SyncError::NotFound)
+    }
+
+    /// Renames a folder on this Mac (its directory). Other devices keep their own names.
+    pub async fn rename_folder(&self, id: &FolderId, name: &str) -> Result<FolderStatus, SyncError> {
+        let name = name.trim();
+        if name.is_empty() || name.contains('/') || name == "." || name == ".." || name.starts_with('.') {
+            return Err(invalid("not a usable folder name"));
+        }
+        let path = lock(&self.inner.cfg).folder(&id.to_string()).map(|e| e.path.clone()).ok_or(SyncError::NotFound)?;
+        let parent = path.parent().ok_or_else(|| invalid("the folder has no parent"))?;
+        self.move_folder(id, parent.join(name)).await
+    }
+
+    /// Pauses or resumes a folder.
+    pub async fn set_paused(&self, id: &FolderId, paused: bool) -> Result<(), SyncError> {
+        let f = self.inner.ctx.registry.folder(id).ok_or(SyncError::NotFound)?;
+        f.paused.store(paused, Ordering::Relaxed);
+        if let Some(e) = lock(&self.inner.cfg).folder_mut(&id.to_string()) {
+            e.paused = paused;
+        }
+        self.save_config()?;
+        if paused {
+            lock(&f.live).state = FolderState::Paused;
+        } else {
+            lock(&f.live).state = FolderState::Starting;
+            f.rescan.notify_one();
+        }
+        Ok(())
+    }
+
+    /// The conflict copies in a folder not yet resolved: (copy, the path it is a copy of), in the
+    /// folder's wire form. Reads the whole index: call when the list is shown, not for every update.
+    pub async fn conflicts(&self, id: &FolderId) -> Result<Vec<(String, String)>, SyncError> {
+        let f = self.inner.ctx.registry.folder(id).ok_or(SyncError::NotFound)?;
+        Ok(crate::runtime::refresh_conflicts(&f).await?)
+    }
+
+    /// What a folder is busy with, path by path ([`Activity`]). Never waits for the folder's core.
+    pub fn activity(&self, id: &FolderId) -> Result<Activity, SyncError> {
+        let f = self.inner.ctx.registry.folder(id).ok_or(SyncError::NotFound)?;
+        let local = lock(&self.inner.cfg).folders.iter().any(|e| e.id == id.to_string() && !e.ignore.is_empty());
+        let own_ignores = local || f.root.join(".seedwellignore").exists();
+        let live = lock(&f.live);
+        Ok(Activity {
+            pending: live.pending.0.clone(),
+            pending_more: live.pending.1,
+            conflicts: live.conflicts.keys().cloned().collect(),
+            own_ignores,
+        })
+    }
+
+    /// Resolves a conflict: `copy` is the conflict copy (in the folder, wire form). The version that is
+    /// not kept goes to this Mac's archive, never away; the change then syncs like any edit.
+    pub async fn resolve_conflict(&self, id: &FolderId, copy: &str, keep: Keep) -> Result<(), SyncError> {
+        let f = self.inner.ctx.registry.folder(id).ok_or(SyncError::NotFound)?;
+        trs_sync_proto::model::validate_path(copy).map_err(|_| invalid(format!("{copy:?} is not a path in the folder")))?;
+        let parsed = trs_sync::conflict::parse_conflict(copy);
+        let known = lock(&f.live).conflicts.get(copy).cloned();
+        let Some(original) = known.or_else(|| parsed.map(|c| c.original)) else {
+            return Err(invalid(format!("{copy} is not a conflict copy")));
+        };
+        let root = f.root.clone();
+        let (copy_path, original) = (copy.to_string(), original.to_string());
+        tokio::task::spawn_blocking(move || -> io::Result<()> {
+            let copy = copy_path;
+            let fs = StdFs::new(root);
+            if fs.lstat(STATE_DIR)?.is_none() {
+                return Err(io::Error::other("the folder is missing"));
+            }
+            let stamp = trs_sync::clock::compact_stamp(trs_sync::clock::Clock::now_ns(&SystemClock::default()));
+            let to_archive = |p: &str| -> io::Result<()> {
+                if fs.lstat(p)?.is_none() {
+                    return Ok(());
+                }
+                let mut dest = trs_sync::conflict::archive_path(p, &stamp);
+                let mut n = 2;
+                while fs.lstat(&dest)?.is_some() {
+                    dest = trs_sync::conflict::archive_path(p, &format!("{stamp}-{n}"));
+                    n += 1;
+                }
+                if let Some((dir, _)) = dest.rsplit_once('/') {
+                    std::fs::create_dir_all(fs.root().join(dir))?;
+                }
+                fs.rename(p, &dest)
+            };
+            match keep {
+                Keep::Original => to_archive(&copy),
+                Keep::Copy => {
+                    to_archive(&original)?;
+                    fs.rename(&copy, &original)
+                }
+                Keep::Both => {
+                    // The copy becomes an ordinary file: "Report (MacBook, 2026-10-25 14.32).docx".
+                    let at = copy.rfind(" (conflict, ").ok_or_else(|| io::Error::other("not a conflict copy"))?;
+                    let base = format!("{} ({}", &copy[..at], &copy[at + " (conflict, ".len()..]);
+                    let mut name = base.clone();
+                    let mut n = 2;
+                    while fs.lstat(&name)?.is_some() {
+                        name = match base.rsplit_once('.') {
+                            Some((stem, ext)) if !ext.contains(['/', ' ', ')']) => format!("{stem} {n}.{ext}"),
+                            _ => format!("{base} {n}"),
+                        };
+                        n += 1;
+                    }
+                    fs.rename(&copy, &name)
+                }
+            }
+        })
+        .await
+        .map_err(io::Error::other)??;
+        lock(&f.live).conflicts.remove(copy);
+        f.rescan.notify_one();
+        Ok(())
+    }
+
+    /// Scans the whole folder now.
+    pub fn rescan(&self, id: &FolderId) -> Result<(), SyncError> {
+        self.inner.ctx.registry.folder(id).ok_or(SyncError::NotFound)?.rescan.notify_one();
+        Ok(())
+    }
+
+    /// The keys and links this device may give out for a folder. Secrets: callers must treat them as such
+    /// (the agent interface returns them only with Full permission).
+    pub fn shares(&self, id: &FolderId) -> Result<Shares, SyncError> {
+        let f = self.inner.ctx.registry.folder(id).ok_or(SyncError::NotFound)?;
+        let name = lock(&f.name).clone();
+        let link = |k: &FolderKey| Link { key: k.clone(), name: Some(name.clone()) }.format();
+        let rw = (f.key.access() == Access::Write).then(|| f.key.clone());
+        let ro = f.key.read_only();
+        Ok(Shares {
+            read_write: rw.as_ref().map(FolderKey::to_text),
+            read_write_link: rw.as_ref().map(link),
+            read_only: ro.as_ref().map(FolderKey::to_text),
+            read_only_link: ro.as_ref().map(link),
+        })
+    }
+
+    /// Adds an address (`host:port`) where devices of this folder can be reached.
+    pub fn add_address(&self, id: &FolderId, addr: SocketAddr) -> Result<(), SyncError> {
+        self.inner.ctx.registry.folder(id).ok_or(SyncError::NotFound)?;
+        lock(&self.inner.book).hints.entry(*id).or_default().insert(addr);
+        if let Some(e) = lock(&self.inner.cfg).folder_mut(&id.to_string())
+            && !e.addresses.contains(&addr.to_string())
+        {
+            e.addresses.push(addr.to_string());
+        }
+        self.save_config()?;
+        self.inner.wake_dialer.notify_one();
+        Ok(())
+    }
+
+    /// The device-wide settings.
+    pub fn settings(&self) -> Settings {
+        lock(&self.inner.cfg).settings.clone()
+    }
+
+    /// Changes the device-wide settings (the port takes effect at the next start).
+    pub fn set_settings(&self, s: Settings) -> Result<(), SyncError> {
+        if !s.device_name.is_empty() {
+            *lock(&self.inner.ctx.device_name) = s.device_name.chars().take(64).collect();
+        }
+        self.inner.ctx.limits.set_kib(s.up_kib, s.down_kib);
+        lock(&self.inner.cfg).settings = s;
+        self.save_config()?;
+        Ok(())
+    }
+
+    /// Syncs a folder only with devices on the local network (or everywhere again). Sessions with other
+    /// devices stop sharing it at once; they keep the folders that are still allowed.
+    pub fn set_lan_only(&self, id: &FolderId, lan_only: bool) -> Result<(), SyncError> {
+        let f = self.inner.ctx.registry.folder(id).ok_or(SyncError::NotFound)?;
+        f.lan_only.store(lan_only, Ordering::Relaxed);
+        if let Some(e) = lock(&self.inner.cfg).folder_mut(&id.to_string()) {
+            e.lan_only = lan_only;
+        }
+        self.save_config()?;
+        if lan_only {
+            for p in self.inner.ctx.registry.peers().into_iter().filter(|p| !p.lan) {
+                p.folders.write().unwrap_or_else(|e| e.into_inner()).remove(id);
+            }
+        } else {
+            self.inner.wake_dialer.notify_one();
+        }
+        Ok(())
+    }
+
+    fn refuse_overlap(&self, path: &Path) -> Result<(), SyncError> {
+        for e in &lock(&self.inner.cfg).folders {
+            if path.starts_with(&e.path) || e.path.starts_with(path) {
+                return Err(invalid(format!("{} overlaps the synced folder {}", path.display(), e.path.display())));
+            }
+        }
+        Ok(())
+    }
+
+    fn folder_status(&self, id: &FolderId) -> Option<FolderStatus> {
+        let f = self.inner.ctx.registry.folder(id)?;
+        Some(self.status_of(&f))
+    }
+
+    fn status_of(&self, f: &FolderShared) -> FolderStatus {
+        let live = lock(&f.live).clone();
+        let (need_files, need_bytes) = live.need;
+        let connected = self.inner.ctx.registry.peers().iter().filter(|p| p.access(&f.id).is_some()).count() as u32;
+        let members = f.members.read().unwrap_or_else(|e| e.into_inner()).len() as u32;
+        FolderStatus {
+            id: f.id.to_string(),
+            name: lock(&f.name).clone(),
+            path: f.root.display().to_string(),
+            access: f.key.access(),
+            state: if f.paused.load(Ordering::Relaxed) { FolderState::Paused } else { live.state },
+            files: live.local.0,
+            bytes: live.local.1,
+            need_files,
+            need_bytes,
+            rate_in: f.fetched.rate(),
+            rate_out: f.served.rate(),
+            connected,
+            members,
+            conflicts: live.conflicts.len() as u32,
+            lan_only: f.lan_only.load(Ordering::Relaxed),
+            issues: live.issues,
+            error: live.error,
+            last_synced_s: live.last_synced_s,
+        }
+    }
+
+    /// Everything, for the UI.
+    pub fn snapshot(&self) -> Snapshot {
+        let folders = self.inner.ctx.registry.folders().iter().map(|f| self.status_of(f)).collect();
+        let devices = self
+            .inner
+            .ctx
+            .registry
+            .peers()
+            .iter()
+            .map(|p| DeviceStatus {
+                id: p.device.to_string(),
+                name: p.name.clone(),
+                client: p.client.clone(),
+                address: p.remote.to_string(),
+                via: if p.via == Via::Relay {
+                    "Relay".into()
+                } else if p.lan {
+                    "LAN".into()
+                } else {
+                    "Internet".into()
+                },
+                folders: p.folders.read().unwrap_or_else(|e| e.into_inner()).keys().map(|f| f.to_string()).collect(),
+                rx_bytes: p.rx_bytes.load(Ordering::Relaxed),
+                tx_bytes: p.tx_bytes.load(Ordering::Relaxed),
+            })
+            .collect();
+        Snapshot {
+            device_id: self.inner.ctx.me.to_string(),
+            device_name: lock(&self.inner.ctx.device_name).clone(),
+            port: self.inner.port,
+            folders,
+            devices,
+        }
+    }
+
+    /// Remembers where a device can be reached (LAN discovery, peer exchange) and dials it if needed.
+    pub(crate) fn learn_address(&self, device: Option<DeviceId>, folder: Option<FolderId>, addr: SocketAddr) {
+        if device == Some(self.inner.ctx.me) {
+            return;
+        }
+        // A device found for a folder (LAN discovery: its tag needs the folder's key) is one of its members,
+        // so the dial loop wants it (and offers it the folder). Before the book's lock: `open_folder` takes
+        // the members' lock first.
+        if let (Some(d), Some(f)) = (device, folder.and_then(|f| self.inner.ctx.registry.folder(&f))) {
+            f.members.write().unwrap_or_else(|e| e.into_inner()).insert(d);
+        }
+        let mut book = lock(&self.inner.book);
+        match (device, folder) {
+            (Some(d), _) => {
+                book.by_device.entry(d).or_default().insert(addr);
+            }
+            (None, Some(f)) => {
+                book.hints.entry(f).or_default().insert(addr);
+            }
+            (None, None) => return,
+        }
+        drop(book);
+        self.inner.wake_dialer.notify_one();
+    }
+
+    /// Forgets the dial backoff of `addr` (LAN discovery saw a device start, or met it for the first time).
+    pub(crate) fn retry_now(&self, addr: SocketAddr) {
+        lock(&self.inner.book).tried.remove(&addr);
+    }
+
+    /// What LAN discovery needs.
+    pub(crate) fn lan(&self) -> &crate::lan::Lan {
+        &self.inner.lan
+    }
+
+    // ----- what relays and hole punching need (crate::relay, crate::punch, crate::relay_server) -----
+
+    /// The session context.
+    pub(crate) fn ctx(&self) -> &Arc<Ctx> {
+        &self.inner.ctx
+    }
+
+    /// Relay and hole-punch state.
+    pub(crate) fn net(&self) -> &crate::relay::Net {
+        &self.inner.net
+    }
+
+    /// Our uTP socket, if uTP runs.
+    pub(crate) fn utp(&self) -> Option<&trs_utp::UtpSocket> {
+        self.inner.utp.as_ref()
+    }
+
+    /// The service is stopping.
+    pub(crate) fn is_stopping(&self) -> bool {
+        self.inner.stopping.load(Ordering::Relaxed)
+    }
+
+    /// Wakes the dial loop.
+    pub(crate) fn wake_dialer(&self) {
+        self.inner.wake_dialer.notify_one();
+    }
+
+    /// Runs a task until the service stops.
+    pub(crate) fn spawn_task(&self, f: impl Future<Output = ()> + Send + 'static) {
+        let t = tokio::spawn(f);
+        if self.is_stopping() {
+            t.abort();
+        } else {
+            lock(&self.inner.tasks).push(t);
+        }
+    }
+
+    /// The folders to prove when dialing `device`.
+    pub(crate) fn candidates(&self, device: DeviceId) -> Vec<FolderId> {
+        candidates_for(&self.inner.ctx, Some(device), None)
+    }
+
+    /// Runs a session that finished its handshake (dialed, accepted, punched or relayed). A direct one with
+    /// a device the test switch refuses is dropped.
+    pub(crate) async fn run_session(&self, conn: session::Connected, candidates: Vec<FolderId>) {
+        if self.is_stopping() || (conn.via != Via::Relay && self.is_blocked(conn.device())) {
+            return;
+        }
+        let _ = crate::peer::run(self.inner.ctx.clone(), conn, candidates).await;
+    }
+
+    /// Direct sessions with `device` are refused (the test switch).
+    pub(crate) fn is_blocked(&self, device: DeviceId) -> bool {
+        lock(&self.inner.refuse_direct).contains(&device)
+    }
+
+    /// Direct dials to `device` are not getting through: it has no known address, or each was tried and
+    /// has not connected since.
+    pub(crate) fn direct_failing(&self, device: DeviceId) -> bool {
+        if self.is_blocked(device) {
+            return true;
+        }
+        let book = lock(&self.inner.book);
+        book.by_device.get(&device).is_none_or(|addrs| addrs.iter().all(|a| book.tried.get(a).is_some_and(|t| t.1 > 0)))
+    }
+
+    /// The addresses `device`'s signed record lists.
+    pub(crate) fn record_addrs(&self, device: DeviceId) -> Vec<String> {
+        lock(&self.inner.book).records.get(&device).map(|r| r.addrs.clone()).unwrap_or_default()
+    }
+
+    /// Every relay server (`relay://…`) in some folder's addresses.
+    pub(crate) fn relay_urls(&self) -> Vec<String> {
+        let cfg = lock(&self.inner.cfg);
+        let mut out: Vec<String> = Vec::new();
+        for a in cfg.folders.iter().flat_map(|f| f.addresses.iter()) {
+            if crate::relay_server::is_relay_url(a) && !out.contains(a) {
+                out.push(a.clone());
+            }
+        }
+        out
+    }
+
+    /// The relay servers `device` may be registered at: those of the folders it is a member of, and the one
+    /// its signed address record names.
+    pub(crate) fn relays_for(&self, device: DeviceId) -> Vec<String> {
+        let ids: BTreeSet<String> = self
+            .inner
+            .ctx
+            .registry
+            .folders()
+            .iter()
+            .filter(|f| f.members.read().unwrap_or_else(|e| e.into_inner()).contains(&device))
+            .map(|f| f.id.to_string())
+            .collect();
+        let mut out: Vec<String> = Vec::new();
+        {
+            let cfg = lock(&self.inner.cfg);
+            for a in cfg.folders.iter().filter(|f| ids.contains(&f.id) && !f.lan_only).flat_map(|f| f.addresses.iter()) {
+                if crate::relay_server::is_relay_url(a) && !out.contains(a) {
+                    out.push(a.clone());
+                }
+            }
+        }
+        if let Some(r) = lock(&self.inner.book).records.get(&device).map(|r| r.relay.clone())
+            && crate::relay_server::is_relay_url(&r)
+            && !out.contains(&r)
+        {
+            out.push(r);
+        }
+        out
+    }
+
+    /// Adds a relay server (`relay://host:port#<relay device id>`) to a folder's addresses: this device
+    /// keeps a registration there, and the folder's members are also tried through it.
+    pub fn add_relay(&self, id: &FolderId, url: &str) -> Result<(), SyncError> {
+        self.inner.ctx.registry.folder(id).ok_or(SyncError::NotFound)?;
+        let url = url.trim();
+        if !crate::relay_server::is_relay_url(url) {
+            return Err(invalid("not a relay address (relay://host:port#<relay device id>)"));
+        }
+        if let Some(e) = lock(&self.inner.cfg).folder_mut(&id.to_string())
+            && !e.addresses.iter().any(|a| a == url)
+        {
+            e.addresses.push(url.to_string());
+        }
+        self.save_config()?;
+        crate::relay_server::ensure_registered(self, url);
+        self.inner.wake_dialer.notify_one();
+        Ok(())
+    }
+
+    /// What this device relays, for diagnostics.
+    pub fn relay_stats(&self) -> crate::relay::RelayStats {
+        self.inner.net.stats()
+    }
+
+    /// What each connected device's session runs over (`TCP`, `uTP` or `Relay`).
+    pub fn transports(&self) -> Vec<(DeviceId, Via)> {
+        self.inner.ctx.registry.peers().iter().map(|p| (p.device, p.via)).collect()
+    }
+
+    /// **Tests only:** from now on, neither dial nor accept direct (TCP or uTP) sessions with `device`, and
+    /// close the direct one that runs; relayed sessions still work. This is how tests make two devices on
+    /// one loopback "unable to reach each other".
+    #[doc(hidden)]
+    pub fn test_refuse_direct(&self, device: DeviceId) {
+        lock(&self.inner.refuse_direct).insert(device);
+        if let Some(p) = self.inner.ctx.registry.peer(&device)
+            && p.via != Via::Relay
+        {
+            p.close();
+        }
+    }
+
+    /// Our own signed address record: our port at the address a peer reached us on (`local`).
+    fn own_record(&self, local: SocketAddr) -> AddressRecord {
+        let addrs = vec![SocketAddr::new(local.ip(), self.inner.port).to_string()];
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        // Where we keep a registration: others reach us through it.
+        let relay = self.relay_urls().into_iter().next().unwrap_or_default();
+        AddressRecord::sign(&self.inner.ctx.key, addrs, relay, now)
+    }
+
+    /// Remembers a device met in folders (its name, folders and an address), in `sync.toml`.
+    fn remember_device(&self, device: DeviceId, name: Option<&str>, folder: Option<FolderId>, addr: Option<SocketAddr>) {
+        let mut cfg = lock(&self.inner.cfg);
+        let d = cfg.device_mut(&device.to_string());
+        let mut changed = false;
+        if let Some(n) = name.filter(|n| !n.is_empty() && *n != d.name) {
+            d.name = n.to_string();
+            changed = true;
+        }
+        if let Some(f) = folder.map(|f| f.to_string()).filter(|f| !d.folders.contains(f)) {
+            d.folders.push(f);
+            changed = true;
+        }
+        if let Some(a) = addr.map(|a| a.to_string()).filter(|a| d.addresses.first() != Some(a)) {
+            d.addresses.retain(|x| *x != a);
+            d.addresses.insert(0, a);
+            d.addresses.truncate(8);
+            changed = true;
+        }
+        drop(cfg);
+        if changed {
+            let _ = self.save_config();
+        }
+    }
+
+    /// Dials `addr` (for a known `device`, or for the folders in `candidates`).
+    fn dial(&self, addr: SocketAddr, device: Option<DeviceId>, candidates: Vec<FolderId>) {
+        {
+            let mut book = lock(&self.inner.book);
+            let now = Instant::now();
+            let (last, fails) = book.tried.get(&addr).copied().unwrap_or((now - Duration::from_secs(3600), 0));
+            let wait = Duration::from_secs(5u64 << fails.min(6));
+            if now.duration_since(last) < wait {
+                return;
+            }
+            book.tried.insert(addr, (now, fails + 1));
+        }
+        let h = self.clone();
+        tokio::spawn(async move {
+            // A failed dial is retried with backoff by the dial loop.
+            if device.is_some_and(|d| h.is_blocked(d)) {
+                return;
+            }
+            let plan = session::DialPlan { utp: h.inner.utp.as_ref(), tcp: h.inner.dial_tcp };
+            if let Ok(conn) = session::dial(&h.inner.ctx.tls, plan, addr, device).await {
+                if h.is_blocked(conn.device()) {
+                    return;
+                }
+                lock(&h.inner.book).tried.remove(&addr);
+                let dev = conn.device();
+                h.learn_address(Some(dev), None, addr);
+                h.remember_device(dev, None, None, Some(addr));
+                h.run_session(conn, candidates).await;
+            }
+        });
+    }
+}
+
+/// The folders shared with `device` as far as we know (it was seen as a member), else every folder.
+fn candidates_for(ctx: &Ctx, device: Option<DeviceId>, hint: Option<FolderId>) -> Vec<FolderId> {
+    let mut out: Vec<FolderId> = ctx
+        .registry
+        .folders()
+        .iter()
+        .filter(|f| device.is_some_and(|d| f.members.read().unwrap_or_else(|e| e.into_inner()).contains(&d)))
+        .map(|f| f.id)
+        .collect();
+    if let Some(h) = hint
+        && !out.contains(&h)
+    {
+        out.push(h);
+    }
+    out
+}
+
+fn absolute(p: &Path) -> io::Result<PathBuf> {
+    if p.is_absolute() { Ok(p.to_path_buf()) } else { Ok(std::env::current_dir()?.join(p)) }
+}
+
+/// iCloud Drive and File Provider folders are refused: their files may be placeholders, and two sync
+/// engines on one folder fight (SPEC §7G.2).
+fn refuse_cloud_root(p: &Path) -> Result<(), SyncError> {
+    let s = p.to_string_lossy();
+    if s.contains("/Library/Mobile Documents") || s.contains("/Library/CloudStorage") {
+        return Err(invalid("folders in iCloud Drive or other cloud storage cannot be synced"));
+    }
+    Ok(())
+}
+
+fn load_ignore(fs: &StdFs, local: &[String]) -> Ignore {
+    let synced = trs_sync::fs::read_all(fs, ".seedwellignore").ok().and_then(|b| String::from_utf8(b).ok()).unwrap_or_default();
+    let local = local.join("\n");
+    Ignore::parse_all(&[&synced, &local]).0
+}
+
+/// Moves a directory: a rename on the same volume, else a copy then a delete of the original.
+fn move_tree(from: &Path, to: &Path) -> io::Result<()> {
+    if let Some(parent) = to.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    match std::fs::rename(from, to) {
+        Ok(()) => Ok(()),
+        Err(e) if e.raw_os_error() == Some(18) => {
+            // EXDEV: another volume.
+            copy_tree(from, to)?;
+            std::fs::remove_dir_all(from)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+fn copy_tree(from: &Path, to: &Path) -> io::Result<()> {
+    std::fs::create_dir(to)?;
+    for e in std::fs::read_dir(from)? {
+        let e = e?;
+        let (src, dst) = (e.path(), to.join(e.file_name()));
+        let t = e.file_type()?;
+        if t.is_dir() {
+            copy_tree(&src, &dst)?;
+        } else if t.is_symlink() {
+            std::os::unix::fs::symlink(std::fs::read_link(&src)?, &dst)?;
+        } else {
+            std::fs::copy(&src, &dst)?;
+            let m = std::fs::metadata(&src)?;
+            if let Ok(t) = m.modified() {
+                std::fs::File::options().write(true).open(&dst)?.set_modified(t)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+type Foreign = mpsc::Receiver<trs_utp::ForeignDatagram>;
+
+/// Binds the sync port: TCP, and with `utp` its UDP twin (same number) for uTP and hole-punch probes. The
+/// saved port first; if it (or its UDP twin) is taken, any free pair, which the caller then remembers. If
+/// no pair is free after a few tries, the service runs without uTP.
+async fn bind_port(ip: IpAddr, saved: u16, utp: bool) -> io::Result<(TcpListener, Option<trs_utp::UtpSocket>, Option<Foreign>)> {
+    const TRIES: usize = 8;
+    let mut last = None;
+    for attempt in 0..TRIES {
+        let want = if attempt == 0 { saved } else { 0 };
+        let listener = match TcpListener::bind(SocketAddr::new(ip, want)).await {
+            Ok(l) => l,
+            Err(e) if attempt + 1 < TRIES => {
+                last = Some(e);
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
+        if !utp {
+            return Ok((listener, None, None));
+        }
+        let port = listener.local_addr()?.port();
+        let (tx, rx) = mpsc::channel(256);
+        let cfg = trs_utp::Config::default();
+        match trs_utp::UtpSocket::bind_with_foreign(SocketAddr::new(ip, port), cfg, tx).await {
+            Ok(u) => return Ok((listener, Some(u), Some(rx))),
+            Err(e) if attempt + 1 < TRIES => last = Some(e),
+            Err(e) => {
+                eprintln!("seedwell sync: no uTP (UDP port {port}: {e})");
+                return Ok((listener, None, None));
+            }
+        }
+    }
+    Err(last.unwrap_or_else(|| io::Error::other("could not bind the sync port")))
+}
+
+/// Accepts uTP sessions on the sync port's UDP twin, like TCP ones (magic, then TLS).
+async fn utp_accept_loop(h: SyncHandle, sock: trs_utp::UtpSocket) {
+    loop {
+        let Ok((s, remote)) = sock.accept().await else {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            continue;
+        };
+        if h.inner.stopping.load(Ordering::Relaxed) {
+            return;
+        }
+        let h = h.clone();
+        tokio::spawn(async move {
+            let local = s.local_addr();
+            if let Ok(conn) = session::accept_over(&h.inner.ctx.tls, Box::new(s), remote, local, Via::Utp).await {
+                h.run_session(conn, Vec::new()).await;
+            }
+        });
+    }
+}
+
+/// Datagrams on the sync port that are not uTP: hole-punch probes.
+async fn foreign_loop(h: SyncHandle, mut rx: Foreign) {
+    while let Some(d) = rx.recv().await {
+        crate::punch::on_datagram(&h, d.from, &d.data);
+    }
+}
+
+async fn accept_loop(h: SyncHandle, listener: TcpListener) {
+    loop {
+        let Ok((tcp, remote)) = listener.accept().await else {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            continue;
+        };
+        if h.inner.stopping.load(Ordering::Relaxed) {
+            return;
+        }
+        let h = h.clone();
+        tokio::spawn(async move {
+            match session::accept(&h.inner.ctx.tls, tcp, remote).await {
+                Ok(Accepted::Session(conn)) => {
+                    h.run_session(*conn, Vec::new()).await;
+                }
+                Ok(Accepted::Relay(tcp, remote)) => crate::relay::serve(h.clone(), tcp, remote).await,
+                Err(_) => {}
+            }
+        });
+    }
+}
+
+async fn hub_loop(h: SyncHandle, mut rx: mpsc::UnboundedReceiver<HubMsg>) {
+    while let Some(msg) = rx.recv().await {
+        match msg {
+            HubMsg::PeerUp(d) => {
+                // Tell the new peer where we are, and pass on what we know of other devices (peer
+                // exchange: records are signed by their devices, so passing them on cannot forge them).
+                if let Some(p) = h.inner.ctx.registry.peer(&d) {
+                    h.remember_device(d, Some(&p.name), None, None);
+                    let mut records = vec![h.own_record(p.local)];
+                    records.extend(lock(&h.inner.book).records.values().filter(|r| DeviceId::of_public_key(&r.device_pk) != d).take(64).cloned());
+                    let _ = p.control.send(Message::Addresses(Addresses { records })).await;
+                }
+            }
+            HubMsg::PeerDown(_) => h.inner.wake_dialer.notify_one(),
+            HubMsg::MemberSeen { folder, device } => h.remember_device(device, None, Some(folder), None),
+            HubMsg::Addresses(records) => {
+                for r in records {
+                    if !r.verify() {
+                        continue;
+                    }
+                    let dev = DeviceId::of_public_key(&r.device_pk);
+                    {
+                        let mut book = lock(&h.inner.book);
+                        let newer = book.records.get(&dev).is_none_or(|old| old.issued_s < r.issued_s);
+                        if !newer {
+                            continue;
+                        }
+                        book.records.insert(dev, r.clone());
+                    }
+                    for a in &r.addrs {
+                        if let Ok(sa) = a.parse::<SocketAddr>() {
+                            h.learn_address(Some(dev), None, sa);
+                        }
+                    }
+                }
+            }
+            HubMsg::Relay(from, msg) => crate::relay::on_message(&h, from, *msg).await,
+        }
+    }
+}
+
+/// Dials every member of every folder that is not connected, and every address hint, with backoff.
+async fn dial_loop(h: SyncHandle) {
+    loop {
+        tokio::select! {
+            _ = h.inner.wake_dialer.notified() => {}
+            _ = tokio::time::sleep(Duration::from_secs(30)) => {}
+        }
+        if h.inner.stopping.load(Ordering::Relaxed) {
+            return;
+        }
+        let ctx = h.inner.ctx.clone();
+        let mut wanted: BTreeMap<DeviceId, ()> = BTreeMap::new();
+        let mut hints: Vec<(SocketAddr, FolderId)> = Vec::new();
+        for f in ctx.registry.folders() {
+            if f.paused.load(Ordering::Relaxed) {
+                continue;
+            }
+            for d in f.members.read().unwrap_or_else(|e| e.into_inner()).iter() {
+                if ctx.registry.peer(d).is_none() {
+                    wanted.insert(*d, ());
+                }
+            }
+            if let Some(addrs) = lock(&h.inner.book).hints.get(&f.id) {
+                hints.extend(addrs.iter().map(|a| (*a, f.id)));
+            }
+        }
+        let by_device: Vec<(DeviceId, Vec<SocketAddr>)> = {
+            let book = lock(&h.inner.book);
+            wanted.keys().filter_map(|d| book.by_device.get(d).map(|a| (*d, a.iter().copied().collect()))).collect()
+        };
+        for (d, addrs) in by_device {
+            for a in addrs {
+                h.dial(a, Some(d), candidates_for(&ctx, Some(d), None));
+            }
+        }
+        // A hint that turned out to be a connected device's address is not dialed again (each successful
+        // dial clears its backoff and wakes this loop, which would otherwise redial it at once, forever).
+        let connected: BTreeSet<SocketAddr> = {
+            let book = lock(&h.inner.book);
+            ctx.registry.peers().iter().filter_map(|p| book.by_device.get(&p.device)).flatten().copied().collect()
+        };
+        for (a, f) in hints {
+            if !connected.contains(&a) {
+                h.dial(a, None, candidates_for(&ctx, None, Some(f)));
+            }
+        }
+        // Members that direct dials do not reach: relay servers, hole punching, member relays.
+        for d in wanted.keys() {
+            crate::relay::reach(&h, *d);
+        }
+    }
+}
+
+/// Announces and looks up each folder's daily DHT topic every 15 minutes.
+async fn dht_loop(h: SyncHandle) {
+    let Some(dht) = h.inner.discovery.clone() else { return };
+    loop {
+        let day = (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs()) / 86_400) as u32;
+        let lan_only: BTreeSet<String> = lock(&h.inner.cfg).folders.iter().filter(|f| f.lan_only || f.paused).map(|f| f.id.clone()).collect();
+        if lock(&h.inner.cfg).settings.dht_discovery {
+            for f in h.inner.ctx.registry.folders() {
+                if lan_only.contains(&f.id.to_string()) {
+                    continue;
+                }
+                let mut found = dht.announce(f.key.dht_topic(day), h.inner.port).await;
+                found.extend(dht.lookup(f.key.dht_topic(day.saturating_sub(1))).await);
+                for a in found {
+                    h.learn_address(None, Some(f.id), a);
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(15 * 60)).await;
+    }
+}

@@ -27,6 +27,9 @@ import os
     private var rowItems: [String: NSMenuItem] = [:]
     private var rows: [String: TransferRow] = [:]
     private var sharingItem: NSMenuItem?
+    /// The Folder Sync line and its submenu (SPEC 8.2 item 5).
+    private var syncItem: NSMenuItem?
+    private(set) lazy var menuSync = MenuSync(actions: commands.sync)
     /// The inline file lists of the torrent rows (lazy: nothing is fetched until one opens).
     private(set) lazy var menuFiles = MenuFiles(core: core, commands: commands)
     /// The Open / Quit row (QA draws its hover state).
@@ -125,6 +128,7 @@ import os
         onWillOpen?()
         qaMenuOpen = true
         pinToSRGB()
+        menuSync.menuOpened(core.syncSnapshot())
         rebuild(core.snapshot())
         let t = Timer(timeInterval: 1, repeats: true) { [weak self] _ in MainActor.assumeIsolated { self?.tick() } }
         t.tolerance = 0.1
@@ -202,6 +206,7 @@ import os
         commands.arrivals.note(s)
         // An open file list is not rebuilt under the pointer (ticking a file can move the row).
         if signatureOf(s) != signature, !menuFiles.isOpen { rebuild(s) } else { update(s) }
+        menuSync.update(core.syncSnapshot())
     }
 
     /// The Downloading section and the Queued section as the menu shows them (SPEC 8.2). A torrent that
@@ -267,13 +272,20 @@ import os
         let r = s.recent.prefix(Self.recentShown).map(\.id)
         let a = ["\(s.sharingTotal > 0)", "\(s.errorCount)", "\(s.online)"]
         let c = s.downloading.filter(\.awaitingChoice).map(\.id)
-        return [d, q, r, a, c].map { $0.joined(separator: ",") }.joined(separator: "|")
+        return [d, q, r, a, c].map { $0.joined(separator: ",") }.joined(separator: "|") + "|" + Self.syncSignature(core.syncSnapshot())
     }
+
+    /// The Folder Sync line is in the menu once sync runs or has folders. Its folders are the submenu's own
+    /// business (`MenuSync` rebuilds them in place), so only the line's presence is part of the menu's structure.
+    nonisolated static func showsSync(_ s: SyncSnapshot) -> Bool { s.running || !s.folders.isEmpty || s.problem != nil }
+    nonisolated static func syncSignature(_ s: SyncSnapshot) -> String { showsSync(s) ? "sync" : "" }
 
     private func rebuild(_ s: Snapshot) {
         commands.arrivals.note(s)
         signature = signatureOf(s)
         let layout = Self.layout(s, arrivals: commands.arrivals.arrivals)
+        syncItem?.submenu = nil  // the submenu is reused: it may hang under one item only
+        syncItem = nil
         menu.removeAllItems()
         rowItems = [:]
         rows = [:]
@@ -315,6 +327,17 @@ import os
             sharingItem = item
             menu.addItem(item)
             update(s)
+        }
+        let sync = core.syncSnapshot()
+        if Self.showsSync(sync) {
+            if s.sharingTotal == 0, !menu.items.isEmpty { menu.addItem(.separator()) }
+            // The one submenu of this menu (approved 2026-10-25): the folders, then Add Folder….
+            let item = NSMenuItem(title: "Folder Sync", action: nil, keyEquivalent: "")
+            item.image = NSImage(systemSymbolName: "arrow.triangle.2.circlepath", accessibilityDescription: nil)
+            item.subtitle = SyncText.summary(sync)
+            item.submenu = menuSync.menu
+            syncItem = item
+            menu.addItem(item)
         }
         menu.addItem(.separator())
         // Only while an update is waiting (read when the menu is rebuilt; no timer of its own).
@@ -361,6 +384,10 @@ import os
             rowItems[r.id]?.subtitle = Self.recentSubtitle(r)
         }
         if let item = sharingItem { item.attributedTitle = Self.sharingTitle(s) }
+        if let item = syncItem {
+            let line = SyncText.summary(core.syncSnapshot())
+            if item.subtitle != line { item.subtitle = line }
+        }
         for item in rowItems.values { (item.view as? MenuTorrentRow)?.sync(from: item) }
         refreshHover()
     }

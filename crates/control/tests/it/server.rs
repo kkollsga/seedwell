@@ -96,6 +96,18 @@ async fn permission_matrix_every_method_every_level() {
             Method::StopStream => json!({"token": "nope"}),
             Method::SettingsSet => json!({"changes": {"transfers.max_active_downloads": 4}}),
             Method::WaitFor => json!({"ids": ["bbbbbb"], "timeout_secs": 1}),
+            Method::SyncStatus | Method::SyncShare | Method::SyncPause | Method::SyncResume | Method::SyncRescan | Method::SyncRemove | Method::SyncConflicts => {
+                json!({"folder": "Docs"})
+            }
+            Method::SyncSetLanOnly => json!({"folder": "Docs", "lan_only": true}),
+            Method::SyncResolve => json!({"folder": "Docs", "copy": "a (Mac, 2026-10-25 14.32).txt", "keep": "both"}),
+            Method::SyncAdd => json!({"path": "/tmp/seedwell-test-sync"}),
+            Method::SyncJoin => json!({"key_or_link": "SWR-NOTAKEY"}),
+            Method::SyncRename => json!({"folder": "Docs", "name": "Papers"}),
+            Method::SyncMove => json!({"folder": "Docs", "path": "/tmp/seedwell-test-sync-2"}),
+            Method::SyncAddAddress => json!({"folder": "Docs", "address": "127.0.0.1:9"}),
+            Method::SyncRemoveConfirm => json!({"token": "nope"}),
+            Method::SyncSetSettings => json!({"device_name": "Studio"}),
             _ => json!({}),
         }
     };

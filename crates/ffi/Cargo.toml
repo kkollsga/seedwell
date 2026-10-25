@@ -29,6 +29,11 @@ trs-storage = { path = "../storage" }
 trs-state = { path = "../state" }
 trs-classify = { path = "../classify" }
 trs-control = { path = "../control" }
+# Folder sync (SPEC 7G): the service's handle, its secret store and status, keys and links.
+trs-sync-net = { path = "../sync-net" }
+trs-sync-proto = { path = "../sync-proto" }
+# Conflict copy names read back (device and time, for the folder page).
+trs-sync = { path = "../sync" }
 trs-tracker = { path = "../tracker" }
 # Developer mode: the tracker log viewer reads and clears the log.
 trs-devlog = { path = "../devlog" }

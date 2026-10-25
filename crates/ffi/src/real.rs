@@ -164,6 +164,8 @@ pub struct RealBackend {
     sd: Arc<Shutdown>,
     /// Whether a torrent holds a video file, by id: asked of the engine once and remembered.
     videos: Mutex<std::collections::HashMap<String, RowFiles>>,
+    /// Folder sync (SPEC 7G), started next to the engine.
+    sync: Arc<crate::sync::RealSync>,
 }
 
 pub struct StartOptions {
@@ -173,6 +175,8 @@ pub struct StartOptions {
     pub allow_loopback_trackers: bool,
     /// Refuse to start when any folder of the state lies inside this path.
     pub forbidden_root: Option<PathBuf>,
+    /// The Keychain for folder sync's keys (`None`: a 0600 file in the state folder).
+    pub secret_vault: Option<Arc<dyn crate::sync::SecretVault>>,
 }
 
 /// Every folder `trackers.toml` makes the engine touch, `~` expanded.
@@ -234,8 +238,10 @@ impl RealBackend {
         let settings = SettingsStore::new(&o.dir);
         let cfg = settings.config();
 
+        // Folder sync starts in the background; the control server serves it once it is up.
+        let sync = crate::sync::RealSync::start(rt.handle(), &engine, &o.dir, o.secret_vault.clone());
         // The control server for agents (SPEC 9A) lives on the engine's runtime.
-        let server = trs_control::start_for_app(
+        let server = trs_control::start_for_app_with_sync(
             rt.handle(),
             engine.clone(),
             AppServerConfig {
@@ -246,6 +252,7 @@ impl RealBackend {
                 options: ServerOptions::default().with_config(&cfg),
                 tz_offset: Some(Arc::new(|| trs_engine::util::local_utc_offset(trs_engine::util::unix_secs() as i64))),
             },
+            sync.slot(),
         );
         let (server, socket) = match server {
             Ok(s) => (Some(s), Some(o.socket.display().to_string())),
@@ -294,6 +301,7 @@ impl RealBackend {
             socket,
             cleared_at: Mutex::new(cleared),
             videos: Mutex::new(std::collections::HashMap::new()),
+            sync,
             sd: Arc::new(Shutdown {
                 started: AtomicBool::new(false),
                 result: Mutex::new(None),
@@ -876,6 +884,10 @@ fn host_of(url: Option<&str>) -> String {
 }
 
 impl Backend for RealBackend {
+    fn sync(&self) -> Arc<dyn crate::sync::SyncBackend> {
+        self.sync.clone()
+    }
+
     fn snapshot(&self) -> Snapshot {
         let l = self.loaded(CACHE_AGE);
         let pol = lock(&self.policy);
@@ -1227,6 +1239,7 @@ impl Backend for RealBackend {
         if !sd.started.swap(true, Ordering::SeqCst) {
             let host = lock(&self.host).take();
             let server = lock(&self.server).take();
+            let sync = self.sync.clone();
             let sd2 = self.sd.clone();
             let secs = u64::from(deadline_secs);
             *lock(&sd.deadline) = Some(Instant::now() + Duration::from_secs(secs + 5));
@@ -1234,6 +1247,7 @@ impl Backend for RealBackend {
                 if let Some(s) = server {
                     s.shutdown().await;
                 }
+                sync.stop().await;
                 let r = match host {
                     Some(h) => h.shutdown(Duration::from_secs(secs)).await,
                     None => eng::ShutdownReport::default(),

@@ -1750,6 +1750,10 @@ pub struct PortMapStatus {
     pub external_tcp_port: Option<u16>,
     /// UDP port as seen from outside.
     pub external_udp_port: Option<u16>,
+    /// The extra port (folder sync's, `EngineHandle::set_extra_mapped_port`), TCP, as seen from outside.
+    pub extra_external_tcp_port: Option<u16>,
+    /// The extra port, UDP (sync's uTP), as seen from outside.
+    pub extra_external_udp_port: Option<u16>,
     /// No method worked.
     pub unavailable: bool,
 }

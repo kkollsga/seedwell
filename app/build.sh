@@ -73,7 +73,9 @@ fi
 "$APP_DIR/fetch-sparkle.sh"
 echo "==> Swift app (${SWIFT_ARGS[*]})"
 (cd "$APP_DIR" && swift build "${SWIFT_ARGS[@]}" --product SeedwellApp)
-BIN="$(cd "$APP_DIR" && swift build "${SWIFT_ARGS[@]}" --show-bin-path)/SeedwellApp"
+(cd "$APP_DIR" && swift build "${SWIFT_ARGS[@]}" --product SeedwellFinderSync)
+BIN_DIR="$(cd "$APP_DIR" && swift build "${SWIFT_ARGS[@]}" --show-bin-path)"
+BIN="$BIN_DIR/SeedwellApp"
 
 echo "==> Assembling $APP"
 rm -rf "$APP"
@@ -158,7 +160,51 @@ cat > "$APP/Contents/Info.plist" <<PLIST
             <key>CFBundleURLName</key><string>Magnet link</string>
             <key>CFBundleURLSchemes</key><array><string>magnet</string></array>
         </dict>
+        <dict>
+            <!-- Folder sync links, seedwell://sync/<key>?name=… (SPEC 7G.1): they open the Add Folder modal. -->
+            <key>CFBundleURLName</key><string>Seedwell folder link</string>
+            <key>CFBundleURLSchemes</key><array><string>seedwell</string></array>
+        </dict>
     </array>
+    <!-- Folder sync finds devices on the LAN by UDP broadcast and multicast (SPEC 7G.3), which needs the Local
+         Network permission (macOS 15+). Plain sockets, no Bonjour: NSBonjourServices is not needed, and macOS needs
+         no multicast entitlement (TN3179). -->
+    <key>NSLocalNetworkUsageDescription</key><string>Seedwell finds your other devices on the local network to sync folders with them.</string>
+</dict>
+</plist>
+PLIST
+
+echo "==> Finder extension"
+# Badges on synced folders (SPEC 7G.5). It runs sandboxed and may read only the folder the app writes its status
+# to: the app's own state, unless SEEDWELL_FINDER_STATUS_DIR (an absolute path) points a QA build elsewhere.
+# sign.sh gives it the matching sandbox exception.
+EXT="$APP/Contents/PlugIns/SeedwellFinderSync.appex"
+mkdir -p "$EXT/Contents/MacOS"
+cp "$BIN_DIR/SeedwellFinderSync" "$EXT/Contents/MacOS/SeedwellFinderSync"
+FINDER_STATUS_DIR="${SEEDWELL_FINDER_STATUS_DIR:-~/Library/Application Support/Seedwell/Finder}"
+cat > "$EXT/Contents/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key><string>io.github.kkollsga.Seedwell.FinderSync</string>
+    <key>CFBundleName</key><string>SeedwellFinderSync</string>
+    <key>CFBundleDisplayName</key><string>Seedwell</string>
+    <key>CFBundleExecutable</key><string>SeedwellFinderSync</string>
+    <key>CFBundlePackageType</key><string>XPC!</string>
+    <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+    <key>CFBundleShortVersionString</key><string>$VERSION</string>
+    <key>CFBundleVersion</key><string>$BUILD_NUMBER</string>
+    <key>LSMinimumSystemVersion</key><string>15.0</string>
+    <key>NSHumanReadableDescription</key><string>Shows the sync status of Seedwell's folders in Finder.</string>
+    <key>NSExtension</key>
+    <dict>
+        <key>NSExtensionAttributes</key><dict/>
+        <key>NSExtensionPointIdentifier</key><string>com.apple.FinderSync</string>
+        <key>NSExtensionPrincipalClass</key><string>SeedwellFinderSync</string>
+    </dict>
+    <!-- Read by the extension; sign.sh derives its sandbox exception from it. -->
+    <key>SeedwellStatusDir</key><string>$FINDER_STATUS_DIR</string>
 </dict>
 </plist>
 PLIST
@@ -169,6 +215,7 @@ PLIST
 SDK_VER="$(xcrun --sdk "${SDKROOT:-macosx}" --show-sdk-version 2>/dev/null || true)"
 if [ -n "$SDK_VER" ]; then
     vtool -set-build-version macos 15.0 "$SDK_VER" -replace -output "$APP/Contents/MacOS/SeedwellApp" "$APP/Contents/MacOS/SeedwellApp"
+    vtool -set-build-version macos 15.0 "$SDK_VER" -replace -output "$EXT/Contents/MacOS/SeedwellFinderSync" "$EXT/Contents/MacOS/SeedwellFinderSync"
     echo "    LC_BUILD_VERSION: minos 15.0, sdk $SDK_VER"
 fi
 
