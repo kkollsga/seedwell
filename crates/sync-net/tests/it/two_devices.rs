@@ -136,6 +136,44 @@ fn archived(root: &Path) -> Vec<String> {
     out
 }
 
+/// Both devices pull from each other at once. A pull holds its folder's core while it waits for the
+/// other's answers; answering, and taking in the other's index, must not wait for that core, or each
+/// waits for the other until requests time out (60 s).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_devices_pulling_from_each_other_at_once_do_not_wait_on_each_other() {
+    let (a, b) = (device("Alpha").await, device("Beta").await);
+    let (fa, fb) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let st = a.h.add_folder(fa.path().to_path_buf()).await.unwrap();
+    let id: FolderId = st.id.parse().unwrap();
+    let key = a.h.shares(&id).unwrap().read_write_link.unwrap();
+    let dest = fb.path().join("Shared");
+    b.h.join_folder(&key, dest.clone()).await.unwrap();
+    b.h.add_address(&id, addr(&a)).unwrap();
+    std::fs::write(fa.path().join("ready"), b"1").unwrap();
+    until(20, "B has the first file", || read(&dest.join("ready")).is_some()).await;
+
+    // Big files on both while paused (distinct chunks: no local copy to reuse), then both go at once.
+    for d in [&a, &b] {
+        d.h.set_paused(&id, true).await.unwrap();
+    }
+    let big = |seed: u8| (0..48u32 << 20).map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8 ^ seed).collect::<Vec<u8>>();
+    std::fs::write(fa.path().join("from-a.bin"), big(1)).unwrap();
+    std::fs::write(dest.join("from-b.bin"), big(2)).unwrap();
+    let t = Instant::now();
+    let (ra, rb) = tokio::join!(a.h.set_paused(&id, false), b.h.set_paused(&id, false));
+    ra.unwrap();
+    rb.unwrap();
+    until(45, "both have both files", || {
+        let len = |p: &Path| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+        len(&fa.path().join("from-b.bin")) == 48 << 20 && len(&dest.join("from-a.bin")) == 48 << 20
+    })
+    .await;
+    assert!(t.elapsed() < Duration::from_secs(30), "took {:?}: the pulls waited on each other", t.elapsed());
+    assert_eq!(read(&fa.path().join("from-b.bin")), Some(big(2)));
+    a.h.shutdown().await;
+    b.h.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_edits_make_one_conflict_copy_that_either_device_resolves() {
     let (a, b) = (device("Alpha").await, device("Beta").await);

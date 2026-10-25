@@ -862,6 +862,10 @@ design notes, with the research behind them, are in `dev-docs/` (local).
   - Index records of finished files are committed in batches (every 64 files and at the end of a round), each
     after the directories they changed are fsynced, so the index is never ahead of the disk.
   - Interrupted temp files are kept 24 h to resume.
+  - A pull holds the folder's core while it waits for peers. So nothing a peer needs from this device may wait
+    for that core, or two devices pulling from each other each wait for the other:
+    - chunk requests are answered through a second, read-only handle on the index;
+    - received index batches queue (8 deep) for a per-session applier, while the session keeps reading answers.
 - **Folder marker:** `<root>/.seedwell/` must exist. Without it (an unmounted disk, a deleted folder) the folder
   stops with *Folder missing* and nothing is deleted anywhere.
 - **Not synced:**

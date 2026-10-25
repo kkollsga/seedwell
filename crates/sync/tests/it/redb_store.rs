@@ -310,6 +310,24 @@ fn reopen_after_drop_keeps_everything() {
 }
 
 #[test]
+fn a_reader_sees_every_commit_and_keeps_compaction_off() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut db = RedbStore::open(dir.path().join("f.redb"), 1).unwrap();
+    let reader = db.reader();
+    assert_eq!(reader.local("a").unwrap(), None);
+    let rec = |p: &str, seq| LocalRecord { file: signed(p, false, &[(0, 1)], &[(1, 5)], 0, 0), sequence: seq, invalid: false, stamp: None, tier: None };
+    db.apply(vec![Op::PutLocal(rec("a", 1))]).unwrap();
+    // An eventual commit is not on disk yet, but it is committed: readers see it.
+    db.apply_with(vec![Op::PutLocal(rec("b", 2))], Durability::Eventual).unwrap();
+    assert_eq!(reader.local("a").unwrap(), db.local("a").unwrap());
+    assert_eq!(reader.local("b").unwrap().map(|r| r.sequence), Some(2));
+    // Compaction needs the file to itself.
+    assert!(db.compact().is_err());
+    drop(reader);
+    db.compact().unwrap();
+}
+
+#[test]
 fn a_failed_apply_leaves_nothing() {
     let dir = tempfile::tempdir().unwrap();
     let mut mem = MemStore::new(1);

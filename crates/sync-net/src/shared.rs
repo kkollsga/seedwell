@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use tokio::sync::{Notify, mpsc, oneshot, watch};
 use trs_sync::folder::FolderCore;
+use trs_sync::store_redb::RedbReader;
 use trs_sync_proto::ids::{DeviceId, FolderId};
 use trs_sync_proto::keys::{Access, FolderKey};
 use trs_sync_proto::msg::{Message, Request, Response};
@@ -31,6 +32,9 @@ pub struct FolderShared {
     pub root: PathBuf,
     /// The core. Lock only on a blocking thread.
     pub core: Mutex<FolderCore>,
+    /// Reads the core's index without its lock: requests from peers are answered while a pull holds the
+    /// core (waiting on peers itself), so two devices pulling from each other never wait on each other.
+    pub index: RedbReader,
     /// Our latest local sequence: sessions wake on changes and send the new entries.
     pub local_seq: watch::Sender<u64>,
     /// A peer's index changed what we need: the runtime pulls.

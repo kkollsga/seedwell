@@ -12,11 +12,11 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use tokio::io::{ReadHalf, WriteHalf};
-use tokio::sync::{Semaphore, mpsc};
+use tokio::sync::{Semaphore, mpsc, oneshot};
 use tokio_rustls::TlsStream;
 use trs_sync::folder::RemoteIndex;
 use trs_sync::fs::{Fs, StdFs};
-use trs_sync_proto::ids::{DeviceId, FolderId};
+use trs_sync_proto::ids::{DeviceId, FolderId, ShortId};
 use trs_sync_proto::keys::Access;
 use trs_sync_proto::model::FileKind;
 use trs_sync_proto::msg::{
@@ -39,6 +39,8 @@ const PING_EVERY: Duration = Duration::from_secs(90);
 const SERVE_BUDGET_KIB: usize = 32 * 1024;
 /// About this much index per frame.
 const INDEX_BATCH_BYTES: usize = 1 << 20;
+/// Index frames received and waiting to be applied (beyond this the session stops reading).
+const APPLY_QUEUE: usize = 8;
 
 fn bad(why: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, why.into())
@@ -315,10 +317,15 @@ async fn read_loop(
     links: &mut Vec<tokio::task::JoinHandle<()>>,
 ) -> io::Result<()> {
     let mut closed = peer.closed.subscribe();
+    let (apply, queue) = mpsc::channel(APPLY_QUEUE);
+    let (failed_tx, mut failed) = oneshot::channel();
+    tokio::spawn(apply_loop(peer.device.short(), queue, failed_tx));
+    let applier_gone = || io::Error::other("the index applier stopped");
     loop {
         let next = tokio::select! {
             m = tokio::time::timeout(PING_EVERY * 3, reader.next()) => m,
             _ = closed.wait_for(|c| *c) => return Ok(()),
+            e = &mut failed => return Err(e.unwrap_or_else(|_| applier_gone())),
         };
         let msg = match next {
             Err(_) => return Err(io::Error::new(io::ErrorKind::TimedOut, "the peer went quiet")),
@@ -328,23 +335,12 @@ async fn read_loop(
         match msg {
             Message::Writers(w) => {
                 let Some(f) = shared_folder(ctx, peer, &w.folder_id) else { continue };
-                let r = tokio::task::spawn_blocking(move || lock(&f.core).add_writers(&w.writers).map_err(|e| e.to_string()))
-                    .await
-                    .map_err(io::Error::other)?;
-                r.map_err(bad)?;
+                apply.send(Apply::Writers(f, w.writers)).await.map_err(|_| applier_gone())?;
             }
             Message::Index(idx) => {
                 let Some(f) = shared_folder(ctx, peer, &idx.folder_id) else { continue };
-                let who = peer.device.short();
-                let f2 = f.clone();
                 let ri = RemoteIndex { index_id: idx.index_id, full: idx.full, done: idx.done, entries: idx.entries };
-                let stored = tokio::task::spawn_blocking(move || lock(&f2.core).apply_remote(who, ri).map_err(|e| e.to_string()))
-                    .await
-                    .map_err(io::Error::other)?
-                    .map_err(bad)?;
-                if stored > 0 || idx.done {
-                    f.remote_changed.notify_one();
-                }
+                apply.send(Apply::Index(f, ri)).await.map_err(|_| applier_gone())?;
             }
             Message::Request(req) => {
                 let Some(f) = shared_folder(ctx, peer, &req.folder_id) else {
@@ -400,6 +396,39 @@ async fn read_loop(
     }
 }
 
+/// What the peer sent that changes the folder's core.
+enum Apply {
+    Writers(Arc<FolderShared>, Vec<trs_sync_proto::sign::Writer>),
+    Index(Arc<FolderShared>, RemoteIndex),
+}
+
+/// Applies the peer's index and writers in the order they came, off the read loop: applying waits for the
+/// folder's core, which a pull may hold while it waits for this very peer's answers. The first that fails
+/// ends the session with its reason.
+async fn apply_loop(who: ShortId, mut queue: mpsc::Receiver<Apply>, failed: oneshot::Sender<io::Error>) {
+    while let Some(a) = queue.recv().await {
+        let res = tokio::task::spawn_blocking(move || match a {
+            Apply::Writers(f, w) => lock(&f.core).add_writers(&w).map(|_| ()).map_err(|e| e.to_string()),
+            Apply::Index(f, ri) => {
+                let done = ri.done;
+                let stored = lock(&f.core).apply_remote(who, ri).map_err(|e| e.to_string())?;
+                if stored > 0 || done {
+                    f.remote_changed.notify_one();
+                }
+                Ok(())
+            }
+        })
+        .await;
+        let e = match res {
+            Ok(Ok(())) => continue,
+            Ok(Err(why)) => bad(why),
+            Err(e) => io::Error::other(e),
+        };
+        let _ = failed.send(e);
+        return;
+    }
+}
+
 /// A folder this session shares with the peer (and is not paused).
 fn shared_folder(ctx: &Ctx, peer: &PeerHandle, id: &FolderId) -> Option<Arc<FolderShared>> {
     peer.access(id)?;
@@ -410,11 +439,7 @@ fn shared_folder(ctx: &Ctx, peer: &PeerHandle, id: &FolderId) -> Option<Arc<Fold
 /// this offset, and only if the bytes still hash right (the file may have changed since the scan).
 fn serve_chunk(f: &FolderShared, req: &Request) -> Response {
     let fail = |code| Response { id: req.id, code, data: vec![] };
-    let found = {
-        let core = lock(&f.core);
-        core.store().local(&req.path).ok().flatten()
-    };
-    let Some(rec) = found else { return fail(ResponseCode::NoSuchFile) };
+    let Some(rec) = f.index.local(&req.path).ok().flatten() else { return fail(ResponseCode::NoSuchFile) };
     let info = &rec.file.info;
     if rec.invalid || info.deleted || info.kind != FileKind::File {
         return fail(ResponseCode::NoSuchFile);

@@ -66,6 +66,7 @@ use std::fs;
 use std::io;
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use redb::{
@@ -185,12 +186,36 @@ pub struct OpenReport {
 
 /// A folder's index in one redb file. See the module docs for the layout and the durability rules.
 pub struct RedbStore {
-    db: Database,
+    /// Shared with [`RedbReader`]s.
+    db: Arc<Database>,
     path: PathBuf,
     durability: Durability,
     /// `Eventual` batches were committed since the last durable commit.
     unflushed: AtomicBool,
     report: OpenReport,
+}
+
+/// A read-only handle on an open index, for reads that must not wait for whoever holds the store: a device
+/// serving chunks to its peers while its own pull holds the folder. It sees every committed change.
+#[derive(Clone)]
+pub struct RedbReader {
+    db: Arc<Database>,
+    path: PathBuf,
+}
+
+impl RedbReader {
+    /// Our record at a path, as [`IndexStore::local`].
+    pub fn local(&self, path: &str) -> io::Result<Option<LocalRecord>> {
+        read_local(&self.db, &self.path, path)
+    }
+}
+
+fn read_local(db: &Database, file: &Path, path: &str) -> io::Result<Option<LocalRecord>> {
+    guard(file, || {
+        let rtx = db.begin_read().map_err(dbe)?;
+        let t = rtx.open_table(LOCAL).map_err(dbe)?;
+        get_local(&t, path)
+    })
 }
 
 impl fmt::Debug for RedbStore {
@@ -266,13 +291,18 @@ impl RedbStore {
             }
             let (db, migrated) = prepare(open_database(path, opts)?, path, new_index_id, opts)?;
             Ok(RedbStore {
-                db,
+                db: Arc::new(db),
                 path: path.to_path_buf(),
                 durability: opts.durability,
                 unflushed: AtomicBool::new(false),
                 report: OpenReport { created, migrated },
             })
         })
+    }
+
+    /// A handle for reads that do not go through the store's owner ([`RedbReader`]).
+    pub fn reader(&self) -> RedbReader {
+        RedbReader { db: self.db.clone(), path: self.path.clone() }
     }
 
     /// What happened at open.
@@ -321,7 +351,8 @@ impl RedbStore {
     /// or a large scan). Slow on a large file; `Ok(false)` when there was nothing to reclaim.
     pub fn compact(&mut self) -> io::Result<bool> {
         self.flush_shared()?;
-        guard(&self.path, || self.db.compact().map_err(dbe))
+        let db = Arc::get_mut(&mut self.db).ok_or_else(|| io::Error::other("the index is open for reading elsewhere"))?;
+        guard(&self.path, || db.compact().map_err(dbe))
     }
 
     fn flush_shared(&self) -> io::Result<()> {
@@ -903,11 +934,7 @@ impl IndexStore for RedbStore {
     }
 
     fn local(&self, path: &str) -> io::Result<Option<LocalRecord>> {
-        guard(&self.path, || {
-            let rtx = self.rtx()?;
-            let t = rtx.open_table(LOCAL).map_err(dbe)?;
-            get_local(&t, path)
-        })
+        read_local(&self.db, &self.path, path)
     }
 
     fn local_since(&self, after: u64, limit: usize) -> io::Result<Vec<LocalRecord>> {

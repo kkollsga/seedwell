@@ -19,7 +19,7 @@ use trs_sync::clock::SystemClock;
 use trs_sync::folder::{FolderConfig, FolderCore};
 use trs_sync::fs::{Fs, StdFs};
 use trs_sync::ignore::Ignore;
-use trs_sync::store_redb::RedbStore;
+use trs_sync::store_redb::{RedbReader, RedbStore};
 use trs_sync_proto::device::DeviceKey;
 use trs_sync_proto::ids::{DeviceId, FolderId};
 use trs_sync_proto::keys::{Access, FolderKey, FolderSecret, Link};
@@ -407,13 +407,14 @@ impl SyncHandle {
         let entry = e.clone();
         let key2 = key.clone();
         let tz = self.inner.utc_offset.clone();
-        let core = tokio::task::spawn_blocking(move || -> Result<FolderCore, SyncError> {
+        let core = tokio::task::spawn_blocking(move || -> Result<(FolderCore, RedbReader), SyncError> {
             let fs = StdFs::new(root.clone());
             let case_insensitive = match fs.lstat(STATE_DIR) {
                 Ok(Some(_)) => trs_sync::path::probe_case_insensitive(&fs).unwrap_or(true),
                 _ => cfg!(target_os = "macos"),
             };
             let store = RedbStore::open(&index, random_u64())?;
+            let reader = store.reader();
             let cfg = FolderConfig {
                 me: ctx.me,
                 folder_pk: *key2.public_key(),
@@ -428,11 +429,13 @@ impl SyncHandle {
                 Some(tz) => Arc::new(ZonedClock(tz)),
                 None => Arc::new(SystemClock { offset_s: local_offset_s() }),
             };
-            FolderCore::new(cfg, Box::new(store), Arc::new(fs), device, clock, Arc::new(random_id), ignore)
-                .map_err(|e| invalid(e.to_string()))
+            let core = FolderCore::new(cfg, Box::new(store), Arc::new(fs), device, clock, Arc::new(random_id), ignore)
+                .map_err(|e| invalid(e.to_string()))?;
+            Ok((core, reader))
         })
         .await
         .map_err(io::Error::other)??;
+        let (core, reader) = core;
 
         let (seq_tx, _) = watch::channel(core.index_state().map(|(_, s)| s).unwrap_or(0));
         let name = e.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
@@ -441,6 +444,7 @@ impl SyncHandle {
             key,
             root: e.path.clone(),
             core: Mutex::new(core),
+            index: reader,
             local_seq: seq_tx,
             remote_changed: Notify::new(),
             paused: AtomicBool::new(e.paused),
