@@ -7,7 +7,9 @@ import Observation
 /// Sidebar: Downloads, Sharing and each tracker are places (sections). A tracker tab shows every
 /// torrent of that tracker, downloads and seeds, as collapsible groups (SPEC §8.3).
 @MainActor @Observable final class LibraryModel {
-    enum Section: Hashable { case downloads, sharing, folderSync, settings, tracker(String) }
+    /// A channel's page is its General (`topic: nil`) or one of its topics; `direct` is a private conversation with a
+    /// device (SPEC 7G.7).
+    enum Section: Hashable { case downloads, sharing, folderSync, chat(String, topic: String?), direct(String), settings, tracker(String) }
 
     let core: Core
     var section: Section
@@ -51,6 +53,21 @@ import Observation
     /// The selected folder's members with their roles (read every 2 s, off the main thread; the core keeps them
     /// apart from the folder's index, so this never waits for a pull).
     private(set) var syncMembers: [SyncMember] = []
+    /// Channels (SPEC 7G.7), listed in the sidebar under Chats: every channel, read with each refresh (cheap), and the
+    /// shown one's messages (newest last) and members. Shown messages count as read.
+    private(set) var chats: [SyncChannel] = []
+    /// Each channel's topics, newest activity first (its General is not one).
+    private(set) var chatTopics: [String: [SyncTopic]] = [:]
+    /// The devices this Mac has private conversations with.
+    private(set) var directs: [SyncDirect] = []
+    /// Names of devices a private conversation was just started with (no message yet, so not in `directs`).
+    var directNames: [String: String] = [:]
+    /// The channels open in the sidebar (their topics shown under them).
+    var chatExpanded: Set<String> = []
+    private(set) var chatMessages: [SyncMessage] = []
+    private(set) var chatMembers: [SyncMember] = []
+    /// The conversation `chatMessages` and `chatMembers` are of.
+    private var chatLoaded: Section?
     /// The folder whose "Stop syncing" question is open under its page header, and its Trash choice.
     var syncAskRemove: String?
     var syncTrash = false
@@ -97,6 +114,12 @@ import Observation
     func refresh() {
         snapshot = core.snapshot()
         sync = core.syncSnapshot()
+        let channels = core.chatChannels()
+        if channels != chats { chats = channels }
+        let topics = Dictionary(uniqueKeysWithValues: channels.map { ($0.id, core.chatTopics(channelId: $0.id)) })
+        if topics != chatTopics { chatTopics = topics }
+        let ds = core.chatDirects()
+        if ds != directs { directs = ds }
         onSnapshot(snapshot)
         ticks += 1
         if section == .folderSync {
@@ -105,6 +128,12 @@ import Observation
                 if ticks % 10 == 0 { loadConflicts() }
                 if ticks % 2 == 0 { loadMembers() }
             }
+        }
+        if let id = chatID {
+            // A channel left (here or by removal elsewhere) takes its page with it.
+            if chats.contains(where: { $0.id == id }) { loadChatMessages() } else { select(.downloads) }
+        } else if directID != nil {
+            loadChatMessages()
         }
         FilesStore.shared.tick()
         if let id = trackerID, !snapshot.trackers.contains(where: { $0.id == id }) {
@@ -134,6 +163,70 @@ import Observation
 
     /// The selected folder of the Folder Sync page.
     var syncFolder: SyncFolder? { syncSelection.flatMap { id in sync.folders.first { $0.id == id } } }
+
+    /// The channel whose page (General or a topic) is shown, and the topic.
+    var chatID: String? {
+        if case .chat(let id, _) = section { return id }
+        return nil
+    }
+
+    var chatTopicID: String? {
+        if case .chat(_, let t) = section { return t }
+        return nil
+    }
+
+    var chat: SyncChannel? { chatID.flatMap { id in chats.first { $0.id == id } } }
+
+    var chatTopic: SyncTopic? { chatTopicID.flatMap { t in chatID.flatMap { chatTopics[$0] }?.first { $0.id == t } } }
+
+    /// The sidebar's private conversations: every one with messages, plus the one just started (no message yet).
+    var directRows: [SyncDirect] {
+        guard let id = directID, !directs.contains(where: { $0.deviceId == id }) else { return directs }
+        return [SyncDirect(deviceId: id, name: directName, online: false, unread: 0, lastMessageS: nil)] + directs
+    }
+
+    /// The device whose private conversation is shown.
+    var directID: String? {
+        if case .direct(let id) = section { return id }
+        return nil
+    }
+
+    var direct: SyncDirect? { directID.flatMap { id in directs.first { $0.deviceId == id } } }
+
+    /// The name of the device of the shown private conversation.
+    var directName: String {
+        guard let id = directID else { return "" }
+        return direct?.name ?? directNames[id] ?? "Unnamed device"
+    }
+
+    /// Reads the shown conversation's latest messages, and marks them read (the page is on screen when this runs).
+    func loadChatMessages() {
+        let place = section
+        if chatLoaded != place { chatLoaded = place; chatMessages = []; chatMembers = [] }
+        let list: [SyncMessage]
+        switch place {
+        case .chat(let id, let topic):
+            if topic != nil, !chatExpanded.contains(id) { chatExpanded.insert(id) }  // a topic shown has its channel open
+            list = core.chatMessages(id: id, topic: topic, before: nil, limit: 300)
+            let unread = topic == nil ? chat.map { ChatText.generalUnread($0, chatTopics[id] ?? []) } ?? 0 : (chatTopic?.unread ?? 0)
+            if unread > 0 { core.chatMarkRead(id: id, topic: topic) }
+        case .direct(let id):
+            list = core.chatDirectMessages(deviceId: id, before: nil, limit: 300)
+            if direct?.unread ?? 0 > 0 { core.chatMarkDirectRead(deviceId: id) }
+        default:
+            list = []
+        }
+        if list != chatMessages { chatMessages = list }
+    }
+
+    func loadChatMembers() {
+        guard let id = chatID else { chatMembers = []; return }
+        let core = self.core
+        Task {
+            let list = await Task.detached(priority: .utility) { core.syncMembers(id: id) }.value
+            if chatID == id { chatMembers = list }
+        }
+    }
 
     func loadMembers() {
         guard let id = syncSelection else { syncMembers = []; return }
@@ -258,6 +351,8 @@ import Observation
         case .downloads: "Downloads"
         case .sharing: "Sharing"
         case .folderSync: "Folder Sync"
+        case .chat: [chat?.name ?? "Channel", chatTopic?.title].compactMap { $0 }.joined(separator: " › ")
+        case .direct: directName
         case .settings: "Settings"
         }
     }
@@ -285,6 +380,11 @@ import Observation
             return "\(Fmt.count(snapshot.sharingTotal, "torrent")) · \(Self.rates(snapshot))"
         case .folderSync:
             return SyncText.summary(sync) + (sync.deviceName.isEmpty ? "" : " · This Mac: \(sync.deviceName)")
+        case .chat:
+            if let t = chatTopic { return ChatText.topicLine(t) }
+            return chat.map(ChatText.header) ?? "No longer on this Mac"
+        case .direct:
+            return ChatText.directLine(online: direct?.online ?? false)
         case .settings:
             return "Settings"
         }
@@ -333,7 +433,7 @@ import Observation
             // As the tab lists them: a finished torrent is in Sharing; only a finished direct download stays under Recently Finished.
             let top = (s.allDownloading + s.allQueued + s.allRecent.filter { $0.kind != .torrent && !seeding.contains($0.id) }).filter(matches)
             return top + seeds
-        case .settings, .folderSync: return []
+        case .settings, .folderSync, .chat, .direct: return []
         }
     }
 

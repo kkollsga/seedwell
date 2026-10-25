@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 7044c35d3b2881668ce33bef07e014275581597ff0b1f141111a9d8c04e93b24 # shrinks to m = ChatMessages(ChatMessages { channel_id: FolderId(AAAAAAA), messages: [ChatMessage(00000000000000000000000000000000, seq 0, Topic, 0 bytes)] })

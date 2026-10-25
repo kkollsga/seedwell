@@ -321,7 +321,7 @@ fn build(h: &SyncHandle, instance: u64, round: u64) -> Option<Vec<u8>> {
         return None;
     }
     let ctx = &h.lan().ctx;
-    let folders: Vec<_> = ctx.registry.folders().into_iter().filter(|f| !f.paused.load(Ordering::Relaxed)).collect();
+    let folders: Vec<_> = ctx.registry.spaces().into_iter().filter(|f| !f.paused.load(Ordering::Relaxed)).collect();
     if folders.is_empty() {
         return None;
     }
@@ -402,7 +402,7 @@ fn handle(h: &SyncHandle, rx: &Mutex<Rx>, b: &[u8], src: SocketAddr) {
         if rx.lan_keys.len() > 4 * MAX_FOLDERS_CONSIDERED {
             rx.lan_keys.clear();
         }
-        for f in ctx.registry.folders().iter().filter(|f| !f.paused.load(Ordering::Relaxed)).take(MAX_FOLDERS_CONSIDERED) {
+        for f in ctx.registry.spaces().iter().filter(|f| !f.paused.load(Ordering::Relaxed)).take(MAX_FOLDERS_CONSIDERED) {
             let k = *rx.lan_keys.entry(f.id).or_insert_with(|| f.public.lan_key());
             if a.tags.contains(&lan_tag(&k, a.hour, &a.nonce)) {
                 found.push(f.id);

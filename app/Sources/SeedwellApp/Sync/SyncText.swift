@@ -162,7 +162,8 @@ enum SyncText {
         }
         if info.alreadySynced { return "This folder is already synced on this Mac" }
         if info.expired { return "This link has expired: ask for a new one" }
-        return [role(info.role), info.name].compactMap { $0 }.joined(separator: " · ")
+        let chat = info.channelName.map { "with the channel “\($0)”\(info.channelJoined ? " (joined already)" : "")" }
+        return [role(info.role), info.name, chat].compactMap { $0 }.joined(separator: " · ")
     }
 
     /// An invitation link's line in the Share dialog: "Read & write · 0 of 1 used", or "· Used", "· Expired",
@@ -179,14 +180,16 @@ enum SyncText {
 
     /// What the Share dialog's next link does, in words: "One Mac can join with this link within 7 days, as Read &
     /// write." `0` is no limit.
-    static func shareSummary(role r: SyncRole, uses: UInt32, linkDays: UInt32) -> String {
+    /// `chat`: the channel the link joins as well.
+    static func shareSummary(role r: SyncRole, uses: UInt32, linkDays: UInt32, chat: String? = nil) -> String {
         let who = switch uses {
         case 1: "One Mac"
         case 0: "Any number of Macs"
         default: "Up to \(uses) Macs"
         }
         let when = linkDays > 0 ? " within \(Fmt.count(linkDays, "day"))" : ""
-        return "\(who) can join with this link\(when), as \(role(r))."
+        let also = chat.map { " It joins the channel “\($0)” too." } ?? ""
+        return "\(who) can join with this link\(when), as \(role(r)).\(also)"
     }
 
     /// The time left of a sharing period: "Sharing ends in 6 days, 23 hours", "… in 5 hours, 12 minutes",
@@ -212,7 +215,7 @@ enum SyncText {
 
     /// The grey line under an open link: "Link until 1 Nov" (empty without an expiry).
     static func inviteDetail(_ i: SyncInvite) -> String {
-        i.expiresS.map { "Link until \(day($0))" } ?? ""
+        [i.expiresS.map { "Link until \(day($0))" }, i.channelName.map { "with the channel “\($0)”" }].compactMap { $0 }.joined(separator: " · ")
     }
 
     /// "1 Nov" (with the year when it is not this year).

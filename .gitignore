@@ -1,5 +1,6 @@
 /target
 /app/.build
+/app/.build-xcode
 /app/build
 *.xcuserstate
 .DS_Store

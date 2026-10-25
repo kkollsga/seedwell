@@ -2,6 +2,8 @@
 
 use proptest::collection::vec;
 use proptest::prelude::*;
+use trs_sync_proto::chat::{AuthorHave, ChatMessage, MessageKind};
+use trs_sync_proto::direct::{DirectKey, DirectMessage};
 use trs_sync_proto::codec::Frame;
 use trs_sync_proto::ids::{DeviceId, FolderId, ShortId};
 use trs_sync_proto::keys::Proof;
@@ -144,6 +146,55 @@ fn addresses() -> impl Strategy<Value = Message> {
     vec(record, 0..4).prop_map(|records| Message::Addresses(Addresses { records }))
 }
 
+fn chat() -> impl Strategy<Value = Message> {
+    let kind = prop_oneof![Just(MessageKind::Text), Just(MessageKind::Json), Just(MessageKind::Topic), (4..255u8).prop_map(MessageKind::Unknown)];
+    let agent = proptest::option::of("[a-z][a-z-]{0,20}");
+    let ids = (proptest::option::of(bytes::<16>()), proptest::option::of(bytes::<16>()));
+    let msg = (bytes::<16>(), bytes::<32>(), any::<u64>(), any::<u64>(), ids, agent, kind, text(40), bytes::<64>())
+        .prop_map(|(id, author, seq, at_ms, (reply_to, topic), agent, kind, body, sig)| ChatMessage {
+            id,
+            author,
+            seq,
+            at_ms,
+            reply_to,
+            topic,
+            agent,
+            kind,
+            // A topic's title is never blank (one that is does not decode).
+            body: if kind == MessageKind::Topic { format!("T{body}") } else { body }.into_bytes(),
+            extra: Vec::new(),
+            sig,
+        });
+    let ranges = vec((0..1u64 << 40, 1..1000u64), 0..5).prop_map(|r| {
+        let mut start = 0;
+        r.into_iter().map(|(gap, len)| { start += gap; let s = start; start += len; (s, len) }).collect::<Vec<_>>()
+    });
+    let author = (bytes::<32>(), ranges).prop_map(|(author, ranges)| AuthorHave { author, ranges });
+    prop_oneof![
+        vec((folder_id(), vec(proof(), 0..=MAX_PROOFS)), 0..4)
+            .prop_map(|c| Message::ChatJoin(ChatJoin { channels: c.into_iter().map(|(channel_id, proofs)| JoinChannel { channel_id, proofs }).collect() })),
+        (folder_id(), any::<u64>(), vec(author, 0..4)).prop_map(|(channel_id, floor_at_ms, authors)| Message::ChatHave(ChatHave { channel_id, floor_at_ms, authors })),
+        (folder_id(), vec(msg, 0..4)).prop_map(|(channel_id, messages)| Message::ChatMessages(ChatMessages { channel_id, messages })),
+    ]
+}
+
+fn direct() -> impl Strategy<Value = Message> {
+    let key = (bytes::<32>(), bytes::<32>(), any::<u64>(), bytes::<64>()).prop_map(|(device, x25519, at_ms, sig)| DirectKey { device, x25519, at_ms, sig });
+    let ranges = vec((0..1u64 << 40, 1..1000u64), 0..5).prop_map(|r| {
+        let mut start = 0;
+        r.into_iter().map(|(gap, len)| { start += gap; let s = start; start += len; (s, len) }).collect::<Vec<_>>()
+    });
+    let author = (bytes::<32>(), ranges).prop_map(|(author, ranges)| AuthorHave { author, ranges });
+    let msg = (bytes::<16>(), bytes::<32>(), bytes::<32>(), any::<u64>(), any::<u64>(), bytes::<32>(), vec(any::<u8>(), 16..200), bytes::<64>()).prop_map(
+        |(id, author, recipient, seq, at_ms, ephemeral, sealed, sig)| DirectMessage { id, author, recipient, seq, at_ms, ephemeral, sealed, extra: Vec::new(), sig },
+    );
+    prop_oneof![
+        vec(key, 0..4).prop_map(|records| Message::DirectKeys(DirectKeys { records })),
+        vec(author, 0..4).prop_map(|authors| Message::DirectHave(DirectHave { authors })),
+        vec(msg, 0..4).prop_map(|messages| Message::DirectMessages(DirectMessages { messages })),
+    ]
+}
+
 fn the_rest() -> impl Strategy<Value = Message> {
     prop_oneof![
         Just(Message::Ping),
@@ -162,7 +213,7 @@ fn the_rest() -> impl Strategy<Value = Message> {
 
 /// Every message type, for the properties below and for the garbage tests.
 pub fn message() -> impl Strategy<Value = Message> {
-    prop_oneof![hello(), join(), members(), index(), request(), response(), progress(), addresses(), the_rest()]
+    prop_oneof![hello(), join(), members(), index(), request(), response(), progress(), addresses(), chat(), direct(), the_rest()]
 }
 
 fn roundtrip(m: &Message) -> Message {
@@ -179,6 +230,12 @@ proptest! {
 
     #[test]
     fn hello_roundtrips(m in hello()) { prop_assert_eq!(roundtrip(&m), m); }
+
+    #[test]
+    fn chat_roundtrips(m in chat()) { prop_assert_eq!(roundtrip(&m), m); }
+
+    #[test]
+    fn direct_roundtrips(m in direct()) { prop_assert_eq!(roundtrip(&m), m); }
 
     #[test]
     fn join_roundtrips(m in join()) { prop_assert_eq!(roundtrip(&m), m); }

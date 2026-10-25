@@ -1,4 +1,5 @@
-//! `sync.toml`: device-wide settings and the list of folders. Keys are never in it (see [`crate::secrets`]).
+//! `sync.toml`: device-wide settings and the lists of folders and channels. Keys are never in it (see
+//! [`crate::secrets`]).
 //!
 //! The file is written by the service (atomically: a temp file renamed over it) and read at start.
 //! Keys this version does not know are dropped when it rewrites the file. `format` says which layout it has
@@ -78,6 +79,10 @@ pub struct FolderEntry {
     /// Addresses typed in by the user for devices of this folder (`host:port`).
     #[serde(default)]
     pub addresses: Vec<String>,
+    /// The channel that goes with it (its id; empty: none): a setting of this device, which a link for both
+    /// sets on the devices that join with it.
+    #[serde(default)]
+    pub channel: String,
 }
 
 fn yes() -> bool {
@@ -101,8 +106,51 @@ impl FolderEntry {
             lan_only: false,
             ignore: Vec::new(),
             addresses: Vec::new(),
+            channel: String::new(),
         }
     }
+}
+
+/// Private messages on this device (`[direct]`).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DirectEntry {
+    /// What agents on this Mac may do with private messages: `off` (the default), `read` or `post`.
+    pub agents: String,
+    /// The sequence number of this device's last private message.
+    pub seq: u64,
+    /// The last message read with each device: `<device id>:<time>:<seq>:<message id>`.
+    pub read: Vec<String>,
+}
+
+/// One channel on this device (`[[channel]]`).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ChannelEntry {
+    /// The channel id, as text.
+    pub id: String,
+    /// The channel's public key, hex.
+    pub channel_pk: String,
+    /// Its name on this device.
+    pub name: String,
+    /// No notifications for it (an @mention still notifies: the app's rule).
+    pub muted: bool,
+    /// What agents on this Mac may do in it: `off` (the default), `read` or `post`.
+    pub agents: String,
+    /// The command run for each message from another device while agents may read it (empty: none).
+    pub wake: String,
+    /// The last message read here: its time and id (hex).
+    pub read_at: u64,
+    /// See `read_at`: the message's sequence number.
+    pub read_seq: u64,
+    /// See `read_at`.
+    pub read_id: String,
+    /// The last message read in each topic: `<topic id>:<time>:<seq>:<message id>`.
+    pub topic_read: Vec<String>,
+    /// The sequence number of this device's last message in it.
+    pub seq: u64,
+    /// Addresses typed in by the user for devices of this channel (`host:port`).
+    pub addresses: Vec<String>,
 }
 
 /// A device this one has synced with: remembered so it can be dialed again and named in the UI.
@@ -113,7 +161,7 @@ pub struct DeviceEntry {
     /// Its name, from its last Hello.
     #[serde(default)]
     pub name: String,
-    /// The folders it is a member of (ids, as text).
+    /// The folders and channels it is a member of (ids, as text).
     #[serde(default)]
     pub folders: Vec<String>,
     /// Where it was last reached or said it can be reached (`ip:port`), newest first, at most 8.
@@ -132,9 +180,14 @@ pub struct SyncConfig {
     pub format: u32,
     /// Device-wide settings.
     pub settings: Settings,
+    /// Private messages: this Mac's settings.
+    pub direct: DirectEntry,
     /// The folders.
     #[serde(rename = "folder")]
     pub folders: Vec<FolderEntry>,
+    /// The channels.
+    #[serde(rename = "channel")]
+    pub channels: Vec<ChannelEntry>,
     /// Devices met in those folders.
     #[serde(rename = "device")]
     pub devices: Vec<DeviceEntry>,
@@ -142,7 +195,7 @@ pub struct SyncConfig {
 
 impl Default for SyncConfig {
     fn default() -> Self {
-        SyncConfig { format: CONFIG_FORMAT, settings: Settings::default(), folders: Vec::new(), devices: Vec::new() }
+        SyncConfig { format: CONFIG_FORMAT, settings: Settings::default(), direct: DirectEntry::default(), folders: Vec::new(), channels: Vec::new(), devices: Vec::new() }
     }
 }
 
@@ -177,6 +230,11 @@ impl SyncConfig {
     /// The entry of a folder, to change.
     pub fn folder_mut(&mut self, id: &str) -> Option<&mut FolderEntry> {
         self.folders.iter_mut().find(|f| f.id == id)
+    }
+
+    /// The entry of a channel, to change.
+    pub fn channel_mut(&mut self, id: &str) -> Option<&mut ChannelEntry> {
+        self.channels.iter_mut().find(|c| c.id == id)
     }
 
     /// The entry of a device, made when missing.

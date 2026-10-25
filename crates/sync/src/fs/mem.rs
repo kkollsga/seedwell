@@ -10,7 +10,9 @@
 //! simulates a crash and reboot: the live tree becomes the durable image again. In between,
 //! [`FileHandle::sync_all`] on a file that exists in the durable image copies that file's content and
 //! metadata into it, so data written and synced since the snapshot survives the crash, and unsynced
-//! data is lost. Namespace changes (create, rename, link, remove) become durable at the next
+//! data is lost. [`FileHandle::sync_barrier`] is weaker: what it covers becomes durable only at the next full
+//! flush (`sync_all` of any file, or `sync_dir`), as a write barrier on a real drive is ordered but not yet on
+//! the medium; a crash before that loses it. Namespace changes (create, rename, link, remove) become durable at the next
 //! snapshot, or when [`Fs::sync_dir`] syncs their directory, which is the pessimistic end of what
 //! real filesystems do: a crash can undo a rename whose directory was not synced. A node a synced
 //! directory names for the first time becomes durable with it (a directory with no entries yet). Handles opened before a restore are dead afterwards (their calls
@@ -125,6 +127,24 @@ struct State {
     generation: u64,
     /// Path key → the failures still to come.
     faults: BTreeMap<String, Fault>,
+    /// Files behind a write barrier since the last full flush: inode → content, mtime, ctime, exec bit.
+    barriered: BTreeMap<u64, (Vec<u8>, i64, i64, bool)>,
+}
+
+impl State {
+    /// A full flush: what is behind a barrier reaches the durable image (files it already holds).
+    fn flush_barriers(&mut self) {
+        for (ino, (data, mtime, ctime, exec)) in std::mem::take(&mut self.barriered) {
+            if let Some(n) = self.durable.nodes.get_mut(&ino)
+                && let Data::File(old) = &mut n.data
+            {
+                *old = data;
+                n.mtime = mtime;
+                n.ctime = ctime;
+                n.exec = exec;
+            }
+        }
+    }
 }
 
 struct Fault {
@@ -265,7 +285,7 @@ impl MemFs {
     /// A filesystem with these options.
     pub fn with_options(opts: MemFsOptions) -> Self {
         let now = (opts.clock)();
-        let state = State { live: Tree::new(now), durable: Tree::new(now), generation: 0, faults: BTreeMap::new() };
+        let state = State { live: Tree::new(now), durable: Tree::new(now), generation: 0, faults: BTreeMap::new(), barriered: BTreeMap::new() };
         MemFs { inner: Arc::new(Inner { opts, state: Mutex::new(state) }) }
     }
 
@@ -273,6 +293,7 @@ impl MemFs {
     pub fn snapshot(&self) {
         let mut st = self.lock();
         st.durable = st.live.clone();
+        st.barriered.clear();
     }
 
     /// Crash and reboot: back to the last snapshot, plus file data synced since (see the module docs).
@@ -288,6 +309,7 @@ impl MemFs {
         }
         st.live = t;
         st.generation += 1;
+        st.barriered.clear();
     }
 
     /// Makes the next `n` operations that name `rel` fail with `kind` (before they change anything).
@@ -654,6 +676,7 @@ impl Fs for MemFs {
         let keys = self.keys(rel)?;
         let mut guard = self.begin("sync_dir", &[rel])?;
         let st = &mut *guard;
+        st.flush_barriers();
         let ino = st.live.find(&keys).ok_or_else(|| err(io::ErrorKind::NotFound, rel, "no such directory"))?;
         let entries = st.live.dir(ino).ok_or_else(|| err(io::ErrorKind::NotADirectory, rel, "not a directory"))?.clone();
         for e in entries.values() {
@@ -769,8 +792,18 @@ impl FileHandle for MemHandle {
         self.with("len", |_, d| Ok(d.len() as u64))
     }
 
+    fn sync_barrier(&self) -> io::Result<()> {
+        self.with("sync_barrier", |st, d| {
+            let live = st.live.node(self.ino);
+            let entry = (d.clone(), live.mtime, live.ctime, live.exec);
+            st.barriered.insert(self.ino, entry);
+            Ok(())
+        })
+    }
+
     fn sync_all(&self) -> io::Result<()> {
         self.with("sync_all", |st, d| {
+            st.flush_barriers();
             let live = st.live.node(self.ino);
             let (mtime, ctime, exec) = (live.mtime, live.ctime, live.exec);
             if let Some(n) = st.durable.nodes.get_mut(&self.ino)
@@ -830,6 +863,27 @@ mod tests {
         fs.restore();
         assert!(fs.lstat("e").unwrap().is_some_and(|m| m.kind == FileKind::Dir), "a new directory comes with its parent");
         assert!(fs.lstat("e/sub").unwrap().is_none(), "but not its own entries");
+    }
+
+    #[test]
+    fn data_behind_a_barrier_is_durable_only_after_a_full_flush() {
+        let fs = MemFs::new();
+        write_all(&fs, "f", b"old").unwrap();
+        fs.snapshot();
+        let h = fs.open_rw("f").unwrap();
+        h.write_at(0, b"new").unwrap();
+        h.sync_barrier().unwrap();
+        drop(h);
+        fs.restore();
+        assert_eq!(read_all(&fs, "f").unwrap(), b"old", "a barrier alone does not reach the medium");
+        let h = fs.open_rw("f").unwrap();
+        h.write_at(0, b"new").unwrap();
+        h.sync_barrier().unwrap();
+        drop(h);
+        fs.create_dir("d").unwrap();
+        fs.sync_dir("d").unwrap();
+        fs.restore();
+        assert_eq!(read_all(&fs, "f").unwrap(), b"new", "any full flush makes it durable");
     }
 
     #[test]

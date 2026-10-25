@@ -102,7 +102,13 @@ impl EventHub {
         Self { inner: Mutex::new((0, VecDeque::new())), tx }
     }
 
-    fn publish(&self, mut e: EventDto) {
+    fn publish(&self, e: EventDto) {
+        self.publish_with(e, true);
+    }
+
+    /// `scrub`: mask URL secrets and cap the strings in `data` (engine events). A channel message is not: it
+    /// arrives as `chat.read` gives it.
+    fn publish_with(&self, mut e: EventDto, scrub: bool) {
         // Hold the lock across the send so sequence order is delivery order.
         let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         g.0 += 1;
@@ -111,7 +117,9 @@ impl EventHub {
         if let Some(m) = &e.name {
             e.name = Some(clip(&ops::clean_name(m), 300));
         }
-        e.data = scrub_value(e.data);
+        if scrub {
+            e.data = scrub_value(e.data);
+        }
         let e = Arc::new(e);
         if g.1.len() >= EVENT_RING {
             g.1.pop_front();
@@ -269,6 +277,9 @@ pub async fn serve_backend<B: Backend>(
             }
         }
     });
+    // Channel messages, for agents whose channels allow it.
+    #[cfg(feature = "sync")]
+    tokio::spawn(chat_methods::pump(ctx.clone(), stop_rx.clone()));
     let c1 = ctx.clone();
     let c2 = ctx.clone();
     let task = tokio::spawn(accept_loop(ctx, bound.listener, bound.uid));
@@ -986,6 +997,27 @@ async fn dispatch<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &mut Conn, req: Request) 
         | Request::SyncRemoveConfirm(_)
         | Request::SyncSettings(_)
         | Request::SyncSetSettings(_)) => sync_call(ctx, conn, r).await,
+        r @ (Request::ChatList(_)
+        | Request::ChatNew(_)
+        | Request::ChatJoin(_)
+        | Request::ChatShare(_)
+        | Request::ChatMembers(_)
+        | Request::ChatSetRole(_)
+        | Request::ChatRemoveDevice(_)
+        | Request::ChatSetShareUntil(_)
+        | Request::ChatSend(_)
+        | Request::ChatRead(_)
+        | Request::ChatMute(_)
+        | Request::ChatAddAddress(_)
+        | Request::ChatSetAgents(_)
+        | Request::ChatSetWake(_)
+        | Request::ChatLeave(_)
+        | Request::ChatTopics(_)
+        | Request::ChatNewTopic(_)
+        | Request::ChatDmList(_)
+        | Request::ChatDmRead(_)
+        | Request::ChatDmSend(_)
+        | Request::ChatDmSetAgents(_)) => chat_call(ctx, conn, r).await,
         Request::SettingsSet(p) => {
             let st = ctx.state.clone();
             let changes = p.changes;
@@ -1014,6 +1046,21 @@ mod sync_methods;
 #[cfg(feature = "sync")]
 async fn sync_call<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &Conn, r: Request) -> Result<Reply, ApiError> {
     sync_methods::call(ctx, conn, r).await
+}
+
+#[cfg(feature = "sync")]
+#[path = "server_chat.rs"]
+mod chat_methods;
+
+#[cfg(feature = "sync")]
+async fn chat_call<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &Conn, r: Request) -> Result<Reply, ApiError> {
+    chat_methods::call(ctx, conn, r).await
+}
+
+/// Built without folder sync: every `chat.*` method says so.
+#[cfg(not(feature = "sync"))]
+async fn chat_call<B: Backend>(_ctx: &Arc<Ctx<B>>, _conn: &Conn, _r: Request) -> Result<Reply, ApiError> {
+    Err(ApiError::new(ErrorCode::Unsupported, "channels are not available (this build has no folder sync)"))
 }
 
 /// Built without folder sync: every `sync.*` method says so.

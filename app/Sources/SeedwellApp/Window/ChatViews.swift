@@ -1,0 +1,270 @@
+import SwiftUI
+
+/// A conversation in the sidebar, under Chats (SPEC 7G.7): a channel, one of its topics or a private conversation,
+/// with its unread count, like a tracker row.
+struct ChatSidebarRow: View {
+    let icon: String
+    let name: String
+    let unread: UInt32
+    var online: Bool?
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: icon).frame(width: 20).foregroundStyle(.secondary)
+            Text(name).lineLimit(1).fontWeight(unread > 0 ? .semibold : .regular)
+            if let online {
+                Circle().fill(online ? Color.green : Color.secondary.opacity(0.4)).frame(width: 6, height: 6)
+                    .accessibilityLabel(online ? "Online" : "Offline")
+            }
+            Spacer(minLength: 4)
+            if unread > 0 {
+                Text("\(unread)").font(.system(size: 11, weight: .semibold)).monospacedDigit()
+                    .padding(.horizontal, 6).padding(.vertical, 1)
+                    .background(Capsule().fill(Color.accentColor)).foregroundStyle(.white)
+            }
+        }
+        .accessibilityElement(children: .combine)
+    }
+}
+
+/// The channel's controls in the window's toolbar, next to its name: Members, Share… and its settings menu.
+struct ChatToolbarControls: View {
+    @Bindable var model: LibraryModel
+    let channel: SyncChannel
+    let actions: ChatActions
+    @State private var showMembers = false
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Button("Members") { model.loadChatMembers(); showMembers = true }
+                .help("Who is in this channel")
+                .popover(isPresented: $showMembers, arrowEdge: .bottom) {
+                    ChatMembersView(model: model, channel: channel, actions: actions) { m in
+                        showMembers = false
+                        actions.showDirect(m.deviceId, name: m.name)
+                    }
+                }
+            if SyncText.canShare(channel.role) {
+                Button("Share…") { actions.share(channel.id) }.help("Make a link that lets another Mac join this channel")
+            }
+            Menu {
+                Button(channel.muted ? "Unmute" : "Mute") { actions.setMuted(channel, !channel.muted) }
+                Menu("Agents on This Mac") {
+                    ForEach([SyncAgentAccess.off, .read, .readPost], id: \.self) { a in
+                        Button { actions.setAgents(channel, a) } label: {
+                            if a == channel.agents { Label(ChatText.agents(a), systemImage: "checkmark") } else { Text(ChatText.agents(a)) }
+                        }
+                    }
+                }
+                Button("Wake Command…") { actions.askWakeCommand(channel) }.disabled(channel.agents == .off)
+                Divider()
+                Button("New Topic…") { actions.newTopic(channel) }.disabled(channel.role == .readOnly)
+                Divider()
+                Button("Leave Channel…") { actions.leave(channel) }
+            } label: { Image(systemName: "ellipsis.circle") }
+                .menuIndicator(.hidden).fixedSize()
+                .help("Mute, what agents on this Mac may do, the wake command, a new topic, leave")
+                .accessibilityIdentifier("chat-channel-menu")
+        }
+    }
+}
+
+/// A private conversation's control in the toolbar: what agents on this Mac may do with private messages.
+struct ChatDirectToolbarControls: View {
+    let actions: ChatActions
+    @State private var access: SyncAgentAccess = .off
+
+    var body: some View {
+        Menu {
+            Menu("Agents on This Mac") {
+                ForEach([SyncAgentAccess.off, .read, .readPost], id: \.self) { a in
+                    Button { actions.setDirectAgents(a); access = a } label: {
+                        if a == access { Label(ChatText.agents(a), systemImage: "checkmark") } else { Text(ChatText.agents(a)) }
+                    }
+                }
+            }
+        } label: { Image(systemName: "ellipsis.circle") }
+            .menuIndicator(.hidden).fixedSize()
+            .help("What agents on this Mac may do with private messages (one setting for all of them)")
+            .accessibilityIdentifier("chat-direct-menu")
+            .onAppear { access = actions.directAgents }
+    }
+}
+
+/// One conversation's page (a channel's General or a topic, or a private one): the messages and the message field.
+/// Its name and line are the window's title, its controls in the toolbar (`ChatToolbarControls`).
+struct ChatConversationView: View {
+    @Bindable var model: LibraryModel
+    let place: LibraryModel.Section
+    /// The field's placeholder names it: "Message Team", "Message Dinner", "Message Kari's iPhone".
+    let name: String
+    let canPost: Bool
+    var empty = "No messages yet."
+    let actions: ChatActions
+    @State private var draft = ""
+    @State private var replyTo: SyncMessage?
+    @FocusState private var typing: Bool
+
+    var body: some View {
+        VStack(spacing: 0) {
+            messages
+            Divider()
+            if canPost { composer.padding(12) } else {
+                Text("Read only: you see the messages but cannot post.").font(.system(size: 12)).foregroundStyle(.secondary).padding(12)
+            }
+        }
+    }
+
+    private var messages: some View {
+        ScrollViewReader { scroll in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    let ms = model.chatMessages
+                    if ms.isEmpty {
+                        Text(empty).font(.system(size: 13)).foregroundStyle(.secondary).padding(.top, 30)
+                            .frame(maxWidth: .infinity).multilineTextAlignment(.center)
+                    }
+                    ForEach(Array(ms.enumerated()), id: \.element.id) { n, m in
+                        ChatMessageRow(message: m, header: ChatText.startsRun(m, after: n > 0 ? ms[n - 1] : nil),
+                                       reply: m.replyTo.flatMap { r in ms.first { $0.id == r } },
+                                       onReply: canPost ? { replyTo = m; typing = true } : nil)
+                            .id(m.id)
+                    }
+                }
+                .padding(.horizontal, 22).padding(.vertical, 12)
+            }
+            .onChange(of: model.chatMessages.last?.id) { _, last in
+                if let last { withAnimation(.easeOut(duration: 0.15)) { scroll.scrollTo(last, anchor: .bottom) } }
+            }
+            .onAppear { if let last = model.chatMessages.last?.id { scroll.scrollTo(last, anchor: .bottom) } }
+        }
+    }
+
+    private var composer: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if let r = replyTo {
+                HStack(spacing: 6) {
+                    Image(systemName: "arrowshape.turn.up.left").font(.system(size: 11))
+                    Text("Replying to \(ChatText.author(r)): \(ChatText.preview(r, limit: 60))").lineLimit(1)
+                    Spacer()
+                    Button { replyTo = nil } label: { Image(systemName: "xmark.circle.fill") }.buttonStyle(.plain)
+                        .help("Don't reply to it")
+                }
+                .font(.system(size: 11.5)).foregroundStyle(.secondary)
+            }
+            HStack(alignment: .bottom, spacing: 8) {
+                TextField("Message \(name)", text: $draft, axis: .vertical)
+                    .textFieldStyle(.roundedBorder).lineLimit(1...6)
+                    .focused($typing)
+                    .onKeyPress(.return, phases: .down) { press in
+                        if press.modifiers.contains(.shift) || press.modifiers.contains(.option) { return .ignored }
+                        send()
+                        return .handled
+                    }
+                    .accessibilityIdentifier("chat-field")
+                Button("Send", action: send).disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .help("Send (Return; Shift-Return for a new line)")
+            }
+        }
+    }
+
+    private func send() {
+        let (text, reply) = (draft, replyTo?.id)
+        draft = ""
+        replyTo = nil
+        actions.send(to: place, text, replyTo: reply) { [model] sent in
+            if sent { model.loadChatMessages() } else if draft.isEmpty { draft = text }
+        }
+    }
+}
+
+/// A message: the author (with an agent label) and time at the start of a run, a quoted reply, the text.
+struct ChatMessageRow: View {
+    let message: SyncMessage
+    let header: Bool
+    let reply: SyncMessage?
+    let onReply: (() -> Void)?
+    @State private var hovered = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            if header {
+                HStack(spacing: 6) {
+                    Text(message.isMe ? "You" : (message.authorName.isEmpty ? "Unnamed device" : message.authorName))
+                        .font(.system(size: 12.5, weight: .semibold))
+                    if let agent = message.agent {
+                        Text("agent · \(agent)").font(.system(size: 10.5, weight: .medium))
+                            .padding(.horizontal, 5).padding(.vertical, 1)
+                            .background(Capsule().fill(Color.secondary.opacity(0.16)))
+                            .foregroundStyle(.secondary)
+                            .help("Sent by an agent through Seedwell on that device")
+                    }
+                    Text(ChatText.time(message.atS)).font(.system(size: 11)).foregroundStyle(.secondary)
+                }
+                .padding(.top, 10)
+            }
+            if let reply {
+                Text("↳ \(ChatText.author(reply)): \(ChatText.preview(reply, limit: 80))")
+                    .font(.system(size: 11.5)).foregroundStyle(.secondary).lineLimit(1)
+            }
+            HStack(alignment: .top) {
+                Text(message.kind == .other ? ChatText.preview(message) : message.body)
+                    .font(message.kind == .json ? .system(size: 12, design: .monospaced) : .system(size: 13))
+                    .foregroundStyle(message.kind == .other ? .secondary : .primary)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                if hovered, let onReply {
+                    Button(action: onReply) { Image(systemName: "arrowshape.turn.up.left") }
+                        .buttonStyle(.plain).foregroundStyle(.secondary).help("Reply")
+                }
+            }
+        }
+        .padding(.vertical, 1)
+        .contentShape(Rectangle())
+        .onHover { hovered = $0 }
+    }
+}
+
+/// The members popover: every device in the channel with its role; an owner's role menu for the others.
+struct ChatMembersView: View {
+    @Bindable var model: LibraryModel
+    let channel: SyncChannel
+    let actions: ChatActions
+    /// Opens the private conversation with a member (and closes the popover).
+    let message: (SyncMember) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Members").font(.system(size: 12, weight: .semibold)).foregroundStyle(.secondary)
+            ForEach(SyncText.ordered(model.chatMembers), id: \.deviceId) { m in
+                HStack(spacing: 10) {
+                    Circle().fill(m.online || m.isMe ? Color.green : Color.secondary.opacity(0.4)).frame(width: 7, height: 7)
+                    Text(m.isMe ? "\(m.name) (this Mac)" : (m.name.isEmpty ? "Unnamed device" : m.name)).font(.system(size: 13))
+                    Spacer(minLength: 12)
+                    if channel.role == .owner, !m.isMe {
+                        Menu(SyncText.role(m.role)) {
+                            ForEach([SyncRole.owner, .admin, .readWrite, .readOnly], id: \.self) { r in
+                                Button(SyncText.role(r)) { actions.sync.setRole(channel.id, m, r) { [model] in model.loadChatMembers() } }
+                                    .disabled(r == m.role)
+                            }
+                            Divider()
+                            Button("Remove from Channel") {
+                                actions.sync.removeDevice(channel.id, name: channel.name, m) { [model] in model.loadChatMembers() }
+                            }
+                        }
+                        .menuStyle(.button).fixedSize().controlSize(.small)
+                    } else {
+                        Text(SyncText.role(m.role)).font(.system(size: 12)).foregroundStyle(.secondary)
+                    }
+                    if !m.isMe {
+                        Button { message(m) } label: { Image(systemName: "envelope") }
+                            .buttonStyle(.borderless).help("Message \(m.name.isEmpty ? "this device" : m.name) privately")
+                            .accessibilityLabel("Message Privately")
+                    }
+                }
+            }
+        }
+        .padding(14)
+        .frame(minWidth: 300)
+    }
+}

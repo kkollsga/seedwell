@@ -46,7 +46,7 @@ fn need_full(ctx_level: Permission, what: &str) -> Result<(), ApiError> {
 }
 
 /// `host:port` or `ip:port`, resolved (the first address).
-async fn address(raw: &str) -> Result<SocketAddr, ApiError> {
+pub(super) async fn address(raw: &str) -> Result<SocketAddr, ApiError> {
     let raw = raw.trim();
     if raw.is_empty() || raw.len() > 300 || raw.chars().any(char::is_control) {
         return Err(ApiError::params("`address` is host:port"));
@@ -88,12 +88,25 @@ pub(super) async fn call<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &Conn, req: Reques
         Request::SyncShare(p) => {
             let f = pick(&h, &p.folder)?;
             let role = s::parse_role(p.role.as_deref().unwrap_or("read_write"))?;
-            let inv = h.create_invite(&folder_id(&f)?, role, p.uses.unwrap_or(1), p.days.unwrap_or(7)).map_err(s::err)?;
+            let (uses, days) = (p.uses.unwrap_or(1), p.days.unwrap_or(7));
+            let inv = match p.chat.as_deref().map(str::trim) {
+                None | Some("") => h.create_invite(&folder_id(&f)?, role, uses, days).map_err(s::err)?,
+                Some(q) => {
+                    let channel = if q.eq_ignore_ascii_case("new") {
+                        let c = h.chat_new(&f.name).await.map_err(s::chat_err)?;
+                        c.id.parse().map_err(|_| ApiError::internal("the service returned a malformed channel id"))?
+                    } else {
+                        super::chat_methods::pick(&h, q)?.1
+                    };
+                    h.create_bundle_invite(&folder_id(&f)?, role, uses, days, &channel).map_err(s::err)?
+                }
+            };
             let d = folder_dto(&f);
             let mut r = reply(&s::invite_dto(&inv))?;
             // What was handed out, never the link itself.
             let uses = if inv.max_uses == 0 { "unlimited uses".to_string() } else { format!("{} use(s)", inv.max_uses) };
-            r.note = Some(format!("a {} link ({uses}) to {} ({}) made", s::role_name(role), clip(&d.name, 80), short(&d.id)));
+            let with = inv.channel_name.as_deref().map(|c| format!(" and channel {}", clip(c, 80))).unwrap_or_default();
+            r.note = Some(format!("a {} link ({uses}) to {} ({}){with} made", s::role_name(role), clip(&d.name, 80), short(&d.id)));
             Ok(r)
         }
         Request::SyncMembers(p) => {

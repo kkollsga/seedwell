@@ -241,6 +241,8 @@ pub fn invite_dto(i: &trs_sync_net::InviteInfo) -> SyncInviteDto {
         expires_at: i.expires_s,
         created_at: i.created_s,
         revoked: i.revoked,
+        channel_id: i.channel_id.clone(),
+        channel_name: i.channel_name.as_deref().map(|n| clip(&ops::clean_name(n), 100)),
     }
 }
 
@@ -301,6 +303,7 @@ pub fn folder_dto(f: &FolderStatus) -> SyncFolderDto {
         issues: f.issues.iter().take(200).map(|(p, r)| SyncIssueDto { path: clip(p, 400), reason: clip(r, 200) }).collect(),
         error: f.error.as_deref().map(|e| clip(&scrub_keys(e), 300)),
         last_synced_at: f.last_synced_s,
+        channel_id: f.channel_id.clone(),
     }
 }
 
@@ -487,6 +490,114 @@ pub fn move_to_trash(folder: &Path, target: &Path) -> io::Result<()> {
     std::fs::rename(folder, target)
 }
 
+// ----------------------------------------------------------------------------- channels
+
+/// One channel in protocol form.
+pub fn channel_dto(c: &trs_sync_net::chat::ChannelStatus) -> ChatChannelDto {
+    ChatChannelDto {
+        id: c.id.clone(),
+        name: clip(&ops::clean_name(&c.name), 200),
+        role: c.role.map(|r| role_name(r).into()),
+        joining: c.joining,
+        error: c.error.as_deref().map(|e| clip(&scrub_keys(e), 300)),
+        share_until: c.share_until,
+        members: c.members,
+        online: c.online,
+        unread: c.unread,
+        last_message_at: c.last_message_s,
+        muted: c.muted,
+        agents: c.agents.name().into(),
+        wake_command: c.wake_command.clone(),
+        issues: c.issues.iter().take(50).map(|i| clip(i, 300)).collect(),
+    }
+}
+
+/// One message in protocol form: the same fields as the service's (and a wake-up command's) JSON.
+pub fn message_dto(m: &trs_sync_net::chat::MessageInfo) -> ChatMessageDto {
+    ChatMessageDto {
+        id: m.id.clone(),
+        channel_id: m.channel_id.clone(),
+        channel_name: clip(&ops::clean_name(&m.channel_name), 200),
+        author_device: m.author_device.clone(),
+        author_name: clip(&ops::clean_name(&m.author_name), 100),
+        me: m.me,
+        agent: m.agent.clone(),
+        at: m.at,
+        future: m.future,
+        reply_to: m.reply_to.clone(),
+        topic: m.topic.clone(),
+        topic_title: m.topic_title.as_deref().map(|t| clip(&ops::clean_name(t), 300)),
+        direct: m.direct,
+        peer_device: m.peer_device.clone(),
+        kind: m.kind.clone(),
+        body: m.body.clone(),
+        trust: m.trust.clone(),
+    }
+}
+
+/// The channel `q` names: its id, an unambiguous prefix of it (4+ characters), or its name (any case).
+pub fn resolve_channel<'a>(channels: &'a [trs_sync_net::chat::ChannelStatus], q: &str) -> Result<&'a trs_sync_net::chat::ChannelStatus, ApiError> {
+    let q = q.trim();
+    if q.is_empty() || q.len() > 200 {
+        return Err(ApiError::params("`channel` is a channel id, a prefix of it, or the channel's name"));
+    }
+    let nq = norm_id(q);
+    if let Some(c) = channels.iter().find(|c| !nq.is_empty() && norm_id(&c.id) == nq) {
+        return Ok(c);
+    }
+    let lower = q.to_lowercase();
+    let mut hits: Vec<&trs_sync_net::chat::ChannelStatus> = channels.iter().filter(|c| c.name.to_lowercase() == lower).collect();
+    if nq.len() >= MIN_FOLDER_PREFIX && nq.len() == q.chars().filter(|c| *c != '-').count() {
+        for c in channels.iter().filter(|c| norm_id(&c.id).starts_with(&nq)) {
+            if !hits.iter().any(|h| h.id == c.id) {
+                hits.push(c);
+            }
+        }
+    }
+    match hits.as_slice() {
+        [] => Err(ApiError::not_found(format!("no channel `{}` (see `chat.list`)", clip(q, 60)))),
+        [one] => Ok(one),
+        many => {
+            let cands: Vec<_> = many.iter().take(8).map(|c| json!({"id": c.id, "name": c.name})).collect();
+            Err(ApiError::new(ErrorCode::Ambiguous, format!("`{}` matches {} channels; use more of the id", clip(q, 60), many.len()))
+                .with_data(json!({ "candidates": cands })))
+        }
+    }
+}
+
+/// One topic in protocol form.
+pub fn topic_dto(t: &trs_sync_net::chat::TopicStatus) -> ChatTopicDto {
+    ChatTopicDto {
+        id: t.id.clone(),
+        channel_id: t.channel_id.clone(),
+        title: clip(&ops::clean_name(&t.title), 300),
+        author_name: clip(&ops::clean_name(&t.author_name), 100),
+        created_at: t.created_s,
+        last_message_at: t.last_message_s,
+        unread: t.unread,
+        messages: t.messages,
+    }
+}
+
+/// One private conversation in protocol form.
+pub fn direct_dto(d: &trs_sync_net::direct::DirectStatus) -> ChatDirectDto {
+    ChatDirectDto {
+        device_id: d.device.to_string(),
+        name: clip(&ops::clean_name(&d.name), 100),
+        online: d.online,
+        unread: d.unread,
+        last_message_at: d.last_message_s,
+    }
+}
+
+/// A channel service error for the protocol (not found means the channel).
+pub fn chat_err(e: SyncError) -> ApiError {
+    match e {
+        SyncError::NotFound => ApiError::not_found("no such channel (see `chat.list`)"),
+        e => err(e),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -513,6 +624,7 @@ mod tests {
             issues: Vec::new(),
             error: None,
             last_synced_s: None,
+            channel_id: None,
         }
     }
 
@@ -578,3 +690,4 @@ mod tests {
         assert_eq!(default_join_path(&base, "nonsense").unwrap_err().code, ErrorCode::Invalid);
     }
 }
+

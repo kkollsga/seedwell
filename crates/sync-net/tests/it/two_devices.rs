@@ -253,3 +253,39 @@ async fn keeping_both_gives_the_copy_a_plain_name_and_keeping_the_original_archi
     assert!(a.h.resolve_conflict(&id, "../x (conflict, B, 2026-10-25 14.32)", Keep::Copy).await.is_err());
     a.h.shutdown().await;
 }
+
+/// 2000 small files over loopback (SPEC §7G.2: one full flush per commit batch, not per file). Prints how long the
+/// pull took; `SEEDWELL_PULL_FILES` changes the count.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_thousand_small_files_pull_without_a_full_flush_each() {
+    let n: usize = std::env::var("SEEDWELL_PULL_FILES").ok().and_then(|v| v.parse().ok()).unwrap_or(2000);
+    let (a, b) = (device("Alpha").await, device("Beta").await);
+    let (fa, fb) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    for i in 0..n {
+        let dir = fa.path().join(format!("d{}", i % 10));
+        std::fs::create_dir_all(&dir).unwrap();
+        let body: Vec<u8> = (0..1024).map(|j| ((i * 31 + j) % 251) as u8).collect();
+        std::fs::write(dir.join(format!("f{i:05}.txt")), body).unwrap();
+    }
+    let st = a.h.add_folder(fa.path().to_path_buf()).await.unwrap();
+    let id: FolderId = st.id.parse().unwrap();
+    until(60, "A has scanned", || a.h.snapshot().folders.iter().any(|f| f.files as usize >= n)).await;
+    let key = a.h.create_invite(&id, Role::ReadWrite, 1, 1).unwrap().link;
+    let dest = fb.path().join("Shared");
+    b.h.join_folder(&key, dest.clone()).await.unwrap();
+    let started = Instant::now();
+    b.h.add_address(&id, addr(&a)).unwrap();
+    let last = dest.join(format!("d{}", (n - 1) % 10)).join(format!("f{:05}.txt", n - 1));
+    until(300, "B has every file", || {
+        b.h.snapshot().folders.iter().any(|f| f.state == FolderState::UpToDate && f.files as usize >= n) && last.exists()
+    })
+    .await;
+    let took = started.elapsed();
+    eprintln!("pulled {n} files of 1 KB in {:.1} s ({:.1} ms a file)", took.as_secs_f64(), took.as_secs_f64() * 1000.0 / n as f64);
+    for i in (0..n).step_by(97) {
+        let p = dest.join(format!("d{}", i % 10)).join(format!("f{i:05}.txt"));
+        assert_eq!(read(&p).map(|b| b.len()), Some(1024), "{}", p.display());
+    }
+    a.h.shutdown().await;
+    b.h.shutdown().await;
+}

@@ -46,6 +46,57 @@ struct SidebarView: View {
                 .badge(model.sync.folders.count)
                 .help("Folders kept the same on your devices")
                 .tag(LibraryModel.Section.folderSync)
+            // Channels (SPEC 7G.7): each is a tab of its own, like a tracker, its topics under it.
+            Section("Chats") {
+                ForEach(model.chats, id: \.id) { c in
+                    let topics = model.chatTopics[c.id] ?? []
+                    let open = model.chatExpanded.contains(c.id)
+                    DisclosureGroup(isExpanded: Binding(get: { open }, set: { if $0 { model.chatExpanded.insert(c.id) } else { model.chatExpanded.remove(c.id) } })) {
+                        ForEach(topics, id: \.id) { t in
+                            ChatSidebarRow(icon: "number", name: t.title, unread: c.muted ? 0 : t.unread)
+                                .tag(LibraryModel.Section.chat(c.id, topic: t.id))
+                                .help("\(t.title): \(ChatText.topicLine(t))")
+                        }
+                        if c.role != .readOnly {
+                            Button { commands.chat.newTopic(c) } label: {
+                                Label("New Topic…", systemImage: "plus").foregroundStyle(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                            .help("Start a topic in \(c.name): a conversation of its own, apart from General")
+                        }
+                    } label: {
+                        // Open, the channel's row is its General; closed, it counts its topics too.
+                        ChatSidebarRow(icon: c.muted ? "bell.slash" : "bubble.left.and.bubble.right", name: c.name,
+                                       unread: c.muted ? 0 : (open ? ChatText.generalUnread(c, topics) : c.unread))
+                            .tag(LibraryModel.Section.chat(c.id, topic: nil))
+                            .help("\(c.name): \(ChatText.subtitle(c))")
+                            .contextMenu {
+                                if SyncText.canShare(c.role) { Button("Share…") { commands.chat.share(c.id) } }
+                                if c.role != .readOnly { Button("New Topic…") { commands.chat.newTopic(c) } }
+                                Button(c.muted ? "Unmute" : "Mute") { commands.chat.setMuted(c, !c.muted) }
+                                Divider()
+                                Button("Leave Channel…") { commands.chat.leave(c) }
+                            }
+                    }
+                }
+                Button { commands.chat.showNew() } label: {
+                    Label("New Channel…", systemImage: "plus").foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Make a channel with your devices, the people you share with and their agents, or join one with a link")
+                .accessibilityIdentifier("chat-new-channel")
+            }
+            // Private conversations (end-to-end encrypted, carried by the channels' members).
+            let directs = model.directRows
+            if !directs.isEmpty {
+                Section("Direct Messages") {
+                    ForEach(directs, id: \.deviceId) { d in
+                        ChatSidebarRow(icon: "person.crop.circle", name: d.name.isEmpty ? "Unnamed device" : d.name, unread: d.unread, online: d.online)
+                            .tag(LibraryModel.Section.direct(d.deviceId))
+                            .help("Private conversation with \(d.name.isEmpty ? "this device" : d.name)")
+                    }
+                }
+            }
             let shownTrackers = TrackerOrder.visible(s.trackers, selected: model.trackerID)
             if !shownTrackers.isEmpty {
             Section("Trackers") {
@@ -126,6 +177,7 @@ struct DetailView: View {
             .toolbar(removing: .title)
             .toolbar {
                 TitleToolbarItem(title: model.title, summary: model.summary, favorite: model.tracker?.favorite == true)
+                ChatToolbarItem(model: model, actions: commands.chat)
                 RemoveConfirmToolbarItem(commands: commands)
             }
             .sheet(isPresented: $model.adding) { AddSheet(commands: commands, isPresented: $model.adding) }
@@ -140,6 +192,16 @@ struct DetailView: View {
             SettingsView(model: settings, nav: nav)
         case .folderSync:
             SyncPage(model: model, actions: commands.sync)
+        case .chat(_, let topic):
+            if let c = model.chat, topic == nil || model.chatTopic != nil {
+                ChatConversationView(model: model, place: model.section, name: model.chatTopic?.title ?? c.name, canPost: c.role != .readOnly,
+                                     actions: commands.chat)
+            } else {
+                EmptyListNote(text: model.chat == nil ? "This channel is no longer on this Mac" : "This topic is no longer in the channel")
+            }
+        case .direct:
+            ChatConversationView(model: model, place: model.section, name: model.directName, canPost: true,
+                                 empty: "No messages yet. Only you and \(model.directName) can read what you write here.", actions: commands.chat)
         case .downloads:
             let groups = Lists.downloads(model, commands: commands)
             RowList(model: model, commands: commands, groups: groups) {
@@ -169,6 +231,25 @@ struct DetailView: View {
                 }
             }
         }
+    }
+}
+
+/// A channel's controls at the toolbar's trailing end (SPEC 7G.7), in the style of the other items there.
+struct ChatToolbarItem: ToolbarContent {
+    @Bindable var model: LibraryModel
+    let actions: ChatActions
+
+    var body: some ToolbarContent {
+        if #available(macOS 26.0, *) {
+            ToolbarItem(placement: .primaryAction) { controls }.sharedBackgroundVisibility(.hidden)
+        } else {
+            ToolbarItem(placement: .primaryAction) { controls }
+        }
+    }
+
+    @ViewBuilder private var controls: some View {
+        if let c = model.chat { ChatToolbarControls(model: model, channel: c, actions: actions) }
+        else if model.directID != nil { ChatDirectToolbarControls(actions: actions) }
     }
 }
 

@@ -109,6 +109,7 @@ tools/sysguard/heavy.sh cargo test --release -p trs-sync chunk_bench -- --ignore
 | `trs-sync-proto` | The shared model: `FileInfo`, `ChunkRef`, `MAX_CHUNK`, `validate_path`, `STATE_DIR`, and the entry codec the index stores reuse. |
 | `redb` | The index file (`store_redb`). Already Seedwell's database (`trs-state`, same major version): pure Rust, ACID transactions, crash-safe commits, ordered keys with range reads, no C library or server. |
 | `sha2` | SHA-256 per chunk. Already in the workspace (`trs-storage`); it uses the ARMv8 SHA instructions, chosen at run time. |
+| `libc` | `fcntl(F_BARRIERFSYNC)` in `fs::flush`, the one call `std` lacks: a write barrier per pulled file instead of a full flush. Already in the workspace (`trs-storage`, `trs-fswatch`). |
 | `unicode-normalization` | NFC for wire names and keys. The tables are not in `std`, and the Linux daemon cannot use CFString. No default features beyond `std`; pulls only `tinyvec`. |
 
 Dev: `proptest` (properties: chunk stability, streaming, the two-byte step), `tempfile` (temp folders for the

@@ -57,20 +57,13 @@ async fn start_at(state: &std::path::Path, name: &str, protocol: (u32, u32)) -> 
     trs_sync_net::SyncHandle::start(opts).await.unwrap()
 }
 
-/// Stops `h` and starts its state folder again, as `protocol`, once its `folders` have opened (a stopped service
-/// lets go of its indexes a moment after `shutdown` returns).
+/// Stops `h` and starts its state folder again in this process, as `protocol`: its `folders` open at once
+/// (`shutdown` returns once they are closed).
 async fn restart(h: trs_sync_net::SyncHandle, state: &std::path::Path, name: &str, protocol: (u32, u32), folders: usize) -> trs_sync_net::SyncHandle {
     h.shutdown().await;
-    drop(h);
-    for _ in 0..50 {
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        let h = start_at(state, name, protocol).await;
-        if h.snapshot().folders.len() >= folders {
-            return h;
-        }
-        h.shutdown().await;
-    }
-    panic!("{name} did not open its folders again");
+    let h = start_at(state, name, protocol).await;
+    assert_eq!(h.snapshot().folders.len(), folders, "{name}'s folders open again right after shutdown");
+    h
 }
 
 fn issues(h: &trs_sync_net::SyncHandle, id: &FolderId) -> Vec<String> {

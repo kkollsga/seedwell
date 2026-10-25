@@ -1,13 +1,16 @@
 //! The wire format as 0.1.6 writes it, frozen: every message type, statement kind, invitation link and proof, as
-//! bytes (hex). Each decodes to its value and encodes back to the same bytes, so a change to the format fails here
-//! first. 0.1.6 is the baseline every later version must still read (`PROTOCOL.md`): these vectors only ever get
-//! new entries, never edits.
+//! bytes (hex), channels included (types 17 to 22: channel messages and topics, a channel link, private messages
+//! and the keys they are sealed to). Each decodes to its value and
+//! encodes back to the same bytes, so a change to the format fails here first. 0.1.6 is the baseline every later
+//! version must still read (`PROTOCOL.md`): these vectors only ever get new entries, never edits.
 //!
 //! `SEEDWELL_GOLDEN_PRINT=1 cargo test golden -- --nocapture` prints the table for a new entry.
 //!
 //! Then the rules for what later versions may send: appended fields, records that grew, kinds and values this
 //! version does not know, and a peer with a newer protocol and features.
 
+use trs_sync_proto::chat::{AuthorHave, ChatMessage, Draft, MessageKind};
+use trs_sync_proto::direct::{DirectBody, DirectDraft, DirectKey, DirectMessage, secret_of};
 use trs_sync_proto::codec::{DecodeError, Frame, Reader};
 use trs_sync_proto::device::DeviceKey;
 use trs_sync_proto::ids::{DeviceId, FolderId, ShortId};
@@ -139,7 +142,119 @@ fn messages() -> Vec<(&'static str, Message)> {
         ("message 14 relay data", Message::RelayData(RelayData { session: 3, data: vec![0, 1, 2, 3] })),
         ("message 15 relay close", Message::RelayClose(RelayClose { session: 3 })),
         ("message 16 owner key", Message::OwnerKey(OwnerKey { folder_id: fid(), secret: [0x5e; 32] })),
+        (
+            "message 17 chat join",
+            Message::ChatJoin(ChatJoin {
+                channels: vec![JoinChannel { channel_id: fid(), proofs: vec![Proof::Grant(statements()[0].1.to_bytes()), Proof::Invite(redeem())] }],
+            }),
+        ),
+        (
+            "message 18 chat have",
+            Message::ChatHave(ChatHave {
+                channel_id: fid(),
+                floor_at_ms: T * 1000 - 86_400_000,
+                authors: vec![AuthorHave::of(*dev(3).public_key(), [1, 2, 3, 7]), AuthorHave::of(*a.public_key(), [5])],
+            }),
+        ),
+        ("message 19 chat messages", Message::ChatMessages(ChatMessages { channel_id: fid(), messages: chat().into_iter().map(|(_, m)| m).collect() })),
+        ("message 20 direct keys", Message::DirectKeys(DirectKeys { records: vec![direct_key(3), direct_key(7)] })),
+        ("message 21 direct have", Message::DirectHave(DirectHave { authors: vec![AuthorHave::of(*dev(3).public_key(), [1, 2])] })),
+        ("message 22 direct messages", Message::DirectMessages(DirectMessages { messages: direct().into_iter().map(|(_, m)| m).collect() })),
     ]
+}
+
+/// A device's key for private messages.
+fn direct_key(n: u8) -> DirectKey {
+    DirectKey::of(&dev(n), T * 1000 + n as u64)
+}
+
+/// A private message each way between dev(3) and dev(7): text, and an agent's JSON answer to it.
+fn direct() -> Vec<(&'static str, DirectMessage)> {
+    let (anna, agent) = (dev(3), dev(7));
+    let seal = |from: &DeviceKey, to: u8, d: DirectDraft| DirectMessage::seal(from, dev(to).public_key(), &direct_key(to).x25519, d).unwrap();
+    vec![
+        (
+            "direct 1 text",
+            seal(
+                &anna,
+                7,
+                DirectDraft {
+                    id: [0x31; 16],
+                    seq: 1,
+                    at_ms: T * 1000 + 10,
+                    body: DirectBody { reply_to: None, agent: None, kind: MessageKind::Text, body: "Bare oss to?".as_bytes().to_vec() },
+                    ephemeral_secret: [0x41; 32],
+                },
+            ),
+        ),
+        (
+            "direct 2 json from an agent",
+            seal(
+                &agent,
+                3,
+                DirectDraft {
+                    id: [0x32; 16],
+                    seq: 1,
+                    at_ms: T * 1000 + 20,
+                    body: DirectBody { reply_to: Some([0x31; 16]), agent: Some("claude-code".into()), kind: MessageKind::Json, body: br#"{"ok":true}"#.to_vec() },
+                    ephemeral_secret: [0x42; 32],
+                },
+            ),
+        ),
+    ]
+}
+
+/// One message of each kind: text, an agent's JSON answer, a kind of a later version, a new topic and a message in
+/// it.
+fn chat() -> Vec<(&'static str, ChatMessage)> {
+    let (anna, agent) = (dev(3), dev(7));
+    let ch = fid();
+    let sign = |k: &DeviceKey, d: Draft| ChatMessage::sign(k, &ch, d).unwrap();
+    vec![
+        (
+            "chat 1 text",
+            sign(&anna, Draft { id: [0x11; 16], seq: 1, at_ms: T * 1000 + 5, reply_to: None, topic: None, agent: None, kind: MessageKind::Text, body: "Middag kl. 18?".as_bytes().to_vec() }),
+        ),
+        (
+            "chat 2 json from an agent",
+            sign(
+                &agent,
+                Draft {
+                    id: [0x12; 16],
+                    seq: 4,
+                    at_ms: T * 1000 + 900,
+                    reply_to: Some([0x11; 16]),
+                    topic: None,
+                    agent: Some("claude-code".into()),
+                    kind: MessageKind::Json,
+                    body: br#"{"answer":"yes","confidence":0.9}"#.to_vec(),
+                },
+            ),
+        ),
+        (
+            "chat 3 later kind",
+            sign(&anna, Draft { id: [0x13; 16], seq: 2, at_ms: T * 1000 + 1200, reply_to: Some([0x12; 16]), topic: None, agent: None, kind: MessageKind::Unknown(9), body: vec![0x12, 0x01] }),
+        ),
+        (
+            "chat 4 topic",
+            sign(&anna, Draft { id: [0x14; 16], seq: 3, at_ms: T * 1000 + 1500, reply_to: None, topic: None, agent: None, kind: MessageKind::Topic, body: "Lørdag".as_bytes().to_vec() }),
+        ),
+        (
+            "chat 5 in a topic",
+            sign(&agent, Draft { id: [0x15; 16], seq: 5, at_ms: T * 1000 + 1800, reply_to: None, topic: Some([0x14; 16]), agent: None, kind: MessageKind::Text, body: "Bord for 4 kl. 18".as_bytes().to_vec() }),
+        ),
+    ]
+}
+
+fn chat_link() -> InviteLink {
+    InviteLink { invite: invite(None, Role::ReadWrite, 9), token_seed: [9; 32], name: Some("Middag".into()) }
+}
+
+/// The channel a folder's link also invites to (`format_bundle`): another channel than [`chat_link`]'s folder key.
+fn bundled_channel() -> InviteLink {
+    let ch = FolderSecret::from_bytes([2; 32]);
+    let invite = new_invite(*ch.public_key(), [10; 16], [10; 32], Role::ReadWrite, 1, T + 7 * 86_400, T, Signer::Folder, &|m: &[u8]| ch.sign(m));
+    InviteLink { invite, token_seed: [10; 32], name: Some("Family Photos chat".into()) }
 }
 
 fn link() -> InviteLink {
@@ -176,6 +291,13 @@ fn written() -> Vec<(String, String)> {
     out.extend(statements().iter().map(|(n, s)| (n.to_string(), hex(&s.to_bytes()))));
     out.push(("link".into(), link().format()));
     out.push(("proof 5 redeem".into(), hex(&redeem())));
+    out.extend(chat().iter().map(|(n, m)| (n.to_string(), hex(&m.to_bytes()))));
+    out.push(("chat link".into(), chat_link().format_chat()));
+    out.push(("folder and channel link".into(), link().format_bundle(&bundled_channel())));
+    out.extend(direct().iter().map(|(n, m)| (n.to_string(), hex(&m.to_bytes()))));
+    let mut key = Vec::new();
+    direct_key(3).put(&mut key);
+    out.push(("direct key".into(), hex(&key)));
     out
 }
 
@@ -186,13 +308,14 @@ fn frozen(name: &str) -> &'static str {
 #[test]
 fn golden_vectors_are_frozen() {
     if std::env::var_os("SEEDWELL_GOLDEN_PRINT").is_some() {
-        for (n, v) in written() {
+        // The entries not frozen yet (the frozen ones never change).
+        for (n, v) in written().into_iter().filter(|(n, _)| !GOLDEN.iter().any(|(g, _)| g == n)) {
             println!("    (\"{n}\", \"{v}\"),");
         }
         return;
     }
     for (n, v) in written() {
-        assert_eq!(v, frozen(&n), "{n} is not written as 0.1.6 wrote it");
+        assert_eq!(v, frozen(&n), "{n} is not written as it was frozen");
     }
     assert_eq!(GOLDEN.len(), written().len(), "every frozen vector is still written");
     // And each reads back as its value.
@@ -204,6 +327,28 @@ fn golden_vectors_are_frozen() {
         assert!(s.verify(secret().public_key()), "{n}");
     }
     assert_eq!(InviteLink::parse(frozen("link")).unwrap(), link());
+    assert_eq!(InviteLink::parse_chat(frozen("chat link")).unwrap(), chat_link());
+    assert!(InviteLink::parse(frozen("chat link")).is_err() && InviteLink::parse_chat(frozen("link")).is_err(), "one kind each");
+    let bundle = frozen("folder and channel link");
+    assert_eq!(InviteLink::parse_bundle(bundle).unwrap(), (link(), Some(bundled_channel())));
+    assert_eq!(InviteLink::parse(bundle).unwrap(), link(), "a folder link to anything that reads only that");
+    assert_eq!(InviteLink::parse_chat(bundle), Err(KeyError::FolderLink));
+    assert_eq!(InviteLink::parse_bundle(frozen("link")).unwrap(), (link(), None));
+    for (n, m) in chat() {
+        let back = ChatMessage::from_bytes(&unhex(frozen(n))).unwrap();
+        assert_eq!(back, m, "{n}");
+        assert!(back.verify(&fid()), "{n}");
+    }
+    for (n, m) in direct() {
+        let back = DirectMessage::from_bytes(&unhex(frozen(n))).unwrap();
+        assert_eq!(back, m, "{n}");
+        assert!(back.verify(), "{n}");
+        let to = if back.recipient == *dev(7).public_key() { dev(7) } else { dev(3) };
+        assert!(back.open(&secret_of(&to)).is_some_and(|b| b.kind != MessageKind::Topic), "{n} opens for its recipient");
+        assert!(back.open(&secret_of(&dev(9))).is_none(), "{n} opens for no one else");
+    }
+    let key = DirectKey::read(&mut Reader::new(&unhex(frozen("direct key")))).unwrap();
+    assert!(key == direct_key(3) && key.verify());
     let invite = check_redeem(&unhex(frozen("proof 5 redeem")), dev(9).public_key(), &[0xee; 32]).unwrap();
     assert_eq!(invite, link().invite);
 }
@@ -312,6 +457,21 @@ fn statements_of_unknown_kinds_or_values_are_kept_passed_on_and_give_no_role() {
 }
 
 #[test]
+fn a_bundled_channel_part_that_is_damaged_or_the_folder_itself_spoils_the_link() {
+    let good = link().format_bundle(&bundled_channel());
+    let (head, chat) = good.split_once("&chat=").unwrap();
+    let mut damaged = chat.to_string();
+    damaged.replace_range(3..4, if &chat[3..4] == "A" { "B" } else { "A" });
+    assert_eq!(InviteLink::parse_bundle(&format!("{head}&chat={damaged}")), Err(KeyError::Damaged));
+    let itself = link().format_bundle(&link());
+    assert_eq!(InviteLink::parse_bundle(&itself), Err(KeyError::Damaged));
+    // A channel's link ignores a `chat=` field; a bundle is only ever a folder's.
+    let chat_with = format!("{}&chat={}", chat_link().format_chat(), &chat[..chat.find('&').unwrap_or(chat.len())]);
+    assert_eq!(InviteLink::parse_chat(&chat_with).unwrap(), chat_link());
+    assert_eq!(InviteLink::parse_bundle(&chat_with), Err(KeyError::ChannelLink));
+}
+
+#[test]
 fn links_and_invitations_of_a_later_version_say_update() {
     let text = link().format();
     let body = text.strip_prefix("seedwell://sync/").unwrap().split('?').next().unwrap();
@@ -372,4 +532,21 @@ const GOLDEN: &[(&str, &str)] = &[
     ("statement 5 share until", "050b809cb8d8060480829ad706008dca1af0b9d0ccdaef792d18a367ccbcd2c4cb5423a3f3f6534f9c6089cbf842b39342e798c8597b5856331d2c9a8bb6b17e3fd18fa24e60f39c92968590be0c"),
     ("link", "seedwell://sync/AGLDPMSJYBPHZDQBSHSEHOQNKW7YP5AX3UU24U27KEDS4YVPR3ATECAIBAEAQCAIBAEAQCAIBAEAQCADAGAPPPWXA2AIFGWXAYAK33EGQCPYBFA6WPIV5ZLSW3Y4TD2JR3EYE6KVJ43RA4RIYUDNTRWTXJRF53PLOCP3DR7ZTMH2HGHAOQPBW6DD6BLKYW5ERWKUSFZUAYEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQA7S?name=Family%20Photos"),
     ("proof 5 redeem", "019637b249c05e7c8e0191e443ba0d55bf87f417dd29ae535f51072e62af8ec13208080808080808080808080808080808030180f7bed70680829ad706001398f62c6d1a457c51ba6a4b5f3dbd2f69fca93216218dc8997e416bd17d93caadec86809f80941eb3d15ee572b6f1c98f498ec98279554f37107228c506d9c6d3ba625eedeb709fb1c7f99b0fa398e0741e1b7863f056ac5ba48d9549173406b4125bfe4ef842f5d4357d82bafc144a2e88a8dda4c437dd35886b034d025778159f67f11e7416e7c51c4edb90a87d6ba66f6ee7e802b07a152accae6b14380b"),
+    // Channels (feature bit 0).
+    ("message 17 chat join", "00000174110001ef029e64389090ed3bd0aecea44c8015b863a7eea036114e2aa1d76daa5ed1f14c5602046b0128ed4928c628d1c2c6eae90338905995612959273a5c63f93636c14614ac8737d1010180829ad70600006e0fac6bc3157adbfa575e36b997a504aca780fd63baa2cfd3e3dfe8226c53a0c4dfb9e8356fa1463e3b6f3cefb254cfb512aefbdb4c250a5e9f72e6d73c4d0905de01019637b249c05e7c8e0191e443ba0d55bf87f417dd29ae535f51072e62af8ec13208080808080808080808080808080808030180f7bed70680829ad706001398f62c6d1a457c51ba6a4b5f3dbd2f69fca93216218dc8997e416bd17d93caadec86809f80941eb3d15ee572b6f1c98f498ec98279554f37107228c506d9c6d3ba625eedeb709fb1c7f99b0fa398e0741e1b7863f056ac5ba48d9549173406b4125bfe4ef842f5d4357d82bafc144a2e88a8dda4c437dd35886b034d025778159f67f11e7416e7c51c4edb90a87d6ba66f6ee7e802b07a152accae6b14380b"),
+    ("message 18 chat have", "0000007312009e64389090ed3bd0aecea44c8015b863a7eea036114e2aa1d76daa5ed1f14c56809886fa98340225ed4928c628d1c2c6eae90338905995612959273a5c63f93636c14614ac8737d1020103070123ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c010501"),
+    ("message 19 chat messages", "0000032213009e64389090ed3bd0aecea44c8015b863a7eea036114e2aa1d76daa5ed1f14c56058b014a11111111111111111111111111111111ed4928c628d1c2c6eae90338905995612959273a5c63f93636c14614ac8737d10185d09fa39934000000010e4d6964646167206b6c2e2031383fedba3f0c694cd649b510f16a07cfccda7fac2ca260f6c25e566e026b20c487e6c32c0f0473350806f96dc6574c296433eafaa70454272c219eb1e5e062737202b9017812121212121212121212121212121212ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c0484d79fa399340111111111111111111111111111111111000b636c617564652d636f646502217b22616e73776572223a22796573222c22636f6e666964656e6365223a302e397d2fb3819dd7205c335f24b5f925064d97f4c3f81dca1241b417f75dcfcba7764ff31a07a30db2fe96543ea608bf7c82c188d6aee022335570793a96a4f0b7480d8f014e13131313131313131313131313131313ed4928c628d1c2c6eae90338905995612959273a5c63f93636c14614ac8737d102b0d99fa399340112121212121212121212121212121212000009021201e44a90951db802165f476de9cd2c2cf20b603d1e03462b790d653ce61ce9f0aa0955c0506dedbb32e1c4663c415881e89bde6022f9190c77ebe348d4aa4d800184014314141414141414141414141414141414ed4928c628d1c2c6eae90338905995612959273a5c63f93636c14614ac8737d103dcdb9fa3993400000003074cc3b872646167be7a1e57f0c6f0ece1367904783f29f3869907a375f66490977974da39a82f9408bccb3be92f5b914a7c630e69822411bd51a684a0fa14ade932d1de3f3db90c9e015d15151515151515151515151515151515ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c0588de9fa39934000114141414141414141414141414141414000111426f726420666f722034206b6c2e20313831d3eca909e8cb31a70b8ce00b1e54c76945393e81a495a3773b07adfb3c95b941fa389fa2fbcb69a13d61a8e63d1e7bf9b445cc4c1b19400f90dbac5d78310a"),
+    ("message 20 direct keys", "000001131400028601ed4928c628d1c2c6eae90338905995612959273a5c63f93636c14614ac8737d1d584d8f13a009997bc3a40d9ceb3ff937883ea52b9f3df921545eb1f4fd7c74583d09fa39934ddaa4b273fd0f10fb2854e587bb52ab7f6345b25c6d006f35c53b6a9d531f52ae51063d89cc58d9622ce55dd8f5917ce83bd4ea91b428c35f8b4bde34d689a0f8601ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c27917c7be2f2e90a3c73ee90dfb8079b6e7505021ac5eb9b0cc4071b8669361587d09fa39934832fd198b3bdc0c6bf76a736d8302ff4615d291afb3de0433c20e488397a825e52b3787e771f68d0d57951ac5ea1d21d46b9a95a855fbdba5a33400a7b8e9106"),
+    ("message 21 direct have", "0000002715000123ed4928c628d1c2c6eae90338905995612959273a5c63f93636c14614ac8737d1010102"),
+    ("message 22 direct messages", "000001d5160002da01980131313131313131313131313131313131ed4928c628d1c2c6eae90338905995612959273a5c63f93636c14614ac8737d1ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c018ad09fa399347a1a4e709bf085ac494aba0469b9b1eda0ab1f78b16aabb79ffeda90623e852220d7c381f7888d09181b9a45b8b88bea9031c1ffba7d0ebc08d2f80a2afbef403961eb711b2a293e7b95baffa6d083620c9a5f439c48edaa248f25a74b66efcb7ffabdb236d49f34f3509f6dffbd9415ae4450171eca405ae599d6eff4caf5ad0cf401b20132323232323232323232323232323232ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22ced4928c628d1c2c6eae90338905995612959273a5c63f93636c14614ac8737d10194d09fa39934132c442be010fbd57e72603328aa76e71fccc1503aae219327d14d9c9993f4723ad01b8d60854b1bef3dd8b14d4977d0a7fc20ab56685ff96d74aadbffbfef77d51a5dae49064736efb21f061c44861e31c452e8f2dc70a370e671ef2812d1b179bab2849c306cc293d92cbd6d7c2a239668bc9376af70f9eb5df90e751e5deff1696d0f1d62a706115c257161c346dc47832e252a5dac34d00901"),
+    ("chat link", "seedwell://chat/AGLDPMSJYBPHZDQBSHSEHOQNKW7YP5AX3UU24U27KEDS4YVPR3ATECIJBEEQSCIJBEEQSCIJBEEQSCIDAGAPPPWXA2AIFGWXAYAETOGXKKOVBZZL32EIKJZMYZ7FRB34MUHHNKPNXPZD4LTP3Q3M7VNBL5ZVVH3A2OBPLDYOARUX4KIIQF75P7LKQK77YXO74N2OQSLPAYEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSJP3?name=Middag"),
+    ("folder and channel link", "seedwell://sync/AGLDPMSJYBPHZDQBSHSEHOQNKW7YP5AX3UU24U27KEDS4YVPR3ATECAIBAEAQCAIBAEAQCAIBAEAQCADAGAPPPWXA2AIFGWXAYAK33EGQCPYBFA6WPIV5ZLSW3Y4TD2JR3EYE6KVJ43RA4RIYUDNTRWTXJRF53PLOCP3DR7ZTMH2HGHAOQPBW6DD6BLKYW5ERWKUSFZUAYEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQA7S?name=Family%20Photos&chat=AHJ2NEPDOIMGW22BOYRL7KSRFX3WCEVK4ZSNTOZJEBBZ6O7LY6PZKCQKBIFAUCQKBIFAUCQKBIFAUCQDAGAPPPWXA2AIFGWXAYAL7HHNX2BNDVW7V27HC3BOBZ5U43WQO3MDHBCH4U77UTZ5ZTQ56Y2GWPHDD3KYXGLK35XGLEGTPKRUXLZW3ZKCM3FCYYWXY7GFL37YAMFAUCQKBIFAUCQKBIFAUCQKBIFAUCQKBIFAUCQKBIFAUCQKBIFAVR6D&chat_name=Family%20Photos%20chat"),
+    ("chat 1 text", "4a11111111111111111111111111111111ed4928c628d1c2c6eae90338905995612959273a5c63f93636c14614ac8737d10185d09fa39934000000010e4d6964646167206b6c2e2031383fedba3f0c694cd649b510f16a07cfccda7fac2ca260f6c25e566e026b20c487e6c32c0f0473350806f96dc6574c296433eafaa70454272c219eb1e5e062737202"),
+    ("chat 2 json from an agent", "7812121212121212121212121212121212ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c0484d79fa399340111111111111111111111111111111111000b636c617564652d636f646502217b22616e73776572223a22796573222c22636f6e666964656e6365223a302e397d2fb3819dd7205c335f24b5f925064d97f4c3f81dca1241b417f75dcfcba7764ff31a07a30db2fe96543ea608bf7c82c188d6aee022335570793a96a4f0b7480d"),
+    ("chat 3 later kind", "4e13131313131313131313131313131313ed4928c628d1c2c6eae90338905995612959273a5c63f93636c14614ac8737d102b0d99fa399340112121212121212121212121212121212000009021201e44a90951db802165f476de9cd2c2cf20b603d1e03462b790d653ce61ce9f0aa0955c0506dedbb32e1c4663c415881e89bde6022f9190c77ebe348d4aa4d8001"),
+    ("chat 4 topic", "4314141414141414141414141414141414ed4928c628d1c2c6eae90338905995612959273a5c63f93636c14614ac8737d103dcdb9fa3993400000003074cc3b872646167be7a1e57f0c6f0ece1367904783f29f3869907a375f66490977974da39a82f9408bccb3be92f5b914a7c630e69822411bd51a684a0fa14ade932d1de3f3db90c"),
+    ("chat 5 in a topic", "5d15151515151515151515151515151515ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c0588de9fa39934000114141414141414141414141414141414000111426f726420666f722034206b6c2e20313831d3eca909e8cb31a70b8ce00b1e54c76945393e81a495a3773b07adfb3c95b941fa389fa2fbcb69a13d61a8e63d1e7bf9b445cc4c1b19400f90dbac5d78310a"),
+    ("direct 1 text", "980131313131313131313131313131313131ed4928c628d1c2c6eae90338905995612959273a5c63f93636c14614ac8737d1ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c018ad09fa399347a1a4e709bf085ac494aba0469b9b1eda0ab1f78b16aabb79ffeda90623e852220d7c381f7888d09181b9a45b8b88bea9031c1ffba7d0ebc08d2f80a2afbef403961eb711b2a293e7b95baffa6d083620c9a5f439c48edaa248f25a74b66efcb7ffabdb236d49f34f3509f6dffbd9415ae4450171eca405ae599d6eff4caf5ad0c"),
+    ("direct 2 json from an agent", "b20132323232323232323232323232323232ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22ced4928c628d1c2c6eae90338905995612959273a5c63f93636c14614ac8737d10194d09fa39934132c442be010fbd57e72603328aa76e71fccc1503aae219327d14d9c9993f4723ad01b8d60854b1bef3dd8b14d4977d0a7fc20ab56685ff96d74aadbffbfef77d51a5dae49064736efb21f061c44861e31c452e8f2dc70a370e671ef2812d1b179bab2849c306cc293d92cbd6d7c2a239668bc9376af70f9eb5df90e751e5deff1696d0f1d62a706115c257161c346dc47832e252a5dac34d00901"),
+    ("direct key", "ed4928c628d1c2c6eae90338905995612959273a5c63f93636c14614ac8737d1d584d8f13a009997bc3a40d9ceb3ff937883ea52b9f3df921545eb1f4fd7c74583d09fa39934ddaa4b273fd0f10fb2854e587bb52ab7f6345b25c6d006f35c53b6a9d531f52ae51063d89cc58d9622ce55dd8f5917ce83bd4ea91b428c35f8b4bde34d689a0f"),
 ];

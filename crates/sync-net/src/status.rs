@@ -69,6 +69,8 @@ pub struct FolderStatus {
     pub error: Option<String>,
     /// When the folder last had nothing left to do, Unix seconds.
     pub last_synced_s: Option<u64>,
+    /// The channel that goes with it on this device (its id), while that channel is here.
+    pub channel_id: Option<String>,
 }
 
 /// A connected device.

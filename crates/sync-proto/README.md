@@ -169,9 +169,12 @@ the file payload).
 
 * `ring` 0.17 (default features off, `std`): Ed25519 (device and folder keys), HKDF-SHA256 (the derivation),
   HMAC-SHA256 (proofs, LAN tags, constant-time compare), SHA-256 (ids, key checks, chunk lists) and SHA-1 (DHT
-  topics, which must be 20 bytes like an info hash). It is already linked through rustls, so sync adds no crypto
-  crate.
+  topics, which must be 20 bytes like an info hash), and ChaCha20-Poly1305 (private messages). It is already
+  linked through rustls.
+* `x25519-dalek` 3 (default features off, `static_secrets`, `zeroize`): X25519 for private messages (`direct`).
+  ring has X25519 only for ephemeral keys, and a recipient needs a long-lived one; this is the maintained,
+  audited Rust implementation (with `curve25519-dalek`, `subtle`, `zeroize`). The only crypto crate sync adds.
 * dev: `proptest` (properties).
 * No `base32`, `data-encoding` or `percent-encoding` crates: base32 is ~60 lines and checked against RFC 4648,
-  percent-encoding of one query field is ~30. No `zeroize`: secrets live in ordinary arrays (the Keychain is where
-  they are protected at rest).
+  percent-encoding of one query field is ~30. Secrets live in ordinary arrays (the Keychain is where they are
+  protected at rest); `zeroize` comes only with `x25519-dalek`.

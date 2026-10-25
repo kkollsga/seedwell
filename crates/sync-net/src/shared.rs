@@ -1,5 +1,9 @@
 //! State shared by the service, the folder runtimes and the peer sessions.
 //!
+//! Folders and channels are both [`Space`]s: a key pair, a membership, invitations and the devices met in it. A
+//! folder adds its files ([`FolderShared`]), a channel its messages ([`crate::chat::ChannelShared`]); both
+//! dereference to their space, so membership, admission and discovery are written once.
+//!
 //! Locks are short: a `FolderCore` is only ever locked inside `spawn_blocking` (its methods do disk I/O),
 //! and the registries are locked to clone an `Arc` out, never across an `.await`.
 
@@ -23,22 +27,118 @@ pub fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// One folder, as the network side sees it.
-pub struct FolderShared {
-    /// Its id.
+/// A folder or a channel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpaceKind {
+    /// A synced folder.
+    Folder,
+    /// A channel.
+    Channel,
+}
+
+/// What a folder and a channel have in common: who is in it, and how it is found.
+pub struct Space {
+    /// Its id (the SHA-256 of its public key).
     pub id: FolderId,
-    /// The folder's public key (the folder id, discovery topics, LAN tags).
+    /// A folder or a channel.
+    pub kind: SpaceKind,
+    /// Its public key (the id, discovery topics, LAN tags).
     pub public: FolderKey,
-    /// The folder secret, on an owner device (a new co-owner receives it from an owner).
+    /// Its secret, on an owner device (a new co-owner receives it from an owner).
     pub secret: RwLock<Option<FolderSecret>>,
-    /// Who is in the folder and what each device may do. Read without the core: the UI asks often.
+    /// Who is in it and what each device may do. Read without the core: the UI asks often.
     pub membership: RwLock<Membership>,
-    /// Where the membership is kept (next to the index).
+    /// Where the membership is kept.
     pub members_path: PathBuf,
     /// The invitation this device joins with, until an owner or admin admits it.
     pub invite: Mutex<Option<InviteLink>>,
     /// The links of invitations this device made, by invite id (shown again in the Share dialog).
     pub links: Mutex<BTreeMap<[u8; 16], String>>,
+    /// Devices we have seen in it (from their announcements and sessions): dialed when not connected.
+    pub members: RwLock<BTreeSet<DeviceId>>,
+    /// Its name on this device.
+    pub name: Mutex<String>,
+    /// Syncing is paused by the user (nothing is scanned, pulled or served). Never for a channel.
+    pub paused: AtomicBool,
+    /// Only sync with devices on the local network. Never for a channel.
+    pub lan_only: AtomicBool,
+    /// What went wrong with its membership and its peers, for the status.
+    pub notes: Mutex<Notes>,
+}
+
+/// What a space's membership and sessions tell the status.
+#[derive(Clone, Debug, Default)]
+pub struct Notes {
+    /// Joining: an owner or admin refused this device's invitation, for this reason.
+    pub refused: Option<String>,
+    /// Devices this one cannot sync with (their Seedwell is too old or too new), and why. Shown with the issues;
+    /// a device's entry goes when a session with it starts.
+    pub incompatible: BTreeMap<DeviceId, String>,
+    /// The membership could not be saved or applied (shown with the issues).
+    pub problems: Vec<String>,
+}
+
+impl Space {
+    /// A space with nothing joined or paused yet.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        id: FolderId,
+        kind: SpaceKind,
+        public: FolderKey,
+        secret: Option<FolderSecret>,
+        membership: Membership,
+        members_path: PathBuf,
+        invite: Option<InviteLink>,
+        links: BTreeMap<[u8; 16], String>,
+        name: String,
+    ) -> Self {
+        Space {
+            id,
+            kind,
+            public,
+            secret: RwLock::new(secret),
+            membership: RwLock::new(membership),
+            members_path,
+            invite: Mutex::new(invite),
+            links: Mutex::new(links),
+            members: RwLock::new(BTreeSet::new()),
+            name: Mutex::new(name),
+            paused: AtomicBool::new(false),
+            lan_only: AtomicBool::new(false),
+            notes: Mutex::new(Notes::default()),
+        }
+    }
+
+    /// A device's role (`device_pk`: its public key), if it is a member.
+    pub fn role_of(&self, device_pk: &[u8; 32]) -> Option<Role> {
+        self.membership.read().unwrap_or_else(|e| e.into_inner()).role(device_pk)
+    }
+
+    /// May it be synced with a peer over this connection (`lan`: the peer is on the LAN, not relayed)? Not when it
+    /// is paused, nor a LAN-only folder with a peer elsewhere.
+    pub fn allowed_with(&self, lan: bool) -> bool {
+        !self.paused.load(Ordering::Relaxed) && (lan || !self.lan_only.load(Ordering::Relaxed))
+    }
+
+    /// Notes a problem with the membership (once).
+    pub fn problem(&self, why: String) {
+        let mut n = lock(&self.notes);
+        if !n.problems.contains(&why) {
+            n.problems.push(why);
+        }
+    }
+
+    /// The issues its notes add to the status: problems, then devices it cannot sync with.
+    pub fn note_issues(&self) -> Vec<(String, String)> {
+        let n = lock(&self.notes);
+        n.problems.iter().chain(n.incompatible.values()).map(|w| (String::new(), w.clone())).collect()
+    }
+}
+
+/// One folder, as the network side sees it: its space (dereferenced to), and its files.
+pub struct FolderShared {
+    /// Who is in it.
+    pub space: Arc<Space>,
     /// Where it is on disk.
     pub root: PathBuf,
     /// The core. Lock only on a blocking thread.
@@ -50,36 +150,43 @@ pub struct FolderShared {
     pub local_seq: watch::Sender<u64>,
     /// A peer's index changed what we need: the runtime pulls.
     pub remote_changed: Notify,
-    /// Syncing is paused by the user (nothing is scanned, pulled or served).
-    pub paused: AtomicBool,
-    /// Devices we have seen in this folder (from their announcements): dialed when not connected.
-    pub members: RwLock<BTreeSet<DeviceId>>,
-    /// The folder's name on this device.
-    pub name: Mutex<String>,
     /// What the runtime is doing, for the snapshot.
     pub live: Mutex<Live>,
     /// Ask the runtime for a full scan now (the user's "Rescan", or a changed ignore file).
     pub rescan: Notify,
-    /// Only sync with devices on the local network.
-    pub lan_only: AtomicBool,
     /// How long archived versions are kept, and how much room they may take.
     pub retention: trs_sync::archive::Retention,
     /// Bytes fetched from peers for this folder.
     pub fetched: crate::limit::Meter,
     /// Bytes served to peers from this folder.
     pub served: crate::limit::Meter,
+    /// Set once everything above is dropped, the index included. Last, because fields drop in order: the last
+    /// `Arc` of a folder counts as gone before its fields are, so only this says the index file is closed.
+    pub closed: Closed,
 }
 
-impl FolderShared {
-    /// This device's role (`me`: its public key), if it is a member.
-    pub fn role_of(&self, device_pk: &[u8; 32]) -> Option<Role> {
-        self.membership.read().unwrap_or_else(|e| e.into_inner()).role(device_pk)
-    }
+/// A flag that goes up when it is dropped (see [`FolderShared::closed`]).
+#[derive(Debug, Default)]
+pub struct Closed(Arc<AtomicBool>);
 
-    /// May this folder be synced with a peer over this connection (`lan`: the peer is on the LAN, not
-    /// relayed)? Not when it is paused, nor a LAN-only folder with a peer elsewhere.
-    pub fn allowed_with(&self, lan: bool) -> bool {
-        !self.paused.load(Ordering::Relaxed) && (lan || !self.lan_only.load(Ordering::Relaxed))
+impl Closed {
+    /// Something to watch: true once the owner's earlier fields are dropped.
+    pub fn watch(&self) -> Arc<AtomicBool> {
+        self.0.clone()
+    }
+}
+
+impl Drop for Closed {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+impl std::ops::Deref for FolderShared {
+    type Target = Space;
+
+    fn deref(&self) -> &Space {
+        &self.space
     }
 }
 
@@ -107,11 +214,6 @@ pub struct Live {
     pub local: (u64, u64),
     /// Bytes fetched and served, for rates.
     pub fetched: u64,
-    /// Joining: an owner or admin refused this device's invitation, for this reason.
-    pub refused: Option<String>,
-    /// Devices of this folder this one cannot sync with (their Seedwell is too old or too new), and why. Shown
-    /// with the issues; a device's entry goes when a session with it starts.
-    pub incompatible: BTreeMap<DeviceId, String>,
 }
 
 impl Default for Live {
@@ -126,8 +228,6 @@ impl Default for Live {
             pending: (Vec::new(), false),
             local: (0, 0),
             fetched: 0,
-            refused: None,
-            incompatible: BTreeMap::new(),
         }
     }
 }
@@ -165,7 +265,7 @@ pub struct PeerHandle {
     pub data: mpsc::Sender<Message>,
     next_id: AtomicU32,
     pending: Mutex<HashMap<u32, oneshot::Sender<Response>>>,
-    /// The folders shared over this connection, with the access the peer proved.
+    /// The folders and channels shared over this connection, with the access the peer proved.
     pub folders: RwLock<BTreeMap<FolderId, Access>>,
     /// Bytes of our requests not answered yet (to spread requests over peers).
     pub inflight: AtomicU64,
@@ -220,7 +320,12 @@ impl PeerHandle {
         (h, crx, drx)
     }
 
-    /// The access the peer proved in `folder`, if it shares it with us.
+    /// The session carries channels (both sides have [`trs_sync_proto::msg::FEATURE_CHAT`]).
+    pub fn chat(&self) -> bool {
+        self.agreed.features & trs_sync_proto::msg::FEATURE_CHAT != 0
+    }
+
+    /// The access the peer proved in `folder` (or channel), if it shares it with us.
     pub fn access(&self, folder: &FolderId) -> Option<Access> {
         self.folders.read().unwrap_or_else(|e| e.into_inner()).get(folder).copied()
     }
@@ -257,14 +362,47 @@ impl PeerHandle {
     }
 }
 
-/// Every folder and every connected device.
+/// Every folder, channel and connected device.
 #[derive(Default)]
 pub struct Registry {
     folders: RwLock<BTreeMap<FolderId, Arc<FolderShared>>>,
+    channels: RwLock<BTreeMap<FolderId, Arc<crate::chat::ChannelShared>>>,
     peers: RwLock<BTreeMap<DeviceId, Arc<PeerHandle>>>,
 }
 
 impl Registry {
+    /// A channel.
+    pub fn channel(&self, id: &FolderId) -> Option<Arc<crate::chat::ChannelShared>> {
+        self.channels.read().unwrap_or_else(|e| e.into_inner()).get(id).cloned()
+    }
+
+    /// Every channel.
+    pub fn channels(&self) -> Vec<Arc<crate::chat::ChannelShared>> {
+        self.channels.read().unwrap_or_else(|e| e.into_inner()).values().cloned().collect()
+    }
+
+    /// Adds or replaces a channel.
+    pub fn add_channel(&self, c: Arc<crate::chat::ChannelShared>) {
+        self.channels.write().unwrap_or_else(|e| e.into_inner()).insert(c.id, c);
+    }
+
+    /// Removes a channel.
+    pub fn remove_channel(&self, id: &FolderId) -> Option<Arc<crate::chat::ChannelShared>> {
+        self.channels.write().unwrap_or_else(|e| e.into_inner()).remove(id)
+    }
+
+    /// A folder's or a channel's space.
+    pub fn space(&self, id: &FolderId) -> Option<Arc<Space>> {
+        self.folder(id).map(|f| f.space.clone()).or_else(|| self.channel(id).map(|c| c.space.clone()))
+    }
+
+    /// Every folder's and channel's space.
+    pub fn spaces(&self) -> Vec<Arc<Space>> {
+        let mut out: Vec<Arc<Space>> = self.folders().iter().map(|f| f.space.clone()).collect();
+        out.extend(self.channels().iter().map(|c| c.space.clone()));
+        out
+    }
+
     /// A folder.
     pub fn folder(&self, id: &FolderId) -> Option<Arc<FolderShared>> {
         self.folders.read().unwrap_or_else(|e| e.into_inner()).get(id).cloned()
@@ -363,4 +501,8 @@ pub struct Ctx {
     pub protocol: (u32, u32),
     /// Its feature bits (in its Hello).
     pub features: u64,
+    /// New channel messages (this device's and others'), for watchers.
+    pub chat_events: tokio::sync::broadcast::Sender<crate::chat::ChatEvent>,
+    /// Private messages.
+    pub direct: crate::direct::Direct,
 }

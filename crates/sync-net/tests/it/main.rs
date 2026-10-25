@@ -1,5 +1,8 @@
 //! Integration tests of trs-sync-net (one binary; temp folders and loopback only).
 
+mod bundle;
+mod chat;
+mod direct;
 mod lan;
 mod relay;
 mod roles;

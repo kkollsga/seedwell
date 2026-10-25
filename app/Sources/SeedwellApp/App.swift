@@ -56,6 +56,9 @@ import os
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // A write to a connection or pipe the other end has closed must fail with EPIPE, not end the app: the core's
+        // sockets and the folder sync wake-up commands write to peers that may go away at any time.
+        signal(SIGPIPE, SIG_IGN)
         signal(SIGTERM, SIG_IGN)
         let term = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
         term.setEventHandler { [weak self] in MainActor.assumeIsolated { self?.quitForReal() } }
@@ -151,6 +154,12 @@ import os
         sync.showEdit = { [weak self, sync] id in self?.syncWindows.showEdit(id: id, actions: sync) }
         sync.showShare = { [weak self, sync] id in self?.syncWindows.showShare(id: id, actions: sync) }
         sync.showAddFolder = { [weak self, sync] path in self?.syncWindows.showAdd(prefill: nil, folder: path, actions: sync) }
+        let chat = commands.chat
+        chat.show = { place in main.show(section: place) }
+        chat.isShowing = { place in NSApp.isActive && main.isOpen && main.libraryModel?.section == place }
+        chat.noteDirectName = { device, name in main.libraryModel?.directNames[device] = name }
+        chat.start()
+        sync.showChat = { [chat] id in chat.showChannel(id) }
         sync.showFolder = { id, ask in main.show(section: .folderSync); main.libraryModel?.showSyncFolder(id, askRemove: ask) }
         FinderSetup.show = { [weak self] in self?.syncWindows.showFinderSetup() }
         let finder = FinderStatusWriter(core: core)
@@ -362,6 +371,8 @@ import os
         // A folder sync link (`seedwell://sync/<key>?name=…`) opens the add modal, filled in (SPEC 7G.5).
         let links = urls.filter { $0.scheme?.lowercased() == "seedwell" }
         for link in links where link.host?.lowercased() == "sync" { commands.sync.showAdd(link.absoluteString) }
+        // A channel link (`seedwell://chat/<invite>?name=…`) opens the New Channel window on Join, filled in.
+        for link in links where link.host?.lowercased() == "chat" { commands.chat.showNew(prefill: link.absoluteString) }
         // `seedwell://share?path=…`: the system Share menu (the Share extension).
         for link in links where link.host?.lowercased() == "share" {
             if let path = URLComponents(url: link, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "path" })?.value,
@@ -378,9 +389,16 @@ import os
 
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
         let id = response.notification.request.content.userInfo["transfer"] as? String
+        let info = response.notification.request.content.userInfo
+        let channel = info["channel"] as? String, topic = (info["topic"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        let direct = info["direct"] as? String
         let isChoice = response.notification.request.identifier.hasPrefix("choice-")
         await MainActor.run {
-            if let id, isChoice {
+            if let channel {
+                commands.chat.show(.chat(channel, topic: topic))
+            } else if let direct {
+                commands.chat.show(.direct(direct))
+            } else if let id, isChoice {
                 commands.showChooser(id)
             } else {
                 commands.showMain(nil, id)

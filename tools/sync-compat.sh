@@ -7,7 +7,8 @@
 #
 # Starts both as headless daemons (`seedwell daemon`) with temporary state folders and HOME, on loopback only,
 # and runs two rounds, each side the owner in turn: share a folder with a link, join it, sync files both ways,
-# make the joiner Read only (its changes stop counting, it still receives), remove it (it is cut off). Prints
+# make the joiner Read only (its changes stop counting, it still receives), chat both ways in a channel, remove
+# the joiner from the folder (it is cut off). Prints
 # PASS or FAIL per step and exits 1 if any failed.
 #
 # The CLI tests run it with this build on both sides (crates/cli/tests/it/sync.rs). 0.1.6 is the first release
@@ -97,6 +98,7 @@ wait_for() {
 }
 
 has() { [ "$(cat "$1" 2>/dev/null)" = "$2" ]; }
+chat_has() { cli "$1" chat read "$2" --last 20 | grep -qF "\"$3\""; }
 role_is() { [ "$(cli "$1" sync status "$2" | field role)" = "$3" ]; }
 state_is() { [ "$(cli "$1" sync status "$2" | field state)" = "$3" ]; }
 
@@ -125,6 +127,21 @@ round() {
   echo "not taken" >"$theirs/late.txt"
   sleep 3
   if [ -e "$mine/late.txt" ]; then fail "$owner ignores a Read only device's change"; else pass "$owner ignores a Read only device's change"; fi
+
+  # A channel between the two, the same way.
+  local cid clink
+  cid=$(cli "$owner" chat new "Plans $owner" | field id)
+  clink=$(cli "$owner" chat share "$cid" | field link)
+  if [ -n "$cid" ] && echo "$clink" | cli "$joiner" chat join - >/dev/null; then
+    cli "$joiner" chat address "$cid" "127.0.0.1:$oport" >/dev/null
+    for side in "$owner" "$joiner"; do cli "$side" chat agents "$cid" post >/dev/null; done
+    echo "hello from $owner" | cli "$owner" chat send "$cid" - >/dev/null
+    if wait_for 60 chat_has "$joiner" "$cid" "hello from $owner"; then pass "$joiner gets $owner's channel message"; else fail "$joiner gets $owner's channel message"; fi
+    echo "hello from $joiner" | cli "$joiner" chat send "$cid" - >/dev/null
+    if wait_for 30 chat_has "$owner" "$cid" "hello from $joiner"; then pass "$owner gets $joiner's channel message"; else fail "$owner gets $joiner's channel message"; fi
+  else
+    fail "$owner shares a channel with $joiner"
+  fi
 
   cli "$owner" sync remove-device "$id" "$dev" >/dev/null || fail "$owner removes $joiner"
   if wait_for 30 state_is "$joiner" "$id" error; then pass "$joiner learns it was removed"; else fail "$joiner learns it was removed"; fi

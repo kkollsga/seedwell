@@ -140,6 +140,7 @@ made live in a `SecretStore`: the Keychain in an app build that may use it, else
 | `ring` | random ids, SHA-256 when serving; already linked through rustls |
 | `flate2` (Rust backend) | deflate for metadata messages; already used by the tracker crate |
 | `serde`, `toml` | `sync.toml`; already used by `trs-state` |
+| `serde_json` | the JSON a channel's wake-up command reads; already used by `trs-control` and `trs-engine` |
 | `socket2` (`all`) | SO_REUSEPORT on the LAN discovery socket before it binds (std and tokio cannot set it, and `unsafe` is forbidden); already built with `all` through tokio's `net` |
 
 ## Tests

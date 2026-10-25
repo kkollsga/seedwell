@@ -71,6 +71,15 @@ impl DeviceKey {
         self.pkcs8.clone()
     }
 
+    /// A secret derived from this key for one purpose (`label`): HMAC-SHA256 keyed with the stored key. The device's
+    /// X25519 key for private messages comes from it, so it needs no storage of its own.
+    pub fn derive(&self, label: &str) -> [u8; 32] {
+        let k = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, &self.pkcs8);
+        let mut out = [0u8; 32];
+        out.copy_from_slice(ring::hmac::sign(&k, label.as_bytes()).as_ref());
+        out
+    }
+
     /// The public key (the TLS raw public key, and what [`DeviceId`] hashes).
     pub fn public_key(&self) -> &[u8; 32] {
         &self.public

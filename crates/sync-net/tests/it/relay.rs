@@ -128,3 +128,75 @@ async fn devices_registered_at_a_relay_server_sync_through_it() {
     b.h.shutdown().await;
     server.abort();
 }
+
+fn texts(d: &Device, id: &FolderId) -> Vec<String> {
+    d.h.chat_read(id, None, None, None).unwrap_or_default().into_iter().map(|m| m.body).collect()
+}
+
+/// A channel only (no folder): C makes it, A and B join, all meet, then A and B cannot reach each other directly.
+async fn three_in_a_channel() -> (Device, Device, Device, FolderId) {
+    let (a, b, c) = (device("Alpha").await, device("Beta").await, device("Hub").await);
+    let id: FolderId = c.h.chat_new("Plans").await.unwrap().id.parse().unwrap();
+    for d in [&a, &b] {
+        d.h.chat_join(&c.h.create_invite(&id, Role::ReadWrite, 1, 1).unwrap().link).await.unwrap();
+        d.h.add_address(&id, addr(&c)).unwrap();
+    }
+    a.h.add_address(&id, addr(&b)).unwrap();
+    let (ai, bi, ci) = (a.h.device_id(), b.h.device_id(), c.h.device_id());
+    until(30, "A, B and C all connected", || {
+        via_to(&a, bi).is_some() && via_to(&a, ci).is_some() && via_to(&b, ci).is_some() && via_to(&b, ai).is_some()
+    })
+    .await;
+    a.h.test_refuse_direct(bi);
+    b.h.test_refuse_direct(ai);
+    (a, b, c, id)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_member_relays_a_channel_between_devices_that_cannot_reach_each_other() {
+    let (a, b, c, id) = three_in_a_channel().await;
+    let (ai, bi) = (a.h.device_id(), b.h.device_id());
+    until(60, "A and B connected through C", || via_to(&a, bi) == Some(Via::Relay) && via_to(&b, ai) == Some(Via::Relay)).await;
+    assert!(c.h.relay_stats().relayed >= 1);
+    // C leaves the channel: it still relays the session (it shares nothing with them now, but the pipe stands),
+    // and the message can only come over the relayed session.
+    c.h.chat_leave(&id).unwrap();
+    a.h.chat_send(&id, None, trs_sync_net::chat::MessageKind::Text, "over the relay", None, None).await.unwrap();
+    until(30, "B has A's message", || texts(&b, &id) == ["over the relay"]).await;
+    for d in [&a, &b, &c] {
+        d.h.shutdown().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn devices_registered_at_a_relay_server_chat_through_it() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let opts = RelayOptions::new(DeviceKey::generate(&mut ring::rand::SystemRandom::new()).unwrap());
+    let url = opts.url(&format!("127.0.0.1:{port}"));
+    let server = tokio::spawn(run_relay(listener, opts));
+
+    let (a, b) = (device("Alpha").await, device("Beta").await);
+    let id: FolderId = a.h.chat_new("Plans").await.unwrap().id.parse().unwrap();
+    b.h.chat_join(&a.h.create_invite(&id, Role::ReadWrite, 1, 1).unwrap().link).await.unwrap();
+    b.h.add_address(&id, addr(&a)).unwrap();
+    until(30, "B is admitted", || b.h.channel_status(&id).is_some_and(|c| c.role.is_some())).await;
+
+    a.h.add_relay(&id, &url).unwrap();
+    b.h.add_relay(&id, &url).unwrap();
+    let (ai, bi) = (a.h.device_id(), b.h.device_id());
+    a.h.test_refuse_direct(bi);
+    b.h.test_refuse_direct(ai);
+    until(60, "A and B connected through the relay server", || {
+        via_to(&a, bi) == Some(Via::Relay) && via_to(&b, ai) == Some(Via::Relay)
+    })
+    .await;
+    // With direct sessions refused and no third device, these can only come through the relay.
+    a.h.chat_send(&id, None, trs_sync_net::chat::MessageKind::Text, "through the server", None, None).await.unwrap();
+    until(30, "B has A's message", || texts(&b, &id) == ["through the server"]).await;
+    b.h.chat_send(&id, None, trs_sync_net::chat::MessageKind::Text, "and back", None, None).await.unwrap();
+    until(30, "A has B's answer", || texts(&a, &id).last().is_some_and(|t| t == "and back")).await;
+    a.h.shutdown().await;
+    b.h.shutdown().await;
+    server.abort();
+}

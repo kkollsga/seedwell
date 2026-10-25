@@ -89,3 +89,16 @@ if [ "$CHECK_APP" = 1 ]; then
   SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk swift test --package-path app -q \
     -Xswiftc -plugin-path -Xswiftc /Library/Developer/CommandLineTools/usr/lib/swift/host/plugins/testing
 fi
+# CI builds the app with Xcode's Swift, which is stricter than the Command Line Tools' in places (it refused a
+# closure that used a name declared after it). Compile the app with it too when Xcode is installed and its licence
+# accepted; its own build folder, so the builds above are not disturbed. DEVELOPER_DIR picks Xcode for this command
+# only (never `xcode-select -s`, which would change the whole Mac).
+if [ "$CHECK_APP" = 1 ]; then
+  XC=/Applications/Xcode.app/Contents/Developer
+  if [ -d "$XC" ] && DEVELOPER_DIR="$XC" xcrun swift --version >/dev/null 2>&1; then
+    DEVELOPER_DIR="$XC" swift build --package-path app --scratch-path app/.build-xcode -q
+    echo "check: the app also builds with $(DEVELOPER_DIR="$XC" xcrun swift --version 2>&1 | head -1 | sed 's/.*\(Swift version [0-9.]*\).*/\1/') (Xcode, as CI)"
+  elif [ -d "$XC" ]; then
+    echo "check: skipped the Xcode build (accept Xcode's licence: sudo $XC/usr/bin/xcodebuild -license accept)"
+  fi
+fi

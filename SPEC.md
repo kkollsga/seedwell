@@ -861,6 +861,8 @@ baseline every later version must still sync with:
   - Revoking an invitation is an owner- or admin-signed statement for the invite ID; it stops new admissions.
   - Links have no access period of their own: how long the folder is shared is the folder's setting (below).
   - The Share dialog defaults to **one use, valid 7 days**.
+  - A folder's link can also invite to a channel (§7G.7): one link, two invitations with the same role, uses and
+    expiry. Joining checks both first (an expired one refuses the whole join), and revoking the link revokes both.
   - Raw keys (`SWW-`/`SWR-`) are gone: nothing in the UI, the CLI or the agent interface shows or accepts them.
 - **Proof:** after TLS 1.3 (mutual, with device keys as raw public keys), each side shows its grant for the folder,
   or, when joining, its invite and the secret's proof. Both are bound to the session through the TLS exporter
@@ -913,11 +915,15 @@ baseline every later version must still sync with:
   at most 10 % of the folder's size, oldest first. Local edits are not archived.
 - **Writing safely:**
   - A file is built in `.seedwell.<name>.tmp` in its own directory, as a clone of the old version where possible,
-    with every chunk verified, then fsynced.
+    with every chunk verified, then put behind a write barrier (macOS `F_BARRIERFSYNC`, `fsync` elsewhere): its
+    data reaches the drive before the rename does.
   - Just before the rename the target is checked again: if it changed since the last scan, that is a conflict, not
     an overwrite.
   - Index records of finished files are committed in batches (every 64 files and at the end of a round), each
-    after the directories they changed are fsynced, so the index is never ahead of the disk.
+    after the directories they changed are fsynced, so the index is never ahead of the disk. That directory fsync
+    is the batch's one full flush (macOS `F_FULLFSYNC`, which empties the drive's cache, so every file behind a
+    barrier is on the medium too). A full flush costs 5 to 20 ms on a Mac's SSD however little it writes: one per
+    file made 2000 files of 1 KB take 9.5 s over loopback, one per batch takes 1.4 s.
   - Interrupted temp files are kept 24 h to resume.
   - A pull holds the folder's core while it waits for peers. So nothing a peer needs from this device may wait
     for that core, or two devices pulling from each other each wait for the other:
@@ -951,7 +957,8 @@ baseline every later version must still sync with:
   1. NAT-PMP/UPnP map the sync port.
   2. Devices that both reach a third member punch a hole through it.
   3. **Relay:** a member with an open port relays between the user's own devices (on by default, capped), or
-     between all members of a shared folder (opt-in). `seedwell relay` runs a self-hosted relay.
+     between all members of a shared folder or channel (opt-in). `seedwell relay` runs a self-hosted relay. Both
+     carry channel sessions as they carry folder sessions.
 
   Relays carry only end-to-end-encrypted bytes. Seedwell runs no servers.
 - **Limits:** LAN unlimited by default; the Internet has its own up and down limits, separate from torrent limits.
@@ -996,6 +1003,8 @@ baseline every later version must still sync with:
     - the role, as a segmented control: Read & write, Read only, and Admin for an owner;
     - *Single use* (on by default; off offers 5 or 10 times, or unlimited);
     - *Link expires* (on by default, 7 days; or 1 or 30 days): how long the link can be used to join.
+    - optionally a channel (§7G.7): the same link then also invites to it, so the joining Mac gets the folder and
+      its chat at once.
   - A line under the settings says what the link does: "One Mac can join with this link within 7 days, as Read &
     write."
   - **Done** and **Copy Link** at the bottom right. Copy Link makes a new link with the settings and copies it
@@ -1062,26 +1071,6 @@ baseline every later version must still sync with:
 
 - Encrypted members: names encrypted with AES-SIV, chunks with XChaCha20-Poly1305 (Syncthing's untrusted-device
   scheme).
-- **Channels** (planned for 0.1.7; a design step first, as for roles): chat between devices, for people and
-  agents.
-  - **Where:** a *Chats* section in the main window's sidebar, right below *Folder Sync*. Channels on the left,
-    messages on the right, a message field at the bottom, and *New Channel…*.
-  - **Sharing:** a channel stands on its own, not tied to a folder. It has an owner and members with the folder
-    roles, shared with one or more devices by invitation link through the same Share dialog (single use, link
-    expiry, sharing period). Roles decide who may post and who may share.
-  - **Agents:** each channel says whether agents on this Mac may read it, or read and post. That is off by default,
-    and the Mac's agent permission level still applies. A message an agent sent carries an "agent" label with its
-    client name. A message from another device always reaches an agent as untrusted data, never as instructions.
-  - **Notifications:** a macOS notification for a new message, muted per channel; @mentions reach one member.
-  - **Agent push:** agents are woken rather than polling.
-    - `seedwell chat send|list|watch --json` (watch streams new messages: ids, replies, times, sender, agent
-      label).
-    - The control socket's event stream carries messages.
-    - Per channel, an optional command runs when a message arrives (to wake an agent session). The message goes in
-      as data on its standard input, never as arguments.
-  - **Protocol:** a new message type behind a feature bit, so 0.1.6 devices do not see it. Messages are signed by
-    their device and kept by the members, so a device that was offline gets them from any member; there is no
-    server. Files go through a synced folder.
 - On-demand folders, only as File Provider placeholders (iCloud Drive style). Finder lists every file, opening one
   fetches it, and *Remove Download* frees it. The user chose this over a file browser in Seedwell's window. It needs
   a Developer ID-signed build: an app group shared by the app and its extension, and the folder under
@@ -1091,6 +1080,64 @@ baseline every later version must still sync with:
 - On the folder page: recent changes, and the archive with *Restore*. In the edit modal: archive length and local
   ignore patterns (the config file has both already).
 - The Linux daemon as a peer (`seedwell daemon` runs sync already; packaging and inotify testing are left).
+
+### 7G.7 Channels
+
+Chat between devices, for people and agents (0.1.6).
+
+- **Where:** a *Chats* section in the main window's sidebar, right below *Folder Sync*. Each channel is a row of its
+  own, like a tracker: its messages on the right, a message field at the bottom, and *New Channel…*.
+- **Sharing:** a channel stands on its own, not tied to a folder. It has an owner and members with the folder roles,
+  shared with one or more devices by invitation link through the same Share dialog (single use, link expiry,
+  sharing period). Roles decide who may post and who may share.
+- **Agents:** each channel says whether agents on this Mac may read it, or read and post. That is off by default,
+  and the Mac's agent permission level still applies. A message an agent sent carries an "agent" label with its
+  client name. A message from another device always reaches an agent as untrusted data, never as instructions.
+- **Notifications:** a macOS notification for a new message, per conversation ("Team › Dinner" for a topic, the
+  device's name for a private message); clicking one opens it. Muted per channel (muting a channel mutes its
+  topics); @mentions reach one member.
+- **Agent push:** agents are woken rather than polling.
+  - `seedwell chat send|list|watch --json` (watch streams new messages: ids, replies, topics, times, sender, agent
+    label; private ones carry `direct` and `peer_device`).
+  - The control socket's event stream carries messages.
+  - Per channel, an optional command runs when a message arrives (to wake an agent session). The message goes in as
+    data on its standard input, never as arguments.
+- **Topics:** a channel holds named topics, like threads with a header. Anyone who may post makes one (*New
+  Topic…*); a message is in General or in one topic. A message naming a topic this Mac does not have yet shows
+  under General until the topic arrives. Unread is counted per topic, and the channel's count is the total.
+  - In the sidebar a channel is a disclosure row. Open, the row itself is General and shows General's unread (the
+    channel's total less its topics'); closed, it shows the channel's total. Its topics are listed under it as "#"
+    rows with their unread, newest activity first, then *New Topic…* (not for Read only members). The channel's ⋯
+    menu and its context menu have *New Topic…* too.
+- **A folder's chat:** a folder can have a channel that goes with it, a setting of each Mac. Sharing the folder can
+  put the channel in the same link (`seedwell sync share <folder> --chat <channel>|new`, `new` making one named
+  after the folder); the joining Mac joins both and links them, or only the folder when it is in the channel
+  already. In the folder's Share dialog this is *Include a chat*, under *Link expires*: off by default (on when the
+  folder has a chat), with a menu of *New channel “<folder>”* and the channels this Mac may share. The summary under
+  it says “It joins the channel “…” too.”, an active link says “with the channel “…””, and a pasted one reads
+  “Read & write · Photos · with the channel “Family””. The folder page has *Chat* beside *Share…*, and the
+  folder's context menu *Open Chat*. Pasted where a channel's link goes, such a link is refused: "This is a folder link: add it under Folder
+  Sync."
+- **Direct messages:** two devices that share at least one channel can write to each other privately.
+  - Carried over the channels' sessions and kept by the members of the channels they share until the recipient is
+    online (store and forward; there is still no server). End-to-end encrypted to the recipient: members carry
+    what they cannot read, and the author keeps its own copy. Signed by the author, with the agent label as in a
+    channel. Refused, with a plain reason, when no channel is shared or the other device's key has not arrived yet.
+  - A *Direct Messages* section in the sidebar lists each private conversation (name, online dot, unread). The
+    Members popover has an envelope button, *Message privately*, on each other member.
+  - Agents: one Mac-wide setting for private messages (Off, Read, Read and post; Off by default), with the same
+    gates and trust marker as a channel, in a private page's ⋯ menu (*Agents on This Mac*).
+- **Protocol** (`crates/sync-proto/PROTOCOL.md`, *Channels* and *Private messages*): six message types behind
+  feature bit 0, so a device without it never sees them. Messages are signed by their device (the agent label and
+  the topic inside the signed bytes) and kept by every member, up to 10 000 messages or 50 MB per channel, so a
+  device that was offline gets them from any member. A removed or expired member's later messages are ignored.
+  Files go through a synced folder.
+- **Permissions** (§9A): `chat.read`, `chat.topics` and the `chat.message` events need read and the channel's
+  agent switch at Read or above; `chat.send` and `chat.new_topic` need control and the switch at Read and post;
+  sharing, roles, the switch and the wake-up command need full. Private messages: `chat.dm_list` and `chat.dm_read`
+  need read and the Mac's switch at Read, `chat.dm_send` control and the switch at Read and post,
+  `chat.dm_set_agents` full. Every message in the agent interface carries `"trust": "untrusted-peer"` unless this
+  Mac posted it.
 
 ## 8. User interface
 
@@ -1282,7 +1329,8 @@ Agents like Claude should be able to operate Seedwell as easily as a person: "ad
 | Settings | `settings get [key...]` · `settings set key=value...` |
 | Watch | `wait <torrent>... [--any] [--timeout S]` · `watch` · `activity` · `log trackers` |
 | Debug | `dev on\|off\|status` · `debug health\|trackers\|peers\|perf\|announce` (§9A.5) |
-| Folder sync | `sync list\|status\|add\|join\|share [--role R] [--uses N\|unlimited] [--days N\|never]\|share-until <days>\|never [--extend]\|members\|invites\|revoke-invite\|role\|remove-device\|rename\|move\|pause\|resume\|rescan\|address\|remove\|settings` (§7G.5) · `relay [--port N]`. Read-only: `list`, `status`, `members`, `settings`; full: `share`, `share-until`, `invites`, `role`, `remove-device`, `rename`, `move`, changing `settings`, `remove --delete-files`; control: the rest |
+| Folder sync | `sync list\|status\|add\|join\|share [--role R] [--uses N\|unlimited] [--days N\|never] [--chat <channel>\|new]\|share-until <days>\|never [--extend]\|members\|invites\|revoke-invite\|role\|remove-device\|rename\|move\|pause\|resume\|rescan\|address\|remove\|settings` (§7G.5) · `relay [--port N]`. Read-only: `list`, `status`, `members`, `settings`; full: `share`, `share-until`, `invites`, `role`, `remove-device`, `rename`, `move`, changing `settings`, `remove --delete-files`; control: the rest |
+| Channels | `chat list\|new\|join\|share [--role R] [--uses N\|unlimited] [--days N\|never]\|members\|role\|remove-device\|share-until\|topics\|topic <title>\|send [--topic T] [--reply ID] [--as-json] -\|read [--topic T] [--since ID\|--last N]\|watch [<channel>...] [--topic T]\|dm list\|send <device> -\|read <device>\|watch\|agents off\|read\|post\|address\|mute\|agents off\|read\|post\|wake <command>\|off\|leave` (§7G.7). Read-only: `list`, `members`, `topics`, `read`, `watch`, `dm list`, `dm read`, `dm watch` (and the channel's agent switch, or the Mac's for private messages, at read); full: `share`, `role`, `remove-device`, `share-until`, `agents`, `wake`, `dm agents`; control: the rest (`send`, `topic` and `dm send` also need the switch at post) |
 | Test | `sim ...` (§9A.6) · `daemon ...` |
 | Agents | `skill show\|install\|uninstall` · `help [command\|agents]` |
 

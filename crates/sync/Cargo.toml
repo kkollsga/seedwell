@@ -13,6 +13,7 @@ trs-sync-proto = { path = "../sync-proto" }
 redb = "4"
 sha2 = { version = "0.11", default-features = false }
 unicode-normalization = { version = "0.1", default-features = false, features = ["std"] }
+libc = "0.2"
 
 [dev-dependencies]
 proptest = { version = "1", default-features = false, features = ["std"] }

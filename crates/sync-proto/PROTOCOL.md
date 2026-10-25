@@ -1,14 +1,15 @@
 # Seedwell folder sync: the wire protocol
 
-This is the protocol two Seedwell devices speak to sync folders (SPEC §7G). It covers the framing, every
-message, membership statement, invitation and proof, the stored formats, and the rules for changing any of
-them. The code is the reference: `src/codec.rs` (framing), `src/msg.rs` (messages), `src/members.rs`
-(statements, invitations, links), `src/sign.rs` (signed file versions), `src/keys.rs` (folder keys, proofs).
+This is the protocol two Seedwell devices speak to sync folders and to chat in channels (SPEC §7G). It covers the
+framing, every message, membership statement, invitation, proof and channel message, the stored formats, and the
+rules for changing any of them. The code is the reference: `src/codec.rs` (framing), `src/msg.rs` (messages),
+`src/members.rs` (statements, invitations, links), `src/sign.rs` (signed file versions), `src/keys.rs` (folder
+keys, proofs), `src/chat.rs` (channel messages and topics), `src/direct.rs` (private messages).
 
 **0.1.6 is the baseline.** It is the first release with folder sync, and every later version must still
 sync with it until a major version change drops it (see [Evolution](#evolution)). The bytes 0.1.6 writes are
-frozen in `tests/it/golden.rs`: each message type, statement kind, invitation link and proof, decoded and
-encoded back byte for byte. That table only ever gets new entries.
+frozen in `tests/it/golden.rs`: each message type, statement kind, invitation link (a link for a folder and its
+channel too), proof, channel message and private message, decoded and encoded back byte for byte. That table only ever gets new entries.
 
 ## Contents
 
@@ -19,6 +20,8 @@ encoded back byte for byte. That table only ever gets new entries.
 - [Index entries and signed versions](#index-entries-and-signed-versions)
 - [Membership statements](#membership-statements)
 - [Invitations, links and proofs](#invitations-links-and-proofs)
+- [Channels](#channels)
+- [Private messages](#private-messages)
 - [Other formats](#other-formats)
 - [Stored formats](#stored-formats)
 - [Evolution](#evolution)
@@ -74,12 +77,13 @@ encoded back byte for byte. That table only ever gets new entries.
    cannot sync with: update this Mac" on the older one. A joining device shows that as the reason it waits;
    a folder the other device is a member of lists it with its issues until a session with it succeeds.
 
-2. **Join.** The dialing side proves first, for the folders it believes the other device shares. The other
-   side answers only for folders the dialer proved, so a stranger who connects learns nothing about which
-   folders a device has. A listener with nothing to share sends a Close instead (with an invitation's refusal,
-   `link: <reason>`).
+2. **Join**, then, when both have the chat feature bit, **ChatJoin**. The dialing side proves first, for the
+   folders and channels it believes the other device shares. The other side answers only for those the dialer
+   proved, so a stranger who connects learns nothing about which folders or channels a device has. A listener
+   with nothing to share sends a Close instead (with an invitation's refusal, `link: <reason>`).
 3. Then, per shared folder: Members (the statements), the Index (full or the changes since what the peer
-   holds), and from then on index updates, Requests and Responses, Progress and Addresses, both ways. A quiet
+   holds), and from then on index updates, Requests and Responses, Progress and Addresses, both ways. Per shared
+   channel: Members, ChatHave, the ChatMessages the other lacks, and new messages as they come. A quiet
    session sends a Ping every 90 s; one silent for three times that is dead.
 4. Either side ends it with a Close (a reason for the other side's log or, for a joining device, its UI).
 
@@ -105,6 +109,12 @@ encoded back byte for byte. That table only ever gets new entries.
 | 14 | RelayData | `session` varint ‖ `data` bytes (≤ 16 MiB) |
 | 15 | RelayClose | `session` varint |
 | 16 | OwnerKey | `folder_id` (32) ‖ `secret` (32, the folder secret `S`): from an owner to a device whose grant says Owner, only inside TLS |
+| 17 | ChatJoin (chat bit) | records of channels, each: `channel_id` (32) ‖ proofs (as in Join) |
+| 18 | ChatHave (chat bit) | `channel_id` (32) ‖ `floor_at_ms` varint (older messages are not wanted: the sender dropped them; 0 = all) ‖ records of authors (≤ 1024), each: `author` pk (32) ‖ ranges (count ≤ 4096 ‖ n × (`start` varint ‖ `len` varint ≥ 1)), sorted |
+| 19 | ChatMessages (chat bit) | `channel_id` (32) ‖ records of channel messages (≤ 1000, about 1 MiB) |
+| 20 | DirectKeys (chat bit) | records of key records for private messages (≤ 1024) |
+| 21 | DirectHave (chat bit) | records of authors as in ChatHave: what the sender holds of the private messages to it |
+| 22 | DirectMessages (chat bit) | records of private messages (≤ 1000, about 1 MiB) |
 | other | (unknown) | skipped |
 
 - **Version** (in entries and progress): `count ‖ n × (short device id, 8 bytes BE ‖ counter varint)`, sorted by
@@ -176,7 +186,12 @@ check      = SHA-256("seedwell-sync/v2/link" ‖ what comes before it)[..2]
   does not know ("this link was made by a newer Seedwell: update Seedwell to use it"), a statement holding
   one is kept as unknown, and an owner or admin that cannot read a redeemed one tells the joining device that
   it runs an older Seedwell.
-- Query fields other than `name` are ignored.
+- Query fields other than `name` (and, in a folder's link, `chat` and `chat_name`) are ignored.
+- **A link for a folder and its channel** is one folder link that also carries the channel's invitation:
+  `seedwell://sync/<the folder's>?name=<name>&chat=<the channel's base32, as in its own link>&chat_name=<its name>`.
+  The two invitations are separate (each in its own membership, with the same role, uses and expiry); the joining
+  device checks both and joins both, or only the folder when the channel is there already. A damaged `chat` part,
+  or one naming the folder itself, makes the whole link damaged. A channel's link ignores a `chat` field.
 
 **Proofs** (in a Join, per folder): `kind u8 ‖ bytes`.
 
@@ -188,6 +203,78 @@ check      = SHA-256("seedwell-sync/v2/link" ‖ what comes before it)[..2]
 
 A member also sends the owners' latest share-until statement as a grant proof, so a device that was cut off
 when the share ended learns of an extension when it reconnects.
+
+## Channels
+
+A channel is a folder without files: its own key pair (its id is the SHA-256 of the public key; owners hold the
+secret), its own membership with the same statements, roles, invitations and sharing period, and links of their
+own: `seedwell://chat/<the same payload as a folder link>?name=<name>`. Owners, admins and Read & write members
+post; Read only members read. Channels need the chat feature bit (bit 0): a device without it never gets types
+17 to 22, and one that has it ignores them over a session without it.
+
+```text
+message = fields (varint length ‖ bytes) ‖ signature (64)
+  fields = id (16, random) ‖ author pk (32) ‖ seq varint ‖ at_ms varint ‖ has_reply bool [‖ reply_to id (16)]
+           ‖ has_topic bool [‖ topic id (16)] ‖ agent str (empty = none, ≤ 64 characters) ‖ kind u8 ‖ body bytes
+           ‖ (later fields)
+  signed = "seedwell-chat/v1/message" ‖ channel id ‖ fields (with their length)
+  kind   = 1 text (UTF-8, ≤ 16 KiB) | 2 json (UTF-8, ≤ 64 KiB) | 3 topic (its title: UTF-8, not blank, ≤ 200
+           characters) | other: kept and passed on, not shown (≤ 64 KiB)
+```
+
+- The author's device signs; the agent label (the control client that posted it, set by the posting device's
+  service from the client's `hello`, never by the client) is inside the signed bytes.
+- `seq` counts an author's messages in the channel (1, 2, …), so a device's holdings are a few ranges per author
+  (ChatHave). `(author, seq)` names one message: a second one with the same pair is not taken. A device that
+  sees a higher `seq` of its own than it knows (it lost its store) continues after it.
+- A message counts only if its author may post when it arrives (Owner, Admin or Read & write, while the sharing
+  lasts): a removed or expired member's later messages are ignored; what devices took before stays.
+- Order: `at_ms` (a message more than ten minutes ahead of the receiver's clock is placed at the time it arrived,
+  and marked), then the author's `seq`, then the id.
+- Every member keeps every message up to its cap (10 000 messages or 50 MB per channel, the oldest dropped
+  first), and sends any member what it lacks: a device that was away catches up from whoever is online.
+- A text message or JSON body that is too long or not UTF-8 makes its record unreadable: it is skipped.
+- **Topics.** A topic message (kind 3) makes a topic: its id is the topic's id, its body the title; anyone who
+  may post makes one. A message whose `topic` names it belongs to it; one without, or naming a topic this device
+  does not have (yet), is shown under General, and moves into the topic when the topic message arrives. A topic
+  message has no `topic` of its own (one that has is still a topic).
+
+## Private messages
+
+Two devices that share a channel can write to each other privately (`src/direct.rs`). The messages travel over
+the channels' sessions (the chat bit), and the members of the channels they share carry them: they keep and pass
+on messages they cannot read.
+
+```text
+direct key = device pk (32) ‖ x25519 pk (32) ‖ at_ms varint ‖ signature (64)
+  signed   = "seedwell-chat/v1/direct-key" ‖ device pk ‖ x25519 pk ‖ at_ms (u64 BE)
+direct     = fields (varint length ‖ bytes) ‖ signature (64)
+  fields   = id (16) ‖ author pk (32) ‖ recipient pk (32) ‖ seq varint ‖ at_ms varint ‖ ephemeral x25519 pk (32)
+             ‖ sealed bytes ‖ (later fields)
+  signed   = "seedwell-chat/v1/direct" ‖ fields (with their length)
+  sealed   = ChaCha20-Poly1305(key, nonce 0, aad = "seedwell-chat/v1/direct" ‖ id ‖ author ‖ recipient, body)
+  key      = HKDF-SHA256(salt "seedwell-chat/v1/direct", ikm X25519(ephemeral secret, recipient's x25519 pk),
+                         info = ephemeral pk ‖ recipient's x25519 pk ‖ author ‖ recipient ‖ id), 32 bytes
+  body     = has_reply bool [‖ reply_to id (16)] ‖ agent str ‖ kind u8 (as in channels) ‖ body bytes ‖ (later)
+```
+
+- **Keys.** A device's X25519 key is derived from its device key (`HMAC-SHA256(device key, "seedwell-chat/v1/x25519")`
+  as the secret), so nothing more is stored; the record above carries its public half, signed by the device. A
+  device sends its record, and those it holds of the other members of the channels it shares with the peer, when a
+  channel starts over a session (DirectKeys), and again when a channel's members change. A newer record (by
+  `at_ms`) replaces an older one.
+- **Sealing.** Each message has a fresh ephemeral X25519 key, so a key is never used twice and the nonce can be
+  fixed. Only the recipient can open it; the author keeps its own copy in the clear on its own disk. A message
+  that does not open for its recipient (changed, or sealed to another key) is dropped; one whose signature does
+  not check is not taken by anyone.
+- **Carrying.** A device takes a private message when its signature checks, its author is a member of a channel
+  the device is in, and it is to the device, or to another member of a channel the device is in. It passes a new
+  one to every connected device that is its recipient or shares a channel with it, but not back to where it came
+  from or to its author. When a channel starts over a session, each side says what it holds of the messages to it
+  (DirectHave: ranges of `seq` per author); the other sends what it lacks. A recipient that was away gets its
+  messages from whichever member carries them.
+- `seq` counts the author's private messages, to anyone (1, 2, …). Order and the cap are as for a channel (10 000
+  messages or 50 MB per device, the oldest dropped first).
 
 ## Other formats
 
@@ -210,6 +297,16 @@ when the share ended learns of an extension when it reconnects.
   file; the older one then refuses it.
 - **The index store** (redb, `crates/sync/src/store_redb.rs`): its own schema version and migration rule, as
   before. Entries are kept in the bare entry form.
+- **A channel's messages** (`sync/<channel id>.chat`): `"SWCH" ‖ format varint (1) ‖ n × (varint length ‖
+  received_ms varint ‖ message)`, appended to as messages arrive and written anew when old ones are dropped. A
+  file of a later format is refused; a cut-off last record is dropped. Its membership is a `.members` file as
+  for folders; its settings on this device (name, muted, the agent switch, the wake-up command, what was read)
+  are a `[[channel]]` entry in `sync.toml` (`topic_read` keeps what was read in each topic).
+- **Private messages** (`sync/direct.chat`): `"SWDM" ‖ format varint (1) ‖ n × (varint length ‖ received_ms
+  varint ‖ has_body u8 [‖ body bytes] ‖ direct message)`; the body only in the author's own copies (those to this
+  device are opened again when read). The key records it knows: `sync/direct.keys`, `"SWDK" ‖ format varint (1) ‖
+  records`. The settings (the agent switch, the next `seq`, what was read) are the `[direct]` table of
+  `sync.toml`.
 
 ## Evolution
 
@@ -226,11 +323,11 @@ What a later version may change, and how:
    protocol version. Response codes are the exception: an unknown one means failed.
 4. **Feature bits** (`FEATURES` in `src/msg.rs`) are for optional behaviour both sides must support: a session
    uses `my features AND theirs`. A new behaviour takes the next free bit, documented in `src/msg.rs` and in a
-   table here; bits are never reused. None is defined in 0.1.6.
+   table here; bits are never reused.
 
    | bit | feature | since |
    |---|---|---|
-   | (none yet) | | |
+   | 0 | channels, their topics and private messages: types 17 to 22 | 0.1.6 |
 
 5. **Breaking changes** raise `PROTOCOL`, the highest version spoken. The new build keeps `MIN_PROTOCOL` one
    behind for at least one release (N-1), so devices a release apart still sync at the older version, and
@@ -247,7 +344,11 @@ What a later version may change, and how:
   kinds and values, newer links, a peer with a newer protocol and features).
 - `crates/sync-net/tests/it/versions.rs`: two services on loopback, one speaking a newer protocol range with
   unknown features (they sync), and one that only speaks a newer version (refused, with the reason shown).
+- `crates/sync-net/tests/it/chat.rs`: channels and topics on loopback, including a device without the chat bit,
+  which gets no channel messages while its folders still sync; `direct.rs`: private messages (sealed to the
+  recipient, carried by a third member, delivered later through it, tampered with).
 - `tools/sync-compat.sh OTHER`: this build's daemon against another `seedwell` binary, on loopback with
-  temporary state: share both ways (each side the owner in turn), sync files, change a role, remove a device.
+  temporary state: share both ways (each side the owner in turn), sync files, change a role, chat in a channel,
+  remove a device.
   The CLI tests run it with this build on both sides. From 0.1.7 on, CI should also run it against the latest
   release's CLI (`Seedwell.app/Contents/MacOS/seedwell`).

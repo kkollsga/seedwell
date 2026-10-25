@@ -131,9 +131,10 @@ pub fn describe(r: &Request) -> String {
         // The key is the permission to the folder: never in the log.
         Request::SyncJoin(p) => format!("join a shared folder (key not logged) at {}", p.path.as_deref().map_or("the default location".into(), |d| clip(d, 200))),
         Request::SyncShare(p) => format!(
-            "make a {} link to folder {} (link not logged)",
+            "make a {} link to folder {}{} (link not logged)",
             clip(p.role.as_deref().unwrap_or("read_write"), 20),
-            folder(&p.folder)
+            folder(&p.folder),
+            p.chat.as_deref().map(|c| format!(" and channel {}", clip(c, 60))).unwrap_or_default()
         ),
         Request::SyncMembers(p) => format!("list the devices of folder {}", folder(&p.folder)),
         Request::SyncInvites(p) => format!("list the links of folder {} (links not logged)", folder(&p.folder)),
@@ -165,6 +166,26 @@ pub fn describe(r: &Request) -> String {
             let keys: Vec<String> = v.as_object().into_iter().flatten().filter(|(_, v)| !v.is_null()).map(|(k, _)| k.clone()).collect();
             format!("change folder sync settings: {}", keys.join(", "))
         }
+        Request::ChatNew(p) => format!("make the channel {}", clip(&p.name, 100)),
+        // The link is the permission to the channel: never in the log.
+        Request::ChatJoin(_) => "join a channel (link not logged)".into(),
+        Request::ChatShare(p) => format!("make a {} link to channel {} (link not logged)", clip(p.role.as_deref().unwrap_or("read_write"), 20), folder(&p.channel)),
+        Request::ChatSetRole(p) => format!("make device {} {} in channel {}", clip(&p.device, 60), clip(&p.role, 20), folder(&p.channel)),
+        Request::ChatRemoveDevice(p) => format!("remove device {} from channel {}", clip(&p.device, 60), folder(&p.channel)),
+        Request::ChatSetShareUntil(p) => format!("share channel {} for {} days{}", folder(&p.channel), p.days, if p.extend { " more" } else { "" }),
+        // What it says stays out of the log; how long it is does not.
+        Request::ChatSend(p) => format!("post {} bytes{} to channel {}", p.body.len(), if p.json { " of JSON" } else { "" }, folder(&p.channel)),
+        Request::ChatAddAddress(p) => format!("add address {} to channel {}", clip(&p.address, 100), folder(&p.channel)),
+        Request::ChatMute(p) => format!("{} channel {}", if p.muted { "mute" } else { "unmute" }, folder(&p.channel)),
+        Request::ChatSetAgents(p) => format!("let agents {} in channel {}", clip(&p.agents, 20), folder(&p.channel)),
+        Request::ChatSetWake(p) => match p.command.as_deref().filter(|c| !c.trim().is_empty()) {
+            Some(c) => format!("wake-up command of channel {}: {}", folder(&p.channel), clip(c, 200)),
+            None => format!("no wake-up command for channel {}", folder(&p.channel)),
+        },
+        Request::ChatLeave(p) => format!("leave channel {}", folder(&p.channel)),
+        Request::ChatNewTopic(p) => format!("make the topic {} in channel {}", clip(&p.title, 100), folder(&p.channel)),
+        Request::ChatDmSend(p) => format!("write {} bytes{} privately to device {}", p.body.len(), if p.json { " of JSON" } else { "" }, clip(&p.device, 60)),
+        Request::ChatDmSetAgents(p) => format!("let agents {} with private messages", clip(&p.agents, 20)),
         other => other.method().name().to_owned(),
     };
     // A key pasted into any field (a name, a path) is masked too.

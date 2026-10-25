@@ -23,8 +23,8 @@
 //! sender overruns it, so a slow or hostile side cannot make C buffer more than about 2 MiB per pipe.
 //!
 //! **What C relays** ([`may_relay`]): with `relay_own_devices`, A and B must both have proved Write access to
-//! a folder C also holds with Write access (the user's own devices); with `relay_everyone`, it is enough that
-//! both share a folder with C. Never a session that is itself relayed (no chains), at most
+//! a folder or channel C also holds with Write access (the user's own devices); with `relay_everyone`, it is
+//! enough that both share a folder or channel with C. Never a session that is itself relayed (no chains), at most
 //! [`MAX_FORWARDS`] pipes at once and [`MAX_PER_PAIR`] per pair of devices, each direction capped at
 //! [`RELAY_RATE`] bytes per second. A refused `RelayOpen` is answered with `RelayClose`.
 //!
@@ -213,7 +213,7 @@ pub(crate) fn may_relay(h: &SyncHandle, a: &PeerHandle, b: &PeerHandle) -> bool 
     if !s.relay_own_devices && !s.relay_everyone {
         return false;
     }
-    h.ctx().registry.folders().iter().any(|f| {
+    h.ctx().registry.spaces().iter().any(|f| {
         let (Some(fa), Some(fb)) = (a.access(&f.id), b.access(&f.id)) else { return false };
         s.relay_everyone
             || (s.relay_own_devices
@@ -551,10 +551,10 @@ pub(crate) fn reach(h: &SyncHandle, target: DeviceId) {
     });
 }
 
-/// A connected peer (directly, not relayed) that shares a folder `target` is a member of.
+/// A connected peer (directly, not relayed) that shares a folder (or channel) `target` is a member of.
 pub(crate) fn common_peer(h: &SyncHandle, target: DeviceId) -> Option<Arc<PeerHandle>> {
     let ctx = h.ctx();
-    let folders = ctx.registry.folders();
+    let folders = ctx.registry.spaces();
     ctx.registry.peers().into_iter().find(|p| {
         p.device != target
             && p.via != Via::Relay

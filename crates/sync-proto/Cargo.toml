@@ -10,6 +10,7 @@ description = "Seedwell Sync: the folder key, roles and invitations, device ids,
 [dependencies]
 # Each dependency is justified in README.md.
 ring = { version = "0.17", default-features = false, features = ["std"] }
+x25519-dalek = { version = "3", default-features = false, features = ["static_secrets", "zeroize"] }
 
 [dev-dependencies]
 proptest = { version = "1", default-features = false, features = ["std"] }

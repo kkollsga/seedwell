@@ -14,7 +14,8 @@
 //!
 //! No sockets and no async: the driver (`trs-sync-net`) runs this on blocking threads and moves
 //! messages. See the README for the design.
-#![forbid(unsafe_code)]
+// `unsafe` only in `fs::flush`, the one OS call `std` lacks (a write barrier).
+#![deny(unsafe_code)]
 #![warn(missing_docs)]
 
 pub mod archive;

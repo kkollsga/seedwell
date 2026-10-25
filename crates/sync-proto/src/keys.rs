@@ -183,6 +183,10 @@ pub enum KeyError {
     Name,
     /// A link of a later format (its check is good, its invitation version unknown): made by a newer Seedwell.
     Newer,
+    /// A channel's link (`seedwell://chat/`) where a folder's was expected.
+    ChannelLink,
+    /// A folder's link (`seedwell://sync/`) where a channel's was expected.
+    FolderLink,
 }
 
 impl fmt::Display for KeyError {
@@ -193,6 +197,8 @@ impl fmt::Display for KeyError {
             KeyError::Damaged => f.write_str("the folder link is damaged or incomplete"),
             KeyError::Name => f.write_str("the folder name in the link is damaged"),
             KeyError::Newer => f.write_str("this link was made by a newer Seedwell: update Seedwell to use it"),
+            KeyError::ChannelLink => f.write_str("this is a channel link: open it under Chats"),
+            KeyError::FolderLink => f.write_str("this is a folder link: add it under Folder Sync"),
         }
     }
 }

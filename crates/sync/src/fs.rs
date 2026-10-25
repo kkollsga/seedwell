@@ -10,6 +10,7 @@ use std::io;
 use trs_sync_proto::model::FileKind;
 
 mod disk;
+mod flush;
 mod mem;
 
 pub use disk::StdFs;
@@ -67,8 +68,14 @@ pub trait FileHandle: Send {
     fn set_len(&self, len: u64) -> io::Result<()>;
     /// The current length.
     fn len(&self) -> io::Result<u64>;
-    /// Flushes data and metadata to stable storage.
+    /// Flushes data and metadata to stable storage (on macOS `F_FULLFSYNC`: the drive empties its cache).
     fn sync_all(&self) -> io::Result<()>;
+    /// Orders the file's data before everything written after it, without waiting for the medium (macOS
+    /// `F_BARRIERFSYNC`; `fsync` elsewhere). Durable at the next full flush ([`Self::sync_all`] or
+    /// [`Fs::sync_dir`] of anything).
+    fn sync_barrier(&self) -> io::Result<()> {
+        self.sync_all()
+    }
 }
 
 /// The operations the scanner and the puller need.
@@ -101,9 +108,10 @@ pub trait Fs: Send + Sync {
     fn symlink(&self, target: &str, rel: &str) -> io::Result<()>;
     /// Reads a symlink's target.
     fn read_link(&self, rel: &str) -> io::Result<String>;
-    /// Makes a directory's entries durable (`fsync` on the directory): the files created, renamed
-    /// into or out of it and removed from it since. Without it a crash can undo a rename even after
-    /// the file's own data was synced.
+    /// Makes a directory's entries durable (`fsync` on the directory; on macOS `F_FULLFSYNC`, which also
+    /// empties the drive's cache, so data behind a [`FileHandle::sync_barrier`] is durable too): the files
+    /// created, renamed into or out of it and removed from it since. Without it a crash can undo a rename even
+    /// after the file's own data was synced.
     fn sync_dir(&self, rel: &str) -> io::Result<()>;
 }
 

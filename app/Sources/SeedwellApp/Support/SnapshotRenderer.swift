@@ -61,7 +61,7 @@ import SwiftUI
                 return SyncAddView(model: m)
             }
             await render("sync-add-shared-\(suffix)", size: NSSize(width: 480, height: 290), dark: dark, settings: true) {
-                let link = (try? core.syncCreateInvite(id: folders[0].id, role: .readOnly, maxUses: 1, validDays: 7))?.link ?? ""
+                let link = (try? core.syncCreateInvite(id: folders[0].id, role: .readOnly, maxUses: 1, validDays: 7, channelId: core.syncSnapshot().folders[0].channelId))?.link ?? ""
                 return SyncAddView(model: SyncAddModel(core: core, prefill: link))
             }
             await render("sync-add-bad-\(suffix)", size: NSSize(width: 480, height: 290), dark: dark, settings: true) {
@@ -75,7 +75,7 @@ import SwiftUI
                 return SyncEditView(model: m, actions: sync)
             }
             await render("sync-share-\(suffix)", size: NSSize(width: 460, height: 440), dark: dark, settings: true) {
-                _ = try? core.syncCreateInvite(id: folders[0].id, role: .readWrite, maxUses: 1, validDays: 7)
+                _ = try? core.syncCreateInvite(id: folders[0].id, role: .readWrite, maxUses: 1, validDays: 7, channelId: nil)
                 return SyncShareView(model: SyncShareModel(core: core, id: folders[0].id, copied: true), actions: sync)
             }
             await render("sync-share-period-\(suffix)", size: NSSize(width: 460, height: 360), dark: dark, settings: true) {
@@ -87,6 +87,26 @@ import SwiftUI
                 await render("finder-setup-\(name)-\(suffix)", size: NSSize(width: 460, height: state.0 ? 260 : 330), dark: dark, settings: true) {
                     FinderSetupView(model: FinderSetupModel(check: { (badges: state.0, shareMenu: state.1) }))
                 }
+            }
+        }
+        // Channels (SPEC 7G.7): the mock's first channel's page, and the New Channel window.
+        for dark in [true, false] {
+            let suffix = dark ? "dark" : "light"
+            await render("chats-window-\(suffix)", size: NSSize(width: 1180, height: 760), dark: dark) {
+                let m = model(.chat(core.chatChannels().first?.id ?? "", topic: nil), select: nil)
+                return MainWindowView(model: m, commands: commands, settings: settings, nav: SettingsNavigation())
+            }
+            await render("chats-topic-\(suffix)", size: NSSize(width: 1180, height: 760), dark: dark) {
+                let c = core.chatChannels().first?.id ?? ""
+                let m = model(.chat(c, topic: core.chatTopics(channelId: c).first?.id), select: nil)
+                return MainWindowView(model: m, commands: commands, settings: settings, nav: SettingsNavigation())
+            }
+            await render("chats-direct-\(suffix)", size: NSSize(width: 1180, height: 760), dark: dark) {
+                let m = model(.direct(core.chatDirects().first?.deviceId ?? ""), select: nil)
+                return MainWindowView(model: m, commands: commands, settings: settings, nav: SettingsNavigation())
+            }
+            await render("chat-new-\(suffix)", size: NSSize(width: 440, height: 240), dark: dark, settings: true) {
+                ChatNewView(model: ChatNewModel(core: core, prefill: nil))
             }
         }
         await render("settings-folderSync-light", size: NSSize(width: 860, height: 900), dark: false, settings: true) {

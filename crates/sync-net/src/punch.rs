@@ -124,7 +124,7 @@ pub(crate) fn on_rendezvous(h: &SyncHandle, a: &Arc<PeerHandle>, m: Rendezvous) 
     if b.via == Via::Relay {
         return;
     }
-    let shared = ctx.registry.folders().iter().any(|f| a.access(&f.id).is_some() && b.access(&f.id).is_some());
+    let shared = ctx.registry.spaces().iter().any(|f| a.access(&f.id).is_some() && b.access(&f.id).is_some());
     if !shared || !rate_ok(&h.net().punch, (a.device, b.device)) {
         return;
     }

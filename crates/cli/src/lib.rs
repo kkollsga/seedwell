@@ -5,6 +5,7 @@
 #![warn(missing_docs)]
 
 pub mod args;
+pub mod chat;
 pub mod cmd;
 pub mod commands;
 #[cfg(feature = "daemon")]

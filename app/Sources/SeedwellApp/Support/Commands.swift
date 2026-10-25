@@ -44,11 +44,14 @@ indirect enum MenuEntry {
     let arrivals = DownloadWatcher()
     /// Folder sync (SPEC 7G): its commands and the modals.
     let sync: SyncActions
+    /// Channels (SPEC 7G.7): their commands, the New Channel window and notifications.
+    let chat: ChatActions
     private let log = Logger(subsystem: "io.github.kkollsga.Seedwell", category: "commands")
 
     init(core: Core) {
         self.core = core
         sync = SyncActions(core: core)
+        chat = ChatActions(core: core, sync: sync)
         favorites = FavoriteEditing(store: core)
         favorites.openTab = { [weak self] id in self?.showMain(.tracker(id), nil) }
         favorites.openInfo = { [weak self] id in self?.showTrackerInfo(id) }

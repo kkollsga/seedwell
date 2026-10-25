@@ -156,6 +156,10 @@ impl FileHandle for StdHandle {
     fn sync_all(&self) -> io::Result<()> {
         self.0.sync_all()
     }
+
+    fn sync_barrier(&self) -> io::Result<()> {
+        super::flush::barrier(&self.0)
+    }
 }
 
 impl Fs for StdFs {
@@ -236,7 +240,8 @@ impl Fs for StdFs {
     }
 
     fn sync_dir(&self, rel: &str) -> io::Result<()> {
-        // Opening a directory read-only and fsyncing it works on macOS and Linux.
+        // Opening a directory read-only and fsyncing it works on macOS and Linux (`sync_all` is F_FULLFSYNC on
+        // macOS: a full flush).
         File::open(self.join_checked(rel)?)?.sync_all()
     }
 }

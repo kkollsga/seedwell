@@ -7,7 +7,7 @@ use trs_control::proto::{AtGoalParam, FilePriorityParam, KindFilter, ListFilter,
 
 use crate::args::{Opts, Usage, parse_duration, parse_index_list, parse_rate};
 use crate::select::{Selection, parse_state};
-use crate::{debug, sim, skill, sync};
+use crate::{chat, debug, sim, skill, sync};
 
 /// What `start` does with the files.
 #[derive(Clone, Debug, PartialEq)]
@@ -200,6 +200,8 @@ pub enum Cmd {
     Skill(skill::Cmd),
     /// `sync …` (folder sync)
     Sync(sync::Cmd),
+    /// `chat …` (channels)
+    Chat(chat::Cmd),
     /// `relay [--port N] [--bind ADDR] [--key-file PATH]`
     Relay(sync::RelayArgs),
     /// `help [x]`
@@ -527,6 +529,7 @@ pub fn parse(args: Vec<String>) -> Result<Cmd, Usage> {
         "sim" => Cmd::Sim(sim::parse(rest)?),
         "skill" => Cmd::Skill(skill::parse(rest)?),
         "sync" => Cmd::Sync(sync::parse(rest)?),
+        "chat" => Cmd::Chat(chat::parse(rest)?),
         "relay" => Cmd::Relay(sync::parse_relay(rest)?),
         "help" => {
             let pos = o.finish()?;
@@ -640,6 +643,8 @@ mod tests {
         assert!(matches!(p("seedwell help agents").unwrap(), Cmd::Help(Some(_))));
         assert!(matches!(p("seedwell daemon --state-dir x").unwrap(), Cmd::Daemon(_)));
         assert_eq!(p("seedwell sync list").unwrap(), Cmd::Sync(sync::Cmd::List));
+        assert_eq!(p("seedwell chat list --json").unwrap(), Cmd::Chat(chat::Cmd::List));
+        assert!(matches!(p("seedwell chat send Plans -").unwrap(), Cmd::Chat(chat::Cmd::Send { .. })));
         assert!(matches!(p("seedwell sync status MFZWI3D").unwrap(), Cmd::Sync(sync::Cmd::Status { .. })));
         assert!(matches!(p("seedwell sync add ~/Shared").unwrap(), Cmd::Sync(sync::Cmd::Add { .. })));
         assert!(matches!(p("seedwell sync join seedwell://sync/ABCDEF --to ~/Seedwell/Docs").unwrap(), Cmd::Sync(sync::Cmd::Join { to: Some(_), .. })));

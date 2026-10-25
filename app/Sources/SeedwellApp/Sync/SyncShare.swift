@@ -1,14 +1,29 @@
 import AppKit
 import SwiftUI
 
-/// The Share dialog (SPEC 7G.1, 7G.5): the settings of a link, and one Copy Link that makes a link with them and
-/// copies it; the folder's sharing period (an owner's setting, applied at once: when it ends, every device but the
-/// owners' is removed); and the folder's active links, each with Revoke. A link admits devices at its role until it
-/// is used up, expires or is revoked; only the folder's owner and admins may share.
+/// What is being shared: a synced folder or a channel (both have members, roles, links and a sharing period).
+struct ShareTarget: Equatable {
+    let id: String
+    let name: String
+    let role: SyncRole
+    let shareUntilS: UInt64?
+    let isChannel: Bool
+    /// A folder's chat: the channel its links can invite to as well.
+    let channelId: String?
+
+    init(_ f: SyncFolder) { (id, name, role, shareUntilS, isChannel, channelId) = (f.id, f.name, f.role, f.shareUntilS, false, f.channelId) }
+    init(_ c: SyncChannel) { (id, name, role, shareUntilS, isChannel, channelId) = (c.id, c.name, c.role, c.shareUntilS, true, nil) }
+}
+
+/// The Share dialog (SPEC 7G.1, 7G.5) of a folder or a channel: the settings of a link, and one Copy Link that makes
+/// a link with them and copies it; the sharing period (an owner's setting, applied at once: when it ends, every
+/// device but the owners' is removed); and the active links, each with Revoke. A link admits devices at its role
+/// until it is used up, expires or is revoked; only the owner and admins may share.
 @MainActor @Observable final class SyncShareModel {
     @ObservationIgnored let core: Core
     let id: String
-    private(set) var folder: SyncFolder?
+    /// The folder or channel (`nil` once it is gone from this Mac).
+    private(set) var target: ShareTarget?
     var role: SyncRole = .readWrite
     /// One use (the default), else `uses` (0 = unlimited).
     var singleUse = true
@@ -18,6 +33,13 @@ import SwiftUI
     var linkDays: UInt32 = 7
     /// The days chosen for the folder's sharing period (shown while it has none; applied when switched on).
     var shareDays: UInt32 = 7
+    /// A folder's link also invites to a channel (the same invite): its chat, a new channel named after the folder
+    /// (`SyncShareModel.newChat`), or another channel this Mac may share. On when the folder has a chat already.
+    var withChat = false
+    var chat = SyncShareModel.newChat
+    /// The channels a folder's link can invite to (this Mac may share them).
+    private(set) var chatChoices: [SyncChannel] = []
+    @ObservationIgnored private var chatChosen = false
     private(set) var invites: [SyncInvite] = []
     var error: String?
     var busy = false
@@ -25,6 +47,7 @@ import SwiftUI
     var copied = false
     @ObservationIgnored private var copiedTask: Task<Void, Never>?
 
+    static let newChat = ""
     static let useChoices: [(UInt32, String)] = [(5, "5 times"), (10, "10 times"), (0, "Unlimited")]
     static let dayChoices: [(UInt32, String)] = [(1, "1 day"), (7, "7 days"), (30, "30 days")]
 
@@ -38,7 +61,14 @@ import SwiftUI
 
     func reload() {
         let (core, id) = (core, id)
-        folder = core.syncSnapshot().folders.first { $0.id == id }
+        let channels = core.chatChannels()
+        target = core.syncSnapshot().folders.first { $0.id == id }.map(ShareTarget.init)
+            ?? channels.first { $0.id == id }.map(ShareTarget.init)
+        if let t = target, !t.isChannel {
+            chatChoices = channels.filter { SyncText.canShare($0.role) }
+            // The first look starts from the folder's chat; later ones keep what the user picked.
+            if !chatChosen, let c = t.channelId, chatChoices.contains(where: { $0.id == c }) { chatChosen = true; withChat = true; chat = c }
+        }
         Task {
             let list = await Task.detached(priority: .userInitiated) { core.syncInvites(id: id) }.value
             invites = list.sorted { $0.createdS > $1.createdS }
@@ -47,15 +77,21 @@ import SwiftUI
 
     /// Roles this device may hand out: an owner any of them but Owner (co-owners are made on the folder page),
     /// an admin Read & write and Read only.
-    var roles: [SyncRole] { folder?.role == .owner ? [.readWrite, .readOnly, .admin] : [.readWrite, .readOnly] }
+    var roles: [SyncRole] { target?.role == .owner ? [.readWrite, .readOnly, .admin] : [.readWrite, .readOnly] }
 
-    var canShare: Bool { folder.map { SyncText.canShare($0.role) } ?? false }
+    var canShare: Bool { target.map { SyncText.canShare($0.role) } ?? false }
+
+    /// The name of the channel the next link invites to as well (`nil`: none).
+    var chatName: String? {
+        guard withChat, target?.isChannel == false else { return nil }
+        return chat == Self.newChat ? target?.name : chatChoices.first { $0.id == chat }?.name
+    }
 
     /// What the next link is: (uses, days valid), 0 = no limit.
     var settings: (uses: UInt32, linkDays: UInt32) { (singleUse ? 1 : uses, linkExpires ? linkDays : 0) }
 
     /// The folder is shared for a limited time (an owner set an end).
-    var sharingEnds: Bool { folder?.shareUntilS != nil }
+    var sharingEnds: Bool { target?.shareUntilS != nil }
 
     /// Starts a sharing period of `days` from now, or ends the period (`0`: shared with no end). Owners only.
     func setSharing(days: UInt32) {
@@ -64,7 +100,7 @@ import SwiftUI
 
     /// Adds `days` to the running period's end.
     func extendSharing(days: UInt32) {
-        guard let until = folder?.shareUntilS else { return setSharing(days: days) }
+        guard let until = target?.shareUntilS else { return setSharing(days: days) }
         setSharing(until: max(until, UInt64(Date().timeIntervalSince1970)) + UInt64(days) * 86_400)
     }
 
@@ -89,9 +125,20 @@ import SwiftUI
         busy = true
         error = nil
         let (core, id, role, s) = (core, id, role, settings)
+        // With a chat: a new channel is made first (named after the folder), and the folder's chat is the one chosen.
+        let name = chatName
+        let isNew = chat == Self.newChat
+        let newName: String? = isNew ? name : nil
+        let existing: String? = name != nil && !isNew ? chat : nil
+        let current = target?.channelId
         Task {
             let r: Result<SyncInvite, Error> = await Task.detached(priority: .userInitiated) {
-                Result { try core.syncCreateInvite(id: id, role: role, maxUses: s.uses, validDays: s.linkDays) }
+                Result {
+                    var channel = existing
+                    if let newName { channel = try core.chatNew(name: newName).id }
+                    if let channel, channel != current { try core.syncSetChannel(id: id, channelId: channel) }
+                    return try core.syncCreateInvite(id: id, role: role, maxUses: s.uses, validDays: s.linkDays, channelId: channel)
+                }
             }.value
             busy = false
             switch r {
@@ -131,17 +178,17 @@ struct SyncShareView: View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 3) {
                 ModalCaption(text: "Folder Sync")
-                Text("Share “\(model.folder?.name ?? "Folder")”").font(.system(size: 17, weight: .semibold)).lineLimit(1).truncationMode(.middle)
+                Text("Share “\(model.target?.name ?? "Folder")”").font(.system(size: 17, weight: .semibold)).lineLimit(1).truncationMode(.middle)
             }
-            if model.folder == nil {
-                Text("This folder is no longer synced on this Mac.").foregroundStyle(.secondary).padding(.top, 16)
+            if model.target == nil {
+                Text("This is no longer on this Mac.").foregroundStyle(.secondary).padding(.top, 16)
             } else if !model.canShare {
-                Text("Only the folder’s owner and admins can share it. Ask one of them for a link.")
+                Text("Only the owner and admins can share it. Ask one of them for a link.")
                     .foregroundStyle(.secondary).padding(.top, 16).fixedSize(horizontal: false, vertical: true)
             } else {
                 settings.padding(.top, 18)
                 let s = model.settings
-                Text(SyncText.shareSummary(role: model.role, uses: s.uses, linkDays: s.linkDays))
+                Text(SyncText.shareSummary(role: model.role, uses: s.uses, linkDays: s.linkDays, chat: model.chatName))
                     .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     .padding(.top, 14)
                     .accessibilityIdentifier("sync-share-summary")
@@ -191,14 +238,28 @@ struct SyncShareView: View {
             row("Link expires", on: $model.linkExpires, help: "How long the link can be used to join") {
                 if model.linkExpires { menu($model.linkDays, SyncShareModel.dayChoices) }
             }
+            if model.target?.isChannel == false {
+                row("Include a chat", on: $model.withChat,
+                    help: "The same link also joins a channel, for the people and agents of this folder") {
+                    if model.withChat {
+                        Picker("", selection: $model.chat) {
+                            Text("New channel “\(model.target?.name ?? "")”").tag(SyncShareModel.newChat)
+                            if !model.chatChoices.isEmpty { Divider() }
+                            ForEach(model.chatChoices, id: \.id) { Text($0.name).tag($0.id) }
+                        }
+                        .labelsHidden().fixedSize().controlSize(.small)
+                    }
+                }
+                .accessibilityIdentifier("sync-share-chat")
+            }
         }
     }
 
     /// The folder's sharing period: an owner starts it (applied at once, for every device), then sees it count down
     /// and can extend it or lift the end; an admin sees the countdown.
     @ViewBuilder private var sharing: some View {
-        let until = model.folder?.shareUntilS
-        let owner = model.folder?.role == .owner
+        let until = model.target?.shareUntilS
+        let owner = model.target?.role == .owner
         if let until {
             // Ticks once a minute while the dialog is open.
             TimelineView(.periodic(from: .now, by: 60)) { context in

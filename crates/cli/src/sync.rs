@@ -28,8 +28,8 @@ pub enum Cmd {
     Add { path: String },
     /// `sync join <link> [--to <path>]` (`-` reads the link from standard input)
     Join { key: String, to: Option<String> },
-    /// `sync share <folder> [--role R] [--uses N|unlimited] [--days N|never]`
-    Share { folder: String, role: Option<String>, uses: Option<u32>, days: Option<u32> },
+    /// `sync share <folder> [--role R] [--uses N|unlimited] [--days N|never] [--chat <channel>|new]`
+    Share { folder: String, role: Option<String>, uses: Option<u32>, days: Option<u32>, chat: Option<String> },
     /// `sync share-until <folder> <days>|never [--extend]`: `days` 0 = no end; `extend` counts from the current end.
     ShareUntil { folder: String, days: u32, extend: bool },
     /// `sync members <folder>`
@@ -71,7 +71,7 @@ pub enum Cmd {
 }
 
 /// The one-line usage.
-pub const USAGE: &str = "usage: seedwell sync list | status <folder> | add <path> | join <link> [--to <path>] | share <folder> [--role read_write|read_only|admin|owner] [--uses N|unlimited] [--days N|never] | share-until <folder> <days>|never [--extend] | members <folder> | invites <folder> | revoke-invite <folder> <invite-id> | role <folder> <device> owner|admin|read_write|read_only | remove-device <folder> <device> | rename <folder> <name> | move <folder> <path> | pause <folder> | resume <folder> | rescan <folder> | lan-only <folder> on|off | conflicts <folder> | resolve <folder> <copy> --keep original|copy|both | address <folder> <host:port> | remove <folder> [--delete-files] [-y] | remove-confirm <token> | settings [--device-name N] [--port N] [--lan on|off] [--dht on|off] [--relay-own on|off] [--relay-everyone on|off] [--up R] [--down R] [--default-location PATH]";
+pub const USAGE: &str = "usage: seedwell sync list | status <folder> | add <path> | join <link> [--to <path>] | share <folder> [--role read_write|read_only|admin|owner] [--uses N|unlimited] [--days N|never] [--chat <channel>|new] | share-until <folder> <days>|never [--extend] | members <folder> | invites <folder> | revoke-invite <folder> <invite-id> | role <folder> <device> owner|admin|read_write|read_only | remove-device <folder> <device> | rename <folder> <name> | move <folder> <path> | pause <folder> | resume <folder> | rescan <folder> | lan-only <folder> on|off | conflicts <folder> | resolve <folder> <copy> --keep original|copy|both | address <folder> <host:port> | remove <folder> [--delete-files] [-y] | remove-confirm <token> | settings [--device-name N] [--port N] [--lan on|off] [--dht on|off] [--relay-own on|off] [--relay-everyone on|off] [--up R] [--down R] [--default-location PATH]";
 
 fn on_off(v: Option<String>, name: &str) -> Result<Option<bool>, Usage> {
     match v.as_deref() {
@@ -124,7 +124,8 @@ pub fn parse(args_in: Vec<String>) -> Result<Cmd, Usage> {
                 Some("never" | "unlimited") => Some(0),
                 Some(n) => Some(n.parse::<u32>().ok().filter(|n| *n >= 1).ok_or_else(|| Usage(format!("--days is a number of days or never, not `{n}`")))?),
             };
-            Cmd::Share { folder: one(o, "share <folder> [--role R] [--uses N|unlimited] [--days N|never]")?, role, uses, days }
+            let chat = o.value(&["--chat", "--channel"])?;
+            Cmd::Share { folder: one(o, "share <folder> [--role R] [--uses N|unlimited] [--days N|never] [--chat <channel>|new]")?, role, uses, days, chat }
         }
         "share-until" | "shared-until" => {
             let extend = o.flag(&["--extend"]);
@@ -261,13 +262,19 @@ pub async fn run(cmd: Cmd, g: &Global) -> R {
             let key = if key == "-" { key_from_stdin()? } else { key };
             let path = to.as_deref().map(abs).transpose()?;
             let (raw, d): (_, SyncFolderDto) = ask(&mut c, Request::SyncJoin(SyncJoinParams { key_or_link: key, path })).await?;
-            show(g, &raw, || match d.role.as_deref() {
-                Some(r) => format!("Joined {} at {} ({}).", d.name, d.path, role(r)),
-                None => format!("Joining {} at {}: it starts once one of the folder's owners or admins is online.", d.name, d.path),
+            show(g, &raw, || {
+                let mut t = match d.role.as_deref() {
+                    Some(r) => format!("Joined {} at {} ({}).", d.name, d.path, role(r)),
+                    None => format!("Joining {} at {}: it starts once one of the folder's owners or admins is online.", d.name, d.path),
+                };
+                if let Some(ch) = &d.channel_id {
+                    t.push_str(&format!("\nIts channel ({}) is in `seedwell chat list`.", first_group(ch)));
+                }
+                t
             });
         }
-        Cmd::Share { folder: f, role: r, uses, days } => {
-            let (raw, i): (_, SyncInviteDto) = ask(&mut c, Request::SyncShare(SyncShareParams { folder: f, role: r, uses, days })).await?;
+        Cmd::Share { folder: f, role: r, uses, days, chat } => {
+            let (raw, i): (_, SyncInviteDto) = ask(&mut c, Request::SyncShare(SyncShareParams { folder: f, role: r, uses, days, chat })).await?;
             show(g, &raw, || invite(&i));
         }
         Cmd::ShareUntil { folder: f, days, extend } => {
@@ -574,6 +581,9 @@ pub fn status(f: &SyncFolderDto) -> String {
     if let Some(t) = f.share_until {
         let _ = writeln!(o, "  sharing    {}", shared_until(t));
     }
+    if let Some(c) = &f.channel_id {
+        let _ = writeln!(o, "  channel    {} (seedwell chat read {})", first_group(c), first_group(c));
+    }
     if f.need_files > 0 || f.need_bytes > 0 {
         let _ = writeln!(o, "  to fetch   {} files, {}", f.need_files, human::bytes(f.need_bytes));
     }
@@ -614,8 +624,9 @@ pub fn conflicts(l: &SyncConflictsDto) -> String {
 pub fn invite(i: &SyncInviteDto) -> String {
     let uses = if i.max_uses == 0 { "any number of devices".to_string() } else if i.max_uses == 1 { "one device".to_string() } else { format!("{} devices", i.max_uses) };
     let until = i.expires_at.map_or_else(|| "with no expiry".to_string(), |t| format!("expiring {}", when(t)));
+    let with = i.channel_name.as_deref().map(|c| format!(" (the folder and the channel {c})")).unwrap_or_default();
     format!(
-        "{} link for {uses}, {until}. Anyone who has it can join with it: send it only to people you trust.\n  {}",
+        "{} link{with} for {uses}, {until}. Anyone who has it can join with it: send it only to people you trust.\n  {}",
         role(&i.role),
         i.link
     )
@@ -640,7 +651,8 @@ pub fn invites(l: &SyncInvitesDto) -> String {
             let left = if i.max_uses == 0 { "unlimited".to_string() } else { format!("{}/{} used", i.uses, i.max_uses) };
             format!("{left}{}", i.expires_at.map(|t| format!(", expires {}", when(t))).unwrap_or_default())
         };
-        let _ = writeln!(o, "  {}  {:<13} {status}", &i.id[..8.min(i.id.len())], role(&i.role));
+        let with = i.channel_name.as_deref().map(|c| format!("  (and the channel {c})")).unwrap_or_default();
+        let _ = writeln!(o, "  {}  {:<13} {status}{with}", &i.id[..8.min(i.id.len())], role(&i.role));
         if !i.link.is_empty() && status != "revoked" {
             let _ = writeln!(o, "    {}", i.link);
         }
@@ -702,14 +714,14 @@ mod tests {
         assert_eq!(parse(w("add ~/Documents/Shared")).unwrap(), Cmd::Add { path: "~/Documents/Shared".into() });
         assert_eq!(parse(w("join seedwell://sync/ABC --to /tmp/x")).unwrap(), Cmd::Join { key: "seedwell://sync/ABC".into(), to: Some("/tmp/x".into()) });
         assert_eq!(parse(w("join -")).unwrap(), Cmd::Join { key: "-".into(), to: None });
-        assert_eq!(parse(w("share Docs")).unwrap(), Cmd::Share { folder: "Docs".into(), role: None, uses: None, days: None });
+        assert_eq!(parse(w("share Docs")).unwrap(), Cmd::Share { folder: "Docs".into(), role: None, uses: None, days: None, chat: None });
         assert_eq!(
             parse(w("share Docs --role ro --uses unlimited --days never")).unwrap(),
-            Cmd::Share { folder: "Docs".into(), role: Some("ro".into()), uses: Some(0), days: Some(0) }
+            Cmd::Share { folder: "Docs".into(), role: Some("ro".into()), uses: Some(0), days: Some(0), chat: None }
         );
         assert_eq!(
-            parse(w("share Docs --uses 3 --days 2")).unwrap(),
-            Cmd::Share { folder: "Docs".into(), role: None, uses: Some(3), days: Some(2) }
+            parse(w("share Docs --uses 3 --days 2 --chat new")).unwrap(),
+            Cmd::Share { folder: "Docs".into(), role: None, uses: Some(3), days: Some(2), chat: Some("new".into()) }
         );
         assert_eq!(parse(w("members Docs")).unwrap(), Cmd::Members { folder: "Docs".into() });
         assert_eq!(parse(w("share-until Docs 7")).unwrap(), Cmd::ShareUntil { folder: "Docs".into(), days: 7, extend: false });

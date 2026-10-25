@@ -9,7 +9,8 @@ import Testing
                        access: SyncAccess = .readWrite, role: SyncRole = .owner) -> SyncFolder {
         SyncFolder(id: id ?? "ID-\(name)", name: name, path: "/Users/me/Seedwell/\(name)", access: access, role: role, shareUntilS: nil, state: state,
                    files: 10, bytes: bytes, needFiles: need > 0 ? 3 : 0, needBytes: need, rateIn: rate, rateOut: 0,
-                   connected: connected, members: connected, conflicts: conflicts, lanOnly: false, issues: [], error: nil, lastSyncedS: nil)
+                   connected: connected, members: connected, conflicts: conflicts, lanOnly: false, issues: [], error: nil, lastSyncedS: nil,
+                   channelId: nil)
     }
 
     static func folder(_ state: SyncState, bytes: UInt64 = 1_000_000_000, need: UInt64 = 0, rate: UInt64 = 0,
@@ -67,13 +68,19 @@ import Testing
         #expect(MenuSync.structureOf(Self.snap([Self.folder("A2", id: "ID-A")])) != one)
     }
 
-    static func link(_ role: SyncRole, _ name: String? = nil, id: String = "MFZWI3D-BONSGYC", mine: Bool = false, expired: Bool = false) -> SyncLinkInfo {
-        SyncLinkInfo(role: role, name: name, folderId: id, alreadySynced: mine, expiresS: nil, expired: expired)
+    static func link(_ role: SyncRole, _ name: String? = nil, id: String = "MFZWI3D-BONSGYC", mine: Bool = false, expired: Bool = false,
+                     chat: String? = nil, inChat: Bool = false) -> SyncLinkInfo {
+        SyncLinkInfo(role: role, name: name, folderId: id, alreadySynced: mine, expiresS: nil, expired: expired, channelName: chat,
+                     channelJoined: inChat)
     }
 
     @Test func pastedLinksAreShownForWhatTheyAre() {
         let rw = Self.link(.readWrite, "Photos")
         #expect(SyncText.linkLine("seedwell://sync/ABC", info: rw) == "Read & write · Photos")
+        #expect(SyncText.linkLine("seedwell://sync/ABC", info: Self.link(.readWrite, "Photos", chat: "Family"))
+                == "Read & write · Photos · with the channel “Family”", "one link joins the folder and its chat")
+        #expect(SyncText.linkLine("seedwell://sync/ABC", info: Self.link(.readOnly, chat: "Family", inChat: true))
+                == "Read only · with the channel “Family” (joined already)")
         let ro = Self.link(.readOnly)
         #expect(SyncText.linkLine("seedwell://sync/ABC", info: ro) == "Read only")
         #expect(SyncText.suggestedName(ro) == "MFZWI3D")
@@ -92,9 +99,9 @@ import Testing
 
     @Test func invitationLinksSayWhatIsLeft() {
         let now: UInt64 = 1_800_000_000
-        func invite(_ uses: UInt32, of max: UInt32, expires: UInt64? = nil, revoked: Bool = false) -> SyncInvite {
+        func invite(_ uses: UInt32, of max: UInt32, expires: UInt64? = nil, revoked: Bool = false, chat: String? = nil) -> SyncInvite {
             SyncInvite(id: "I", link: "seedwell://sync/I", role: .readWrite, maxUses: max, uses: uses, expiresS: expires, createdS: now - 60,
-                       revoked: revoked)
+                       revoked: revoked, channelId: chat.map { "C-\($0)" }, channelName: chat)
         }
         #expect(SyncText.inviteState(invite(0, of: 1), now: now) == .open)
         #expect(SyncText.inviteLine(invite(0, of: 1), now: now) == "Read & write · 0 of 1 used")
@@ -105,12 +112,15 @@ import Testing
         #expect(SyncText.inviteState(invite(0, of: 1, revoked: true), now: now) == .revoked)
         #expect(SyncText.inviteDetail(invite(0, of: 5, expires: now + 86_400)).hasPrefix("Link until "))
         #expect(SyncText.inviteDetail(invite(0, of: 1)) == "", "no dates, no line")
+        #expect(SyncText.inviteDetail(invite(0, of: 1, chat: "Family")) == "with the channel “Family”")
     }
 
     @Test func theShareDialogSaysWhatTheNextLinkDoes() {
         #expect(SyncText.shareSummary(role: .readWrite, uses: 1, linkDays: 7) == "One Mac can join with this link within 7 days, as Read & write.")
         #expect(SyncText.shareSummary(role: .readOnly, uses: 0, linkDays: 0) == "Any number of Macs can join with this link, as Read only.")
         #expect(SyncText.shareSummary(role: .admin, uses: 5, linkDays: 1) == "Up to 5 Macs can join with this link within 1 day, as Admin.")
+        #expect(SyncText.shareSummary(role: .readWrite, uses: 1, linkDays: 7, chat: "Photos")
+                == "One Mac can join with this link within 7 days, as Read & write. It joins the channel “Photos” too.")
         #expect(SyncText.sharingLine(until: nil, owner: false) == "Shared until the owner stops it.")
         let t: UInt64 = 1_800_000_000
         #expect(SyncText.countdown(until: t + 6 * 86_400 + 23 * 3_600 + 59 * 60, now: t) == "Sharing ends in 6 days, 23 hours")

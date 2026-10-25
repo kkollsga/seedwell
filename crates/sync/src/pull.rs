@@ -5,18 +5,21 @@
 //!   have nothing. Anything else is a local change the scanner has not seen yet: the step is skipped
 //!   and the path handed back for a scan, so it becomes a conflict instead of being overwritten;
 //! - **build aside:** a file is built in `.seedwell.<name>.tmp` next to it, from a clone of the old
-//!   version, local chunks and peers, every chunk checked against its SHA-256, then fsynced;
+//!   version, local chunks and peers, every chunk checked against its SHA-256, then put behind a write barrier
+//!   ([`FileHandle::sync_barrier`]: its data reaches the drive before the rename does);
 //! - **check again, then swap:** right before the rename the target is checked once more;
 //! - **keep what is replaced:** the old version goes to the archive (a hard link, or a rename for a
 //!   delete), a losing concurrent version becomes a conflict copy.
 //!
 //! **Recording.** A finished step's record waits: every 64 steps, at the end of the round, and
 //! before a step on a path with a waiting record, the directories the steps changed are made durable
-//! ([`Fs::sync_dir`]), then the records are committed in one batch. So a record is never ahead of
-//! the disk (a crash could otherwise undo a rename the index already holds, and the next scan would
-//! read the missing file as the user deleting it). A crash before the commit loses only records, and
-//! the scanner recognises a finished-but-unrecorded file as the version it was built from
-//! (`scan.rs`). One fsync per directory per batch, not per file.
+//! ([`Fs::sync_dir`], a full flush: on macOS `F_FULLFSYNC`, which also makes every file behind a barrier
+//! durable), then the records are committed in one batch. So a record is never ahead of the disk (a crash
+//! could otherwise undo a rename the index already holds, and the next scan would read the missing file as
+//! the user deleting it). A crash before the commit loses only records, and the scanner recognises a
+//! finished-but-unrecorded file as the version it was built from (`scan.rs`). One full flush per directory
+//! per batch, not per file: a full flush costs 5 to 20 ms on a Mac's SSD whatever it writes, a barrier almost
+//! nothing.
 //!
 //! **The known window.** Between the check right before the swap and the rename itself, a save by
 //! the user (an app's own atomic rename onto the file) is replaced by the pulled version; an in-place
@@ -257,12 +260,17 @@ impl Puller<'_> {
             r.paths.clear();
             (std::mem::take(&mut r.records), std::mem::take(&mut r.dirs))
         };
+        let mut flushed = false;
         for d in &dirs {
             match self.fs.sync_dir(d) {
-                Ok(()) => {}
+                Ok(()) => flushed = true,
                 Err(e) if matches!(e.kind(), io::ErrorKind::NotFound | io::ErrorKind::NotADirectory) => {}
                 Err(e) => return Err(e),
             }
+        }
+        // Every changed directory is gone again: the files behind barriers still get their full flush.
+        if !dirs.is_empty() && !flushed {
+            self.fs.sync_dir("")?;
         }
         if records.is_empty() {
             return Ok(());
@@ -961,11 +969,12 @@ impl Puller<'_> {
         }
         if waiting {
             // What arrived stays in the temp file; the rest comes when a device that has it connects.
-            fh.sync_all()?;
+            fh.sync_barrier()?;
             return Err(Skip::Waiting);
         }
         fh.set_len(want.size)?;
-        fh.sync_all()?;
+        // Ordered before the rename; durable at the batch's full flush, before its record is committed.
+        fh.sync_barrier()?;
         drop(fh);
         self.fs.set_mtime(tmp, want.mtime_ns)?;
         self.fs.set_exec(tmp, want.exec)?;

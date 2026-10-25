@@ -43,6 +43,7 @@ struct SyncPage: View {
                             .contextMenu {
                                 Button("Show in Finder") { actions.reveal(f) }
                                 if SyncText.canShare(f.role) { Button("Share…") { actions.showShare(f.id) } }
+                                if let c = f.channelId, model.chats.contains(where: { $0.id == c }) { Button("Open Chat") { actions.showChat(c) } }
                                 Button("Edit…") { actions.showEdit(f.id) }
                                 Divider()
                                 Button("Stop Syncing…") { model.showSyncFolder(f.id, askRemove: true) }
@@ -163,6 +164,9 @@ struct SyncFolderPage: View {
             HStack(alignment: .firstTextBaseline, spacing: 10) {
                 Text(folder.name).font(.system(size: 20, weight: .semibold)).lineLimit(1).truncationMode(.middle)
                 Spacer(minLength: 8)
+                if let c = folder.channelId, let channel = model.chats.first(where: { $0.id == c }) {
+                    Button("Chat") { actions.showChat(c) }.help("Open “\(channel.name)”, this folder’s channel")
+                }
                 if SyncText.canShare(folder.role) {
                     Button("Share…") { actions.showShare(folder.id) }.help("Make a link that lets another Mac join this folder")
                 }
@@ -252,7 +256,7 @@ struct SyncFolderPage: View {
             if folder.role == .owner, !m.isMe {
                 Menu(SyncText.role(m.role)) {
                     ForEach([SyncRole.owner, .admin, .readWrite, .readOnly], id: \.self) { r in
-                        Button { actions.setRole(folder, m, r) { [model] in model.loadMembers() } } label: {
+                        Button { actions.setRole(folder.id, m, r) { [model] in model.loadMembers() } } label: {
                             if r == m.role { Label(SyncText.role(r), systemImage: "checkmark") } else { Text(SyncText.role(r)) }
                         }
                         .disabled(r == m.role)
@@ -271,7 +275,7 @@ struct SyncFolderPage: View {
         .accessibilityElement(children: .combine)
         .confirmationDialog("Remove \(askRemoveMember?.name ?? "") from “\(folder.name)”?", isPresented: Binding(
             get: { askRemoveMember?.deviceId == m.deviceId }, set: { if !$0 { askRemoveMember = nil } })) {
-            Button("Remove", role: .destructive) { actions.removeDevice(folder, m) { [model] in model.loadMembers() }; askRemoveMember = nil }
+            Button("Remove", role: .destructive) { actions.removeDevice(folder.id, name: folder.name, m) { [model] in model.loadMembers() }; askRemoveMember = nil }
             Button("Cancel", role: .cancel) { askRemoveMember = nil }
         } message: {
             Text("It stops syncing at once, on every device. It keeps the files it already has.")

@@ -52,12 +52,18 @@ final class CoreEvents: CoreListener, Sendable {
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
     }
 
-    static func post(title: String, body: String, transfer: String? = nil, key: String = UUID().uuidString) {
-        guard available else { log.notice("(notification) \(title, privacy: .public): \(body, privacy: .public)"); return }
+    /// `transfer` or `chat` (a conversation): what a click opens.
+    static func post(title: String, body: String, transfer: String? = nil, chat: LibraryModel.Section? = nil, key: String = UUID().uuidString) {
+        guard available else { log.notice("(notification) \(title, privacy: .public): \(body, privacy: .private)"); return }
         let content = UNMutableNotificationContent()
         content.title = title
         content.body = body
         if let transfer { content.userInfo = ["transfer": transfer] }
+        switch chat {
+        case .chat(let id, let topic): content.userInfo = ["channel": id, "topic": topic ?? ""]
+        case .direct(let device): content.userInfo = ["direct": device]
+        default: break
+        }
         UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: key, content: content, trigger: nil))
     }
 

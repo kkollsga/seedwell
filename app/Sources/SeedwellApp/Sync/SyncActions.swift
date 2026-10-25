@@ -11,6 +11,8 @@ import AppKit
     var showFolder: (_ id: String?, _ askRemove: Bool) -> Void = { _, _ in }
     /// The Share dialog of a folder (invitation links), from the folder list, the edit modal and Finder.
     var showShare: (_ id: String) -> Void = { _ in }
+    /// A folder's chat: the channel's page.
+    var showChat: (_ channel: String) -> Void = { _ in }
     /// The add modal on "From this Mac" with a folder chosen (the system Share menu, for a folder not synced yet).
     var showAddFolder: (_ path: String) -> Void = { _ in }
     /// Where removed folders go: the user's Trash, or the QA one (`SEEDWELL_QA_TRASH_DIR`).
@@ -87,12 +89,12 @@ import AppKit
         showAddFolder(isDir ? real : (real as NSString).deletingLastPathComponent)
     }
 
-    /// Gives a device another role in the folder (owners only; the core says so otherwise). Errors are told in an
-    /// alert; `done` runs either way (the page reads the members again).
-    func setRole(_ folder: SyncFolder, _ m: SyncMember, _ role: SyncRole, done: @escaping () -> Void) {
+    /// Gives a device another role in a folder or channel `id` (owners only; the core says so otherwise). Errors are
+    /// told in an alert; `done` runs either way (the page reads the members again).
+    func setRole(_ id: String, _ m: SyncMember, _ role: SyncRole, done: @escaping () -> Void) {
         Task {
             let core = self.core
-            let (id, device) = (folder.id, m.deviceId)
+            let device = m.deviceId
             if case .failure(let e) = await run({ try core.syncSetRole(id: id, deviceId: device, role: role) }) {
                 alert("Couldn't change \(m.name)’s role", SyncText.message(e))
             }
@@ -100,13 +102,14 @@ import AppKit
         }
     }
 
-    /// Removes a device from the folder for everyone (owners only). It stops syncing at once and keeps the files it has.
-    func removeDevice(_ folder: SyncFolder, _ m: SyncMember, done: @escaping () -> Void) {
+    /// Removes a device from a folder or channel `id` (named `name`) for everyone (owners only). It is cut off at
+    /// once and keeps what it has.
+    func removeDevice(_ id: String, name: String, _ m: SyncMember, done: @escaping () -> Void) {
         Task {
             let core = self.core
-            let (id, device) = (folder.id, m.deviceId)
+            let device = m.deviceId
             if case .failure(let e) = await run({ try core.syncRemoveDevice(id: id, deviceId: device) }) {
-                alert("Couldn't remove \(m.name) from “\(folder.name)”", SyncText.message(e))
+                alert("Couldn't remove \(m.name) from “\(name)”", SyncText.message(e))
             }
             done()
         }

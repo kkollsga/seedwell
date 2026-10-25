@@ -31,9 +31,19 @@ pub const PROTOCOL: u32 = 2;
 /// The lowest protocol version this build still speaks. A breaking change raises [`PROTOCOL`] and keeps this one
 /// version behind for a while (N-1), so devices that are a release apart still sync.
 pub const MIN_PROTOCOL: u32 = 2;
-/// The optional behaviours this build supports, one bit each; a session uses those both sides have (the AND). None
-/// is defined yet. A new one takes the next free bit, documented here and in `PROTOCOL.md`; bits are never reused.
-pub const FEATURES: u64 = 0;
+/// Feature bit 0: channels, their topics and private messages (in 0.1.6, the baseline, so every device has it; the
+/// bit documents the mechanism). Sessions that both have it carry types 17 to 22. Sessions that both have it carry [`ChatJoin`], [`ChatHave`] and
+/// [`ChatMessages`]; a device without it is never sent them.
+pub const FEATURE_CHAT: u64 = 1 << 0;
+/// The optional behaviours this build supports, one bit each; a session uses those both sides have (the AND). A new
+/// one takes the next free bit, documented here and in `PROTOCOL.md`; bits are never reused.
+pub const FEATURES: u64 = FEATURE_CHAT;
+/// Channels in one [`ChatJoin`].
+pub const MAX_JOIN_CHANNELS: usize = 1024;
+/// Messages in one [`ChatMessages`] (and [`DirectMessages`]).
+pub const MAX_CHAT_MESSAGES: usize = 1000;
+/// Records in one [`DirectKeys`].
+pub const MAX_DIRECT_KEYS: usize = 1024;
 
 /// Longest client string (`Seedwell <version>`), bytes.
 pub const MAX_CLIENT: usize = 128;
@@ -395,6 +405,69 @@ pub struct RelayClose {
     pub session: u64,
 }
 
+/// One channel in a [`ChatJoin`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JoinChannel {
+    /// The channel.
+    pub channel_id: FolderId,
+    /// As for a folder ([`JoinFolder::proofs`]).
+    pub proofs: Vec<Proof>,
+}
+
+/// Type 17 (feature [`FEATURE_CHAT`]): the channels the sender shares with the receiver, and its proof for each. Sent
+/// right after the [`Join`] while the session starts (and later for a channel joined meanwhile), by the same rule:
+/// the dialer proves first, the other side answers for the channels the dialer proved.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChatJoin {
+    /// The channels.
+    pub channels: Vec<JoinChannel>,
+}
+
+/// Type 18 (feature [`FEATURE_CHAT`]): which messages of a channel the sender holds, so the receiver sends what it
+/// lacks.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChatHave {
+    /// The channel.
+    pub channel_id: FolderId,
+    /// Older messages than this (Unix milliseconds) are not wanted: the sender's store is full and dropped them. 0:
+    /// all.
+    pub floor_at_ms: u64,
+    /// Per author, the sequence numbers held.
+    pub authors: Vec<crate::chat::AuthorHave>,
+}
+
+/// Type 19 (feature [`FEATURE_CHAT`]): messages of a channel (new ones, or what the receiver lacks).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChatMessages {
+    /// The channel.
+    pub channel_id: FolderId,
+    /// The messages, each checked by the receiver against the channel's membership.
+    pub messages: Vec<crate::chat::ChatMessage>,
+}
+
+/// Type 20 (feature [`FEATURE_CHAT`]): devices' keys for private messages, each signed by its device: the sender's
+/// own and those it knows of devices that share a channel with the receiver.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DirectKeys {
+    /// The records.
+    pub records: Vec<crate::direct::DirectKey>,
+}
+
+/// Type 21 (feature [`FEATURE_CHAT`]): which private messages to the sender it holds (ranges per author), so the
+/// receiver sends those it keeps for the sender and the sender lacks.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DirectHave {
+    /// Per author, the sequence numbers held.
+    pub authors: Vec<crate::chat::AuthorHave>,
+}
+
+/// Type 22 (feature [`FEATURE_CHAT`]): private messages, for the receiver or for it to pass on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DirectMessages {
+    /// The messages (sealed: only each one's recipient reads it).
+    pub messages: Vec<crate::direct::DirectMessage>,
+}
+
 /// Every message, by frame type.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Message {
@@ -430,6 +503,18 @@ pub enum Message {
     RelayClose(RelayClose),
     /// 16.
     OwnerKey(OwnerKey),
+    /// 17.
+    ChatJoin(ChatJoin),
+    /// 18.
+    ChatHave(ChatHave),
+    /// 19.
+    ChatMessages(ChatMessages),
+    /// 20.
+    DirectKeys(DirectKeys),
+    /// 21.
+    DirectHave(DirectHave),
+    /// 22.
+    DirectMessages(DirectMessages),
     /// A type this version does not know: skipped, not an error. Encodes as an empty frame of that type.
     Unknown(u8),
 }
@@ -454,6 +539,12 @@ impl Message {
             Message::RelayData(_) => 14,
             Message::RelayClose(_) => 15,
             Message::OwnerKey(_) => 16,
+            Message::ChatJoin(_) => 17,
+            Message::ChatHave(_) => 18,
+            Message::ChatMessages(_) => 19,
+            Message::DirectKeys(_) => 20,
+            Message::DirectHave(_) => 21,
+            Message::DirectMessages(_) => 22,
             Message::Unknown(k) => *k,
         }
     }
@@ -557,6 +648,25 @@ impl Message {
                 out.extend_from_slice(&m.folder_id.0);
                 out.extend_from_slice(&m.secret);
             }
+            Message::ChatJoin(m) => {
+                put_records(out, &m.channels, |out, c| {
+                    out.extend_from_slice(&c.channel_id.0);
+                    put_len(out, c.proofs.len());
+                    c.proofs.iter().for_each(|p| put_proof(out, p));
+                });
+            }
+            Message::ChatHave(m) => {
+                out.extend_from_slice(&m.channel_id.0);
+                put_varint(out, m.floor_at_ms);
+                put_records(out, &m.authors, |out, a| a.put(out));
+            }
+            Message::ChatMessages(m) => {
+                out.extend_from_slice(&m.channel_id.0);
+                put_records(out, &m.messages, |out, msg| msg.put(out));
+            }
+            Message::DirectKeys(m) => put_records(out, &m.records, |out, k| k.put(out)),
+            Message::DirectHave(m) => put_records(out, &m.authors, |out, a| a.put(out)),
+            Message::DirectMessages(m) => put_records(out, &m.messages, |out, d| d.put(out)),
         }
     }
 
@@ -631,6 +741,23 @@ impl Message {
             }),
             15 => Message::RelayClose(RelayClose { session: r.varint("session")? }),
             16 => Message::OwnerKey(OwnerKey { folder_id: FolderId(r.array("folder id")?), secret: r.array("folder secret")? }),
+            17 => Message::ChatJoin(ChatJoin {
+                channels: records(r, MAX_JOIN_CHANNELS, "channels", |r| {
+                    Ok(JoinChannel { channel_id: FolderId(r.array("channel id")?), proofs: r.list(MAX_PROOFS, 2, "proofs", proof)? })
+                })?,
+            }),
+            18 => Message::ChatHave(ChatHave {
+                channel_id: FolderId(r.array("channel id")?),
+                floor_at_ms: r.varint("floor")?,
+                authors: records(r, crate::chat::MAX_AUTHORS, "authors", crate::chat::AuthorHave::read)?,
+            }),
+            19 => Message::ChatMessages(ChatMessages {
+                channel_id: FolderId(r.array("channel id")?),
+                messages: records(r, MAX_CHAT_MESSAGES, "chat messages", crate::chat::ChatMessage::read)?,
+            }),
+            20 => Message::DirectKeys(DirectKeys { records: records(r, MAX_DIRECT_KEYS, "direct keys", crate::direct::DirectKey::read)? }),
+            21 => Message::DirectHave(DirectHave { authors: records(r, crate::chat::MAX_AUTHORS, "authors", crate::chat::AuthorHave::read)? }),
+            22 => Message::DirectMessages(DirectMessages { messages: records(r, MAX_CHAT_MESSAGES, "direct messages", crate::direct::DirectMessage::read)? }),
             k => Message::Unknown(k),
         })
     }
@@ -884,8 +1011,10 @@ mod tests {
         let me = hello(PROTOCOL, MIN_PROTOCOL, FEATURES);
         assert_eq!(agree(&me, &me), Ok(Agreed { protocol: PROTOCOL, features: FEATURES }));
         // A newer device that still speaks ours, with features we do not have.
-        let newer = hello(PROTOCOL + 3, PROTOCOL, 0b1011);
-        assert_eq!(agree(&me, &newer), Ok(Agreed { protocol: PROTOCOL, features: 0 }));
+        let newer = hello(PROTOCOL + 3, PROTOCOL, 0b1010);
+        assert_eq!(agree(&me, &newer), Ok(Agreed { protocol: PROTOCOL, features: 0 }), "no chat bit: no chat");
+        let chat = hello(PROTOCOL, PROTOCOL, FEATURE_CHAT | 0b1000);
+        assert_eq!(agree(&me, &chat), Ok(Agreed { protocol: PROTOCOL, features: FEATURE_CHAT }));
         assert_eq!(agree(&hello(5, 2, 0b0110), &hello(4, 3, 0b0011)), Ok(Agreed { protocol: 4, features: 0b0010 }));
         // One that no longer does, and one this device no longer speaks.
         assert_eq!(agree(&me, &hello(PROTOCOL + 2, PROTOCOL + 1, 0)), Err(Incompatible::PeerTooNew));

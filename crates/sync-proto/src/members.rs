@@ -19,6 +19,8 @@
 //!          ‖ expires_s varint (0 = never) ‖ at_s varint ‖ issuer (signer) ‖ token pk(32) ‖ signature(64)
 //!   signed  = "seedwell-sync/v2/invite" ‖ everything before the signature
 //! link = seedwell://sync/<base32(invite without token pk ‖ token seed(32) ‖ check(2))>?name=<name>
+//!        (a channel's: seedwell://chat/<the same>?name=<name>; a folder's with its channel, one link for both:
+//!        seedwell://sync/<the folder's>?name=<name>&chat=<the channel's base32>&chat_name=<its name>)
 //! redeem proof = invite ‖ token_sign("seedwell-sync/v2/redeem" ‖ folder_id ‖ device pk ‖ TLS exporter)
 //! ```
 //!
@@ -43,6 +45,16 @@ const INVITE: &str = "seedwell-sync/v2/invite";
 const REDEEM: &str = "seedwell-sync/v2/redeem";
 const LINK_CHECK: &str = "seedwell-sync/v2/link";
 const LINK_PREFIX: &str = "seedwell://sync/";
+const CHAT_PREFIX: &str = "seedwell://chat/";
+
+/// What a link invites to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LinkKind {
+    /// A synced folder (`seedwell://sync/`).
+    Folder,
+    /// A channel (`seedwell://chat/`).
+    Channel,
+}
 
 /// Most uses a limited invitation may have; 0 means unlimited.
 pub const MAX_INVITE_USES: u32 = 1000;
@@ -981,15 +993,20 @@ impl fmt::Debug for InviteLink {
 }
 
 impl InviteLink {
-    /// The link's text.
+    /// The link's text, for a folder.
     pub fn format(&self) -> String {
-        let mut bytes = Vec::with_capacity(200);
-        self.invite.put_unsigned(&mut bytes, false);
-        bytes.extend_from_slice(&self.invite.sig);
-        bytes.extend_from_slice(&self.token_seed);
-        let check = link_check(&bytes);
-        bytes.extend_from_slice(&check);
-        let mut out = format!("{LINK_PREFIX}{}", base32::encode(&bytes));
+        self.format_as(LinkKind::Folder)
+    }
+
+    /// The link's text, for a channel.
+    pub fn format_chat(&self) -> String {
+        self.format_as(LinkKind::Channel)
+    }
+
+    /// The link's text for a folder or a channel.
+    pub fn format_as(&self, kind: LinkKind) -> String {
+        let prefix = if kind == LinkKind::Channel { CHAT_PREFIX } else { LINK_PREFIX };
+        let mut out = format!("{prefix}{}", self.payload());
         if let Some(name) = self.name.as_deref().filter(|n| !n.is_empty()) {
             out.push_str("?name=");
             out.push_str(&percent_encode(name));
@@ -997,25 +1014,34 @@ impl InviteLink {
         out
     }
 
-    /// Parses a link. Surrounding whitespace and the `<` `>` quotes mail clients put around links are allowed;
-    /// query fields other than `name` are ignored (later versions may add some). A bare key of the earlier test
-    /// builds is refused with [`KeyError::OldKey`].
-    pub fn parse(text: &str) -> Result<Self, KeyError> {
-        let mut text = text.trim();
-        if let Some(inner) = text.strip_prefix('<').and_then(|t| t.strip_suffix('>')) {
-            text = inner.trim();
+    /// A folder's link that also invites to a channel: one link for both. The channel's invitation goes in the
+    /// query, `chat=<its payload>` and `chat_name=<its name>`, which a folder link's reader that does not know them
+    /// ignores.
+    pub fn format_bundle(&self, channel: &InviteLink) -> String {
+        let mut out = self.format_as(LinkKind::Folder);
+        out.push(if out.contains('?') { '&' } else { '?' });
+        out.push_str("chat=");
+        out.push_str(&channel.payload());
+        if let Some(name) = channel.name.as_deref().filter(|n| !n.is_empty()) {
+            out.push_str("&chat_name=");
+            out.push_str(&percent_encode(name));
         }
-        if crate::keys::is_old_key(text) {
-            return Err(KeyError::OldKey);
-        }
-        let has_scheme = text.len() >= LINK_PREFIX.len()
-            && text.is_char_boundary(LINK_PREFIX.len())
-            && text[..LINK_PREFIX.len()].eq_ignore_ascii_case(LINK_PREFIX);
-        if !has_scheme {
-            return Err(KeyError::Link);
-        }
-        let rest = &text[LINK_PREFIX.len()..];
-        let (body, query) = rest.split_once('?').unwrap_or((rest, ""));
+        out
+    }
+
+    /// The invitation, its signature and the token's seed, with a 2-byte check, in base32.
+    fn payload(&self) -> String {
+        let mut bytes = Vec::with_capacity(200);
+        self.invite.put_unsigned(&mut bytes, false);
+        bytes.extend_from_slice(&self.invite.sig);
+        bytes.extend_from_slice(&self.token_seed);
+        let check = link_check(&bytes);
+        bytes.extend_from_slice(&check);
+        base32::encode(&bytes)
+    }
+
+    /// A link (without its name) from its payload.
+    fn from_payload(body: &str) -> Result<InviteLink, KeyError> {
         if crate::keys::is_old_key(body) {
             return Err(KeyError::OldKey);
         }
@@ -1039,13 +1065,82 @@ impl InviteLink {
         if r.remaining() != 0 || !invite.verify() {
             return Err(KeyError::Damaged);
         }
-        let mut name = None;
+        Ok(InviteLink { invite, token_seed, name: None })
+    }
+
+    /// Parses a link. Surrounding whitespace and the `<` `>` quotes mail clients put around links are allowed;
+    /// query fields other than `name` are ignored (later versions may add some). A bare key of the earlier test
+    /// builds is refused with [`KeyError::OldKey`], a channel's link with [`KeyError::ChannelLink`].
+    pub fn parse(text: &str) -> Result<Self, KeyError> {
+        match Self::parse_any(text)? {
+            (l, LinkKind::Folder) => Ok(l),
+            (_, LinkKind::Channel) => Err(KeyError::ChannelLink),
+        }
+    }
+
+    /// Parses a channel's link (a folder's is refused with [`KeyError::FolderLink`]).
+    pub fn parse_chat(text: &str) -> Result<Self, KeyError> {
+        match Self::parse_any(text)? {
+            (l, LinkKind::Channel) => Ok(l),
+            (_, LinkKind::Folder) => Err(KeyError::FolderLink),
+        }
+    }
+
+    /// Parses a folder's or a channel's link.
+    pub fn parse_any(text: &str) -> Result<(Self, LinkKind), KeyError> {
+        Self::parse_full(text).map(|(l, kind, _)| (l, kind))
+    }
+
+    /// Parses a folder's link and the channel invitation it may carry ([`InviteLink::format_bundle`]); a channel's
+    /// link is refused with [`KeyError::ChannelLink`]. A damaged channel part makes the whole link damaged.
+    pub fn parse_bundle(text: &str) -> Result<(Self, Option<InviteLink>), KeyError> {
+        match Self::parse_full(text)? {
+            (l, LinkKind::Folder, chat) => Ok((l, chat)),
+            (_, LinkKind::Channel, _) => Err(KeyError::ChannelLink),
+        }
+    }
+
+    fn parse_full(text: &str) -> Result<(Self, LinkKind, Option<InviteLink>), KeyError> {
+        let mut text = text.trim();
+        if let Some(inner) = text.strip_prefix('<').and_then(|t| t.strip_suffix('>')) {
+            text = inner.trim();
+        }
+        if crate::keys::is_old_key(text) {
+            return Err(KeyError::OldKey);
+        }
+        let has = |prefix: &str| text.len() >= prefix.len() && text.is_char_boundary(prefix.len()) && text[..prefix.len()].eq_ignore_ascii_case(prefix);
+        let kind = if has(LINK_PREFIX) {
+            LinkKind::Folder
+        } else if has(CHAT_PREFIX) {
+            LinkKind::Channel
+        } else {
+            return Err(KeyError::Link);
+        };
+        let rest = &text[if kind == LinkKind::Channel { CHAT_PREFIX.len() } else { LINK_PREFIX.len() }..];
+        let (body, query) = rest.split_once('?').unwrap_or((rest, ""));
+        let mut link = Self::from_payload(body)?;
+        let mut chat: Option<InviteLink> = None;
+        let mut chat_name = None;
         for field in query.split('&') {
             if let Some(v) = field.strip_prefix("name=") {
-                name = Some(percent_decode(v)?).filter(|n| !n.is_empty() && n.len() <= MAX_LINK_NAME);
+                link.name = Some(percent_decode(v)?).filter(|n| !n.is_empty() && n.len() <= MAX_LINK_NAME);
+            } else if let Some(v) = field.strip_prefix("chat=")
+                && kind == LinkKind::Folder
+            {
+                let c = Self::from_payload(v)?;
+                // The channel is not the folder (a link that says so is not one Seedwell made).
+                if c.invite.folder_pk == link.invite.folder_pk {
+                    return Err(KeyError::Damaged);
+                }
+                chat = Some(c);
+            } else if let Some(v) = field.strip_prefix("chat_name=") {
+                chat_name = Some(percent_decode(v)?).filter(|n| !n.is_empty() && n.len() <= MAX_LINK_NAME);
             }
         }
-        Ok(InviteLink { invite, token_seed, name })
+        if let Some(c) = chat.as_mut() {
+            c.name = chat_name;
+        }
+        Ok((link, kind, chat))
     }
 }
 
