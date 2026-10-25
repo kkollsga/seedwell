@@ -642,7 +642,7 @@ mod tests {
         assert_eq!(p("seedwell sync list").unwrap(), Cmd::Sync(sync::Cmd::List));
         assert!(matches!(p("seedwell sync status MFZWI3D").unwrap(), Cmd::Sync(sync::Cmd::Status { .. })));
         assert!(matches!(p("seedwell sync add ~/Shared").unwrap(), Cmd::Sync(sync::Cmd::Add { .. })));
-        assert!(matches!(p("seedwell sync join SWR-ABCDEF --to ~/Seedwell/Docs").unwrap(), Cmd::Sync(sync::Cmd::Join { to: Some(_), .. })));
+        assert!(matches!(p("seedwell sync join seedwell://sync/ABCDEF --to ~/Seedwell/Docs").unwrap(), Cmd::Sync(sync::Cmd::Join { to: Some(_), .. })));
         assert!(matches!(p("seedwell sync share Docs").unwrap(), Cmd::Sync(sync::Cmd::Share { .. })));
         assert!(matches!(p("seedwell sync rename Docs Papers").unwrap(), Cmd::Sync(sync::Cmd::Rename { .. })));
         assert!(matches!(p("seedwell sync move Docs /tmp/Docs").unwrap(), Cmd::Sync(sync::Cmd::Move { .. })));

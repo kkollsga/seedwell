@@ -32,7 +32,7 @@ torrent's tracker. It does one thing: move torrent data well.
 8. **Agent-operable.** A local agent interface (the `seedwell` command line and an embedded Agent Skill) lets agents like Claude do anything the UI can, safely (§9A).
 9. **Direct downloads.** Large HTTP/HTTPS files get the same pause/resume/throttle/queue treatment as torrents (§7D).
 10. **Play while downloading.** A video can be watched in VLC, IINA or QuickTime before it finishes, with a working timeline; dragging it fetches that part first (§7F).
-11. **Folder sync.** Folders kept the same on the user's devices and shared by key or link, peer to peer over the LAN and the Internet, with no account and no servers (§7G).
+11. **Folder sync.** Folders kept the same on the user's devices and shared by invitation link, with roles (owner, admin, read & write, read only), peer to peer over the LAN and the Internet, with no account and no servers (§7G).
 
 ### Non-goals (deliberately excluded)
 Spoofing another client's identity, stat/ratio manipulation, network-exposed remote control (agent access is local-only), RSS feeds, torrent search, a built-in media player (streaming to the user's own player is in scope, §7F), web UI, plugin system, built-in
@@ -782,6 +782,17 @@ Keep folders the same on several devices, peer to peer, with no account and no c
 Sync (now Resilio Sync) did, with Syncthing's proven sync rules. Holding a folder's key is the permission. The
 design notes, with the research behind them, are in `dev-docs/` (local).
 
+**The wire protocol** is specified in `crates/sync-proto/PROTOCOL.md`: framing, every message, statement,
+invitation and proof, the stored formats, and how they may change. 0.1.6, the first release with sync, is the
+baseline every later version must still sync with:
+- devices agree on a protocol version and feature bits in their Hellos, and two that share none refuse each
+  other and say which needs an update;
+- fields are only appended, records carry their length, and types, kinds and values a device does not know are
+  skipped or kept and passed on;
+- a breaking change raises the version and keeps the previous one (N-1) for at least a release;
+- the 0.1.6 bytes are frozen in golden tests, and `tools/sync-compat.sh` runs this build against another
+  Seedwell's (from 0.1.7, CI runs it against the latest release).
+
 **Separate from torrents by construction.**
 - Sync lives in its own crates: `trs-sync-proto`, `trs-sync`, `trs-sync-net` and `trs-fswatch`.
 - It has its own port, its own state file (`sync.redb`) and its own speed limits and counters. Sync bytes never
@@ -793,33 +804,79 @@ design notes, with the research behind them, are in `dev-docs/` (local).
 
 - **Device:** each install has an Ed25519 key pair. The **device ID** is SHA-256 of the public key, shown in base32
   with check characters (`MFZWI3D-BONSGYC-…`, as Syncthing writes them).
-- **Folder keys:** a folder has a 32-byte secret `S`. Each key is derived one way from the one above it, and the
-  derivation is published (HKDF-SHA256 with fixed labels):
+- **Folder authority:** a folder has a 32-byte secret `S`, from which its Ed25519 signing key is derived (HKDF-SHA256
+  with a fixed label). The folder ID is SHA-256 of the signing key's public half `pk`.
+  - Only **owner** devices hold `S`. It is never in a link, and it is only sent to a new co-owner, inside the
+    encrypted session.
+  - Discovery (DHT topics, LAN tags) is derived from `pk`, so members find each other without `S`.
+- **Roles:** every device in a folder has one role, set by a signed **grant**.
 
-  | Key | Text form | Can |
-  |---|---|---|
-  | Read & write | `SWW-` + base32(S) | change files; derive the keys below |
-  | Read only | `SWR-` + base32(R ‖ pk) | receive and pass on changes, never send its own |
-  | Encrypted | `SWE-` + base32(A ‖ pk) | store and pass on data it cannot read (v1.x) |
+  | Role | Syncs | May share (invite) | May change roles, remove devices |
+  |---|---|---|---|
+  | Owner | read & write | any role | yes |
+  | Admin | read & write | Read & write or Read only | no |
+  | Read & write | read & write | no | no |
+  | Read only | receives and passes on changes, never sends its own | no | no |
 
-  `pk` is the public half of the folder signing key derived from `S`; the folder ID is SHA-256(pk).
-  - A link is `seedwell://sync/<key>?name=<name>`, where the name is only a hint for the joining device.
-  - A key is never sent over the network.
-- **Proof:** after TLS 1.3 (mutual, with device keys as raw public keys), each side proves its permission level,
-  bound to the session.
-  - A writer shows a writer certificate signed with the folder key.
-  - A reader or encrypted member shows an HMAC with its access secret over the TLS exporter value.
-  - A peer that fails the proof is dropped.
+  - A grant says "device D has role X in folder F" and carries a serial number.
+    - A grant for Owner or Admin, a role change and a removal must be signed with the folder key, so only an owner
+      can make them.
+    - An admin signs grants only for devices it admits through an invitation (below), at the invitation's role.
+    - A later owner-signed grant for the same device replaces earlier ones (higher serial; equal serials: the
+      greater signature bytes).
+  - Grants and removals form the folder's **membership**. Every device keeps it, checks every statement itself, and
+    passes it on to the others when they connect, as with writers today.
+  - **Removing a device:** an owner-signed statement.
+    - Devices refuse sessions with a removed device and ignore every version it signs from then on.
+    - Versions they already accepted stay valid.
+    - It keeps the files it has; that cannot be prevented.
+  - **Sharing end:** how long the folder is shared is an owner-signed statement: an end time, or none. Admins
+    cannot set it; an owner's latest statement (by serial) counts.
+    - Until the end nothing changes. Once it has passed, every device that is not an owner counts as removed:
+      sessions with it are refused or closed, versions it signs later are ignored, and it keeps its files. No
+      invitation admits anyone ("this folder is no longer shared").
+    - An owner's later statement (a later end, or none) makes them count again. The statement travels with every
+      device's grant when it connects, so a device that was cut off learns of it.
+    - Each device judges the end by its own clock, so devices whose clocks differ cut off a little apart.
+  - **Co-owners:** an owner can grant Owner to another device. That device receives `S` over the encrypted session
+    the next time the two connect. That is the backup: a folder whose only owner device is lost keeps syncing, but
+    nobody can change roles any more.
+- **Links are invitations:** `seedwell://sync/<invite>?name=<name>`. The name is only a hint for the joining device.
+  - The invite is base32 and holds:
+    - the folder's `pk`, the role it admits (Read & write or Read only; Admin only from an owner);
+    - an expiry, and a maximum number of uses (1 to 1000, or unlimited);
+    - an invite ID and the issuer's device key, all signed by the issuer;
+    - a one-off secret.
+  - **Admission:**
+    - The joining device finds the folder's devices from `pk` and connects. It presents the invite, and proves it
+      has the secret, bound to its TLS session.
+    - Only an **owner or admin** device admits. It checks the issuer is still an owner or admin, the invite has not
+      expired or been revoked, and uses are left. Then it signs the new device's grant and passes it on.
+    - Until an owner or admin device is online, the joining device waits ("Waiting for the folder's owner or an
+      admin").
+  - **Counting uses:** every grant names the invite it came from.
+    - When devices learn of more grants from one invite than its limit (two admins admitting at the same moment),
+      they all keep the same ones: the earliest by issuer time, then by signature bytes. The rest are treated as
+      removed.
+  - Revoking an invitation is an owner- or admin-signed statement for the invite ID; it stops new admissions.
+  - Links have no access period of their own: how long the folder is shared is the folder's setting (below).
+  - The Share dialog defaults to **one use, valid 7 days**.
+  - Raw keys (`SWW-`/`SWR-`) are gone: nothing in the UI, the CLI or the agent interface shows or accepts them.
+- **Proof:** after TLS 1.3 (mutual, with device keys as raw public keys), each side shows its grant for the folder,
+  or, when joining, its invite and the secret's proof. Both are bound to the session through the TLS exporter
+  value. A peer without a valid grant (or a valid invite, toward an owner or admin) is dropped.
 - **Signed versions:** every file version is signed by the writer device that made it. Every device checks every
   entry, and every chunk against the hashes in signed entries. A dishonest member can pass data on but cannot change
   it.
-- **Secrets:** folder keys are stored in the Keychain on macOS and in a 0600 file for the Linux daemon. They are
-  never written into the synced folder, never logged, and returned through the agent interface only with Full
-  permission (logged).
-- **Revoking:** a shared key cannot be taken back from one person.
-  - *Rotate Keys* makes a new secret for the same files; devices without the new key stop receiving.
-  - *Ask before new devices join* (per folder, off by default) makes a key only enough to ask; a writer approves
-    each new device once.
+- **Secrets:** the folder secret `S` (owners only), unused invite secrets and the device key are kept in one of
+  two places.
+  - **The Keychain:** a build with a keychain entitlement uses the data protection keychain. The app probes this
+    with a write, because without the entitlement a read only answers "not found".
+  - **A 0600 file in the state folder:** used by ad-hoc builds (the curl-installed releases), isolated runs and
+    the Linux daemon. The login keychain is not used: it ties an item to the exact build, so macOS would ask for
+    the password after every update.
+  - Either way, the keys are never written into the synced folder, never logged, and returned through the agent
+    interface only with Full permission (logged).
 
 ### 7G.2 The sync model
 
@@ -918,15 +975,53 @@ design notes, with the research behind them, are in `dev-docs/` (local).
   - an edit and a delete button on hover;
   - a delete confirmation that slides out under the row;
   - an *Add Folder…* row at the bottom.
-- **Add Folder…** opens a modal with *From this Mac* (choose a folder) or *Shared with me* (paste a key or link,
-  choose where it goes), then **Cancel** and **Start**. After Start a shared folder shows its keys to copy.
-  Opening a `seedwell://sync/…` link opens the same modal, filled in.
-- **Edit** opens a modal with the name (renames the folder on this Mac only), the location (*Move…*), the keys and
-  links this Mac may share, and options (pause, only sync on the local network, rescan now), then **Cancel** and
-  **Save**.
-- **Main window:** *Folder Sync* in the sidebar under Sharing. A folder page shows devices (LAN / Internet /
-  relay, client, bytes each way), conflicts (*Show in Finder*, and *Keep* ▸ *Current Version* / *<device>'s
-  Version* / *Both*), and issues with their reason.
+- **Add Folder…** opens a modal, then **Cancel** and **Start**:
+  - *From this Mac*: choose a folder. This Mac becomes its owner, and the Share dialog opens after Start.
+  - *Shared with me*: paste a link, and choose where it goes. A bare key is refused, with "Folders are shared with
+    links now".
+  - Opening a `seedwell://sync/…` link opens the same modal, filled in.
+- **Share…** opens the Share dialog, for owners and admins only. It is in the folder list's right-click menu, the
+  folder page, the edit modal, and Finder's right-click menu on synced items.
+- **The system Share menu** (Finder's Share ▸, next to AirDrop) has *Seedwell* for one file or folder. A Share
+  extension hands the path to the app (`seedwell://share?path=…`); it reads nothing itself.
+  - Inside a synced folder, it opens that folder's Share dialog, or says that only the owner and admins can share.
+  - Anywhere else, it opens Add Folder with the folder (or the file's folder) chosen.
+  - **Switching it on:** the "Seedwell in Finder" window, offered once like the badges, has a row for each
+    extension. Each row shows **On**, or **Open Settings**, which opens that extension's list in System Settings.
+    The window checks once a second and notices a switch by itself. Settings › Folder Sync has both rows too.
+    - The badges are read with `FIFinderSyncController.isExtensionEnabled`.
+    - The Share menu is read by asking which services the system offers for a folder. A switched-off extension is
+      left out; it is the only way an app can read this.
+  - Settings:
+    - the role, as a segmented control: Read & write, Read only, and Admin for an owner;
+    - *Single use* (on by default; off offers 5 or 10 times, or unlimited);
+    - *Link expires* (on by default, 7 days; or 1 or 30 days): how long the link can be used to join.
+  - A line under the settings says what the link does: "One Mac can join with this link within 7 days, as Read &
+    write."
+  - **Done** and **Copy Link** at the bottom right. Copy Link makes a new link with the settings and copies it
+    ("Link copied"); a link is never shown or copied again.
+  - **Folder sharing:** an owner's *Stop sharing after* switch (off by default; 1, 7 or 30 days), which applies
+    at once. It is the folder's setting, not a link's.
+    - When the time is up, every Mac but the owners' leaves the folder. Each keeps the files it has, and links
+      stop working.
+    - Every device compares with its own clock.
+    - While it runs, the dialog shows a countdown instead of the switch ("Sharing ends in 6 days, 23 hours";
+      hours and minutes in the last day), ticking while the dialog is open. Beside it, the owner's **Extend** menu
+      adds 1, 7 or 30 days to the current end, or **No End Date** lifts the end; the members count again.
+    - Members' rows show "until 1 Nov", and the folder page shows "shared until 1 Nov".
+    - An admin sees the countdown, without the menu.
+  - **Active links:** the links that still admit someone, with uses and dates, each with **Revoke**. Used, expired
+    and revoked links are not listed.
+- **Edit** opens a modal, then **Cancel** and **Save**:
+  - the name (renames the folder on this Mac only), and the location (*Move…*);
+  - a *Share* line saying what this Mac may do, with *Share…* for owners and admins;
+  - options: pause, only sync on the local network, rescan now.
+- **Main window:** *Folder Sync* in the sidebar under Sharing. A folder page shows:
+  - **Members:** every device in the folder, with this Mac first, then by role. Each row shows how the device is
+    reached (LAN / Internet / relay, client, bytes each way) or *Offline*, and its role. The owner has a role menu
+    on every other device (Owner, Admin, Read & write, Read only, *Remove from Folder…*, which asks first).
+  - **Conflicts:** *Show in Finder*, and *Keep* ▸ *Current Version* / *<device>'s Version* / *Both*.
+  - **Issues:** each with its reason.
 - **Settings › Folder Sync:** device name, sync port, finding devices on the LAN and over the Internet, relaying,
   Internet speed limits, default location for joined folders, and *Sync status in Finder* (*Turn On…*, or *On* with
   *Manage…*).
@@ -955,16 +1050,43 @@ design notes, with the research behind them, are in `dev-docs/` (local).
     - three steps, then **Cancel** and **Open System Settings**, which opens the extension list;
     - it notices the switch by itself and says *Finder Shows Sync Status*, then **Done**.
     - Later, Settings has the way in.
-- **Agents (§9A):** the `sync.*` methods and `seedwell sync …` commands. Sharing a key needs Full permission;
-  *Remove and delete files* takes two steps.
+- **Agents (§9A):** the `sync.*` methods and `seedwell sync …` commands.
+  - Making or listing invitation links (`sync.share`, `sync.invites`), changing roles and removing devices
+    (`sync.set_role`, `sync.remove_device`) and how long a folder is shared (`sync.set_share_until`) need Full
+    permission; `sync.members` is read-only; revoking a link is
+    Control.
+  - Links never reach the activity log.
+  - *Remove and delete files* takes two steps.
 
 ### 7G.6 Later (v1.x)
 
 - Encrypted members: names encrypted with AES-SIV, chunks with XChaCha20-Poly1305 (Syncthing's untrusted-device
   scheme).
-- Selective sync with File Provider placeholders.
+- **Channels** (planned for 0.1.7; a design step first, as for roles): chat between devices, for people and
+  agents.
+  - **Where:** a *Chats* section in the main window's sidebar, right below *Folder Sync*. Channels on the left,
+    messages on the right, a message field at the bottom, and *New Channel…*.
+  - **Sharing:** a channel stands on its own, not tied to a folder. It has an owner and members with the folder
+    roles, shared with one or more devices by invitation link through the same Share dialog (single use, link
+    expiry, sharing period). Roles decide who may post and who may share.
+  - **Agents:** each channel says whether agents on this Mac may read it, or read and post. That is off by default,
+    and the Mac's agent permission level still applies. A message an agent sent carries an "agent" label with its
+    client name. A message from another device always reaches an agent as untrusted data, never as instructions.
+  - **Notifications:** a macOS notification for a new message, muted per channel; @mentions reach one member.
+  - **Agent push:** agents are woken rather than polling.
+    - `seedwell chat send|list|watch --json` (watch streams new messages: ids, replies, times, sender, agent
+      label).
+    - The control socket's event stream carries messages.
+    - Per channel, an optional command runs when a message arrives (to wake an agent session). The message goes in
+      as data on its standard input, never as arguments.
+  - **Protocol:** a new message type behind a feature bit, so 0.1.6 devices do not see it. Messages are signed by
+    their device and kept by the members, so a device that was offline gets them from any member; there is no
+    server. Files go through a synced folder.
+- On-demand folders, only as File Provider placeholders (iCloud Drive style). Finder lists every file, opening one
+  fetches it, and *Remove Download* frees it. The user chose this over a file browser in Seedwell's window. It needs
+  a Developer ID-signed build: an app group shared by the app and its extension, and the folder under
+  `~/Library/CloudStorage/`.
 - Renaming a folder on every device.
-- One-time invite links, and asking before a new device joins (an option; off by default).
 - Device records in the DHT (BEP 44).
 - On the folder page: recent changes, and the archive with *Restore*. In the edit modal: archive length and local
   ignore patterns (the config file has both already).
@@ -1160,7 +1282,7 @@ Agents like Claude should be able to operate Seedwell as easily as a person: "ad
 | Settings | `settings get [key...]` · `settings set key=value...` |
 | Watch | `wait <torrent>... [--any] [--timeout S]` · `watch` · `activity` · `log trackers` |
 | Debug | `dev on\|off\|status` · `debug health\|trackers\|peers\|perf\|announce` (§9A.5) |
-| Folder sync | `sync list\|status\|add\|join\|share\|rename\|move\|pause\|resume\|rescan\|address\|remove\|settings` (§7G.5) · `relay [--port N]`. Read-only: `list`, `status`, `settings`; full: `share`, `rename`, `move`, changing `settings`, `remove --delete-files`; control: the rest |
+| Folder sync | `sync list\|status\|add\|join\|share [--role R] [--uses N\|unlimited] [--days N\|never]\|share-until <days>\|never [--extend]\|members\|invites\|revoke-invite\|role\|remove-device\|rename\|move\|pause\|resume\|rescan\|address\|remove\|settings` (§7G.5) · `relay [--port N]`. Read-only: `list`, `status`, `members`, `settings`; full: `share`, `share-until`, `invites`, `role`, `remove-device`, `rename`, `move`, changing `settings`, `remove --delete-files`; control: the rest |
 | Test | `sim ...` (§9A.6) · `daemon ...` |
 | Agents | `skill show\|install\|uninstall` · `help [command\|agents]` |
 

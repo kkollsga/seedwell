@@ -401,18 +401,18 @@ mod tests {
     use trs_sync::ignore::Ignore;
     use trs_sync::index::MemStore;
     use trs_sync_proto::device::DeviceKey;
-    use trs_sync_proto::keys::{FolderKey, FolderSecret};
+    use trs_sync_proto::keys::{Access, FolderSecret};
 
     use super::{PENDING_SAMPLE, sample_pending};
 
-    fn core(seed: u8, key: &FolderKey) -> (MemFs, FolderCore) {
+    fn core(seed: u8, key: &FolderSecret) -> (MemFs, FolderCore) {
         let fs = MemFs::new();
         fs.create_dir(".seedwell").unwrap();
         let dk = Arc::new(DeviceKey::from_seed(&[seed; 32]));
         let cfg = FolderConfig {
             me: dk.device_id(),
             folder_pk: *key.public_key(),
-            access: key.access(),
+            access: Access::Write,
             case_insensitive: false,
             byte_exact_names: false,
             archive: true,
@@ -423,12 +423,11 @@ mod tests {
             id[..8].copy_from_slice(&ids.fetch_add(1, Ordering::SeqCst).to_be_bytes());
             id
         });
-        let cert = key.writer_cert(dk.public_key()).map(|c| (dk.clone(), c));
         let core = FolderCore::new(
             cfg,
             Box::new(MemStore::new(u64::from(seed))),
             Arc::new(fs.clone()),
-            cert,
+            Some(dk),
             Arc::new(trs_sync::clock::SystemClock::default()),
             new_id,
             Ignore::defaults(),
@@ -439,13 +438,14 @@ mod tests {
 
     /// `n` files on A, then A's index on B: what B samples as pending.
     fn pending_after(n: usize) -> (Vec<String>, bool) {
-        let key = FolderKey::ReadWrite(FolderSecret::from_bytes([7; 32]));
+        let key = FolderSecret::from_bytes([7; 32]);
         let ((afs, mut a), (_, mut b)) = (core(1, &key), core(2, &key));
         for i in 0..n {
             write_all(&afs, &format!("f{i:05}"), b"x").unwrap();
         }
         a.scan("").unwrap();
-        b.add_writers(&a.writers()).unwrap();
+        let writers: Vec<[u8; 32]> = a.writers().iter().chain(b.writers().iter()).map(|w| w.device_pk).collect();
+        b.set_membership(&writers, Access::Write).unwrap();
         let (index_id, _) = a.index_state().unwrap();
         let entries = a.announce_since(0, usize::MAX).unwrap();
         b.apply_remote(a.me(), RemoteIndex { index_id, full: true, done: true, entries }).unwrap();
@@ -459,7 +459,7 @@ mod tests {
         assert_eq!((paths.len(), more), (PENDING_SAMPLE, true));
         assert_eq!(paths.first().map(String::as_str), Some("f00000"));
         // Nothing needed: nothing listed.
-        let key = FolderKey::ReadWrite(FolderSecret::from_bytes([7; 32]));
+        let key = FolderSecret::from_bytes([7; 32]);
         assert_eq!(sample_pending(&core(3, &key).1), (Vec::new(), false));
     }
 }

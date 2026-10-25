@@ -35,9 +35,11 @@ public struct FinderStatus: Codable, Equatable, Sendable {
         /// Everything not listed above is in sync: nothing is pending beyond the list, and the folder has
         /// no ignore patterns of its own (an ignored file would otherwise get a tick).
         public var complete: Bool
+        /// This Mac may share the folder (its owner or an admin): Finder's menu offers Share….
+        public var canShare: Bool
 
         public init(id: String, name: String, path: String, badge: FinderBadge, pending: [String] = [], pendingMore: Bool = false,
-                    conflicts: [String] = [], issues: [String] = [], complete: Bool = true) {
+                    conflicts: [String] = [], issues: [String] = [], complete: Bool = true, canShare: Bool = false) {
             self.id = id
             self.name = name
             self.path = path
@@ -47,6 +49,7 @@ public struct FinderStatus: Codable, Equatable, Sendable {
             self.conflicts = conflicts
             self.issues = issues
             self.complete = complete
+            self.canShare = canShare
         }
     }
 
@@ -81,20 +84,6 @@ public enum FinderBadge: String, Codable, CaseIterable, Sendable {
         case .offline: "No devices online"
         case .conflict: "Conflict"
         case .error: "Needs attention"
-        }
-    }
-
-    /// The SF Symbol drawn on the badge.
-    public var symbol: String {
-        switch self {
-        case .synced: "checkmark"
-        case .syncing: "arrow.triangle.2.circlepath"
-        case .downloading: "arrow.down"
-        case .uploading: "arrow.up"
-        case .paused: "pause.fill"
-        case .offline: "minus"
-        case .conflict: "exclamationmark"
-        case .error: "xmark"
         }
     }
 }
@@ -137,6 +126,12 @@ public struct FinderBadges: Sendable {
 
     /// The synced folders' roots, for `directoryURLs`.
     public var roots: [String] { entries.map(\.root) }
+
+    /// The synced folder an absolute path is in (the innermost one), compared as the badges are.
+    public func folder(containing absolutePath: String) -> FinderStatus.Folder? {
+        let path = Self.normalized(absolutePath)
+        return entries.first { path == $0.root || path.hasPrefix($0.root + "/") }?.folder
+    }
 
     /// The badge for an absolute path, `nil` for none (outside every folder, ignored, or unknown).
     public func badge(for absolutePath: String) -> FinderBadge? {
@@ -183,27 +178,100 @@ public struct FinderBadges: Sendable {
 }
 
 public extension FinderBadge {
-    /// A coloured disc with a white symbol (Finder scales it to the icon size; the app's setup window shows
-    /// the same ones).
+    /// A bold glyph in the badge's colour with a soft shadow on a clear background, as a ready bitmap (128 px; Finder scales it to the
+    /// icon size, and the app's setup window shows the same ones). No disc behind it: at list-view size a white
+    /// glyph on a disc read as a plain dot, and a disc looks like a system icon. The glyphs are plain paths drawn
+    /// here once, not SF Symbols drawn lazily (which in the sandboxed extension could come out empty).
     var image: NSImage {
-        let color: NSColor = switch self {
+        let px = 128
+        guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: px, pixelsHigh: px, bitsPerSample: 8, samplesPerPixel: 4,
+                                         hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0),
+              let ctx = NSGraphicsContext(bitmapImageRep: rep) else { return NSImage(size: NSSize(width: 64, height: 64)) }
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = ctx
+        let s = CGFloat(px)
+        // A soft shadow keeps the glyph visible on light, dark and selected rows; the glyph is a little smaller
+        // than the square so the shadow is not cut off.
+        let shadow = NSShadow()
+        shadow.shadowColor = NSColor.black.withAlphaComponent(0.5)
+        shadow.shadowBlurRadius = s * 0.05
+        shadow.shadowOffset = NSSize(width: 0, height: -s * 0.02)
+        shadow.set()
+        var fit = AffineTransform(translationByX: s / 2, byY: s / 2)
+        fit.scale(0.86)
+        fit.translate(x: -s / 2, y: -s / 2)
+        let paths = glyph(in: s)
+        for p in paths {
+            p.transform(using: fit)
+            p.lineCapStyle = .round
+            p.lineJoinStyle = .round
+        }
+        // A thin light rim under the glyph, so a blue glyph still shows on a selected (blue) row.
+        NSColor.white.set()
+        for p in paths {
+            p.lineWidth = s * 0.24
+            p.stroke()
+        }
+        NSShadow().set()
+        color.set()
+        for p in paths {
+            p.lineWidth = s * 0.14
+            p.stroke()
+        }
+        NSGraphicsContext.restoreGraphicsState()
+        let image = NSImage(size: NSSize(width: 64, height: 64))
+        image.addRepresentation(rep)
+        image.accessibilityDescription = label
+        return image
+    }
+
+    private var color: NSColor {
+        switch self {
         case .synced: .systemGreen
         case .syncing, .downloading, .uploading: .systemBlue
         case .paused, .offline: .systemGray
         case .conflict: .systemOrange
         case .error: .systemRed
         }
-        let (symbol, label) = (self.symbol, self.label)
-        return NSImage(size: NSSize(width: 64, height: 64), flipped: false) { rect in
-            NSColor.white.setFill()
-            NSBezierPath(ovalIn: rect).fill()
-            color.setFill()
-            NSBezierPath(ovalIn: rect.insetBy(dx: 3, dy: 3)).fill()
-            let config = NSImage.SymbolConfiguration(pointSize: 30, weight: .bold).applying(.init(paletteColors: [.white]))
-            if let s = NSImage(systemSymbolName: symbol, accessibilityDescription: label)?.withSymbolConfiguration(config) {
-                s.draw(in: NSRect(x: rect.midX - s.size.width / 2, y: rect.midY - s.size.height / 2, width: s.size.width, height: s.size.height))
+    }
+
+    /// The glyph as strokes on an `s` × `s` square (origin bottom left), filling most of it.
+    private func glyph(in s: CGFloat) -> [NSBezierPath] {
+        func line(_ pts: [(CGFloat, CGFloat)]) -> NSBezierPath {
+            let p = NSBezierPath()
+            for (i, (x, y)) in pts.enumerated() {
+                let pt = NSPoint(x: x * s, y: y * s)
+                if i == 0 { p.move(to: pt) } else { p.line(to: pt) }
             }
-            return true
+            return p
+        }
+        switch self {
+        case .synced:
+            return [line([(0.14, 0.52), (0.4, 0.26), (0.86, 0.74)])]
+        case .downloading:
+            return [line([(0.5, 0.86), (0.5, 0.16)]), line([(0.22, 0.44), (0.5, 0.15), (0.78, 0.44)])]
+        case .uploading:
+            return [line([(0.5, 0.14), (0.5, 0.84)]), line([(0.22, 0.56), (0.5, 0.85), (0.78, 0.56)])]
+        case .syncing:
+            // Most of a circle, and an arrowhead at its end pointing the way it turns.
+            let (r, end): (CGFloat, CGFloat) = (0.32, 60 * .pi / 180)
+            let arc = NSBezierPath()
+            arc.appendArc(withCenter: NSPoint(x: s / 2, y: s / 2), radius: s * r, startAngle: 120, endAngle: 420)
+            let tip = (0.5 + r * cos(end), 0.5 + r * sin(end))
+            // The arc turns anticlockwise, so at its end it heads along `end + 90°`; the wings point back from there.
+            let back = { (turn: CGFloat) -> (CGFloat, CGFloat) in
+                (tip.0 - 0.18 * cos(end + .pi / 2 + turn), tip.1 - 0.18 * sin(end + .pi / 2 + turn))
+            }
+            return [arc, line([back(0.7), tip, back(-0.7)])]
+        case .paused:
+            return [line([(0.36, 0.2), (0.36, 0.8)]), line([(0.64, 0.2), (0.64, 0.8)])]
+        case .offline:
+            let ring = NSBezierPath(ovalIn: NSRect(x: s * 0.2, y: s * 0.2, width: s * 0.6, height: s * 0.6))
+            return [ring]
+        case .conflict:
+            return [line([(0.5, 0.86), (0.5, 0.42)]), line([(0.5, 0.16), (0.5, 0.15)])]
+        case .error:
+            return [line([(0.22, 0.22), (0.78, 0.78)]), line([(0.22, 0.78), (0.78, 0.22)])]
         }
     }
 }

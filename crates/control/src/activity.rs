@@ -130,7 +130,21 @@ pub fn describe(r: &Request) -> String {
         Request::SyncAdd(p) => format!("share the folder {}", clip(&p.path, 200)),
         // The key is the permission to the folder: never in the log.
         Request::SyncJoin(p) => format!("join a shared folder (key not logged) at {}", p.path.as_deref().map_or("the default location".into(), |d| clip(d, 200))),
-        Request::SyncShare(p) => format!("show the keys of folder {} (keys not logged)", folder(&p.folder)),
+        Request::SyncShare(p) => format!(
+            "make a {} link to folder {} (link not logged)",
+            clip(p.role.as_deref().unwrap_or("read_write"), 20),
+            folder(&p.folder)
+        ),
+        Request::SyncMembers(p) => format!("list the devices of folder {}", folder(&p.folder)),
+        Request::SyncInvites(p) => format!("list the links of folder {} (links not logged)", folder(&p.folder)),
+        Request::SyncRevokeInvite(p) => format!("revoke link {} of folder {}", clip(&p.invite, 40), folder(&p.folder)),
+        Request::SyncSetRole(p) => format!("make device {} {} in folder {}", clip(&p.device, 60), clip(&p.role, 20), folder(&p.folder)),
+        Request::SyncRemoveDevice(p) => format!("remove device {} from folder {}", clip(&p.device, 60), folder(&p.folder)),
+        Request::SyncSetShareUntil(p) => match (p.days, p.extend) {
+            (0, _) => format!("share folder {} with no end", folder(&p.folder)),
+            (d, true) => format!("share folder {} {d} days longer", folder(&p.folder)),
+            (d, false) => format!("share folder {} for {d} days", folder(&p.folder)),
+        },
         Request::SyncRename(p) => format!("rename folder {} to {}", folder(&p.folder), clip(&p.name, 100)),
         Request::SyncMove(p) => format!("move folder {} to {}", folder(&p.folder), clip(&p.path, 200)),
         Request::SyncPause(p) => format!("pause folder {}", folder(&p.folder)),

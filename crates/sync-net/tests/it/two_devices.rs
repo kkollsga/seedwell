@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use trs_sync_net::secrets::FileSecrets;
 use trs_sync_net::status::FolderState;
 use trs_sync_net::{Keep, Options, SyncHandle};
+use trs_sync_proto::members::Role;
 use trs_sync_proto::ids::FolderId;
 
 struct Device {
@@ -54,7 +55,7 @@ async fn a_file_syncs_both_ways_over_tls() {
 
     let st = a.h.add_folder(fa.path().to_path_buf()).await.unwrap();
     let id: FolderId = st.id.parse().unwrap();
-    let key = a.h.shares(&id).unwrap().read_write_link.unwrap();
+    let key = a.h.create_invite(&id, Role::ReadWrite, 1, 1).unwrap().link;
     let dest = fb.path().join("Shared");
     b.h.join_folder(&key, dest.clone()).await.unwrap();
     b.h.add_address(&id, addr(&a)).unwrap();
@@ -104,12 +105,12 @@ async fn a_read_only_device_receives_and_its_changes_stay_local() {
     std::fs::write(fa.path().join("doc.txt"), b"v1").unwrap();
     let st = a.h.add_folder(fa.path().to_path_buf()).await.unwrap();
     let id: FolderId = st.id.parse().unwrap();
-    let ro = a.h.shares(&id).unwrap().read_only.unwrap();
+    let ro = a.h.create_invite(&id, Role::ReadOnly, 1, 1).unwrap().link;
     let dest = fr.path().join("Docs");
     r.h.join_folder(&ro, dest.clone()).await.unwrap();
-    assert!(r.h.shares(&id).unwrap().read_write.is_none(), "a reader cannot share write access");
     r.h.add_address(&id, addr(&a)).unwrap();
     until(20, "R has the file", || read(&dest.join("doc.txt")).as_deref() == Some(b"v1")).await;
+    assert!(r.h.create_invite(&id, Role::ReadOnly, 1, 1).is_err(), "a reader cannot share");
 
     std::fs::write(dest.join("doc.txt"), b"reader's edit").unwrap();
     std::fs::write(fa.path().join("other.txt"), b"later from A").unwrap();
@@ -145,7 +146,7 @@ async fn two_devices_pulling_from_each_other_at_once_do_not_wait_on_each_other()
     let (fa, fb) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let st = a.h.add_folder(fa.path().to_path_buf()).await.unwrap();
     let id: FolderId = st.id.parse().unwrap();
-    let key = a.h.shares(&id).unwrap().read_write_link.unwrap();
+    let key = a.h.create_invite(&id, Role::ReadWrite, 1, 1).unwrap().link;
     let dest = fb.path().join("Shared");
     b.h.join_folder(&key, dest.clone()).await.unwrap();
     b.h.add_address(&id, addr(&a)).unwrap();
@@ -181,7 +182,7 @@ async fn concurrent_edits_make_one_conflict_copy_that_either_device_resolves() {
     std::fs::write(fa.path().join("plan.txt"), b"v1").unwrap();
     let st = a.h.add_folder(fa.path().to_path_buf()).await.unwrap();
     let id: FolderId = st.id.parse().unwrap();
-    let key = a.h.shares(&id).unwrap().read_write_link.unwrap();
+    let key = a.h.create_invite(&id, Role::ReadWrite, 1, 1).unwrap().link;
     let dest = fb.path().join("Shared");
     b.h.join_folder(&key, dest.clone()).await.unwrap();
     b.h.add_address(&id, addr(&a)).unwrap();

@@ -57,7 +57,7 @@ async fn two_devices_sync_over_utp_only() {
 
     let st = a.h.add_folder(fa.path().to_path_buf()).await.unwrap();
     let id: FolderId = st.id.parse().unwrap();
-    let key = a.h.shares(&id).unwrap().read_write_link.unwrap();
+    let key = a.h.create_invite(&id, trs_sync_proto::members::Role::ReadWrite, 1, 1).unwrap().link;
     let dest = fb.path().join("Shared");
     b.h.join_folder(&key, dest.clone()).await.unwrap();
     b.h.add_address(&id, addr(&a)).unwrap();

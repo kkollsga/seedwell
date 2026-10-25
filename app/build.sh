@@ -74,6 +74,7 @@ fi
 echo "==> Swift app (${SWIFT_ARGS[*]})"
 (cd "$APP_DIR" && swift build "${SWIFT_ARGS[@]}" --product SeedwellApp)
 (cd "$APP_DIR" && swift build "${SWIFT_ARGS[@]}" --product SeedwellFinderSync)
+(cd "$APP_DIR" && swift build "${SWIFT_ARGS[@]}" --product SeedwellShare)
 BIN_DIR="$(cd "$APP_DIR" && swift build "${SWIFT_ARGS[@]}" --show-bin-path)"
 BIN="$BIN_DIR/SeedwellApp"
 
@@ -209,6 +210,42 @@ cat > "$EXT/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
+echo "==> Share extension"
+# Seedwell in the system Share menu (SPEC 7G.5): one file or folder; it hands the path to the app and needs no
+# access of its own (sign.sh: sandbox only).
+SHARE="$APP/Contents/PlugIns/SeedwellShare.appex"
+mkdir -p "$SHARE/Contents/MacOS"
+cp "$BIN_DIR/SeedwellShare" "$SHARE/Contents/MacOS/SeedwellShare"
+cat > "$SHARE/Contents/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key><string>io.github.kkollsga.Seedwell.Share</string>
+    <key>CFBundleName</key><string>SeedwellShare</string>
+    <key>CFBundleDisplayName</key><string>Seedwell</string>
+    <key>CFBundleExecutable</key><string>SeedwellShare</string>
+    <key>CFBundlePackageType</key><string>XPC!</string>
+    <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+    <key>CFBundleShortVersionString</key><string>$VERSION</string>
+    <key>CFBundleVersion</key><string>$BUILD_NUMBER</string>
+    <key>LSMinimumSystemVersion</key><string>15.0</string>
+    <key>NSHumanReadableDescription</key><string>Shares a folder with Seedwell Folder Sync.</string>
+    <key>NSExtension</key>
+    <dict>
+        <key>NSExtensionAttributes</key>
+        <dict>
+            <!-- One file or folder from the file system (not text, links or images from other apps). -->
+            <key>NSExtensionActivationRule</key>
+            <string>SUBQUERY(extensionItems, \$e, SUBQUERY(\$e.attachments, \$a, ANY \$a.registeredTypeIdentifiers UTI-CONFORMS-TO "public.file-url").@count == 1).@count == 1</string>
+        </dict>
+        <key>NSExtensionPointIdentifier</key><string>com.apple.share-services</string>
+        <key>NSExtensionPrincipalClass</key><string>SeedwellShareViewController</string>
+    </dict>
+</dict>
+</plist>
+PLIST
+
 # SwiftPM with Command Line Tools stamps LC_BUILD_VERSION sdk=15.0 (the deployment target), and
 # macOS then runs the app in compatibility mode: no Liquid Glass sidebar or toolbar. Stamp the
 # SDK we actually compiled against.
@@ -216,6 +253,7 @@ SDK_VER="$(xcrun --sdk "${SDKROOT:-macosx}" --show-sdk-version 2>/dev/null || tr
 if [ -n "$SDK_VER" ]; then
     vtool -set-build-version macos 15.0 "$SDK_VER" -replace -output "$APP/Contents/MacOS/SeedwellApp" "$APP/Contents/MacOS/SeedwellApp"
     vtool -set-build-version macos 15.0 "$SDK_VER" -replace -output "$EXT/Contents/MacOS/SeedwellFinderSync" "$EXT/Contents/MacOS/SeedwellFinderSync"
+    vtool -set-build-version macos 15.0 "$SDK_VER" -replace -output "$SHARE/Contents/MacOS/SeedwellShare" "$SHARE/Contents/MacOS/SeedwellShare"
     echo "    LC_BUILD_VERSION: minos 15.0, sdk $SDK_VER"
 fi
 

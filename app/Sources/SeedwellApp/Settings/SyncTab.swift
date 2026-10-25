@@ -6,6 +6,7 @@ import SwiftUI
 struct SyncTab: View {
     @Bindable var model: SettingsModel
     @State private var finderOn = FinderStatusWriter.extensionEnabled
+    @State private var shareOn = ShareMenu.enabled
 
     var body: some View {
         SettingsPage {
@@ -59,13 +60,25 @@ struct SyncTab: View {
                                 .accessibilityIdentifier("finder-turn-on")
                         }
                     }
+                    SettingsRow(label: "Seedwell in the Share menu", hint: "Right-click any folder, Share ▸ Seedwell: share it, or start syncing it") {
+                        if shareOn {
+                            HStack(spacing: 10) {
+                                Label("On", systemImage: "checkmark.circle.fill").foregroundStyle(.secondary)
+                                Button("Manage…") { ShareMenu.openSettings() }.help("Open the Share menu's list of extensions in System Settings")
+                            }
+                        } else {
+                            Button("Turn On…") { FinderSetup.show() }.help("Show how to add Seedwell to the Share menu")
+                                .accessibilityIdentifier("share-menu-turn-on")
+                        }
+                    }
                 }
             }
         }
-        .onAppear { model.reloadSync(); finderOn = FinderStatusWriter.extensionEnabled }
+        .onAppear { model.reloadSync(); finderOn = FinderStatusWriter.extensionEnabled; shareOn = ShareMenu.enabled }
         // Switched in System Settings: seen when the app comes back.
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             finderOn = FinderStatusWriter.extensionEnabled
+            shareOn = ShareMenu.enabled
         }
     }
 }

@@ -24,6 +24,13 @@ let package = Package(
             swiftSettings: [.unsafeFlags(["-application-extension"])],
             linkerSettings: [.linkedFramework("FinderSync"), .unsafeFlags(["-Xlinker", "-application_extension"])]
         ),
+        // Seedwell in the system Share menu; build.sh wraps it into Seedwell.app/Contents/PlugIns/SeedwellShare.appex.
+        .executableTarget(
+            name: "SeedwellShare",
+            path: "Sources/SeedwellShare",
+            swiftSettings: [.unsafeFlags(["-application-extension"])],
+            linkerSettings: [.unsafeFlags(["-Xlinker", "-application_extension"])]
+        ),
         .executableTarget(
             name: "SeedwellApp",
             dependencies: ["trs_ffiFFI", "Sparkle", "SeedwellFinderShared"],

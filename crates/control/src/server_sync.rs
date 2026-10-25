@@ -1,10 +1,11 @@
 //! The `sync.*` methods (SPEC 7G.5, 9A): folder sync through the control socket. A child of `server` so it
 //! shares the permission gate, the activity log and the two-step removal.
 //!
-//! Permissions (SPEC 9A.3): read-only for `sync.list`, `sync.status`, `sync.conflicts` and `sync.settings`;
-//! full for `sync.share` (it returns keys), for what moves files on disk (`sync.rename`, `sync.move`, removal
-//! with `delete_files`) and for changing settings (`sync.set_settings`); control for the rest (`sync.resolve`
-//! moves a file too, but only into the folder's archive). Keys are never written to the
+//! Permissions (SPEC 9A.3): read-only for `sync.list`, `sync.status`, `sync.members`, `sync.conflicts` and
+//! `sync.settings`; full for `sync.share` and `sync.invites` (they return invitation links), for changing roles
+//! and removing devices (`sync.set_role`, `sync.remove_device`), for what moves files on disk (`sync.rename`,
+//! `sync.move`, removal with `delete_files`) and for changing settings (`sync.set_settings`); control for the
+//! rest (`sync.resolve` moves a file too, but only into the folder's archive). Links are never written to the
 //! activity log: [`crate::activity::describe`] leaves them out and every entry is scrubbed again.
 
 use std::net::SocketAddr;
@@ -86,23 +87,73 @@ pub(super) async fn call<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &Conn, req: Reques
         }
         Request::SyncShare(p) => {
             let f = pick(&h, &p.folder)?;
-            let sh = h.shares(&folder_id(&f)?).map_err(s::err)?;
+            let role = s::parse_role(p.role.as_deref().unwrap_or("read_write"))?;
+            let inv = h.create_invite(&folder_id(&f)?, role, p.uses.unwrap_or(1), p.days.unwrap_or(7)).map_err(s::err)?;
             let d = folder_dto(&f);
-            let which = match (sh.read_write.is_some(), sh.read_only.is_some()) {
-                (true, true) => "Read & write and Read only keys",
-                (false, true) => "the Read only key",
-                _ => "no keys",
+            let mut r = reply(&s::invite_dto(&inv))?;
+            // What was handed out, never the link itself.
+            let uses = if inv.max_uses == 0 { "unlimited uses".to_string() } else { format!("{} use(s)", inv.max_uses) };
+            r.note = Some(format!("a {} link ({uses}) to {} ({}) made", s::role_name(role), clip(&d.name, 80), short(&d.id)));
+            Ok(r)
+        }
+        Request::SyncMembers(p) => {
+            let f = pick(&h, &p.folder)?;
+            let members = h.members(&folder_id(&f)?).map_err(s::err)?;
+            let d = folder_dto(&f);
+            reply(&SyncMembersDto { id: d.id, name: d.name, members: members.iter().map(s::member_dto).collect() })
+        }
+        Request::SyncInvites(p) => {
+            let f = pick(&h, &p.folder)?;
+            let invites = h.invites(&folder_id(&f)?).map_err(s::err)?;
+            let d = folder_dto(&f);
+            let mut r = reply(&SyncInvitesDto { id: d.id.clone(), name: d.name.clone(), invites: invites.iter().take(1000).map(s::invite_dto).collect() })?;
+            r.note = Some(format!("the links of {} ({}) shown", clip(&d.name, 80), short(&d.id)));
+            Ok(r)
+        }
+        Request::SyncRevokeInvite(p) => {
+            let f = pick(&h, &p.folder)?;
+            h.revoke_invite(&folder_id(&f)?, &p.invite).map_err(s::err)?;
+            folder_reply(&status_of(&h, &f.id)?, "a link revoked in")
+        }
+        Request::SyncSetRole(p) => {
+            let f = pick(&h, &p.folder)?;
+            let id = folder_id(&f)?;
+            let role = s::parse_role(&p.role)?;
+            let members = h.members(&id).map_err(s::err)?;
+            let m = s::resolve_member(&members, &p.device)?;
+            h.set_role(&id, &m.device, role).map_err(s::err)?;
+            let mut r = folder_reply(&status_of(&h, &f.id)?, "role changed in")?;
+            r.note = Some(format!("{} is now {} in {}", clip(&m.name, 60), s::role_name(role), clip(&f.name, 80)));
+            Ok(r)
+        }
+        Request::SyncRemoveDevice(p) => {
+            let f = pick(&h, &p.folder)?;
+            let id = folder_id(&f)?;
+            let members = h.members(&id).map_err(s::err)?;
+            let m = s::resolve_member(&members, &p.device)?;
+            h.remove_device(&id, &m.device).map_err(s::err)?;
+            let mut r = folder_reply(&status_of(&h, &f.id)?, "device removed from")?;
+            r.note = Some(format!("{} removed from {}", clip(&m.name, 60), clip(&f.name, 80)));
+            Ok(r)
+        }
+        Request::SyncSetShareUntil(p) => {
+            let f = pick(&h, &p.folder)?;
+            let id = folder_id(&f)?;
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+            let span = u64::from(p.days) * 86_400;
+            let until = match (p.days, p.extend, f.share_until) {
+                (0, _, _) => 0,
+                (_, true, Some(end)) => end.max(now) + span,
+                (_, true, None) => return Err(ApiError::invalid("the folder is shared with no end; give the days from now instead")),
+                (_, false, _) => now + span,
             };
-            let mut r = reply(&SyncSharesDto {
-                id: d.id.clone(),
-                name: d.name.clone(),
-                read_write: sh.read_write,
-                read_write_link: sh.read_write_link,
-                read_only: sh.read_only,
-                read_only_link: sh.read_only_link,
-            })?;
-            // What was handed out, never the keys themselves.
-            r.note = Some(format!("{which} of {} ({}) given out", clip(&d.name, 80), short(&d.id)));
+            h.set_share_until(&id, until).map_err(s::err)?;
+            let st = status_of(&h, &f.id)?;
+            let mut r = folder_reply(&st, "sharing changed for")?;
+            r.note = Some(match st.share_until {
+                Some(t) => format!("{} is shared until {}", clip(&f.name, 80), crate::human::date(t)),
+                None => format!("{} is shared with no end", clip(&f.name, 80)),
+            });
             Ok(r)
         }
         Request::SyncRename(p) => {

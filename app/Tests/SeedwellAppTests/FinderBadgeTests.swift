@@ -92,6 +92,9 @@ import Testing
         #expect(b.badge(for: "/u/Cafe\u{301}/re\u{301}sume\u{301}.txt") == .downloading)
         #expect(Set(b.roots) == ["/d", "/d/in", "/u/Caf\u{E9}"])
         #expect(b.badge(for: "/System/Volumes/Data/d/x") == .synced, "the data volume's own path")
+        #expect(b.folder(containing: "/d/in/x")?.id == "I", "the innermost folder, for the menu")
+        #expect(b.folder(containing: "/System/Volumes/Data/u/Cafe\u{301}")?.id == "U")
+        #expect(b.folder(containing: "/elsewhere") == nil)
     }
 
     @Test func theStatusIsBuiltFromTheSnapshot() {
@@ -105,7 +108,7 @@ import Testing
         #expect(FinderStatusWriter.realPath("/tmp") == "/private/tmp")
         #expect(FinderStatusWriter.realPath("/no/such/folder") == "/no/such/folder")
         #expect(s.folders == [Folder(id: "ID-Docs", name: "Docs", path: "/private/tmp", badge: .downloading, pending: ["a"],
-                                     pendingMore: true, conflicts: ["c"], issues: ["bad"], complete: false)])
+                                     pendingMore: true, conflicts: ["c"], issues: ["bad"], complete: false, canShare: true)])
     }
 
     @Test func theStatusFileRoundTripsAndAnUnknownVersionIsIgnored() throws {
@@ -125,7 +128,17 @@ import Testing
         for b in FinderBadge.allCases {
             #expect(!b.label.isEmpty)
             #expect(b.image.size == NSSize(width: 64, height: 64))
-            #expect(NSImage(systemSymbolName: b.symbol, accessibilityDescription: nil) != nil, "\(b.symbol)")
+            // A ready bitmap: a glyph and nothing behind it (the corners are clear, no disc).
+            let rep = b.image.representations.first as? NSBitmapImageRep
+            #expect(rep?.pixelsWide == 128)
+            var painted = 0
+            for x in stride(from: 0, to: 128, by: 4) {
+                for y in stride(from: 0, to: 128, by: 4) where (rep?.colorAt(x: x, y: y)?.alphaComponent ?? 0) > 0.9 {
+                    painted += 1
+                }
+            }
+            #expect(painted > 40, "\(b) has no glyph (\(painted))")
+            #expect(rep?.colorAt(x: 6, y: 6)?.alphaComponent == 0, "\(b) has something behind the glyph")
         }
     }
 }

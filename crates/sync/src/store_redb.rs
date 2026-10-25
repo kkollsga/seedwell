@@ -14,7 +14,7 @@
 //! | `remote` | (path, device) | the device's wire entry |
 //! | `remote_by_device` | (device, path) | `()` (so dropping a device reads only its own rows) |
 //! | `peers` | device | index id, highest stored sequence |
-//! | `writers` | device | public key ‖ certificate (96 bytes) |
+//! | `writers` | device | public key (32 bytes): the devices the folder's membership lets write |
 //! | `need` | path | need kind, holders, the current version's wire entry |
 //! | `chunks` | (hash, path, offset) | `()`: where a valid local file holds a chunk |
 //!
@@ -691,15 +691,12 @@ fn dec_need(b: &[u8]) -> Result<NeedRecord, DecodeError> {
 }
 
 fn enc_writer(w: &Writer) -> Vec<u8> {
-    let mut out = Vec::with_capacity(96);
-    out.extend_from_slice(&w.device_pk);
-    out.extend_from_slice(&w.cert);
-    out
+    w.device_pk.to_vec()
 }
 
 fn dec_writer(b: &[u8]) -> Result<Writer, DecodeError> {
     let mut r = Reader::new(b);
-    let w = Writer { device_pk: r.array("device key")?, cert: r.array("certificate")? };
+    let w = Writer { device_pk: r.array("device key")? };
     done(&r)?;
     Ok(w)
 }
@@ -783,6 +780,9 @@ impl<'t> Writing<'t> {
             }
             Op::PutWriter(d, w) => {
                 self.writers.insert(d.0, enc_writer(&w).as_slice()).map_err(dbe)?;
+            }
+            Op::DropWriter(d) => {
+                self.writers.remove(d.0).map_err(dbe)?;
             }
             Op::SetNeed(p, n) => self.set_need(&p, n.as_ref())?,
         }

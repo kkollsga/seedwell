@@ -13,7 +13,7 @@
 //! 50       4    Unix hour (UTC seconds / 3600), u32 BE
 //! 54       8    nonce (random per announcement)
 //! 62       1    tag count n (at most MAX_TAGS = 150)
-//! 63      8n    tags: FolderKey::lan_tag(hour, nonce), one per folder
+//! 63      8n    tags: FolderKey::lan_tag(hour, nonce) (from the folder's public key), one per folder
 //! 63+8n   64    Ed25519 signature by the device key over bytes 0 .. 63+8n
 //! ```
 //!
@@ -327,7 +327,7 @@ fn build(h: &SyncHandle, instance: u64, round: u64) -> Option<Vec<u8>> {
     }
     let hour = unix_hour();
     let nonce = random();
-    let tags = rotation(folders.len(), round, MAX_TAGS).into_iter().map(|i| folders[i].key.lan_tag(hour, &nonce)).collect();
+    let tags = rotation(folders.len(), round, MAX_TAGS).into_iter().map(|i| folders[i].public.lan_tag(hour, &nonce)).collect();
     let a = Announcement { device_pk: *ctx.key.public_key(), instance, port: h.port(), hour, nonce, tags };
     Some(a.encode(&ctx.key))
 }
@@ -403,7 +403,7 @@ fn handle(h: &SyncHandle, rx: &Mutex<Rx>, b: &[u8], src: SocketAddr) {
             rx.lan_keys.clear();
         }
         for f in ctx.registry.folders().iter().filter(|f| !f.paused.load(Ordering::Relaxed)).take(MAX_FOLDERS_CONSIDERED) {
-            let k = *rx.lan_keys.entry(f.id).or_insert_with(|| f.key.lan_key());
+            let k = *rx.lan_keys.entry(f.id).or_insert_with(|| f.public.lan_key());
             if a.tags.contains(&lan_tag(&k, a.hour, &a.nonce)) {
                 found.push(f.id);
             }
@@ -522,11 +522,11 @@ mod tests {
     #[test]
     fn tags_match_only_the_same_folder_and_change_with_the_nonce() {
         let s = FolderSecret::generate(&mut ring::rand::SystemRandom::new()).unwrap();
-        let rw = FolderKey::ReadWrite(s);
-        let ro = rw.read_only().unwrap();
-        let other = FolderKey::ReadWrite(FolderSecret::generate(&mut ring::rand::SystemRandom::new()).unwrap());
+        let ro = FolderKey::Member(*s.public_key());
+        let rw = FolderKey::Owner(s);
+        let other = FolderKey::Owner(FolderSecret::generate(&mut ring::rand::SystemRandom::new()).unwrap());
         let n1 = [1u8; 8];
-        assert_eq!(rw.lan_tag(10, &n1), ro.lan_tag(10, &n1), "every level computes the tag");
+        assert_eq!(rw.lan_tag(10, &n1), ro.lan_tag(10, &n1), "owners and members compute the same tag");
         assert_eq!(lan_tag(&ro.lan_key(), 10, &n1), rw.lan_tag(10, &n1));
         assert_ne!(rw.lan_tag(10, &n1), other.lan_tag(10, &n1));
         assert_ne!(rw.lan_tag(10, &n1), rw.lan_tag(10, &[2u8; 8]), "unlinkable across announcements");

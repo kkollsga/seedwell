@@ -9,6 +9,10 @@ import AppKit
     var showAdd: (_ prefill: String?) -> Void = { _ in }
     var showEdit: (_ id: String) -> Void = { _ in }
     var showFolder: (_ id: String?, _ askRemove: Bool) -> Void = { _, _ in }
+    /// The Share dialog of a folder (invitation links), from the folder list, the edit modal and Finder.
+    var showShare: (_ id: String) -> Void = { _ in }
+    /// The add modal on "From this Mac" with a folder chosen (the system Share menu, for a folder not synced yet).
+    var showAddFolder: (_ path: String) -> Void = { _ in }
     /// Where removed folders go: the user's Trash, or the QA one (`SEEDWELL_QA_TRASH_DIR`).
     var trash = SourceTrash.standard()
     /// The last folder that was removed (the window drops its page).
@@ -65,6 +69,49 @@ import AppKit
         }
     }
 
+    /// The system Share menu shared `path`: the Share dialog of the synced folder it is in (or why this Mac may not
+    /// share it), else Add Folder with that folder, or the file's folder, chosen.
+    func share(path: String) {
+        let real = FinderStatusWriter.realPath(path)
+        let inside = snapshot().folders.filter { f in
+            let root = FinderStatusWriter.realPath(f.path)
+            return real == root || real.hasPrefix(root + "/")
+        }
+        if let f = inside.max(by: { $0.path.count < $1.path.count }) {
+            if SyncText.canShare(f.role) { showShare(f.id) }
+            else { alert("Only the owner and admins can share “\(f.name)”", "This Mac is \(SyncText.role(f.role)) in it. Ask the owner or an admin for a link.") }
+            return
+        }
+        var dir: ObjCBool = false
+        let isDir = FileManager.default.fileExists(atPath: real, isDirectory: &dir) && dir.boolValue
+        showAddFolder(isDir ? real : (real as NSString).deletingLastPathComponent)
+    }
+
+    /// Gives a device another role in the folder (owners only; the core says so otherwise). Errors are told in an
+    /// alert; `done` runs either way (the page reads the members again).
+    func setRole(_ folder: SyncFolder, _ m: SyncMember, _ role: SyncRole, done: @escaping () -> Void) {
+        Task {
+            let core = self.core
+            let (id, device) = (folder.id, m.deviceId)
+            if case .failure(let e) = await run({ try core.syncSetRole(id: id, deviceId: device, role: role) }) {
+                alert("Couldn't change \(m.name)’s role", SyncText.message(e))
+            }
+            done()
+        }
+    }
+
+    /// Removes a device from the folder for everyone (owners only). It stops syncing at once and keeps the files it has.
+    func removeDevice(_ folder: SyncFolder, _ m: SyncMember, done: @escaping () -> Void) {
+        Task {
+            let core = self.core
+            let (id, device) = (folder.id, m.deviceId)
+            if case .failure(let e) = await run({ try core.syncRemoveDevice(id: id, deviceId: device) }) {
+                alert("Couldn't remove \(m.name) from “\(folder.name)”", SyncText.message(e))
+            }
+            done()
+        }
+    }
+
     func alert(_ title: String, _ text: String) {
         let a = NSAlert()
         a.messageText = title
@@ -80,9 +127,9 @@ import AppKit
         pb.setString(text, forType: .string)
     }
 
-    /// The pasteboard's text when it holds a folder key or link (the add modal starts with it).
+    /// The pasteboard's text when it holds a folder link (the add modal starts with it).
     func pastedKey() -> String? {
-        guard let s = NSPasteboard.general.string(forType: .string), SyncText.looksLikeKey(s) else { return nil }
+        guard let s = NSPasteboard.general.string(forType: .string), SyncText.looksLikeLink(s) else { return nil }
         return s.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }

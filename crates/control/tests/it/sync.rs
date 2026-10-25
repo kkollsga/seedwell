@@ -192,34 +192,81 @@ async fn settings_are_read_and_changed() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn keys_are_shared_at_full_and_never_logged() {
+async fn links_are_made_at_full_and_never_logged() {
     let s = SyncRig::new(Permission::Full).await;
     let mut c = s.rig.client("claude").await;
     let docs = s.folder("Docs");
     call(&mut c, "sync.add", json!({"path": text(&docs)})).await.unwrap();
-    let sh: SyncSharesDto = serde_json::from_value(call(&mut c, "sync.share", json!({"folder": "Docs"})).await.unwrap()).unwrap();
-    let rw = sh.read_write.clone().unwrap();
-    let ro = sh.read_only.clone().unwrap();
-    assert!(rw.starts_with("SWW-") && ro.starts_with("SWR-"), "{rw} {ro}");
-    assert!(sh.read_only_link.as_deref().unwrap().starts_with("seedwell://sync/SWR-"));
+    let inv: SyncInviteDto =
+        serde_json::from_value(call(&mut c, "sync.share", json!({"folder": "Docs", "role": "read_only", "uses": 2, "days": 7})).await.unwrap())
+            .unwrap();
+    assert!(inv.link.starts_with("seedwell://sync/"), "{}", inv.link);
+    assert_eq!((inv.role.as_str(), inv.max_uses, inv.uses, inv.revoked), ("read_only", 2, 0, false));
+    assert!(inv.expires_at.is_some());
+    let list: SyncInvitesDto = serde_json::from_value(call(&mut c, "sync.invites", json!({"folder": "Docs"})).await.unwrap()).unwrap();
+    assert_eq!(list.invites.len(), 1);
+    assert_eq!(list.invites[0].link, inv.link);
+    let members: SyncMembersDto = serde_json::from_value(call(&mut c, "sync.members", json!({"folder": "Docs"})).await.unwrap()).unwrap();
+    assert_eq!(members.members.len(), 1);
+    assert!(members.members[0].me && members.members[0].role == "owner" && members.members[0].online);
+    let f: SyncFolderDto = serde_json::from_value(call(&mut c, "sync.status", json!({"folder": "Docs"})).await.unwrap()).unwrap();
+    assert_eq!((f.role.as_deref(), f.access.as_str(), f.share_until), (Some("owner"), "read_write", None));
+    // How long it is shared: from now, extended from the end, or no end.
+    let e = call(&mut c, "sync.set_share_until", json!({"folder": "Docs", "days": 3, "extend": true})).await.unwrap_err();
+    assert!(e.message.contains("no end"), "{}", e.message);
+    let f: SyncFolderDto =
+        serde_json::from_value(call(&mut c, "sync.set_share_until", json!({"folder": "Docs", "days": 7})).await.unwrap()).unwrap();
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    let end = f.share_until.unwrap();
+    assert!(end > now + 7 * 86_400 - 60 && end <= now + 7 * 86_400, "{end}");
+    let f: SyncFolderDto =
+        serde_json::from_value(call(&mut c, "sync.set_share_until", json!({"folder": "Docs", "days": 2, "extend": true})).await.unwrap()).unwrap();
+    assert_eq!(f.share_until, Some(end + 2 * 86_400));
+    let members: SyncMembersDto = serde_json::from_value(call(&mut c, "sync.members", json!({"folder": "Docs"})).await.unwrap()).unwrap();
+    assert_eq!(members.members[0].expires_at, None, "an owner's access does not end");
+    let f: SyncFolderDto =
+        serde_json::from_value(call(&mut c, "sync.set_share_until", json!({"folder": "Docs", "days": 0})).await.unwrap()).unwrap();
+    assert_eq!(f.share_until, None);
+    // The only owner keeps its role, and leaves by removing the folder.
+    let me = members.members[0].device_id.clone();
+    let e = call(&mut c, "sync.set_role", json!({"folder": "Docs", "device": me, "role": "read_only"})).await.unwrap_err();
+    assert!(e.message.contains("needs an owner"), "{}", e.message);
+    let e = call(&mut c, "sync.remove_device", json!({"folder": "Docs", "device": me})).await.unwrap_err();
+    assert!(e.message.contains("remove the folder"), "{}", e.message);
+    call(&mut c, "sync.revoke_invite", json!({"folder": "Docs", "invite": inv.id})).await.unwrap();
+    let list: SyncInvitesDto = serde_json::from_value(call(&mut c, "sync.invites", json!({"folder": "Docs"})).await.unwrap()).unwrap();
+    assert!(list.invites[0].revoked);
 
     // Joining another folder by link, at the default location (set into the temp dir).
     let joined = s.folder("JoinedHere");
     call(&mut c, "sync.set_settings", json!({"default_location": text(&joined)})).await.unwrap();
-    let other = trs_sync_proto::keys::FolderKey::ReadWrite(trs_sync_proto::keys::FolderSecret::from_bytes([9; 32]));
-    let link = trs_sync_proto::keys::Link { key: other.clone(), name: Some("Shared".into()) }.format();
+    let other = trs_sync_proto::keys::FolderSecret::from_bytes([9; 32]);
+    let invite = trs_sync_proto::members::new_invite(
+        *other.public_key(),
+        [3; 16],
+        [4; 32],
+        trs_sync_proto::members::Role::ReadWrite,
+        1,
+        0,
+        1,
+        trs_sync_proto::members::Signer::Folder,
+        &|m| other.sign(m),
+    );
+    let link = trs_sync_proto::members::InviteLink { invite, token_seed: [4; 32], name: Some("Shared".into()) }.format();
     let f: SyncFolderDto = serde_json::from_value(call(&mut c, "sync.join", json!({"key_or_link": link})).await.unwrap()).unwrap();
     assert_eq!(f.path, text(&joined.join("Shared")));
-    assert_eq!(f.id, other.folder_id().to_string());
-    // A bad key is refused without being quoted back.
+    assert_eq!(f.id, trs_sync_proto::ids::FolderId::of_public_key(other.public_key()).to_string());
+    assert_eq!((f.state.as_str(), f.role.as_deref()), ("waiting-for-admin", None));
+    // A bare key is refused without being quoted back.
     let e = call(&mut c, "sync.join", json!({"key_or_link": "SWW-NOTAKEYATALL", "path": text(&s.folder("x"))})).await.unwrap_err();
     assert!(!e.message.contains("NOTAKEYATALL"), "{}", e.message);
+    assert!(e.message.contains("link"), "{}", e.message);
 
     let log = activity(&s.rig).await;
-    for secret in [rw.as_str(), ro.as_str(), &other.to_text(), &link, &rw[4..20], &other.to_text()[4..20]] {
-        assert!(!log.contains(secret), "a key reached the activity log: {log}");
+    for secret in [inv.link.as_str(), &inv.link[16..40], &link, &link[16..40]] {
+        assert!(!log.contains(secret), "a link reached the activity log: {log}");
     }
-    assert!(log.contains("sync.share") && log.contains("keys not logged"), "share is always logged: {log}");
+    assert!(log.contains("sync.share") && log.contains("link not logged"), "share is always logged: {log}");
     assert!(log.contains("sync.join") && log.contains("key not logged"), "{log}");
 }
 

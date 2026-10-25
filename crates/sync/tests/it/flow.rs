@@ -12,7 +12,53 @@ use trs_sync::index::MemStore;
 use trs_sync::pull::{ChunkRequest, ChunkSource, FetchError};
 use trs_sync_proto::device::DeviceKey;
 use trs_sync_proto::ids::ShortId;
-use trs_sync_proto::keys::{Access, FolderKey, FolderSecret};
+use trs_sync::folder::RemoteError;
+use trs_sync_proto::ids::FolderId;
+use trs_sync_proto::keys::{Access, FolderSecret};
+use trs_sync_proto::sign::Writer;
+
+/// What a device holds of the test folder: its public key and its access. In the driver both come from the
+/// folder's membership; here a test hands them out.
+#[derive(Clone, Debug)]
+pub(crate) struct Key {
+    pk: [u8; 32],
+    access: Access,
+}
+
+impl Key {
+    /// Read & write access to the folder made from `secret`.
+    pub(crate) fn rw(secret: [u8; 32]) -> Key {
+        Key { pk: *FolderSecret::from_bytes(secret).public_key(), access: Access::Write }
+    }
+
+    /// The same folder, read only.
+    pub(crate) fn read_only(&self) -> Option<Key> {
+        Some(Key { access: Access::Read, ..self.clone() })
+    }
+
+    pub(crate) fn public_key(&self) -> &[u8; 32] {
+        &self.pk
+    }
+
+    pub(crate) fn access(&self) -> Access {
+        self.access
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn folder_id(&self) -> FolderId {
+        FolderId::of_public_key(&self.pk)
+    }
+}
+
+/// Takes in the writers another device knows, as the driver does when membership arrives.
+pub(crate) fn learn_writers(core: &mut FolderCore, writers: &[Writer]) -> Result<bool, RemoteError> {
+    let mut keys: Vec<[u8; 32]> = core.writers().iter().map(|w| w.device_pk).collect();
+    keys.extend(writers.iter().map(|w| w.device_pk));
+    keys.sort_unstable();
+    keys.dedup();
+    let access = core.access();
+    core.set_membership(&keys, access)
+}
 
 struct Utc;
 impl Clock for Utc {
@@ -51,7 +97,7 @@ impl ChunkSource for Disks<'_> {
     }
 }
 
-fn dev(name: &'static str, seed: u8, key: &FolderKey) -> Dev {
+fn dev(name: &'static str, seed: u8, key: &Key) -> Dev {
     let fs = MemFs::new();
     fs.create_dir(".seedwell").unwrap();
     let dk = Arc::new(DeviceKey::from_seed(&[seed; 32]));
@@ -63,7 +109,6 @@ fn dev(name: &'static str, seed: u8, key: &FolderKey) -> Dev {
         byte_exact_names: false,
         archive: true,
     };
-    let cert = key.writer_cert(dk.public_key());
     let ids = Arc::new(AtomicU64::new(u64::from(seed) << 32));
     let new_id = Arc::new(move || {
         let n = ids.fetch_add(1, Ordering::SeqCst);
@@ -75,7 +120,7 @@ fn dev(name: &'static str, seed: u8, key: &FolderKey) -> Dev {
         cfg,
         Box::new(MemStore::new(u64::from(seed))),
         Arc::new(fs.clone()),
-        cert.map(|c| (dk.clone(), c)),
+        Some(dk.clone()),
         Arc::new(Utc),
         new_id,
         Ignore::defaults(),
@@ -90,7 +135,7 @@ fn short(d: &Dev) -> ShortId {
 
 /// `from`'s whole index (and writers) to `to`.
 fn send(from: &Dev, to: &mut Dev) {
-    to.core.add_writers(&from.core.writers()).unwrap();
+    learn_writers(&mut to.core, &from.core.writers()).unwrap();
     let (index_id, _) = from.core.index_state().unwrap();
     let entries = from.core.announce_since(0, usize::MAX).unwrap();
     to.core.apply_remote(short(from), RemoteIndex { index_id, full: true, done: true, entries }).unwrap();
@@ -114,8 +159,8 @@ fn pull(to: &mut Dev, from: &[&Dev]) -> trs_sync::pull::PullReport {
     }
 }
 
-fn rw() -> FolderKey {
-    FolderKey::ReadWrite(FolderSecret::from_bytes([7; 32]))
+fn rw() -> Key {
+    Key::rw([7; 32])
 }
 
 #[test]

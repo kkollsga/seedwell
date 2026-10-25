@@ -53,6 +53,14 @@ ENT
     codesign "${COMMON[@]}" --identifier "$BUNDLE_ID.FinderSync" --entitlements "$EXT_ENT" "$EXT"
     rm -f "$EXT_ENT"
 fi
+# The Share extension: sandboxed, with nothing beyond (it only hands a path to the app).
+SHARE="$APP/Contents/PlugIns/SeedwellShare.appex"
+if [ -d "$SHARE" ]; then
+    SHARE_ENT="$(mktemp -t seedwell-share-ent).plist"
+    printf '<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict><key>com.apple.security.app-sandbox</key><true/></dict></plist>\n' > "$SHARE_ENT"
+    codesign "${COMMON[@]}" --identifier "$BUNDLE_ID.Share" --entitlements "$SHARE_ENT" "$SHARE"
+    rm -f "$SHARE_ENT"
+fi
 # The CLI runs on its own (agents and terminals launch `seedwell`), so it carries its own identifier.
 codesign "${COMMON[@]}" --identifier "$BUNDLE_ID.cli" "$APP/Contents/MacOS/seedwell"
 codesign "${COMMON[@]}" --identifier "$BUNDLE_ID" --entitlements "$ENT" "$APP"

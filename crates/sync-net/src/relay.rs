@@ -216,7 +216,10 @@ pub(crate) fn may_relay(h: &SyncHandle, a: &PeerHandle, b: &PeerHandle) -> bool 
     h.ctx().registry.folders().iter().any(|f| {
         let (Some(fa), Some(fb)) = (a.access(&f.id), b.access(&f.id)) else { return false };
         s.relay_everyone
-            || (s.relay_own_devices && f.key.access() == Access::Write && fa == Access::Write && fb == Access::Write)
+            || (s.relay_own_devices
+                && f.role_of(h.ctx().key.public_key()).is_some_and(|r| r.access() == Access::Write)
+                && fa == Access::Write
+                && fb == Access::Write)
     })
 }
 

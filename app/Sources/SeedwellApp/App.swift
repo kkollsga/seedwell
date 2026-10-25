@@ -21,6 +21,8 @@ import os
     private(set) var syncWindows = SyncWindows()
     /// The Finder extension's status file.
     private var finderStatus: FinderStatusWriter?
+    /// This build may keep folder sync's keys in the Keychain (asked once, for the app's own state only).
+    private lazy var keychainUsable = KeychainVault.available()
     var qaChooserWindow: NSWindow? { chooserWindows.qaWindow }
     private var qa: QAControl?
     private let realHome: String
@@ -86,9 +88,10 @@ import os
                 mock: options.mock,
                 allowLoopbackTrackers: options.allowLoopbackTrackers,
                 forbiddenRoot: options.isolated ? realHome : nil)
-            // Folder sync's keys go in the Keychain for the app's own state only; a mock, QA or other isolated
-            // run keeps them in a 0600 file in its state folder and never touches the user's Keychain.
-            if options.mock || options.stateDir != nil {
+            // Folder sync's keys go in the Keychain for the app's own state, when this build may use it (a keychain
+            // entitlement; see KeychainVault). An ad-hoc build, a mock, QA or other isolated run keeps them in a
+            // 0600 file in its state folder, and the latter never touch the user's Keychain.
+            if options.mock || options.stateDir != nil || !keychainUsable {
                 core = try Core(options: coreOptions)
             } else {
                 core = try Core.withSecretVault(options: coreOptions, vault: KeychainVault())
@@ -146,6 +149,8 @@ import os
         let sync = commands.sync
         sync.showAdd = { [weak self, sync] prefill in self?.syncWindows.showAdd(prefill: prefill, actions: sync) }
         sync.showEdit = { [weak self, sync] id in self?.syncWindows.showEdit(id: id, actions: sync) }
+        sync.showShare = { [weak self, sync] id in self?.syncWindows.showShare(id: id, actions: sync) }
+        sync.showAddFolder = { [weak self, sync] path in self?.syncWindows.showAdd(prefill: nil, folder: path, actions: sync) }
         sync.showFolder = { id, ask in main.show(section: .folderSync); main.libraryModel?.showSyncFolder(id, askRemove: ask) }
         FinderSetup.show = { [weak self] in self?.syncWindows.showFinderSetup() }
         let finder = FinderStatusWriter(core: core)
@@ -215,12 +220,13 @@ import os
         if let tab = options.showSettings { main.show(settings: SettingsTab(rawValue: tab), openSettings: true) }
     }
 
-    /// Finder badges are offered once ever, when there is a synced folder and the extension is off (macOS lets only
-    /// the user switch it on). Later, Settings › Folder Sync has the way in. Not for mock, QA or other isolated runs.
+    /// Seedwell in Finder (badges and the Share menu) is offered once ever, when there is a synced folder and either
+    /// extension is off (macOS lets only the user switch them on). Later, Settings › Folder Sync has the way in. Not
+    /// for mock, QA or other isolated runs.
     private func offerFinderBadges() {
         let marker = URL(fileURLWithPath: core.stateDir()).appendingPathComponent("finder-badges-offered")
         guard !options.mock, options.stateDir == nil, !FileManager.default.fileExists(atPath: marker.path),
-              !FinderStatusWriter.extensionEnabled else { return }
+              !(FinderStatusWriter.extensionEnabled && ShareMenu.enabled) else { return }
         try? "offered".write(to: marker, atomically: true, encoding: .utf8)
         syncWindows.showFinderSetup()
     }
@@ -356,10 +362,16 @@ import os
         // A folder sync link (`seedwell://sync/<key>?name=…`) opens the add modal, filled in (SPEC 7G.5).
         let links = urls.filter { $0.scheme?.lowercased() == "seedwell" }
         for link in links where link.host?.lowercased() == "sync" { commands.sync.showAdd(link.absoluteString) }
-        // `seedwell://folder/<id>`: the Finder extension's Show in Seedwell.
+        // `seedwell://share?path=…`: the system Share menu (the Share extension).
+        for link in links where link.host?.lowercased() == "share" {
+            if let path = URLComponents(url: link, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "path" })?.value,
+               path.hasPrefix("/") { commands.sync.share(path: path) }
+        }
+        // `seedwell://folder/<id>` and `…/<id>/share`: the Finder extension's Show in Seedwell and Share….
         for link in links where link.host?.lowercased() == "folder" {
-            let id = link.lastPathComponent
-            if commands.sync.snapshot().folders.contains(where: { $0.id == id }) { commands.sync.showFolder(id, false) }
+            let parts = link.pathComponents.filter { $0 != "/" }
+            guard let id = parts.first, commands.sync.snapshot().folders.contains(where: { $0.id == id }) else { continue }
+            if parts.dropFirst().first == "share" { commands.sync.showShare(id) } else { commands.sync.showFolder(id, false) }
         }
         commands.add(urls: urls.filter { $0.scheme?.lowercased() != "seedwell" })
     }

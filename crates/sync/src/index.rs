@@ -96,8 +96,10 @@ pub enum Op {
     SetPeer(ShortId, PeerState),
     /// Forget everything a device announced (its index id changed, or it left the folder).
     DropPeer(ShortId),
-    /// A writer.
+    /// A writer (the folder's membership lets it write).
     PutWriter(ShortId, Writer),
+    /// No longer a writer.
+    DropWriter(ShortId),
     /// The need of a path (`None` = nothing needed).
     SetNeed(String, Option<NeedRecord>),
 }
@@ -229,6 +231,11 @@ impl<'a, S: IndexStore + ?Sized> Batch<'a, S> {
     /// Records a writer.
     pub fn put_writer(&mut self, device: ShortId, w: Writer) {
         self.ops.push(Op::PutWriter(device, w));
+    }
+
+    /// Forgets a writer.
+    pub fn drop_writer(&mut self, device: ShortId) {
+        self.ops.push(Op::DropWriter(device));
     }
 
     /// Sets our index id (a reset database).
@@ -500,6 +507,9 @@ impl IndexStore for MemStore {
                 }
                 Op::PutWriter(d, w) => {
                     self.writers.insert(d, w);
+                }
+                Op::DropWriter(d) => {
+                    self.writers.remove(&d);
                 }
                 Op::SetNeed(p, n) => match n {
                     Some(n) => {

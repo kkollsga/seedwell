@@ -44,10 +44,13 @@ import Observation
     /// Folder sync (SPEC 7G.5): every folder and device, read with each refresh (cheap).
     var sync: SyncSnapshot
     /// The folder whose page is shown on Folder Sync.
-    var syncSelection: String? { didSet { if syncSelection != oldValue { syncAskRemove = nil; loadConflicts() } } }
+    var syncSelection: String? { didSet { if syncSelection != oldValue { syncAskRemove = nil; syncMembers = []; loadConflicts(); loadMembers() } } }
     /// The conflict copies of the selected folder (read when it is selected, then every 10 s, off the main
     /// thread: the core reads the folder's whole index).
     private(set) var syncConflicts: [SyncConflict] = []
+    /// The selected folder's members with their roles (read every 2 s, off the main thread; the core keeps them
+    /// apart from the folder's index, so this never waits for a pull).
+    private(set) var syncMembers: [SyncMember] = []
     /// The folder whose "Stop syncing" question is open under its page header, and its Trash choice.
     var syncAskRemove: String?
     var syncTrash = false
@@ -98,7 +101,10 @@ import Observation
         ticks += 1
         if section == .folderSync {
             if syncSelection.map({ id in !sync.folders.contains { $0.id == id } }) ?? true { syncSelection = sync.folders.first?.id }
-            else if ticks % 10 == 0 { loadConflicts() }
+            else {
+                if ticks % 10 == 0 { loadConflicts() }
+                if ticks % 2 == 0 { loadMembers() }
+            }
         }
         FilesStore.shared.tick()
         if let id = trackerID, !snapshot.trackers.contains(where: { $0.id == id }) {
@@ -128,6 +134,15 @@ import Observation
 
     /// The selected folder of the Folder Sync page.
     var syncFolder: SyncFolder? { syncSelection.flatMap { id in sync.folders.first { $0.id == id } } }
+
+    func loadMembers() {
+        guard let id = syncSelection else { syncMembers = []; return }
+        let core = self.core
+        Task {
+            let list = await Task.detached(priority: .utility) { core.syncMembers(id: id) }.value
+            if syncSelection == id, list != syncMembers { syncMembers = list }
+        }
+    }
 
     func loadConflicts() {
         guard let id = syncSelection else { syncConflicts = []; return }

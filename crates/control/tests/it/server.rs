@@ -96,9 +96,19 @@ async fn permission_matrix_every_method_every_level() {
             Method::StopStream => json!({"token": "nope"}),
             Method::SettingsSet => json!({"changes": {"transfers.max_active_downloads": 4}}),
             Method::WaitFor => json!({"ids": ["bbbbbb"], "timeout_secs": 1}),
-            Method::SyncStatus | Method::SyncShare | Method::SyncPause | Method::SyncResume | Method::SyncRescan | Method::SyncRemove | Method::SyncConflicts => {
-                json!({"folder": "Docs"})
-            }
+            Method::SyncStatus
+            | Method::SyncShare
+            | Method::SyncPause
+            | Method::SyncResume
+            | Method::SyncRescan
+            | Method::SyncRemove
+            | Method::SyncConflicts
+            | Method::SyncMembers
+            | Method::SyncInvites => json!({"folder": "Docs"}),
+            Method::SyncRevokeInvite => json!({"folder": "Docs", "invite": "00"}),
+            Method::SyncSetRole => json!({"folder": "Docs", "device": "NOPE", "role": "admin"}),
+            Method::SyncRemoveDevice => json!({"folder": "Docs", "device": "NOPE"}),
+            Method::SyncSetShareUntil => json!({"folder": "Docs", "days": 7}),
             Method::SyncSetLanOnly => json!({"folder": "Docs", "lan_only": true}),
             Method::SyncResolve => json!({"folder": "Docs", "copy": "a (Mac, 2026-10-25 14.32).txt", "keep": "both"}),
             Method::SyncAdd => json!({"path": "/tmp/seedwell-test-sync"}),

@@ -1,10 +1,11 @@
-//! The pieces together, as two devices use them: share a folder, prove access, exchange signed entries.
+//! The pieces together, as two devices use them: invite, redeem, admit, exchange membership and signed entries.
 
 use trs_sync_proto::codec::Frame;
 use trs_sync_proto::model::{ChunkRef, FileInfo, FileKind, IndexEntry, Version};
-use trs_sync_proto::msg::{Index, Join, JoinFolder, Message, Writers};
+use trs_sync_proto::members::{AdmitError, Body, Signer, Statement, check_redeem, new_invite, redeem_proof};
+use trs_sync_proto::msg::{Index, Join, JoinFolder, Members, Message};
 use trs_sync_proto::sign::{Writer, WriterTable, sign_file};
-use trs_sync_proto::{Access, DeviceKey, FolderKey, Link, Random, random::RandomFailed};
+use trs_sync_proto::{Access, DeviceKey, FolderKey, InviteLink, Membership, Proof, Random, Role, random::RandomFailed};
 
 /// A deterministic random source, as simulations use.
 struct Counter(u8);
@@ -27,47 +28,59 @@ fn send(m: &Message) -> Message {
 }
 
 #[test]
-fn a_writer_shares_a_folder_with_a_reader() {
+fn an_owner_invites_a_reader() {
     let mut rng = Counter(1);
-    let laptop = DeviceKey::generate(&mut rng).unwrap();
-    let phone = DeviceKey::generate(&mut rng).unwrap();
+    // Fixed seeds: the counter's sequence repeats within 32 bytes, so two generated keys would be one.
+    let laptop = DeviceKey::from_seed(&[1; 32]);
+    let phone = DeviceKey::from_seed(&[2; 32]);
     let folder = FolderKey::generate(&mut rng).unwrap();
+    let secret = folder.secret().unwrap().clone();
+    let now = 1_800_000_000;
 
-    // The laptop shares a read-only link; the phone pastes it out of a mail.
-    let link = Link { key: folder.read_only().unwrap(), name: Some("Photos".into()) };
-    let pasted = Link::parse(&format!("<{}>\r\n", link.format())).unwrap();
-    let phone_key = pasted.key;
-    assert_eq!(phone_key.folder_id(), folder.folder_id());
+    // The laptop owns the folder, and makes a one-use Read only invitation; the phone pastes it out of a mail.
+    let mut owner_view = Membership::new(*folder.public_key());
+    owner_view.add([Statement::by_owner(&secret, Body::Grant { device: *laptop.public_key(), role: Role::Owner, serial: 1, at_s: now, invite: None })]);
+    let invite = new_invite(*folder.public_key(), [5; 16], [6; 32], Role::ReadOnly, 1, now + 7 * 86_400, now, Signer::Folder, &|m| secret.sign(m));
+    let link = InviteLink { invite, token_seed: [6; 32], name: Some("Photos".into()) };
+    let pasted = InviteLink::parse(&format!("<{}>\r\n", link.format())).unwrap();
+    assert_eq!(pasted.invite.folder_id(), folder.folder_id());
     assert_eq!(pasted.name.as_deref(), Some("Photos"));
 
-    // After TLS both sides see the same exporter value and each other's device key.
+    // After TLS both sides see the same exporter value and each other's device key. The laptop proves its grant;
+    // the phone redeems the invitation, bound to the session.
     let exporter = [42u8; 32];
-    let join = Message::Join(Join {
-        folders: vec![JoinFolder {
-            folder_id: folder.folder_id(),
-            proofs: folder.proofs(laptop.public_key(), &exporter),
-            my_index_id: 1,
-            your_index_id: 0,
-            your_max_seq: 0,
-        }],
-    });
-    let Message::Join(got) = send(&join) else { panic!() };
-    let proofs = &got.folders[0].proofs;
-    assert_eq!(phone_key.verify_proofs(laptop.public_key(), &exporter, proofs), Some(Access::Write));
-    let phone_proofs = phone_key.proofs(phone.public_key(), &exporter);
-    assert_eq!(folder.verify_proofs(phone.public_key(), &exporter, &phone_proofs), Some(Access::Read));
-
-    // The laptop sends its writer certificate and a signed entry; the phone checks both.
-    let cert = folder.writer_cert(laptop.public_key()).unwrap();
-    let writers = Message::Writers(Writers {
-        folder_id: folder.folder_id(),
-        writers: vec![Writer { device_pk: *laptop.public_key(), cert }],
-    });
-    let Message::Writers(got) = send(&writers) else { panic!() };
-    let mut table = WriterTable::new(*phone_key.public_key());
-    for w in got.writers {
-        assert_eq!(table.insert(w), Ok(true));
+    let proofs = owner_view.proofs_for(laptop.public_key()).iter().map(|st| Proof::Grant(st.to_bytes())).collect();
+    let join = |proofs| Message::Join(Join { folders: vec![JoinFolder { folder_id: folder.folder_id(), proofs, my_index_id: 1, your_index_id: 0, your_max_seq: 0 }] });
+    let Message::Join(got) = send(&join(proofs)) else { panic!() };
+    let mut phone_view = Membership::new(pasted.invite.folder_pk);
+    for p in &got.folders[0].proofs {
+        let Proof::Grant(b) = p else { panic!() };
+        phone_view.add([Statement::from_bytes(b).unwrap()]);
     }
+    assert_eq!(phone_view.role(laptop.public_key()), Some(Role::Owner));
+
+    let redeem = vec![Proof::Invite(redeem_proof(&pasted.invite, &pasted.token_seed, phone.public_key(), &exporter))];
+    let Message::Join(got) = send(&join(redeem)) else { panic!() };
+    let Proof::Invite(b) = &got.folders[0].proofs[0] else { panic!() };
+    let redeemed = check_redeem(b, phone.public_key(), &exporter).unwrap();
+    assert_eq!(check_redeem(b, phone.public_key(), &[0; 32]), None, "another session");
+    assert_eq!(owner_view.check_admit(laptop.public_key(), &redeemed, phone.public_key(), now), Ok(None));
+    let grant = Statement::by_owner(&secret, Body::Grant { device: *phone.public_key(), role: redeemed.role, serial: owner_view.next_serial(), at_s: now, invite: Some(redeemed) });
+    owner_view.add([grant]);
+    assert_eq!(owner_view.check_admit(laptop.public_key(), &redeemed, laptop.public_key(), now), Ok(Some(Role::Owner)));
+    assert_eq!(owner_view.check_admit(laptop.public_key(), &redeemed, &[3; 32], now), Err(AdmitError::UsedUp), "one use only");
+
+    // The laptop sends the membership; the phone is a reader, and the laptop its only writer.
+    let members = Message::Members(Members { folder_id: folder.folder_id(), statements: owner_view.statements().cloned().collect() });
+    let Message::Members(got) = send(&members) else { panic!() };
+    phone_view.add(got.statements);
+    assert_eq!(phone_view.role(phone.public_key()), Some(Role::ReadOnly));
+    assert_eq!(phone_view.role(phone.public_key()).map(Role::access), Some(Access::Read));
+    let mut table = WriterTable::new(*folder.public_key());
+    for pk in phone_view.writers() {
+        assert_eq!(table.insert(Writer { device_pk: pk }), Ok(true));
+    }
+    assert_eq!(table.len(), 1);
 
     let me = laptop.device_id().short();
     let info = FileInfo {

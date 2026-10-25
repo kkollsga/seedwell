@@ -19,7 +19,8 @@ use trs_sync_net::service::BoxFuture;
 use trs_sync_net::status::{FolderState, FolderStatus, Snapshot};
 use trs_sync_net::{Options, PublicDiscovery, SyncError, SyncHandle};
 use trs_sync_proto::ids::FolderId;
-use trs_sync_proto::keys::{Access, Link};
+use trs_sync_proto::keys::Access;
+use trs_sync_proto::members::{InviteLink, Role};
 
 use crate::ops;
 use crate::proto::{ApiError, ErrorCode, clip};
@@ -192,6 +193,7 @@ pub fn state_name(s: &FolderState) -> &'static str {
         FolderState::Scanning => "scanning",
         FolderState::Syncing => "syncing",
         FolderState::WaitingForDevices => "waiting-for-devices",
+        FolderState::WaitingForAdmin => "waiting-for-admin",
         FolderState::Paused => "paused",
         FolderState::Missing => "missing",
         FolderState::Error => "error",
@@ -207,6 +209,75 @@ pub fn access_name(a: Access) -> &'static str {
     }
 }
 
+/// The role name on the wire.
+pub fn role_name(r: Role) -> &'static str {
+    match r {
+        Role::Owner => "owner",
+        Role::Admin => "admin",
+        Role::ReadWrite => "read_write",
+        Role::ReadOnly => "read_only",
+    }
+}
+
+/// A role from its wire name (also `rw`, `ro`, `read-write`, `read-only`).
+pub fn parse_role(s: &str) -> Result<Role, ApiError> {
+    match s.trim().to_ascii_lowercase().replace('-', "_").as_str() {
+        "owner" => Ok(Role::Owner),
+        "admin" => Ok(Role::Admin),
+        "read_write" | "rw" => Ok(Role::ReadWrite),
+        "read_only" | "ro" => Ok(Role::ReadOnly),
+        _ => Err(ApiError::params("`role` is owner, admin, read_write or read_only")),
+    }
+}
+
+/// One invitation in protocol form.
+pub fn invite_dto(i: &trs_sync_net::InviteInfo) -> SyncInviteDto {
+    SyncInviteDto {
+        id: i.id.clone(),
+        link: i.link.clone(),
+        role: role_name(i.role).into(),
+        max_uses: i.max_uses,
+        uses: i.uses,
+        expires_at: i.expires_s,
+        created_at: i.created_s,
+        revoked: i.revoked,
+    }
+}
+
+/// One member in protocol form.
+pub fn member_dto(m: &trs_sync_net::MemberInfo) -> SyncMemberDto {
+    SyncMemberDto {
+        device_id: m.device.to_string(),
+        name: clip(&ops::clean_name(&m.name), 100),
+        role: role_name(m.role).into(),
+        online: m.online,
+        me: m.is_me,
+        expires_at: m.expires_s,
+    }
+}
+
+/// The member `q` names: its device id, an unambiguous prefix (4+ characters), or its name (any case).
+pub fn resolve_member<'a>(members: &'a [trs_sync_net::MemberInfo], q: &str) -> Result<&'a trs_sync_net::MemberInfo, ApiError> {
+    let q = q.trim();
+    if q.is_empty() || q.len() > 200 {
+        return Err(ApiError::params("`device` is a device id, a prefix of it, or the device's name"));
+    }
+    let nq = norm_id(q);
+    let lower = q.to_lowercase();
+    let hits: Vec<&trs_sync_net::MemberInfo> = members
+        .iter()
+        .filter(|m| {
+            let id = norm_id(&m.device.to_string());
+            id == nq || (nq.len() >= MIN_FOLDER_PREFIX && id.starts_with(&nq)) || m.name.to_lowercase() == lower
+        })
+        .collect();
+    match hits.as_slice() {
+        [] => Err(ApiError::not_found(format!("no device `{}` in this folder (see `sync.members`)", clip(q, 60)))),
+        [one] => Ok(one),
+        many => Err(ApiError::new(ErrorCode::Ambiguous, format!("`{}` matches {} devices; use more of the id", clip(q, 60), many.len()))),
+    }
+}
+
 /// One folder in protocol form.
 pub fn folder_dto(f: &FolderStatus) -> SyncFolderDto {
     SyncFolderDto {
@@ -214,6 +285,8 @@ pub fn folder_dto(f: &FolderStatus) -> SyncFolderDto {
         name: clip(&ops::clean_name(&f.name), 200),
         path: f.path.clone(),
         access: access_name(f.access).into(),
+        role: f.role.map(|r| role_name(r).into()),
+        share_until: f.share_until,
         state: state_name(&f.state).into(),
         files: f.files,
         bytes: f.bytes,
@@ -374,10 +447,10 @@ fn unique_in(dir: &Path, name: &str) -> PathBuf {
 /// Where a folder joined without a path goes: the default location for joined folders (empty = `~/Seedwell`),
 /// under the link's name hint (else the first group of the folder id), with a number when that is taken.
 pub fn default_join_path(default_location: &str, key_or_link: &str) -> Result<PathBuf, ApiError> {
-    let link = Link::parse(key_or_link).map_err(|_| ApiError::invalid("not a folder key or link (`SWW-…`, `SWR-…` or `seedwell://sync/…`)"))?;
+    let link = InviteLink::parse(key_or_link).map_err(|e| ApiError::invalid(e.to_string()))?;
     let base = if default_location.trim().is_empty() { "~/Seedwell" } else { default_location };
     let base = folder_path(base, "the default location")?;
-    let id = link.key.folder_id().to_string();
+    let id = link.invite.folder_id().to_string();
     let name = link.name.as_deref().and_then(component).unwrap_or_else(|| id.split('-').next().unwrap_or("Folder").to_owned());
     Ok(unique_in(&base, &name))
 }
@@ -424,6 +497,8 @@ mod tests {
             name: name.into(),
             path: format!("/tmp/{name}"),
             access: Access::Write,
+            role: Some(Role::Owner),
+            share_until: None,
             state: FolderState::UpToDate,
             files: 0,
             bytes: 0,
@@ -473,15 +548,33 @@ mod tests {
         assert!(e.message.contains("another volume"), "{}", e.message);
     }
 
+    /// An invitation link to the folder of `key` (an owner's).
+    fn test_link(key: &trs_sync_proto::keys::FolderKey, name: Option<&str>) -> String {
+        let s = key.secret().unwrap();
+        let invite = trs_sync_proto::members::new_invite(
+            *s.public_key(),
+            [1; 16],
+            [2; 32],
+            Role::ReadWrite,
+            1,
+            0,
+            1,
+            trs_sync_proto::members::Signer::Folder,
+            &|m| s.sign(m),
+        );
+        InviteLink { invite, token_seed: [2; 32], name: name.map(str::to_owned) }.format()
+    }
+
     #[test]
     fn joined_folders_get_a_default_place() {
         let dir = tempfile::tempdir().unwrap();
-        let key = trs_sync_proto::keys::FolderKey::ReadWrite(trs_sync_proto::keys::FolderSecret::from_bytes([7; 32]));
-        let link = Link { key: key.clone(), name: Some("../My Docs".into()) }.format();
+        let key = trs_sync_proto::keys::FolderKey::Owner(trs_sync_proto::keys::FolderSecret::from_bytes([7; 32]));
+        let link = test_link(&key, Some("../My Docs"));
         let base = dir.path().display().to_string();
         assert_eq!(default_join_path(&base, &link).unwrap(), dir.path().join("My Docs"), "the name hint, made safe");
-        let bare = default_join_path(&base, &key.to_text()).unwrap();
+        let bare = default_join_path(&base, &test_link(&key, None)).unwrap();
         assert_eq!(bare, dir.path().join(key.folder_id().to_string().split('-').next().unwrap()));
+        assert!(default_join_path(&base, "SWW-AAAA").is_err(), "bare keys are no longer links");
         assert_eq!(default_join_path(&base, "nonsense").unwrap_err().code, ErrorCode::Invalid);
     }
 }

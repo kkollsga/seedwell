@@ -7,7 +7,8 @@ use trs_sync_proto::ids::{DeviceId, FolderId, ShortId};
 use trs_sync_proto::keys::Proof;
 use trs_sync_proto::model::{ChunkRef, Counter, FileInfo, FileKind, IndexEntry, MAX_CHUNK, SignedFile, Version};
 use trs_sync_proto::msg::*;
-use trs_sync_proto::sign::Writer;
+use trs_sync_proto::keys::FolderSecret;
+use trs_sync_proto::members::{Body, Role, Statement};
 
 fn cases() -> u32 {
     std::env::var("PROPTEST_CASES").ok().and_then(|v| v.parse().ok()).unwrap_or(256)
@@ -38,10 +39,9 @@ fn version() -> impl Strategy<Value = Version> {
 
 fn proof() -> impl Strategy<Value = Proof> {
     prop_oneof![
-        bytes::<64>().prop_map(Proof::Writer),
-        bytes::<32>().prop_map(Proof::Read),
-        bytes::<32>().prop_map(Proof::Storage),
-        (4..=255u8, vec(any::<u8>(), 0..40)).prop_map(|(kind, data)| Proof::Unknown { kind, data }),
+        vec(any::<u8>(), 0..300).prop_map(Proof::Grant),
+        vec(any::<u8>(), 0..300).prop_map(Proof::Invite),
+        (6..=255u8, vec(any::<u8>(), 0..40)).prop_map(|(kind, data)| Proof::Unknown { kind, data }),
     ]
 }
 
@@ -71,8 +71,11 @@ prop_compose! {
 }
 
 fn hello() -> impl Strategy<Value = Message> {
-    (any::<u32>(), text(30), text(MAX_DEVICE_NAME))
-        .prop_map(|(protocol, client, device_name)| Message::Hello(Hello { protocol, client, device_name }))
+    (any::<u32>(), text(30), text(MAX_DEVICE_NAME), any::<u32>(), any::<u64>()).prop_map(
+        |(protocol, client, device_name, min_protocol, features)| {
+            Message::Hello(Hello { protocol, client, device_name, min_protocol, features })
+        },
+    )
 }
 
 fn join() -> impl Strategy<Value = Message> {
@@ -88,9 +91,18 @@ fn join() -> impl Strategy<Value = Message> {
     vec(folder, 0..5).prop_map(|folders| Message::Join(Join { folders }))
 }
 
-fn writers() -> impl Strategy<Value = Message> {
-    let writer = (bytes::<32>(), bytes::<64>()).prop_map(|(device_pk, cert)| Writer { device_pk, cert });
-    (folder_id(), vec(writer, 0..5)).prop_map(|(folder_id, writers)| Message::Writers(Writers { folder_id, writers }))
+fn members() -> impl Strategy<Value = Message> {
+    let statement = (bytes::<32>(), 0..4usize, any::<u64>(), any::<u64>(), 0..3u8).prop_map(|(device, r, serial, at_s, kind)| {
+        let secret = FolderSecret::from_bytes([1; 32]);
+        let role = [Role::Owner, Role::Admin, Role::ReadWrite, Role::ReadOnly][r];
+        let body = match kind {
+            0 => Body::Remove { device, serial, at_s },
+            1 => Body::ShareUntil { until_s: at_s / 2, serial, at_s },
+            _ => Body::Grant { device, role, serial, at_s, invite: None },
+        };
+        Statement::by_owner(&secret, body)
+    });
+    (folder_id(), vec(statement, 0..5)).prop_map(|(folder_id, statements)| Message::Members(Members { folder_id, statements }))
 }
 
 fn index() -> impl Strategy<Value = Message> {
@@ -150,7 +162,7 @@ fn the_rest() -> impl Strategy<Value = Message> {
 
 /// Every message type, for the properties below and for the garbage tests.
 pub fn message() -> impl Strategy<Value = Message> {
-    prop_oneof![hello(), join(), writers(), index(), request(), response(), progress(), addresses(), the_rest()]
+    prop_oneof![hello(), join(), members(), index(), request(), response(), progress(), addresses(), the_rest()]
 }
 
 fn roundtrip(m: &Message) -> Message {
@@ -172,7 +184,7 @@ proptest! {
     fn join_roundtrips(m in join()) { prop_assert_eq!(roundtrip(&m), m); }
 
     #[test]
-    fn writers_roundtrip(m in writers()) { prop_assert_eq!(roundtrip(&m), m); }
+    fn members_roundtrip(m in members()) { prop_assert_eq!(roundtrip(&m), m); }
 
     #[test]
     fn index_roundtrips(m in index()) { prop_assert_eq!(roundtrip(&m), m); }

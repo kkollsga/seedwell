@@ -38,6 +38,7 @@ enum SyncText {
         case .scanning: return [conflicts, "Scanning…"].compactMap { $0 }.joined(separator: " · ")
         case .waitingForDevices:
             return [conflicts, "Waiting for devices"].compactMap { $0 }.joined(separator: " · ")
+        case .waitingForAdmin: return "Waiting for the owner or an admin"
         case .syncing:
             var parts = ["Syncing"]
             if let p = fraction(f) { parts.append("\(min(99, Int(p * 100)))%") }
@@ -57,6 +58,7 @@ enum SyncText {
         case .error: return .attention
         case _ where f.conflicts > 0: return .attention
         case .syncing, .waitingForDevices: return .progress(fraction(f) ?? 0)
+        case .waitingForAdmin: return .progress(0)
         case .starting, .scanning: return .progress(0)
         case .upToDate: return .upToDate
         }
@@ -81,7 +83,7 @@ enum SyncText {
         }
         let all = Fmt.count(f.count, "folder")
         if f.allSatisfy({ $0.state == .paused }) { return "\(all) · Paused" }
-        if f.contains(where: { $0.state == .waitingForDevices }) { return "\(all) · Waiting for devices" }
+        if f.contains(where: { $0.state == .waitingForDevices || $0.state == .waitingForAdmin }) { return "\(all) · Waiting for devices" }
         if f.contains(where: { $0.state == .starting || $0.state == .scanning }) { return "\(all) · Scanning…" }
         return "\(all) · Up to date"
     }
@@ -99,14 +101,134 @@ enum SyncText {
         }
     }
 
-    /// "Read & write · Photos" for a pasted key or link, or why it cannot be used.
-    static func linkLine(_ text: String, info: SyncLinkInfo?) -> String {
+    /// The core's lowercase reason as a line: a capital first letter, no full stop.
+    static func sentence(_ s: String) -> String {
+        var t = s.trimmingCharacters(in: .whitespaces)
+        while t.hasSuffix(".") { t.removeLast() }
+        return t.prefix(1).uppercased() + t.dropFirst()
+    }
+
+    /// A role as people read it.
+    static func role(_ r: SyncRole) -> String {
+        switch r {
+        case .owner: "Owner"
+        case .admin: "Admin"
+        case .readWrite: "Read & write"
+        case .readOnly: "Read only"
+        }
+    }
+
+    /// What a role may do, in one line (the Share dialog and the members' menu).
+    static func roleNote(_ r: SyncRole) -> String {
+        switch r {
+        case .owner: "Can do everything, including changing roles"
+        case .admin: "Can change files and share the folder"
+        case .readWrite: "Can change files"
+        case .readOnly: "Receives changes, never sends its own"
+        }
+    }
+
+    /// Members in the order the folder page lists them: this Mac first, then by role (owners first), then by name.
+    static func ordered(_ ms: [SyncMember]) -> [SyncMember] {
+        let rank: (SyncRole) -> Int = { [.owner, .admin, .readWrite, .readOnly].firstIndex(of: $0) ?? 4 }
+        return ms.sorted { a, b in
+            if a.isMe != b.isMe { return a.isMe }
+            if rank(a.role) != rank(b.role) { return rank(a.role) < rank(b.role) }
+            return a.name.localizedStandardCompare(b.name) == .orderedAscending
+        }
+    }
+
+    /// A member's grey line: "Local network · Seedwell 0.1.6", "Offline", and "until 1 Nov" when its access ends.
+    static func memberLine(_ m: SyncMember, device: SyncDevice?) -> String {
+        let until = m.expiresS.map { "until \(day($0))" }
+        if m.isMe { return until.map { "Access \($0)" } ?? "" }
+        let reach = device.flatMap { d in m.online ? [via(d.via), d.client].filter { !$0.isEmpty }.joined(separator: " · ") : nil }
+        return [reach ?? "Offline", until].compactMap { $0 }.joined(separator: " · ")
+    }
+
+    /// The device may share the folder (create invitation links).
+    static func canShare(_ r: SyncRole) -> Bool { r == .owner || r == .admin }
+
+    /// "Read & write · Photos" for a pasted link, or why it cannot be used: the core's `problem` when it gave one
+    /// ("this link was made by a newer Seedwell…").
+    static func linkLine(_ text: String, info: SyncLinkInfo?, problem: String? = nil) -> String {
         let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if t.isEmpty { return "" }
-        guard let info else { return "Not a folder key or link" }
+        guard let info else {
+            if let problem { return SyncText.sentence(problem) }
+            return ["SWW-", "SWR-", "SWE-"].contains { t.uppercased().hasPrefix($0) }
+                ? "Folders are shared with links now: ask for a seedwell:// link"
+                : "Not a Seedwell folder link"
+        }
         if info.alreadySynced { return "This folder is already synced on this Mac" }
-        if info.access == .encrypted { return "Encrypted keys are not supported yet" }
-        return [access(info.access), info.name].compactMap { $0 }.joined(separator: " · ")
+        if info.expired { return "This link has expired: ask for a new one" }
+        return [role(info.role), info.name].compactMap { $0 }.joined(separator: " · ")
+    }
+
+    /// An invitation link's line in the Share dialog: "Read & write · 0 of 1 used", or "· Used", "· Expired",
+    /// "· Revoked". `now` in Unix seconds.
+    static func inviteLine(_ i: SyncInvite, now: UInt64) -> String {
+        let state = switch inviteState(i, now: now) {
+        case .revoked: "Revoked"
+        case .used: "Used"
+        case .expired: "Expired"
+        case .open: i.maxUses == 0 ? "\(Fmt.count(i.uses, "use")), unlimited" : "\(i.uses) of \(i.maxUses) used"
+        }
+        return "\(role(i.role)) · \(state)"
+    }
+
+    /// What the Share dialog's next link does, in words: "One Mac can join with this link within 7 days, as Read &
+    /// write." `0` is no limit.
+    static func shareSummary(role r: SyncRole, uses: UInt32, linkDays: UInt32) -> String {
+        let who = switch uses {
+        case 1: "One Mac"
+        case 0: "Any number of Macs"
+        default: "Up to \(uses) Macs"
+        }
+        let when = linkDays > 0 ? " within \(Fmt.count(linkDays, "day"))" : ""
+        return "\(who) can join with this link\(when), as \(role(r))."
+    }
+
+    /// The time left of a sharing period: "Sharing ends in 6 days, 23 hours", "… in 5 hours, 12 minutes",
+    /// "… in 12 minutes", "Sharing has ended".
+    static func countdown(until: UInt64, now: UInt64) -> String {
+        guard until > now else { return "Sharing has ended" }
+        let left = until - now
+        let (d, h, m) = (left / 86_400, left % 86_400 / 3_600, left % 3_600 / 60)
+        let parts: [String] = d > 0 ? [Fmt.count(d, "day"), Fmt.count(h, "hour")]
+            : h > 0 ? [Fmt.count(h, "hour"), Fmt.count(m, "minute")]
+            : [Fmt.count(max(m, 1), "minute")]
+        return "Sharing ends in " + parts.joined(separator: ", ")
+    }
+
+    /// The folder's sharing period under its setting: "When it ends (1 Nov), every Mac but the owners' leaves the
+    /// folder, and links stop working." `owner`: this Mac sets it.
+    static func sharingLine(until: UInt64?, owner: Bool) -> String {
+        guard let until else {
+            return owner ? "Shared until you stop it. Macs you remove keep the files they have." : "Shared until the owner stops it."
+        }
+        return "When it ends (\(day(until))), every Mac but the owners’ leaves the folder, and links stop working."
+    }
+
+    /// The grey line under an open link: "Link until 1 Nov" (empty without an expiry).
+    static func inviteDetail(_ i: SyncInvite) -> String {
+        i.expiresS.map { "Link until \(day($0))" } ?? ""
+    }
+
+    /// "1 Nov" (with the year when it is not this year).
+    static func day(_ unix: UInt64) -> String {
+        let d = Date(timeIntervalSince1970: TimeInterval(unix))
+        let sameYear = Calendar.current.isDate(d, equalTo: .now, toGranularity: .year)
+        return d.formatted(sameYear ? .dateTime.day().month(.abbreviated) : .dateTime.day().month(.abbreviated).year())
+    }
+
+    enum InviteState { case open, used, expired, revoked }
+
+    static func inviteState(_ i: SyncInvite, now: UInt64) -> InviteState {
+        if i.revoked { return .revoked }
+        if i.maxUses > 0, i.uses >= i.maxUses { return .used }
+        if let e = i.expiresS, e <= now { return .expired }
+        return .open
     }
 
     /// The folder's name a key gives (its name hint, else the first group of its id).
@@ -115,11 +237,11 @@ enum SyncText {
         return String(info.folderId.split(separator: "-").first ?? "Folder")
     }
 
-    /// A pasteboard text that is worth prefilling the add modal with: a key or a `seedwell://sync/` link.
-    static func looksLikeKey(_ text: String) -> Bool {
+    /// A pasteboard text that is worth prefilling the add modal with: a `seedwell://sync/` link.
+    static func looksLikeLink(_ text: String) -> Bool {
         let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard t.count < 2_000 else { return false }
-        return t.lowercased().hasPrefix("seedwell://sync/") || ["SWW-", "SWR-", "SWE-"].contains { t.uppercased().hasPrefix($0) }
+        return t.lowercased().hasPrefix("seedwell://sync/")
     }
 
     /// "Studio iMac · LAN"
@@ -145,16 +267,18 @@ struct SyncAddForm: Equatable {
     /// Shared with me: what was pasted, what it is, and where it goes.
     var key = ""
     var info: SyncLinkInfo?
+    /// Why the pasted text is not a usable link, in the core's words (none when it is one, or nothing is pasted).
+    var problem: String?
     var location = ""
     /// The user picked the location: a new key does not move it any more.
     var locationChosen = false
 
-    var keyLine: String { SyncText.linkLine(key, info: info) }
+    var keyLine: String { SyncText.linkLine(key, info: info, problem: problem) }
 
-    /// The pasted text is a usable key.
+    /// The pasted text is a usable link.
     var keyUsable: Bool {
         guard let info else { return false }
-        return info.access != .encrypted && !info.alreadySynced
+        return !info.expired && !info.alreadySynced
     }
 
     var canStart: Bool {
@@ -165,9 +289,10 @@ struct SyncAddForm: Equatable {
     }
 
     /// A new key was pasted: decode it, and follow it with the location unless the user chose one.
-    mutating func setKey(_ text: String, info: SyncLinkInfo?, defaultLocation: String?) {
+    mutating func setKey(_ text: String, info: SyncLinkInfo?, defaultLocation: String?, problem: String? = nil) {
         key = text
         self.info = info
+        self.problem = info == nil ? problem : nil
         if !locationChosen { location = info == nil ? "" : (defaultLocation ?? "") }
     }
 

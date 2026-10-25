@@ -1,6 +1,7 @@
 //! What the UI and the agent interface see: one snapshot of every folder and device.
 
 use trs_sync_proto::keys::Access;
+use trs_sync_proto::members::Role;
 
 /// What a folder is doing.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -15,6 +16,8 @@ pub enum FolderState {
     Syncing,
     /// Needs data that no connected device has.
     WaitingForDevices,
+    /// Joining: waits for one of the folder's owners or admins to be online and admit this device.
+    WaitingForAdmin,
     /// Paused by the user.
     Paused,
     /// The folder is not where it should be (`.seedwell` missing: an unmounted disk, a deleted folder).
@@ -32,8 +35,12 @@ pub struct FolderStatus {
     pub name: String,
     /// Where it is.
     pub path: String,
-    /// What this device may do.
+    /// What this device may do (from its role; Read while it is not admitted yet).
     pub access: Access,
+    /// This device's role (`None` while joining, or after it was removed).
+    pub role: Option<Role>,
+    /// When the folder stops being shared (its owners' setting; Unix seconds); `None` = no end.
+    pub share_until: Option<u64>,
     /// What it is doing.
     pub state: FolderState,
     /// Files and directories in the folder (as last scanned).

@@ -1,7 +1,9 @@
 //! `sync.toml`: device-wide settings and the list of folders. Keys are never in it (see [`crate::secrets`]).
 //!
 //! The file is written by the service (atomically: a temp file renamed over it) and read at start.
-//! Keys this version does not know are dropped when it rewrites the file.
+//! Keys this version does not know are dropped when it rewrites the file. `format` says which layout it has
+//! ([`CONFIG_FORMAT`]; a file without it is format 1): a later version raises it only when an older one would
+//! misread the file, and an older one then refuses it instead of dropping what it does not know.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -53,6 +55,9 @@ impl Default for Settings {
 pub struct FolderEntry {
     /// The folder id, as text.
     pub id: String,
+    /// The folder's public key, hex (empty in folders made by the test builds before roles: refused).
+    #[serde(default)]
+    pub folder_pk: String,
     /// Where it is.
     pub path: PathBuf,
     /// Paused by the user.
@@ -86,7 +91,17 @@ fn thirty() -> u32 {
 impl FolderEntry {
     /// A new entry with the defaults.
     pub fn new(id: String, path: PathBuf) -> Self {
-        FolderEntry { id, path, paused: false, archive: true, archive_days: 30, lan_only: false, ignore: Vec::new(), addresses: Vec::new() }
+        FolderEntry {
+            id,
+            folder_pk: String::new(),
+            path,
+            paused: false,
+            archive: true,
+            archive_days: 30,
+            lan_only: false,
+            ignore: Vec::new(),
+            addresses: Vec::new(),
+        }
     }
 }
 
@@ -106,10 +121,15 @@ pub struct DeviceEntry {
     pub addresses: Vec<String>,
 }
 
+/// The layout of `sync.toml` this version writes and reads.
+pub const CONFIG_FORMAT: u32 = 1;
+
 /// The whole file.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SyncConfig {
+    /// The file's layout ([`CONFIG_FORMAT`]).
+    pub format: u32,
     /// Device-wide settings.
     pub settings: Settings,
     /// The folders.
@@ -120,21 +140,32 @@ pub struct SyncConfig {
     pub devices: Vec<DeviceEntry>,
 }
 
+impl Default for SyncConfig {
+    fn default() -> Self {
+        SyncConfig { format: CONFIG_FORMAT, settings: Settings::default(), folders: Vec::new(), devices: Vec::new() }
+    }
+}
+
 impl SyncConfig {
-    /// Reads `path`; a missing file is the default configuration.
+    /// Reads `path`; a missing file is the default configuration. A file of a later format is refused.
     pub fn load(path: &Path) -> io::Result<Self> {
-        match std::fs::read_to_string(path) {
-            Ok(text) => toml::from_str(&text).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("{}: {e}", path.display()))),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(e) => Err(e),
+        let bad = |why: String| io::Error::new(io::ErrorKind::InvalidData, format!("{}: {why}", path.display()));
+        let c: SyncConfig = match std::fs::read_to_string(path) {
+            Ok(text) => toml::from_str(&text).map_err(|e| bad(e.to_string()))?,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Self::default()),
+            Err(e) => return Err(e),
+        };
+        if c.format > CONFIG_FORMAT {
+            return Err(bad(format!("written by a newer Seedwell (format {}): update Seedwell", c.format)));
         }
+        Ok(c)
     }
 
-    /// Writes `path` atomically.
+    /// Writes `path` atomically, in this version's format.
     pub fn save(&self, path: &Path) -> io::Result<()> {
-        let text = toml::to_string(self).map_err(io::Error::other)?;
+        let text = toml::to_string(&SyncConfig { format: CONFIG_FORMAT, ..self.clone() }).map_err(io::Error::other)?;
         let tmp = path.with_extension("toml.tmp");
-        std::fs::write(&tmp, format!("# Seedwell folder sync. Keys are in the Keychain, not here.\n{text}"))?;
+        std::fs::write(&tmp, format!("# Seedwell folder sync. Secrets are kept elsewhere (the Keychain or a 0600 file), not here.\n{text}"))?;
         std::fs::rename(&tmp, path)
     }
 
@@ -176,5 +207,12 @@ mod tests {
         std::fs::write(&p, "[[folder]]\nid = \"X\"\npath = \"/y\"\n").unwrap();
         let c = SyncConfig::load(&p).unwrap();
         assert!(c.folders[0].archive && c.settings.lan_discovery, "defaults fill in");
+        assert_eq!(c.format, CONFIG_FORMAT, "a file without a format is format 1");
+        assert!(std::fs::read_to_string(&p).is_ok_and(|t| !t.contains("format")));
+        c.save(&p).unwrap();
+        assert!(std::fs::read_to_string(&p).unwrap().contains("format = 1\n"));
+        std::fs::write(&p, "format = 2\n[settings]\nport = 1\n").unwrap();
+        let e = SyncConfig::load(&p).unwrap_err().to_string();
+        assert!(e.contains("newer Seedwell"), "{e}");
     }
 }

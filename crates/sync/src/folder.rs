@@ -44,9 +44,9 @@ impl Signer for DeviceSigner {
 pub struct FolderConfig {
     /// This device's id.
     pub me: DeviceId,
-    /// The folder's signing public key (identifies it; checks writer certificates).
+    /// The folder's signing public key (identifies it).
     pub folder_pk: [u8; 32],
-    /// What this device may do.
+    /// What this device may do (from its role; changed with [`FolderCore::set_membership`]).
     pub access: Access,
     /// The folder is case-insensitive (default APFS): refuse names that clash by case only.
     pub case_insensitive: bool,
@@ -64,7 +64,7 @@ pub enum RemoteError {
     BadSignature(String),
     /// An entry's path is not acceptable.
     BadPath(String),
-    /// A writer certificate does not check out.
+    /// A writer could not be recorded.
     BadWriter(BadWriter),
     /// The index could not be stored.
     Io(io::Error),
@@ -106,6 +106,7 @@ pub struct FolderCore {
     store: Box<dyn IndexStore>,
     fs: Arc<dyn Fs>,
     writers: WriterTable,
+    device_key: Option<Arc<DeviceKey>>,
     signer: Option<DeviceSigner>,
     clock: Arc<dyn Clock>,
     new_file_id: Arc<dyn Fn() -> [u8; 16] + Send + Sync>,
@@ -116,25 +117,27 @@ pub struct FolderCore {
 }
 
 impl FolderCore {
-    /// Opens a folder. A writer passes its device key and certificate; it is added to the writer table.
+    /// Opens a folder. `device_key` signs this device's versions while its access is Write; it is then in the
+    /// writer table too. The driver keeps the table and the access in line with the folder's membership
+    /// ([`FolderCore::set_membership`]).
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         cfg: FolderConfig,
         store: Box<dyn IndexStore>,
         fs: Arc<dyn Fs>,
-        device_key: Option<(Arc<DeviceKey>, [u8; 64])>,
+        device_key: Option<Arc<DeviceKey>>,
         clock: Arc<dyn Clock>,
         new_file_id: Arc<dyn Fn() -> [u8; 16] + Send + Sync>,
         ignore: Ignore,
     ) -> Result<Self, RemoteError> {
         let mut writers = WriterTable::new(cfg.folder_pk);
         for (_, w) in store.writers()? {
-            // Stored writers were checked when they arrived; a bad one now means a damaged store.
             writers.insert(w).map_err(RemoteError::BadWriter)?;
         }
         let me = cfg.me.short();
         let mut core = FolderCore {
             signer: None,
+            device_key,
             cfg,
             me,
             store,
@@ -145,9 +148,12 @@ impl FolderCore {
             ignore,
             receiving_full: BTreeMap::new(),
         };
-        if let Some((key, cert)) = device_key.filter(|_| core.cfg.access == Access::Write) {
-            core.add_writers(&[Writer { device_pk: *key.public_key(), cert }])?;
-            core.signer = Some(DeviceSigner::new(key, core.writers.folder_id()));
+        if core.cfg.access == Access::Write
+            && let Some(key) = core.device_key.clone()
+        {
+            let mut keys: Vec<[u8; 32]> = core.writers.iter().map(|w| w.device_pk).collect();
+            keys.push(*key.public_key());
+            core.set_membership(&keys, Access::Write)?;
         }
         Ok(core)
     }
@@ -235,26 +241,46 @@ impl FolderCore {
         Ok(self.store.peer(peer)?.unwrap_or_default())
     }
 
-    /// Every writer we know (sent to peers, so they can check what we pass on).
+    /// Every writer.
     pub fn writers(&self) -> Vec<Writer> {
         self.writers.iter().copied().collect()
     }
 
-    /// Adds writers a peer told us about (each certificate checked). True when any was new.
-    pub fn add_writers(&mut self, ws: &[Writer]) -> Result<bool, RemoteError> {
+    /// The folder's membership changed: these devices write (every other device's versions are refused from
+    /// now on; those already stored stay), and this device has `access` (Write: it signs its versions; Read: its
+    /// changes stay local). True when anything changed.
+    pub fn set_membership(&mut self, writer_keys: &[[u8; 32]], access: Access) -> Result<bool, RemoteError> {
+        let want: BTreeMap<ShortId, Writer> =
+            writer_keys.iter().map(|pk| (DeviceId::of_public_key(pk).short(), Writer { device_pk: *pk })).collect();
+        let mut table = WriterTable::new(self.cfg.folder_pk);
+        for w in want.values() {
+            table.insert(*w).map_err(RemoteError::BadWriter)?;
+        }
+        let have: BTreeMap<ShortId, Writer> = self.writers.iter().map(|w| (DeviceId::of_public_key(&w.device_pk).short(), *w)).collect();
         let mut batch = Batch::new(&*self.store, self.me)?;
-        let mut new = false;
-        for w in ws {
-            if self.writers.insert(*w).map_err(RemoteError::BadWriter)? {
-                batch.put_writer(DeviceId::of_public_key(&w.device_pk).short(), *w);
-                new = true;
+        let mut changed = false;
+        for (id, w) in &want {
+            if have.get(id) != Some(w) {
+                batch.put_writer(*id, *w);
+                changed = true;
             }
         }
-        if new {
+        for id in have.keys().filter(|id| !want.contains_key(id)) {
+            batch.drop_writer(*id);
+            changed = true;
+        }
+        if changed {
             let ops = batch.finish()?;
             self.store.apply(ops)?;
+            self.writers = table;
         }
-        Ok(new)
+        let signs = access == Access::Write && want.contains_key(&self.me);
+        if access != self.cfg.access || signs != self.signer.is_some() {
+            self.cfg.access = access;
+            self.signer = signs.then(|| self.device_key.clone()).flatten().map(|k| DeviceSigner::new(k, self.writers.folder_id()));
+            changed = true;
+        }
+        Ok(changed)
     }
 
     /// A peer's index batch. Every entry is checked (path, signature) before any is stored: one bad entry

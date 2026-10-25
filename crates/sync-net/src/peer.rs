@@ -20,8 +20,8 @@ use trs_sync_proto::ids::{DeviceId, FolderId, ShortId};
 use trs_sync_proto::keys::Access;
 use trs_sync_proto::model::FileKind;
 use trs_sync_proto::msg::{
-    Close, Hello, Index, Join, JoinFolder, MAX_INDEX_ENTRIES, Message, PROTOCOL, Request, Response, ResponseCode,
-    Writers,
+    Close, Hello, Incompatible, Index, Join, JoinFolder, MAX_INDEX_ENTRIES, Members, Message, Request, Response,
+    ResponseCode, agree,
 };
 
 use crate::framed::{Reader, Writer};
@@ -61,48 +61,75 @@ pub async fn run(ctx: Arc<Ctx>, conn: Connected, candidates: Vec<FolderId>) -> i
 
     let setup = async {
         let name = lock(&ctx.device_name).clone();
-        writer
-            .send(&Message::Hello(Hello { protocol: PROTOCOL, client: ctx.client.clone(), device_name: name }))
-            .await?;
+        let (min_protocol, protocol) = ctx.protocol;
+        let mine = Hello { protocol, client: ctx.client.clone(), device_name: name, min_protocol, features: ctx.features };
+        writer.send(&Message::Hello(mine.clone())).await?;
         let hello = match reader.next().await? {
             Some(Message::Hello(h)) => h,
             _ => return Err(bad("expected Hello")),
         };
-        if hello.protocol != PROTOCOL {
-            return Err(bad(format!("protocol {} is not supported", hello.protocol)));
-        }
+        // Both sides work this out from the two Hellos, so each can say why.
+        let agreed = match agree(&mine, &hello) {
+            Ok(a) => a,
+            Err(e) => {
+                let reason = version_reason(e, &hello.device_name);
+                let _ = writer.send(&Message::Close(Close { reason: reason.clone() })).await;
+                return Err(bad(format!("{VERSION_REFUSED}{reason}")));
+            }
+        };
         let mut sent: BTreeSet<FolderId> = BTreeSet::new();
-        let shared;
+        let checked;
         if dialed {
             let join = own_join(&ctx, &candidates, &est.exporter, device, lan).await;
             sent.extend(join.folders.iter().map(|f| f.folder_id));
             writer.send(&Message::Join(join)).await?;
             match reader.next().await? {
-                Some(Message::Join(j)) => shared = check_join(&ctx, &j, &est, &sent, lan),
+                Some(Message::Join(j)) => checked = check_join(&ctx, &j, &est, &sent, lan),
+                Some(Message::Close(c)) => return Err(io::Error::new(io::ErrorKind::ConnectionAborted, c.reason)),
                 _ => return Err(bad("expected Join")),
             }
         } else {
             match reader.next().await? {
                 Some(Message::Join(j)) => {
                     let proved = check_join(&ctx, &j, &est, &BTreeSet::new(), lan);
-                    let ids: Vec<FolderId> = proved.iter().map(|(f, _, _)| *f).collect();
+                    if proved.shared.is_empty() {
+                        // Nothing to share: say why instead of answering (a refused invitation is shown there).
+                        let reason = close_reason(&proved);
+                        let _ = writer.send(&Message::Close(Close { reason: reason.clone() })).await;
+                        return Err(bad(reason));
+                    }
+                    let ids: Vec<FolderId> = proved.shared.iter().map(|(f, _, _)| *f).collect();
                     let join = own_join(&ctx, &ids, &est.exporter, device, lan).await;
                     sent.extend(join.folders.iter().map(|f| f.folder_id));
                     writer.send(&Message::Join(join)).await?;
-                    shared = proved;
+                    checked = proved;
                 }
                 _ => return Err(bad("expected Join")),
             }
         }
-        Ok::<_, io::Error>((hello, shared, sent))
+        Ok::<_, io::Error>((hello, agreed, checked, sent))
     };
-    let (hello, shared, sent) = tokio::time::timeout(SETUP_TIMEOUT, setup).await.map_err(|_| bad("setup timed out"))??;
-    if shared.is_empty() {
-        let _ = writer.send(&Message::Close(Close { reason: "no folders in common".into() })).await;
-        return Err(bad("no folders in common"));
+    let setup = tokio::time::timeout(SETUP_TIMEOUT, setup).await.map_err(|_| bad("setup timed out"))?;
+    let (hello, agreed, checked, sent) = setup.inspect_err(|e| note_refusal(&ctx, &candidates, device, e))?;
+    // The two Seedwells talk: a version problem with this device is over.
+    for f in ctx.registry.folders() {
+        lock(&f.live).incompatible.remove(&device);
     }
+    for id in &checked.changed {
+        if let Some(f) = ctx.registry.folder(id) {
+            let ctx = ctx.clone();
+            tokio::spawn(async move { crate::roles::changed(&ctx, &f).await });
+        }
+    }
+    if checked.shared.is_empty() {
+        // A refused invitation is told to the joining device, which shows why.
+        let reason = close_reason(&checked);
+        let _ = writer.send(&Message::Close(Close { reason: reason.clone() })).await;
+        return Err(bad(reason));
+    }
+    let shared = checked.shared;
 
-    let (peer, crx, drx) = PeerHandle::new(device, hello.device_name, hello.client, remote, local, est.exporter, dialed, via);
+    let (peer, crx, drx) = PeerHandle::new(est.peer_pk, hello.device_name, hello.client, agreed, remote, local, est.exporter, dialed, via);
     if !ctx.registry.add_peer(&ctx.me, peer.clone()) {
         let _ = writer.send(&Message::Close(Close { reason: "already connected".into() })).await;
         return Ok(());
@@ -116,6 +143,9 @@ pub async fn run(ctx: Arc<Ctx>, conn: Connected, candidates: Vec<FolderId>) -> i
         links.push(start_link(&ctx, &peer, folder, access, their));
     }
     let result = read_loop(&ctx, &peer, &mut reader, &serve, &est, sent, &mut links).await;
+    if let Err(e) = &result {
+        note_refusal(&ctx, &candidates, device, e);
+    }
 
     peer.close();
     ctx.registry.remove_peer(&peer);
@@ -127,8 +157,54 @@ pub async fn run(ctx: Arc<Ctx>, conn: Connected, candidates: Vec<FolderId>) -> i
     result
 }
 
-/// Our Join for these folders (those we have), with every proof our key can make, bound to the session
-/// with this exporter value.
+/// The start of a Close reason that tells a joining device its invitation was refused.
+const LINK_REFUSED: &str = "link: ";
+/// The start of the error of a session refused because the two Seedwells cannot talk.
+const VERSION_REFUSED: &str = "version: ";
+
+/// Why two devices whose protocol versions do not overlap cannot sync, for the person at this one.
+fn version_reason(e: Incompatible, peer_name: &str) -> String {
+    let who = if peer_name.is_empty() { "The other device" } else { peer_name };
+    match e {
+        Incompatible::PeerTooOld => format!("{who} runs an older Seedwell that cannot sync with this one: update it"),
+        Incompatible::PeerTooNew => format!("{who} runs a newer Seedwell that this one cannot sync with: update this Mac"),
+    }
+}
+
+/// Why a session with nothing in common ends: an invitation's refusal, told to the joining device.
+fn close_reason(c: &Checked) -> String {
+    c.refused.first().map_or_else(|| "no folders in common".to_string(), |r| format!("{LINK_REFUSED}{r}"))
+}
+
+/// A session ended with an owner's or admin's refusal of our invitation, or because the two Seedwells cannot
+/// talk: the joining folders show why, and a folder the device is a member of lists it with its issues.
+fn note_refusal(ctx: &Ctx, candidates: &[FolderId], device: DeviceId, e: &io::Error) {
+    let text = e.to_string();
+    if let Some(reason) = text.strip_prefix(VERSION_REFUSED) {
+        // The folders we dialed it for, and those it was seen in (it may have dialed us).
+        for f in ctx.registry.folders() {
+            let seen = f.members.read().unwrap_or_else(|e| e.into_inner()).contains(&device);
+            // A joining folder shows it as the reason it waits (below), not as an issue.
+            if (seen || candidates.contains(&f.id)) && lock(&f.invite).is_none() {
+                lock(&f.live).incompatible.insert(device, reason.to_string());
+            }
+        }
+    }
+    // A version refusal only for the folders we dialed for (any device may connect to us).
+    let version = text.strip_prefix(VERSION_REFUSED).filter(|_| !candidates.is_empty());
+    let Some(reason) = text.strip_prefix(LINK_REFUSED).or(version) else { return };
+    let folders: Vec<Arc<FolderShared>> = if candidates.is_empty() {
+        ctx.registry.folders()
+    } else {
+        candidates.iter().filter_map(|id| ctx.registry.folder(id)).collect()
+    };
+    for f in folders.iter().filter(|f| lock(&f.invite).is_some()) {
+        lock(&f.live).refused = Some(reason.to_string());
+    }
+}
+
+/// Our Join for these folders (those we are a member of, or join with an invitation), with our proofs bound to
+/// the session with this exporter value.
 pub(crate) async fn own_join(ctx: &Ctx, folders: &[FolderId], exporter: &[u8; 32], peer: DeviceId, lan: bool) -> Join {
     let mut out = Vec::new();
     for id in folders {
@@ -144,9 +220,10 @@ pub(crate) async fn own_join(ctx: &Ctx, folders: &[FolderId], exporter: &[u8; 32
         .await
         .ok();
         let Some((Some((my_index_id, _)), Some(theirs))) = state else { continue };
+        let Some(proofs) = crate::roles::proofs(ctx, &f, exporter) else { continue };
         out.push(JoinFolder {
             folder_id: f.id,
-            proofs: f.key.proofs(ctx.key.public_key(), exporter),
+            proofs,
             my_index_id,
             your_index_id: theirs.index_id,
             your_max_seq: theirs.max_seq,
@@ -155,25 +232,34 @@ pub(crate) async fn own_join(ctx: &Ctx, folders: &[FolderId], exporter: &[u8; 32
     Join { folders: out }
 }
 
-/// What the peer proved: (folder, its access, its Join entry). Storage-only access is refused: encrypted
-/// members are not supported yet, and a storage member must never be sent plaintext. `answered_only`
-/// (non-empty for a dialer) limits the answer to folders we asked about.
-fn check_join(
-    ctx: &Ctx,
-    j: &Join,
-    est: &crate::tls::Established,
-    answered_only: &BTreeSet<FolderId>,
-    lan: bool,
-) -> Vec<(FolderId, Access, JoinFolder)> {
-    let mut out = Vec::new();
+/// What a peer's Join proved.
+struct Checked {
+    /// (folder, its access, its Join entry).
+    shared: Vec<(FolderId, Access, JoinFolder)>,
+    /// Invitations this device refused, and why.
+    refused: Vec<String>,
+    /// Folders whose membership changed (its grants were new to us, or we admitted it).
+    changed: Vec<FolderId>,
+}
+
+/// What the peer proved, folder by folder ([`crate::roles::check`]); a device redeeming an invitation is admitted
+/// when this device is an owner or admin. `answered_only` (non-empty for a dialer) limits the answer to folders
+/// we asked about.
+fn check_join(ctx: &Ctx, j: &Join, est: &crate::tls::Established, answered_only: &BTreeSet<FolderId>, lan: bool) -> Checked {
+    let mut out = Checked { shared: Vec::new(), refused: Vec::new(), changed: Vec::new() };
     for jf in &j.folders {
         if !answered_only.is_empty() && !answered_only.contains(&jf.folder_id) {
             continue;
         }
         let Some(f) = ctx.registry.folder(&jf.folder_id).filter(|f| f.allowed_with(lan)) else { continue };
-        match f.key.verify_proofs(&est.peer_pk, &est.exporter, &jf.proofs) {
-            Some(a) if a >= Access::Read => out.push((jf.folder_id, a, jf.clone())),
-            _ => {}
+        let mut changed = false;
+        match crate::roles::check(ctx, &f, &est.peer_pk, &est.exporter, jf, &mut changed) {
+            crate::roles::Proved::Member(a) => out.shared.push((jf.folder_id, a, jf.clone())),
+            crate::roles::Proved::Refused(why) => out.refused.push(why),
+            crate::roles::Proved::Nothing => {}
+        }
+        if changed {
+            out.changed.push(jf.folder_id);
         }
     }
     out
@@ -201,18 +287,13 @@ fn start_link(
 }
 
 async fn send_index(f: &Arc<FolderShared>, peer: &Arc<PeerHandle>, their: JoinFolder) -> io::Result<()> {
-    // Writers first: the peer checks every entry against them.
-    let f2 = f.clone();
-    let (writers, (index_id, _)) = tokio::task::spawn_blocking(move || {
-        let core = lock(&f2.core);
-        (core.writers(), core.index_state())
-    })
-    .await
-    .map_err(io::Error::other)
-    .and_then(|(w, s)| s.map(|s| (w, s)))?;
-    if peer.control.send(Message::Writers(Writers { folder_id: f.id, writers })).await.is_err() {
+    // The membership first: the peer checks every entry against the writers it gives.
+    let statements: Vec<_> = f.membership.read().unwrap_or_else(|e| e.into_inner()).statements().cloned().collect();
+    if peer.control.send(Message::Members(Members { folder_id: f.id, statements })).await.is_err() {
         return Ok(());
     }
+    let f2 = f.clone();
+    let (index_id, _) = tokio::task::spawn_blocking(move || lock(&f2.core).index_state()).await.map_err(io::Error::other)??;
 
     // What the peer holds of our index decides between changes only and a full send.
     let (mut full, mut sent) = if their.your_index_id == index_id { (false, their.your_max_seq) } else { (true, 0) };
@@ -319,7 +400,7 @@ async fn read_loop(
     let mut closed = peer.closed.subscribe();
     let (apply, queue) = mpsc::channel(APPLY_QUEUE);
     let (failed_tx, mut failed) = oneshot::channel();
-    tokio::spawn(apply_loop(peer.device.short(), queue, failed_tx));
+    tokio::spawn(apply_loop(ctx.clone(), peer.device.short(), queue, failed_tx));
     let applier_gone = || io::Error::other("the index applier stopped");
     loop {
         let next = tokio::select! {
@@ -333,9 +414,14 @@ async fn read_loop(
         };
         let Some(msg) = msg else { return Ok(()) };
         match msg {
-            Message::Writers(w) => {
-                let Some(f) = shared_folder(ctx, peer, &w.folder_id) else { continue };
-                apply.send(Apply::Writers(f, w.writers)).await.map_err(|_| applier_gone())?;
+            Message::Members(m) => {
+                let Some(f) = shared_folder(ctx, peer, &m.folder_id) else { continue };
+                apply.send(Apply::Members(f, m.statements)).await.map_err(|_| applier_gone())?;
+            }
+            Message::OwnerKey(k) => {
+                // In order with the membership that makes this device an owner.
+                let Some(f) = shared_folder(ctx, peer, &k.folder_id) else { continue };
+                apply.send(Apply::OwnerKey(f, peer.device_pk, k.secret)).await.map_err(|_| applier_gone())?;
             }
             Message::Index(idx) => {
                 let Some(f) = shared_folder(ctx, peer, &idx.folder_id) else { continue };
@@ -370,8 +456,14 @@ async fn read_loop(
                 peer.answer(r);
             }
             Message::Join(j) => {
-                // A folder added while connected.
-                for (folder, access, their) in check_join(ctx, &j, est, &BTreeSet::new(), peer.lan) {
+                // A folder added while connected (a refused invitation is not worth ending the session over).
+                let checked = check_join(ctx, &j, est, &BTreeSet::new(), peer.lan);
+                for id in &checked.changed {
+                    if let Some(f) = ctx.registry.folder(id) {
+                        crate::roles::changed(ctx, &f).await;
+                    }
+                }
+                for (folder, access, their) in checked.shared {
                     if peer.access(&folder).is_some() {
                         continue;
                     }
@@ -396,19 +488,35 @@ async fn read_loop(
     }
 }
 
-/// What the peer sent that changes the folder's core.
+/// What the peer sent that changes the folder's membership or core.
 enum Apply {
-    Writers(Arc<FolderShared>, Vec<trs_sync_proto::sign::Writer>),
+    Members(Arc<FolderShared>, Vec<trs_sync_proto::members::Statement>),
+    /// The folder secret from an owner (its key), for this device as a new co-owner.
+    OwnerKey(Arc<FolderShared>, [u8; 32], [u8; 32]),
     Index(Arc<FolderShared>, RemoteIndex),
 }
 
-/// Applies the peer's index and writers in the order they came, off the read loop: applying waits for the
+/// Applies the peer's membership and index in the order they came, off the read loop: applying waits for the
 /// folder's core, which a pull may hold while it waits for this very peer's answers. The first that fails
 /// ends the session with its reason.
-async fn apply_loop(who: ShortId, mut queue: mpsc::Receiver<Apply>, failed: oneshot::Sender<io::Error>) {
+async fn apply_loop(ctx: Arc<Ctx>, who: ShortId, mut queue: mpsc::Receiver<Apply>, failed: oneshot::Sender<io::Error>) {
     while let Some(a) = queue.recv().await {
+        let a = match a {
+            Apply::Members(f, statements) => {
+                // Statements a member cannot have made are skipped, not fatal (an older view of the folder).
+                if crate::roles::add(&f, statements) {
+                    crate::roles::changed(&ctx, &f).await;
+                }
+                continue;
+            }
+            Apply::OwnerKey(f, from, secret) => {
+                crate::roles::owner_key(&ctx, &f, &from, secret).await;
+                continue;
+            }
+            a => a,
+        };
         let res = tokio::task::spawn_blocking(move || match a {
-            Apply::Writers(f, w) => lock(&f.core).add_writers(&w).map(|_| ()).map_err(|e| e.to_string()),
+            Apply::Members(..) | Apply::OwnerKey(..) => Ok::<(), String>(()),
             Apply::Index(f, ri) => {
                 let done = ri.done;
                 let stored = lock(&f.core).apply_remote(who, ri).map_err(|e| e.to_string())?;

@@ -6,6 +6,8 @@
 #   … | bash -s -- --version 0.1.0    a specific release instead of the latest
 #   … | bash -s -- --no-launch        don't open the app afterwards
 #   … | bash -s -- --uninstall        remove the app and the command link (asks before deleting your data)
+#   install.sh --zip Seedwell-X.zip [--sha256 HEX]   install a zip you already have (a test build), checked
+#                                     against HEX when given; same quit, swap and relaunch as an update
 #
 # What it touches: /Applications/Seedwell.app (or ~/Applications if /Applications is not writable), the
 # `seedwell` link if you ask for it, and a temporary folder. Downloaded files are never touched.
@@ -18,14 +20,16 @@ EXE_NAME="SeedwellApp"
 # SEEDWELL_INSTALL_DIR: install somewhere else (tests); default /Applications, else ~/Applications.
 INSTALL_DIR="${SEEDWELL_INSTALL_DIR:-}"
 
-version=""; cli=0; launch=1; uninstall=0
+version=""; cli=0; launch=1; uninstall=0; local_zip=""; want_sha=
 while [ $# -gt 0 ]; do
   case "$1" in
     --version) version="${2:?--version needs a value}"; shift ;;
     --cli) cli=1 ;;
     --no-launch) launch=0 ;;
     --uninstall) uninstall=1 ;;
-    -h|--help) sed -n '2,11p' "$0" 2>/dev/null || true; exit 0 ;;
+    --zip) local_zip="${2:?--zip needs a file}"; shift ;;
+    --sha256) want_sha="${2:?--sha256 needs a value}"; shift ;;
+    -h|--help) sed -n '2,13p' "$0" 2>/dev/null || true; exit 0 ;;
     *) echo "seedwell-install: unknown option $1" >&2; exit 2 ;;
   esac
   shift
@@ -99,14 +103,27 @@ if [ -n "$version" ]; then base="$REPO_URL/releases/download/v${version#v}"; els
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
-say "Downloading $APP_NAME${version:+ $version}"
-curl -fsSL --retry 3 -o "$tmp/SHA256SUMS" "$base/SHA256SUMS" || die "could not download $base/SHA256SUMS"
-zip=$(awk '$2 ~ /^Seedwell-.*\.zip$/ {print $2; exit}' "$tmp/SHA256SUMS")
-[ -n "$zip" ] || die "SHA256SUMS lists no Seedwell zip"
-curl -fSL --retry 3 --progress-bar -o "$tmp/$zip" "$base/$zip" || die "could not download $base/$zip"
+if [ -n "$local_zip" ]; then
+  [ -f "$local_zip" ] || die "no such file: $local_zip"
+  zip=$(basename "$local_zip")
+  cp "$local_zip" "$tmp/$zip"
+  have=$(shasum -a 256 "$tmp/$zip" | cut -d' ' -f1)
+  if [ -n "$want_sha" ]; then
+    [ "$have" = "$(printf '%s' "$want_sha" | tr 'A-F' 'a-f')" ] || die "checksum mismatch: $zip is $have, not $want_sha; nothing was installed"
+    say "Checked the SHA-256 checksum of $zip"
+  else
+    say "Installing $zip (SHA-256 $have, not checked: no --sha256 given)"
+  fi
+else
+  say "Downloading $APP_NAME${version:+ $version}"
+  curl -fsSL --retry 3 -o "$tmp/SHA256SUMS" "$base/SHA256SUMS" || die "could not download $base/SHA256SUMS"
+  zip=$(awk '$2 ~ /^Seedwell-.*\.zip$/ {print $2; exit}' "$tmp/SHA256SUMS")
+  [ -n "$zip" ] || die "SHA256SUMS lists no Seedwell zip"
+  curl -fSL --retry 3 --progress-bar -o "$tmp/$zip" "$base/$zip" || die "could not download $base/$zip"
 
-say "Checking the SHA-256 checksum"
-(cd "$tmp" && grep " $zip\$" SHA256SUMS | shasum -a 256 -c - >/dev/null) || die "checksum mismatch: the download is damaged or not the published file; nothing was installed"
+  say "Checking the SHA-256 checksum"
+  (cd "$tmp" && grep " $zip\$" SHA256SUMS | shasum -a 256 -c - >/dev/null) || die "checksum mismatch: the download is damaged or not the published file; nothing was installed"
+fi
 
 ditto -x -k "$tmp/$zip" "$tmp/unpacked"
 new="$tmp/unpacked/$APP_NAME.app"
@@ -125,8 +142,8 @@ if [ -d "$dest" ]; then
   rm -rf "$dest"
 fi
 ditto "$new" "$dest"
-# Fetched with curl, so it carries no quarantine mark; clear one anyway in case this script itself was
-# downloaded in a browser and something inherited the mark.
+# Fetched with curl, so it carries no quarantine mark; clear one anyway in case this script itself, or a --zip
+# file, was downloaded in a browser or synced by a cloud drive and carries the mark.
 xattr -dr com.apple.quarantine "$dest" 2>/dev/null || true
 v=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$dest/Contents/Info.plist" 2>/dev/null || echo "")
 say "Installed $APP_NAME $v in $dest_dir"

@@ -66,7 +66,7 @@ import SeedwellFinderShared
             return FinderStatus.Folder(
                 id: f.id, name: f.name, path: realPath(f.path),
                 badge: badge(f), pending: a.pending, pendingMore: a.pendingMore, conflicts: a.conflicts,
-                issues: f.issues.map(\.path).filter { !$0.isEmpty }, complete: !a.ownIgnores)
+                issues: f.issues.map(\.path).filter { !$0.isEmpty }, complete: !a.ownIgnores, canShare: SyncText.canShare(f.role))
         }
         return FinderStatus(running: s.running, folders: folders)
     }
@@ -86,7 +86,7 @@ import SeedwellFinderShared
         case .paused: return .paused
         case .missing, .error: return .error
         case .starting, .scanning: b = .syncing
-        case .waitingForDevices: b = .offline
+        case .waitingForDevices, .waitingForAdmin: b = .offline
         case .syncing:
             let (down, up) = (f.rateIn > 0 || f.needFiles > 0, f.rateOut > 0)
             b = down && up ? .syncing : down ? .downloading : up ? .uploading : .syncing

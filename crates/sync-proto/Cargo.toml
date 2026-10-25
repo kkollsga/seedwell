@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish = false
-description = "Seedwell Sync v1: folder keys and their derivation, device ids, the signed file model and the wire messages (sans-I/O)"
+description = "Seedwell Sync: the folder key, roles and invitations, device ids, the signed file model and the wire messages (sans-I/O)"
 
 [dependencies]
 # Each dependency is justified in README.md.

@@ -2,4 +2,5 @@
 
 mod flow;
 mod garbage;
+mod golden;
 mod roundtrip;

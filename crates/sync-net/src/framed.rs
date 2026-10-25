@@ -21,7 +21,7 @@ fn bad(e: impl std::fmt::Display) -> io::Error {
 }
 
 fn compressible(m: &Message) -> bool {
-    matches!(m, Message::Index(_) | Message::Writers(_) | Message::Addresses(_) | Message::Join(_))
+    matches!(m, Message::Index(_) | Message::Members(_) | Message::Addresses(_) | Message::Join(_))
 }
 
 /// Encodes `m` into one frame, compressing it when that pays.
@@ -130,7 +130,7 @@ mod tests {
         let (a, b) = tokio::io::duplex(1 << 16);
         let mut w = Writer::new(a);
         let mut r = Reader::new(b);
-        let hello = Message::Hello(Hello { protocol: 1, client: "Seedwell 0.1.5".into(), device_name: "Mac".into() });
+        let hello = Message::Hello(Hello::new("Seedwell 0.1.6".into(), "Mac".into()));
         let close = Message::Close(Close { reason: "x".repeat(200) });
         w.send(&hello).await.unwrap();
         w.send(&close).await.unwrap();

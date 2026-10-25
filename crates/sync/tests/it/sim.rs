@@ -47,8 +47,10 @@ use trs_sync::index::{IndexStore, LocalRecord, MemStore, Meta as IndexMeta, Need
 use trs_sync::pull::{ChunkRequest, ChunkSource, FetchError};
 use trs_sync::scan::ScanError;
 use trs_sync_proto::device::DeviceKey;
+
+use crate::flow::{Key, learn_writers};
 use trs_sync_proto::ids::ShortId;
-use trs_sync_proto::keys::{Access, FolderKey, FolderSecret};
+use trs_sync_proto::keys::Access;
 use trs_sync_proto::model::{FileKind, IndexEntry, STATE_DIR};
 use trs_sync_proto::sign::Writer;
 
@@ -468,7 +470,6 @@ struct Device {
     writer: bool,
     short: ShortId,
     key: Arc<DeviceKey>,
-    cert: Option<[u8; 64]>,
     folder_pk: [u8; 32],
     access: Access,
     real: MemFs,
@@ -484,7 +485,6 @@ struct Device {
 #[allow(clippy::too_many_arguments)]
 fn open_core(
     key: &Arc<DeviceKey>,
-    cert: Option<[u8; 64]>,
     folder_pk: [u8; 32],
     access: Access,
     store: &Arc<Mutex<MemStore>>,
@@ -513,7 +513,7 @@ fn open_core(
         cfg,
         Box::new(SimStore { inner: store.clone(), ctl: ctl.clone() }),
         Arc::new(fs.clone()),
-        cert.map(|c| (key.clone(), c)),
+        Some(key.clone()),
         clock.clone(),
         new_id,
         Ignore::defaults(),
@@ -531,7 +531,6 @@ impl Device {
         }
         self.core = open_core(
             &self.key,
-            self.cert,
             self.folder_pk,
             self.access,
             &self.store,
@@ -732,7 +731,7 @@ impl Sim {
         let cfg = Cfg::from_seed(&mut rng, steps, mode);
         let base = Arc::new(AtomicI64::new(START_NS));
         let secret: [u8; 32] = rng.bytes(32).try_into().unwrap();
-        let rw = FolderKey::ReadWrite(FolderSecret::from_bytes(secret));
+        let rw = Key::rw(secret);
         let ro = rw.read_only().unwrap();
         let mut devs = Vec::new();
         for i in 0..cfg.devices {
@@ -754,10 +753,8 @@ impl Sim {
             let store = Arc::new(Mutex::new(MemStore::new(rng.next())));
             let clock = Arc::new(SimClock { base: base.clone(), skew });
             let ids = Arc::new(AtomicU64::new((i as u64 + 1) << 40));
-            let cert = key.writer_cert(dk.public_key());
             let core = open_core(
                 &dk,
-                cert,
                 *key.public_key(),
                 key.access(),
                 &store,
@@ -772,7 +769,6 @@ impl Sim {
                 writer: key.access() == Access::Write,
                 short: core.me(),
                 key: dk,
-                cert,
                 folder_pk: *key.public_key(),
                 access: key.access(),
                 real,
@@ -880,7 +876,7 @@ impl Sim {
         let times = if dup { 2 } else { 1 };
         for _ in 0..times {
             let d = &mut self.devs[j];
-            let r = d.core.add_writers(&msg.writers).and_then(|_| {
+            let r = learn_writers(&mut d.core, &msg.writers).and_then(|_| {
                 d.core.apply_remote(
                     peer,
                     RemoteIndex { index_id: msg.index_id, full: msg.full, done: msg.done, entries: msg.entries.clone() },

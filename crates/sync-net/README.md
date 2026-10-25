@@ -1,7 +1,7 @@
 # trs-sync-net
 
 The folder-sync driver (SPEC §7G): devices talk to each other, folders run, and the app, the CLI and agents
-get one API, `SyncHandle`. The rules for *what* to sync live in `trs-sync`; the wire format and the keys in
+get one API, `SyncHandle`. The rules for *what* to sync live in `trs-sync`; the wire format, keys and roles in
 `trs-sync-proto`. This crate moves bytes and runs the loops. `#![forbid(unsafe_code)]`.
 
 It is a compartment of its own: its own port, its own state (`sync.toml`, `sync/<folder>.redb`), its own
@@ -17,23 +17,28 @@ dialer                                   acceptor
   TLS 1.3, both sides present their Ed25519 device key as a raw public key (RFC 7250), ALPN seedwell-sync/1
   Hello ◀──────────────────────────────▶ Hello            (client "Seedwell x.y.z", device name)
   Join (folders it believes are shared,
-        with every proof its key makes) ▶
-                                       ◀ Join (only folders the dialer proved)
-  per shared folder: Writers, then Index (full, or the changes since what the peer holds)
+        with its grants, or an invitation) ▶
+                                       ◀ Join (only folders the dialer proved), or Close with the
+                                         reason an invitation was refused
+  per shared folder: Members, then Index (full, or the changes since what the peer holds)
   then, both ways: Index updates as files change, Request/Response for chunks, Ping when idle
 ```
 
 - **Identity** is the TLS key. The verifiers accept any Ed25519 key and check only the handshake signatures;
-  which devices are welcome is decided by the folder proofs, bound to the session by the TLS exporter value.
+  which devices are welcome is decided by each folder's membership (`roles.rs`): the peer's key must have a role,
+  or it redeems an invitation (bound to the session by the TLS exporter value) with an owner or admin, which
+  admits it and signs its grant.
+- **Membership** lives beside the core (`FolderShared::membership`, kept in `sync/<folder>.members`), so the UI
+  and the sessions read it without waiting for a pull. When it changes, `roles::changed` updates the core's
+  writers and this device's access, cuts off a device that is no longer a member (after telling it), sends the
+  statements on, re-signs admins' admissions on an owner, and gives the folder secret to new co-owners.
 - **Privacy:** the dialer proves first. The acceptor answers only for folders the dialer proved, so a
   stranger who connects learns nothing about which folders this device has.
-- **Storage-level access is refused** for now (encrypted members are v1.x): a device that proves only the
-  Encrypted key is never sent plaintext.
 - **Serving a chunk:** only from a file our index holds as a valid file with exactly that chunk at that
   offset, and only if the bytes still hash right.
 - **Two queues per session:** control (index, requests) before data (responses), so a big transfer never
   holds up index updates. At most 32 MiB of a peer's requests are read at once.
-- **Compression:** index, writer, address and join messages over 1 KiB are deflated; file data is not.
+- **Compression:** index, membership, address and join messages over 1 KiB are deflated; file data is not.
   Inflating is capped at the frame limit (a compression bomb is refused).
 
 ## A folder
@@ -120,8 +125,9 @@ relay sees only ciphertext.
 
 ## Keys
 
-`secrets.rs`: the device key and the folder keys live in a `SecretStore`: the Keychain in the app, a 0600
-file for the daemon and tests. Never in `sync.toml`, the synced folder or a log.
+`secrets.rs`: the device key, an owner's folder secret, a joining device's invitation and the links this device
+made live in a `SecretStore`: the Keychain in an app build that may use it, else a 0600 file. Never in
+`sync.toml`, the synced folder or a log.
 
 ## Dependencies
 
@@ -139,7 +145,10 @@ file for the daemon and tests. Never in `sync.toml`, the synced folder or a log.
 ## Tests
 
 `tests/it`: whole services on loopback with temp state and temp folders: two devices syncing both ways
-over TLS, a device with the wrong key getting nothing, a read-only device whose edits stay local. LAN discovery
+over TLS, a read-only device whose edits stay local, two devices pulling from each other at once. Roles
+(`roles.rs`): a one-use link admits one device and tells the next why not; an admin invites but cannot change
+roles or invite admins; a removed device is cut off and its changes ignored; a co-owner receives the folder key
+and changes roles; joining waits while no owner or admin is online. LAN discovery
 (`lan.rs`): two services that find each other only through announcements (unicast on loopback, own
 ports) and sync; badly signed announcements, other folders' tags and stale hours lead to no dial. uTP
 (`utp.rs`): two services with TCP dialing off sync both ways over uTP. Relays (`relay.rs`, with a test switch

@@ -2,10 +2,17 @@
 //!
 //! The decoder checks structure and caps: lengths, counts, UTF-8, enum values, sorted version vectors. Policy is
 //! the receiver's: paths ([`crate::model::validate_path`], so one bad entry can be skipped without dropping its
-//! whole batch), signatures ([`crate::sign::WriterTable`]) and proofs ([`crate::keys::FolderKey::verify_proofs`]).
+//! whole batch), signatures ([`crate::sign::WriterTable`]) and membership ([`crate::members::Membership`]).
 //!
-//! Bytes after the last field of a message are ignored, so a later version can append fields that older devices
-//! skip. A frame of an unknown type decodes to [`Message::Unknown`], which the session ignores.
+//! How the format may change is in `PROTOCOL.md` (next to this crate's sources); in short:
+//! * bytes after the last field of a message are ignored, so a later version can append fields that older devices
+//!   skip;
+//! * every record in a list (a folder of a [`Join`], an index entry, a statement, a progress update, an address
+//!   record) carries its length, so it can grow the same way, and a record holding a value this version does not
+//!   know (a file kind, a role) is skipped rather than failing its message;
+//! * a frame of an unknown type decodes to [`Message::Unknown`], which the session ignores;
+//! * behaviour that both sides must support is a feature bit ([`FEATURES`]) or a protocol version
+//!   ([`PROTOCOL`], [`MIN_PROTOCOL`]), agreed in the [`Hello`]s ([`agree`]).
 
 use crate::codec::{
     DecodeError, FLAG_COMPRESSED, Frame, Reader, put_bool, put_bytes, put_ivarint, put_len, put_str, put_varint,
@@ -16,10 +23,17 @@ use crate::keys::Proof;
 use crate::model::{
     ChunkRef, Counter, FileInfo, FileKind, IndexEntry, MAX_CHUNK, MAX_COUNTERS, MAX_PATH, SignedFile, Version,
 };
-use crate::sign::{Writer, flags_byte, kind_byte};
+use crate::members::Statement;
+use crate::sign::{flags_byte, kind_byte};
 
-/// The protocol version in [`Hello`].
-pub const PROTOCOL: u32 = 1;
+/// The highest protocol version this build speaks (in [`Hello`]). 2 is 0.1.6's, the first release with sync.
+pub const PROTOCOL: u32 = 2;
+/// The lowest protocol version this build still speaks. A breaking change raises [`PROTOCOL`] and keeps this one
+/// version behind for a while (N-1), so devices that are a release apart still sync.
+pub const MIN_PROTOCOL: u32 = 2;
+/// The optional behaviours this build supports, one bit each; a session uses those both sides have (the AND). None
+/// is defined yet. A new one takes the next free bit, documented here and in `PROTOCOL.md`; bits are never reused.
+pub const FEATURES: u64 = 0;
 
 /// Longest client string (`Seedwell <version>`), bytes.
 pub const MAX_CLIENT: usize = 128;
@@ -27,12 +41,12 @@ pub const MAX_CLIENT: usize = 128;
 pub const MAX_DEVICE_NAME: usize = 64;
 /// Folders in one [`Join`].
 pub const MAX_JOIN_FOLDERS: usize = 1024;
-/// Proofs per folder in a [`Join`] (a writer sends 3).
+/// Proofs per folder in a [`Join`] (a member sends 1 or 2 grants, a joining device 1 invitation).
 pub const MAX_PROOFS: usize = 8;
-/// Bytes of one proof of a kind this version does not know.
-pub const MAX_PROOF_BYTES: usize = 256;
-/// Writers in one [`Writers`].
-pub const MAX_WRITERS: usize = 1024;
+/// Bytes of one proof.
+pub const MAX_PROOF_BYTES: usize = 1024;
+/// Statements in one [`Members`].
+pub const MAX_STATEMENTS: usize = crate::members::MAX_STATEMENTS;
 /// Entries in one [`Index`] batch.
 pub const MAX_INDEX_ENTRIES: usize = 1000;
 /// Chunks of one file. At most 36 bytes each on the wire, so one entry with this many still fits a frame; that is
@@ -51,15 +65,56 @@ pub const MAX_ADDR: usize = 256;
 /// Longest [`Close`] reason, bytes.
 pub const MAX_REASON: usize = 256;
 
-/// Type 1, first in each direction: who is talking.
+/// Type 1, first in each direction: who is talking, and which protocol versions and features it speaks.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Hello {
-    /// [`PROTOCOL`].
+    /// The highest version it speaks ([`PROTOCOL`]).
     pub protocol: u32,
     /// `Seedwell <version>`.
     pub client: String,
     /// The device's name as its owner set it (at most [`MAX_DEVICE_NAME`] characters).
     pub device_name: String,
+    /// The lowest version it speaks ([`MIN_PROTOCOL`]; read as `protocol` when absent).
+    pub min_protocol: u32,
+    /// Its optional behaviours ([`FEATURES`]; 0 when absent).
+    pub features: u64,
+}
+
+impl Hello {
+    /// This build's Hello.
+    pub fn new(client: String, device_name: String) -> Hello {
+        Hello { protocol: PROTOCOL, client, device_name, min_protocol: MIN_PROTOCOL, features: FEATURES }
+    }
+}
+
+/// Why two devices cannot talk: their protocol ranges do not overlap.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Incompatible {
+    /// The other device's newest version is below what this one still speaks: it must be updated.
+    PeerTooOld,
+    /// This device's newest version is below what the other one still speaks: this one must be updated.
+    PeerTooNew,
+}
+
+/// What a session runs at: the version both speak and the features both have.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Agreed {
+    /// The protocol version.
+    pub protocol: u32,
+    /// The feature bits both sides have.
+    pub features: u64,
+}
+
+/// The version two devices speak: the lower of their highest, if both still speak it.
+pub fn agree(mine: &Hello, theirs: &Hello) -> Result<Agreed, Incompatible> {
+    let protocol = mine.protocol.min(theirs.protocol);
+    if protocol < mine.min_protocol {
+        return Err(Incompatible::PeerTooOld);
+    }
+    if protocol < theirs.min_protocol {
+        return Err(Incompatible::PeerTooNew);
+    }
+    Ok(Agreed { protocol, features: mine.features & theirs.features })
 }
 
 /// One folder in a [`Join`].
@@ -67,7 +122,7 @@ pub struct Hello {
 pub struct JoinFolder {
     /// The folder.
     pub folder_id: FolderId,
-    /// Every proof the sender can make ([`crate::keys::FolderKey::proofs`]).
+    /// The statements that make the sender a member, or the invitation it redeems ([`Proof`]).
     pub proofs: Vec<Proof>,
     /// The sender's index id for this folder (a new one means "my sequence numbers started again").
     pub my_index_id: u64,
@@ -84,13 +139,30 @@ pub struct Join {
     pub folders: Vec<JoinFolder>,
 }
 
-/// Type 3: writers of a folder the sender knows (each checked on arrival, [`crate::sign::WriterTable::insert`]).
+/// Type 3: membership statements of a folder the sender knows (each checked on arrival,
+/// [`crate::members::Membership::add`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Writers {
+pub struct Members {
     /// The folder.
     pub folder_id: FolderId,
-    /// The writers.
-    pub writers: Vec<Writer>,
+    /// The statements.
+    pub statements: Vec<Statement>,
+}
+
+/// Type 16: the folder secret `S`, from an owner to a device it made a co-owner. Sent only inside the TLS
+/// session, only to a device whose grant says Owner; the receiver checks that it gives the folder's key.
+#[derive(Clone, PartialEq, Eq)]
+pub struct OwnerKey {
+    /// The folder.
+    pub folder_id: FolderId,
+    /// `S`.
+    pub secret: [u8; 32],
+}
+
+impl std::fmt::Debug for OwnerKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "OwnerKey({:?})", self.folder_id)
+    }
 }
 
 /// Type 4: a batch of the sender's index (at most 1000 entries or about 1 MiB).
@@ -331,7 +403,7 @@ pub enum Message {
     /// 2.
     Join(Join),
     /// 3.
-    Writers(Writers),
+    Members(Members),
     /// 4.
     Index(Index),
     /// 5.
@@ -356,6 +428,8 @@ pub enum Message {
     RelayData(RelayData),
     /// 15.
     RelayClose(RelayClose),
+    /// 16.
+    OwnerKey(OwnerKey),
     /// A type this version does not know: skipped, not an error. Encodes as an empty frame of that type.
     Unknown(u8),
 }
@@ -366,7 +440,7 @@ impl Message {
         match self {
             Message::Hello(_) => 1,
             Message::Join(_) => 2,
-            Message::Writers(_) => 3,
+            Message::Members(_) => 3,
             Message::Index(_) => 4,
             Message::Request(_) => 5,
             Message::Response(_) => 6,
@@ -379,6 +453,7 @@ impl Message {
             Message::RelayOpen(_) => 13,
             Message::RelayData(_) => 14,
             Message::RelayClose(_) => 15,
+            Message::OwnerKey(_) => 16,
             Message::Unknown(k) => *k,
         }
     }
@@ -401,32 +476,29 @@ impl Message {
                 put_varint(out, u64::from(m.protocol));
                 put_str(out, &m.client);
                 put_str(out, &m.device_name);
+                put_varint(out, u64::from(m.min_protocol));
+                put_varint(out, m.features);
             }
             Message::Join(m) => {
-                put_len(out, m.folders.len());
-                for f in &m.folders {
+                put_records(out, &m.folders, |out, f| {
                     out.extend_from_slice(&f.folder_id.0);
                     put_len(out, f.proofs.len());
                     f.proofs.iter().for_each(|p| put_proof(out, p));
                     put_varint(out, f.my_index_id);
                     put_varint(out, f.your_index_id);
                     put_varint(out, f.your_max_seq);
-                }
+                });
             }
-            Message::Writers(m) => {
+            Message::Members(m) => {
                 out.extend_from_slice(&m.folder_id.0);
-                put_len(out, m.writers.len());
-                for w in &m.writers {
-                    out.extend_from_slice(&w.device_pk);
-                    out.extend_from_slice(&w.cert);
-                }
+                put_len(out, m.statements.len());
+                m.statements.iter().for_each(|st| put_bytes(out, &st.to_bytes()));
             }
             Message::Index(m) => {
                 out.extend_from_slice(&m.folder_id.0);
                 put_varint(out, m.index_id);
                 put_bool(out, m.full);
-                put_len(out, m.entries.len());
-                m.entries.iter().for_each(|e| put_entry(out, e));
+                put_records(out, &m.entries, put_entry);
                 put_bool(out, m.done);
             }
             Message::Request(m) => {
@@ -445,23 +517,21 @@ impl Message {
             }
             Message::Progress(m) => {
                 out.extend_from_slice(&m.folder_id.0);
-                put_len(out, m.updates.len());
-                for u in &m.updates {
+                put_records(out, &m.updates, |out, u| {
                     put_str(out, &u.path);
                     put_version(out, &u.version);
                     put_len(out, u.have.len());
                     u.have.iter().for_each(|&i| put_varint(out, u64::from(i)));
-                }
+                });
             }
             Message::Addresses(m) => {
-                put_len(out, m.records.len());
-                for r in &m.records {
+                put_records(out, &m.records, |out, r| {
                     out.extend_from_slice(&r.device_pk);
                     put_strs(out, &r.addrs);
                     put_str(out, &r.relay);
                     put_varint(out, r.issued_s);
                     out.extend_from_slice(&r.sig);
-                }
+                });
             }
             Message::Ping | Message::Unknown(_) => {}
             Message::Close(m) => put_str(out, &m.reason),
@@ -483,6 +553,10 @@ impl Message {
                 put_bytes(out, &m.data);
             }
             Message::RelayClose(m) => put_varint(out, m.session),
+            Message::OwnerKey(m) => {
+                out.extend_from_slice(&m.folder_id.0);
+                out.extend_from_slice(&m.secret);
+            }
         }
     }
 
@@ -493,23 +567,28 @@ impl Message {
         }
         let r = &mut Reader::new(frame.payload);
         Ok(match frame.kind {
-            1 => Message::Hello(Hello {
-                protocol: r.u32("protocol")?,
-                client: r.str(MAX_CLIENT, "client")?,
-                device_name: device_name(r)?,
-            }),
-            2 => Message::Join(Join { folders: r.list(MAX_JOIN_FOLDERS, 36, "folders", join_folder)? }),
-            3 => Message::Writers(Writers {
+            1 => {
+                let protocol = r.u32("protocol")?;
+                let client = r.str(MAX_CLIENT, "client")?;
+                let device_name = device_name(r)?;
+                let min_protocol = if r.remaining() > 0 { r.u32("min protocol")? } else { protocol };
+                let features = if r.remaining() > 0 { r.varint("features")? } else { 0 };
+                Message::Hello(Hello { protocol, client, device_name, min_protocol, features })
+            }
+            2 => Message::Join(Join { folders: records(r, MAX_JOIN_FOLDERS, "folders", join_folder)? }),
+            3 => Message::Members(Members {
                 folder_id: FolderId(r.array("folder id")?),
-                writers: r.list(MAX_WRITERS, 96, "writers", |r| {
-                    Ok(Writer { device_pk: r.array("writer key")?, cert: r.array("writer certificate")? })
+                // A statement this version cannot even frame (a signer kind it does not know) is left out: it could
+                // not be checked or passed on as it came.
+                statements: records(r, MAX_STATEMENTS, "statements", |r| {
+                    Statement::read(r).map_err(|_| DecodeError::Invalid("statement"))
                 })?,
             }),
             4 => Message::Index(Index {
                 folder_id: FolderId(r.array("folder id")?),
                 index_id: r.varint("index id")?,
                 full: r.bool("full")?,
-                entries: r.list(MAX_INDEX_ENTRIES, 90, "index entries", entry)?,
+                entries: records(r, MAX_INDEX_ENTRIES, "index entries", entry)?,
                 done: r.bool("done")?,
             }),
             5 => Message::Request(Request {
@@ -528,9 +607,9 @@ impl Message {
             }),
             7 => Message::Progress(Progress {
                 folder_id: FolderId(r.array("folder id")?),
-                updates: r.list(MAX_PROGRESS_UPDATES, 3, "progress updates", progress_update)?,
+                updates: records(r, MAX_PROGRESS_UPDATES, "progress updates", progress_update)?,
             }),
-            8 => Message::Addresses(Addresses { records: r.list(MAX_RECORDS, 99, "address records", record)? }),
+            8 => Message::Addresses(Addresses { records: records(r, MAX_RECORDS, "address records", record)? }),
             9 => Message::Ping,
             10 => Message::Close(Close { reason: r.str(MAX_REASON, "reason")? }),
             11 => Message::Rendezvous(Rendezvous {
@@ -551,6 +630,7 @@ impl Message {
                 data: r.bytes(MAX_DATA, "data")?.to_vec(),
             }),
             15 => Message::RelayClose(RelayClose { session: r.varint("session")? }),
+            16 => Message::OwnerKey(OwnerKey { folder_id: FolderId(r.array("folder id")?), secret: r.array("folder secret")? }),
             k => Message::Unknown(k),
         })
     }
@@ -565,6 +645,40 @@ fn device_name(r: &mut Reader<'_>) -> Result<String, DecodeError> {
     Ok(name)
 }
 
+/// A list of records, each with its length first: `count ‖ n × (varint length ‖ record)`.
+fn put_records<T>(out: &mut Vec<u8>, items: &[T], mut put: impl FnMut(&mut Vec<u8>, &T)) {
+    put_len(out, items.len());
+    let mut b = Vec::new();
+    for item in items {
+        b.clear();
+        put(&mut b, item);
+        put_bytes(out, &b);
+    }
+}
+
+/// Reads a list written by [`put_records`]. Each record is read from its own bytes: what follows the fields this
+/// version knows is ignored, and a record with a value it does not know ([`DecodeError::Invalid`]: a file kind, a
+/// role) is skipped. Every other error fails the message.
+fn records<T>(
+    r: &mut Reader<'_>,
+    max: usize,
+    what: &'static str,
+    mut item: impl FnMut(&mut Reader<'_>) -> Result<T, DecodeError>,
+) -> Result<Vec<T>, DecodeError> {
+    // Each record is one byte at least (its length); the count is checked against the bytes left.
+    let n = r.count(max, 1, what)?;
+    let mut out = Vec::with_capacity(n.min(1024));
+    for _ in 0..n {
+        let b = r.bytes(crate::codec::MAX_FRAME as usize, what)?;
+        match item(&mut Reader::new(b)) {
+            Ok(v) => out.push(v),
+            Err(DecodeError::Invalid(_)) => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(out)
+}
+
 fn put_strs(out: &mut Vec<u8>, list: &[String]) {
     put_len(out, list.len());
     list.iter().for_each(|s| put_str(out, s));
@@ -574,16 +688,14 @@ fn strs(r: &mut Reader<'_>, what: &'static str) -> Result<Vec<String>, DecodeErr
     r.list(MAX_ADDRS, 1, what, |r| r.str(MAX_ADDR, "address"))
 }
 
-const PROOF_WRITER: u8 = 1;
-const PROOF_READ: u8 = 2;
-const PROOF_STORAGE: u8 = 3;
+const PROOF_GRANT: u8 = 4;
+const PROOF_INVITE: u8 = 5;
 
 /// A proof is `u8 kind ‖ bytes`, so a device can carry past a kind from a newer version.
 fn put_proof(out: &mut Vec<u8>, p: &Proof) {
     let (kind, data): (u8, &[u8]) = match p {
-        Proof::Writer(c) => (PROOF_WRITER, c),
-        Proof::Read(t) => (PROOF_READ, t),
-        Proof::Storage(t) => (PROOF_STORAGE, t),
+        Proof::Grant(b) => (PROOF_GRANT, b),
+        Proof::Invite(b) => (PROOF_INVITE, b),
         Proof::Unknown { kind, data } => (*kind, data),
     };
     out.push(kind);
@@ -593,11 +705,9 @@ fn put_proof(out: &mut Vec<u8>, p: &Proof) {
 fn proof(r: &mut Reader<'_>) -> Result<Proof, DecodeError> {
     let kind = r.u8("proof kind")?;
     let data = r.bytes(MAX_PROOF_BYTES, "proof")?;
-    let bad = |_| DecodeError::Invalid("proof length");
     Ok(match kind {
-        PROOF_WRITER => Proof::Writer(data.try_into().map_err(bad)?),
-        PROOF_READ => Proof::Read(data.try_into().map_err(bad)?),
-        PROOF_STORAGE => Proof::Storage(data.try_into().map_err(bad)?),
+        PROOF_GRANT => Proof::Grant(data.to_vec()),
+        PROOF_INVITE => Proof::Invite(data.to_vec()),
         kind => Proof::Unknown { kind, data: data.to_vec() },
     })
 }
@@ -636,6 +746,7 @@ const ENTRY_INVALID: u8 = 1;
 const FILE_FLAGS: u8 = 0b11;
 
 fn put_entry(out: &mut Vec<u8>, e: &IndexEntry) {
+    // Inside an Index each entry has its length first (put_records); stores keep the bare form.
     encode_entry(out, e.sequence, e.invalid, &e.file);
 }
 
@@ -745,17 +856,40 @@ mod tests {
         Message::decode(frame).unwrap()
     }
 
+    fn hello(protocol: u32, min_protocol: u32, features: u64) -> Hello {
+        Hello { protocol, client: "Seedwell 0.1.6".into(), device_name: "Mac".into(), min_protocol, features }
+    }
+
     #[test]
-    fn hello_is_byte_exact() {
-        let m = Message::Hello(Hello { protocol: 1, client: "Seedwell 0.1.5".into(), device_name: "Mac".into() });
+    fn hello_is_byte_exact_and_reads_without_its_range() {
+        let m = Message::Hello(hello(2, 2, 0));
         let mut out = Vec::new();
         m.encode(&mut out);
-        let mut want = vec![0, 0, 0, 22, 1, 0, 1, 14];
-        want.extend_from_slice(b"Seedwell 0.1.5");
+        let mut want = vec![0, 0, 0, 24, 1, 0, 2, 14];
+        want.extend_from_slice(b"Seedwell 0.1.6");
         want.push(3);
         want.extend_from_slice(b"Mac");
+        want.extend_from_slice(&[2, 0]);
         assert_eq!(out, want);
         assert_eq!(roundtrip(&m), m);
+        // Without the appended range: one version, no features.
+        let f = Frame { kind: 1, flags: 0, payload: &want[6..want.len() - 2] };
+        assert_eq!(Message::decode(f), Ok(Message::Hello(hello(2, 2, 0))));
+        let f = Frame { kind: 1, flags: 0, payload: &[&want[6..], &[0xff, 0x01][..]].concat() };
+        assert_eq!(Message::decode(f), Ok(Message::Hello(hello(2, 2, 0))), "later fields are ignored");
+    }
+
+    #[test]
+    fn versions_are_agreed_from_both_ranges() {
+        let me = hello(PROTOCOL, MIN_PROTOCOL, FEATURES);
+        assert_eq!(agree(&me, &me), Ok(Agreed { protocol: PROTOCOL, features: FEATURES }));
+        // A newer device that still speaks ours, with features we do not have.
+        let newer = hello(PROTOCOL + 3, PROTOCOL, 0b1011);
+        assert_eq!(agree(&me, &newer), Ok(Agreed { protocol: PROTOCOL, features: 0 }));
+        assert_eq!(agree(&hello(5, 2, 0b0110), &hello(4, 3, 0b0011)), Ok(Agreed { protocol: 4, features: 0b0010 }));
+        // One that no longer does, and one this device no longer speaks.
+        assert_eq!(agree(&me, &hello(PROTOCOL + 2, PROTOCOL + 1, 0)), Err(Incompatible::PeerTooNew));
+        assert_eq!(agree(&hello(4, 3, 0), &hello(2, 1, 0)), Err(Incompatible::PeerTooOld));
     }
 
     #[test]
@@ -773,7 +907,7 @@ mod tests {
     #[test]
     fn device_names_are_capped_in_characters() {
         let name =
-            |n: usize| Message::Hello(Hello { protocol: 1, client: String::new(), device_name: "ø".repeat(n) });
+            |n: usize| Message::Hello(Hello { device_name: "ø".repeat(n), ..hello(2, 2, 0) });
         assert_eq!(roundtrip(&name(64)), name(64));
         let mut out = Vec::new();
         name(65).encode(&mut out);
@@ -782,14 +916,26 @@ mod tests {
     }
 
     #[test]
-    fn proofs_of_a_wrong_length_are_refused() {
-        let mut p = vec![1];
-        p.extend_from_slice(&[0; 32]); // folder id
-        p.extend_from_slice(&[1, PROOF_READ, 31]);
-        p.extend_from_slice(&[0; 31]);
-        p.extend_from_slice(&[0, 0, 0]);
-        let f = Frame { kind: 2, flags: 0, payload: &p };
-        assert_eq!(Message::decode(f), Err(DecodeError::Invalid("proof length")));
+    fn members_and_owner_keys_roundtrip() {
+        use crate::members::{Body, Role, Statement};
+        let secret = crate::keys::FolderSecret::from_bytes([1; 32]);
+        let fid = FolderId::of_public_key(secret.public_key());
+        let st = Statement::by_owner(&secret, Body::Grant { device: [2; 32], role: Role::Admin, serial: 3, at_s: 4, invite: None });
+        let m = Message::Members(Members { folder_id: fid, statements: vec![st.clone(), st] });
+        assert_eq!(roundtrip(&m), m);
+        let k = Message::OwnerKey(OwnerKey { folder_id: fid, secret: [1; 32] });
+        assert_eq!(roundtrip(&k), k);
+        assert!(!format!("{k:?}").contains("[1, 1"), "the secret never prints");
+        let j = Message::Join(Join {
+            folders: vec![JoinFolder {
+                folder_id: fid,
+                proofs: vec![Proof::Grant(vec![1, 2]), Proof::Invite(vec![3]), Proof::Unknown { kind: 9, data: vec![] }],
+                my_index_id: 1,
+                your_index_id: 2,
+                your_max_seq: 3,
+            }],
+        });
+        assert_eq!(roundtrip(&j), j);
     }
 
     #[test]

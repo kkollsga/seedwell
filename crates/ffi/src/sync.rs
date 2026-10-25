@@ -16,7 +16,8 @@ use trs_sync_net::secrets::{FileSecrets, SecretStore};
 use trs_sync_net::status::{FolderState, FolderStatus};
 use trs_sync_net::{Keep, SyncError, SyncHandle};
 use trs_sync_proto::ids::FolderId;
-use trs_sync_proto::keys::{Access, Link};
+use trs_sync_proto::keys::Access;
+use trs_sync_proto::members::{InviteLink, Role};
 
 use crate::Core;
 use crate::types::CoreError;
@@ -38,6 +39,19 @@ pub enum SyncAccess {
     Encrypted,
 }
 
+/// A device's role in a folder (SPEC 7G.1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum SyncRole {
+    /// Changes roles, removes devices, invites at any role.
+    Owner,
+    /// Invites at Read & write or Read only; cannot change roles.
+    Admin,
+    /// Changes go both ways.
+    ReadWrite,
+    /// Changes only arrive.
+    ReadOnly,
+}
+
 /// What a folder is doing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum SyncState {
@@ -46,6 +60,8 @@ pub enum SyncState {
     Scanning,
     Syncing,
     WaitingForDevices,
+    /// Joining: waits for one of the folder's owners or admins to be online and admit this Mac.
+    WaitingForAdmin,
     Paused,
     /// `.seedwell` is gone: an unmounted disk or a deleted folder. Nothing is deleted anywhere.
     Missing,
@@ -66,7 +82,13 @@ pub struct SyncFolder {
     /// Its name on this Mac (the directory's name).
     pub name: String,
     pub path: String,
+    /// From the role (Read only while joining).
     pub access: SyncAccess,
+    /// This Mac's role (Read only while joining, or after it was removed: the state says which).
+    pub role: SyncRole,
+    /// When the folder stops being shared (its owners' setting), Unix seconds; `None` = no end. After it only the
+    /// owners sync: every other device is cut off (it keeps its files) and no link admits anyone.
+    pub share_until_s: Option<u64>,
     pub state: SyncState,
     /// Files and directories (as last scanned; 0 when not counted yet).
     pub files: u64,
@@ -123,24 +145,52 @@ pub struct SyncSnapshot {
     pub devices: Vec<SyncDevice>,
 }
 
-/// The keys and links of a folder this Mac may give out. Secrets: shown and copied, never logged.
+/// A device of a folder, with its role.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
-pub struct SyncShares {
-    pub read_write: Option<String>,
-    pub read_write_link: Option<String>,
-    pub read_only: Option<String>,
-    pub read_only_link: Option<String>,
+pub struct SyncMember {
+    pub device_id: String,
+    /// Its name (empty when never met).
+    pub name: String,
+    pub role: SyncRole,
+    /// A session with it is open now for this folder.
+    pub online: bool,
+    pub is_me: bool,
+    /// When its access ends: the folder's share end, for a device that is not an owner (Unix seconds); `None` =
+    /// no end.
+    pub expires_s: Option<u64>,
 }
 
-/// What a pasted key or link is, for the add modal ("Read & write · Photos").
+/// An invitation to a folder. The link is a secret: shown and copied, never logged.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct SyncInvite {
+    /// Its id (for revoking).
+    pub id: String,
+    /// The `seedwell://sync/…` link (empty for one another device made).
+    pub link: String,
+    pub role: SyncRole,
+    /// Devices it admits; 0 = unlimited. `uses == max_uses`: used up.
+    pub max_uses: u32,
+    pub uses: u32,
+    /// When it stops admitting, Unix seconds; `None` = never.
+    pub expires_s: Option<u64>,
+    pub created_s: u64,
+    pub revoked: bool,
+}
+
+/// What a pasted link is, for the add modal ("Read & write · Photos").
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct SyncLinkInfo {
-    pub access: SyncAccess,
+    /// The role it admits at.
+    pub role: SyncRole,
     /// The link's name hint, if it has one.
     pub name: Option<String>,
     pub folder_id: String,
     /// The folder is already synced on this Mac.
     pub already_synced: bool,
+    /// When it stops admitting, Unix seconds; `None` = never.
+    pub expires_s: Option<u64>,
+    /// It has expired already.
+    pub expired: bool,
 }
 
 /// A conflict copy in a folder: `Report (conflict, MacBook, 2026-10-25 14.32).txt`.
@@ -278,7 +328,13 @@ pub trait SyncBackend: Send + Sync {
     fn join(&self, key_or_link: &str, path: &str) -> Result<SyncFolder, CoreError>;
     /// Where a joined folder goes by default (`~/Seedwell/<name>`, numbered when taken).
     fn join_path(&self, key_or_link: &str) -> Option<String>;
-    fn shares(&self, id: &str) -> Result<SyncShares, CoreError>;
+    fn members(&self, id: &str) -> Vec<SyncMember>;
+    fn set_role(&self, id: &str, device_id: &str, role: SyncRole) -> Result<(), CoreError>;
+    fn remove_device(&self, id: &str, device_id: &str) -> Result<(), CoreError>;
+    fn set_share_until(&self, id: &str, until_s: u64) -> Result<(), CoreError>;
+    fn create_invite(&self, id: &str, role: SyncRole, max_uses: u32, valid_days: u32) -> Result<SyncInvite, CoreError>;
+    fn invites(&self, id: &str) -> Vec<SyncInvite>;
+    fn revoke_invite(&self, id: &str, invite_id: &str) -> Result<(), CoreError>;
     fn rename(&self, id: &str, name: &str) -> Result<SyncFolder, CoreError>;
     fn move_to(&self, id: &str, path: &str) -> Result<SyncFolder, CoreError>;
     /// Stops syncing; returns where the folder is (the app moves it to the Trash when asked to).
@@ -335,6 +391,37 @@ pub fn access_of(a: Access) -> SyncAccess {
     }
 }
 
+pub fn role_of(r: Role) -> SyncRole {
+    match r {
+        Role::Owner => SyncRole::Owner,
+        Role::Admin => SyncRole::Admin,
+        Role::ReadWrite => SyncRole::ReadWrite,
+        Role::ReadOnly => SyncRole::ReadOnly,
+    }
+}
+
+fn role_from(r: SyncRole) -> Role {
+    match r {
+        SyncRole::Owner => Role::Owner,
+        SyncRole::Admin => Role::Admin,
+        SyncRole::ReadWrite => Role::ReadWrite,
+        SyncRole::ReadOnly => Role::ReadOnly,
+    }
+}
+
+fn invite_of(i: &trs_sync_net::InviteInfo) -> SyncInvite {
+    SyncInvite {
+        id: i.id.clone(),
+        link: i.link.clone(),
+        role: role_of(i.role),
+        max_uses: i.max_uses,
+        uses: i.uses,
+        expires_s: i.expires_s,
+        created_s: i.created_s,
+        revoked: i.revoked,
+    }
+}
+
 fn state_of(s: &FolderState) -> SyncState {
     match s {
         FolderState::Starting => SyncState::Starting,
@@ -342,6 +429,7 @@ fn state_of(s: &FolderState) -> SyncState {
         FolderState::Scanning => SyncState::Scanning,
         FolderState::Syncing => SyncState::Syncing,
         FolderState::WaitingForDevices => SyncState::WaitingForDevices,
+        FolderState::WaitingForAdmin => SyncState::WaitingForAdmin,
         FolderState::Paused => SyncState::Paused,
         FolderState::Missing => SyncState::Missing,
         FolderState::Error => SyncState::Error,
@@ -354,6 +442,8 @@ fn folder_of(f: &FolderStatus) -> SyncFolder {
         name: f.name.clone(),
         path: f.path.clone(),
         access: access_of(f.access),
+        role: f.role.map_or(SyncRole::ReadOnly, role_of),
+        share_until_s: f.share_until,
         state: state_of(&f.state),
         files: f.files,
         bytes: f.bytes,
@@ -371,14 +461,17 @@ fn folder_of(f: &FolderStatus) -> SyncFolder {
     }
 }
 
-/// A pasted key or link, decoded (nothing is joined).
-pub fn parse_link(text: &str) -> Option<(SyncLinkInfo, Link)> {
-    let link = Link::parse(text).ok()?;
+/// A pasted invitation link, decoded (nothing is joined). Bare keys of the test builds are not links.
+pub fn parse_link(text: &str) -> Option<(SyncLinkInfo, InviteLink)> {
+    let link = InviteLink::parse(text).ok()?;
+    let i = &link.invite;
     let info = SyncLinkInfo {
-        access: access_of(link.key.access()),
+        role: role_of(i.role),
         name: link.name.clone(),
-        folder_id: link.key.folder_id().to_string(),
+        folder_id: i.folder_id().to_string(),
         already_synced: false,
+        expires_s: (i.expires_s != 0).then_some(i.expires_s),
+        expired: i.expired(now_s()),
     };
     Some((info, link))
 }
@@ -520,8 +613,8 @@ impl SyncBackend for RealSync {
 
     fn join(&self, key_or_link: &str, path: &str) -> Result<SyncFolder, CoreError> {
         let h = self.handle()?;
-        if Link::parse(key_or_link).is_err() {
-            return Err(failed("Not a folder key or link."));
+        if let Err(e) = InviteLink::parse(key_or_link) {
+            return Err(failed(e.to_string()));
         }
         let p = if path.trim().is_empty() {
             default_join_path(&h.settings().default_location, key_or_link).map_err(api_err)?
@@ -538,10 +631,53 @@ impl SyncBackend for RealSync {
         default_join_path(&base, key_or_link).ok().map(|p| p.display().to_string())
     }
 
-    fn shares(&self, id: &str) -> Result<SyncShares, CoreError> {
+    fn members(&self, id: &str) -> Vec<SyncMember> {
+        let (Ok(h), Ok(fid)) = (self.handle(), folder_id(id)) else { return Vec::new() };
+        h.members(&fid)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|m| SyncMember {
+                device_id: m.device.to_string(),
+                name: m.name,
+                role: role_of(m.role),
+                online: m.online,
+                is_me: m.is_me,
+                expires_s: m.expires_s,
+            })
+            .collect()
+    }
+
+    fn set_role(&self, id: &str, device_id: &str, role: SyncRole) -> Result<(), CoreError> {
         let h = self.handle()?;
-        let s = h.shares(&folder_id(id)?).map_err(sync_err)?;
-        Ok(SyncShares { read_write: s.read_write, read_write_link: s.read_write_link, read_only: s.read_only, read_only_link: s.read_only_link })
+        let device = device_id.parse().map_err(|_| failed("Not a device of this folder"))?;
+        h.set_role(&folder_id(id)?, &device, role_from(role)).map_err(sync_err)
+    }
+
+    fn remove_device(&self, id: &str, device_id: &str) -> Result<(), CoreError> {
+        let h = self.handle()?;
+        let device = device_id.parse().map_err(|_| failed("Not a device of this folder"))?;
+        h.remove_device(&folder_id(id)?, &device).map_err(sync_err)
+    }
+
+    fn set_share_until(&self, id: &str, until_s: u64) -> Result<(), CoreError> {
+        let h = self.handle()?;
+        h.set_share_until(&folder_id(id)?, until_s).map_err(sync_err)
+    }
+
+    fn create_invite(&self, id: &str, role: SyncRole, max_uses: u32, valid_days: u32) -> Result<SyncInvite, CoreError> {
+        let h = self.handle()?;
+        let i = h.create_invite(&folder_id(id)?, role_from(role), max_uses, valid_days).map_err(sync_err)?;
+        Ok(invite_of(&i))
+    }
+
+    fn invites(&self, id: &str) -> Vec<SyncInvite> {
+        let (Ok(h), Ok(fid)) = (self.handle(), folder_id(id)) else { return Vec::new() };
+        h.invites(&fid).unwrap_or_default().iter().map(invite_of).collect()
+    }
+
+    fn revoke_invite(&self, id: &str, invite_id: &str) -> Result<(), CoreError> {
+        let h = self.handle()?;
+        h.revoke_invite(&folder_id(id)?, invite_id).map_err(sync_err)
     }
 
     fn rename(&self, id: &str, name: &str) -> Result<SyncFolder, CoreError> {
@@ -683,7 +819,25 @@ impl SyncBackend for NoSync {
     fn join_path(&self, _: &str) -> Option<String> {
         None
     }
-    fn shares(&self, _: &str) -> Result<SyncShares, CoreError> {
+    fn members(&self, _: &str) -> Vec<SyncMember> {
+        Vec::new()
+    }
+    fn set_role(&self, _: &str, _: &str, _: SyncRole) -> Result<(), CoreError> {
+        Err(gone())
+    }
+    fn remove_device(&self, _: &str, _: &str) -> Result<(), CoreError> {
+        Err(gone())
+    }
+    fn set_share_until(&self, _: &str, _: u64) -> Result<(), CoreError> {
+        Err(gone())
+    }
+    fn create_invite(&self, _: &str, _: SyncRole, _: u32, _: u32) -> Result<SyncInvite, CoreError> {
+        Err(gone())
+    }
+    fn invites(&self, _: &str) -> Vec<SyncInvite> {
+        Vec::new()
+    }
+    fn revoke_invite(&self, _: &str, _: &str) -> Result<(), CoreError> {
         Err(gone())
     }
     fn rename(&self, _: &str, _: &str) -> Result<SyncFolder, CoreError> {
@@ -727,8 +881,10 @@ impl SyncBackend for NoSync {
 // ------------------------------------------------------------------------------------------ mock
 
 struct MockFolder {
+    n: u32,
     f: SyncFolder,
-    shares: SyncShares,
+    members: Vec<SyncMember>,
+    invites: Vec<SyncInvite>,
 }
 
 struct MockState {
@@ -749,22 +905,53 @@ fn mock_id(n: u32) -> String {
     format!("{}-{}-{}-{n:07}", groups[n as usize % 6], groups[(n as usize + 1) % 6], groups[(n as usize + 2) % 6])
 }
 
-fn mock_key(n: u32, write: bool) -> String {
+/// A real invitation link to mock folder `n` (nothing listens for it).
+fn mock_invite(n: u32, k: u32, name: &str, role: SyncRole, max_uses: u32, valid_days: u32) -> SyncInvite {
     let secret = trs_sync_proto::keys::FolderSecret::from_bytes([n as u8 + 1; 32]);
-    let key = trs_sync_proto::keys::FolderKey::ReadWrite(secret);
-    if write { key.to_text() } else { key.read_only().map(|k| k.to_text()).unwrap_or_default() }
+    let now = now_s();
+    let expires_s = if valid_days == 0 { 0 } else { now + u64::from(valid_days) * 86_400 };
+    let id = [k as u8 + 1; 16];
+    let seed = [(n * 16 + k) as u8; 32];
+    let invite = trs_sync_proto::members::new_invite(
+        *secret.public_key(),
+        id,
+        seed,
+        role_from(role),
+        max_uses,
+        expires_s,
+        now,
+        trs_sync_proto::members::Signer::Folder,
+        &|m| secret.sign(m),
+    );
+    let link = InviteLink { invite, token_seed: seed, name: Some(name.to_owned()) }.format();
+    SyncInvite {
+        id: trs_sync_proto::members::hex(&id),
+        link,
+        role,
+        max_uses,
+        uses: 0,
+        expires_s: (expires_s != 0).then_some(expires_s),
+        created_s: now,
+        revoked: false,
+    }
 }
 
-fn mock_shares(n: u32, name: &str, write: bool) -> SyncShares {
-    let link = |k: &str| Link { key: k.parse().expect("a mock key"), name: Some(name.to_owned()) }.format();
-    let rw = write.then(|| mock_key(n, true));
-    let ro = mock_key(n, false);
-    SyncShares {
-        read_write_link: rw.as_deref().map(link),
-        read_write: rw,
-        read_only_link: Some(link(&ro)),
-        read_only: Some(ro),
+/// The mock devices of a folder: this Mac at `mine`, and `others` (name, role, online).
+fn mock_members(mine: SyncRole, others: &[(&str, SyncRole, bool)], share_until_s: Option<u64>) -> Vec<SyncMember> {
+    let ends = |role: SyncRole| share_until_s.filter(|_| role != SyncRole::Owner);
+    let mut out = vec![SyncMember {
+        device_id: "HTU7WQB-QKZ4XNA-MFZWI3D-YLTMRWG".into(),
+        name: "Kristian's MacBook Pro".into(),
+        role: mine,
+        online: true,
+        is_me: true,
+        expires_s: ends(mine),
+    }];
+    for (i, (name, role, online)) in others.iter().enumerate() {
+        let groups = ["MFZWI3D-BONSGYC-YLTMRWG-QKZ4XNA", "P2RFOJE-HTU7WQB-MFZWI3D-BONSGYC", "QKZ4XNA-YLTMRWG-P2RFOJE-HTU7WQB"];
+        out.push(SyncMember { device_id: groups[i % 3].into(), name: (*name).into(), role: *role, online: *online, is_me: false, expires_s: ends(*role) });
     }
+    out
 }
 
 impl MockSync {
@@ -776,6 +963,8 @@ impl MockSync {
             name: name.into(),
             path: format!("{base}/{name}"),
             access,
+            role: if access == SyncAccess::ReadOnly { SyncRole::ReadOnly } else { SyncRole::ReadWrite },
+            share_until_s: None,
             state,
             files: 1_200 + u64::from(n) * 731,
             bytes: (8 + u64::from(n) * 5) * 1_000_000_000,
@@ -792,22 +981,43 @@ impl MockSync {
             last_synced_s: Some(now_s().saturating_sub(120)),
         };
         let mut photos = mk(1, "Photos", SyncAccess::ReadWrite, SyncState::UpToDate, 3, 3);
+        photos.role = SyncRole::Owner;
         photos.path = format!("{home}/Pictures/Photos");
         let mut docs = mk(2, "Documents", SyncAccess::ReadWrite, SyncState::Syncing, 2, 2);
         docs.need_files = 312;
+        docs.role = SyncRole::Owner;
+        // Shared for a while (the owner's setting).
+        docs.share_until_s = Some(now_s() + 12 * 86_400);
+        let docs_end = docs.share_until_s;
         let mut projects = mk(3, "Projects", SyncAccess::ReadWrite, SyncState::UpToDate, 2, 1);
         projects.conflicts = 1;
+        projects.role = SyncRole::Admin;
         projects.issues = vec![SyncIssue { path: "Build/Icon\r".into(), reason: "The name cannot be used on every device".into() }];
         let camera = mk(4, "Camera Uploads from the Family iPhone and iPad", SyncAccess::ReadOnly, SyncState::WaitingForDevices, 1, 0);
         let mut archive = mk(5, "Archive", SyncAccess::ReadWrite, SyncState::Missing, 2, 0);
         archive.path = "/Volumes/Backup/Archive".into();
+        archive.role = SyncRole::ReadWrite;
+        let members = [
+            mock_members(SyncRole::Owner, &[("Studio iMac", SyncRole::Owner, true), ("Kristian's iPhone", SyncRole::ReadWrite, true), ("Office Mac mini", SyncRole::ReadOnly, true)], None),
+            mock_members(SyncRole::Owner, &[("Studio iMac", SyncRole::Admin, true), ("Kristian's iPhone", SyncRole::ReadWrite, true)], docs_end),
+            mock_members(SyncRole::Admin, &[("Studio iMac", SyncRole::Owner, true), ("Ola's MacBook Air", SyncRole::ReadWrite, false)], None),
+            mock_members(SyncRole::ReadOnly, &[("Family iPad", SyncRole::Owner, false)], None),
+            mock_members(SyncRole::ReadWrite, &[("Studio iMac", SyncRole::Owner, false), ("Office Mac mini", SyncRole::ReadWrite, false)], None),
+        ];
         let folders = [photos, docs, projects, camera, archive]
             .into_iter()
+            .zip(members)
             .enumerate()
-            .map(|(i, f)| {
+            .map(|(i, (f, members))| {
                 let n = i as u32 + 1;
-                let shares = mock_shares(n, &f.name, f.access == SyncAccess::ReadWrite);
-                MockFolder { f, shares }
+                let invites = if matches!(f.role, SyncRole::Owner | SyncRole::Admin) {
+                    let mut used = mock_invite(n, 1, &f.name, SyncRole::ReadWrite, 1, 7);
+                    used.uses = 1;
+                    vec![mock_invite(n, 2, &f.name, SyncRole::ReadOnly, 5, 30), used]
+                } else {
+                    Vec::new()
+                };
+                MockFolder { n, f, members, invites }
             })
             .collect();
         Arc::new(MockSync { state: Mutex::new(MockState { folders, settings: Self::default_settings(), next: 6 }), started: Instant::now() })
@@ -833,16 +1043,19 @@ impl MockSync {
         s.folders.iter_mut().find(|m| m.f.id == id).map(f).ok_or_else(gone)
     }
 
-    fn add(&self, name: String, path: String, access: SyncAccess) -> SyncFolder {
+    fn add(&self, name: String, path: String, role: SyncRole, joining: bool) -> SyncFolder {
         let mut s = lock(&self.state);
         let n = s.next;
         s.next += 1;
+        let access = if role == SyncRole::ReadOnly || joining { SyncAccess::ReadOnly } else { SyncAccess::ReadWrite };
         let f = SyncFolder {
             id: mock_id(n),
             name: name.clone(),
             path,
             access,
-            state: SyncState::Starting,
+            role: if joining { SyncRole::ReadOnly } else { role },
+            share_until_s: None,
+            state: if joining { SyncState::WaitingForAdmin } else { SyncState::Starting },
             files: 0,
             bytes: 0,
             need_files: 0,
@@ -857,8 +1070,8 @@ impl MockSync {
             error: None,
             last_synced_s: None,
         };
-        let shares = mock_shares(n, &name, access == SyncAccess::ReadWrite);
-        s.folders.push(MockFolder { f: f.clone(), shares });
+        let members = mock_members(if joining { SyncRole::ReadOnly } else { role }, &[], None);
+        s.folders.push(MockFolder { n, f: f.clone(), members, invites: Vec::new() });
         f
     }
 }
@@ -939,17 +1152,17 @@ impl SyncBackend for MockSync {
         if lock(&self.state).folders.iter().any(|m| path.starts_with(&m.f.path) || m.f.path.starts_with(&path)) {
             return Err(failed(format!("{path} overlaps a synced folder")));
         }
-        Ok(self.add(name, path, SyncAccess::ReadWrite))
+        Ok(self.add(name, path, SyncRole::Owner, false))
     }
 
     fn join(&self, key_or_link: &str, path: &str) -> Result<SyncFolder, CoreError> {
-        let (info, _) = parse_link(key_or_link).ok_or_else(|| failed("Not a folder key or link"))?;
-        if info.access == SyncAccess::Encrypted {
-            return Err(failed("Encrypted keys are not supported yet"));
+        let (info, _) = parse_link(key_or_link).ok_or_else(|| failed("Not a folder link"))?;
+        if info.expired {
+            return Err(failed("This link has expired"));
         }
         let path = if path.trim().is_empty() { self.join_path(key_or_link).unwrap_or_default() } else { path.trim().to_owned() };
         let name = Path::new(&path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "Folder".into());
-        Ok(self.add(name, path, info.access))
+        Ok(self.add(name, path, info.role, true))
     }
 
     fn join_path(&self, key_or_link: &str) -> Option<String> {
@@ -959,8 +1172,75 @@ impl SyncBackend for MockSync {
         Some(format!("{}/{}", self.default_location(), name.trim().trim_start_matches('.')))
     }
 
-    fn shares(&self, id: &str) -> Result<SyncShares, CoreError> {
-        self.with(id, |m| m.shares.clone())
+    fn members(&self, id: &str) -> Vec<SyncMember> {
+        lock(&self.state).folders.iter().find(|m| m.f.id == id).map(|m| m.members.clone()).unwrap_or_default()
+    }
+
+    fn set_role(&self, id: &str, device_id: &str, role: SyncRole) -> Result<(), CoreError> {
+        self.with(id, |m| {
+            if m.f.role != SyncRole::Owner {
+                return Err(failed("Only the folder's owner can change roles"));
+            }
+            let d = m.members.iter_mut().find(|d| d.device_id == device_id).ok_or_else(|| failed("Not a device of this folder"))?;
+            d.role = role;
+            d.expires_s = m.f.share_until_s.filter(|_| role != SyncRole::Owner);
+            Ok(())
+        })?
+    }
+
+    fn remove_device(&self, id: &str, device_id: &str) -> Result<(), CoreError> {
+        self.with(id, |m| {
+            if m.f.role != SyncRole::Owner {
+                return Err(failed("Only the folder's owner can change roles"));
+            }
+            if m.members.iter().any(|d| d.device_id == device_id && d.is_me) {
+                return Err(failed("To stop syncing on this Mac, remove the folder instead"));
+            }
+            m.members.retain(|d| d.device_id != device_id);
+            Ok(())
+        })?
+    }
+
+    fn set_share_until(&self, id: &str, until_s: u64) -> Result<(), CoreError> {
+        self.with(id, |m| {
+            if m.f.role != SyncRole::Owner {
+                return Err(failed("Only the folder's owner can change how long it is shared."));
+            }
+            if until_s != 0 && until_s <= now_s() {
+                return Err(failed("Pick an end in the future."));
+            }
+            m.f.share_until_s = (until_s != 0).then_some(until_s);
+            for d in &mut m.members {
+                d.expires_s = m.f.share_until_s.filter(|_| d.role != SyncRole::Owner);
+            }
+            Ok(())
+        })?
+    }
+
+    fn create_invite(&self, id: &str, role: SyncRole, max_uses: u32, valid_days: u32) -> Result<SyncInvite, CoreError> {
+        self.with(id, |m| {
+            match (m.f.role, role) {
+                (SyncRole::Owner, _) | (SyncRole::Admin, SyncRole::ReadWrite | SyncRole::ReadOnly) => {}
+                (SyncRole::Admin, _) => return Err(failed("Only the folder's owner can invite admins or owners")),
+                _ => return Err(failed("Only the folder's owner or an admin can share it")),
+            }
+            let k = m.invites.len() as u32 + 3;
+            let i = mock_invite(m.n, k, &m.f.name, role, max_uses, valid_days);
+            m.invites.insert(0, i.clone());
+            Ok(i)
+        })?
+    }
+
+    fn invites(&self, id: &str) -> Vec<SyncInvite> {
+        lock(&self.state).folders.iter().find(|m| m.f.id == id).map(|m| m.invites.clone()).unwrap_or_default()
+    }
+
+    fn revoke_invite(&self, id: &str, invite_id: &str) -> Result<(), CoreError> {
+        self.with(id, |m| {
+            let i = m.invites.iter_mut().find(|i| i.id == invite_id).ok_or_else(|| failed("No such link"))?;
+            i.revoked = true;
+            Ok(())
+        })?
     }
 
     fn rename(&self, id: &str, name: &str) -> Result<SyncFolder, CoreError> {
@@ -1056,21 +1336,33 @@ impl Core {
         self.backend.sync().snapshot()
     }
 
-    /// Starts sharing a folder on this Mac (a new Read & write key).
+    /// Starts sharing a folder on this Mac (this Mac becomes its owner).
     pub fn sync_add_folder(&self, path: String) -> Result<SyncFolder, CoreError> {
         self.backend.sync().add_folder(&path)
     }
 
-    /// Joins a shared folder with a key or a link, at `path` (empty: the default place). Created when missing.
+    /// Joins a shared folder with an invitation link, at `path` (empty: the default place). Created when
+    /// missing. The folder waits until one of its owners or admins is online and admits this Mac.
     pub fn sync_join(&self, key_or_link: String, path: String) -> Result<SyncFolder, CoreError> {
         self.backend.sync().join(&key_or_link, &path)
     }
 
-    /// What a pasted text is: a folder key or link (its access and name hint), or `None`.
+    /// What a pasted text is: an invitation link (its role, name hint and expiry), or `None` (also for bare
+    /// keys of the test builds).
     pub fn sync_parse_link(&self, text: String) -> Option<SyncLinkInfo> {
         let (mut info, _) = parse_link(&text)?;
         info.already_synced = self.backend.sync().snapshot().folders.iter().any(|f| f.id == info.folder_id);
         Some(info)
+    }
+
+    /// Why a pasted text is not a link this Mac can use, as a sentence for the add modal ("This link was made by a
+    /// newer Seedwell: update Seedwell to use it."); `None` when [`Core::sync_parse_link`] reads it, or the text
+    /// is empty.
+    pub fn sync_link_problem(&self, text: String) -> Option<String> {
+        if text.trim().is_empty() {
+            return None;
+        }
+        InviteLink::parse(&text).err().map(|e| readable(&e.to_string()))
     }
 
     /// Where a joined folder goes by default: `<default location>/<name>`, numbered when taken.
@@ -1078,9 +1370,42 @@ impl Core {
         self.backend.sync().join_path(&key_or_link)
     }
 
-    /// The keys and links this Mac may share for a folder.
-    pub fn sync_shares(&self, id: String) -> Result<SyncShares, CoreError> {
-        self.backend.sync().shares(&id)
+    /// The folder's devices and their roles (this Mac first). Never waits for the folder's core.
+    pub fn sync_members(&self, id: String) -> Vec<SyncMember> {
+        self.backend.sync().members(&id)
+    }
+
+    /// Changes a device's role (owners only; a folder keeps at least one owner).
+    pub fn sync_set_role(&self, id: String, device_id: String, role: SyncRole) -> Result<(), CoreError> {
+        self.backend.sync().set_role(&id, &device_id, role)
+    }
+
+    /// Removes a device from the folder (owners only). It is cut off at once and keeps the files it has.
+    pub fn sync_remove_device(&self, id: String, device_id: String) -> Result<(), CoreError> {
+        self.backend.sync().remove_device(&id, &device_id)
+    }
+
+    /// Sets how long the folder is shared (owners only): `until_s` Unix seconds, 0 = no end. After it every
+    /// device but the owners is cut off (it keeps its files) and no link admits anyone; a later end, or none,
+    /// lets them back in. An end in the past is refused (to cut a device off now, remove it).
+    pub fn sync_set_share_until(&self, id: String, until_s: u64) -> Result<(), CoreError> {
+        self.backend.sync().set_share_until(&id, until_s)
+    }
+
+    /// Makes an invitation link: `max_uses` 0 = unlimited, `valid_days` (how long the link admits) 0 = no
+    /// expiry. Owners invite at any role, admins at Read & write or Read only.
+    pub fn sync_create_invite(&self, id: String, role: SyncRole, max_uses: u32, valid_days: u32) -> Result<SyncInvite, CoreError> {
+        self.backend.sync().create_invite(&id, role, max_uses, valid_days)
+    }
+
+    /// The folder's invitations, newest first (links for those this Mac made). Never waits for the core.
+    pub fn sync_invites(&self, id: String) -> Vec<SyncInvite> {
+        self.backend.sync().invites(&id)
+    }
+
+    /// Revokes an invitation: it admits nobody from now on.
+    pub fn sync_revoke_invite(&self, id: String, invite_id: String) -> Result<(), CoreError> {
+        self.backend.sync().revoke_invite(&id, &invite_id)
     }
 
     /// Renames the folder on this Mac (its directory); other devices keep their names.
@@ -1225,6 +1550,11 @@ mod tests {
         assert!(core.sync_conflicts(s.folders[0].id.clone()).is_empty());
     }
 
+    /// A mock folder where this Mac has `role`.
+    fn s_folder(core: &Core, role: SyncRole) -> String {
+        core.sync_snapshot().folders.into_iter().find(|f| f.role == role).map(|f| f.id).expect("a mock folder with that role")
+    }
+
     #[test]
     fn the_mock_adds_joins_edits_and_removes() {
         let (core, _d) = mock_core();
@@ -1232,19 +1562,45 @@ mod tests {
         let f = core.sync_add_folder("/tmp/seedwell-mock/Notes".into()).unwrap();
         assert_eq!((f.name.as_str(), f.access), ("Notes", SyncAccess::ReadWrite));
         assert!(core.sync_add_folder("/tmp/seedwell-mock/Notes/Inner".into()).is_err(), "overlap");
-        let sh = core.sync_shares(f.id.clone()).unwrap();
-        let (rw, ro) = (sh.read_write_link.unwrap(), sh.read_only.unwrap());
-        assert!(rw.starts_with("seedwell://sync/SWW-") && rw.ends_with("?name=Notes"), "{rw}");
-        assert!(ro.starts_with("SWR-"));
+        assert_eq!(f.role, SyncRole::Owner);
+        let rw = core.sync_create_invite(f.id.clone(), SyncRole::ReadWrite, 1, 7).unwrap().link;
+        let ro = core.sync_create_invite(f.id.clone(), SyncRole::ReadOnly, 0, 0).unwrap();
+        assert!(rw.starts_with("seedwell://sync/") && rw.ends_with("?name=Notes"), "{rw}");
+        assert_eq!((ro.max_uses, ro.expires_s), (0, None));
+        assert_eq!(core.sync_invites(f.id.clone()).len(), 2);
         let info = core.sync_parse_link(rw.clone()).unwrap();
-        assert_eq!((info.access, info.name.as_deref()), (SyncAccess::ReadWrite, Some("Notes")));
-        assert_eq!(core.sync_parse_link(ro.clone()).unwrap().access, SyncAccess::ReadOnly);
+        assert_eq!((info.role, info.name.as_deref(), info.expired), (SyncRole::ReadWrite, Some("Notes"), false));
+        assert!(info.expires_s.is_some());
+        assert_eq!(core.sync_parse_link(ro.link.clone()).unwrap().role, SyncRole::ReadOnly);
         assert!(core.sync_parse_link("hello".into()).is_none());
-        assert!(core.sync_parse_link("SWW-AAAA".into()).is_none(), "a damaged key");
+        assert!(core.sync_parse_link("SWW-AAAA".into()).is_none(), "bare keys are no longer links");
+        assert_eq!(core.sync_link_problem(rw.clone()), None);
+        assert_eq!(core.sync_link_problem("  ".into()), None);
+        assert_eq!(core.sync_link_problem("hello".into()).as_deref(), Some("Not a Seedwell folder link."));
+        assert_eq!(core.sync_link_problem("SWW-AAAA".into()).as_deref(), Some("Folder keys are no longer shared: ask for a link to the folder."));
+        assert_eq!(core.sync_link_problem(format!("{}X", &rw[..40])).as_deref(), Some("The folder link is damaged or incomplete."));
         let place = core.sync_join_path(rw.clone()).unwrap();
         assert!(place.ends_with("/Seedwell/Notes"), "{place}");
-        let j = core.sync_join(ro, "/tmp/seedwell-mock/Joined".into()).unwrap();
-        assert_eq!(j.access, SyncAccess::ReadOnly);
+        let j = core.sync_join(ro.link.clone(), "/tmp/seedwell-mock/Joined".into()).unwrap();
+        assert_eq!((j.access, j.state), (SyncAccess::ReadOnly, SyncState::WaitingForAdmin));
+        // Roles: the mock's own device is the owner of what it adds.
+        let members = core.sync_members(f.id.clone());
+        assert!(members[0].is_me && members[0].role == SyncRole::Owner);
+        // How long it is shared: the owner's setting, shown on the folder and as non-owners' access end.
+        let end = now_s() + 7 * 86_400;
+        assert!(core.sync_set_share_until(f.id.clone(), now_s() - 1).is_err(), "an end in the past");
+        core.sync_set_share_until(f.id.clone(), end).unwrap();
+        assert_eq!(core.sync_snapshot().folders.iter().find(|x| x.id == f.id).unwrap().share_until_s, Some(end));
+        assert_eq!(core.sync_members(f.id.clone())[0].expires_s, None, "an owner's access does not end");
+        let admin = s_folder(&core, SyncRole::Admin);
+        let e = core.sync_set_share_until(admin, end).unwrap_err();
+        assert!(e.to_string().contains("Only the folder's owner"), "{e}");
+        core.sync_set_share_until(f.id.clone(), 0).unwrap();
+        assert_eq!(core.sync_snapshot().folders.iter().find(|x| x.id == f.id).unwrap().share_until_s, None);
+        core.sync_revoke_invite(f.id.clone(), ro.id.clone()).unwrap();
+        assert!(core.sync_invites(f.id.clone()).iter().any(|i| i.id == ro.id && i.revoked));
+        let reader = s_folder(&core, SyncRole::ReadOnly);
+        assert!(core.sync_create_invite(reader, SyncRole::ReadOnly, 1, 7).is_err(), "a reader cannot share");
         assert!(matches!(core.sync_join("nope".into(), String::new()), Err(CoreError::Failed { .. })));
         let r = core.sync_rename(f.id.clone(), "Notebook".into()).unwrap();
         assert_eq!(r.path, "/tmp/seedwell-mock/Notebook");
@@ -1302,11 +1658,24 @@ mod tests {
         assert_eq!((f.name.as_str(), f.access), ("Docs", SyncAccess::ReadWrite));
         assert!(docs.join(".seedwell").is_dir());
         let toml = std::fs::read_to_string(dir.join("sync.toml")).unwrap();
-        let sh = core.sync_shares(f.id.clone()).unwrap();
-        let link = sh.read_write_link.clone().unwrap();
-        assert!(!toml.contains(sh.read_write.as_deref().unwrap()), "no key in sync.toml");
+        assert_eq!(f.role, SyncRole::Owner);
+        let inv = core.sync_create_invite(f.id.clone(), SyncRole::ReadWrite, 1, 7).unwrap();
+        let link = inv.link.clone();
+        assert!(!toml.contains(&link[16..]), "no link in sync.toml");
         let info = core.sync_parse_link(link.clone()).unwrap();
         assert!(info.already_synced && info.name.as_deref() == Some("Docs"));
+        assert_eq!(core.sync_invites(f.id.clone())[0].id, inv.id);
+        let members = core.sync_members(f.id.clone());
+        assert_eq!(members.len(), 1);
+        assert!(members[0].is_me && members[0].role == SyncRole::Owner && members[0].online);
+        assert!(core.sync_set_role(f.id.clone(), members[0].device_id.clone(), SyncRole::ReadOnly).is_err(), "the only owner stays one");
+        let e = core.sync_set_share_until(f.id.clone(), 1).unwrap_err();
+        assert!(e.to_string().contains("Pick an end in the future."), "{e}");
+        let end = now_s() + 3 * 86_400;
+        core.sync_set_share_until(f.id.clone(), end).unwrap();
+        assert_eq!(core.sync_snapshot().folders[0].share_until_s, Some(end));
+        core.sync_set_share_until(f.id.clone(), 0).unwrap();
+        assert_eq!(core.sync_snapshot().folders[0].share_until_s, None);
         let e = core.sync_join(link, work.path().join("Again").display().to_string()).unwrap_err();
         assert!(e.to_string().contains("already synced"), "{e}");
         assert!(core.sync_add_folder(home.path().join("x").display().to_string()).is_err(), "never the real home under test");
@@ -1334,7 +1703,7 @@ mod tests {
         assert_eq!(path, work.path().join("Papers").display().to_string());
         assert!(work.path().join("Papers/a.txt").exists(), "the files stay");
         assert!(core.sync_snapshot().folders.is_empty());
-        assert!(core.sync_shares(f.id).is_err());
+        assert!(core.sync_create_invite(f.id, SyncRole::ReadOnly, 1, 7).is_err());
         assert!(core.shutdown(5).finished);
     }
 }

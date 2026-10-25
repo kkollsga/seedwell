@@ -1,9 +1,9 @@
 //! `seedwell sync …`: folder sync (SPEC 7G) through the control socket, and `seedwell relay`.
 //!
 //! `<folder>` is a folder id, an unambiguous prefix of it (the first group is enough) or the folder's name;
-//! the app resolves it (`sync.*` methods), so an ambiguous one is exit 3 with the candidates. Keys are
-//! secrets: `sync share` prints them (permission full), nothing else does, and `sync join -` reads the key
-//! from standard input so it stays out of the shell history.
+//! the app resolves it (`sync.*` methods), so an ambiguous one is exit 3 with the candidates. Invitation links
+//! are secrets: `sync share` and `sync invites` print them (permission full), nothing else does, and
+//! `sync join -` reads the link from standard input so it stays out of the shell history.
 #![allow(missing_docs)] // variant fields are named after the options they hold
 
 use std::fmt::Write as _;
@@ -26,10 +26,22 @@ pub enum Cmd {
     Status { folder: String },
     /// `sync add <path>`
     Add { path: String },
-    /// `sync join <key-or-link> [--to <path>]` (`-` reads the key from standard input)
+    /// `sync join <link> [--to <path>]` (`-` reads the link from standard input)
     Join { key: String, to: Option<String> },
-    /// `sync share <folder>`
-    Share { folder: String },
+    /// `sync share <folder> [--role R] [--uses N|unlimited] [--days N|never]`
+    Share { folder: String, role: Option<String>, uses: Option<u32>, days: Option<u32> },
+    /// `sync share-until <folder> <days>|never [--extend]`: `days` 0 = no end; `extend` counts from the current end.
+    ShareUntil { folder: String, days: u32, extend: bool },
+    /// `sync members <folder>`
+    Members { folder: String },
+    /// `sync invites <folder>`
+    Invites { folder: String },
+    /// `sync revoke-invite <folder> <invite-id>`
+    RevokeInvite { folder: String, invite: String },
+    /// `sync role <folder> <device> owner|admin|read_write|read_only`
+    Role { folder: String, device: String, role: String },
+    /// `sync remove-device <folder> <device>`
+    RemoveDevice { folder: String, device: String },
     /// `sync rename <folder> <name>`
     Rename { folder: String, name: String },
     /// `sync move <folder> <path>`
@@ -59,7 +71,7 @@ pub enum Cmd {
 }
 
 /// The one-line usage.
-pub const USAGE: &str = "usage: seedwell sync list | status <folder> | add <path> | join <key-or-link> [--to <path>] | share <folder> | rename <folder> <name> | move <folder> <path> | pause <folder> | resume <folder> | rescan <folder> | lan-only <folder> on|off | conflicts <folder> | resolve <folder> <copy> --keep original|copy|both | address <folder> <host:port> | remove <folder> [--delete-files] [-y] | remove-confirm <token> | settings [--device-name N] [--port N] [--lan on|off] [--dht on|off] [--relay-own on|off] [--relay-everyone on|off] [--up R] [--down R] [--default-location PATH]";
+pub const USAGE: &str = "usage: seedwell sync list | status <folder> | add <path> | join <link> [--to <path>] | share <folder> [--role read_write|read_only|admin|owner] [--uses N|unlimited] [--days N|never] | share-until <folder> <days>|never [--extend] | members <folder> | invites <folder> | revoke-invite <folder> <invite-id> | role <folder> <device> owner|admin|read_write|read_only | remove-device <folder> <device> | rename <folder> <name> | move <folder> <path> | pause <folder> | resume <folder> | rescan <folder> | lan-only <folder> on|off | conflicts <folder> | resolve <folder> <copy> --keep original|copy|both | address <folder> <host:port> | remove <folder> [--delete-files] [-y] | remove-confirm <token> | settings [--device-name N] [--port N] [--lan on|off] [--dht on|off] [--relay-own on|off] [--relay-everyone on|off] [--up R] [--down R] [--default-location PATH]";
 
 fn on_off(v: Option<String>, name: &str) -> Result<Option<bool>, Usage> {
     match v.as_deref() {
@@ -93,9 +105,56 @@ pub fn parse(args_in: Vec<String>) -> Result<Cmd, Usage> {
         "add" => Cmd::Add { path: one(o, "add <path>")? },
         "join" => {
             let to = o.value(&["--to"])?;
-            Cmd::Join { key: one(o, "join <key-or-link> [--to <path>]   (- reads the key from standard input)")?, to }
+            Cmd::Join { key: one(o, "join <link> [--to <path>]   (- reads the link from standard input)")?, to }
         }
-        "share" | "keys" => Cmd::Share { folder: one(o, "share <folder>")? },
+        "share" | "invite" => {
+            let role = o.value(&["--role"])?;
+            if let Some(r) = &role
+                && !matches!(r.as_str(), "read_write" | "read-write" | "rw" | "read_only" | "read-only" | "ro" | "admin" | "owner")
+            {
+                return Err(Usage(format!("--role is read_write, read_only, admin or owner, not `{r}`")));
+            }
+            let uses = match o.value(&["--uses"])?.as_deref() {
+                None => None,
+                Some("unlimited" | "any") => Some(0),
+                Some(n) => Some(n.parse::<u32>().ok().filter(|n| (1..=1000).contains(n)).ok_or_else(|| Usage(format!("--uses is 1 to 1000 or unlimited, not `{n}`")))?),
+            };
+            let days = match o.value(&["--days"])?.as_deref() {
+                None => None,
+                Some("never" | "unlimited") => Some(0),
+                Some(n) => Some(n.parse::<u32>().ok().filter(|n| *n >= 1).ok_or_else(|| Usage(format!("--days is a number of days or never, not `{n}`")))?),
+            };
+            Cmd::Share { folder: one(o, "share <folder> [--role R] [--uses N|unlimited] [--days N|never]")?, role, uses, days }
+        }
+        "share-until" | "shared-until" => {
+            let extend = o.flag(&["--extend"]);
+            let mut p = args(o, 2, "share-until <folder> <days>|never [--extend]")?;
+            let days = match p.remove(1).as_str() {
+                "never" | "no-end" if !extend => 0,
+                n => n.parse::<u32>().ok().filter(|n| (1..=36_500).contains(n)).ok_or_else(|| {
+                    Usage(format!("share-until takes a number of days{}, not `{n}`", if extend { "" } else { " or never" }))
+                })?,
+            };
+            Cmd::ShareUntil { folder: p.remove(0), days, extend }
+        }
+        "members" | "devices" => Cmd::Members { folder: one(o, "members <folder>")? },
+        "invites" | "links" => Cmd::Invites { folder: one(o, "invites <folder>")? },
+        "revoke-invite" | "revoke" => {
+            let mut p = args(o, 2, "revoke-invite <folder> <invite-id>")?;
+            Cmd::RevokeInvite { invite: p.remove(1), folder: p.remove(0) }
+        }
+        "role" | "set-role" => {
+            let mut p = args(o, 3, "role <folder> <device> owner|admin|read_write|read_only")?;
+            let role = p.remove(2);
+            if !matches!(role.as_str(), "owner" | "admin" | "read_write" | "read-write" | "rw" | "read_only" | "read-only" | "ro") {
+                return Err(Usage(format!("the role is owner, admin, read_write or read_only, not `{role}`")));
+            }
+            Cmd::Role { device: p.remove(1), folder: p.remove(0), role }
+        }
+        "remove-device" => {
+            let mut p = args(o, 2, "remove-device <folder> <device>")?;
+            Cmd::RemoveDevice { device: p.remove(1), folder: p.remove(0) }
+        }
         "rename" => {
             let mut p = args(o, 2, "rename <folder> <name>")?;
             Cmd::Rename { name: p.remove(1), folder: p.remove(0) }
@@ -163,17 +222,17 @@ fn abs(p: &str) -> R<String> {
     std::path::absolute(p).map(|a| a.display().to_string()).map_err(|e| CliError::plain(2, format!("{p}: {e}")))
 }
 
-/// The key from standard input, for `sync join -`.
+/// The link from standard input, for `sync join -`.
 fn key_from_stdin() -> R<String> {
     if std::io::stdin().is_terminal() {
-        eprint!("Folder key or link: ");
+        eprint!("Folder link: ");
         let _ = std::io::stderr().flush();
     }
     let mut line = String::new();
-    std::io::stdin().lock().read_line(&mut line).map_err(|e| CliError::plain(1, format!("cannot read the key: {e}")))?;
+    std::io::stdin().lock().read_line(&mut line).map_err(|e| CliError::plain(1, format!("cannot read the link: {e}")))?;
     let k = line.trim().to_owned();
     if k.is_empty() {
-        return Err(CliError::plain(2, "no key given on standard input"));
+        return Err(CliError::plain(2, "no link given on standard input"));
     }
     Ok(k)
 }
@@ -196,17 +255,47 @@ pub async fn run(cmd: Cmd, g: &Global) -> R {
         }
         Cmd::Add { path } => {
             let (raw, d): (_, SyncFolderDto) = ask(&mut c, Request::SyncAdd(SyncAddParams { path: abs(&path)? })).await?;
-            show(g, &raw, || format!("Sharing {} from {}.\nGive another device its key: seedwell sync share {}", d.name, d.path, first_group(&d.id)));
+            show(g, &raw, || format!("Sharing {} from {} (this Mac is its owner).\nInvite another device: seedwell sync share {}", d.name, d.path, first_group(&d.id)));
         }
         Cmd::Join { key, to } => {
             let key = if key == "-" { key_from_stdin()? } else { key };
             let path = to.as_deref().map(abs).transpose()?;
             let (raw, d): (_, SyncFolderDto) = ask(&mut c, Request::SyncJoin(SyncJoinParams { key_or_link: key, path })).await?;
-            show(g, &raw, || format!("Joined {} at {} ({}).", d.name, d.path, access(&d.access)));
+            show(g, &raw, || match d.role.as_deref() {
+                Some(r) => format!("Joined {} at {} ({}).", d.name, d.path, role(r)),
+                None => format!("Joining {} at {}: it starts once one of the folder's owners or admins is online.", d.name, d.path),
+            });
         }
-        Cmd::Share { folder: f } => {
-            let (raw, s): (_, SyncSharesDto) = ask(&mut c, Request::SyncShare(folder(f))).await?;
-            show(g, &raw, || shares(&s));
+        Cmd::Share { folder: f, role: r, uses, days } => {
+            let (raw, i): (_, SyncInviteDto) = ask(&mut c, Request::SyncShare(SyncShareParams { folder: f, role: r, uses, days })).await?;
+            show(g, &raw, || invite(&i));
+        }
+        Cmd::ShareUntil { folder: f, days, extend } => {
+            let (raw, d): (_, SyncFolderDto) = ask(&mut c, Request::SyncSetShareUntil(SyncShareUntilParams { folder: f, days, extend })).await?;
+            show(g, &raw, || match d.share_until {
+                Some(t) => format!("{} is {}; after that only its owners sync.", d.name, shared_until(t)),
+                None => format!("{} is shared with no end.", d.name),
+            });
+        }
+        Cmd::Members { folder: f } => {
+            let (raw, m): (_, SyncMembersDto) = ask(&mut c, Request::SyncMembers(folder(f))).await?;
+            show(g, &raw, || members(&m));
+        }
+        Cmd::Invites { folder: f } => {
+            let (raw, l): (_, SyncInvitesDto) = ask(&mut c, Request::SyncInvites(folder(f))).await?;
+            show(g, &raw, || invites(&l));
+        }
+        Cmd::RevokeInvite { folder: f, invite: i } => {
+            let (raw, d): (_, SyncFolderDto) = ask(&mut c, Request::SyncRevokeInvite(SyncRevokeInviteParams { folder: f, invite: i })).await?;
+            show(g, &raw, || format!("The link admits nobody from now on ({}).", d.name));
+        }
+        Cmd::Role { folder: f, device, role: r } => {
+            let (raw, d): (_, SyncFolderDto) = ask(&mut c, Request::SyncSetRole(SyncSetRoleParams { folder: f, device: device.clone(), role: r.clone() })).await?;
+            show(g, &raw, || format!("{device} is now {} in {}.", role(&r.replace('-', "_")), d.name));
+        }
+        Cmd::RemoveDevice { folder: f, device } => {
+            let (raw, d): (_, SyncFolderDto) = ask(&mut c, Request::SyncRemoveDevice(SyncDeviceParams { folder: f, device: device.clone() })).await?;
+            show(g, &raw, || format!("{device} is out of {}; it keeps the files it has.", d.name));
         }
         Cmd::Rename { folder: f, name } => {
             let (raw, d): (_, SyncFolderDto) = ask(&mut c, Request::SyncRename(SyncRenameParams { folder: f, name })).await?;
@@ -401,6 +490,28 @@ fn access(a: &str) -> &'static str {
     }
 }
 
+fn role(r: &str) -> &'static str {
+    match r {
+        "owner" => "Owner",
+        "admin" => "Admin",
+        "read_write" | "rw" => "Read & write",
+        "read_only" | "ro" => "Read only",
+        _ => "?",
+    }
+}
+
+/// `shared until 2026-11-01 (in 6d 23h)`, or `no longer shared (since 2026-11-01)`.
+fn shared_until(t: u64) -> String {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    if t >= now { format!("shared until {} ({})", human::date(t), when(t)) } else { format!("no longer shared (since {})", human::date(t)) }
+}
+
+/// When a link expires, from now: `in 6 days`.
+fn when(t: u64) -> String {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    if t > now { format!("in {}", human::duration(t - now)) } else { "now".into() }
+}
+
 fn ago(t: Option<u64>) -> String {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     match t {
@@ -422,23 +533,26 @@ pub fn list(l: &SyncListDto) -> String {
         l.external_port.map(|p| format!(", router port {p}")).unwrap_or_default()
     );
     if l.folders.is_empty() {
-        let _ = write!(o, "No synced folders. Share one with `seedwell sync add <path>` or join one with `seedwell sync join <key>`.");
+        let _ = write!(o, "No synced folders. Share one with `seedwell sync add <path>` or join one with `seedwell sync join <link>`.");
         return o;
     }
-    let _ = writeln!(o, "\n{:<8} {:<20} {:<13} {:>10} {:>7}  NAME / PATH", "FOLDER", "STATE", "ACCESS", "TO FETCH", "DEVICES");
+    let _ = writeln!(o, "\n{:<8} {:<20} {:<13} {:>10} {:>7}  NAME / PATH", "FOLDER", "STATE", "ROLE", "TO FETCH", "DEVICES");
     for f in &l.folders {
         let _ = writeln!(
             o,
             "{:<8} {:<20} {:<13} {:>10} {:>3}/{:<3}  {}  {}",
             first_group(&f.id),
             f.state,
-            access(&f.access),
+            f.role.as_deref().map_or("joining", role),
             if f.need_bytes > 0 || f.need_files > 0 { human::bytes(f.need_bytes) } else { "-".into() },
             f.connected,
             f.members,
             f.name,
             f.path
         );
+        if let Some(t) = f.share_until {
+            let _ = writeln!(o, "{:<8} {}", "", shared_until(t));
+        }
     }
     if !l.devices.is_empty() {
         let _ = writeln!(o, "\nCONNECTED DEVICES");
@@ -455,8 +569,11 @@ pub fn status(f: &SyncFolderDto) -> String {
     let _ = writeln!(o, "{}  {}", f.name, f.path);
     let _ = writeln!(o, "  id         {}", f.id);
     let _ = writeln!(o, "  state      {}{}", f.state, f.error.as_deref().map(|e| format!(": {e}")).unwrap_or_default());
-    let _ = writeln!(o, "  access     {}", access(&f.access));
+    let _ = writeln!(o, "  role       {}{}", f.role.as_deref().map_or("not admitted yet", role), if f.role.is_some() { format!(" ({})", access(&f.access)) } else { String::new() });
     let _ = writeln!(o, "  devices    {} connected of {} known{}", f.connected, f.members, if f.lan_only { " (local network only)" } else { "" });
+    if let Some(t) = f.share_until {
+        let _ = writeln!(o, "  sharing    {}", shared_until(t));
+    }
     if f.need_files > 0 || f.need_bytes > 0 {
         let _ = writeln!(o, "  to fetch   {} files, {}", f.need_files, human::bytes(f.need_bytes));
     }
@@ -493,15 +610,54 @@ pub fn conflicts(l: &SyncConflictsDto) -> String {
     o
 }
 
-/// `sync share`.
-pub fn shares(s: &SyncSharesDto) -> String {
-    let mut o = String::new();
-    let _ = writeln!(o, "Keys of {} ({}). Anyone with a key has the folder: send it only to people you trust.", s.name, first_group(&s.id));
-    if let (Some(k), Some(l)) = (&s.read_write, &s.read_write_link) {
-        let _ = writeln!(o, "\nRead & write\n  {k}\n  {l}");
+/// `sync share`: the new link.
+pub fn invite(i: &SyncInviteDto) -> String {
+    let uses = if i.max_uses == 0 { "any number of devices".to_string() } else if i.max_uses == 1 { "one device".to_string() } else { format!("{} devices", i.max_uses) };
+    let until = i.expires_at.map_or_else(|| "with no expiry".to_string(), |t| format!("expiring {}", when(t)));
+    format!(
+        "{} link for {uses}, {until}. Anyone who has it can join with it: send it only to people you trust.\n  {}",
+        role(&i.role),
+        i.link
+    )
+}
+
+/// `sync invites`.
+pub fn invites(l: &SyncInvitesDto) -> String {
+    if l.invites.is_empty() {
+        return format!("No links for {}. Make one with: seedwell sync share {}", l.name, first_group(&l.id));
     }
-    if let (Some(k), Some(l)) = (&s.read_only, &s.read_only_link) {
-        let _ = writeln!(o, "\nRead only\n  {k}\n  {l}");
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let mut o = String::new();
+    let _ = writeln!(o, "Links of {}:", l.name);
+    for i in &l.invites {
+        let status = if i.revoked {
+            "revoked".to_string()
+        } else if i.max_uses != 0 && i.uses >= i.max_uses {
+            "used".to_string()
+        } else if i.expires_at.is_some_and(|t| t < now) {
+            "expired".to_string()
+        } else {
+            let left = if i.max_uses == 0 { "unlimited".to_string() } else { format!("{}/{} used", i.uses, i.max_uses) };
+            format!("{left}{}", i.expires_at.map(|t| format!(", expires {}", when(t))).unwrap_or_default())
+        };
+        let _ = writeln!(o, "  {}  {:<13} {status}", &i.id[..8.min(i.id.len())], role(&i.role));
+        if !i.link.is_empty() && status != "revoked" {
+            let _ = writeln!(o, "    {}", i.link);
+        }
+    }
+    let _ = write!(o, "Revoke one with: seedwell sync revoke-invite {} <id>", first_group(&l.id));
+    o
+}
+
+/// `sync members`.
+pub fn members(m: &SyncMembersDto) -> String {
+    let mut o = String::new();
+    let _ = writeln!(o, "Devices of {}:", m.name);
+    for d in &m.members {
+        let name = if d.name.is_empty() { "(not met yet)" } else { &d.name };
+        let tail = if d.me { "  (this Mac)" } else if d.online { "  (online)" } else { "" };
+        let until = d.expires_at.map(|t| format!("  ({})", shared_until(t))).unwrap_or_default();
+        let _ = writeln!(o, "  {:<7}  {:<13} {name}{tail}{until}", first_group(&d.device_id), role(&d.role));
     }
     o.trim_end().to_owned()
 }
@@ -544,9 +700,25 @@ mod tests {
         assert_eq!(parse(w("list")).unwrap(), Cmd::List);
         assert_eq!(parse(w("status MFZWI3D")).unwrap(), Cmd::Status { folder: "MFZWI3D".into() });
         assert_eq!(parse(w("add ~/Documents/Shared")).unwrap(), Cmd::Add { path: "~/Documents/Shared".into() });
-        assert_eq!(parse(w("join SWR-ABC --to /tmp/x")).unwrap(), Cmd::Join { key: "SWR-ABC".into(), to: Some("/tmp/x".into()) });
+        assert_eq!(parse(w("join seedwell://sync/ABC --to /tmp/x")).unwrap(), Cmd::Join { key: "seedwell://sync/ABC".into(), to: Some("/tmp/x".into()) });
         assert_eq!(parse(w("join -")).unwrap(), Cmd::Join { key: "-".into(), to: None });
-        assert_eq!(parse(w("share Docs")).unwrap(), Cmd::Share { folder: "Docs".into() });
+        assert_eq!(parse(w("share Docs")).unwrap(), Cmd::Share { folder: "Docs".into(), role: None, uses: None, days: None });
+        assert_eq!(
+            parse(w("share Docs --role ro --uses unlimited --days never")).unwrap(),
+            Cmd::Share { folder: "Docs".into(), role: Some("ro".into()), uses: Some(0), days: Some(0) }
+        );
+        assert_eq!(
+            parse(w("share Docs --uses 3 --days 2")).unwrap(),
+            Cmd::Share { folder: "Docs".into(), role: None, uses: Some(3), days: Some(2) }
+        );
+        assert_eq!(parse(w("members Docs")).unwrap(), Cmd::Members { folder: "Docs".into() });
+        assert_eq!(parse(w("share-until Docs 7")).unwrap(), Cmd::ShareUntil { folder: "Docs".into(), days: 7, extend: false });
+        assert_eq!(parse(w("share-until Docs never")).unwrap(), Cmd::ShareUntil { folder: "Docs".into(), days: 0, extend: false });
+        assert_eq!(parse(w("share-until Docs 7 --extend")).unwrap(), Cmd::ShareUntil { folder: "Docs".into(), days: 7, extend: true });
+        assert_eq!(parse(w("invites Docs")).unwrap(), Cmd::Invites { folder: "Docs".into() });
+        assert_eq!(parse(w("revoke-invite Docs ab12")).unwrap(), Cmd::RevokeInvite { folder: "Docs".into(), invite: "ab12".into() });
+        assert_eq!(parse(w("role Docs MFZWI3D admin")).unwrap(), Cmd::Role { folder: "Docs".into(), device: "MFZWI3D".into(), role: "admin".into() });
+        assert_eq!(parse(w("remove-device Docs MFZWI3D")).unwrap(), Cmd::RemoveDevice { folder: "Docs".into(), device: "MFZWI3D".into() });
         assert_eq!(parse(w("rename Docs 'Work Docs'")).unwrap(), Cmd::Rename { folder: "Docs".into(), name: "Work Docs".into() });
         assert_eq!(parse(w("move Docs /tmp/y")).unwrap(), Cmd::Move { folder: "Docs".into(), path: "/tmp/y".into() });
         assert_eq!(parse(w("pause Docs")).unwrap(), Cmd::Pause { folder: "Docs".into() });
@@ -565,7 +737,7 @@ mod tests {
         assert_eq!(parse(w("settings")).unwrap(), Cmd::Settings);
         let Cmd::SetSettings(p) = parse(w("settings --device-name 'Studio Mac' --lan off --up 1MB/s --down unlimited")).unwrap() else { panic!() };
         assert_eq!((p.device_name.as_deref(), p.lan_discovery, p.up_limit, p.down_limit), (Some("Studio Mac"), Some(false), Some(1_000_000), Some(0)));
-        for bad in ["", "frob", "status", "status a b", "rename Docs", "move Docs", "address Docs", "remove", "settings --lan maybe", "settings extra", "list x", "join", "lan-only Docs", "lan-only Docs maybe", "conflicts", "resolve Docs x", "resolve Docs x --keep neither", "resolve Docs --keep copy"] {
+        for bad in ["share Docs --access-days 30", "share-until Docs", "share-until Docs 0", "share-until Docs never --extend", "share-until Docs soon", "share Docs --role boss", "share Docs --uses 0", "share Docs --uses 1001", "share Docs --days 0", "role Docs X chief", "role Docs X", "remove-device Docs", "", "frob", "status", "status a b", "rename Docs", "move Docs", "address Docs", "remove", "settings --lan maybe", "settings extra", "list x", "join", "lan-only Docs", "lan-only Docs maybe", "conflicts", "resolve Docs x", "resolve Docs x --keep neither", "resolve Docs --keep copy"] {
             assert!(parse(w(bad)).is_err(), "`sync {bad}` should be a usage error");
         }
     }
@@ -581,9 +753,11 @@ mod tests {
 
     #[test]
     fn texts_never_hide_what_matters() {
-        let s = SyncSharesDto { id: "MFZWI3D-X".into(), name: "Docs".into(), read_only: Some("SWR-K".into()), read_only_link: Some("seedwell://sync/SWR-K".into()), ..Default::default() };
-        let t = shares(&s);
-        assert!(t.contains("SWR-K") && !t.contains("Read & write"), "{t}");
+        let i = SyncInviteDto { id: "ab".repeat(16), link: "seedwell://sync/LINK".into(), role: "read_only".into(), max_uses: 1, ..Default::default() };
+        let t = invite(&i);
+        assert!(t.contains("seedwell://sync/LINK") && t.contains("Read only") && t.contains("one device"), "{t}");
+        let used = SyncInvitesDto { id: "MFZWI3D-X".into(), name: "Docs".into(), invites: vec![SyncInviteDto { uses: 1, ..i }] };
+        assert!(invites(&used).contains("used"), "{}", invites(&used));
         let l = SyncListDto { device_name: "Mac".into(), device_id: "AAAAAAA-B".into(), port: 22000, ..Default::default() };
         assert!(list(&l).contains("No synced folders"));
     }

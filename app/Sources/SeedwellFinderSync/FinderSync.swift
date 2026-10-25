@@ -110,25 +110,47 @@ final class FinderSync: FIFinderSync, @unchecked Sendable {
     }
 
     override func menu(for menuKind: FIMenuKind) -> NSMenu? {
-        guard menuKind != .toolbarItemMenu, folder(of: FIFinderSyncController.default().targetedURL()) != nil else { return nil }
+        let f = menuKind == .toolbarItemMenu ? nil : folder(of: clicked)
+        log.info("menu \(menuKind.rawValue, privacy: .public): \(f == nil ? "no synced folder" : f!.canShare ? "share" : "show only", privacy: .public)")
+        guard let f else { return nil }
         let menu = NSMenu(title: "")
-        let item = NSMenuItem(title: "Show in Seedwell", action: #selector(showInSeedwell(_:)), keyEquivalent: "")
-        item.target = self
-        menu.addItem(item)
+        let show = NSMenuItem(title: "Show in Seedwell", action: #selector(showInSeedwell(_:)), keyEquivalent: "")
+        show.target = self
+        menu.addItem(show)
+        if f.canShare {
+            let share = NSMenuItem(title: "Share “\(f.name)”…", action: #selector(share(_:)), keyEquivalent: "")
+            share.target = self
+            menu.addItem(share)
+        }
         return menu
     }
 
     @objc private func showInSeedwell(_ sender: Any?) {
-        guard let f = folder(of: FIFinderSyncController.default().targetedURL()),
-              let url = URL(string: "seedwell://folder/\(f.id)") else { return }
+        openInApp("")
+    }
+
+    @objc private func share(_ sender: Any?) {
+        openInApp("/share")
+    }
+
+    /// Opens `seedwell://folder/<id><suffix>` for the folder of the item the menu was opened on.
+    private func openInApp(_ suffix: String) {
+        guard let f = folder(of: clicked),
+              let url = URL(string: "seedwell://folder/\(f.id)\(suffix)") else { return }
         NSWorkspace.shared.open(url)
     }
 
-    /// The synced folder an item is in.
+    /// The item the menu is for: the selected one for a right-click on items, else the folder clicked in.
+    private var clicked: URL? {
+        let c = FIFinderSyncController.default()
+        return c.selectedItemURLs()?.first ?? c.targetedURL()
+    }
+
+    /// The synced folder an item is in (paths compared as for the badges: Unicode form, the data volume's path).
     private func folder(of url: URL?) -> FinderStatus.Folder? {
         guard let path = url?.path else { return nil }
         lock.lock()
         defer { lock.unlock() }
-        return status?.folders.filter { path == $0.path || path.hasPrefix($0.path + "/") }.max { $0.path.count < $1.path.count }
+        return badges.folder(containing: path)
     }
 }

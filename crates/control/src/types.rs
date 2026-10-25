@@ -1350,9 +1350,17 @@ pub struct SyncFolderDto {
     pub name: String,
     /// Where it is.
     pub path: String,
-    /// What this Mac may do: `read_write`, `read_only` or `encrypted`.
+    /// What this Mac may do: `read_write` or `read_only` (from its role; `read_only` while joining).
     pub access: String,
-    /// `starting`, `up-to-date`, `scanning`, `syncing`, `waiting-for-devices`, `paused`, `missing`, `error`.
+    /// This Mac's role: `owner`, `admin`, `read_write` or `read_only`; absent while joining or after removal.
+    #[serde(default)]
+    pub role: Option<String>,
+    /// When the folder stops being shared (Unix seconds; its owners' setting): after it only the owners sync.
+    /// Absent: no end.
+    #[serde(default)]
+    pub share_until: Option<u64>,
+    /// `starting`, `up-to-date`, `scanning`, `syncing`, `waiting-for-devices`, `waiting-for-admin`, `paused`,
+    /// `missing`, `error`.
     pub state: String,
     /// Files and folders in it (as last scanned).
     pub files: u64,
@@ -1449,25 +1457,67 @@ pub struct SyncListDto {
     pub devices: Vec<SyncDeviceDto>,
 }
 
-/// `sync.share` result: the keys and links this Mac may give out. Secrets: anyone who has one has the folder.
+/// One invitation of a folder (`sync.share`, `sync.invites`). The link is a secret: anyone who has it can join
+/// until it is used up, expires or is revoked.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct SyncSharesDto {
+pub struct SyncInviteDto {
+    /// Its id (hex), for `sync.revoke_invite`.
+    pub id: String,
+    /// The `seedwell://sync/…` link (empty for one another device made).
+    pub link: String,
+    /// The role it admits at: `owner`, `admin`, `read_write` or `read_only`.
+    pub role: String,
+    /// Devices it admits; 0 = unlimited.
+    pub max_uses: u32,
+    /// Devices admitted with it.
+    pub uses: u32,
+    /// When it stops admitting (Unix seconds); absent: never.
+    #[serde(default)]
+    pub expires_at: Option<u64>,
+    /// When it was made.
+    pub created_at: u64,
+    /// Revoked.
+    pub revoked: bool,
+}
+
+/// `sync.invites` result.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct SyncInvitesDto {
     /// The folder id.
     pub id: String,
     /// Its name.
     pub name: String,
-    /// The Read & write key (only on a device that has it).
+    /// Newest first.
+    pub invites: Vec<SyncInviteDto>,
+}
+
+/// One device of a folder (`sync.members`).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct SyncMemberDto {
+    /// Its device id.
+    pub device_id: String,
+    /// Its name (empty when never met).
+    pub name: String,
+    /// `owner`, `admin`, `read_write` or `read_only`.
+    pub role: String,
+    /// Connected now for this folder.
+    pub online: bool,
+    /// This Mac.
+    pub me: bool,
+    /// When its access ends (Unix seconds); absent: until removed.
     #[serde(default)]
-    pub read_write: Option<String>,
-    /// Its link.
-    #[serde(default)]
-    pub read_write_link: Option<String>,
-    /// The Read only key.
-    #[serde(default)]
-    pub read_only: Option<String>,
-    /// Its link.
-    #[serde(default)]
-    pub read_only_link: Option<String>,
+    pub expires_at: Option<u64>,
+}
+
+/// `sync.members` result.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct SyncMembersDto {
+    /// The folder id.
+    pub id: String,
+    /// Its name.
+    pub name: String,
+    /// This Mac first, then by role.
+    pub members: Vec<SyncMemberDto>,
 }
 
 /// `sync.settings` and `sync.set_settings` result.

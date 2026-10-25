@@ -75,6 +75,7 @@ enum Act {
     SetPeer { dev: usize, index_id: u64, max_seq: u64 },
     DropPeer { dev: usize },
     PutWriter { dev: usize, b: u8 },
+    DropWriter { dev: usize },
     SetIndexId(u64),
 }
 
@@ -111,7 +112,8 @@ fn build<S: IndexStore>(store: &S, acts: &[Act]) -> Vec<Op> {
                 b.set_peer(DEVS[*dev], PeerState { index_id: *index_id, max_seq: *max_seq })
             }
             Act::DropPeer { dev } => b.drop_peer(DEVS[*dev]).unwrap(),
-            Act::PutWriter { dev, b: x } => b.put_writer(DEVS[*dev], Writer { device_pk: [*x; 32], cert: [x ^ 1; 64] }),
+            Act::PutWriter { dev, b: x } => b.put_writer(DEVS[*dev], Writer { device_pk: [*x; 32] }),
+            Act::DropWriter { dev } => b.drop_writer(DEVS[*dev]),
             Act::SetIndexId(id) => b.set_index_id(*id),
         }
     }
@@ -206,6 +208,7 @@ fn act() -> impl Strategy<Value = Act> {
         1 => (0..DEVS.len(), 0u64..3, 0u64..100).prop_map(|(dev, index_id, max_seq)| Act::SetPeer { dev, index_id, max_seq }),
         1 => (0..DEVS.len()).prop_map(|dev| Act::DropPeer { dev }),
         1 => (0..DEVS.len(), any::<u8>()).prop_map(|(dev, b)| Act::PutWriter { dev, b }),
+        1 => (0..DEVS.len()).prop_map(|dev| Act::DropWriter { dev }),
         1 => (0u64..4).prop_map(Act::SetIndexId),
     ]
 }

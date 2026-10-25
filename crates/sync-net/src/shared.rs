@@ -13,7 +13,8 @@ use tokio::sync::{Notify, mpsc, oneshot, watch};
 use trs_sync::folder::FolderCore;
 use trs_sync::store_redb::RedbReader;
 use trs_sync_proto::ids::{DeviceId, FolderId};
-use trs_sync_proto::keys::{Access, FolderKey};
+use trs_sync_proto::keys::{Access, FolderKey, FolderSecret};
+use trs_sync_proto::members::{InviteLink, Membership, Role};
 use trs_sync_proto::msg::{Message, Request, Response};
 
 /// Locks a std mutex, also after a panic elsewhere (the data is still consistent: every critical
@@ -26,8 +27,18 @@ pub fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 pub struct FolderShared {
     /// Its id.
     pub id: FolderId,
-    /// The key this device holds (never sent; used for proofs and discovery topics).
-    pub key: FolderKey,
+    /// The folder's public key (the folder id, discovery topics, LAN tags).
+    pub public: FolderKey,
+    /// The folder secret, on an owner device (a new co-owner receives it from an owner).
+    pub secret: RwLock<Option<FolderSecret>>,
+    /// Who is in the folder and what each device may do. Read without the core: the UI asks often.
+    pub membership: RwLock<Membership>,
+    /// Where the membership is kept (next to the index).
+    pub members_path: PathBuf,
+    /// The invitation this device joins with, until an owner or admin admits it.
+    pub invite: Mutex<Option<InviteLink>>,
+    /// The links of invitations this device made, by invite id (shown again in the Share dialog).
+    pub links: Mutex<BTreeMap<[u8; 16], String>>,
     /// Where it is on disk.
     pub root: PathBuf,
     /// The core. Lock only on a blocking thread.
@@ -60,6 +71,11 @@ pub struct FolderShared {
 }
 
 impl FolderShared {
+    /// This device's role (`me`: its public key), if it is a member.
+    pub fn role_of(&self, device_pk: &[u8; 32]) -> Option<Role> {
+        self.membership.read().unwrap_or_else(|e| e.into_inner()).role(device_pk)
+    }
+
     /// May this folder be synced with a peer over this connection (`lan`: the peer is on the LAN, not
     /// relayed)? Not when it is paused, nor a LAN-only folder with a peer elsewhere.
     pub fn allowed_with(&self, lan: bool) -> bool {
@@ -91,6 +107,11 @@ pub struct Live {
     pub local: (u64, u64),
     /// Bytes fetched and served, for rates.
     pub fetched: u64,
+    /// Joining: an owner or admin refused this device's invitation, for this reason.
+    pub refused: Option<String>,
+    /// Devices of this folder this one cannot sync with (their Seedwell is too old or too new), and why. Shown
+    /// with the issues; a device's entry goes when a session with it starts.
+    pub incompatible: BTreeMap<DeviceId, String>,
 }
 
 impl Default for Live {
@@ -105,6 +126,8 @@ impl Default for Live {
             pending: (Vec::new(), false),
             local: (0, 0),
             fetched: 0,
+            refused: None,
+            incompatible: BTreeMap::new(),
         }
     }
 }
@@ -116,10 +139,14 @@ pub const PENDING_SAMPLE: usize = 1000;
 pub struct PeerHandle {
     /// Its id.
     pub device: DeviceId,
+    /// Its public key (what membership statements name).
+    pub device_pk: [u8; 32],
     /// Its name, from its Hello.
     pub name: String,
     /// Its client string (`Seedwell 0.1.5`).
     pub client: String,
+    /// The protocol version and features the session runs at (from both Hellos).
+    pub agreed: trs_sync_proto::msg::Agreed,
     /// Where the connection goes.
     pub remote: SocketAddr,
     /// The connection stays on the local network (no Internet limits apply). Never for a relayed one.
@@ -154,9 +181,10 @@ impl PeerHandle {
     /// A handle for a new session; the receivers go to its writer task.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        device: DeviceId,
+        device_pk: [u8; 32],
         name: String,
         client: String,
+        agreed: trs_sync_proto::msg::Agreed,
         remote: SocketAddr,
         local: SocketAddr,
         exporter: [u8; 32],
@@ -168,9 +196,11 @@ impl PeerHandle {
         let (data, drx) = mpsc::channel(64);
         let (closed, _) = watch::channel(false);
         let h = Arc::new(PeerHandle {
-            device,
+            device: DeviceId::of_public_key(&device_pk),
+            device_pk,
             name,
             client,
+            agreed,
             remote,
             lan,
             via,
@@ -327,4 +357,10 @@ pub struct Ctx {
     pub hub: mpsc::UnboundedSender<HubMsg>,
     /// Internet speed limits.
     pub limits: crate::limit::Limits,
+    /// Where secrets are kept (a new co-owner stores the folder secret it receives).
+    pub secrets: Arc<dyn crate::secrets::SecretStore>,
+    /// The protocol versions this device speaks, lowest and highest (in its Hello).
+    pub protocol: (u32, u32),
+    /// Its feature bits (in its Hello).
+    pub features: u64,
 }

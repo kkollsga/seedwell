@@ -1,7 +1,8 @@
 # trs-sync-proto
 
-Seedwell Sync v1: everything two devices must agree on to sync a folder (SPEC §7G). Folder keys and their
-derivation, device ids, the signed file model and the wire messages. **Sans-I/O**: no sockets, no files, no clocks;
+Seedwell Sync (protocol 2): everything two devices must agree on to sync a folder (SPEC §7G). The folder key and
+what is derived from it, roles and membership, invitations, device ids, the signed file model and the wire
+messages. **Sans-I/O**: no sockets, no files, no clocks;
 randomness comes in through a trait (`Random`, implemented for ring's `SystemRandom`) so simulations are
 deterministic. `#![forbid(unsafe_code)]`. The sessions, TLS and compression live in `trs-sync-net`; the scanner,
 index and puller in `trs-sync`.
@@ -10,7 +11,8 @@ index and puller in `trs-sync`.
 |---|---|
 | `model` | version vectors, `FileInfo`, `SignedFile`, `IndexEntry`, `validate_path` (Syncthing's rules) |
 | `ids` | `DeviceId`, `FolderId`, `ShortId`; Syncthing's checked text form |
-| `keys` | `FolderKey` (three levels), `Access`, `Link`, `Proof`, DHT topics and LAN tags |
+| `keys` | `FolderSecret`, `FolderKey` (owner or member), `Access`, `Proof`, DHT topics and LAN tags |
+| `members` | `Role`, signed `Statement`s, `Membership` (the roles they give), `Invite`, `InviteLink`, redeem proofs |
 | `device` | `DeviceKey` (Ed25519), `verify` |
 | `sign` | `file_payload`, `chunks_hash`, `sign_file`, `verify_file`, `WriterTable` |
 | `codec`, `msg` | frames, magics, the primitive encodings, every message |
@@ -25,21 +27,16 @@ characters), four groups of 13 each followed by a Luhn mod-32 check character, s
 `0 1 8` as `O I B`, and requires every check character; the old 52-character form is refused. `Debug` prints the
 first group only. Folder ids use the same form.
 
-**Folder keys:** `<prefix>-<base32(payload ‖ check)>`, `check = SHA-256("seedwell-sync/v1/key" ‖ prefix ‖
-payload)[..2]`, so a typo is caught (and so is a prefix swapped between `SWR` and `SWE`).
+**Folder authority:** a folder's secret `S` gives its Ed25519 signing key; only owner devices hold it. Every member
+knows the public half `pk`; the folder id is `SHA-256(pk)`. No key is shared: devices join with invitation links.
 
-| Prefix | Level (`Access`) | Payload | Bytes | Text |
-|---|---|---|---|---|
-| `SWW` | Read & write (`Write`) | S | 32 | 59 characters |
-| `SWR` | Read only (`Read`) | R ‖ pk | 64 | 110 characters |
-| `SWE` | Encrypted (`Storage`) | A ‖ pk | 64 | 110 characters |
+**Invitation link:** `seedwell://sync/<base32(invite without its token key ‖ token seed 32 ‖ check 2)>?name=<name>`,
+`check = SHA-256("seedwell-sync/v2/link" ‖ payload)[..2]` (so a typo is caught; the name is only a hint, ≤ 255
+bytes). Parsing takes surrounding whitespace, `<…>` quotes from mail and `+` for a space, ignores other query fields,
+and refuses the bare `SWW-`/`SWR-` keys of the test builds (`KeyError::OldKey`).
 
-**Link:** `seedwell://sync/<key>?name=<percent-encoded UTF-8>` (name ≤ 255 bytes, only a hint). Parsing also takes
-a bare key, surrounding whitespace, `<…>` quotes from mail, `+` for a space, and ignores other query fields.
-
-Keys, links and secrets have hand-written `Debug` that prints the prefix and the folder id, never key material.
-The text forms come only from `to_text()` / `format()`, never from `Display`, so a key cannot end up in a log line
-by accident.
+Links, invitations and secrets have hand-written `Debug` that prints the invite id or folder id, never secret material.
+The link text comes only from `format()`, never from `Display`, so a link cannot end up in a log line by accident.
 
 ## Derivation
 
@@ -47,31 +44,40 @@ by accident.
 
 | Value | Derivation | Who can compute it |
 |---|---|---|
-| S | 32 random bytes | Write |
-| folder signing key | Ed25519 from seed `H(S, "seedwell-sync/v1/sign")`; `pk` its public half | Write (`pk`: all) |
-| R | `H(S, "seedwell-sync/v1/read")` | Write, Read |
-| A | `H(R, "seedwell-sync/v1/storage")` | all |
+| S | 32 random bytes | owners |
+| folder signing key | Ed25519 from seed `H(S, "seedwell-sync/v1/sign")`; `pk` its public half | owners (`pk`: all) |
 | folder id | `SHA-256(pk)` | all |
-| auth_r | `H(R, "seedwell-sync/v1/auth-read")` | Write, Read |
-| auth_a | `H(A, "seedwell-sync/v1/auth-storage")` | all |
 | lan_key | `H(pk, "seedwell-sync/v1/lan")` | all |
 | `dht_topic(day)` | `SHA-1("seedwell-sync/v1/dht" ‖ pk ‖ day u32 BE)`, day = Unix days UTC | all |
 | `lan_tag(hour, nonce8)` | `HMAC-SHA256(lan_key, "seedwell-sync/v1/lan-tag" ‖ hour u32 BE ‖ nonce8)[..8]` | all |
 
+## Membership
+
+Roles: **Owner** (holds `S`: changes roles, removes devices, invites at any role), **Admin** (invites at Read & write or
+Read only), **Read & write**, **Read only** (receives, never sends its own). A folder's membership is a set of signed
+statements (wire forms in `members.rs`):
+
+| Statement | Says | Signed by |
+|---|---|---|
+| grant | device `pk` has a role; `serial` orders an owner's statements; may carry the invitation it came from | the folder key, or an admin (only with an invitation, for a device no owner decided on) |
+| remove | the device is out | the folder key |
+| invite | an invitation, published so owners and admins can count and show it | its issuer |
+| revoke | an invitation admits nobody from now on | the folder key or an admin |
+
+`Membership::add` checks every signature; the roles follow deterministically from the statements, in any order:
+owners' latest statement per device (higher serial, then greater signature) decides; admins' grants count for devices
+no owner decided on (earliest by time, then signature); an invitation used more often than its limit keeps its
+earliest admissions and the rest count as removed. An owner signs admins' admissions again (`to_confirm`), so they
+stay if that admin is later demoted.
+
 ## Proofs (after TLS)
 
-`X` is a 32-byte TLS exporter value with label `EXPORTER-seedwell-sync-v1` (`keys::EXPORTER_LABEL`).
-
-| Proof | Value | Checked by |
-|---|---|---|
-| `Writer` | `sign_folder_sk("seedwell-sync/v1/writer" ‖ folder_id ‖ device_pk)`, 64 bytes | everyone (with `pk`) |
-| `Read` | `HMAC(auth_r, "seedwell-sync/v1/proof-read" ‖ folder_id ‖ device_pk ‖ X)` | Write, Read |
-| `Storage` | `HMAC(auth_a, "seedwell-sync/v1/proof-storage" ‖ folder_id ‖ device_pk ‖ X)` | everyone |
-
-`FolderKey::proofs` makes every proof the key can (writer 3, reader 2, storage 1); `FolderKey::verify_proofs` returns
-the highest `Access` it can check, or `None` (drop the peer). HMACs are compared in constant time (ring
-`hmac::verify`). The writer certificate is bound to the device, not the session: it is permanent, sent around in
-`Writers`, and only useful together with the device's TLS key. The HMAC proofs are bound to the session.
+TLS authenticates each device's key. In `Join`, each side sends `Proof::Grant`s (the statements that make it a
+member: its grant, and an admin's own grant if an admin signed it), or, when joining, one `Proof::Invite`: the
+invitation and the token's signature of `"seedwell-sync/v2/redeem" ‖ folder_id ‖ device_pk ‖ X`, where `X` is the
+32-byte TLS exporter value with label `EXPORTER-seedwell-sync-v1` (`keys::EXPORTER_LABEL`). So a redeem proof is
+bound to the device and the session. Only an owner or admin admits (`Membership::check_admit`): issuer still an
+owner or admin, not expired, not revoked, uses left.
 
 ## Signed file versions
 
@@ -106,7 +112,7 @@ byte strings `varint len ‖ bytes`; lists `varint count ‖ items`; bools one b
 |---|---|---|
 | 1 | Hello | protocol, client str (≤ 128 B), device_name str (≤ 64 chars) |
 | 2 | Join | folders ≤ 1024: [folder_id 32, proofs ≤ 8: [u8 kind ‖ bytes], my_index_id, your_index_id, your_max_seq] |
-| 3 | Writers | folder_id 32, writers ≤ 1024: [device_pk 32, cert 64] |
+| 3 | Members | folder_id 32, statements ≤ 10 000: [bytes ≤ 1024 B: a statement] |
 | 4 | Index | folder_id 32, index_id, full bool, entries ≤ 1000: [IndexEntry], done bool |
 | 5 | Request | id, folder_id 32, path str, offset, len, hash 32, from_temp bool |
 | 6 | Response | id, code u8 (0 ok, 1 generic, 2 no such file, 3 invalid, 4 busy; unknown → generic), data ≤ 16 MiB |
@@ -119,13 +125,15 @@ byte strings `varint len ‖ bytes`; lists `varint count ‖ items`; bools one b
 | 13 | RelayOpen | target device_id 32, session |
 | 14 | RelayData | session, data ≤ 16 MiB |
 | 15 | RelayClose | session |
+| 16 | OwnerKey | folder_id 32, S 32 (an owner to a co-owner, inside TLS) |
 
 An `IndexEntry` is `sequence ‖ u8 entry flags (bit0 invalid) ‖ path str ‖ u8 kind ‖ size ‖ mtime_ns (zigzag) ‖
 u8 file flags ‖ version ‖ modified_by 8 ‖ file_id 16 ‖ symlink_target str ‖ bool [conflict_of str] ‖ chunks ≤
 400 000: [len ‖ hash 32] ‖ sig 64`. A version is `count ≤ 256 ‖ n × (short id 8 BE ‖ value)`, and must be sorted,
 unique and non-zero. Paths are ≤ 4096 bytes, chunks ≤ 16 MiB. Unknown file-flag bits are refused (the signature
-could not cover them); unknown entry-flag bits are ignored. Proof kinds are 1 writer (64 bytes), 2 read (32),
-3 storage (32); other kinds (≤ 256 bytes) are carried as `Proof::Unknown` and never trusted.
+could not cover them); unknown entry-flag bits are ignored. Proof kinds are 4 grant and 5 invite (≤ 1024 bytes);
+other kinds are carried as `Proof::Unknown` and never trusted. `Hello.protocol` is 2; a peer with another one is
+refused.
 
 Every cap is checked while decoding, before allocating, and so is the claim itself: a count of `n` items needs at
 least `n ×` (smallest item) bytes left in the frame, so no frame makes the decoder reserve more than the frame
@@ -142,13 +150,15 @@ the file payload).
 * Test vectors: Syncthing's Luhn vectors (`luhn_test.go`) and two Syncthing device ids (the documentation example
   and `deviceid_test.go`), RFC 4648 base32, RFC 5869 HKDF (case 3, empty salt), RFC 8032 Ed25519 (test 1); a
   byte-exact `Hello` frame and `file_payload` layout.
-* Keys: every level roundtrips through text; derived keys equal parsed ones; the derivation matches the published
-  labels; every one-character typo is caught (bar padding bits in the last character); Debug never shows secrets; links survive mail quoting.
+* Keys and links: the derivation matches the published labels; folder signatures verify only with the folder's
+  key; Debug never shows secrets; links roundtrip, survive mail quoting, and refuse typos, damage and bare keys.
 * Ids: every single-character change of a device id is caught.
-* Proofs: each tier proving to each tier gives the right `Access`; proofs for another device, another session or
-  another folder fail; a flipped bit fails.
-* Signatures: a one-bit change in any signed field (and in the signature) breaks it; the writer table refuses
-  borrowed or foreign certificates and forged `modified_by`.
+* Membership: statements roundtrip and verify; only owners remove or grant without an invitation; every order of the
+  same statements gives the same roles; admins invite below Admin and cannot change roles; a removed device is out
+  and its later versions do not count; limits, expiry and revocation hold; two admins over a limit keep the same
+  earliest device everywhere; a redeem proof is bound to the device and the session.
+* Signatures: a one-bit change in any signed field (and in the signature) breaks it; the writer table refuses a
+  forged `modified_by` and drops a removed writer.
 * Wire: proptest roundtrips for every message, payload/frame agreement, frame streams, and random or damaged input
   (bit flips, truncation) decoded without panics; huge claimed counts refused without allocating.
 * Fuzz: `fuzz/` (own `[workspace]`, not part of the Seedwell workspace) has `msg_decode`: frame splitting plus

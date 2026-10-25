@@ -11,7 +11,6 @@ use ring::digest::{Context, SHA256};
 
 use crate::device::{self, DeviceKey};
 use crate::ids::{DeviceId, FolderId, ShortId};
-use crate::keys::verify_writer_cert;
 use crate::model::{ChunkRef, FileInfo, FileKind, SignedFile};
 
 const FILE: &str = "seedwell-sync/v1/file";
@@ -103,13 +102,12 @@ pub fn verify_file(folder_id: &FolderId, device_pk: &[u8; 32], file: &SignedFile
     device::verify(device_pk, &file_payload(folder_id, &file.info), &file.sig)
 }
 
-/// A writer device of a folder: its public key and the certificate a holder of `S` issued it.
+/// A writer device of a folder: its public key. The folder's membership decides who writes
+/// ([`crate::members::Membership::writers`]).
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Writer {
     /// The device's Ed25519 public key.
     pub device_pk: [u8; 32],
-    /// `sign_folder_sk("seedwell-sync/v1/writer" ‖ folder_id ‖ device_pk)`.
-    pub cert: [u8; 64],
 }
 
 impl std::fmt::Debug for Writer {
@@ -121,8 +119,6 @@ impl std::fmt::Debug for Writer {
 /// Why a writer was not added to a [`WriterTable`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BadWriter {
-    /// The certificate was not made with this folder's key for this device.
-    Certificate,
     /// Another writer already has this short id (two keys whose SHA-256 share 64 bits: not seen in practice).
     ShortIdTaken,
 }
@@ -130,7 +126,6 @@ pub enum BadWriter {
 impl std::fmt::Display for BadWriter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            BadWriter::Certificate => f.write_str("the writer certificate is not valid for this folder and device"),
             BadWriter::ShortIdTaken => f.write_str("another writer already has this short id"),
         }
     }
@@ -138,20 +133,19 @@ impl std::fmt::Display for BadWriter {
 
 impl std::error::Error for BadWriter {}
 
-/// The writers of one folder, by short id: what every entry is checked against. Only writers with a valid
-/// certificate get in, so checking an entry is one signature check.
+/// The writers of one folder, by short id: what every entry is checked against. Checking an entry is one
+/// signature check.
 #[derive(Clone, Debug)]
 pub struct WriterTable {
-    folder_pk: [u8; 32],
     folder_id: FolderId,
-    // Ordered, so iteration (and so what a device sends in `Writers`) is the same on every run.
+    // Ordered, so iteration is the same on every run.
     writers: BTreeMap<ShortId, Writer>,
 }
 
 impl WriterTable {
     /// An empty table for the folder with this signing public key.
     pub fn new(folder_pk: [u8; 32]) -> Self {
-        WriterTable { folder_pk, folder_id: FolderId::of_public_key(&folder_pk), writers: BTreeMap::new() }
+        WriterTable { folder_id: FolderId::of_public_key(&folder_pk), writers: BTreeMap::new() }
     }
 
     /// The folder this table is for.
@@ -159,12 +153,9 @@ impl WriterTable {
         self.folder_id
     }
 
-    /// Adds a writer after checking its certificate. `Ok(true)` when it is new, `Ok(false)` when it was known.
-    /// The short id is computed here from the key, never taken from the sender.
+    /// Adds a writer. `Ok(true)` when it is new, `Ok(false)` when it was known. The short id is computed here
+    /// from the key, never taken from the sender.
     pub fn insert(&mut self, writer: Writer) -> Result<bool, BadWriter> {
-        if !verify_writer_cert(&self.folder_pk, &writer.device_pk, &writer.cert) {
-            return Err(BadWriter::Certificate);
-        }
         match self.writers.entry(DeviceId::of_public_key(&writer.device_pk).short()) {
             Entry::Vacant(v) => {
                 v.insert(writer);
@@ -173,6 +164,11 @@ impl WriterTable {
             Entry::Occupied(o) if o.get().device_pk == writer.device_pk => Ok(false),
             Entry::Occupied(_) => Err(BadWriter::ShortIdTaken),
         }
+    }
+
+    /// Removes a writer: its versions are refused from now on.
+    pub fn remove(&mut self, id: ShortId) -> bool {
+        self.writers.remove(&id).is_some()
     }
 
     /// The writer with this short id.
@@ -205,11 +201,12 @@ impl WriterTable {
 mod tests {
     use super::*;
     use crate::keys::{FolderKey, FolderSecret};
-    use crate::model::{Counter, Version};
 
     fn folder() -> FolderKey {
-        FolderKey::ReadWrite(FolderSecret::from_bytes([1; 32]))
+        FolderKey::Owner(FolderSecret::from_bytes([1; 32]))
     }
+    use crate::model::{Counter, Version};
+
 
     fn info(by: &DeviceKey) -> FileInfo {
         let me = by.device_id().short();
@@ -328,27 +325,21 @@ mod tests {
     }
 
     #[test]
-    fn the_writer_table_checks_certificates_and_signers() {
+    fn the_writer_table_checks_signers() {
         let key = folder();
         let fid = key.folder_id();
         let (a, b) = (DeviceKey::from_seed(&[9; 32]), DeviceKey::from_seed(&[8; 32]));
         let mut t = WriterTable::new(*key.public_key());
         assert_eq!(t.folder_id(), fid);
-        let cert_a = key.writer_cert(a.public_key()).unwrap();
-        assert_eq!(t.insert(Writer { device_pk: *a.public_key(), cert: cert_a }), Ok(true));
-        assert_eq!(t.insert(Writer { device_pk: *a.public_key(), cert: cert_a }), Ok(false));
-        // b presents a's certificate, and a certificate from another folder.
-        assert_eq!(t.insert(Writer { device_pk: *b.public_key(), cert: cert_a }), Err(BadWriter::Certificate));
-        let foreign = FolderKey::ReadWrite(FolderSecret::from_bytes([2; 32])).writer_cert(b.public_key()).unwrap();
-        assert_eq!(t.insert(Writer { device_pk: *b.public_key(), cert: foreign }), Err(BadWriter::Certificate));
+        assert_eq!(t.insert(Writer { device_pk: *a.public_key() }), Ok(true));
+        assert_eq!(t.insert(Writer { device_pk: *a.public_key() }), Ok(false));
         assert_eq!(t.len(), 1);
 
         let fa = sign_file(&a, &fid, info(&a));
         assert!(t.verify(&fa));
         let fb = sign_file(&b, &fid, info(&b));
         assert!(!t.verify(&fb), "b is not a writer yet");
-        let cert_b = key.writer_cert(b.public_key()).unwrap();
-        assert_eq!(t.insert(Writer { device_pk: *b.public_key(), cert: cert_b }), Ok(true));
+        assert_eq!(t.insert(Writer { device_pk: *b.public_key() }), Ok(true));
         assert!(t.verify(&fb));
 
         // b signs a version that names a as its maker: checked against a's key, so it fails.
@@ -357,5 +348,8 @@ mod tests {
         let forged = SignedFile { sig: b.sign(&file_payload(&fid, &forged)), info: forged };
         assert!(!t.verify(&forged));
         assert_eq!(t.iter().count(), 2);
+        // Removed: its versions no longer count.
+        assert!(t.remove(b.device_id().short()));
+        assert!(!t.verify(&fb));
     }
 }

@@ -7,6 +7,7 @@ use trs_sync_net::session::Via;
 use trs_sync_net::{RelayOptions, run_relay};
 use trs_sync_proto::device::DeviceKey;
 use trs_sync_proto::ids::{DeviceId, FolderId};
+use trs_sync_proto::members::Role;
 
 use crate::utp::{Device, addr, device_with, read, until};
 
@@ -30,9 +31,9 @@ async fn three(b_key: &str) -> (Device, Device, Device, FolderId, Vec<tempfile::
     std::fs::write(dirs[2].path().join("from-c.txt"), b"hub").unwrap();
     let st = c.h.add_folder(dirs[2].path().to_path_buf()).await.unwrap();
     let id: FolderId = st.id.parse().unwrap();
-    let shares = c.h.shares(&id).unwrap();
-    a.h.join_folder(shares.read_write_link.as_ref().unwrap(), dirs[0].path().join("F")).await.unwrap();
-    let bk = if b_key == "rw" { shares.read_write_link.unwrap() } else { shares.read_only_link.unwrap() };
+    let invite = |role| c.h.create_invite(&id, role, 1, 1).unwrap().link;
+    a.h.join_folder(&invite(Role::ReadWrite), dirs[0].path().join("F")).await.unwrap();
+    let bk = if b_key == "rw" { invite(Role::ReadWrite) } else { invite(Role::ReadOnly) };
     b.h.join_folder(&bk, dirs[1].path().join("F")).await.unwrap();
     a.h.add_address(&id, addr(&c)).unwrap();
     b.h.add_address(&id, addr(&c)).unwrap();
@@ -103,7 +104,7 @@ async fn devices_registered_at_a_relay_server_sync_through_it() {
     std::fs::write(fa.path().join("first.txt"), b"direct").unwrap();
     let st = a.h.add_folder(fa.path().to_path_buf()).await.unwrap();
     let id: FolderId = st.id.parse().unwrap();
-    let key = a.h.shares(&id).unwrap().read_write_link.unwrap();
+    let key = a.h.create_invite(&id, Role::ReadWrite, 1, 1).unwrap().link;
     let dest = fb.path().join("Shared");
     b.h.join_folder(&key, dest.clone()).await.unwrap();
     b.h.add_address(&id, addr(&a)).unwrap();

@@ -42,6 +42,7 @@ struct SyncPage: View {
                             .onTapGesture { model.syncSelection = f.id }
                             .contextMenu {
                                 Button("Show in Finder") { actions.reveal(f) }
+                                if SyncText.canShare(f.role) { Button("Share…") { actions.showShare(f.id) } }
                                 Button("Edit…") { actions.showEdit(f.id) }
                                 Divider()
                                 Button("Stop Syncing…") { model.showSyncFolder(f.id, askRemove: true) }
@@ -114,18 +115,20 @@ struct SyncFolderPage: View {
     let folder: SyncFolder
     let devices: [SyncDevice]
     let actions: SyncActions
+    /// The member whose removal is being asked about.
+    @State private var askRemoveMember: SyncMember?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
             if model.syncAskRemove == folder.id { removeStrip.padding(.top, 12) }
-            section("Devices") {
-                if devices.isEmpty {
-                    quiet(folder.state == .paused ? "Paused: no devices are connected for this folder" : "No devices connected right now")
+            section("Members") {
+                if model.syncMembers.isEmpty {
+                    quiet(folder.state == .waitingForAdmin ? "Waiting for the folder’s owner or an admin to let this Mac in" : "No members known yet")
                 } else {
-                    ForEach(Array(devices.enumerated()), id: \.element.id) { n, d in
+                    ForEach(Array(SyncText.ordered(model.syncMembers).enumerated()), id: \.element.deviceId) { n, m in
                         if n > 0 { Divider().opacity(0.6) }
-                        deviceRow(d)
+                        memberRow(m, device: devices.first { $0.id == m.deviceId })
                     }
                 }
             }
@@ -160,7 +163,10 @@ struct SyncFolderPage: View {
             HStack(alignment: .firstTextBaseline, spacing: 10) {
                 Text(folder.name).font(.system(size: 20, weight: .semibold)).lineLimit(1).truncationMode(.middle)
                 Spacer(minLength: 8)
-                Button("Edit…") { actions.showEdit(folder.id) }.help("Rename or move the folder, copy its keys, options")
+                if SyncText.canShare(folder.role) {
+                    Button("Share…") { actions.showShare(folder.id) }.help("Make a link that lets another Mac join this folder")
+                }
+                Button("Edit…") { actions.showEdit(folder.id) }.help("Rename or move the folder, options")
                 Button("Stop Syncing…") { model.syncTrash = false; model.syncAskRemove = folder.id }
                     .help("Stop syncing this folder on this Mac; other devices keep their copy")
             }
@@ -185,7 +191,8 @@ struct SyncFolderPage: View {
     }
 
     private var statusLine: String {
-        var parts = [SyncText.subtitle(folder), SyncText.access(folder.access)]
+        var parts = [SyncText.subtitle(folder), SyncText.role(folder.role)]
+        if let until = folder.shareUntilS { parts.append("shared until \(SyncText.day(until))") }
         if folder.files > 0 { parts.append("\(Fmt.count(folder.files, "item")) · \(Fmt.bytes(folder.bytes))") }
         if folder.state == .upToDate, let t = folder.lastSyncedS { parts.append("synced \(Fmt.ago(t))") }
         return parts.joined(separator: " · ")
@@ -225,22 +232,50 @@ struct SyncFolderPage: View {
         Text(t).font(.system(size: 13)).foregroundStyle(.secondary).padding(.vertical, 4)
     }
 
-    private func deviceRow(_ d: SyncDevice) -> some View {
+    /// A member: how it is reached (when connected), its name, role and state; the owner's menu for the others.
+    private func memberRow(_ m: SyncMember, device d: SyncDevice?) -> some View {
         HStack(spacing: 10) {
-            Image(systemName: d.via == "LAN" ? "wifi" : d.via == "Relay" ? "arrow.triangle.branch" : "globe")
+            Image(systemName: m.isMe ? "laptopcomputer" : d.map { $0.via == "LAN" ? "wifi" : $0.via == "Relay" ? "arrow.triangle.branch" : "globe" } ?? "moon.zzz")
                 .font(.system(size: 12)).foregroundStyle(.secondary).frame(width: 18)
             VStack(alignment: .leading, spacing: 1) {
-                Text(d.name.isEmpty ? "Unnamed device" : d.name).font(.system(size: 13))
-                Text([SyncText.via(d.via), d.client].filter { !$0.isEmpty }.joined(separator: " · "))
-                    .font(.system(size: 11.5)).foregroundStyle(.secondary)
+                Text(m.isMe ? "\(m.name.isEmpty ? "This Mac" : m.name) (this Mac)" : (m.name.isEmpty ? "Unnamed device" : m.name))
+                    .font(.system(size: 13))
+                let line = SyncText.memberLine(m, device: d)
+                if !line.isEmpty { Text(line).font(.system(size: 11.5)).foregroundStyle(.secondary) }
             }
             Spacer()
-            Text("↓ \(Fmt.bytes(d.rxBytes))   ↑ \(Fmt.bytes(d.txBytes))")
-                .font(.system(size: 12)).monospacedDigit().foregroundStyle(.secondary)
-                .help("Received from and sent to this device since it connected")
+            if let d {
+                Text("↓ \(Fmt.bytes(d.rxBytes))   ↑ \(Fmt.bytes(d.txBytes))")
+                    .font(.system(size: 12)).monospacedDigit().foregroundStyle(.secondary)
+                    .help("Received from and sent to this device since it connected")
+            }
+            if folder.role == .owner, !m.isMe {
+                Menu(SyncText.role(m.role)) {
+                    ForEach([SyncRole.owner, .admin, .readWrite, .readOnly], id: \.self) { r in
+                        Button { actions.setRole(folder, m, r) { [model] in model.loadMembers() } } label: {
+                            if r == m.role { Label(SyncText.role(r), systemImage: "checkmark") } else { Text(SyncText.role(r)) }
+                        }
+                        .disabled(r == m.role)
+                    }
+                    Divider()
+                    Button("Remove from Folder…") { askRemoveMember = m }
+                }
+                .menuStyle(.button).fixedSize().controlSize(.small)
+                .help("Change what \(m.name) may do in this folder, or remove it")
+                .accessibilityIdentifier("sync-member-role")
+            } else {
+                Text(SyncText.role(m.role)).font(.system(size: 12)).foregroundStyle(.secondary)
+            }
         }
         .padding(.vertical, 6)
         .accessibilityElement(children: .combine)
+        .confirmationDialog("Remove \(askRemoveMember?.name ?? "") from “\(folder.name)”?", isPresented: Binding(
+            get: { askRemoveMember?.deviceId == m.deviceId }, set: { if !$0 { askRemoveMember = nil } })) {
+            Button("Remove", role: .destructive) { actions.removeDevice(folder, m) { [model] in model.loadMembers() }; askRemoveMember = nil }
+            Button("Cancel", role: .cancel) { askRemoveMember = nil }
+        } message: {
+            Text("It stops syncing at once, on every device. It keeps the files it already has.")
+        }
     }
 
     private func resolve(_ c: SyncConflict, _ keep: SyncKeep) {

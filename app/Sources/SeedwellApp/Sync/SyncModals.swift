@@ -10,19 +10,21 @@ import SwiftUI
     var form = SyncAddForm()
     var error: String?
     var busy = false
-    /// The default place for the pasted key (`~/Seedwell/<name>`), offered first in the Location popup.
+    /// The default place for the pasted link (`~/Seedwell/<name>`), offered first in the Location popup.
     private(set) var defaultLocation: String?
 
-    init(core: Core, prefill: String? = nil) {
+    /// `prefill`: a pasted link (Shared with me); `folder`: a folder of this Mac to start with (From this Mac).
+    init(core: Core, prefill: String? = nil, folder: String? = nil) {
         self.core = core
         if let prefill { form.mode = .shared; setKey(prefill) }
+        if let folder { form.mode = .local; form.folder = folder }
     }
 
     func setKey(_ text: String) {
         let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
         let info = t.isEmpty ? nil : core.syncParseLink(text: t)
         defaultLocation = info == nil ? nil : core.syncJoinPath(keyOrLink: t)
-        form.setKey(text, info: info, defaultLocation: defaultLocation)
+        form.setKey(text, info: info, defaultLocation: defaultLocation, problem: info == nil && !t.isEmpty ? core.syncLinkProblem(text: t) : nil)
         error = nil
     }
 
@@ -38,7 +40,7 @@ import SwiftUI
         error = nil
     }
 
-    /// Where a shared folder goes: a parent folder; the folder itself is named after the key.
+    /// Where a shared folder goes: a parent folder; the folder itself is named after the link's name.
     func chooseLocation() {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
@@ -158,7 +160,7 @@ struct SyncAddView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 Button("Choose…", action: model.chooseFolder).help("Pick the folder to sync")
             }
-            Text("A new key is made for it. After Start you can copy it, or a link, to your other devices.")
+            Text("You become its owner. After Start, Share… makes a link for each Mac that should join.")
                 .font(.system(size: 12)).foregroundStyle(.secondary)
                 .padding(.leading, 92)
                 .fixedSize(horizontal: false, vertical: true)
@@ -169,9 +171,9 @@ struct SyncAddView: View {
     private var shared: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .firstTextBaseline, spacing: 10) {
-                Text("Key or link").frame(width: 82, alignment: .leading)
+                Text("Link").frame(width: 82, alignment: .leading)
                 VStack(alignment: .leading, spacing: 5) {
-                    TextField("SWW-… or seedwell://sync/…", text: Binding(get: { model.form.key }, set: { model.setKey($0) }))
+                    TextField("seedwell://sync/…", text: Binding(get: { model.form.key }, set: { model.setKey($0) }))
                         .textFieldStyle(.roundedBorder)
                         .accessibilityIdentifier("sync-key-field")
                     if !model.form.keyLine.isEmpty {
@@ -187,7 +189,7 @@ struct SyncAddView: View {
                 Picker("", selection: Binding(get: { model.form.location }, set: { v in
                     if v == Self.choose { model.chooseLocation() } else { model.form.location = v; model.form.locationChosen = v != model.defaultLocation }
                 })) {
-                    if locations.isEmpty { Text("Paste a key first").tag("") }
+                    if locations.isEmpty { Text("Paste a link first").tag("") }
                     ForEach(locations, id: \.self) { p in Text(Notifier.abbreviate(p)).tag(p) }
                     if !locations.isEmpty { Divider() }
                     Text("Choose…").tag(Self.choose)
@@ -202,7 +204,7 @@ struct SyncAddView: View {
 
     private static let choose = "\u{1}choose"
 
-    /// The popup's places: the default for this key, and the one the user chose.
+    /// The popup's places: the default for this link, and the one the user chose.
     private var locations: [String] {
         var out: [String] = []
         if let d = model.defaultLocation { out.append(d) }
@@ -211,7 +213,7 @@ struct SyncAddView: View {
     }
 }
 
-/// The edit modal's state. Name and location apply on Save; copying a key acts at once.
+/// The edit modal's state. Name, location and options apply on Save.
 @MainActor @Observable final class SyncEditModel {
     @ObservationIgnored let core: Core
     let id: String
@@ -222,12 +224,8 @@ struct SyncAddView: View {
     var paused = false
     var lanOnly = false
     var optionsOpen = false
-    private(set) var shares: SyncShares?
     var error: String?
     var busy = false
-    /// "Read & write key" etc., shown briefly after a copy.
-    var copied: String?
-    @ObservationIgnored private var copiedTask: Task<Void, Never>?
 
     init(core: Core, id: String) {
         self.core = core
@@ -242,7 +240,6 @@ struct SyncAddView: View {
             paused = f.state == .paused
             lanOnly = f.lanOnly
         }
-        shares = try? core.syncShares(id: id)
     }
 
     var parent: String { newParent ?? ((folder?.path ?? "") as NSString).deletingLastPathComponent }
@@ -268,17 +265,6 @@ struct SyncAddView: View {
         guard panel.runModal() == .OK, let url = panel.url else { return }
         newParent = url.path
         error = nil
-    }
-
-    func copy(_ text: String?, what: String, actions: SyncActions) {
-        guard let text else { return }
-        actions.copy(text)
-        copied = what
-        copiedTask?.cancel()
-        copiedTask = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(2))
-            if !Task.isCancelled { self?.copied = nil }
-        }
     }
 
     func rescan() {
@@ -324,7 +310,7 @@ struct SyncEditView: View {
                 ModalCaption(text: "Folder Sync")
                 Text(model.folder?.name ?? "Folder").font(.system(size: 17, weight: .semibold)).lineLimit(1).truncationMode(.middle)
                 if let f = model.folder {
-                    Text("\(SyncText.access(f.access)) · \(SyncText.subtitle(f))").font(.system(size: 13)).foregroundStyle(.secondary)
+                    Text("\(SyncText.role(f.role)) · \(SyncText.subtitle(f))").font(.system(size: 13)).foregroundStyle(.secondary)
                 }
             }
             if model.folder == nil {
@@ -361,26 +347,16 @@ struct SyncEditView: View {
             }
             Divider().padding(.vertical, 2)
             VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    ModalCaption(text: "Share")
-                    Spacer()
-                    if let c = model.copied {
-                        Label("Copied \(c)", systemImage: "checkmark").font(.system(size: 11.5)).foregroundStyle(.secondary)
-                            .transition(.opacity)
+                ModalCaption(text: "Share")
+                HStack(spacing: 10) {
+                    Text(shareNote).font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 8)
+                    if let f = model.folder, SyncText.canShare(f.role) {
+                        Button("Share…") { actions.showShare(f.id) }.help("Make a link that lets another Mac join this folder")
+                            .accessibilityIdentifier("sync-edit-share")
                     }
-                }
-                if let s = model.shares {
-                    if s.readWrite != nil {
-                        shareRow("Read & write", note: "Can change files", key: s.readWrite, link: s.readWriteLink)
-                    }
-                    if s.readOnly != nil {
-                        shareRow("Read only", note: "Receives changes, never sends its own", key: s.readOnly, link: s.readOnlyLink)
-                    }
-                    Text("Anyone with a key or link can sync this folder. Send it only to people and devices you trust.")
-                        .font(.system(size: 11.5)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
             }
-            .animation(.easeOut(duration: 0.15), value: model.copied)
             Divider().padding(.vertical, 2)
             DisclosureGroup("Options", isExpanded: $model.optionsOpen) {
                 VStack(alignment: .leading, spacing: 10) {
@@ -402,15 +378,12 @@ struct SyncEditView: View {
         .font(.system(size: 13))
     }
 
-    private func shareRow(_ title: String, note: String, key: String?, link: String?) -> some View {
-        HStack(spacing: 10) {
-            VStack(alignment: .leading, spacing: 1) {
-                Text(title)
-                Text(note).font(.system(size: 11.5)).foregroundStyle(.secondary)
-            }
-            Spacer()
-            Button("Copy Key") { model.copy(key, what: "\(title) key", actions: actions) }.help("Copy the \(title) key")
-            Button("Copy Link") { model.copy(link, what: "\(title) link", actions: actions) }.help("Copy a seedwell:// link with the \(title) key")
+    private var shareNote: String {
+        guard let f = model.folder else { return "" }
+        switch f.role {
+        case .owner: return "You own this folder. Links you make admit devices at the role you pick; roles are changed on the folder page."
+        case .admin: return "You are an admin: you can make links for others to join."
+        case .readWrite, .readOnly: return "Only the folder’s owner and admins can share it."
         }
     }
 }
@@ -420,21 +393,23 @@ struct SyncEditView: View {
     private var add: (NSWindow, SyncAddModel)?
     private var edits: [String: NSWindow] = [:]
     private var finder: NSWindow?
+    private var shares: [String: NSWindow] = [:]
 
     var qaAddModel: SyncAddModel? { add?.1 }
     var qaWindow: NSWindow? { add?.0 ?? edits.values.first }
 
-    func showAdd(prefill: String?, actions: SyncActions) {
+    func showAdd(prefill: String?, folder: String? = nil, actions: SyncActions) {
         if let (w, m) = add {
             if let prefill { m.form.mode = .shared; m.setKey(prefill) }
+            if let folder { m.form.mode = .local; m.form.folder = folder }
             NSApp.activate(); w.makeKeyAndOrderFront(nil)
             return
         }
-        let model = SyncAddModel(core: actions.core, prefill: prefill ?? actions.pastedKey())
+        let model = folder.map { SyncAddModel(core: actions.core, folder: $0) } ?? SyncAddModel(core: actions.core, prefill: prefill ?? actions.pastedKey())
         let view = SyncAddView(model: model, cancel: { [weak self] in self?.closeAdd() }, done: { [weak self] f, mode in
             self?.closeAdd()
-            // Its keys are at hand: a folder shared from this Mac opens in the edit modal.
-            if mode == .local { self?.showEdit(id: f.id, actions: actions) }
+            // A folder shared from this Mac: the next step is sharing it.
+            if mode == .local { self?.showShare(id: f.id, actions: actions) }
         })
         let w = makeWindow(NSHostingController(rootView: view), id: "sync-add")
         add = (w, model)
@@ -450,6 +425,23 @@ struct SyncEditView: View {
         edits[id] = w
         NSApp.activate()
         w.makeKeyAndOrderFront(nil)
+    }
+
+    /// The Share dialog of a folder (one per folder).
+    func showShare(id: String, actions: SyncActions) {
+        if let w = shares[id] { NSApp.activate(); w.makeKeyAndOrderFront(nil); return }
+        let view = SyncShareView(model: SyncShareModel(core: actions.core, id: id), actions: actions, done: { [weak self] in self?.closeShare(id) })
+        let w = makeWindow(NSHostingController(rootView: view), id: "sync-share-\(id)")
+        shares[id] = w
+        NSApp.activate()
+        w.makeKeyAndOrderFront(nil)
+    }
+
+    func closeShare(_ id: String) {
+        guard let w = shares.removeValue(forKey: id) else { return }
+        w.delegate = nil
+        w.contentViewController = nil
+        w.close()
     }
 
     /// Turning on the Finder extension.
@@ -503,12 +495,14 @@ struct SyncEditView: View {
         closeAdd()
         closeFinderSetup()
         for id in Array(edits.keys) { closeEdit(id) }
+        for id in Array(shares.keys) { closeShare(id) }
     }
 
     func windowWillClose(_ notification: Notification) {
         guard let w = notification.object as? NSWindow else { return }
         if add?.0 === w { add = nil }
         if finder === w { finder = nil }
+        if let id = shares.first(where: { $0.value === w })?.key { shares[id] = nil }
         if let id = edits.first(where: { $0.value === w })?.key { edits[id] = nil }
         w.delegate = nil
         DispatchQueue.main.async { w.contentViewController = nil }

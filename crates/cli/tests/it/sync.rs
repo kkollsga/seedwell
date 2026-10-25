@@ -21,21 +21,30 @@ fn folder_sync_runs_in_the_daemon() {
     std::fs::create_dir_all(&docs).unwrap();
     std::fs::write(docs.join("a.txt"), b"hello").unwrap();
     let f = d.json(&["sync", "add", docs.to_str().unwrap()]);
-    assert_eq!((f["name"].as_str(), f["access"].as_str()), (Some("Docs"), Some("read_write")), "{f}");
+    assert_eq!((f["name"].as_str(), f["access"].as_str(), f["role"].as_str()), (Some("Docs"), Some("read_write"), Some("owner")), "{f}");
     let group = f["id"].as_str().unwrap().split('-').next().unwrap().to_owned();
     assert_eq!(d.json(&["sync", "status", &group])["name"], "Docs");
     assert_eq!(d.json(&["sync", "pause", "docs"])["state"], "paused");
-    let sh = d.json(&["sync", "share", "Docs"]);
-    assert!(sh["read_write"].as_str().unwrap().starts_with("SWW-"), "{sh}");
+    let sh = d.json(&["sync", "share", "Docs", "--role", "ro", "--uses", "3", "--days", "2"]);
+    let link = sh["link"].as_str().unwrap().to_owned();
+    assert!(link.starts_with("seedwell://sync/"), "{sh}");
+    assert_eq!((sh["role"].as_str(), sh["max_uses"].as_u64(), sh["uses"].as_u64()), (Some("read_only"), Some(3), Some(0)), "{sh}");
+    assert_eq!(d.json(&["sync", "invites", "Docs"])["invites"][0]["link"].as_str(), Some(link.as_str()));
+    let m = d.json(&["sync", "members", "Docs"]);
+    assert_eq!((m["members"][0]["role"].as_str(), m["members"][0]["me"].as_bool()), (Some("owner"), Some(true)), "{m}");
+    let o = d.cli(&["sync", "role", "Docs", m["members"][0]["device_id"].as_str().unwrap(), "read_only"]);
+    assert_eq!(o.code, 1, "the only owner stays one: {}", o.stderr);
+    let o = d.cli(&["sync", "join", "SWW-AAAAAAAA"]);
+    assert_eq!(o.code, 1, "bare keys are not links: {}", o.stderr);
     let text = cli_text(&d.socket, &["sync", "list"]);
     assert_eq!(text.code, 0, "{}", text.stderr);
     assert!(text.stdout.contains("Docs") && text.stdout.contains(&group), "{}", text.stdout);
-    // The keys are in a file only the user can read, never in sync.toml.
+    // The owner's key and the links are in a file only the user can read, never in sync.toml.
     use std::os::unix::fs::PermissionsExt;
     let mode = std::fs::metadata(d.state.join("sync").join("secrets")).unwrap().permissions().mode();
     assert_eq!(mode & 0o777, 0o600);
     let toml = std::fs::read_to_string(d.state.join("sync.toml")).unwrap();
-    assert!(!toml.contains(sh["read_write"].as_str().unwrap()) && !toml.contains("SWW-"), "{toml}");
+    assert!(!toml.contains(&link[16..]), "{toml}");
     // A script gets the plan and the token; -y removes (the files stay).
     let plan = d.json(&["sync", "remove", "Docs"]);
     assert!(plan["token"].as_str().is_some_and(|t| t.len() == 32), "{plan}");
@@ -91,4 +100,15 @@ fn the_relay_starts_and_keeps_its_id() {
     assert!(line.contains(&format!("#{id}")), "the same key, the same address: {line:?}");
     let _ = b.kill();
     let _ = b.wait();
+}
+
+/// `tools/sync-compat.sh` with this build on both sides: both daemons share, join, sync, change a role and
+/// remove a device, each the owner in turn. From 0.1.7 on it runs against the latest release too (PROTOCOL.md).
+#[test]
+fn the_cross_version_harness_passes_with_this_build_on_both_sides() {
+    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/sync-compat.sh");
+    let o = Command::new("bash").arg(&script).args(["--this", BIN, BIN]).env_remove("SEEDWELL_SOCKET").output().unwrap();
+    let out = String::from_utf8_lossy(&o.stdout);
+    assert!(o.status.success() && out.contains("sync-compat: PASS"), "{out}\n{}", String::from_utf8_lossy(&o.stderr));
+    assert!(!out.contains("FAIL"), "{out}");
 }

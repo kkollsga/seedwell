@@ -6,8 +6,8 @@ import Testing
 @Suite struct SyncTests {
     static func folder(_ name: String = "Photos", _ state: SyncState = .upToDate, id: String? = nil, bytes: UInt64 = 1_000_000_000,
                        need: UInt64 = 0, rate: UInt64 = 0, connected: UInt32 = 0, conflicts: UInt32 = 0,
-                       access: SyncAccess = .readWrite) -> SyncFolder {
-        SyncFolder(id: id ?? "ID-\(name)", name: name, path: "/Users/me/Seedwell/\(name)", access: access, state: state,
+                       access: SyncAccess = .readWrite, role: SyncRole = .owner) -> SyncFolder {
+        SyncFolder(id: id ?? "ID-\(name)", name: name, path: "/Users/me/Seedwell/\(name)", access: access, role: role, shareUntilS: nil, state: state,
                    files: 10, bytes: bytes, needFiles: need > 0 ? 3 : 0, needBytes: need, rateIn: rate, rateOut: 0,
                    connected: connected, members: connected, conflicts: conflicts, lanOnly: false, issues: [], error: nil, lastSyncedS: nil)
     }
@@ -67,22 +67,69 @@ import Testing
         #expect(MenuSync.structureOf(Self.snap([Self.folder("A2", id: "ID-A")])) != one)
     }
 
-    @Test func pastedKeysAreShownForWhatTheyAre() {
-        let rw = SyncLinkInfo(access: .readWrite, name: "Photos", folderId: "MFZWI3D-BONSGYC", alreadySynced: false)
-        #expect(SyncText.linkLine("seedwell://sync/SWW-…", info: rw) == "Read & write · Photos")
-        let ro = SyncLinkInfo(access: .readOnly, name: nil, folderId: "MFZWI3D-BONSGYC", alreadySynced: false)
-        #expect(SyncText.linkLine("SWR-…", info: ro) == "Read only")
+    static func link(_ role: SyncRole, _ name: String? = nil, id: String = "MFZWI3D-BONSGYC", mine: Bool = false, expired: Bool = false) -> SyncLinkInfo {
+        SyncLinkInfo(role: role, name: name, folderId: id, alreadySynced: mine, expiresS: nil, expired: expired)
+    }
+
+    @Test func pastedLinksAreShownForWhatTheyAre() {
+        let rw = Self.link(.readWrite, "Photos")
+        #expect(SyncText.linkLine("seedwell://sync/ABC", info: rw) == "Read & write · Photos")
+        let ro = Self.link(.readOnly)
+        #expect(SyncText.linkLine("seedwell://sync/ABC", info: ro) == "Read only")
         #expect(SyncText.suggestedName(ro) == "MFZWI3D")
-        #expect(SyncText.linkLine("hello", info: nil) == "Not a folder key or link")
+        #expect(SyncText.linkLine("hello", info: nil) == "Not a Seedwell folder link")
+        #expect(SyncText.linkLine("SWW-ABCDEF", info: nil) == "Folders are shared with links now: ask for a seedwell:// link")
         #expect(SyncText.linkLine("  ", info: nil) == "")
-        var mine = rw
-        mine.alreadySynced = true
-        #expect(SyncText.linkLine("x", info: mine) == "This folder is already synced on this Mac")
-        #expect(SyncText.linkLine("x", info: SyncLinkInfo(access: .encrypted, name: nil, folderId: "X", alreadySynced: false)) == "Encrypted keys are not supported yet")
-        #expect(SyncText.looksLikeKey(" seedwell://sync/SWW-ABC?name=x\n"))
-        #expect(SyncText.looksLikeKey("swr-abc"))
-        #expect(!SyncText.looksLikeKey("https://example.com"))
-        #expect(!SyncText.looksLikeKey("magnet:?xt=urn:btih:abc"))
+        #expect(SyncText.linkLine("seedwell://sync/9ABC", info: nil, problem: "this link was made by a newer Seedwell: update Seedwell to use it.")
+                == "This link was made by a newer Seedwell: update Seedwell to use it", "the core's reason, as a line")
+        #expect(SyncText.linkLine("x", info: Self.link(.readWrite, mine: true)) == "This folder is already synced on this Mac")
+        #expect(SyncText.linkLine("x", info: Self.link(.readWrite, expired: true)) == "This link has expired: ask for a new one")
+        #expect(SyncText.looksLikeLink(" seedwell://sync/ABC?name=x\n"))
+        #expect(!SyncText.looksLikeLink("SWR-abc"), "bare keys are not links")
+        #expect(!SyncText.looksLikeLink("https://example.com"))
+        #expect(!SyncText.looksLikeLink("magnet:?xt=urn:btih:abc"))
+    }
+
+    @Test func invitationLinksSayWhatIsLeft() {
+        let now: UInt64 = 1_800_000_000
+        func invite(_ uses: UInt32, of max: UInt32, expires: UInt64? = nil, revoked: Bool = false) -> SyncInvite {
+            SyncInvite(id: "I", link: "seedwell://sync/I", role: .readWrite, maxUses: max, uses: uses, expiresS: expires, createdS: now - 60,
+                       revoked: revoked)
+        }
+        #expect(SyncText.inviteState(invite(0, of: 1), now: now) == .open)
+        #expect(SyncText.inviteLine(invite(0, of: 1), now: now) == "Read & write · 0 of 1 used")
+        #expect(SyncText.inviteState(invite(1, of: 1), now: now) == .used, "a single-use link is spent once used")
+        #expect(SyncText.inviteLine(invite(1, of: 1), now: now) == "Read & write · Used")
+        #expect(SyncText.inviteLine(invite(3, of: 0), now: now) == "Read & write · 3 uses, unlimited")
+        #expect(SyncText.inviteState(invite(0, of: 1, expires: now), now: now) == .expired)
+        #expect(SyncText.inviteState(invite(0, of: 1, revoked: true), now: now) == .revoked)
+        #expect(SyncText.inviteDetail(invite(0, of: 5, expires: now + 86_400)).hasPrefix("Link until "))
+        #expect(SyncText.inviteDetail(invite(0, of: 1)) == "", "no dates, no line")
+    }
+
+    @Test func theShareDialogSaysWhatTheNextLinkDoes() {
+        #expect(SyncText.shareSummary(role: .readWrite, uses: 1, linkDays: 7) == "One Mac can join with this link within 7 days, as Read & write.")
+        #expect(SyncText.shareSummary(role: .readOnly, uses: 0, linkDays: 0) == "Any number of Macs can join with this link, as Read only.")
+        #expect(SyncText.shareSummary(role: .admin, uses: 5, linkDays: 1) == "Up to 5 Macs can join with this link within 1 day, as Admin.")
+        #expect(SyncText.sharingLine(until: nil, owner: false) == "Shared until the owner stops it.")
+        let t: UInt64 = 1_800_000_000
+        #expect(SyncText.countdown(until: t + 6 * 86_400 + 23 * 3_600 + 59 * 60, now: t) == "Sharing ends in 6 days, 23 hours")
+        #expect(SyncText.countdown(until: t + 5 * 3_600 + 12 * 60, now: t) == "Sharing ends in 5 hours, 12 minutes")
+        #expect(SyncText.countdown(until: t + 30, now: t) == "Sharing ends in 1 minute")
+        #expect(SyncText.countdown(until: t, now: t) == "Sharing has ended")
+        #expect(SyncText.sharingLine(until: 1_800_000_000, owner: true).hasPrefix("When it ends ("))
+    }
+
+    @Test func rolesDecideWhoSharesAndMembersAreListedMineFirstThenByRole() {
+        #expect(SyncText.canShare(.owner) && SyncText.canShare(.admin))
+        #expect(!SyncText.canShare(.readWrite) && !SyncText.canShare(.readOnly))
+        let m = { (name: String, role: SyncRole, me: Bool) in SyncMember(deviceId: name, name: name, role: role, online: true, isMe: me, expiresS: nil) }
+        let ordered = SyncText.ordered([m("Zed", .readOnly, false), m("Bo", .admin, false), m("Me", .readWrite, true), m("Al", .owner, false), m("Ann", .admin, false)])
+        #expect(ordered.map(\.name) == ["Me", "Al", "Ann", "Bo", "Zed"])
+        #expect(SyncText.memberLine(m("Me", .readWrite, true), device: nil) == "", "this Mac's role is on the right already")
+        #expect(SyncText.memberLine(SyncMember(deviceId: "X", name: "X", role: .readOnly, online: false, isMe: false, expiresS: nil), device: nil) == "Offline")
+        let guest = SyncMember(deviceId: "G", name: "G", role: .readWrite, online: false, isMe: false, expiresS: 1_800_000_000)
+        #expect(SyncText.memberLine(guest, device: nil).hasPrefix("Offline · until "), "time-limited access shows its end")
     }
 
     @Test func oneDeleteConfirmationIsOpenAtATime() {
@@ -113,19 +160,18 @@ import Testing
         f.mode = .shared
         #expect(!f.canStart)
         f.setKey("nonsense", info: nil, defaultLocation: nil)
-        #expect(!f.canStart && f.keyLine == "Not a folder key or link" && f.location.isEmpty)
-        let rw = SyncLinkInfo(access: .readWrite, name: "Photos", folderId: "F", alreadySynced: false)
-        f.setKey("SWW-x", info: rw, defaultLocation: "/Users/me/Seedwell/Photos")
+        #expect(!f.canStart && f.keyLine == "Not a Seedwell folder link" && f.location.isEmpty)
+        f.setKey("seedwell://sync/x", info: Self.link(.readWrite, "Photos", id: "F"), defaultLocation: "/Users/me/Seedwell/Photos")
         #expect(f.canStart && f.location == "/Users/me/Seedwell/Photos")
-        // A location the user chose stays when the key changes.
+        // A location the user chose stays when the link changes.
         f.chooseParent("/Volumes/Disk")
         #expect(f.location == "/Volumes/Disk/Photos" && f.locationChosen)
-        f.setKey("SWW-y", info: SyncLinkInfo(access: .readOnly, name: "Other", folderId: "G", alreadySynced: false), defaultLocation: "/Users/me/Seedwell/Other")
+        f.setKey("seedwell://sync/y", info: Self.link(.readOnly, "Other", id: "G"), defaultLocation: "/Users/me/Seedwell/Other")
         #expect(f.location == "/Volumes/Disk/Photos")
-        f.setKey("SWW-z", info: SyncLinkInfo(access: .readWrite, name: nil, folderId: "H", alreadySynced: true), defaultLocation: nil)
+        f.setKey("seedwell://sync/z", info: Self.link(.readWrite, id: "H", mine: true), defaultLocation: nil)
         #expect(!f.canStart, "already synced")
-        f.setKey("SWE-z", info: SyncLinkInfo(access: .encrypted, name: nil, folderId: "H", alreadySynced: false), defaultLocation: nil)
-        #expect(!f.canStart, "encrypted keys are for later")
+        f.setKey("seedwell://sync/z", info: Self.link(.readWrite, id: "H", expired: true), defaultLocation: nil)
+        #expect(!f.canStart, "an expired link admits nobody")
         #expect(SyncEditModel.nameProblem(" ") != nil)
         #expect(SyncEditModel.nameProblem("a/b") != nil)
         #expect(SyncEditModel.nameProblem(".x") != nil)

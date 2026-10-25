@@ -61,7 +61,7 @@ import SwiftUI
                 return SyncAddView(model: m)
             }
             await render("sync-add-shared-\(suffix)", size: NSSize(width: 480, height: 290), dark: dark, settings: true) {
-                let link = (try? core.syncShares(id: folders[0].id))?.readOnlyLink ?? ""
+                let link = (try? core.syncCreateInvite(id: folders[0].id, role: .readOnly, maxUses: 1, validDays: 7))?.link ?? ""
                 return SyncAddView(model: SyncAddModel(core: core, prefill: link))
             }
             await render("sync-add-bad-\(suffix)", size: NSSize(width: 480, height: 290), dark: dark, settings: true) {
@@ -72,12 +72,20 @@ import SwiftUI
             await render("sync-edit-\(suffix)", size: NSSize(width: 500, height: 560), dark: dark, settings: true) {
                 let m = SyncEditModel(core: core, id: folders[0].id)
                 m.optionsOpen = true
-                m.copied = "Read only link"
                 return SyncEditView(model: m, actions: sync)
             }
-            for on in [false, true] {
-                await render("finder-setup-\(on ? "on" : "off")-\(suffix)", size: NSSize(width: 440, height: on ? 230 : 330), dark: dark, settings: true) {
-                    FinderSetupView(model: FinderSetupModel(isEnabled: { on }))
+            await render("sync-share-\(suffix)", size: NSSize(width: 460, height: 440), dark: dark, settings: true) {
+                _ = try? core.syncCreateInvite(id: folders[0].id, role: .readWrite, maxUses: 1, validDays: 7)
+                return SyncShareView(model: SyncShareModel(core: core, id: folders[0].id, copied: true), actions: sync)
+            }
+            await render("sync-share-period-\(suffix)", size: NSSize(width: 460, height: 360), dark: dark, settings: true) {
+                // A sharing period running: the countdown with Extend.
+                _ = try? core.syncSetShareUntil(id: folders[0].id, untilS: UInt64(Date().timeIntervalSince1970) + 7 * 86_400 - 3_600)
+                return SyncShareView(model: SyncShareModel(core: core, id: folders[0].id), actions: sync)
+            }
+            for (name, state) in [("off", (false, false)), ("badges-on", (true, false)), ("on", (true, true))] {
+                await render("finder-setup-\(name)-\(suffix)", size: NSSize(width: 460, height: state.0 ? 260 : 330), dark: dark, settings: true) {
+                    FinderSetupView(model: FinderSetupModel(check: { (badges: state.0, shareMenu: state.1) }))
                 }
             }
         }

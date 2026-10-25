@@ -13,8 +13,9 @@ use trs_sync::ignore::Ignore;
 use trs_sync::index::MemStore;
 use trs_sync::pull::{ChunkRequest, ChunkSource, FetchError, PullReport};
 use trs_sync_proto::device::DeviceKey;
+
+use crate::flow::{Key, learn_writers};
 use trs_sync_proto::ids::ShortId;
-use trs_sync_proto::keys::{FolderKey, FolderSecret};
 
 const S: i64 = 1_000_000_000;
 
@@ -34,12 +35,12 @@ struct Dev {
     name: &'static str,
 }
 
-fn rw() -> FolderKey {
-    FolderKey::ReadWrite(FolderSecret::from_bytes([7; 32]))
+fn rw() -> Key {
+    Key::rw([7; 32])
 }
 
 /// A device on its own disk (`ci`: case-insensitive, like APFS by default).
-fn dev(name: &'static str, seed: u8, key: &FolderKey, ci: bool) -> Dev {
+fn dev(name: &'static str, seed: u8, key: &Key, ci: bool) -> Dev {
     let fs = MemFs::with_options(MemFsOptions { case_insensitive: ci, ..MemFsOptions::default() });
     fs.create_dir(".seedwell").unwrap();
     let view: Arc<dyn Fs> = Arc::new(fs.clone());
@@ -47,7 +48,7 @@ fn dev(name: &'static str, seed: u8, key: &FolderKey, ci: bool) -> Dev {
 }
 
 /// A device whose core sees the disk through `view`, with this index id.
-fn dev_on(name: &'static str, seed: u8, key: &FolderKey, fs: MemFs, view: Arc<dyn Fs>, ci: bool, index_id: u64) -> Dev {
+fn dev_on(name: &'static str, seed: u8, key: &Key, fs: MemFs, view: Arc<dyn Fs>, ci: bool, index_id: u64) -> Dev {
     let dk = Arc::new(DeviceKey::from_seed(&[seed; 32]));
     let cfg = FolderConfig {
         me: dk.device_id(),
@@ -57,7 +58,6 @@ fn dev_on(name: &'static str, seed: u8, key: &FolderKey, fs: MemFs, view: Arc<dy
         byte_exact_names: false,
         archive: true,
     };
-    let cert = key.writer_cert(dk.public_key());
     let ids = Arc::new(AtomicU64::new((u64::from(seed) << 32) + (index_id << 16)));
     let new_id = Arc::new(move || {
         let n = ids.fetch_add(1, Ordering::SeqCst);
@@ -69,7 +69,7 @@ fn dev_on(name: &'static str, seed: u8, key: &FolderKey, fs: MemFs, view: Arc<dy
         cfg,
         Box::new(MemStore::new(index_id)),
         view,
-        cert.map(|c| (dk.clone(), c)),
+        Some(dk.clone()),
         Arc::new(Utc),
         new_id,
         Ignore::defaults(),
@@ -107,7 +107,7 @@ impl ChunkSource for Disks<'_> {
 
 /// `from`'s whole index (and writers) to `to`.
 fn send(from: &Dev, to: &mut Dev) {
-    to.core.add_writers(&from.core.writers()).unwrap();
+    learn_writers(&mut to.core, &from.core.writers()).unwrap();
     let (index_id, _) = from.core.index_state().unwrap();
     let entries = from.core.announce_since(0, usize::MAX).unwrap();
     to.core.apply_remote(short(from), RemoteIndex { index_id, full: true, done: true, entries }).unwrap();
@@ -383,7 +383,7 @@ fn a_full_send_of_a_new_index_starts_over() {
         write_all(&a.fs, &format!("old{i}"), b"x").unwrap();
     }
     a.core.scan("").unwrap();
-    b.core.add_writers(&a.core.writers()).unwrap();
+    learn_writers(&mut b.core, &a.core.writers()).unwrap();
     let entries = a.core.announce_since(0, usize::MAX).unwrap();
     b.core.apply_remote(short(&a), RemoteIndex { index_id: 1, full: true, done: false, entries }).unwrap();
 

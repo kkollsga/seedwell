@@ -859,7 +859,7 @@ pub struct SyncFolderParams {
     pub folder: String,
 }
 
-/// `sync.add`: share a folder of this Mac (a new Read & write key is made).
+/// `sync.add`: share a folder of this Mac (this Mac becomes its owner).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SyncAddParams {
@@ -867,11 +867,74 @@ pub struct SyncAddParams {
     pub path: String,
 }
 
+/// `sync.share`: make an invitation link to a folder.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SyncShareParams {
+    /// The folder.
+    pub folder: String,
+    /// The role it admits at: `read_write` (default), `read_only`, `admin` or `owner` (the last two: owners only).
+    #[serde(default)]
+    pub role: Option<String>,
+    /// How many devices it admits (default 1; 0 = unlimited; at most 1000).
+    #[serde(default)]
+    pub uses: Option<u32>,
+    /// Days the link admits (default 7; 0 = no expiry).
+    #[serde(default)]
+    pub days: Option<u32>,
+}
+
+/// `sync.set_share_until`: how long a folder is shared (owners only). After the end every device but the owners
+/// is cut off (it keeps its files) and no link admits anyone.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SyncShareUntilParams {
+    /// The folder.
+    pub folder: String,
+    /// Days from now (or from the current end with `extend`); 0 = no end.
+    pub days: u32,
+    /// Add the days to the current end instead of counting from now.
+    #[serde(default)]
+    pub extend: bool,
+}
+
+/// A device of a folder: `sync.remove_device`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SyncDeviceParams {
+    /// The folder.
+    pub folder: String,
+    /// The device: its id, an unambiguous prefix of it (the first group is enough), or its name.
+    pub device: String,
+}
+
+/// `sync.set_role`: change a device's role (owners only).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SyncSetRoleParams {
+    /// The folder.
+    pub folder: String,
+    /// The device, as for [`SyncDeviceParams`].
+    pub device: String,
+    /// `owner`, `admin`, `read_write` or `read_only`.
+    pub role: String,
+}
+
+/// `sync.revoke_invite`: an invitation admits nobody from now on.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SyncRevokeInviteParams {
+    /// The folder.
+    pub folder: String,
+    /// The invitation's id (from `sync.invites`).
+    pub invite: String,
+}
+
 /// `sync.join`: sync a folder shared with you.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SyncJoinParams {
-    /// A folder key (`SWW-…`, `SWR-…`) or a `seedwell://sync/…` link. A secret: it is never logged.
+    /// A `seedwell://sync/…` invitation link. A secret: it is never logged.
     pub key_or_link: String,
     /// Where the folder goes (absolute or `~/...`; created when missing). Absent: the default location
     /// for joined folders (Settings › Folder Sync, else `~/Seedwell`) and the link's name.
@@ -1142,12 +1205,24 @@ methods! {
     SyncList(Empty) = "sync.list", ReadOnly, false;
     /// Folder sync: one folder.
     SyncStatus(SyncFolderParams) = "sync.status", ReadOnly, false;
-    /// Folder sync: share a folder of this Mac (makes a new Read & write key).
+    /// Folder sync: share a folder of this Mac (this Mac becomes its owner).
     SyncAdd(SyncAddParams) = "sync.add", Control, true;
-    /// Folder sync: sync a folder shared with you, by key or link.
+    /// Folder sync: sync a folder shared with you, by invitation link.
     SyncJoin(SyncJoinParams) = "sync.join", Control, true;
-    /// Folder sync: the keys and links this Mac may give out for a folder. Always logged; the keys never are.
-    SyncShare(SyncFolderParams) = "sync.share", Full, true;
+    /// Folder sync: make an invitation link (owners and admins). Always logged; the link never is.
+    SyncShare(SyncShareParams) = "sync.share", Full, true;
+    /// Folder sync: the folder's devices and their roles.
+    SyncMembers(SyncFolderParams) = "sync.members", ReadOnly, false;
+    /// Folder sync: the folder's invitations, with the links this Mac made.
+    SyncInvites(SyncFolderParams) = "sync.invites", Full, false;
+    /// Folder sync: an invitation admits nobody from now on.
+    SyncRevokeInvite(SyncRevokeInviteParams) = "sync.revoke_invite", Control, true;
+    /// Folder sync: change a device's role (owners only).
+    SyncSetRole(SyncSetRoleParams) = "sync.set_role", Full, true;
+    /// Folder sync: remove a device from a folder (owners only); it keeps the files it has.
+    SyncRemoveDevice(SyncDeviceParams) = "sync.remove_device", Full, true;
+    /// Folder sync: how long a folder is shared (owners only); after it only the owners sync.
+    SyncSetShareUntil(SyncShareUntilParams) = "sync.set_share_until", Full, true;
     /// Folder sync: rename a folder on this Mac (moves files on disk).
     SyncRename(SyncRenameParams) = "sync.rename", Full, true;
     /// Folder sync: move a folder on this Mac (moves files on disk).

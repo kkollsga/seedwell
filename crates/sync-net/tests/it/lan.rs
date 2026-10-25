@@ -12,7 +12,8 @@ use trs_sync_net::secrets::FileSecrets;
 use trs_sync_net::{Options, SyncHandle};
 use trs_sync_proto::device::DeviceKey;
 use trs_sync_proto::ids::FolderId;
-use trs_sync_proto::keys::{FolderKey, FolderSecret, Link};
+use trs_sync_proto::keys::{FolderKey, FolderSecret};
+use trs_sync_proto::members::{InviteLink, Role};
 
 struct Device {
     h: SyncHandle,
@@ -65,7 +66,7 @@ async fn devices_find_each_other_on_the_lan_and_sync() {
 
     let st = a.h.add_folder(fa.path().to_path_buf()).await.unwrap();
     let id: FolderId = st.id.parse().unwrap();
-    let key = a.h.shares(&id).unwrap().read_write_link.unwrap();
+    let key = a.h.create_invite(&id, Role::ReadWrite, 1, 1).unwrap().link;
     let dest = fb.path().join("Shared");
     // No address typed in: only the announcements bring them together.
     b.h.join_folder(&key, dest.clone()).await.unwrap();
@@ -85,7 +86,8 @@ async fn listener_with_folder() -> (Device, u16, FolderKey, tempfile::TempDir) {
     let fa = tempfile::tempdir().unwrap();
     let st = a.h.add_folder(fa.path().to_path_buf()).await.unwrap();
     let id: FolderId = st.id.parse().unwrap();
-    let key = Link::parse(&a.h.shares(&id).unwrap().read_write.unwrap()).unwrap().key;
+    let link = InviteLink::parse(&a.h.create_invite(&id, Role::ReadOnly, 1, 1).unwrap().link).unwrap();
+    let key = FolderKey::Member(link.invite.folder_pk);
     (a, pa, key, fa)
 }
 
@@ -135,7 +137,7 @@ async fn an_announcement_for_another_folder_or_hour_is_not_dialed() {
     let stranger = DeviceKey::from_seed(&[9; 32]);
     let hour = unix_hour();
 
-    let other = FolderKey::ReadWrite(FolderSecret::generate(&mut ring::rand::SystemRandom::new()).unwrap());
+    let other = FolderKey::Owner(FolderSecret::generate(&mut ring::rand::SystemRandom::new()).unwrap());
     send(pa, &announcement(&stranger, &other, hour, port).encode(&stranger));
     // Our folder, but three hours old (a replay).
     send(pa, &announcement(&stranger, &key, hour - 3, port).encode(&stranger));
