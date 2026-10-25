@@ -37,8 +37,8 @@ import SwiftUI
     }
 
     func reload() {
-        folder = core.syncSnapshot().folders.first { $0.id == id }
         let (core, id) = (core, id)
+        folder = core.syncSnapshot().folders.first { $0.id == id }
         Task {
             let list = await Task.detached(priority: .userInitiated) { core.syncInvites(id: id) }.value
             invites = list.sorted { $0.createdS > $1.createdS }
