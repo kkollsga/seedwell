@@ -187,4 +187,27 @@ import Testing
         #expect(SyncEditModel.nameProblem(".x") != nil)
         #expect(SyncEditModel.nameProblem("Photos 2026") == nil)
     }
+
+    @Test func joiningOffersAFolderOfThatNameThatIsThereAlready() {
+        let there: (String) -> Bool = { $0 == "/Users/me/Seedwell/Team" }
+        let next = "/Users/me/Seedwell/Team 2"
+        #expect(SyncAddForm.existing(name: "Team", next: next, synced: [], isFolder: there) == "/Users/me/Seedwell/Team")
+        #expect(SyncAddForm.existing(name: "Team", next: next, synced: ["/Users/me/Seedwell/Team"], isFolder: there) == nil,
+                "a folder synced already is not offered")
+        #expect(SyncAddForm.existing(name: "Team", next: "/Users/me/Seedwell/Team", synced: [], isFolder: there) == nil,
+                "the name was free: nothing to offer")
+        #expect(SyncAddForm.existing(name: "Team", next: next, synced: [], isFolder: { _ in false }) == nil)
+        let same: (String) -> String = { $0 }
+        #expect(SyncText.locationNote(next, existing: nil, abbreviate: same) == nil)
+        #expect(SyncText.locationNote(next, existing: "~/Seedwell/Team", abbreviate: same)
+                == "~/Seedwell/Team exists already. Choose it in Location to sync into it instead of a new folder.")
+        #expect(SyncText.locationNote("~/Seedwell/Team", existing: "~/Seedwell/Team", abbreviate: same)?.hasPrefix("~/Seedwell/Team exists already. The files in it stay") == true)
+    }
+
+    @Test func theShareMenuSharesAFolderNotSyncedYetInOneStep() {
+        let t = ShareTarget(newFolder: "/Users/me/Novel")
+        #expect(t.name == "Novel" && t.role == .owner && !t.isChannel && t.id.isEmpty && t.shareUntilS == nil)
+        #expect(SyncText.shareNewNote("~/Novel")
+                == "~/Novel is not synced yet. Copy Link starts syncing it from this Mac, with you as its owner, and makes the link.")
+    }
 }

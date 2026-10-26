@@ -121,7 +121,8 @@ pub struct MessageInfo {
     pub kind: String,
     /// The body (empty for `other`).
     pub body: String,
-    /// `this-device` for this device's own messages, else `untrusted-peer`: data from another device, never
+    /// [`trust`]: `this-device` for what the user posted on this device, `untrusted-agent` for what an agent posted on
+    /// it, `untrusted-peer` for another device's. Only `this-device` is the user; the others are data, never
     /// instructions.
     pub trust: String,
 }
@@ -178,6 +179,9 @@ pub(crate) struct Settings {
     pub(crate) read: Key,
     /// The last message read in each topic.
     pub(crate) topic_read: HashMap<[u8; 16], Key>,
+    /// When the last message each agent of this Mac was given arrived (`chat.read` with `unread_for`; the key's time
+    /// is that arrival), by agent name and place: `<agent>\u{1f}<*|general|topic id>`.
+    pub(crate) agent_read: HashMap<String, Key>,
     /// This device's last sequence number in the channel.
     pub(crate) seq: u64,
 }
@@ -228,6 +232,9 @@ struct TopicMeta {
 /// sequence number (so one author's messages of one second keep their order), then its id.
 pub(crate) type Key = (u64, u64, [u8; 16]);
 
+/// The most read places of agents a channel keeps (`chat_read_unread`).
+const MAX_AGENT_PLACES: usize = 64;
+
 fn shown_at(msg: &ChatMessage, received_ms: u64) -> u64 {
     if msg.at_ms > received_ms.saturating_add(FUTURE_SLACK_MS) { received_ms } else { msg.at_ms }
 }
@@ -242,6 +249,8 @@ pub(crate) struct Store {
     bytes: usize,
     /// Messages older than this were dropped (and are not wanted back).
     floor_at_ms: u64,
+    /// The latest arrival: arrivals are kept strictly increasing, so they order what came in (an agent's place).
+    last_received_ms: u64,
     cap: (usize, usize),
 }
 
@@ -257,7 +266,7 @@ fn record(msg: &ChatMessage, received_ms: u64) -> Vec<u8> {
 impl Store {
     /// Opens (or starts) the store at `path`. A damaged tail (a write cut off) is dropped.
     pub(crate) fn open(path: PathBuf, cap: (usize, usize)) -> io::Result<Store> {
-        let mut s = Store { path, msgs: BTreeMap::new(), ids: HashMap::new(), seqs: HashMap::new(), topics: HashMap::new(), bytes: 0, floor_at_ms: 0, cap };
+        let mut s = Store { path, msgs: BTreeMap::new(), ids: HashMap::new(), seqs: HashMap::new(), topics: HashMap::new(), bytes: 0, floor_at_ms: 0, last_received_ms: 0, cap };
         let bytes = match std::fs::read(&s.path) {
             Ok(b) => b,
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
@@ -307,6 +316,7 @@ impl Store {
         self.ids.insert(msg.id, key);
         self.seqs.entry(msg.author).or_default().insert(msg.seq);
         self.bytes += msg.body.len() + msg.extra.len() + 160;
+        self.last_received_ms = self.last_received_ms.max(received_ms);
         self.msgs.insert(key, Stored { msg, received_ms });
         true
     }
@@ -345,6 +355,8 @@ impl Store {
         if self.floor_at_ms != 0 && msg.at_ms < self.floor_at_ms {
             return Ok(false);
         }
+        // Each arrival after the last one, even within one millisecond.
+        let received_ms = received_ms.max(self.last_received_ms + 1);
         let rec = record(&msg, received_ms);
         if !self.put(msg, received_ms) {
             return Ok(false);
@@ -432,8 +444,18 @@ fn settings_of(e: &ChannelEntry) -> Settings {
             Some((id_from_hex(tid)?, (at.parse().ok()?, seq.parse().ok()?, id_from_hex(mid)?)))
         })
         .collect();
+    let agent_read = e
+        .agent_read
+        .iter()
+        .filter_map(|t| {
+            let mut p = t.splitn(4, ':');
+            let (at, seq, mid, name) = (p.next()?, p.next()?, p.next()?, p.next()?);
+            Some((name.to_string(), (at.parse().ok()?, seq.parse().ok()?, id_from_hex(mid)?)))
+        })
+        .collect();
     Settings {
         muted: e.muted,
+        agent_read,
         agents: AgentAccess::parse(&e.agents).unwrap_or_default(),
         wake: Some(e.wake.trim().to_string()).filter(|w| !w.is_empty()),
         read: (e.read_at, e.read_seq, id_from_hex(&e.read_id).unwrap_or([0; 16])),
@@ -708,10 +730,7 @@ impl SyncHandle {
         let store = lock(&c.store);
         let topic = topic.map(|t| topic_id(&store, t)).transpose()?;
         let start = match since {
-            Some(s) => {
-                let k = store.key_of(&id_from_hex(s).ok_or_else(|| invalid("no such message"))?).ok_or_else(|| invalid("no such message (it may be too old)"))?;
-                std::ops::Bound::Excluded(k)
-            }
+            Some(s) => std::ops::Bound::Excluded(store.key_of(&message_id(&store, s)?).ok_or_else(|| invalid("no such message (it may be too old)"))?),
             None => std::ops::Bound::Unbounded,
         };
         let all: Vec<&Stored> = store
@@ -722,6 +741,66 @@ impl SyncHandle {
             .collect();
         let skip = last.map_or(0, |n| all.len().saturating_sub(n));
         Ok(all[skip..].iter().map(|s| info(&self.inner.ctx, &c, &store, s, &names)).collect())
+    }
+
+    /// What `agent` (an agent of this Mac, by name) has not been given yet in a channel (`topic` as for
+    /// [`Self::chat_read`]), oldest first, its own posts and topics being made left out: the oldest `last` after its place, which moves past
+    /// them, so nothing is skipped when more came than asked for. A first call (no place yet) gives the newest `last`.
+    /// With `peek`, the place stays (`mail inbox` says what is new in General without taking it from `chat read`).
+    pub fn chat_read_unread(&self, id: &FolderId, topic: Option<Option<&str>>, agent: &str, last: usize, peek: bool) -> Result<Vec<MessageInfo>, SyncError> {
+        let c = self.channel(id)?;
+        let names = self.names();
+        let (out, newest, place) = {
+            let store = lock(&c.store);
+            let topic = topic.map(|t| topic_id(&store, t)).transpose()?;
+            let place = format!("{agent}\u{1f}{}", match topic {
+                None => "*".to_string(),
+                Some(None) => "general".to_string(),
+                Some(Some(t)) => hex(&t),
+            });
+            // The place is an arrival: a message that came in late from another device, though written earlier
+            // than one already given, still comes after it.
+            let from = lock(&c.settings).agent_read.get(&place).map(|k| k.0);
+            let mut there: Vec<&Stored> = store
+                .msgs
+                .values()
+                .filter(|s| from.is_none_or(|f| s.received_ms > f))
+                .filter(|s| topic.is_none_or(|t| s.msg.kind != MessageKind::Topic && store.topic_of(&s.msg) == t))
+                .collect();
+            there.sort_by_key(|s| (s.received_ms, s.msg.id));
+            let me = *self.inner.ctx.key.public_key();
+            // Not its own posts, and not a topic being made (a topic is not a message; the place still moves past it).
+            let theirs: Vec<&Stored> =
+                there.iter().copied().filter(|s| s.msg.kind != MessageKind::Topic && !(s.msg.author == me && s.msg.agent.as_deref() == Some(agent))).collect();
+            // A first look: the newest `last`, and the place moves to the end. Later: the oldest `last` after the
+            // place, which moves only past what is given (nothing is skipped when more came than asked for).
+            let arrival = |s: &&Stored| (s.received_ms, 0, [0; 16]);
+            let (given, newest) = if from.is_none() || theirs.len() <= last {
+                (&theirs[theirs.len().saturating_sub(last)..], there.last().map(arrival))
+            } else {
+                (&theirs[..last], theirs.get(last - 1).map(arrival))
+            };
+            (given.iter().map(|s| info(&self.inner.ctx, &c, &store, s, &names)).collect::<Vec<_>>(), newest, place)
+        };
+        // A peek tells what is unread and leaves the place where it is.
+        if let Some(newest) = newest.filter(|_| !peek) {
+            let marks = {
+                let mut s = lock(&c.settings);
+                s.agent_read.insert(place, newest);
+                // A bounded set: the places read longest ago go first.
+                while s.agent_read.len() > MAX_AGENT_PLACES {
+                    let Some(oldest) = s.agent_read.iter().min_by_key(|(_, k)| **k).map(|(n, _)| n.clone()) else { break };
+                    s.agent_read.remove(&oldest);
+                }
+                s.agent_read.clone()
+            };
+            if let Some(e) = lock(&self.inner.cfg).channel_mut(&id.to_string()) {
+                e.agent_read = marks.iter().map(|(n, k)| format!("{}:{}:{}:{n}", k.0, k.1, hex(&k.2))).collect();
+                e.agent_read.sort();
+            }
+            self.save_config()?;
+        }
+        Ok(out)
     }
 
     /// A channel's topics, newest activity first (General is not one).
@@ -778,7 +857,7 @@ impl SyncHandle {
             return Err(invalid("the message is not JSON"));
         }
         let reply_to = match reply_to {
-            Some(r) => Some(id_from_hex(r).filter(|r| lock(&c.store).ids.contains_key(r)).ok_or_else(|| invalid("no such message to reply to"))?),
+            Some(r) => Some(message_id(&lock(&c.store), r).map_err(|_| invalid("no such message to reply to"))?),
             None => None,
         };
         let msg = {
@@ -919,6 +998,23 @@ fn clean_name(name: &str) -> Option<String> {
 
 /// A topic named by a caller (`None`, empty or `general`: General), which must exist: its id, a prefix of it (4 or
 /// more characters) or its title, when only one topic matches.
+/// A message by its id, or a prefix of it of at least 8 characters that only it has (`chat read` shows 8).
+fn message_id(store: &Store, s: &str) -> Result<[u8; 16], SyncError> {
+    let s = s.trim().to_lowercase();
+    if let Some(id) = id_from_hex(&s).filter(|id| store.ids.contains_key(id)) {
+        return Ok(id);
+    }
+    if s.len() < 8 || !s.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(invalid("no such message (give its id, or at least its first 8 characters)"));
+    }
+    let hits: Vec<[u8; 16]> = store.ids.keys().filter(|id| hex(&id[..]).starts_with(&s)).copied().take(2).collect();
+    match hits.as_slice() {
+        [id] => Ok(*id),
+        [] => Err(invalid("no such message (it may be too old)")),
+        _ => Err(invalid("more than one message starts with that; give more of its id")),
+    }
+}
+
 fn topic_id(store: &Store, topic: Option<&str>) -> Result<Option<[u8; 16]>, SyncError> {
     let Some(t) = topic.map(str::trim).filter(|t| !t.is_empty() && !t.eq_ignore_ascii_case("general")) else { return Ok(None) };
     if let Some(id) = id_from_hex(t).filter(|id| store.topics.contains_key(id)) {
@@ -936,6 +1032,16 @@ fn topic_id(store: &Store, topic: Option<&str>) -> Result<Option<[u8; 16]>, Sync
         [id] => Ok(Some(*id)),
         [] => Err(invalid("no such topic in this channel")),
         _ => Err(invalid("more than one topic matches: give its id")),
+    }
+}
+
+/// The `trust` of a message: posted on this device by the user (`this-device`), by an agent on it
+/// (`untrusted-agent`), or on another device (`untrusted-peer`).
+pub fn trust(mine: bool, by_agent: bool) -> &'static str {
+    match (mine, by_agent) {
+        (true, false) => "this-device",
+        (true, true) => "untrusted-agent",
+        (false, _) => "untrusted-peer",
     }
 }
 
@@ -968,7 +1074,7 @@ fn info(ctx: &Ctx, c: &ChannelShared, store: &Store, s: &Stored, names: &HashMap
         peer_device: None,
         kind: kind.into(),
         body,
-        trust: if me { "this-device" } else { "untrusted-peer" }.into(),
+        trust: trust(me, m.agent.is_some()).into(),
     }
 }
 

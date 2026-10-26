@@ -240,6 +240,21 @@ enum SyncText {
         return String(info.folderId.split(separator: "-").first ?? "Folder")
     }
 
+    /// Under the join form's Location: syncing into a folder that exists keeps its files and shares them; else, when
+    /// one of the folder's name is already there, that it can be chosen instead of a new one.
+    static func locationNote(_ location: String, existing: String?, abbreviate: (String) -> String) -> String? {
+        if let existing, location == existing {
+            return "\(abbreviate(existing)) exists already. The files in it stay and become part of the shared folder; where they differ from the others’, both versions are kept."
+        }
+        if let existing { return "\(abbreviate(existing)) exists already. Choose it in Location to sync into it instead of a new folder." }
+        return nil
+    }
+
+    /// The Share dialog of a folder not synced yet (the system Share menu): what Copy Link does first (`path` as shown).
+    static func shareNewNote(_ path: String) -> String {
+        "\(path) is not synced yet. Copy Link starts syncing it from this Mac, with you as its owner, and makes the link."
+    }
+
     /// A pasteboard text that is worth prefilling the add modal with: a `seedwell://sync/` link.
     static func looksLikeLink(_ text: String) -> Bool {
         let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -297,6 +312,16 @@ struct SyncAddForm: Equatable {
         self.info = info
         self.problem = info == nil ? problem : nil
         if !locationChosen { location = info == nil ? "" : (defaultLocation ?? "") }
+    }
+
+    /// The folder `name` next to `next` (the new place the core picked) when that was taken by a folder that exists and
+    /// is not synced on this Mac, so `next` got a number: the one to offer for joining into.
+    static func existing(name: String, next: String, synced: [String],
+                         isFolder: (String) -> Bool = { var d: ObjCBool = false; return FileManager.default.fileExists(atPath: $0, isDirectory: &d) && d.boolValue }) -> String? {
+        let plain = ((next as NSString).deletingLastPathComponent as NSString).appendingPathComponent(name)
+        guard plain != next, isFolder(plain) else { return nil }
+        let real = FinderStatusWriter.realPath(plain)
+        return synced.contains { FinderStatusWriter.realPath($0) == real } ? nil : plain
     }
 
     /// The user chose where it goes: the parent folder, the folder itself is named after the key.

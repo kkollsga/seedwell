@@ -57,16 +57,19 @@ enum ChatText {
         return "\(SyncText.day(at)) \(clock)"
     }
 
-    /// The author as shown: "Studio iMac", "Studio iMac · agent claude-code", "You".
+    /// "You", "Studio iMac", or for an agent its name and the computer it runs on: "Seedwell on Studio iMac".
     static func author(_ m: SyncMessage) -> String {
-        let who = m.isMe ? "You" : (m.authorName.isEmpty ? "Unnamed device" : m.authorName)
-        return m.agent.map { "\(who) · agent \($0)" } ?? who
+        if let agent = m.agent { return "\(agent) on \(computer(m))" }
+        return m.isMe ? "You" : computer(m)
     }
+
+    /// The device that sent it, by its name.
+    static func computer(_ m: SyncMessage) -> String { m.authorName.isEmpty ? "Unnamed device" : m.authorName }
 
     /// One line of a message, for notifications, replies and the list: at most `limit` characters.
     static func preview(_ m: SyncMessage, limit: Int = 120) -> String {
         let text: String = switch m.kind {
-        case .text: m.body
+        case .text: ChatMail.parse(m.body)?.line ?? ChatMarkdown.plain(m.body)
         case .json: "JSON message"
         case .other: "A message this version cannot show"
         }

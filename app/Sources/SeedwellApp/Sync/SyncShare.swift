@@ -13,15 +13,26 @@ struct ShareTarget: Equatable {
 
     init(_ f: SyncFolder) { (id, name, role, shareUntilS, isChannel, channelId) = (f.id, f.name, f.role, f.shareUntilS, false, f.channelId) }
     init(_ c: SyncChannel) { (id, name, role, shareUntilS, isChannel, channelId) = (c.id, c.name, c.role, c.shareUntilS, true, nil) }
+    /// A folder not synced yet (the system Share menu): this Mac will be its owner.
+    init(newFolder path: String) {
+        (id, name, role, shareUntilS, isChannel, channelId) = ("", (path as NSString).lastPathComponent, .owner, nil, false, nil)
+    }
 }
 
 /// The Share dialog (SPEC 7G.1, 7G.5) of a folder or a channel: the settings of a link, and one Copy Link that makes
 /// a link with them and copies it; the sharing period (an owner's setting, applied at once: when it ends, every
 /// device but the owners' is removed); and the active links, each with Revoke. A link admits devices at its role
 /// until it is used up, expires or is revoked; only the owner and admins may share.
+/// Opened on a folder not synced yet (Share ▸ Seedwell in Finder), it is add and share in one: Copy Link starts
+/// syncing the folder from this Mac first, as its owner.
 @MainActor @Observable final class SyncShareModel {
     @ObservationIgnored let core: Core
-    let id: String
+    /// The folder or channel (empty while `newPath` is not synced yet).
+    private(set) var id: String
+    /// A folder Copy Link starts syncing first (`nil` once it is synced, or for a synced one).
+    private(set) var newPath: String?
+    /// The folder was added (by Copy Link): its id.
+    @ObservationIgnored var onAdded: (String) -> Void = { _ in }
     /// The folder or channel (`nil` once it is gone from this Mac).
     private(set) var target: ShareTarget?
     var role: SyncRole = .readWrite
@@ -59,16 +70,25 @@ struct ShareTarget: Equatable {
         reload()
     }
 
+    /// A folder not synced yet: shared from this Mac when the first link is made.
+    init(core: Core, newFolder path: String) {
+        self.core = core
+        self.id = ""
+        self.newPath = path
+        reload()
+    }
+
     func reload() {
         let (core, id) = (core, id)
         let channels = core.chatChannels()
-        target = core.syncSnapshot().folders.first { $0.id == id }.map(ShareTarget.init)
+        target = newPath.map { ShareTarget(newFolder: $0) } ?? core.syncSnapshot().folders.first { $0.id == id }.map(ShareTarget.init)
             ?? channels.first { $0.id == id }.map(ShareTarget.init)
         if let t = target, !t.isChannel {
             chatChoices = channels.filter { SyncText.canShare($0.role) }
             // The first look starts from the folder's chat; later ones keep what the user picked.
             if !chatChosen, let c = t.channelId, chatChoices.contains(where: { $0.id == c }) { chatChosen = true; withChat = true; chat = c }
         }
+        guard newPath == nil else { invites = []; return }
         Task {
             let list = await Task.detached(priority: .userInitiated) { core.syncInvites(id: id) }.value
             invites = list.sorted { $0.createdS > $1.createdS }
@@ -131,16 +151,28 @@ struct ShareTarget: Equatable {
         let newName: String? = isNew ? name : nil
         let existing: String? = name != nil && !isNew ? chat : nil
         let current = target?.channelId
+        let path = newPath
         Task {
-            let r: Result<SyncInvite, Error> = await Task.detached(priority: .userInitiated) {
-                Result {
+            // A folder not synced yet is added first; once it is, a failure after that leaves it synced (and shown so).
+            let (added, r): (String?, Result<SyncInvite, Error>) = await Task.detached(priority: .userInitiated) {
+                var added: String?
+                let r = Result {
+                    if let path { added = try core.syncAddFolder(path: path).id }
+                    let fid = added ?? id
                     var channel = existing
                     if let newName { channel = try core.chatNew(name: newName).id }
-                    if let channel, channel != current { try core.syncSetChannel(id: id, channelId: channel) }
-                    return try core.syncCreateInvite(id: id, role: role, maxUses: s.uses, validDays: s.linkDays, channelId: channel)
+                    if let channel, channel != current { try core.syncSetChannel(id: fid, channelId: channel) }
+                    return try core.syncCreateInvite(id: fid, role: role, maxUses: s.uses, validDays: s.linkDays, channelId: channel)
                 }
+                return (added, r)
             }.value
             busy = false
+            if let added {
+                self.id = added
+                newPath = nil
+                onAdded(added)
+                reload()
+            }
             switch r {
             case .success(let i):
                 actions.copy(i.link)
@@ -186,14 +218,22 @@ struct SyncShareView: View {
                 Text("Only the owner and admins can share it. Ask one of them for a link.")
                     .foregroundStyle(.secondary).padding(.top, 16).fixedSize(horizontal: false, vertical: true)
             } else {
+                if let path = model.newPath {
+                    Text(SyncText.shareNewNote(Notifier.abbreviate(path))).font(.system(size: 12)).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true).padding(.top, 6)
+                        .accessibilityIdentifier("sync-share-new")
+                }
                 settings.padding(.top, 18)
                 let s = model.settings
                 Text(SyncText.shareSummary(role: model.role, uses: s.uses, linkDays: s.linkDays, chat: model.chatName))
                     .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     .padding(.top, 14)
                     .accessibilityIdentifier("sync-share-summary")
-                Divider().padding(.top, 16)
-                sharing.padding(.top, 12)
+                // The sharing period is the folder's: set once it is synced (after the first link).
+                if model.newPath == nil {
+                    Divider().padding(.top, 16)
+                    sharing.padding(.top, 12)
+                }
                 let now = UInt64(Date().timeIntervalSince1970)
                 let active = model.active(now: now)
                 if !active.isEmpty { links(active).padding(.top, 20) }
@@ -206,7 +246,11 @@ struct SyncShareView: View {
                 }
                 if model.busy { ProgressView().controlSize(.small) }
                 Spacer(minLength: 0)
-                Button("Done", action: done).keyboardShortcut(.cancelAction).help("Close; links keep working until used up, expired or revoked")
+                if model.newPath != nil {
+                    Button("Cancel", action: done).keyboardShortcut(.cancelAction).help("Close; the folder is not synced")
+                } else {
+                    Button("Done", action: done).keyboardShortcut(.cancelAction).help("Close; links keep working until used up, expired or revoked")
+                }
                 if model.canShare {
                     Button("Copy Link") { model.copyLink(actions: actions) }
                         .buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction).disabled(model.busy)

@@ -147,6 +147,8 @@ pub struct ChannelEntry {
     pub read_id: String,
     /// The last message read in each topic: `<topic id>:<time>:<seq>:<message id>`.
     pub topic_read: Vec<String>,
+    /// The last message each agent of this Mac was given: `<time>:<seq>:<message id>:<agent>\u{1f}<place>`.
+    pub agent_read: Vec<String>,
     /// The sequence number of this device's last message in it.
     pub seq: u64,
     /// Addresses typed in by the user for devices of this channel (`host:port`).

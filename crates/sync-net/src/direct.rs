@@ -461,7 +461,7 @@ fn info(ctx: &Ctx, s: &Stored, names: &HashMap<DeviceId, String>) -> Option<Mess
         peer_device: Some(DeviceId::of_public_key(&other).to_string()),
         kind: kind.into(),
         body,
-        trust: if mine { "this-device" } else { "untrusted-peer" }.into(),
+        trust: crate::chat::trust(mine, b.agent.is_some()).into(),
     })
 }
 

@@ -176,6 +176,7 @@ pub fn describe(r: &Request) -> String {
         // What it says stays out of the log; how long it is does not.
         Request::ChatSend(p) => format!("post {} bytes{} to channel {}", p.body.len(), if p.json { " of JSON" } else { "" }, folder(&p.channel)),
         Request::ChatAddAddress(p) => format!("add address {} to channel {}", clip(&p.address, 100), folder(&p.channel)),
+        Request::ChatRename(p) => format!("rename channel {}", folder(&p.channel)),
         Request::ChatMute(p) => format!("{} channel {}", if p.muted { "mute" } else { "unmute" }, folder(&p.channel)),
         Request::ChatSetAgents(p) => format!("let agents {} in channel {}", clip(&p.agents, 20), folder(&p.channel)),
         Request::ChatSetWake(p) => match p.command.as_deref().filter(|c| !c.trim().is_empty()) {

@@ -34,6 +34,8 @@ trs-sync-net = { path = "../sync-net", optional = true }
 trs-sync-proto = { path = "../sync-proto", optional = true }
 serde = { version = "1", default-features = false, features = ["derive", "std"] }
 serde_json = { version = "1", default-features = false, features = ["std"] }
+# `seedwell mail --attach`: each attached file carries its SHA-256, checked when it is saved.
+sha2 = { version = "0.11", default-features = false }
 # `net` for the sim swarm, `time` for timeouts and rate pacing.
 tokio = { version = "1", default-features = false, features = ["rt", "macros", "io-util", "time", "sync", "net"] }
 

@@ -289,3 +289,50 @@ async fn two_thousand_small_files_pull_without_a_full_flush_each() {
     a.h.shutdown().await;
     b.h.shutdown().await;
 }
+
+/// Joining into a folder that has files already (left from an earlier join, say): nothing of it is lost. A file the
+/// folder has too, with other contents, ends as both versions; a file only it has is shared; the same file stays one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn joining_into_a_folder_with_files_keeps_them_and_both_versions_of_a_difference() {
+    let (a, b) = (device("Alpha").await, device("Beta").await);
+    let (fa, fb) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    std::fs::write(fa.path().join("plan.txt"), b"the folder's").unwrap();
+    std::fs::write(fa.path().join("same.txt"), b"same").unwrap();
+    let st = a.h.add_folder(fa.path().to_path_buf()).await.unwrap();
+    let id: FolderId = st.id.parse().unwrap();
+    let key = a.h.create_invite(&id, Role::ReadWrite, 1, 1).unwrap().link;
+    let dest = fb.path().join("Team");
+    std::fs::create_dir(&dest).unwrap();
+    std::fs::write(dest.join("plan.txt"), b"left here").unwrap();
+    std::fs::write(dest.join("same.txt"), b"same").unwrap();
+    std::fs::write(dest.join("only-here.txt"), b"mine").unwrap();
+    b.h.join_folder(&key, dest.clone()).await.unwrap();
+    b.h.add_address(&id, addr(&a)).unwrap();
+
+    let names = |root: &Path| -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(root)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| !n.starts_with('.'))
+            .collect();
+        v.sort();
+        v
+    };
+    let contents = |root: &Path| -> Vec<Vec<u8>> {
+        let mut v: Vec<Vec<u8>> = names(root).iter().filter(|n| n.starts_with("plan")).filter_map(|n| read(&root.join(n))).collect();
+        v.sort();
+        v
+    };
+    until(30, "both versions of plan.txt and the file only B had, on both", || {
+        read(&fa.path().join("only-here.txt")).as_deref() == Some(b"mine")
+            && contents(fa.path()) == vec![b"left here".to_vec(), b"the folder's".to_vec()]
+            && names(fa.path()) == names(&dest)
+            && contents(&dest) == contents(fa.path())
+    })
+    .await;
+    assert_eq!(names(&dest).len(), 4, "plan.txt, its conflict copy, same.txt, only-here.txt: {:?}", names(&dest));
+    assert_eq!(read(&dest.join("same.txt")).as_deref(), Some(&b"same"[..]));
+    a.h.shutdown().await;
+    b.h.shutdown().await;
+}

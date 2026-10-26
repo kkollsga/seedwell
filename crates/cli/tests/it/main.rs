@@ -7,4 +7,5 @@ mod common;
 
 mod cli;
 mod e2e;
+mod mail;
 mod sync;

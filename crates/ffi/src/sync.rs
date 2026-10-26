@@ -467,6 +467,7 @@ pub trait SyncBackend: Send + Sync {
     fn chat_set_agents(&self, id: &str, access: SyncAgentAccess);
     fn chat_set_wake_command(&self, id: &str, command: Option<&str>) -> Result<(), CoreError>;
     fn chat_leave(&self, id: &str) -> Result<(), CoreError>;
+    fn chat_rename(&self, id: &str, name: &str) -> Result<(), CoreError>;
 }
 
 /// A sentence for people: the service's lowercase reasons get a capital and a full stop.
@@ -884,6 +885,11 @@ impl SyncBackend for RealSync {
         h.chat_leave(&folder_id(id)?).map_err(sync_err)
     }
 
+    fn chat_rename(&self, id: &str, name: &str) -> Result<(), CoreError> {
+        let h = self.handle()?;
+        h.chat_rename(&folder_id(id)?, name).map_err(sync_err)
+    }
+
     fn snapshot(&self) -> SyncSnapshot {
         let Some(h) = self.slot.get() else {
             return SyncSnapshot {
@@ -1168,6 +1174,9 @@ impl SyncBackend for NoSync {
         Err(failed("Channels are not available"))
     }
     fn chat_leave(&self, _: &str) -> Result<(), CoreError> {
+        Err(failed("Channels are not available"))
+    }
+    fn chat_rename(&self, _: &str, _: &str) -> Result<(), CoreError> {
         Err(failed("Channels are not available"))
     }
     fn snapshot(&self) -> SyncSnapshot {
@@ -1533,7 +1542,18 @@ impl MockSync {
         let bid = build.id.clone();
         let messages = vec![
             msg("b1".repeat(16).as_str(), &bid, studio, "Studio iMac", Some("ci-bot"), 7200, None, SyncMessageKind::Json, r#"{"build":"0.1.6","status":"passed","tests":446}"#),
-            msg("b2".repeat(16).as_str(), &bid, me, "Kristian's MacBook Pro", Some("claude-code"), 7000, Some(&"b1".repeat(16)), SyncMessageKind::Text, "Drafted the release notes from the merged pull requests."),
+            msg(
+                "b2".repeat(16).as_str(),
+                &bid,
+                me,
+                "Kristian's MacBook Pro",
+                Some("Seedwell"),
+                7000,
+                Some(&"b1".repeat(16)),
+                SyncMessageKind::Text,
+                "## Release notes drafted\n\nFrom the merged pull requests, in `docs/notes.md`:\n\n1. **Folder Sync**: links, roles, Finder badges\n2. **Chats**: topics and private messages\n\nTo check them:\n\n```sh\nseedwell chat read \"Release notes\" --project Seedwell\n```",
+            ),
+            msg("b3".repeat(16).as_str(), &bid, studio, "Studio iMac", Some("Website"), 6800, None, SyncMessageKind::Text, "Thanks. I'll link them from the download page.\n\n- [ ] screenshot\n- [x] changelog"),
         ];
         out.push(MockFolder {
             n: 12,
@@ -1866,6 +1886,14 @@ impl SyncBackend for MockSync {
                 c.agents = access;
             }
         });
+    }
+
+    fn chat_rename(&self, id: &str, name: &str) -> Result<(), CoreError> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(failed("a channel needs a name"));
+        }
+        self.with_chat(id, |m| m.f.name = name.chars().take(200).collect())
     }
 
     fn chat_set_wake_command(&self, id: &str, command: Option<&str>) -> Result<(), CoreError> {
@@ -2321,6 +2349,11 @@ impl Core {
         self.backend.sync().chat_set_wake_command(&id, command.as_deref())
     }
 
+    /// The channel's name on this Mac (each device names its channels, as folders).
+    pub fn chat_rename(&self, id: String, name: String) -> Result<(), CoreError> {
+        self.backend.sync().chat_rename(&id, &name)
+    }
+
     /// Leaves the channel on this Mac: its messages here go (other members keep theirs).
     pub fn chat_leave(&self, id: String) -> Result<(), CoreError> {
         self.backend.sync().chat_leave(&id)
@@ -2604,6 +2637,11 @@ mod tests {
         assert_eq!(core.chat_direct_agents(), SyncAgentAccess::Read);
         core.chat_set_agents(fam.id.clone(), SyncAgentAccess::Read);
         core.chat_set_muted(fam.id.clone(), true);
+        core.chat_rename(fam.id.clone(), " Family dinners ".into()).unwrap();
+        assert!(core.chat_rename(fam.id.clone(), "  ".into()).is_err());
+        assert!(core.chat_channels().iter().any(|c| c.id == fam.id && c.name == "Family dinners"));
+        core.chat_rename(fam.id.clone(), "Family".into()).unwrap();
+        core.chat_rename(fam.id.clone(), "Family".into()).unwrap();
         core.chat_set_wake_command(fam.id.clone(), Some("~/bin/wake".into())).unwrap();
         let fam2 = core.chat_channels().into_iter().find(|c| c.id == fam.id).unwrap();
         assert_eq!((fam2.unread, fam2.agents, fam2.muted, fam2.wake_command.as_deref()), (0, SyncAgentAccess::Read, true, Some("~/bin/wake")));

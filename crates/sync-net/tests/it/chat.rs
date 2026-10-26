@@ -265,3 +265,102 @@ async fn a_message_in_an_unknown_topic_shows_under_general_until_the_topic_arriv
     a.h.shutdown().await;
     b.h.shutdown().await;
 }
+
+/// A watcher of the whole channel gets a new topic and the messages in it as they arrive from another device (an
+/// agent that watches a channel must not miss its topics).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_watcher_gets_a_new_topic_and_its_messages_from_another_device() {
+    let (a, b) = (device("Anna").await, device("Bo").await);
+    let id: FolderId = a.h.chat_new("Dev").await.unwrap().id.parse().unwrap();
+    join(&b.h, &a.h, &id, Role::ReadWrite, addr(&a)).await;
+    let mut events = a.h.chat_subscribe();
+    let t = b.h.chat_new_topic(&id, "Seedwell", Some("Seedwell")).await.unwrap();
+    b.h.chat_send(&id, Some(&t.id), MessageKind::Text, "in the thread", None, Some("Seedwell")).await.unwrap();
+    b.h.chat_send(&id, None, MessageKind::Text, "in General", None, None).await.unwrap();
+    let mut got = Vec::new();
+    let end = tokio::time::Instant::now() + Duration::from_secs(20);
+    while got.len() < 3 && tokio::time::Instant::now() < end {
+        if let Ok(Ok(e)) = tokio::time::timeout(Duration::from_millis(500), events.recv()).await {
+            got.push((e.message.kind.clone(), e.message.body.clone(), e.message.topic.clone()));
+        }
+    }
+    assert_eq!(
+        got,
+        vec![
+            ("topic".to_string(), "Seedwell".to_string(), None),
+            ("text".to_string(), "in the thread".to_string(), Some(t.id.clone())),
+            ("text".to_string(), "in General".to_string(), None),
+        ]
+    );
+    a.h.shutdown().await;
+    b.h.shutdown().await;
+}
+
+/// An agent's place (`chat_read_unread`): a first look gives the newest, then only what came after; never its own
+/// posts; each agent and thread has its own place, and it is kept across a restart. Short ids answer messages.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn each_agent_reads_only_what_it_has_not_been_given() {
+    let state = tempfile::tempdir().unwrap();
+    let a = start_at(state.path(), "Anna", |_| {}).await;
+    let id: FolderId = a.chat_new("Dev").await.unwrap().id.parse().unwrap();
+    let body = |v: Vec<MessageInfo>| v.into_iter().map(|m| m.body).collect::<Vec<_>>();
+    for n in 1..=3 {
+        a.chat_send(&id, None, MessageKind::Text, &format!("old {n}"), None, Some("Docs")).await.unwrap();
+    }
+    assert_eq!(body(a.chat_read_unread(&id, None, "Seedwell", 2, false).unwrap()), ["old 2", "old 3"], "a first look: the newest");
+    assert!(a.chat_read_unread(&id, None, "Seedwell", 50, false).unwrap().is_empty(), "then nothing new");
+    let q = a.chat_send(&id, None, MessageKind::Text, "a question", None, Some("Docs")).await.unwrap();
+    a.chat_send(&id, None, MessageKind::Text, "my own post", None, Some("Seedwell")).await.unwrap();
+    a.chat_send(&id, None, MessageKind::Text, "an answer", Some(&q.id[..8]), Some("Seedwell")).await.unwrap();
+    assert_eq!(body(a.chat_read_unread(&id, None, "Seedwell", 50, false).unwrap()), ["a question"], "its own posts are left out");
+    assert_eq!(body(a.chat_read_unread(&id, None, "Docs", 50, false).unwrap()), ["my own post", "an answer"], "another agent's place");
+    let answer = a.chat_read(&id, None, None, Some(1)).unwrap().remove(0);
+    assert_eq!(answer.reply_to.as_deref(), Some(q.id.as_str()), "an 8-character id is enough to answer");
+    assert!(a.chat_send(&id, None, MessageKind::Text, "x", Some("0123"), None).await.is_err(), "fewer than 8 is not");
+    // More than asked for: the oldest first, and none skipped (a `watch --unread --count 1`, twice).
+    for n in 1..=3 {
+        a.chat_send(&id, None, MessageKind::Text, &format!("backlog {n}"), None, Some("Docs")).await.unwrap();
+    }
+    assert_eq!(body(a.chat_read_unread(&id, None, "Seedwell", 1, false).unwrap()), ["backlog 1"]);
+    assert_eq!(body(a.chat_read_unread(&id, None, "Seedwell", 1, false).unwrap()), ["backlog 2"]);
+    assert_eq!(body(a.chat_read_unread(&id, None, "Seedwell", 5, false).unwrap()), ["backlog 3"]);
+    assert!(a.chat_read_unread(&id, None, "Seedwell", 5, false).unwrap().is_empty());
+    // A peek says what is unread and leaves the place.
+    a.chat_send(&id, None, MessageKind::Text, "peeked", None, Some("Docs")).await.unwrap();
+    assert_eq!(body(a.chat_read_unread(&id, None, "Seedwell", 5, true).unwrap()), ["peeked"]);
+    assert_eq!(body(a.chat_read_unread(&id, None, "Seedwell", 5, true).unwrap()), ["peeked"], "still unread");
+    assert_eq!(body(a.chat_read_unread(&id, None, "Seedwell", 5, false).unwrap()), ["peeked"]);
+    assert!(a.chat_read_unread(&id, None, "Seedwell", 5, true).unwrap().is_empty());
+    // A thread has a place of its own.
+    let t = a.chat_new_topic(&id, "Seedwell", Some("Seedwell")).await.unwrap();
+    a.chat_send(&id, Some(&t.id), MessageKind::Text, "in the thread", None, Some("Docs")).await.unwrap();
+    assert_eq!(body(a.chat_read_unread(&id, Some(Some(&t.id)), "Seedwell", 50, false).unwrap()), ["in the thread"]);
+    assert!(a.chat_read_unread(&id, Some(Some(&t.id)), "Seedwell", 50, false).unwrap().is_empty());
+    a.shutdown().await;
+    // Kept across a restart.
+    let a = start_at(state.path(), "Anna", |_| {}).await;
+    a.chat_send(&id, None, MessageKind::Text, "after the restart", None, Some("Docs")).await.unwrap();
+    // The whole channel is a place of its own: the thread's message is new there too.
+    assert_eq!(body(a.chat_read_unread(&id, None, "Seedwell", 50, false).unwrap()), ["in the thread", "after the restart"], "the place survives");
+    a.shutdown().await;
+}
+
+/// An agent's place follows arrival: a message from another device that comes in late, though written before
+/// messages the agent was given already, is still given (the lost "please add eta_minutes" of the blind test).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_late_message_written_earlier_is_still_given_to_an_agent() {
+    let (a, b) = (device("Anna").await, device("Bo").await);
+    let id: FolderId = a.h.chat_new("Team").await.unwrap().id.parse().unwrap();
+    join(&b.h, &a.h, &id, Role::ReadWrite, addr(&a)).await;
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+    let body = |v: Vec<MessageInfo>| v.into_iter().map(|m| m.body).collect::<Vec<_>>();
+    a.h.chat_send(&id, None, MessageKind::Text, "first", None, Some("docs")).await.unwrap();
+    assert_eq!(body(a.h.chat_read_unread(&id, None, "api", 50, false).unwrap()), ["first"]);
+    let late = b.h.test_sign_draft(&id, Draft { id: [9; 16], seq: 500, at_ms: now - 60_000, reply_to: None, topic: None, agent: Some("web".into()), kind: MessageKind::Text, body: b"please add eta_minutes".to_vec() });
+    a.h.test_receive(&id, b.h.device_id(), &[late]).await.unwrap();
+    a.h.chat_send(&id, None, MessageKind::Text, "second", None, Some("docs")).await.unwrap();
+    assert_eq!(body(a.h.chat_read_unread(&id, None, "api", 50, false).unwrap()), ["please add eta_minutes", "second"], "in the order they came in");
+    assert!(a.h.chat_read_unread(&id, None, "api", 50, false).unwrap().is_empty());
+    a.h.shutdown().await;
+    b.h.shutdown().await;
+}

@@ -83,6 +83,22 @@ import SwiftUI
         }
     }
 
+    /// Asks for the channel's new name (on this Mac only: each device names its channels, as folders).
+    func rename(_ c: SyncChannel) {
+        let a = NSAlert()
+        a.messageText = "Rename “\(c.name)”"
+        a.informativeText = "The new name is used on this Mac. The other devices keep the name they know it by."
+        let field = NSTextField(string: c.name)
+        field.frame = NSRect(x: 0, y: 0, width: 320, height: 24)
+        a.accessoryView = field
+        a.window.initialFirstResponder = field
+        a.addButton(withTitle: "Rename")
+        a.addButton(withTitle: "Cancel")
+        NSApp.activate()
+        guard a.runModal() == .alertFirstButtonReturn, let name = ChatText.channelName(field.stringValue), name != c.name else { return }
+        do { try core.chatRename(id: c.id, name: name) } catch { sync.alert("Couldn't rename the channel", SyncText.message(error)) }
+    }
+
     /// Asks for the command that wakes an agent when a message arrives (empty: none). It gets the message as JSON on
     /// its standard input, never as arguments.
     func askWakeCommand(_ c: SyncChannel) {

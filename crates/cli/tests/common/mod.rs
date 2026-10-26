@@ -158,9 +158,20 @@ impl Daemon {
         Daemon { child, socket: PathBuf::from(field("socket=")), port: field("port=").parse().unwrap(), state, dl }
     }
 
-    /// Run the CLI against this daemon with `--json`.
+    /// Run the CLI against this daemon with `--json`, in the daemon's own folder (`<root>/<name>`, outside any
+    /// repository), so a chat post goes under the agent name `<name>`.
     pub fn cli(&self, args: &[&str]) -> Out {
-        cli_at(&self.socket, args)
+        let o = Command::new(BIN)
+            .arg("--socket")
+            .arg(&self.socket)
+            .arg("--json")
+            .args(args)
+            .env_remove("SEEDWELL_SOCKET")
+            .env_remove("SEEDWELL_AGENT")
+            .current_dir(self.state.parent().unwrap())
+            .output()
+            .expect("run seedwell");
+        Out { code: o.status.code().unwrap_or(-1), stdout: String::from_utf8_lossy(&o.stdout).into_owned(), stderr: String::from_utf8_lossy(&o.stderr).into_owned() }
     }
 
     pub fn json(&self, args: &[&str]) -> Value {

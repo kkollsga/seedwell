@@ -83,6 +83,10 @@ import SwiftUI
                 _ = try? core.syncSetShareUntil(id: folders[0].id, untilS: UInt64(Date().timeIntervalSince1970) + 7 * 86_400 - 3_600)
                 return SyncShareView(model: SyncShareModel(core: core, id: folders[0].id), actions: sync)
             }
+            await render("sync-share-new-\(suffix)", size: NSSize(width: 460, height: 330), dark: dark, settings: true) {
+                // Share ▸ Seedwell on a folder not synced yet: add and share in one.
+                SyncShareView(model: SyncShareModel(core: core, newFolder: NSHomeDirectory() + "/Documents/Novel"), actions: sync)
+            }
             for (name, state) in [("off", (false, false)), ("badges-on", (true, false)), ("on", (true, true))] {
                 await render("finder-setup-\(name)-\(suffix)", size: NSSize(width: 460, height: state.0 ? 260 : 330), dark: dark, settings: true) {
                     FinderSetupView(model: FinderSetupModel(check: { (badges: state.0, shareMenu: state.1) }))
@@ -101,9 +105,28 @@ import SwiftUI
                 let m = model(.chat(c, topic: core.chatTopics(channelId: c).first?.id), select: nil)
                 return MainWindowView(model: m, commands: commands, settings: settings, nav: SettingsNavigation())
             }
+            await render("chats-agents-\(suffix)", size: NSSize(width: 1180, height: 760), dark: dark) {
+                // Agents writing Markdown, each with its name and computer.
+                let c = core.chatChannels().first { $0.name == "Release notes" }?.id ?? ""
+                return MainWindowView(model: model(.chat(c, topic: nil), select: nil), commands: commands, settings: settings, nav: SettingsNavigation())
+            }
             await render("chats-direct-\(suffix)", size: NSSize(width: 1180, height: 760), dark: dark) {
                 let m = model(.direct(core.chatDirects().first?.deviceId ?? ""), select: nil)
                 return MainWindowView(model: m, commands: commands, settings: settings, nav: SettingsNavigation())
+            }
+            await render("chat-markdown-\(suffix)", size: NSSize(width: 820, height: 1700), dark: dark, settings: true) {
+                // Complex messages (ChatSamples) as the conversation shows them: in a scroll view, as there.
+                ScrollView { VStack(alignment: .leading, spacing: 0) {
+                    ForEach(Array(ChatSamples.messages.enumerated()), id: \.offset) { n, s in
+                        ChatMessageRow(message: SyncMessage(id: "S\(n)", channelId: "C", authorDevice: "D\(n)", authorName: s.computer, isMe: false,
+                                                            agent: s.agent, atS: 1_792_953_675 + UInt64(n) * 60, replyTo: nil, topic: nil,
+                                                            kind: .text, body: s.body),
+                                       header: true, reply: nil, onReply: nil)
+                    }
+                }
+                .padding(.horizontal, 22).padding(.vertical, 12) }
+                .frame(width: 820, height: 1700)
+                .background(.background)
             }
             await render("chat-new-\(suffix)", size: NSSize(width: 440, height: 240), dark: dark, settings: true) {
                 ChatNewView(model: ChatNewModel(core: core, prefill: nil))

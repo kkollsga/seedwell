@@ -127,6 +127,7 @@ async fn permission_matrix_every_method_every_level() {
             Method::ChatSend => json!({"channel": "Plans", "body": "hi"}),
             Method::ChatRead => json!({"channel": "Plans", "last": 5}),
             Method::ChatMute => json!({"channel": "Plans", "muted": true}),
+            Method::ChatRename => json!({"channel": "Plans", "name": "Trips"}),
             Method::ChatAddAddress => json!({"channel": "Plans", "address": "127.0.0.1:9"}),
             Method::ChatTopics => json!({"channel": "Plans"}),
             Method::ChatNewTopic => json!({"channel": "Plans", "title": "Dinner"}),

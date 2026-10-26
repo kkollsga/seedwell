@@ -59,11 +59,12 @@ struct ChatToolbarControls: View {
                 Button("Wake Command…") { actions.askWakeCommand(channel) }.disabled(channel.agents == .off)
                 Divider()
                 Button("New Topic…") { actions.newTopic(channel) }.disabled(channel.role == .readOnly)
+                Button("Rename…") { actions.rename(channel) }
                 Divider()
                 Button("Leave Channel…") { actions.leave(channel) }
             } label: { Image(systemName: "ellipsis.circle") }
                 .menuIndicator(.hidden).fixedSize()
-                .help("Mute, what agents on this Mac may do, the wake command, a new topic, leave")
+                .help("Mute, what agents on this Mac may do, the wake command, a new topic, rename, leave")
                 .accessibilityIdentifier("chat-channel-menu")
         }
     }
@@ -189,39 +190,65 @@ struct ChatMessageRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
             if header {
+                // A person: their device ("You" for this Mac). An agent: its name, a badge, and the computer it runs on.
                 HStack(spacing: 6) {
-                    Text(message.isMe ? "You" : (message.authorName.isEmpty ? "Unnamed device" : message.authorName))
-                        .font(.system(size: 12.5, weight: .semibold))
                     if let agent = message.agent {
-                        Text("agent · \(agent)").font(.system(size: 10.5, weight: .medium))
+                        Text(agent).font(.system(size: 12.5, weight: .semibold))
+                        Text("agent").font(.system(size: 10.5, weight: .medium))
                             .padding(.horizontal, 5).padding(.vertical, 1)
                             .background(Capsule().fill(Color.secondary.opacity(0.16)))
                             .foregroundStyle(.secondary)
-                            .help("Sent by an agent through Seedwell on that device")
+                            .help("Sent by an agent through Seedwell on \(ChatText.computer(message))")
+                        Label(ChatText.computer(message), systemImage: "desktopcomputer").labelStyle(.titleAndIcon)
+                            .font(.system(size: 11.5)).foregroundStyle(.secondary)
+                    } else {
+                        Text(message.isMe ? "You" : ChatText.computer(message)).font(.system(size: 12.5, weight: .semibold))
                     }
                     Text(ChatText.time(message.atS)).font(.system(size: 11)).foregroundStyle(.secondary)
                 }
-                .padding(.top, 10)
+                .padding(.bottom, 2)
             }
             if let reply {
                 Text("↳ \(ChatText.author(reply)): \(ChatText.preview(reply, limit: 80))")
                     .font(.system(size: 11.5)).foregroundStyle(.secondary).lineLimit(1)
             }
             HStack(alignment: .top) {
-                Text(message.kind == .other ? ChatText.preview(message) : message.body)
-                    .font(message.kind == .json ? .system(size: 12, design: .monospaced) : .system(size: 13))
-                    .foregroundStyle(message.kind == .other ? .secondary : .primary)
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                Group {
+                    switch message.kind {
+                    case .text:
+                        if let mail = ChatMail.parse(message.body) {
+                            // A mail between projects: its header as a line, then its text.
+                            VStack(alignment: .leading, spacing: 6) {
+                                ChatMailHeader(mail: mail)
+                                if !mail.body.isEmpty { ChatMarkdownView(text: mail.body) }
+                            }
+                        } else {
+                            ChatMarkdownView(text: message.body)
+                        }
+                    case .json: Text(message.body).font(.system(size: 12, design: .monospaced)).textSelection(.enabled)
+                    case .other: Text(ChatText.preview(message)).font(.system(size: 13)).foregroundStyle(.secondary)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
                 if hovered, let onReply {
                     Button(action: onReply) { Image(systemName: "arrowshape.turn.up.left") }
                         .buttonStyle(.plain).foregroundStyle(.secondary).help("Reply")
                 }
             }
         }
-        .padding(.vertical, 1)
+        // Each message is a card, so one ends visibly where the next begins; yours have the accent's tint.
+        .padding(.horizontal, 12).padding(.vertical, 8)
+        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(cardFill))
+        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Color.secondary.opacity(0.12)))
         .contentShape(Rectangle())
         .onHover { hovered = $0 }
+        // A run's first card stands apart from the one before; the rest of the run sits close.
+        .padding(.top, header ? 10 : 4)
+    }
+
+    private var cardFill: Color {
+        let mine = message.isMe && message.agent == nil
+        return mine ? Color.accentColor.opacity(hovered ? 0.16 : 0.11) : Color.secondary.opacity(hovered ? 0.11 : 0.07)
     }
 }
 

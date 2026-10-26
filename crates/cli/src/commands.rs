@@ -34,6 +34,8 @@ pub struct Global {
     pub socket_given: bool,
     /// Name announced in `hello` (shows up in the activity log).
     pub client: String,
+    /// The client name was given (`--client`), so chat posts go under it unless `--as` says otherwise.
+    pub client_given: bool,
     /// Start the app when it is not running.
     pub launch: bool,
     /// `--yes-i-know`: allow `sim` without Developer mode.
@@ -430,6 +432,7 @@ pub async fn run(cmd: Cmd, g: &Global) -> R {
         Cmd::Skill(s) => skill::run(s, g)?,
         Cmd::Sync(s) => sync::run(s, g).await?,
         Cmd::Chat(s) => chat::run(s, g).await?,
+        Cmd::Mail(m) => crate::mail::run(m, g).await?,
         Cmd::Relay(a) => sync::relay(a).await?,
         Cmd::Help(topic) => crate::print_help(topic.as_deref())?,
         Cmd::Daemon(_) => unreachable!("handled in lib.rs"),

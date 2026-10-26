@@ -1,4 +1,5 @@
 import AppKit
+import os
 
 /// Every folder sync command, in one place: the menu, the window and the modals all go through here
 /// (SPEC 7G.5). Calls that can take a while (moving a folder, joining) run off the main thread.
@@ -13,8 +14,8 @@ import AppKit
     var showShare: (_ id: String) -> Void = { _ in }
     /// A folder's chat: the channel's page.
     var showChat: (_ channel: String) -> Void = { _ in }
-    /// The add modal on "From this Mac" with a folder chosen (the system Share menu, for a folder not synced yet).
-    var showAddFolder: (_ path: String) -> Void = { _ in }
+    /// The Share dialog of a folder not synced yet (add and share in one).
+    var showShareNew: (_ path: String) -> Void = { _ in }
     /// Where removed folders go: the user's Trash, or the QA one (`SEEDWELL_QA_TRASH_DIR`).
     var trash = SourceTrash.standard()
     /// The last folder that was removed (the window drops its page).
@@ -72,21 +73,25 @@ import AppKit
     }
 
     /// The system Share menu shared `path`: the Share dialog of the synced folder it is in (or why this Mac may not
-    /// share it), else Add Folder with that folder, or the file's folder, chosen.
+    /// share it), else the Share dialog of that folder (or the file's folder) as a new one: Copy Link adds it and makes the link.
     func share(path: String) {
         let real = FinderStatusWriter.realPath(path)
         let inside = snapshot().folders.filter { f in
             let root = FinderStatusWriter.realPath(f.path)
             return real == root || real.hasPrefix(root + "/")
         }
-        if let f = inside.max(by: { $0.path.count < $1.path.count }) {
+        let f = inside.max(by: { $0.path.count < $1.path.count })
+        // Like the Finder extension's "menu" lines: what the Share menu was used on, and what it opened.
+        Logger(subsystem: "io.github.kkollsga.Seedwell", category: "share-menu")
+            .info("share: \(f == nil ? "not synced" : SyncText.canShare(f!.role) ? "share dialog" : "may not share", privacy: .public) for \(real)")
+        if let f {
             if SyncText.canShare(f.role) { showShare(f.id) }
             else { alert("Only the owner and admins can share “\(f.name)”", "This Mac is \(SyncText.role(f.role)) in it. Ask the owner or an admin for a link.") }
             return
         }
         var dir: ObjCBool = false
         let isDir = FileManager.default.fileExists(atPath: real, isDirectory: &dir) && dir.boolValue
-        showAddFolder(isDir ? real : (real as NSString).deletingLastPathComponent)
+        showShareNew(isDir ? real : (real as NSString).deletingLastPathComponent)
     }
 
     /// Gives a device another role in a folder or channel `id` (owners only; the core says so otherwise). Errors are

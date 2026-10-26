@@ -279,11 +279,11 @@ async fn remove_confirm<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &Conn, h: &SyncHand
     let plan = plan.map_err(|e| match e {
         TokenError::Unknown => ApiError::new(
             ErrorCode::InvalidToken,
-            "unknown confirmation token (wrong, already used, or issued to another client); call `sync.remove` again",
+            "unknown confirmation token (wrong, already used, or issued to another client); run `seedwell sync remove` again",
         ),
         TokenError::Expired => ApiError::new(
             ErrorCode::TokenExpired,
-            format!("the confirmation expired after {} s; call `sync.remove` again", ctx.opts.confirm_ttl.as_secs()),
+            format!("the confirmation expired after {} s; run `seedwell sync remove` again", ctx.opts.confirm_ttl.as_secs()),
         ),
     })?;
     // The level may have dropped since step 1.
@@ -343,7 +343,7 @@ fn settings_dto(st: &trs_sync_net::config::Settings, changed: Vec<String>, note:
 /// Change the device-wide settings and read them back.
 fn set_settings(h: &SyncHandle, p: SyncSettingsParams) -> Result<Reply, ApiError> {
     if p.is_empty() {
-        return Err(ApiError::params("give at least one setting to change (`sync.settings` reads them)"));
+        return Err(ApiError::params("give at least one setting to change (`seedwell sync settings` shows them)"));
     }
     let mut st = h.settings();
     let mut changed = Vec::new();

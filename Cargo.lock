@@ -1383,7 +1383,7 @@ dependencies = [
 
 [[package]]
 name = "tracker-probe"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "bytes",
@@ -1403,24 +1403,25 @@ dependencies = [
 
 [[package]]
 name = "trs-bencode"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "proptest",
 ]
 
 [[package]]
 name = "trs-classify"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "proptest",
 ]
 
 [[package]]
 name = "trs-cli"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "tokio",
  "trs-control",
@@ -1434,7 +1435,7 @@ dependencies = [
 
 [[package]]
 name = "trs-control"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "getrandom 0.4.3",
  "serde",
@@ -1453,7 +1454,7 @@ dependencies = [
 
 [[package]]
 name = "trs-devlog"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "libc",
  "serde_json",
@@ -1463,7 +1464,7 @@ dependencies = [
 
 [[package]]
 name = "trs-dht"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "proptest",
  "sha1",
@@ -1473,7 +1474,7 @@ dependencies = [
 
 [[package]]
 name = "trs-engine"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "bytes",
  "getrandom 0.4.3",
@@ -1498,7 +1499,7 @@ dependencies = [
 
 [[package]]
 name = "trs-ffi"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "tempfile",
  "tokio",
@@ -1518,7 +1519,7 @@ dependencies = [
 
 [[package]]
 name = "trs-fswatch"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "libc",
  "proptest",
@@ -1527,7 +1528,7 @@ dependencies = [
 
 [[package]]
 name = "trs-http"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "bytes",
  "http-body-util",
@@ -1542,7 +1543,7 @@ dependencies = [
 
 [[package]]
 name = "trs-metainfo"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "getrandom 0.4.3",
  "proptest",
@@ -1553,14 +1554,14 @@ dependencies = [
 
 [[package]]
 name = "trs-portmap"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "tokio",
 ]
 
 [[package]]
 name = "trs-state"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "proptest",
  "redb 2.6.4",
@@ -1573,7 +1574,7 @@ dependencies = [
 
 [[package]]
 name = "trs-storage"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "crossbeam-channel",
  "libc",
@@ -1585,7 +1586,7 @@ dependencies = [
 
 [[package]]
 name = "trs-stream"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "getrandom 0.4.3",
  "tokio",
@@ -1593,7 +1594,7 @@ dependencies = [
 
 [[package]]
 name = "trs-sync"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "libc",
  "proptest",
@@ -1606,7 +1607,7 @@ dependencies = [
 
 [[package]]
 name = "trs-sync-net"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "flate2",
  "ring",
@@ -1626,7 +1627,7 @@ dependencies = [
 
 [[package]]
 name = "trs-sync-proto"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "proptest",
  "ring",
@@ -1635,7 +1636,7 @@ dependencies = [
 
 [[package]]
 name = "trs-tracker"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "bytes",
  "flate2",
@@ -1654,7 +1655,7 @@ dependencies = [
 
 [[package]]
 name = "trs-utp"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "libc",
  "tokio",
@@ -1662,7 +1663,7 @@ dependencies = [
 
 [[package]]
 name = "trs-wire"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "bytes",
  "proptest",

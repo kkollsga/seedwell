@@ -153,7 +153,7 @@ import os
         sync.showAdd = { [weak self, sync] prefill in self?.syncWindows.showAdd(prefill: prefill, actions: sync) }
         sync.showEdit = { [weak self, sync] id in self?.syncWindows.showEdit(id: id, actions: sync) }
         sync.showShare = { [weak self, sync] id in self?.syncWindows.showShare(id: id, actions: sync) }
-        sync.showAddFolder = { [weak self, sync] path in self?.syncWindows.showAdd(prefill: nil, folder: path, actions: sync) }
+        sync.showShareNew = { [weak self, sync] path in self?.syncWindows.showShare(newFolder: path, actions: sync) }
         let chat = commands.chat
         chat.show = { place in main.show(section: place) }
         chat.isShowing = { place in NSApp.isActive && main.isOpen && main.libraryModel?.section == place }

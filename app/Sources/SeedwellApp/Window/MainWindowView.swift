@@ -74,6 +74,7 @@ struct SidebarView: View {
                                 if SyncText.canShare(c.role) { Button("Share…") { commands.chat.share(c.id) } }
                                 if c.role != .readOnly { Button("New Topic…") { commands.chat.newTopic(c) } }
                                 Button(c.muted ? "Unmute" : "Mute") { commands.chat.setMuted(c, !c.muted) }
+                                Button("Rename…") { commands.chat.rename(c) }
                                 Divider()
                                 Button("Leave Channel…") { commands.chat.leave(c) }
                             }

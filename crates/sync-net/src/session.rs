@@ -83,12 +83,18 @@ fn tls_error(e: rustls::Error) -> io::Error {
 /// Is this address on the local network (private, link-local, loopback, unique local)? Such connections
 /// are not subject to Internet speed limits, and are dialed over TCP only.
 pub fn is_lan(ip: IpAddr) -> bool {
-    match ip {
+    match ip.to_canonical() {
         IpAddr::V4(v4) => v4.is_private() || v4.is_link_local() || v4.is_loopback(),
         IpAddr::V6(v6) => {
             v6.is_loopback() || (v6.segments()[0] & 0xfe00) == 0xfc00 || (v6.segments()[0] & 0xffc0) == 0xfe80
         }
     }
+}
+
+/// The address as an IPv4 one when it is IPv4-mapped (`[::ffff:192.168.1.2]:5000`, which a dual-stack listener
+/// reports for an IPv4 peer), so that it is shown and compared as the peer's own address.
+pub fn canonical(a: SocketAddr) -> SocketAddr {
+    SocketAddr::new(a.ip().to_canonical(), a.port())
 }
 
 fn tune(s: &TcpStream) {
@@ -101,7 +107,7 @@ async fn client_over(tls: &Tls, mut io: BoxIo, remote: SocketAddr, local: Socket
     io.write_all(&Magic::Session.bytes()).await?;
     let stream = tls.client.connect(Tls::server_name(), io).await?;
     let est = tls::established(stream.get_ref().1).map_err(tls_error)?;
-    Ok(Connected { stream: TlsStream::Client(stream), est, remote, local, dialed: true, via })
+    Ok(Connected { stream: TlsStream::Client(stream), est, remote: canonical(remote), local: canonical(local), dialed: true, via })
 }
 
 /// Reads the session magic from `io` and runs the TLS handshake as the server (no timeout of its own).
@@ -113,7 +119,7 @@ async fn server_over(tls: &Tls, mut io: BoxIo, remote: SocketAddr, local: Socket
     }
     let stream = tls.server.accept(io).await?;
     let est = tls::established(stream.get_ref().1).map_err(tls_error)?;
-    Ok(Connected { stream: TlsStream::Server(stream), est, remote, local, dialed: false, via })
+    Ok(Connected { stream: TlsStream::Server(stream), est, remote: canonical(remote), local: canonical(local), dialed: false, via })
 }
 
 fn check_expected(c: Connected, expect: Option<DeviceId>) -> io::Result<Connected> {
@@ -222,7 +228,7 @@ pub enum Accepted {
 /// Reads the magic of an accepted TCP connection and, for a session, runs the TLS handshake as the server.
 pub async fn accept(tls: &Tls, mut tcp: TcpStream, remote: SocketAddr) -> io::Result<Accepted> {
     tune(&tcp);
-    let local = tcp.local_addr()?;
+    let (remote, local) = (canonical(remote), canonical(tcp.local_addr()?));
     let run = async {
         let mut magic = [0u8; 8];
         tcp.read_exact(&mut magic).await?;

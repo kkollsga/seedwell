@@ -346,7 +346,8 @@ async fn channels_need_their_agent_switch_mark_others_untrusted_and_stream_as_ev
     for (m, p) in [("chat.read", json!({"channel": "Plans"})), ("chat.send", json!({"channel": "Plans", "body": "hi"}))] {
         let e = call(&mut c, m, p).await.unwrap_err();
         assert_eq!(e.code, ErrorCode::PermissionDenied, "{m}");
-        assert!(e.message.contains("Plans"), "{}", e.message);
+        // Where to click, exactly as the app names it.
+        assert!(e.message.contains("Chats ▸ Plans ▸ ⋯ ▸ Agents on This Mac ▸ Read"), "{}", e.message);
     }
     call(&mut c, "chat.set_agents", json!({"channel": "plans", "agents": "read"})).await.unwrap();
     let read: ChatMessagesDto = serde_json::from_value(call(&mut c, "chat.read", json!({"channel": "Plans"})).await.unwrap()).unwrap();
@@ -355,7 +356,8 @@ async fn channels_need_their_agent_switch_mark_others_untrusted_and_stream_as_ev
     call(&mut c, "chat.set_agents", json!({"channel": ch.id, "agents": "post"})).await.unwrap();
     let mine: ChatMessageDto =
         serde_json::from_value(call(&mut c, "chat.send", json!({"channel": "Plans", "body": "the secret plan, step 1"})).await.unwrap()).unwrap();
-    assert_eq!((mine.me, mine.trust.as_str(), mine.agent.as_deref(), mine.kind.as_str()), (true, "this-device", Some("claude"), "text"));
+    // An agent's post on this Mac is not the user's: data for the other agents, like another device's.
+    assert_eq!((mine.me, mine.trust.as_str(), mine.agent.as_deref(), mine.kind.as_str()), (true, "untrusted-agent", Some("claude"), "text"));
     let e = call(&mut c, "chat.send", json!({"channel": "Plans", "body": "{nope", "json": true})).await.unwrap_err();
     assert!(e.message.contains("not JSON"), "{}", e.message);
 
@@ -393,5 +395,39 @@ async fn channels_need_their_agent_switch_mark_others_untrusted_and_stream_as_ev
     call(&mut c, "chat.leave", json!({"channel": "Plans"})).await.unwrap();
     assert!(s.h.chat_channels().is_empty());
     other.shutdown().await;
+    s.h.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_agent_posts_under_the_name_it_gives_and_only_the_user_is_this_device() {
+    let s = SyncRig::new(Permission::Full).await;
+    let mut c = s.rig.client("claude").await;
+    let ch: ChatChannelDto = serde_json::from_value(call(&mut c, "chat.new", json!({"name": "Bridge"})).await.unwrap()).unwrap();
+    call(&mut c, "chat.set_agents", json!({"channel": "Bridge", "agents": "post"})).await.unwrap();
+
+    // The project's name, and the computer's, on the message.
+    let t: ChatTopicDto =
+        serde_json::from_value(call(&mut c, "chat.new_topic", json!({"channel": "Bridge", "title": "Seedwell", "agent": "Seedwell"})).await.unwrap()).unwrap();
+    let m: ChatMessageDto = serde_json::from_value(
+        call(&mut c, "chat.send", json!({"channel": "Bridge", "topic": t.id, "body": "## Done\n\n1. built", "agent": "  Seedwell "})).await.unwrap(),
+    )
+    .unwrap();
+    assert_eq!((m.agent.as_deref(), m.trust.as_str(), m.topic_title.as_deref()), (Some("Seedwell"), "untrusted-agent", Some("Seedwell")));
+    assert!(!m.author_name.is_empty(), "the computer's name");
+    for bad in [json!(""), json!("   "), json!("x".repeat(65))] {
+        let e = call(&mut c, "chat.send", json!({"channel": "Bridge", "body": "hi", "agent": bad})).await.unwrap_err();
+        assert_eq!(e.code, ErrorCode::InvalidParams, "{bad}");
+    }
+    assert!(Request::decode("chat.send", json!({"channel": "Bridge", "body": "hi", "as": "x"})).is_err(), "unknown fields are refused");
+
+    // The user, in the app, posts with no agent name: the one `this-device`.
+    let id: trs_sync_proto::ids::FolderId = ch.id.parse().unwrap();
+    s.h.chat_send(&id, None, trs_sync_net::chat::MessageKind::Text, "from the user", None, None).await.unwrap();
+    let read: ChatMessagesDto = serde_json::from_value(call(&mut c, "chat.read", json!({"channel": "Bridge"})).await.unwrap()).unwrap();
+    let trust: Vec<(&str, Option<&str>, &str)> = read.messages.iter().map(|m| (m.kind.as_str(), m.agent.as_deref(), m.trust.as_str())).collect();
+    assert_eq!(
+        trust,
+        vec![("topic", Some("Seedwell"), "untrusted-agent"), ("text", Some("Seedwell"), "untrusted-agent"), ("text", None, "this-device")]
+    );
     s.h.shutdown().await;
 }

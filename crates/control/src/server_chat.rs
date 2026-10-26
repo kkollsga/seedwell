@@ -3,8 +3,10 @@
 //!
 //! Each channel has its own agent switch (off by default) on top of the agent permission level: `chat.read` (and
 //! the `chat.message` events) need the channel at Read or above, `chat.send` needs it at Read and post. A message an
-//! agent posts carries the client's name from its `hello`, set here, so no client can post without it or as
-//! another. Every message from another device is marked `"trust": "untrusted-peer"`: data, never instructions.
+//! agent posts always carries an agent name, set here: the request's `agent` (its project's, say), else the client's
+//! name from its `hello`, so no client can post as the user. Only the user's own posts on this device are
+//! `"trust": "this-device"`; an agent's here is `untrusted-agent`, another device's `untrusted-peer`: data, never
+//! instructions.
 //!
 //! Permissions: read-only for `chat.list`, `chat.members` and `chat.read`; control for `chat.new`, `chat.join`,
 //! `chat.send`, `chat.mute` and `chat.leave`; full for what shares a channel or changes who may do what in it
@@ -45,22 +47,33 @@ fn agents_allow(c: &ChannelStatus, need: AgentAccess, what: &str) -> Result<(), 
     if c.agents >= need {
         return Ok(());
     }
-    let how = if need == AgentAccess::ReadPost { "read and post" } else { "read" };
+    let (how, choice) = if need == AgentAccess::ReadPost { ("read and post", "Read and post") } else { ("read", "Read (or Read and post)") };
+    let name = clip(&c.name, 60);
     Err(ApiError::new(
         ErrorCode::PermissionDenied,
         format!(
-            "`{what}` needs agents to be allowed to {how} in the channel `{}`; the user can allow it in the channel's settings in Seedwell (Agents on this Mac may: …)",
-            clip(&c.name, 60)
+            "agents on this Mac may not {how} in the channel `{name}` yet; the user can allow it in Seedwell: Chats ▸ {name} ▸ ⋯ ▸ Agents on This Mac ▸ {choice}. Settings › Agents does not open up chats: each channel has its own switch"
         ),
     )
-    .with_data(json!({ "channel": c.id, "agents": c.agents.name() })))
+    .with_data(json!({ "channel": c.id, "agents": c.agents.name(), "method": what })))
 }
 
-/// The label of what this connection posts: its client name from `hello`, never something the client says in
-/// the call.
+/// The label of what this connection posts when the call names none: its client name from `hello`.
 fn agent_of(conn: &Conn) -> String {
     let agent = conn.client.as_deref().map(|n| n.chars().filter(|c| !c.is_control()).take(trs_sync_proto::chat::MAX_AGENT).collect::<String>());
     agent.filter(|a| !a.trim().is_empty()).unwrap_or_else(|| "agent".into())
+}
+
+/// The agent name a post goes under: the one the request gives (its project's, say), else the client's.
+fn agent_for(conn: &Conn, given: Option<&str>) -> Result<String, ApiError> {
+    let Some(given) = given else { return Ok(agent_of(conn)) };
+    let name: String = given.chars().filter(|c| !c.is_control()).collect();
+    let name = name.trim();
+    let n = name.chars().count();
+    if n == 0 || n > trs_sync_proto::chat::MAX_AGENT {
+        return Err(ApiError::params(format!("`agent` is a name of 1 to {} characters", trs_sync_proto::chat::MAX_AGENT)));
+    }
+    Ok(name.to_owned())
 }
 
 /// The Mac's switch for private messages allows `need`.
@@ -68,12 +81,14 @@ fn direct_allow(h: &SyncHandle, need: AgentAccess, what: &str) -> Result<(), Api
     if h.chat_direct_agents() >= need {
         return Ok(());
     }
-    let how = if need == AgentAccess::ReadPost { "read and post" } else { "read" };
+    let (how, choice) = if need == AgentAccess::ReadPost { ("read and post", "Read and post") } else { ("read", "Read (or Read and post)") };
     Err(ApiError::new(
         ErrorCode::PermissionDenied,
-        format!("`{what}` needs agents to be allowed to {how} private messages on this Mac; the user can allow it in Seedwell (a private conversation's menu: Agents on This Mac)"),
+        format!(
+            "agents on this Mac may not {how} private messages yet; the user can allow it in Seedwell: Chats ▸ a private conversation ▸ ⋯ ▸ Agents on This Mac ▸ {choice} (one switch for every private conversation). Settings › Agents does not open up chats"
+        ),
     )
-    .with_data(json!({ "agents": h.chat_direct_agents().name() })))
+    .with_data(json!({ "agents": h.chat_direct_agents().name(), "method": what })))
 }
 
 /// A device named by a caller: its id, a prefix of it, or its name, among the conversations and the members of
@@ -157,7 +172,7 @@ pub(super) async fn call<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &Conn, req: Reques
         Request::ChatSend(p) => {
             let (c, id) = pick(&h, &p.channel)?;
             agents_allow(&c, AgentAccess::ReadPost, "chat.send")?;
-            let agent = agent_of(conn);
+            let agent = agent_for(conn, p.agent.as_deref())?;
             let kind = if p.json { MessageKind::Json } else { MessageKind::Text };
             let m = h.chat_send(&id, p.topic.as_deref(), kind, &p.body, p.reply_to.as_deref(), Some(&agent)).await.map_err(chat_err)?;
             let mut r = reply(&message_dto(&m))?;
@@ -167,8 +182,19 @@ pub(super) async fn call<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &Conn, req: Reques
         Request::ChatRead(p) => {
             let (c, id) = pick(&h, &p.channel)?;
             agents_allow(&c, AgentAccess::Read, "chat.read")?;
-            let last = p.last.map(|n| n.clamp(1, 1000) as usize).or(if p.since.is_none() { Some(50) } else { None });
-            let msgs = h.chat_read(&id, p.topic.as_deref().map(Some), p.since.as_deref(), last).map_err(chat_err)?;
+            let msgs = match &p.unread_for {
+                Some(a) => {
+                    if p.since.is_some() {
+                        return Err(ApiError::params("`unread_for` takes `last`, not `since`"));
+                    }
+                    let agent = agent_for(conn, Some(a))?;
+                    h.chat_read_unread(&id, p.topic.as_deref().map(Some), &agent, p.last.map_or(200, |n| n.clamp(1, 1000)) as usize, p.peek).map_err(chat_err)?
+                }
+                None => {
+                    let last = p.last.map(|n| n.clamp(1, 1000) as usize).or(if p.since.is_none() { Some(50) } else { None });
+                    h.chat_read(&id, p.topic.as_deref().map(Some), p.since.as_deref(), last).map_err(chat_err)?
+                }
+            };
             reply(&ChatMessagesDto { id: c.id, name: c.name, messages: msgs.iter().take(1000).map(message_dto).collect() })
         }
         Request::ChatTopics(p) => {
@@ -180,7 +206,7 @@ pub(super) async fn call<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &Conn, req: Reques
         Request::ChatNewTopic(p) => {
             let (c, id) = pick(&h, &p.channel)?;
             agents_allow(&c, AgentAccess::ReadPost, "chat.new_topic")?;
-            let t = h.chat_new_topic(&id, &p.title, Some(&agent_of(conn))).await.map_err(chat_err)?;
+            let t = h.chat_new_topic(&id, &p.title, Some(&agent_for(conn, p.agent.as_deref())?)).await.map_err(chat_err)?;
             let mut r = reply(&s::topic_dto(&t))?;
             r.note = Some(format!("made topic {} in channel {} ({})", clip(&t.title, 80), clip(&c.name, 80), short(&c.id)));
             Ok(r)
@@ -199,8 +225,9 @@ pub(super) async fn call<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &Conn, req: Reques
         Request::ChatDmSend(p) => {
             direct_allow(&h, AgentAccess::ReadPost, "chat.dm_send")?;
             let dev = pick_device(&h, &p.device)?;
+            let agent = agent_for(conn, p.agent.as_deref())?;
             let kind = if p.json { MessageKind::Json } else { MessageKind::Text };
-            let m = h.chat_send_direct(&dev, kind, &p.body, p.reply_to.as_deref(), Some(&agent_of(conn))).await.map_err(chat_err)?;
+            let m = h.chat_send_direct(&dev, kind, &p.body, p.reply_to.as_deref(), Some(&agent)).await.map_err(chat_err)?;
             let mut r = reply(&message_dto(&m))?;
             r.note = Some(format!("wrote {} privately to {}", short(&m.id), short(&dev.to_string())));
             Ok(r)
@@ -217,6 +244,11 @@ pub(super) async fn call<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &Conn, req: Reques
             let mut r = channel_reply(&h, &id, "address added to")?;
             r.note = Some(format!("{a} for channel {} ({})", clip(&c.name, 80), short(&c.id)));
             Ok(r)
+        }
+        Request::ChatRename(p) => {
+            let (_, id) = pick(&h, &p.channel)?;
+            h.chat_rename(&id, &p.name).map_err(chat_err)?;
+            channel_reply(&h, &id, "renamed")
         }
         Request::ChatMute(p) => {
             let (_, id) = pick(&h, &p.channel)?;

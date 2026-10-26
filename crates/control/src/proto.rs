@@ -995,6 +995,9 @@ pub struct ChatSendParams {
     /// The topic it goes in (its id); absent: General.
     #[serde(default)]
     pub topic: Option<String>,
+    /// The agent name it is posted under (1 to 64 characters, e.g. the project's); absent: the client's name.
+    #[serde(default)]
+    pub agent: Option<String>,
 }
 
 /// `chat.new_topic`: a new topic in a channel (anyone who may post; agents: the channel's switch at post).
@@ -1005,6 +1008,9 @@ pub struct ChatNewTopicParams {
     pub channel: String,
     /// Its title.
     pub title: String,
+    /// The agent name it is posted under (1 to 64 characters, e.g. the project's); absent: the client's name.
+    #[serde(default)]
+    pub agent: Option<String>,
 }
 
 /// A device for private messages (`chat.dm_read`): its id, a prefix of it, or its name.
@@ -1036,6 +1042,9 @@ pub struct ChatDmSendParams {
     /// The body is JSON.
     #[serde(default)]
     pub json: bool,
+    /// The agent name it is posted under (1 to 64 characters, e.g. the project's); absent: the client's name.
+    #[serde(default)]
+    pub agent: Option<String>,
 }
 
 /// `chat.dm_set_agents`: what agents on this Mac may do with private messages.
@@ -1061,6 +1070,13 @@ pub struct ChatReadParams {
     /// Only this topic's (its id, or `general`); absent: every message, topics' too.
     #[serde(default)]
     pub topic: Option<String>,
+    /// Only what this agent (by name) has not been given yet, its own posts left out; its place then moves on
+    /// (per agent and topic, kept by the channel). With `last` (default 200), not `since`.
+    #[serde(default)]
+    pub unread_for: Option<String>,
+    /// With `unread_for`: say what is unread without moving the place.
+    #[serde(default)]
+    pub peek: bool,
 }
 
 /// `chat.add_address`: where devices of a channel can be reached (`host:port`).
@@ -1071,6 +1087,16 @@ pub struct ChatAddressParams {
     pub channel: String,
     /// `host:port`.
     pub address: String,
+}
+
+/// `chat.rename`: a channel's name on this Mac (each device names its channels, as folders).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChatRenameParams {
+    /// The channel.
+    pub channel: String,
+    /// Its new name.
+    pub name: String,
 }
 
 /// `chat.mute`: no notifications for a channel (or again).
@@ -1479,6 +1505,8 @@ methods! {
     ChatAddAddress(ChatAddressParams) = "chat.add_address", Control, true;
     /// Channels: mute or unmute a channel's notifications.
     ChatMute(ChatMuteParams) = "chat.mute", Control, true;
+    /// Channels: a channel's name on this Mac.
+    ChatRename(ChatRenameParams) = "chat.rename", Control, true;
     /// Channels: what agents on this Mac may do in a channel.
     ChatSetAgents(ChatAgentsParams) = "chat.set_agents", Full, true;
     /// Channels: the wake-up command of a channel.

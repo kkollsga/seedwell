@@ -179,7 +179,7 @@ pub fn not_running() -> ApiError {
 /// A refusal of the service in protocol form (keys masked: a pasted key may be quoted back).
 pub fn err(e: SyncError) -> ApiError {
     match e {
-        SyncError::NotFound => ApiError::not_found("no such synced folder (see `sync.list`)"),
+        SyncError::NotFound => ApiError::not_found("no such synced folder (see `seedwell sync list`)"),
         SyncError::Invalid(why) => ApiError::invalid(clip(&scrub_keys(&why), 300)),
         SyncError::Io(e) => ApiError::new(ErrorCode::Engine, clip(&scrub_keys(&e.to_string()), 300)),
     }
@@ -274,7 +274,7 @@ pub fn resolve_member<'a>(members: &'a [trs_sync_net::MemberInfo], q: &str) -> R
         })
         .collect();
     match hits.as_slice() {
-        [] => Err(ApiError::not_found(format!("no device `{}` in this folder (see `sync.members`)", clip(q, 60)))),
+        [] => Err(ApiError::not_found(format!("no device `{}` in this folder (see `seedwell sync members`)", clip(q, 60)))),
         [one] => Ok(one),
         many => Err(ApiError::new(ErrorCode::Ambiguous, format!("`{}` matches {} devices; use more of the id", clip(q, 60), many.len()))),
     }
@@ -376,7 +376,7 @@ pub fn resolve_folder<'a>(folders: &'a [FolderStatus], q: &str) -> Result<&'a Fo
         }
     }
     match hits.as_slice() {
-        [] => Err(ApiError::not_found(format!("no synced folder `{}` (see `sync.list`)", clip(q, 60)))),
+        [] => Err(ApiError::not_found(format!("no synced folder `{}` (see `seedwell sync list`)", clip(q, 60)))),
         [one] => Ok(one),
         many => {
             let cands: Vec<_> = many.iter().take(8).map(|f| json!({"id": f.id, "name": f.name})).collect();
@@ -555,7 +555,7 @@ pub fn resolve_channel<'a>(channels: &'a [trs_sync_net::chat::ChannelStatus], q:
         }
     }
     match hits.as_slice() {
-        [] => Err(ApiError::not_found(format!("no channel `{}` (see `chat.list`)", clip(q, 60)))),
+        [] => Err(ApiError::not_found(format!("no channel `{}` (see `seedwell chat list`)", clip(q, 60)))),
         [one] => Ok(one),
         many => {
             let cands: Vec<_> = many.iter().take(8).map(|c| json!({"id": c.id, "name": c.name})).collect();
@@ -593,7 +593,7 @@ pub fn direct_dto(d: &trs_sync_net::direct::DirectStatus) -> ChatDirectDto {
 /// A channel service error for the protocol (not found means the channel).
 pub fn chat_err(e: SyncError) -> ApiError {
     match e {
-        SyncError::NotFound => ApiError::not_found("no such channel (see `chat.list`)"),
+        SyncError::NotFound => ApiError::not_found("no such channel (see `seedwell chat list`)"),
         e => err(e),
     }
 }

@@ -12,18 +12,23 @@ import SwiftUI
     var busy = false
     /// The default place for the pasted link (`~/Seedwell/<name>`), offered first in the Location popup.
     private(set) var defaultLocation: String?
+    /// A folder of that name already in the default place (left over from an earlier join, say) and not synced:
+    /// offered next to the new one, which gets a number (`~/Seedwell/Team 2`).
+    private(set) var existingFolder: String?
 
-    /// `prefill`: a pasted link (Shared with me); `folder`: a folder of this Mac to start with (From this Mac).
-    init(core: Core, prefill: String? = nil, folder: String? = nil) {
+    /// `prefill`: a pasted link (Shared with me).
+    init(core: Core, prefill: String? = nil) {
         self.core = core
         if let prefill { form.mode = .shared; setKey(prefill) }
-        if let folder { form.mode = .local; form.folder = folder }
     }
 
     func setKey(_ text: String) {
         let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
         let info = t.isEmpty ? nil : core.syncParseLink(text: t)
         defaultLocation = info == nil ? nil : core.syncJoinPath(keyOrLink: t)
+        existingFolder = info.flatMap { i in
+            defaultLocation.flatMap { SyncAddForm.existing(name: SyncText.suggestedName(i), next: $0, synced: core.syncSnapshot().folders.map(\.path)) }
+        }
         form.setKey(text, info: info, defaultLocation: defaultLocation, problem: info == nil && !t.isEmpty ? core.syncLinkProblem(text: t) : nil)
         error = nil
     }
@@ -198,6 +203,12 @@ struct SyncAddView: View {
                 .disabled(!model.form.keyUsable)
                 .help("Where the shared folder goes on this Mac")
             }
+            if model.form.keyUsable, let note = SyncText.locationNote(model.form.location, existing: model.existingFolder, abbreviate: Notifier.abbreviate) {
+                Text(note).font(.system(size: 12)).foregroundStyle(.secondary)
+                    .padding(.leading, 92)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("sync-location-note")
+            }
         }
         .font(.system(size: 13))
     }
@@ -208,6 +219,7 @@ struct SyncAddView: View {
     private var locations: [String] {
         var out: [String] = []
         if let d = model.defaultLocation { out.append(d) }
+        if let e = model.existingFolder { out.append(e) }
         if !model.form.location.isEmpty, !out.contains(model.form.location) { out.append(model.form.location) }
         return out
     }
@@ -398,14 +410,13 @@ struct SyncEditView: View {
     var qaAddModel: SyncAddModel? { add?.1 }
     var qaWindow: NSWindow? { add?.0 ?? edits.values.first }
 
-    func showAdd(prefill: String?, folder: String? = nil, actions: SyncActions) {
+    func showAdd(prefill: String?, actions: SyncActions) {
         if let (w, m) = add {
             if let prefill { m.form.mode = .shared; m.setKey(prefill) }
-            if let folder { m.form.mode = .local; m.form.folder = folder }
             NSApp.activate(); w.makeKeyAndOrderFront(nil)
             return
         }
-        let model = folder.map { SyncAddModel(core: actions.core, folder: $0) } ?? SyncAddModel(core: actions.core, prefill: prefill ?? actions.pastedKey())
+        let model = SyncAddModel(core: actions.core, prefill: prefill ?? actions.pastedKey())
         let view = SyncAddView(model: model, cancel: { [weak self] in self?.closeAdd() }, done: { [weak self] f, mode in
             self?.closeAdd()
             // A folder shared from this Mac: the next step is sharing it.
@@ -433,6 +444,23 @@ struct SyncEditView: View {
         let view = SyncShareView(model: SyncShareModel(core: actions.core, id: id), actions: actions, done: { [weak self] in self?.closeShare(id) })
         let w = makeWindow(NSHostingController(rootView: view), id: "sync-share-\(id)")
         shares[id] = w
+        NSApp.activate()
+        w.makeKeyAndOrderFront(nil)
+    }
+
+    /// The Share dialog of a folder not synced yet (Share ▸ Seedwell): add and share in one. Once Copy Link has
+    /// added it, it is that folder's dialog.
+    func showShare(newFolder path: String, actions: SyncActions) {
+        let key = "new:" + path
+        if let w = shares[key] { NSApp.activate(); w.makeKeyAndOrderFront(nil); return }
+        let model = SyncShareModel(core: actions.core, newFolder: path)
+        let view = SyncShareView(model: model, actions: actions, done: { [weak self, model] in self?.closeShare(model.id.isEmpty ? key : model.id) })
+        let w = makeWindow(NSHostingController(rootView: view), id: "sync-share-new")
+        model.onAdded = { [weak self] id in
+            guard let self, let w = self.shares.removeValue(forKey: key) else { return }
+            self.shares[id] = w
+        }
+        shares[key] = w
         NSApp.activate()
         w.makeKeyAndOrderFront(nil)
     }

@@ -6,6 +6,7 @@
 
 pub mod args;
 pub mod chat;
+pub mod mail;
 pub mod cmd;
 pub mod commands;
 #[cfg(feature = "daemon")]
@@ -28,6 +29,8 @@ pub fn print_help(topic: Option<&str>) -> Result<(), CliError> {
     match topic {
         None => print!("{}", help::overview()),
         Some("agents") => print!("{}", help::agents_guide()),
+        Some("chat") => print!("{}", help::CHAT_GUIDE),
+        Some("mail") => print!("{}", help::MAIL_GUIDE),
         Some(name) => match help::find(name) {
             Some(c) => print!("{}", help::command_help(c)),
             None => return Err(Usage(format!("no help for `{name}`; try `seedwell help`")).into()),
@@ -61,6 +64,12 @@ pub async fn run(argv: Vec<String>) -> i32 {
         print!("{}", help::overview());
         return if help { 0 } else { 2 };
     };
+    // `seedwell mail <sub> --help`: that one command, not the whole page.
+    if help && first == "mail"
+        && let Some(text) = rest.get(1).and_then(|sub| mail::sub_help(sub)) {
+            print!("{text}");
+            return 0;
+        }
     if help && first != "help" {
         return match help::find(&first) {
             Some(c) => {
@@ -77,6 +86,7 @@ pub async fn run(argv: Vec<String>) -> i32 {
         json,
         socket_given: socket.is_some(),
         socket: socket.map_or_else(trs_control::default_socket_path, PathBuf::from),
+        client_given: client.is_some(),
         client: client.unwrap_or_else(|| "seedwell-cli".into()),
         launch,
         yes_i_know,
@@ -90,7 +100,13 @@ pub async fn run(argv: Vec<String>) -> i32 {
             let mut e = CliError::from(u);
             if !json
                 && let Some(c) = help::find(&first) {
-                    e.message.push_str(&format!("\nusage: seedwell {}   (seedwell {first} --help for examples)", c.usage.lines().next().unwrap_or("")));
+                    // A long usage (chat, mail) would bury the one thing that went wrong: point to the help instead.
+                    let usage = c.usage.lines().next().unwrap_or("");
+                    if usage.chars().count() <= 160 {
+                        e.message.push_str(&format!("\nusage: seedwell {usage}   (seedwell {first} --help for examples)"));
+                    } else if !e.message.starts_with("usage:") {
+                        e.message.push_str(&format!("\n(seedwell {first} --help shows every option)"));
+                    }
                 }
             return finish(&g, &e);
         }

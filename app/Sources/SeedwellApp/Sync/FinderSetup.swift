@@ -82,7 +82,7 @@ struct FinderSetupView: View {
                     .accessibilityIdentifier("finder-setup-badges")
                 if !model.badges { legend.padding(.leading, 34) }
                 feature(on: model.shareMenu, icon: Image(systemName: "square.and.arrow.up"), title: "Seedwell in the Share menu",
-                        note: "Right-click any folder, Share ▸ Seedwell", open: ShareMenu.openSettings)
+                        note: "Right-click any folder, Share ▸ Seedwell (under Send copy, when the sheet opens on Collaborate)", open: ShareMenu.openSettings)
                     .accessibilityIdentifier("finder-setup-share")
             }
             .padding(.top, 18)

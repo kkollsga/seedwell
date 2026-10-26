@@ -7,7 +7,7 @@ use trs_control::proto::{AtGoalParam, FilePriorityParam, KindFilter, ListFilter,
 
 use crate::args::{Opts, Usage, parse_duration, parse_index_list, parse_rate};
 use crate::select::{Selection, parse_state};
-use crate::{chat, debug, sim, skill, sync};
+use crate::{chat, debug, mail, sim, skill, sync};
 
 /// What `start` does with the files.
 #[derive(Clone, Debug, PartialEq)]
@@ -202,6 +202,8 @@ pub enum Cmd {
     Sync(sync::Cmd),
     /// `chat …` (channels)
     Chat(chat::Cmd),
+    /// `mail …` (agents of different projects)
+    Mail(mail::Mail),
     /// `relay [--port N] [--bind ADDR] [--key-file PATH]`
     Relay(sync::RelayArgs),
     /// `help [x]`
@@ -530,8 +532,12 @@ pub fn parse(args: Vec<String>) -> Result<Cmd, Usage> {
         "skill" => Cmd::Skill(skill::parse(rest)?),
         "sync" => Cmd::Sync(sync::parse(rest)?),
         "chat" => Cmd::Chat(chat::parse(rest)?),
+        "mail" => Cmd::Mail(mail::parse(rest)?),
         "relay" => Cmd::Relay(sync::parse_relay(rest)?),
         "help" => {
+            // Options an agent passes everywhere (`--as kglite`, `--channel C`) change nothing here.
+            let _ = o.value(&["--as"])?;
+            let _ = o.value(&["--channel"])?;
             let pos = o.finish()?;
             Cmd::Help(pos.into_iter().next())
         }

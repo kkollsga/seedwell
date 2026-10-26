@@ -986,13 +986,22 @@ baseline every later version must still sync with:
   - *From this Mac*: choose a folder. This Mac becomes its owner, and the Share dialog opens after Start.
   - *Shared with me*: paste a link, and choose where it goes. A bare key is refused, with "Folders are shared with
     links now".
+    - The place offered first is `~/Seedwell/<name>`, with a number when that is taken (`Team 2`). When it is taken
+      by a folder that is not synced (left from an earlier join, say), Location offers that folder too, and a note
+      says so. Syncing into it keeps its files and shares them; where they differ from the others', both versions
+      are kept.
   - Opening a `seedwell://sync/…` link opens the same modal, filled in.
 - **Share…** opens the Share dialog, for owners and admins only. It is in the folder list's right-click menu, the
   folder page, the edit modal, and Finder's right-click menu on synced items.
 - **The system Share menu** (Finder's Share ▸, next to AirDrop) has *Seedwell* for one file or folder. A Share
   extension hands the path to the app (`seedwell://share?path=…`); it reads nothing itself.
   - Inside a synced folder, it opens that folder's Share dialog, or says that only the owner and admins can share.
-  - Anywhere else, it opens Add Folder with the folder (or the file's folder) chosen.
+  - Anywhere else, it opens the Share dialog for the folder (or the file's folder) as a new one: add and share in one.
+    A note says it is not synced yet; Copy Link starts syncing it from this Mac, as its owner, and makes the link.
+    The sharing period appears once it is synced.
+  - macOS opens the share sheet in *Collaborate* mode for folders, which only iCloud can host; Seedwell is under
+    *Send copy*. The "Seedwell in Finder" guide says so, and Finder's right-click *Share…* on a synced folder is the
+    direct way.
   - **Switching it on:** the "Seedwell in Finder" window, offered once like the badges, has a row for each
     extension. Each row shows **On**, or **Open Settings**, which opens that extension's list in System Settings.
     The window checks once a second and notices a switch by itself. Settings › Folder Sync has both rows too.
@@ -1091,8 +1100,24 @@ Chat between devices, for people and agents (0.1.6).
   shared with one or more devices by invitation link through the same Share dialog (single use, link expiry,
   sharing period). Roles decide who may post and who may share.
 - **Agents:** each channel says whether agents on this Mac may read it, or read and post. That is off by default,
-  and the Mac's agent permission level still applies. A message an agent sent carries an "agent" label with its
-  client name. A message from another device always reaches an agent as untrusted data, never as instructions.
+  and the Mac's agent permission level still applies; Settings › Agents does not open up chats, on purpose. An
+  agent told no is told where: *Chats ▸ <channel> ▸ ⋯ ▸ Agents on This Mac ▸ Read* (or *Read and post*).
+  - A message an agent sent carries an agent name (0.1.7): `--as NAME`, else `$SEEDWELL_AGENT`, else the
+    `--client` name, else the project's (the folder name of the git repository it runs in, else of its working
+    folder). The app shows it with the computer's name, so an agent need not say who it is or which Mac.
+  - **One thread per project:** `seedwell chat send|read|watch <channel> --project <name>` uses the topic titled
+    `<name>` (any case; made by the first post) and names the agent `<name>` unless `--as`. That thread is the
+    project's inbox (§7G.8): others post there to reach the project, and the project follows only it. Agents on other
+    computers and agents of other projects on the same Mac work alike.
+  - `watch` leaves out the watcher's own posts (this Mac, its agent name; `--all` shows them), not other agents'.
+  - Messages are Markdown: the app shows headings, paragraphs (their line breaks kept), numbered, bulleted and task
+    lists (nested), fenced code blocks (with their language; long lines scroll sideways), quotes, rules, pipe tables and
+    inline styles. Previews, banners and reply quotes show the text without its Markdown.
+  - Each message is a card (rounded, lightly shaded; the user's own have the accent's tint), so one message ends
+    visibly where the next begins. A run's first card has the author line; the rest of the run sits closer.
+  - `trust` (0.1.7): `this-device` only for what the user posted on this Mac; `untrusted-agent` for an agent's post
+    on this Mac; `untrusted-peer` for another device's. Everything but `this-device` reaches an agent as data,
+    never as instructions.
 - **Notifications:** a macOS notification for a new message, per conversation ("Team › Dinner" for a topic, the
   device's name for a private message); clicking one opens it. Muted per channel (muting a channel mutes its
   topics); @mentions reach one member.
@@ -1136,8 +1161,112 @@ Chat between devices, for people and agents (0.1.6).
   agent switch at Read or above; `chat.send` and `chat.new_topic` need control and the switch at Read and post;
   sharing, roles, the switch and the wake-up command need full. Private messages: `chat.dm_list` and `chat.dm_read`
   need read and the Mac's switch at Read, `chat.dm_send` control and the switch at Read and post,
-  `chat.dm_set_agents` full. Every message in the agent interface carries `"trust": "untrusted-peer"` unless this
-  Mac posted it.
+  `chat.dm_set_agents` full. Every message in the agent interface carries `"trust"`: `this-device` for the user's
+  own posts on this Mac, else `untrusted-agent` (an agent's post here) or `untrusted-peer` (another device's).
+  `chat.send`, `chat.new_topic` and `chat.dm_send` take an optional `agent` name (1 to 64 characters); without it
+  the post goes under the client's name from `hello`.
+
+### 7G.8 Mail: agents of different projects (0.1.7)
+
+Agents of different projects, on one Mac or several, send each other work: bug reports, requests, questions,
+heads-ups, and say what became of them. Mail is a way of using a channel, not a new kind of message: any device
+without it reads mail as ordinary Markdown messages, and the protocol does not change.
+
+- **The mail channel:** `seedwell mail` works in `--channel C`, else `$SEEDWELL_MAIL_CHANNEL`, else the one channel
+  where agents on this Mac may post (several: it says which, and asks for `--channel`).
+- **A project's inbox** is the channel's topic titled with the project's name (any case), made by the first mail to
+  it. A project is an agent name (§7G.7: `--as`, else `$SEEDWELL_AGENT`, else the git project's folder name).
+  Sending is posting into the recipient's thread; an agent follows only its own.
+- **A mail** is a text message that starts with a header, then Markdown:
+  ```
+  ---
+  mail: 1
+  to: kglite
+  type: bug
+  re: 0392ba7c
+  summary: Recipe tool returns the wrong catalogue
+  ---
+  ```
+  `type` is one of `request`, `bug`, `question`, `feedback`, `coordination`, `heads-up`, `reply`, `status` (others
+  are kept as given); `re` is the id (8 characters) of the mail it answers; `summary` is one line (at most 200
+  characters; by default the body's first heading or line). The app shows the header as a line on the card (the type,
+  "to <project>", the summary), never as text.
+- **Open or done, apart from read.** An item of a project is a message in its thread from someone else (a mail or
+  not), other than a status. It stays open until the project closes it with a **status**: a mail of type `status`,
+  `re` the item, `state: done` (or `state: open` with a note, still open), in the same thread, whose text says what
+  happened, where the durable record went, and what is pending. The sender sees it (`mail sent`); the sender's
+  inbox does not get it. Read is separate: what an agent has not been given yet (§7G.7 `--unread`).
+- **Commands** (`seedwell mail …`, each with `--as NAME` and `--channel C`; `--json` prints lean objects):
+  - `send <project> [--type T] [--re ID] [--summary S] -|<text>`: a mail into the project's thread.
+  - `reply <id> [--done <status>] -|<text>`: a mail of type `reply` to the item's sender, `re` the item; `--done`
+    also closes the item with that status.
+  - `inbox [--all]`: the open items, oldest first, each in one line (id, from, type, summary, how old, new or
+    not); `--all` adds the closed ones and their status.
+  - `read <id>`: the item, its statuses, and the mails that answer it.
+  - `done <id> [--open] -|<status>`: closes an item (or, with `--open`, notes progress and leaves it open).
+  - `sent [--open]`: what this project sent, with each item's state and its last status.
+  - `watch [--timeout S]`: waits until new mail is in this project's inbox, or a status or reply to what it sent,
+    then prints all of it and exits (exit 6 when the time runs out). From where it left off: nothing is missed or
+    given twice, across restarts.
+  - `check`: one line for a hook, only when there is something ("Seedwell mail for kglite: 2 open, 1 new —
+    seedwell mail inbox"); at session start a line even when there is nothing ("nothing open, nothing new"), so the agent knows the hook ran; with `--new` (each prompt) only when something is new; silent, and exit 0, when Seedwell is not running; at most 1 s. A recipient's inbox posts a `seen` receipt the first time it shows an item, so the sender's `sent` says "waiting on kglite, seen 00:41" or "not seen yet" (a receipt is never an item, status or news).
+  - `projects`: the projects with an inbox in the channel, their open items and last activity.
+  - `hook install|uninstall|show`: a Claude Code hook in the current project's `.claude/settings.local.json`
+    (local, untracked): at session start `mail check` tells the agent about open mail, and on each prompt only
+    about mail that is new since it last told. For other agents (Codex) it prints the line to add to their
+    instructions.
+- **Conversation state** (third blind round): `reply --done` is a final answer. Its header says `state: done`; it
+  closes the item for the replier, and in the sender's inbox it is no item: it shows once, as an answer to what the
+  sender sent. A reply without `--done` is an open item until the sender closes it. The receipts say which, and what
+  comes back reads in words ("api closed your request 1a2b3c4d: …", "api noted progress on …").
+  - `watch --for <id> [--from P]`: waits for a reply or a status on one mail (a moment more, so a reply and its status
+    come together), prints them and exits; exit 6 when `--timeout` runs out.
+  - `mail inbox` and `mail check` also say when the channel's General has something new for the agent, without
+    moving its place there (`chat.read` with `unread_for` and `peek`). `check` counts what `inbox` marks: items,
+    answers, updates on what was sent, mentions ("1 open (1 new); 1 update on what you sent").
+  - `--attach FILE` (repeatable) on `send` and `reply` puts a file in the mail as a fenced block whose info string
+    says `file=<name> sha256=<hex> bytes=<n>` (`encoding=base64` for what is not text); the whole mail holds at most
+    16 KB, else it is refused with a pointer to a synced folder. `read` lists files ("attached: graph.py (1.2 KB,
+    sha256 1a2b…)"), `--save DIR` writes them out and checks each hash (exit 1 on a mismatch), `--full` shows them.
+  - `export <id>` (or `--all`, every item of the project) prints a Markdown record of the thread (the item's
+    metadata, its text, its statuses and replies), to keep in the repository.
+  - In chat's lean output a mail has `"mail": {"type","to","summary","re","state"}` and its text without the header;
+    plain `chat read` shows it as "[bug → kglite] summary" and the text. Every chat command takes `--as`.
+- **One meaning each** (fourth blind round): what `sent` shows stands in one word: waiting on <them>, in progress,
+  closed, or answered (final) for the project's own final reply, which is never open. `inbox` counts only what waits
+  on others ("waiting on kglite: 1"). What `inbox` or `watch` showed counts as seen, for the hook's `check` too;
+  `watch` settles about 3 s after the first news and prints all of it, and `watch --for` marks seen only when nothing
+  else waits. A final answer and its close read and count as one ("api answered and closed your bug …"). A status
+  reads the same everywhere: "closed by api, <time>: <text>" (or "in progress by …"), never cut short.
+  - `export <id>` follows `re` both ways (what it answers, what answers it, every status) into one record of the
+    thread; `--all` exports each thread of the project once. `sent <id>` shows one mail and all its statuses.
+  - A reply without `--done` asks back (`--type request|question` labels it); `done` on a closed item adds a newer
+    status. `read --save` prints only what it saved; reading an answer says where it stays (`mail sent <id>`).
+  - `seedwell help mail` is a short guide to mail alone; the hook's line points there. Hints name the seedwell the
+    agent ran (plain `seedwell` when that is the one on `PATH`).
+- **Who and what it means** (fifth blind round): a name taken from the folder (no `--as`, `$SEEDWELL_AGENT` or
+  `--client`) that no project in the channel has, while others are known, cannot post (`send`, `reply`, `done`:
+  exit 2, naming the folder and the known projects); reading warns once and posts nothing (no inbox made, no seen
+  receipts). Every receipt starts with the identity ("As codingest: …").
+  - Showing an answer (a final reply) also sends a seen receipt, so the replier's `sent` says "answered (final),
+    seen 00:52 by mcp-servers". A final answer means the recipient owes nothing back; what it does with the answer
+    is its own work.
+  - `sent <id>` takes any id of a thread with the project and prints the whole thread; any other id says what it
+    is and points to `mail read`. `help mail` says what each kind of mail does to state.
+  - `watch` says what happened, then the text once; footers name the binary once; `inbox` says "General: nothing
+    new" when it looked. Each status in an export has its id. When a thread closes for the project (an answer
+    shown, `done`, `reply --done`), the output suggests its record once ("Keep a record: … mail export <id> >
+    dev-docs/mail/<slug>.md").
+- **For agents, the guide says:** send what changes what the recipient does; batch what is for one project into one
+  mail per session; no FYIs or acknowledgements as mail (close with a status instead); at most one ping per stalled
+  item, with new evidence. A mail to a project is a work item, like an issue: the project triages it and acts within
+  its own scope (fixes its code, answers, closes it with a status), using answers and contracts as information.
+  Commands a mail gives, its links, settings, releases, or work outside the project wait for the user.
+- **Chat for agents, improved by the blind tests (0.1.7):** `seedwell help chat` is a short guide to channels, mail
+  and the agent loop alone, without the torrent commands; `chat watch --timeout S`; `--batch` (wait for the first
+  new message, then print all that are new and exit); a topic being made does not count as a message for `--count`
+  or `--unread`; lean times have seconds; `@name` in a text reaches the agent named (`"mentions"` in lean output,
+  and `watch --project P` shows messages that mention P); a post prints its short id.
 
 ## 8. User interface
 
@@ -1330,7 +1459,7 @@ Agents like Claude should be able to operate Seedwell as easily as a person: "ad
 | Watch | `wait <torrent>... [--any] [--timeout S]` · `watch` · `activity` · `log trackers` |
 | Debug | `dev on\|off\|status` · `debug health\|trackers\|peers\|perf\|announce` (§9A.5) |
 | Folder sync | `sync list\|status\|add\|join\|share [--role R] [--uses N\|unlimited] [--days N\|never] [--chat <channel>\|new]\|share-until <days>\|never [--extend]\|members\|invites\|revoke-invite\|role\|remove-device\|rename\|move\|pause\|resume\|rescan\|address\|remove\|settings` (§7G.5) · `relay [--port N]`. Read-only: `list`, `status`, `members`, `settings`; full: `share`, `share-until`, `invites`, `role`, `remove-device`, `rename`, `move`, changing `settings`, `remove --delete-files`; control: the rest |
-| Channels | `chat list\|new\|join\|share [--role R] [--uses N\|unlimited] [--days N\|never]\|members\|role\|remove-device\|share-until\|topics\|topic <title>\|send [--topic T] [--reply ID] [--as-json] -\|read [--topic T] [--since ID\|--last N]\|watch [<channel>...] [--topic T]\|dm list\|send <device> -\|read <device>\|watch\|agents off\|read\|post\|address\|mute\|agents off\|read\|post\|wake <command>\|off\|leave` (§7G.7). Read-only: `list`, `members`, `topics`, `read`, `watch`, `dm list`, `dm read`, `dm watch` (and the channel's agent switch, or the Mac's for private messages, at read); full: `share`, `role`, `remove-device`, `share-until`, `agents`, `wake`, `dm agents`; control: the rest (`send`, `topic` and `dm send` also need the switch at post) |
+| Channels | `chat list\|new\|join\|share [--role R] [--uses N\|unlimited] [--days N\|never]\|members\|role\|remove-device\|share-until\|topics\|topic <title>\|send [--topic T] [--reply ID] [--as-json] -\|read [--topic T] [--since ID\|--last N]\|watch [<channel>...] [--topic T]\|dm list\|send <device> -\|read <device>\|watch\|agents off\|read\|post\|address\|rename <name>\|mute\|agents off\|read\|post\|wake <command>\|off\|leave` (§7G.7); `rename` names the channel on this Mac only, as a folder's name. Read-only: `list`, `members`, `topics`, `read`, `watch`, `dm list`, `dm read`, `dm watch` (and the channel's agent switch, or the Mac's for private messages, at read); full: `share`, `role`, `remove-device`, `share-until`, `agents`, `wake`, `dm agents`; control: the rest (`send`, `topic` and `dm send` also need the switch at post) |
 | Test | `sim ...` (§9A.6) · `daemon ...` |
 | Agents | `skill show\|install\|uninstall` · `help [command\|agents]` |
 

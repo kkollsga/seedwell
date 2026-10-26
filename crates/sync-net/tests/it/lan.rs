@@ -148,3 +148,17 @@ async fn an_announcement_for_another_folder_or_hour_is_not_dialed() {
     assert!(dialed(&tcp, 10).await, "our folder is dialed");
     a.h.shutdown().await;
 }
+
+/// A dual-stack listener reports an IPv4 peer as `[::ffff:a.b.c.d]`: that is still the local network, and it is
+/// shown as the IPv4 address.
+#[test]
+fn ipv4_mapped_addresses_count_as_the_lan() {
+    use trs_sync_net::session::{canonical, is_lan};
+    let mapped: SocketAddr = "[::ffff:192.168.68.66]:57112".parse().unwrap();
+    assert!(is_lan(mapped.ip()));
+    assert_eq!(canonical(mapped).to_string(), "192.168.68.66:57112");
+    assert!(!is_lan("[::ffff:8.8.8.8]:443".parse::<SocketAddr>().unwrap().ip()));
+    assert!(is_lan("[fd00::1]:1".parse::<SocketAddr>().unwrap().ip()));
+    let v6: SocketAddr = "[2001:db8::1]:1".parse().unwrap();
+    assert_eq!(canonical(v6), v6);
+}
