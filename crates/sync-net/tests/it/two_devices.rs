@@ -324,13 +324,27 @@ async fn joining_into_a_folder_with_files_keeps_them_and_both_versions_of_a_diff
         v.sort();
         v
     };
-    until(30, "both versions of plan.txt and the file only B had, on both", || {
+    let done = || {
         read(&fa.path().join("only-here.txt")).as_deref() == Some(b"mine")
             && contents(fa.path()) == vec![b"left here".to_vec(), b"the folder's".to_vec()]
             && names(fa.path()) == names(&dest)
             && contents(&dest) == contents(fa.path())
-    })
-    .await;
+    };
+    // On a loaded machine this can take a while (two scans, a conflict, its copy going back): wait longer, and say
+    // what each side has if it never gets there.
+    let end = Instant::now() + Duration::from_secs(60);
+    while !done() && Instant::now() < end {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let text = |root: &Path| names(root).iter().map(|n| format!("{n}={:?}", read(&root.join(n)).map(|b| String::from_utf8_lossy(&b).into_owned()))).collect::<Vec<_>>();
+    assert!(
+        done(),
+        "both versions of plan.txt and the file only B had, on both\nA: {:?}\nB: {:?}\nA state: {:?}\nB state: {:?}",
+        text(fa.path()),
+        text(&dest),
+        a.h.snapshot().folders.first().map(|f| (f.state.clone(), f.need_files, f.conflicts, f.issues.clone())),
+        b.h.snapshot().folders.first().map(|f| (f.state.clone(), f.need_files, f.conflicts, f.issues.clone())),
+    );
     assert_eq!(names(&dest).len(), 4, "plan.txt, its conflict copy, same.txt, only-here.txt: {:?}", names(&dest));
     assert_eq!(read(&dest.join("same.txt")).as_deref(), Some(&b"same"[..]));
     a.h.shutdown().await;
