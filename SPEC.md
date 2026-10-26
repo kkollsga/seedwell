@@ -989,7 +989,8 @@ baseline every later version must still sync with:
     - The place offered first is `~/Seedwell/<name>`, with a number when that is taken (`Team 2`). When it is taken
       by a folder that is not synced (left from an earlier join, say), Location offers that folder too, and a note
       says so. Syncing into it keeps its files and shares them; where they differ from the others', both versions
-      are kept.
+      are kept, and where they are the same they merge. (A joining Mac scans them before it may write; once it may,
+      the files only it has become its own versions and are sent.)
   - Opening a `seedwell://sync/…` link opens the same modal, filled in.
 - **Share…** opens the Share dialog, for owners and admins only. It is in the folder list's right-click menu, the
   folder page, the edit modal, and Finder's right-click menu on synced items.

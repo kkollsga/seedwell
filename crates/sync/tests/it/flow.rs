@@ -345,3 +345,47 @@ fn a_read_only_device_receives_but_never_sends_its_changes() {
     assert_eq!(a.core.need_totals().unwrap().0, 0);
     assert_eq!(read_all(&a.fs, "f").unwrap(), b"from A");
 }
+
+/// A device that joins into a folder with files and scans them before it may write (a member is admitted, then told
+/// it may write): once it may, the files only it had become its own and are sent; one with the same content as the
+/// folder's merges; one that differs is kept on both sides as a conflict copy.
+#[test]
+fn files_scanned_before_a_device_may_write_are_sent_once_it_may() {
+    let key = rw();
+    let (mut a, mut b) = (dev("A", 1, &key), dev("B", 2, &key.read_only().unwrap()));
+    write_all(&a.fs, "plan.txt", b"the folder's").unwrap();
+    write_all(&a.fs, "same.txt", b"same").unwrap();
+    a.core.scan("").unwrap();
+    write_all(&b.fs, "plan.txt", b"left here").unwrap();
+    write_all(&b.fs, "same.txt", b"same").unwrap();
+    write_all(&b.fs, "only-here.txt", b"mine").unwrap();
+    b.core.scan("").unwrap();
+    assert!(b.core.announce_since(0, usize::MAX).unwrap().iter().all(|e| e.file.info.path != "only-here.txt"), "not while it may only read");
+
+    // Admitted as read & write: B's key joins the writers and it may write.
+    let mut writers: Vec<[u8; 32]> = a.core.writers().iter().map(|w| w.device_pk).collect();
+    writers.push(*DeviceKey::from_seed(&[2; 32]).public_key());
+    writers.sort_unstable();
+    b.core.set_membership(&writers, Access::Write).unwrap();
+    a.core.set_membership(&writers, Access::Write).unwrap();
+    let out = b.core.announce_since(0, usize::MAX).unwrap();
+    assert!(out.iter().any(|e| e.file.info.path == "only-here.txt" && !e.invalid), "now its own: {:?}", out.iter().map(|e| &e.file.info.path).collect::<Vec<_>>());
+
+    for _ in 0..3 {
+        send(&a, &mut b);
+        pull(&mut b, &[&a]);
+        b.core.scan("").unwrap();
+        send(&b, &mut a);
+        pull(&mut a, &[&b]);
+        a.core.scan("").unwrap();
+    }
+    assert_eq!(read_all(&a.fs, "only-here.txt").unwrap(), b"mine", "the file only B had reached A");
+    let names = |fs: &MemFs| {
+        let mut v: Vec<String> = fs.read_dir("").unwrap().entries.into_iter().map(|e| e.name).filter(|n| !n.starts_with('.')).collect();
+        v.sort();
+        v
+    };
+    assert_eq!(names(&a.fs), names(&b.fs));
+    assert!(!names(&a.fs).iter().any(|n| n.starts_with("same (conflict")), "the same content merges: {:?}", names(&a.fs));
+    assert_eq!(names(&a.fs).iter().filter(|n| n.starts_with("plan (conflict")).count(), 1, "one copy of the difference: {:?}", names(&a.fs));
+}

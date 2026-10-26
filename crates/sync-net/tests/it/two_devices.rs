@@ -345,7 +345,7 @@ async fn joining_into_a_folder_with_files_keeps_them_and_both_versions_of_a_diff
         a.h.snapshot().folders.first().map(|f| (f.state.clone(), f.need_files, f.conflicts, f.issues.clone())),
         b.h.snapshot().folders.first().map(|f| (f.state.clone(), f.need_files, f.conflicts, f.issues.clone())),
     );
-    assert_eq!(names(&dest).len(), 4, "plan.txt, its conflict copy, same.txt, only-here.txt: {:?}", names(&dest));
+    assert_eq!(names(&dest).len(), 4, "plan.txt, its conflict copy, same.txt (the same on both: no copy), only-here.txt: {:?}", names(&dest));
     assert_eq!(read(&dest.join("same.txt")).as_deref(), Some(&b"same"[..]));
     a.h.shutdown().await;
     b.h.shutdown().await;

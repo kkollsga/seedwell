@@ -276,11 +276,45 @@ impl FolderCore {
         }
         let signs = access == Access::Write && want.contains_key(&self.me);
         if access != self.cfg.access || signs != self.signer.is_some() {
+            let could_sign = self.signer.is_some();
             self.cfg.access = access;
             self.signer = signs.then(|| self.device_key.clone()).flatten().map(|k| DeviceSigner::new(k, self.writers.folder_id()));
+            if !could_sign && self.signer.is_some() {
+                self.claim_local_only()?;
+            }
             changed = true;
         }
         Ok(changed)
+    }
+
+    /// Files this device recorded while it could not write and that no device has a version of: a joining device
+    /// scans the folder it joins into before it is admitted, so the files already there were kept as local
+    /// differences. Now that it may write they become its own: they are sent, and one with the content another device
+    /// has is merged when that version arrives, not made a conflict copy. (What a read-only member recorded of files it
+    /// had received stays a local difference.)
+    fn claim_local_only(&mut self) -> io::Result<()> {
+        let Some(signer) = self.signer.as_ref() else { return Ok(()) };
+        let now_s = (self.clock.now_ns() / 1_000_000_000).max(0) as u64;
+        let mut after: Option<String> = None;
+        loop {
+            let paths = self.store.local_paths("", after.as_deref(), 1000)?;
+            let Some(last) = paths.last().cloned() else { break };
+            let mut batch = Batch::new(&*self.store, self.me)?;
+            for p in &paths {
+                let Some(rec) = self.store.local(p)? else { continue };
+                if !rec.invalid || !rec.file.info.version.is_empty() || rec.file.info.deleted {
+                    continue;
+                }
+                let mut info = rec.file.info.clone();
+                info.version = trs_sync_proto::model::Version::new().bump(self.me, now_s);
+                info.modified_by = self.me;
+                batch.put_local(crate::index::LocalRecord { file: signer.sign(info), sequence: 0, invalid: false, ..rec });
+            }
+            let ops = batch.finish()?;
+            self.store.apply(ops)?;
+            after = Some(last);
+        }
+        Ok(())
     }
 
     /// A peer's index batch. Every entry is checked (path, signature) before any is stored: one bad entry
