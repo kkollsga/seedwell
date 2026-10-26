@@ -75,6 +75,8 @@ pub trait Backend: Send + Sync {
     fn set_alt_speed(&self, on: bool);
     fn torrent_attrs(&self) -> Vec<AttrRow>;
     fn agent_activity(&self, limit: u32) -> Vec<AgentActivity>;
+    /// Agents' live leases on keeping the Mac awake (`None`: no agent asked). Cheap.
+    fn agents_awake(&self) -> Option<crate::types::AgentsAwake>;
     /// Path of the control socket agents connect to (`None` for the mock).
     fn control_socket(&self) -> Option<String>;
     /// Starts (once) and waits for the shutdown of the engine, at most `deadline_secs`.

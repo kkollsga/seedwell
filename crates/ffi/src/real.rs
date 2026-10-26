@@ -1230,6 +1230,18 @@ impl Backend for RealBackend {
             .unwrap_or_default()
     }
 
+    fn agents_awake(&self) -> Option<crate::types::AgentsAwake> {
+        let leases = lock(&self.server).as_ref()?.awake().leases();
+        let until_ms = leases.iter().map(|l| l.until_ms).max()?;
+        let mut who: Vec<String> = Vec::new();
+        for l in leases {
+            if !who.contains(&l.who) {
+                who.push(l.who);
+            }
+        }
+        Some(crate::types::AgentsAwake { who, until_ms })
+    }
+
     fn control_socket(&self) -> Option<String> {
         self.socket.clone()
     }

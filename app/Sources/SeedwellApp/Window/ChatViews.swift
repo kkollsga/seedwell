@@ -120,7 +120,8 @@ struct ChatConversationView: View {
         ScrollViewReader { scroll in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
-                    let ms = model.chatMessages
+                    // A tag note is a line on the message it is about, not a card.
+                    let (ms, tags) = ChatMail.cards(model.chatMessages)
                     if ms.isEmpty {
                         Text(empty).font(.system(size: 13)).foregroundStyle(.secondary).padding(.top, 30)
                             .frame(maxWidth: .infinity).multilineTextAlignment(.center)
@@ -128,6 +129,8 @@ struct ChatConversationView: View {
                     ForEach(Array(ms.enumerated()), id: \.element.id) { n, m in
                         ChatMessageRow(message: m, header: ChatText.startsRun(m, after: n > 0 ? ms[n - 1] : nil),
                                        reply: m.replyTo.flatMap { r in ms.first { $0.id == r } },
+                                       tags: tags[String(m.id.prefix(8)).lowercased()] ?? [],
+                                       onTag: canPost ? { set in tag(m, set) } : nil,
                                        onReply: canPost ? { replyTo = m; typing = true } : nil)
                             .id(m.id)
                     }
@@ -169,6 +172,13 @@ struct ChatConversationView: View {
         }
     }
 
+    /// Your tags on `m` are now `set` (a note in its conversation; others keep theirs).
+    private func tag(_ m: SyncMessage, _ set: [String]) {
+        actions.send(to: place, ChatTags.note(on: m.id, set), replyTo: nil) { [model] sent in
+            if sent { model.loadChatMessages() }
+        }
+    }
+
     private func send() {
         let (text, reply) = (draft, replyTo?.id)
         draft = ""
@@ -184,6 +194,10 @@ struct ChatMessageRow: View {
     let message: SyncMessage
     let header: Bool
     let reply: SyncMessage?
+    /// Its tags, by owner: shown as a line under the text.
+    var tags: [ChatTags] = []
+    /// Sets your tags on it (the whole set); `nil` where you cannot post.
+    var onTag: (([String]) -> Void)? = nil
     let onReply: (() -> Void)?
     @State private var hovered = false
 
@@ -230,11 +244,13 @@ struct ChatMessageRow: View {
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
+                if hovered, let onTag { tagMenu(onTag) }
                 if hovered, let onReply {
                     Button(action: onReply) { Image(systemName: "arrowshape.turn.up.left") }
                         .buttonStyle(.plain).foregroundStyle(.secondary).help("Reply")
                 }
             }
+            if !tags.isEmpty { tagsLine }
         }
         // Each message is a card, so one ends visibly where the next begins; yours have the accent's tint.
         .padding(.horizontal, 12).padding(.vertical, 8)
@@ -244,6 +260,34 @@ struct ChatMessageRow: View {
         .onHover { hovered = $0 }
         // A run's first card stands apart from the one before; the rest of the run sits close.
         .padding(.top, header ? 10 : 4)
+    }
+
+    /// Who tagged it what: "kglite: Seen, Backlog · You: Needs triage".
+    private var tagsLine: some View {
+        HStack(spacing: 10) {
+            ForEach(tags, id: \.owner) { t in
+                Label("\(t.owner): \(t.tags.map(ChatTags.label).joined(separator: ", "))", systemImage: t.tags == ["seen"] ? "eye" : "tag")
+            }
+        }
+        .font(.system(size: 11)).foregroundStyle(.secondary)
+        .padding(.top, 2)
+    }
+
+    /// Your tags: the usual ones to switch on and off, and clearing them.
+    private func tagMenu(_ onTag: @escaping ([String]) -> Void) -> some View {
+        let yours = tags.first { $0.isYou }?.tags ?? []
+        return Menu {
+            ForEach(ChatTags.known, id: \.self) { t in
+                Toggle(ChatTags.label(t), isOn: Binding(get: { yours.contains(t) },
+                                                        set: { on in onTag(on ? yours + [t] : yours.filter { $0 != t }) }))
+            }
+            if !yours.isEmpty {
+                Divider()
+                Button("Clear My Tags") { onTag([]) }
+            }
+        } label: { Image(systemName: "tag") }
+            .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+            .foregroundStyle(.secondary).help("Tag it (your tags; others see them under your name)")
     }
 
     private var cardFill: Color {

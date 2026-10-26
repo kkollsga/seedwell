@@ -956,7 +956,9 @@ fn start_for_app_inner(rt: &tokio::runtime::Handle, backend: EngineBackend, cfg:
     if let Some(tz) = cfg.tz_offset {
         state = state.with_tz_offset(move || tz());
     }
-    rt.block_on(async move { serve_backend(Arc::new(backend), state, path, cfg.permission, cfg.options).await })
+    // The app holds a power assertion while an agent's lease is live.
+    let options = ServerOptions { keeps_awake: true, ..cfg.options };
+    rt.block_on(async move { serve_backend(Arc::new(backend), state, path, cfg.permission, options).await })
 }
 
 impl StoreRef for trs_engine::StateStore {

@@ -137,8 +137,6 @@ extension TransferRow {
     private func baseLine(_ style: RowStyle, showTracker: Bool, now: Date) -> String {
         let size = Fmt.bytes(sizeBytes)
         let goal = ratioGoal.map { " of \(Fmt.goal($0))" } ?? ""
-        // Inside one tracker's view its name on every row is noise.
-        let lead = showTracker ? "\(trackerName) · " : ""
         switch style {
         case .download:
             if awaitingChoice { return "Choose what to download…" }

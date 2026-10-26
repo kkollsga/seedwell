@@ -66,6 +66,8 @@ pub enum Cmd {
     Address { channel: String, address: String },
     /// `chat rename <channel> <name>`
     Rename { channel: String, name: String },
+    /// `chat tag <channel> <id> [TAG...] [--remove TAG]... [--clear] [--as NAME]` (§7G.9); `chat tags <channel> <id>`
+    Tag { channel: String, id: String, add: Vec<String>, remove: Vec<String>, clear: bool, agent: Option<String> },
     /// `chat mute <channel> [on|off]`
     Mute { channel: String, on: bool },
     /// `chat agents <channel> off|read|post`
@@ -81,7 +83,7 @@ const MAX_AGENT: usize = 64;
 const MAX_TITLE: usize = 200;
 
 /// The one-line usage.
-pub const USAGE: &str = "usage: seedwell chat list | new <name> | join <link>|- | share <channel> [--role read_write|read_only|admin|owner] [--uses N|unlimited] [--days N|never] | members <channel> | role <channel> <device> owner|admin|read_write|read_only | remove-device <channel> <device> | share-until <channel> <days>|never [--extend] | topics <channel> | topic <channel> <title> [--as NAME] | send <channel> [--project P | --topic T] [--as NAME] [--reply ID] [--as-json] -|<text> | read <channel> [--project P | --topic T] [--since ID | [--unread] [--last N]] [--as NAME] [--lean] | watch [<channel>...] [--project P | --topic T] [--as NAME] [--unread] [--all] [--count N] [--batch] [--timeout S] [--lean] | dm list | dm send <device> [--as NAME] [--reply ID] [--as-json] -|<text> | dm read <device> [--before ID] [--last N] | dm watch [<device>...] [--count N] | dm agents off|read|post | address <channel> <host:port> | mute <channel> [on|off] | agents <channel> off|read|post | wake <channel> <command>|off | leave <channel>";
+pub const USAGE: &str = "usage: seedwell chat list | new <name> | join <link>|- | share <channel> [--role read_write|read_only|admin|owner] [--uses N|unlimited] [--days N|never] | members <channel> | role <channel> <device> owner|admin|read_write|read_only | remove-device <channel> <device> | share-until <channel> <days>|never [--extend] | topics <channel> | topic <channel> <title> [--as NAME] | send <channel> [--project P | --topic T] [--as NAME] [--reply ID] [--as-json] -|<text> | read <channel> [--project P | --topic T] [--since ID | [--unread] [--last N]] [--as NAME] [--lean] | watch [<channel>...] [--project P | --topic T] [--as NAME] [--unread] [--all] [--count N] [--batch] [--timeout S] [--lean] | dm list | dm send <device> [--as NAME] [--reply ID] [--as-json] -|<text> | dm read <device> [--before ID] [--last N] | dm watch [<device>...] [--count N] | dm agents off|read|post | address <channel> <host:port> | mute <channel> [on|off] | agents <channel> off|read|post | wake <channel> <command>|off | tag <channel> <id> [TAG...] [--remove TAG]... [--clear] [--as NAME] | leave <channel>";
 
 const READ_USAGE: &str = "read <channel> [--project P | --topic T] [--since ID | [--unread] [--last N]] [--as NAME] [--lean]";
 
@@ -227,6 +229,18 @@ pub fn parse(args_in: Vec<String>) -> Result<Cmd, Usage> {
             Cmd::ShareUntil { channel: p.remove(0), days, extend }
         }
         "topics" => Cmd::Topics { channel: one(o, "topics <channel>")? },
+        "tag" | "tags" => {
+            let agent = given_as.clone();
+            let remove = o.values(&["--remove"])?;
+            let clear = o.flag(&["--clear"]);
+            let mut p = o.finish()?;
+            if p.len() < 2 || (sub == "tags" && (p.len() > 2 || !remove.is_empty() || clear)) {
+                return Err(Usage(format!("usage: seedwell chat tag <channel> <id> [TAG...] [--remove TAG]... [--clear] [--as NAME]   (tags: {}, or your own; none given: shows the tags)", crate::tags::KNOWN.join(", "))));
+            }
+            let channel = p.remove(0);
+            let id = p.remove(0);
+            Cmd::Tag { channel, id, add: p, remove, clear, agent }
+        }
         "topic" | "new-topic" => {
             let agent = given_as.clone();
             let mut p = o.finish()?;
@@ -456,7 +470,11 @@ pub async fn run(cmd: Cmd, g: &Global) -> R {
                     }
                 },
             };
-            let (raw, l): (_, ChatMessagesDto) = ask(&mut c, Request::ChatRead(ChatReadParams { channel, since, last, topic, unread_for, peek: false })).await?;
+            let (raw, mut l): (_, ChatMessagesDto) = ask(&mut c, Request::ChatRead(ChatReadParams { channel, since, last, topic, unread_for, peek: false })).await?;
+            // What an agent reads: no seen receipts or hook notices (`mail` keeps the books).
+            if lean || unread {
+                l.messages.retain(|m| !crate::mail::is_note(m));
+            }
             if lean {
                 println!("{}", serde_json::json!({ "channel": l.name, "messages": l.messages.iter().map(|m| lean_message(m, false)).collect::<Vec<_>>() }));
             } else if unread && l.messages.is_empty() && !g.json {
@@ -574,6 +592,11 @@ pub async fn run(cmd: Cmd, g: &Global) -> R {
         Cmd::Address { channel, address } => {
             let (raw, d): (_, ChatChannelDto) = ask(&mut c, Request::ChatAddAddress(ChatAddressParams { channel, address: address.clone() })).await?;
             show(g, &raw, || format!("Devices of {} are also looked for at {address}.", d.name));
+        }
+        Cmd::Tag { channel, id, add, remove, clear, agent } => {
+            let me = label(g, &agent, &None);
+            let (text, j) = crate::tags::run(&mut c, &channel, &me, &id, &add, &remove, clear).await?;
+            show(g, &j, || text);
         }
         Cmd::Rename { channel, name } => {
             let (raw, d): (_, ChatChannelDto) = ask(&mut c, Request::ChatRename(ChatRenameParams { channel, name })).await?;
@@ -724,7 +747,8 @@ impl Out<'_> {
             return false;
         }
         // A topic being made is not a message: an agent's watch leaves it out, a person's shows it but does not count it.
-        let topic = m.kind == "topic";
+        // So is a mail's note (a seen receipt, a hook notice): news for nobody.
+        let topic = m.kind == "topic" || crate::mail::is_note(m);
         if topic && (self.f.lean || self.f.unread.is_some()) {
             return false;
         }

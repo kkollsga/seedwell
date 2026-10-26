@@ -44,6 +44,7 @@ import os
     private var askingToMove = false
     private var powerOff = false
     private var sleepAssertion = SleepAssertion()
+    private var agentsAssertion = SleepAssertion()
     private var power: PowerWatcher?
     /// The OS network path and sleep/wake, told to the engine (SPEC 7C.4c).
     private(set) var networkWatcher: NetworkWatcher?
@@ -189,6 +190,7 @@ import os
             self?.commands.arrivals.note(s)
             UpdateCenter.shared.noteActivity(busy: s.allDownloading.contains { !$0.isHeld } || s.movingPercent != nil)
             self?.sleepAssertion.update(downloading: s.allDownloading.contains { !$0.awaitingChoice && $0.state == .downloading })
+            self?.agentsAssertion.update(agents: self?.core.agentsAwake())
         }
         NSApp.mainMenu = MainMenu.make(commands: commands)
         settings.applied = { [weak self] s in self?.apply(s) }
@@ -277,6 +279,7 @@ import os
             if !want, service.status == .enabled { try? service.unregister() }
         }
         sleepAssertion.enabled = s.general.preventSleepWhileDownloading
+        agentsAssertion.enabled = s.general.keepAwakeForAgents
         UpdateCenter.shared.apply(s.updates)
         if power == nil, !options.mock { power = PowerWatcher(core: core) }
         power?.mode = s.general.onBattery
@@ -602,23 +605,32 @@ import os
     }
 }
 
-/// Keeps the Mac awake while something downloads (setting "Prevent sleep while downloading").
+/// Keeps the Mac from idle sleep while something downloads (setting "Prevent sleep while downloading") or an
+/// agent works ("Keep awake while agents work"). The display still sleeps and the screen still locks.
 @MainActor final class SleepAssertion {
     var enabled = true
     private var id: UInt32 = 0
-    private var held = false
+    /// The reason it is held with (`pmset -g assertions` shows it).
+    private var held: String?
 
-    func update(downloading: Bool) {
-        let want = enabled && downloading
+    func update(downloading: Bool) { hold(downloading ? "\(AppInfo.name) is downloading" : nil) }
+
+    func update(agents: AgentsAwake?) {
+        hold(agents.map { "\(AppInfo.name): \(ListFormatter.localizedString(byJoining: $0.who)) working" })
+    }
+
+    /// Hold it for `reason`, or let go with `nil`.
+    private func hold(_ reason: String?) {
+        let want = enabled ? reason : nil
         if want == held { return }
-        if want {
-            var newID: UInt32 = 0
-            let ok = IOPMAssertionCreateWithName("PreventUserIdleSystemSleep" as CFString, UInt32(kIOPMAssertionLevelOn),
-                                                 "\(AppInfo.name) is downloading" as CFString, &newID)
-            if ok == kIOReturnSuccess { id = newID; held = true }
-        } else {
+        if held != nil {
             IOPMAssertionRelease(id)
-            held = false
+            held = nil
         }
+        guard let want else { return }
+        var newID: UInt32 = 0
+        let ok = IOPMAssertionCreateWithName("PreventUserIdleSystemSleep" as CFString, UInt32(kIOPMAssertionLevelOn),
+                                             want as CFString, &newID)
+        if ok == kIOReturnSuccess { id = newID; held = want }
     }
 }

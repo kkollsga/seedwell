@@ -48,6 +48,9 @@ import Testing
         #expect(!CommandLineTool.skillInstalled(home: home))
         try FileManager.default.createDirectory(atPath: CommandLineTool.skillFolder(home: home), withIntermediateDirectories: true)
         FileManager.default.createFile(atPath: CommandLineTool.skillFolder(home: home) + "/SKILL.md", contents: Data())
+        #expect(!CommandLineTool.skillInstalled(home: home), "the agents skill is missing (installed before 0.1.8)")
+        try FileManager.default.createDirectory(atPath: CommandLineTool.skillFolder(home: home) + "-agents", withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: CommandLineTool.skillFolder(home: home) + "-agents/SKILL.md", contents: Data())
         #expect(CommandLineTool.skillInstalled(home: home))
     }
 }

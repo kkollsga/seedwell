@@ -16,6 +16,7 @@
 #![warn(missing_docs)]
 
 pub mod activity;
+pub mod awake;
 pub mod b64;
 pub mod backend;
 pub mod client;
@@ -39,6 +40,7 @@ mod engine_backend;
 pub mod sync;
 
 pub use activity::ActivityLog;
+pub use awake::Awake;
 pub use backend::{AddArgs, AddSource, Backend};
 pub use client::{Client, ClientError};
 pub use perm::{Permission, PermissionHandle, PermissionSource};

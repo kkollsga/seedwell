@@ -11,6 +11,7 @@ notify_goal = false
 menu_bar_show_speed = false
 menu_bar_split_by_tracker = false
 prevent_sleep_while_downloading = true
+keep_awake_for_agents = true
 on_battery = "limit"
 play_with = "auto"
 

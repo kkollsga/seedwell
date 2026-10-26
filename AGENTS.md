@@ -31,6 +31,12 @@ release procedure.
 - Agents do not commit unless the coordinator asks. Commit messages end with the attribution trailer the session
   specifies.
 
+## Bugs
+
+- **No bugs left behind.** Fix every bug as it appears, whether it is related to the current work or not: a test that
+  fails only sometimes, an error in a log, wrong behaviour noticed in passing. Find the root cause, fix it with a test,
+  and commit it on its own. Never wave a failure off as flaky or unrelated.
+
 ## Heavy work (16 GB Mac)
 
 - Run builds, tests and benches through `tools/sysguard/heavy.sh`, one at a time and never nested.

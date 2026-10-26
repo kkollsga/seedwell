@@ -33,13 +33,19 @@ pub struct Mail {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Cmd {
     /// `mail send <project> [--type T] [--re ID] [--summary S] [--attach FILE]… -|<text>`
-    Send { to: String, kind: Option<String>, re: Option<String>, summary: Option<String>, attach: Vec<String>, then: Option<String>, body: String },
+    Send { to: String, kind: Option<String>, re: Option<String>, summary: Option<String>, attach: Vec<String>, pass: Vec<String>, via: Option<String>, then: Option<String>, body: String },
     /// `mail reply <id> [--done <status> | --type request|question] [--attach FILE]… -|<text>`
-    Reply { id: String, done: Option<String>, kind: Option<String>, attach: Vec<String>, export: Option<String>, then: Option<String>, body: String },
-    /// `mail inbox [--all]`
-    Inbox { all: bool },
-    /// `mail read <id> [--full] [--save DIR]`
-    Read { id: String, full: bool, save: Option<String> },
+    Reply { id: String, done: Option<String>, kind: Option<String>, attach: Vec<String>, pass: Vec<String>, via: Option<String>, export: Option<String>, then: Option<String>, body: String },
+    /// `mail receive <id> --to DIR [--wait S] [--force]` (§7G.10)
+    Receive { id: String, to: String, wait: Option<u64>, force: bool },
+    /// `mail passes [--clean [--older D]]`
+    Passes { clean: bool, older: Option<u64> },
+    /// `mail inbox [--all] [--tag T]`
+    Inbox { all: bool, tag: Option<String> },
+    /// `mail tag <id> [TAG...] [--remove TAG]... [--clear]` (§7G.9)
+    Tag { id: String, add: Vec<String>, remove: Vec<String>, clear: bool },
+    /// `mail read <id> [--full] [--save DIR [--force]]`
+    Read { id: String, full: bool, save: Option<String>, force: bool },
     /// `mail done <id> [--open] -|<status>`
     Done { id: String, open: bool, export: Option<String>, status: String },
     /// `mail sent [<id>] [--open]`
@@ -64,7 +70,7 @@ pub enum Hook {
     Show,
 }
 
-pub const USAGE: &str = "usage: seedwell mail send <project> [--type T] [--re ID] [--summary S] [--attach FILE]... -|<text> | reply <id> [--done <status>] [--attach FILE]... -|<text> | inbox [--all] | read <id> [--full] [--save DIR] | done <id> [--open] -|<status> | sent [--open] | watch [--for ID [--from P]] [--timeout S] | export <id>|--all | check [--new] | projects | hook install|uninstall|show   (each with [--as NAME] [--channel C])";
+pub const USAGE: &str = "usage: seedwell mail send <project> [--type T] [--re ID] [--summary S] [--attach FILE]... [--pass FILE]... -|<text> | reply <id> [--done <status>] [--attach FILE]... [--pass FILE]... -|<text> | inbox [--all] [--tag T] | tag <id> [TAG...] [--remove TAG]... [--clear] | read <id> [--full] [--save DIR] | receive <id> --to DIR [--wait S] | passes [--clean [--older D]] | done <id> [--open] -|<status> | sent [--open] | watch [--for ID [--from P]] [--timeout S] | export <id>|--all | check [--new] | projects | hook install|uninstall|show   (each with [--as NAME] [--channel C])";
 
 /// The mail types the guide lists (others are kept as given).
 pub const TYPES: [&str; 8] = ["request", "bug", "question", "feedback", "coordination", "heads-up", "reply", "status"];
@@ -77,16 +83,19 @@ pub fn sub_help(sub: &str) -> Option<String> {
     let (usage, text) = match sub {
         "send" => (
             "send <project> [--type bug|request|question|feedback|coordination|heads-up] [--re ID] [--summary S] [--attach FILE]... -|<text>",
-            "A mail into the project's inbox, Markdown on standard input (its first heading or line is the summary). --then \"…\" notes your own next step for when the answer comes; it is shown to you with the answer (and nobody else needs it). One mail per project per session for new matters; a follow-up on the same change goes into the same thread (`mail reply <their mail>`, or `mail send <project> --re <id>`). Tell each project that depends on a change, once; send what changes what it does, no FYIs. --attach adds a file with its sha256 (the whole mail at most 16 KB). The receipt says whether the project has the mail hook: with it, its next session is told when it starts; without it, it sees the mail when an agent there runs `mail inbox`. The mail stays open until the project closes it: `mail sent` shows where it stands, `mail watch --for <id>` waits for the answer.\n\nExample:\n  seedwell mail send kglite --type bug - <<'EOF'\n  ## The cache ignores the repo\n  ...repro, what you need back...\n  EOF",
+            "A mail into the project's inbox, Markdown on standard input (its first heading or line is the summary). --then \"…\" notes your own next step for when the answer comes; it is shown to you with the answer (and nobody else needs it). One mail per project per session for new matters; a follow-up on the same change goes into the same thread (`mail reply <their mail>`, or `mail send <project> --re <id>`). Tell each project that depends on a change, once; send what changes what it does, no FYIs. --attach adds a file with its sha256 (the whole mail at most 16 KB); --pass FILE passes a bigger one through the synced folder that goes with the channel (or --via FOLDER), in its Seedwell Pass-Through folder, and the recipient takes it with `mail receive`, which removes it on both computers. The receipt says whether the project has the mail hook: with it, its next session is told when it starts; without it, it sees the mail when an agent there runs `mail inbox`. The mail stays open until the project closes it: `mail sent` shows where it stands, `mail watch --for <id>` waits for the answer.\n\nExample:\n  seedwell mail send kglite --type bug - <<'EOF'\n  ## The cache ignores the repo\n  ...repro, what you need back...\n  EOF",
         ),
         "inbox" => (
-            "inbox [--all]",
+            "inbox [--all] [--tag T]",
             "What is open for you (new ones marked), the answers and updates on what you sent, and whether General has something new. Start every session with it; the session hook's line is its summary.\n\nWhat news looks like:\n  Mail for mcp-servers in Koding: 1 open\n  9ebc2c99  ... kglite (agent) on Studio Mac  reply: Fixed in 223d0d8 (new)\n  kglite closed your bug df05127c: Fixed in 223d0d8 ...",
         ),
+        "tag" => ("tag <id> [TAG...] [--remove TAG]... [--clear]", "Your tags on a mail or any message of the channel: seen, actioned, backlog, needs-triage, or a word of your own. They are yours: everyone sees who tagged what (`mail inbox`, the app), and nobody else's change. Showing a mail in your inbox tags it seen for you, so its sender sees that. `mail inbox --tag backlog` lists what you tagged so. With no tags given: the tags on it, by owner.\n\nExample:\n  seedwell mail tag 0392ba7c backlog\n  seedwell mail tag 0392ba7c actioned --remove backlog"),
+        "receive" => ("receive <id> --to DIR [--wait S] [--force]", "Takes the files a mail passed to you (send --pass): checks each sha256, copies them into DIR (any folder, made if missing; a different file of the same name is kept unless --force) and deletes them from the pass-through folder, which removes them on both computers (and keeps no archive copy). Not all there yet (still syncing): it says which, exit 6; --wait waits for them. The mail is tagged received for you, so its sender sees that."),
+        "passes" => ("passes [--clean [--older D]]", "The passes still waiting in the Seedwell Pass-Through folders of this Mac's synced folders (to whom, from whom, how big, how old). --clean removes those older than a week (--older 1d: sooner, --older 0: all); a pass is a copy, its original stays with its sender."),
         "read" => ("read <id> [--full] [--save DIR]", "One mail in full, with its statuses and replies; attached files are listed (--full shows them). --save DIR writes the files and checks each sha256, and prints only that. Reading an answer or an update counts it as seen: it leaves your inbox and stays under `mail sent <your mail>`."),
         "reply" => (
-            "reply <id> [--done <status> | --type request|question] [--attach FILE]... -|<text>",
-            "Answers a mail, into its sender's inbox. With --done it is the final answer: it also closes the mail with that status, and the sender owes you nothing back (what it does with the answer, say re-vendoring or retesting, is its own work). Without --done it opens an item for the sender: that is how you ask something back (label it with --type request or question), and the sender closes it when it has answered.",
+            "reply <id> [--final | --done <status> | --type request|question] [--attach FILE]... [--pass FILE]... -|<text>",
+            "Answers a mail, into its sender's inbox. With --final it is the final answer: it also closes the mail, its status the reply's first line (--done \"status\" is the same with a status of its own), and the sender owes you nothing back (what it does with the answer, say re-vendoring or retesting, is its own work). Without --final or --done it opens an item for the sender: that is how you ask something back (label it with --type request or question), and the sender closes it when it has answered.",
         ),
         "done" => ("done <id> [--open] -|<status>", "Closes a mail with a status (what happened, where the durable record went, what is pending); the sender sees it in `mail sent` and nothing new opens in its inbox. --open notes progress and keeps it open. On a mail that is closed already it adds a newer status: the newest one is the record."),
         "sent" => ("sent [<id>] [--open]", "What you sent, each with where it stands: waiting on <them> (no word yet), in progress (they noted progress), closed (they closed it) or answered (final) (your own final reply), and whether they have seen it, with the last status and the replies. --open: only what is waiting or in progress. With an id (your mail, a reply you sent, or the mail you answered): the whole thread, every mail and status in order, files listed."),
@@ -117,13 +126,15 @@ pub fn parse(args: Vec<String>) -> Result<Mail, Usage> {
             let re = o.value(&["--re"])?;
             let summary = o.value(&["--summary"])?;
             let attach = o.values(&["--attach"])?;
+            let pass = o.values(&["--pass"])?;
+            let via = o.value(&["--via"])?;
             let then = o.value(&["--then"])?;
             let mut p = o.finish()?;
             if p.len() < 2 {
-                return Err(usage("send <project> [--type T] [--re ID] [--summary S] [--attach FILE]... [--then \"your next step\"] -|<text>   (- reads the mail from standard input)"));
+                return Err(usage("send <project> [--type T] [--re ID] [--summary S] [--attach FILE]... [--pass FILE]... [--via FOLDER] [--then \"your next step\"] -|<text>   (- reads the mail from standard input)"));
             }
             let to = p.remove(0);
-            Cmd::Send { to, kind, re, summary, attach, then, body: p.join(" ") }
+            Cmd::Send { to, kind, re, summary, attach, pass, via, then, body: p.join(" ") }
         }
         "reply" | "answer" => {
             let mut done = o.value(&["--done"])?;
@@ -138,25 +149,39 @@ pub fn parse(args: Vec<String>) -> Result<Mail, Usage> {
                 return Err(Usage("a reply with --done is the final answer: it asks nothing back, so it takes no --type".into()));
             }
             let attach = o.values(&["--attach"])?;
+            let pass = o.values(&["--pass"])?;
+            let via = o.value(&["--via"])?;
             let mut p = o.finish()?;
             if p.len() < 2 {
-                return Err(usage("reply <id> [--done <status> | --final | --type request|question [--then \"your next step\"]] [--attach FILE]... [--export DIR] -|<text>"));
+                return Err(usage("reply <id> [--done <status> | --final | --type request|question [--then \"your next step\"]] [--attach FILE]... [--pass FILE]... [--via FOLDER] [--export DIR] -|<text>"));
             }
             let id = p.remove(0);
             if then.is_some() && done.is_some() {
                 return Err(Usage("--then is for a reply that asks back (no answer comes to a final one)".into()));
             }
-            Cmd::Reply { id, done, kind, attach, export, then, body: p.join(" ") }
+            Cmd::Reply { id, done, kind, attach, pass, via, export, then, body: p.join(" ") }
         }
         "inbox" | "list" => {
             let all = o.flag(&["--all"]);
-            none_left(o, "inbox [--all]")?;
-            Cmd::Inbox { all }
+            let tag = o.value(&["--tag"])?.map(|t| crate::tags::normalize(&t)).transpose().map_err(Usage)?;
+            none_left(o, "inbox [--all] [--tag T]")?;
+            Cmd::Inbox { all, tag }
+        }
+        "tag" | "tags" => {
+            let remove = o.values(&["--remove"])?;
+            let clear = o.flag(&["--clear"]);
+            let mut p = o.finish()?;
+            if p.is_empty() {
+                return Err(usage(&format!("tag <id> [TAG...] [--remove TAG]... [--clear]   (tags: {}, or your own; none given: shows the tags)", crate::tags::KNOWN.join(", "))));
+            }
+            let id = p.remove(0);
+            Cmd::Tag { id, add: p, remove, clear }
         }
         "read" | "show" => {
             let full = o.flag(&["--full"]);
             let save = o.value(&["--save"])?;
-            Cmd::Read { id: one(o, "read <id> [--full] [--save DIR]")?, full, save }
+            let force = o.flag(&["--force"]);
+            Cmd::Read { id: one(o, "read <id> [--full] [--save DIR [--force]]")?, full, save, force }
         }
         "export" => {
             let all = o.flag(&["--all"]);
@@ -200,6 +225,20 @@ pub fn parse(args: Vec<String>) -> Result<Mail, Usage> {
             let new = o.flag(&["--new"]);
             none_left(o, "check [--new]")?;
             Cmd::Check { new }
+        }
+        "receive" | "take" => {
+            let to = o.value(&["--to"])?;
+            let wait = o.value(&["--wait"])?.map(|t| crate::args::parse_duration(&t)).transpose()?;
+            let force = o.flag(&["--force"]);
+            let id = one(o, "receive <id> --to DIR [--wait S] [--force]")?;
+            let Some(to) = to else { return Err(usage("receive <id> --to DIR [--wait S] [--force]   (where the files go)")) };
+            Cmd::Receive { id, to, wait, force }
+        }
+        "passes" => {
+            let clean = o.flag(&["--clean"]);
+            let older = o.value(&["--older"])?.map(|t| crate::args::parse_duration(&t)).transpose()?;
+            none_left(o, "passes [--clean [--older D]]")?;
+            Cmd::Passes { clean, older }
         }
         "projects" | "inboxes" => {
             none_left(o, "projects")?;
@@ -246,6 +285,13 @@ pub struct Header {
     pub summary: Option<String>,
     /// The sender's own next step when the answer comes (`send --then`): shown to it with the answer.
     pub then: Option<String>,
+    /// A tag note's whole set (`type: tag`, §7G.9), comma-separated.
+    pub tags: Option<String>,
+    /// Files passed through a synced folder (§7G.10): `<folder id>:<the pass's folder in it>`.
+    pub pass: Option<String>,
+    /// The sender's git commit when the mail carries files (`d153c95`, `d153c95+changes` for a working tree that
+    /// differs from it), so the recipient can tell which version it got.
+    pub commit: Option<String>,
 }
 
 /// A text's mail header and the text after it; `None` when it does not start with one (`---` … `mail:` … `---`).
@@ -268,6 +314,9 @@ pub fn parse_header(body: &str) -> Option<(Header, String)> {
             "state" => h.state = v.map(|s| s.to_lowercase()),
             "summary" => h.summary = v,
             "then" => h.then = v,
+            "tags" => h.tags = v,
+            "pass" => h.pass = v,
+            "commit" => h.commit = v,
             _ => {}
         }
     }
@@ -282,7 +331,7 @@ pub fn parse_header(body: &str) -> Option<(Header, String)> {
 pub fn format_mail(h: &Header, body: &str) -> String {
     let one = |v: &str| v.replace(['\n', '\r'], " ").trim().to_string();
     let mut o = String::from("---\nmail: 1\n");
-    for (k, v) in [("to", &h.to), ("type", &h.kind), ("re", &h.re), ("state", &h.state), ("summary", &h.summary), ("then", &h.then)] {
+    for (k, v) in [("to", &h.to), ("type", &h.kind), ("re", &h.re), ("state", &h.state), ("summary", &h.summary), ("then", &h.then), ("tags", &h.tags), ("pass", &h.pass), ("commit", &h.commit)] {
         if let Some(v) = v.as_deref().map(one).filter(|v| !v.is_empty()) {
             o.push_str(&format!("{k}: {v}\n"));
         }
@@ -474,23 +523,25 @@ fn with_files(body: &str, files: &[String]) -> Result<String, CliError> {
 /// Refuses a mail over the channel's limit, saying what to do instead.
 fn fits(text: &str, attached: bool) -> R {
     if text.len() > MAX_MAIL {
-        let hint = if attached { " Put big files in a synced folder (seedwell sync) and send their path instead." } else { " Split it, or put the detail in a file in a synced folder (seedwell sync) and send the path." };
+        let hint = if attached { " Pass big files instead of attaching them: --pass FILE (the recipient takes them with `mail receive`)." } else { " Split it, or pass the detail as a file: --pass FILE." };
         return Err(CliError::plain(2, format!("the mail is {:.1} KB; a mail holds at most 16 KB.{hint}", text.len() as f64 / 1024.0)));
     }
     Ok(())
 }
 
 /// Writes a mail's files into `dir`, each checked; their paths.
-fn save_files(list: &[Attachment], dir: &Path) -> Result<Vec<PathBuf>, CliError> {
+fn save_files(list: &[Attachment], dir: &Path, force: bool) -> Result<Vec<PathBuf>, CliError> {
     std::fs::create_dir_all(dir).map_err(|e| CliError::plain(1, format!("{}: {e}", dir.display())))?;
     let mut out = Vec::new();
     for a in list {
         let data = a.data().map_err(|e| CliError::plain(1, e))?;
         let name = Path::new(&a.name).file_name().map(|n| n.to_owned()).ok_or_else(|| CliError::plain(1, format!("{}: not a file name", a.name)))?;
         let to = dir.join(name);
-        if let Ok(have) = std::fs::read(&to) {
+        if let Ok(have) = std::fs::read(&to)
+            && !force
+        {
             if have != data {
-                return Err(CliError::plain(1, format!("{} exists with other contents; not overwritten", to.display())));
+                return Err(CliError::plain(1, format!("{} exists with other contents; not overwritten (save into an empty folder, or --force to replace it)", to.display())));
             }
         } else {
             std::fs::write(&to, &data).map_err(|e| CliError::plain(1, format!("{}: {e}", to.display())))?;
@@ -565,28 +616,30 @@ fn answers(m: &ChatMessageDto) -> Option<String> {
     header(m).and_then(|h| h.re).or_else(|| m.reply_to.clone())
 }
 
-/// A recipient's note that it has seen an item (`type: seen`, `re` the item), posted once when its inbox first shows it.
+/// A tag note (§7G.9: `type: tag`, and a seen receipt from before tags, `type: seen`): bookkeeping, never an item,
+/// a reply, a status or news.
 fn is_seen(m: &ChatMessageDto) -> bool {
-    header(m).and_then(|h| h.kind).as_deref() == Some("seen")
+    crate::tags::is_tag(m)
 }
 
-/// Tells the sender of `item` (in `me`'s inbox) that `me` has seen it, unless it was told already.
+/// Tags `item` (in `me`'s inbox) `seen` for `me`, unless it has the tag already: its sender's `sent` then says so.
 async fn mark_seen(c: &mut trs_control::client::Client, channel: &str, me: &str, item: &ChatMessageDto, msgs: &[ChatMessageDto]) {
-    if by(item, me) || !in_thread(item, me) || seen_at(item, me, msgs).is_some() {
+    if by(item, me) || !in_thread(item, me) {
         return;
     }
-    let Ok((_, Some(topic))) = project_topic(c, channel, me, None).await else { return };
-    let h = Header { to: item.agent.clone(), kind: Some("seen".into()), re: Some(short(&item.id).to_string()), state: None, summary: Some("seen".into()), then: None };
-    let req = ChatSendParams { channel: channel.to_string(), body: format_mail(&h, ""), reply_to: None, json: false, topic: Some(topic), agent: Some(me.to_string()) };
+    let mine = crate::tags::of_agent(&item.id, me, msgs);
+    if mine.iter().any(|t| t == "seen") {
+        return;
+    }
+    let Ok(set) = crate::tags::change(&mine, &["seen".to_string()], &[], false) else { return };
+    let body = crate::tags::note(&item.id, item.agent.as_deref(), &set);
+    let req = ChatSendParams { channel: channel.to_string(), body, reply_to: None, json: false, topic: item.topic.clone(), agent: Some(me.to_string()) };
     let _: Result<(Value, ChatMessageDto), _> = ask(c, Request::ChatSend(req)).await;
 }
 
-/// When `to` first saw `item` (its seen receipt in its own thread).
+/// When `to` first saw `item` (tagged it `seen`).
 fn seen_at(item: &ChatMessageDto, to: &str, msgs: &[ChatMessageDto]) -> Option<u64> {
-    msgs.iter()
-        .filter(|s| is_seen(s) && in_thread(s, to) && by(s, to) && header(s).and_then(|h| h.re).is_some_and(|r| names(&r, &item.id)))
-        .map(|s| s.at)
-        .min()
+    crate::tags::of(&item.id, msgs).into_iter().find(|o| matches!(&o.owner, crate::tags::Owner::Agent(a) if a.eq_ignore_ascii_case(to))).and_then(|o| o.seen_at)
 }
 
 /// `re` names `id` (8 characters of it at least, or all).
@@ -864,6 +917,93 @@ pub fn waiting_on(list: &[Sent]) -> Option<String> {
     (!by.is_empty()).then(|| format!("waiting on {}{note}", by.iter().map(|(t, n)| format!("{t}: {n}")).collect::<Vec<_>>().join(", ")))
 }
 
+/// The tags on a message, yours first ("tags: yours backlog · codingest: seen"); your own `seen` goes without saying.
+fn tags_line(me: &str, id: &str, msgs: &[ChatMessageDto]) -> Option<String> {
+    let mut owned = crate::tags::of(id, msgs);
+    for o in &mut owned {
+        if matches!(&o.owner, crate::tags::Owner::Agent(a) if a.eq_ignore_ascii_case(me)) {
+            o.name = "yours".into();
+            o.tags.retain(|t| t != "seen");
+        }
+    }
+    owned.retain(|o| !o.tags.is_empty());
+    owned.sort_by_key(|o| o.name != "yours");
+    (!owned.is_empty()).then(|| format!("tags: {}", crate::tags::line(&owned)))
+}
+
+/// Passes `files` to `to` through the synced folder that goes with the channel (or `via`): the pass and the
+/// folder's name; `None` when there are none.
+async fn pass_files(c: &mut trs_control::client::Client, channel: &ChatChannelDto, to: &str, me: &str, files: &[String], via: Option<&str>) -> R<Option<(crate::pass::Pass, String)>> {
+    if files.is_empty() {
+        return Ok(None);
+    }
+    let (all, device, computer) = crate::pass::folders(c).await?;
+    let f = crate::pass::pick(&all, &channel.id, &channel.name, via)?;
+    Ok(Some((crate::pass::put(f, &device, &computer, to, me, files)?, f.name.clone())))
+}
+
+/// The commit of the git repository the working folder is in, `+changes` when the tracked files differ from it.
+fn git_commit() -> Option<String> {
+    let git = |args: &[&str]| std::process::Command::new("git").args(args).stderr(std::process::Stdio::null()).output().ok().filter(|o| o.status.success());
+    let head = String::from_utf8(git(&["rev-parse", "--short", "HEAD"])?.stdout).ok()?.trim().to_string();
+    let dirty = git(&["status", "--porcelain", "--untracked-files=no"]).is_some_and(|o| !o.stdout.is_empty());
+    (!head.is_empty()).then(|| if dirty { format!("{head}+changes") } else { head })
+}
+
+/// Where a pass of `m` stands for its sender: taken (gone, or tagged received), arrived on which devices, or not yet.
+fn pass_state(header: &str, m: &ChatMessageDto, folders: &[SyncFolderDto], all: &[ChatMessageDto]) -> String {
+    let Some(p) = crate::pass::Pass::of(header, &text_of(m)) else { return "pass: (not readable)".into() };
+    let to = m.topic_title.clone().unwrap_or_default();
+    if crate::tags::of_agent(&m.id, &to, all).iter().any(|t| t == "received") {
+        return format!("pass: received by {to}, and removed");
+    }
+    let Some(f) = folders.iter().find(|f| f.id == p.folder) else { return "pass: in a synced folder this Mac no longer has".into() };
+    let dir = PathBuf::from(&f.path).join(&p.rel);
+    if !dir.exists() {
+        return format!("pass: removed from {} (taken, or cleaned up)", f.name);
+    }
+    match crate::pass::words(&crate::pass::statuses(&dir)) {
+        w if w.is_empty() => format!("pass: in {}, not on another computer yet", f.name),
+        w => format!("pass: {w}; {to} has not taken it yet"),
+    }
+}
+
+/// Takes back a pass whose mail could not be sent.
+async fn unpass(c: &mut trs_control::client::Client, passed: &Option<(crate::pass::Pass, String)>) {
+    let Some((p, _)) = passed else { return };
+    if let Ok((all, ..)) = crate::pass::folders(c).await
+        && let Some(f) = all.iter().find(|f| f.id == p.folder)
+    {
+        let dir = PathBuf::from(&f.path).join(&p.rel);
+        let _ = std::fs::remove_dir_all(&dir);
+        if let Some(project) = dir.parent() {
+            let _ = std::fs::remove_dir(project);
+        }
+    }
+}
+
+/// Whether `project` is around, in words: its last own activity, whether its computers are online, and whether its
+/// mail hook tells its next session ("last active 09:27 on Studio Mac (online); its mail hook tells its next session").
+async fn presence(c: &mut trs_control::client::Client, channel: &ChatChannelDto, project: &str, msgs: &[ChatMessageDto]) -> String {
+    let Ok((t, _)) = project_topic(c, &channel.id, project, None).await else { return String::new() };
+    let known = known_projects(&t, msgs);
+    let Some(k) = known.iter().find(|k| k.name.eq_ignore_ascii_case(project)) else { return format!("no project {project} has used {} yet", channel.name) };
+    let members: Vec<SyncMemberDto> = ask::<SyncMembersDto>(c, Request::ChatMembers(ch(channel.id.clone()))).await.map(|(_, m)| m.members).unwrap_or_default();
+    let on = k
+        .computers
+        .iter()
+        .map(|comp| match members.iter().find(|m| m.name == *comp) {
+            Some(m) if m.me => format!("{comp} (this computer)"),
+            Some(m) => format!("{comp} ({})", if m.online { "online" } else { "offline" }),
+            None => comp.clone(),
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let when = k.last_at.map_or_else(|| "never active".to_string(), |t| format!("last active {}", time_s(t)));
+    let hook = if k.hooks.is_empty() { "no mail hook: it sees mail when an agent there runs `mail inbox`" } else { "its mail hook tells its next session" };
+    format!("{when}{}; {hook}. Nothing wakes a project that has no session running.", if on.is_empty() { String::new() } else { format!(" on {on}") })
+}
+
 fn print_json(v: &Value) {
     println!("{v}");
 }
@@ -893,7 +1033,7 @@ pub async fn run(m: Mail, g: &Global) -> R {
                     let last = msgs.iter().rev().find(|m| m.me && by(m, &me) && is_hook_notice(m)).and_then(header).and_then(|h| h.state);
                     let want = if on { "on" } else { "off" };
                     if last.as_deref() != Some(want) {
-                        let h = Header { to: Some(me.clone()), kind: Some("hook".into()), re: None, state: Some(want.into()), summary: Some(format!("mail hook {}", if on { "installed" } else { "removed" })), then: None };
+                        let h = Header { to: Some(me.clone()), kind: Some("hook".into()), re: None, state: Some(want.into()), summary: Some(format!("mail hook {}", if on { "installed" } else { "removed" })), then: None, tags: None, pass: None, commit: None };
                         let body = if on {
                             format!("Sessions of {me} on this computer are told about open mail when they start, and about new mail on each prompt.")
                         } else {
@@ -920,7 +1060,8 @@ pub async fn run(m: Mail, g: &Global) -> R {
         let (t, _) = project_topic(&mut c, &channel.id, &me, None).await?;
         let known = known_projects(&t, &read_all(&mut c, &channel.id).await?);
         if let Some(why) = identity_problem(&me, &known, &channel.name) {
-            if matches!(m.cmd, Cmd::Send { .. } | Cmd::Reply { .. } | Cmd::Done { .. }) {
+            let tagging = matches!(&m.cmd, Cmd::Tag { add, remove, clear, .. } if !add.is_empty() || !remove.is_empty() || *clear);
+            if tagging || matches!(m.cmd, Cmd::Send { .. } | Cmd::Reply { .. } | Cmd::Done { .. } | Cmd::Receive { .. }) {
                 return Err(CliError::plain(2, why));
             }
             eprintln!("Note: {why}");
@@ -928,35 +1069,56 @@ pub async fn run(m: Mail, g: &Global) -> R {
         }
     }
     match m.cmd {
-        Cmd::Send { to, kind, re, summary, attach, then, body } => {
+        Cmd::Send { to, kind, re, summary, attach, pass, via, then, body } => {
             if to.trim().eq_ignore_ascii_case(&me) {
                 return Err(CliError::plain(2, format!("that is {me}'s own inbox; send to another project (see `seedwell mail projects`)")));
             }
             let body = if body == "-" { stdin_text("Mail")? } else { body };
             let summary = Some(summary.map(|s| clip(s.trim(), MAX_SUMMARY)).unwrap_or_else(|| summary_of(&body))).filter(|s| !s.is_empty());
-            let h = Header { to: Some(to.trim().to_string()), kind, re: re.clone(), state: None, summary, then: then.map(|t| clip(t.trim(), MAX_SUMMARY)) };
-            let text = format_mail(&h, &with_files(&body, &attach)?);
-            fits(&text, !attach.is_empty())?;
+            let mut h = Header { to: Some(to.trim().to_string()), kind, re: re.clone(), state: None, summary, then: then.map(|t| clip(t.trim(), MAX_SUMMARY)), tags: None, pass: None, commit: None };
+            let mut text_body = with_files(&body, &attach)?;
+            fits(&format_mail(&h, &text_body), !attach.is_empty())?;
+            if !attach.is_empty() || !pass.is_empty() {
+                h.commit = git_commit();
+            }
+            let passed = pass_files(&mut c, &channel, to.trim(), &me, &pass, via.as_deref()).await?;
+            if let Some((p, name)) = &passed {
+                h.pass = Some(p.header());
+                text_body = format!("{}\n\n{}", text_body.trim_end(), p.section(name));
+            }
+            let text = format_mail(&h, &text_body);
+            if let Err(e) = fits(&text, !attach.is_empty()) {
+                unpass(&mut c, &passed).await;
+                return Err(e);
+            }
             let msgs = read_all(&mut c, &channel.id).await?;
             let (before, _) = project_topic(&mut c, &channel.id, to.trim(), None).await?;
             let known = known_projects(&before, &msgs);
             let unknown = !known.iter().any(|k| k.name.eq_ignore_ascii_case(to.trim()));
             let topic = project_topic(&mut c, &channel.id, to.trim(), Some(&me)).await?.1;
-            let (_, sent): (_, ChatMessageDto) = ask(
-                &mut c,
-                Request::ChatSend(ChatSendParams { channel: channel.id.clone(), body: text, reply_to: re, json: false, topic, agent: Some(me.clone()) }),
-            )
-            .await?;
+            let sent: Result<(Value, ChatMessageDto), CliError> =
+                ask(&mut c, Request::ChatSend(ChatSendParams { channel: channel.id.clone(), body: text, reply_to: re, json: false, topic, agent: Some(me.clone()) })).await;
+            let sent = match sent {
+                Ok((_, m)) => m,
+                Err(e) => {
+                    unpass(&mut c, &passed).await;
+                    return Err(e);
+                }
+            };
             if g.json {
-                print_json(&json!({ "id": short(&sent.id), "to": to.trim(), "channel": channel.name, "attached": attach.len(), "then": header(&sent).and_then(|h| h.then) }));
+                print_json(&json!({ "id": short(&sent.id), "to": to.trim(), "channel": channel.name, "attached": attach.len(), "passed": passed.as_ref().map(|(p, f)| json!({ "folder": f, "path": p.rel, "files": p.files.len() })), "then": header(&sent).and_then(|h| h.then) }));
             } else {
                 let seen = known.iter().find(|k| k.name.eq_ignore_ascii_case(to.trim()));
-                let files = if attach.is_empty() { String::new() } else { format!(" with {} file{}", attach.len(), if attach.len() == 1 { "" } else { "s" }) };
+                let n = attach.len() + pass.len();
+                let files = if n == 0 { String::new() } else { format!(" with {n} file{}", if n == 1 { "" } else { "s" }) };
                 let hook = match seen.map(|k| k.hooks.clone()).unwrap_or_default() {
                     h if !h.is_empty() => format!("{} has the mail hook ({})", to.trim(), h.join(", ")),
                     _ => format!("{} has no mail hook (it sees this at its next `mail inbox`)", to.trim()),
                 };
                 println!("As {me}: sent to {} in {} ({}){files} — {hook}; waits: {} mail watch --for {}", to.trim(), channel.name, short(&sent.id), sw(), short(&sent.id));
+                if let Some((p, name)) = &passed {
+                    println!("Passed {} ({}) through {name}: {}/ — {} takes them with `mail receive {}`, which removes them on both computers.", p.files.len(), crate::pass::size(p.files.iter().map(|f| f.bytes).sum()), p.rel, to.trim(), short(&sent.id));
+                }
                 // The note to its own next session, said back so the sender knows it was kept.
                 if let Some(next) = header(&sent).and_then(|h| h.then) {
                     println!("Your next step, kept with the mail and shown to you with the answer: {next}");
@@ -975,7 +1137,7 @@ pub async fn run(m: Mail, g: &Global) -> R {
                 );
             }
         }
-        Cmd::Reply { id, done, kind, attach, export, then, body } => {
+        Cmd::Reply { id, done, kind, attach, pass, via, export, then, body } => {
             let msgs = read_all(&mut c, &channel.id).await?;
             let item = find(&msgs, &id)?;
             let body = if body == "-" { stdin_text("Reply")? } else { body };
@@ -985,7 +1147,7 @@ pub async fn run(m: Mail, g: &Global) -> R {
                 return Err(CliError::plain(2, format!("{} is not in {me}'s inbox, so {me} cannot close it; reply without --done", short(&item.id))));
             }
             // A reply with --done is the final answer: it closes the item here and asks nothing of the sender.
-            let h = Header {
+            let mut h = Header {
                 to: Some(to.clone()),
                 // A request or question back is a reply too: open for the sender until it closes it.
                 kind: Some(kind.unwrap_or_else(|| "reply".into())),
@@ -993,15 +1155,43 @@ pub async fn run(m: Mail, g: &Global) -> R {
                 state: done.is_some().then(|| "done".to_string()),
                 summary: Some(summary_of(&body)).filter(|s| !s.is_empty()),
                 then: then.map(|t| clip(t.trim(), MAX_SUMMARY)),
+                tags: None,
+                pass: None,
+                commit: None,
             };
-            let text = format_mail(&h, &with_files(&body, &attach)?);
-            fits(&text, !attach.is_empty())?;
+            let mut text_body = with_files(&body, &attach)?;
+            fits(&format_mail(&h, &text_body), !attach.is_empty())?;
+            if !attach.is_empty() || !pass.is_empty() {
+                h.commit = git_commit();
+            }
+            let passed = pass_files(&mut c, &channel, &to, &me, &pass, via.as_deref()).await?;
+            if let Some((p, name)) = &passed {
+                h.pass = Some(p.header());
+                text_body = format!("{}\n\n{}", text_body.trim_end(), p.section(name));
+            }
+            let text = format_mail(&h, &text_body);
+            if let Err(e) = fits(&text, !attach.is_empty()) {
+                unpass(&mut c, &passed).await;
+                return Err(e);
+            }
             let topic = project_topic(&mut c, &channel.id, &to, Some(&me)).await?.1;
-            let (_, r): (_, ChatMessageDto) = ask(
+            let r: Result<(Value, ChatMessageDto), CliError> = ask(
                 &mut c,
                 Request::ChatSend(ChatSendParams { channel: channel.id.clone(), body: text, reply_to: Some(item.id.clone()), json: false, topic, agent: Some(me.clone()) }),
             )
-            .await?;
+            .await;
+            let r = match r {
+                Ok((_, m)) => m,
+                Err(e) => {
+                    unpass(&mut c, &passed).await;
+                    return Err(e);
+                }
+            };
+            if let Some((p, name)) = &passed
+                && !g.json
+            {
+                println!("Passed {} ({}) through {name}: {}/ — {to} takes them with `mail receive {}`.", p.files.len(), crate::pass::size(p.files.iter().map(|f| f.bytes).sum()), p.rel, short(&r.id));
+            }
             let closed = match done {
                 // --final: the status is the reply's own first line.
                 Some(status) => {
@@ -1043,11 +1233,99 @@ pub async fn run(m: Mail, g: &Global) -> R {
             } else {
                 println!("As {me}: closed {} with a status; {sender} sees it in `mail sent` (nothing new opens in its inbox).", short(&item.id));
                 let now = read_all(&mut c, &channel.id).await?;
+                // What this project asked in the same thread stays open: said, so closing is not mistaken for the end.
+                let ids: HashSet<String> = thread(item, &now).iter().map(|x| x.id.clone()).collect();
+                for q in sent(&me, &now).iter().filter(|q| !q.done && ids.contains(&q.m.id)) {
+                    println!("Your {} {} to {} stays open ({}); `mail sent {}` shows it, and your next session's mail line its answer.", q.header.as_ref().and_then(|h| h.kind.clone()).unwrap_or_else(|| "mail".into()), short(&q.m.id), q.to, q.words(), short(&q.m.id));
+                }
                 record_after(&export, item, &me, &now)?;
             }
         }
-        Cmd::Inbox { all } => {
-            let everything = all;
+        Cmd::Tag { id, add, remove, clear } => {
+            let (text, j) = crate::tags::run(&mut c, &channel.id, &me, &id, &add, &remove, clear).await?;
+            if g.json { print_json(&j) } else { println!("{text}") }
+        }
+        Cmd::Receive { id, to, wait, force } => {
+            let msgs = read_all(&mut c, &channel.id).await?;
+            let m = find(&msgs, &id)?;
+            let h = header(m).unwrap_or_default();
+            let Some(pass) = h.pass.as_deref().and_then(|v| crate::pass::Pass::of(v, &text_of(m))) else {
+                return Err(CliError::plain(2, format!("{} passes no files (small files come attached: mail read {} --save DIR)", short(&m.id), short(&m.id))));
+            };
+            if !h.to.as_deref().is_some_and(|t| t.eq_ignore_ascii_case(&me)) {
+                return Err(CliError::plain(2, format!("{} passes files to {}, not to {me}; only its recipient takes them", short(&m.id), h.to.as_deref().unwrap_or("someone else"))));
+            }
+            let (all, ..) = crate::pass::folders(&mut c).await?;
+            let Some(f) = all.iter().find(|f| f.id == pass.folder) else {
+                return Err(CliError::plain(3, format!("the files are in a synced folder this Mac does not have ({}); the user can join it here, then run this again", first_group(&pass.folder))));
+            };
+            let end = wait.map(|s| std::time::Instant::now() + Duration::from_secs(s));
+            let got = loop {
+                match crate::pass::receive(Path::new(&f.path), &pass, Path::new(&to), force)? {
+                    crate::pass::Got::Received(paths) => break paths,
+                    crate::pass::Got::Waiting(missing) => {
+                        if crate::tags::of_agent(&m.id, &me, &msgs).iter().any(|t| t == "received") && !Path::new(&f.path).join(&pass.rel).exists() {
+                            return Err(CliError::plain(2, format!("{me} received {} already (the pass is gone)", short(&m.id))));
+                        }
+                        if end.is_some_and(|e| std::time::Instant::now() < e) {
+                            tokio::time::sleep(Duration::from_secs(2)).await;
+                            continue;
+                        }
+                        let fetch = if f.need_files > 0 { format!(", {} files still to fetch", f.need_files) } else { String::new() };
+                        return Err(CliError::plain(
+                            6,
+                            format!("{} of {} files not here yet ({}): {} is still syncing{fetch}. Run this again, or with --wait 10m", missing.len(), pass.files.len(), missing.join(", "), f.name),
+                        ));
+                    }
+                }
+            };
+            let _ = crate::tags::run(&mut c, &channel.id, &me, &m.id, &["received".to_string()], &[], false).await;
+            if g.json {
+                print_json(&json!({ "id": short(&m.id), "received": got.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(), "removed": format!("{}/{}", f.name, pass.rel) }));
+            } else {
+                for (p, file) in got.iter().zip(&pass.files) {
+                    println!("received {} ({}, sha256 {}… ok)", p.display(), crate::pass::size(file.bytes), &file.sha256[..12]);
+                }
+                println!("As {me}: removed them from {}/{}/ on both computers.", f.name, pass.rel);
+                println!("It is tagged received for you, so its sender sees that.");
+            }
+        }
+        Cmd::Passes { clean, older } => {
+            let (all, ..) = crate::pass::folders(&mut c).await?;
+            let left = crate::pass::left(&all);
+            let min = older.unwrap_or(7 * 86_400);
+            let age = |s: u64| if s >= 86_400 { format!("{} d", s / 86_400) } else if s >= 3600 { format!("{} h", s / 3600) } else { format!("{} min", s / 60) };
+            if clean {
+                let gone: Vec<&crate::pass::Left> = left.iter().filter(|l| l.age_s >= min).collect();
+                for l in &gone {
+                    std::fs::remove_dir_all(&l.path).map_err(|e| CliError::plain(1, format!("cannot remove {}: {e}", l.path.display())))?;
+                    if let Some(p) = l.path.parent() {
+                        let _ = std::fs::remove_dir(p);
+                    }
+                }
+                let bytes: u64 = gone.iter().map(|l| l.bytes).sum();
+                if g.json {
+                    print_json(&json!({ "removed": gone.iter().map(|l| json!({ "folder": l.folder, "pass": l.name, "bytes": l.bytes })).collect::<Vec<_>>(), "kept": left.len() - gone.len() }));
+                } else {
+                    println!("Removed {} pass{} ({}) older than {}; {} newer kept.", gone.len(), if gone.len() == 1 { "" } else { "es" }, crate::pass::size(bytes), age(min), left.len() - gone.len());
+                }
+            } else if g.json {
+                print_json(&json!({ "passes": left.iter().map(|l| json!({ "folder": l.folder, "pass": l.name, "bytes": l.bytes, "age_s": l.age_s,
+                    "statuses": l.statuses.iter().map(|s| json!({ "computer": s.computer, "state": s.state, "at": s.at })).collect::<Vec<_>>() })).collect::<Vec<_>>() }));
+            } else if left.is_empty() {
+                println!("No passes waiting in any {} folder.", crate::pass::DIR);
+            } else {
+                println!("Passes not received yet ({} folder):", crate::pass::DIR);
+                for l in &left {
+                    let w = crate::pass::words(&l.statuses);
+                    let state = if w.is_empty() { "not on another computer yet".to_string() } else { w };
+                    println!("  {:<16} {:<56} {:>9}  {} old; {state}", l.folder, l.name, crate::pass::size(l.bytes), age(l.age_s));
+                }
+                println!("Older than a week, they were likely never taken: {} mail passes --clean (--older 1d for sooner).", sw());
+            }
+        }
+        Cmd::Inbox { all, tag } => {
+            let everything = all || tag.is_some();
             // Checking its mail makes the project known: its inbox is there for others to find (not under a name that is
             // likely the wrong one).
             if !stranger {
@@ -1058,7 +1336,11 @@ pub async fn run(m: Mail, g: &Global) -> R {
             let fresh = given_ids(&mut c, &channel.id, &me).await?;
             let general = general_new(&mut c, &channel.id, &me).await;
             let items = inbox(&me, &msgs);
-            let shown: Vec<&Item> = items.iter().filter(|i| everything || !i.done).collect();
+            let shown: Vec<&Item> = items
+                .iter()
+                .filter(|i| everything || !i.done)
+                .filter(|i| tag.as_ref().is_none_or(|t| crate::tags::of_agent(&i.m.id, &me, &msgs).contains(t)))
+                .collect();
             let open = items.iter().filter(|i| !i.done).count();
             // New about what this project sent, and what names it: answers, updates, mentions.
             let mine: HashSet<String> = msgs.iter().filter(|m| by(m, &me)).map(|m| m.id.clone()).collect();
@@ -1090,16 +1372,32 @@ pub async fn run(m: Mail, g: &Global) -> R {
                     .collect();
                 print_json(&json!({
                     "project": me, "channel": channel.name, "open": open,
-                    "items": shown.iter().map(|i| item_obj(i, fresh.contains(&i.m.id))).collect::<Vec<_>>(),
+                    "items": shown.iter().map(|i| {
+                        let mut o = item_obj(i, fresh.contains(&i.m.id));
+                        let owned = crate::tags::of(&i.m.id, &msgs);
+                        if !owned.is_empty() {
+                            o["tags"] = owned.iter().map(|t| (t.name.clone(), Value::from(t.tags.clone()))).collect::<serde_json::Map<_, _>>().into();
+                        }
+                        o
+                    }).collect::<Vec<_>>(),
                     "news": others_v, "general_new": general, "sent_open": waiting, "waiting_on": waiting_on(&sent_list),
                 }));
             } else {
                 if shown.is_empty() {
-                    println!("No open mail for {me} in {}.", channel.name);
+                    match &tag {
+                        Some(t) => println!("No mail tagged {t} by {me} in {}.", channel.name),
+                        None => println!("No open mail for {me} in {}.", channel.name),
+                    }
                 } else {
-                    println!("Mail for {me} in {}: {open} open", channel.name);
+                    match &tag {
+                        Some(t) => println!("Mail for {me} in {} that you tagged {t}: {}", channel.name, shown.len()),
+                        None => println!("Mail for {me} in {}: {open} open", channel.name),
+                    }
                     for i in &shown {
                         println!("{}", item_line(i, fresh.contains(&i.m.id)));
+                        if let Some(t) = tags_line(&me, &i.m.id, &msgs) {
+                            println!("            {t}");
+                        }
                     }
                     println!("Commands: {} mail read|reply|done <id> --as {me}   (reply <id> --final - answers and closes; reply <id> --type question - asks back; done <id> - closes with a status)", sw());
                 }
@@ -1120,7 +1418,7 @@ pub async fn run(m: Mail, g: &Global) -> R {
                 }
             }
         }
-        Cmd::Read { id, full, save } => {
+        Cmd::Read { id, full, save, force } => {
             let msgs = read_all(&mut c, &channel.id).await?;
             let item = find(&msgs, &id)?;
             if !stranger {
@@ -1131,7 +1429,7 @@ pub async fn run(m: Mail, g: &Global) -> R {
             let replies: Vec<&ChatMessageDto> = msgs.iter().filter(|r| !is_status(r) && r.id != item.id && answers(r).is_some_and(|x| names(&x, &item.id))).collect();
             let files = attachments(&text_of(item));
             let saved = match &save {
-                Some(dir) => save_files(&files, Path::new(dir))?,
+                Some(dir) => save_files(&files, Path::new(dir), force)?,
                 None => Vec::new(),
             };
             let shown_text = |m: &ChatMessageDto| if full { text_of(m) } else { without_attachments(&text_of(m)) };
@@ -1168,6 +1466,12 @@ pub async fn run(m: Mail, g: &Global) -> R {
                 }
                 if !files.is_empty() && save.is_none() {
                     println!("({} mail read {} --save <dir> writes them out and checks each sha256; --full shows them)", sw(), short(&item.id));
+                }
+                if let Some(p) = h.as_ref().and_then(|h| h.pass.clone()).and_then(|v| crate::pass::Pass::of(&v, &text_of(item))) {
+                    println!("passed: {} file{} — take them: {} mail receive {} --to DIR", p.files.len(), if p.files.len() == 1 { "" } else { "s" }, sw(), short(&item.id));
+                }
+                if let Some(c) = h.as_ref().and_then(|h| h.commit.clone()) {
+                    println!("from the sender's repository at {}", c.replace("+changes", ", with uncommitted changes"));
                 }
                 for p in &saved {
                     println!("saved and checked: {}", p.display());
@@ -1207,6 +1511,7 @@ pub async fn run(m: Mail, g: &Global) -> R {
             let msgs = read_all(&mut c, &channel.id).await?;
             let list = sent(&me, &msgs);
             let shown: Vec<&Sent> = list.iter().filter(|s| !open || !s.done).collect();
+            let folders = if shown.iter().any(|s| s.header.as_ref().is_some_and(|h| h.pass.is_some())) { crate::pass::folders(&mut c).await.map(|f| f.0).unwrap_or_default() } else { Vec::new() };
             if g.json {
                 let v: Vec<Value> = shown
                     .iter()
@@ -1222,6 +1527,9 @@ pub async fn run(m: Mail, g: &Global) -> R {
                         }
                         if !s.replies.is_empty() {
                             o.insert("replies".into(), s.replies.iter().map(|r| Value::from(short(&r.id).to_string())).collect());
+                        }
+                        if let Some(p) = s.header.as_ref().and_then(|h| h.pass.as_deref()) {
+                            o.insert("pass".into(), Value::from(pass_state(p, s.m, &folders, &msgs)));
                         }
                         Value::Object(o)
                     })
@@ -1245,10 +1553,13 @@ pub async fn run(m: Mail, g: &Global) -> R {
                     // One line of it here; the whole of it in `mail sent <id>`.
                     if let Some(st) = s.statuses.last() {
                         let line = status_line(st).lines().next().unwrap_or_default().to_string();
-                        println!("            {}", clip(&line, 140));
+                        println!("            {} {}", short(&st.id), clip(&line, 140));
                     }
                     if !s.replies.is_empty() {
                         println!("            answers: {}", s.replies.iter().map(|r| short(&r.id)).collect::<Vec<_>>().join(", "));
+                    }
+                    if let Some(line) = s.header.as_ref().and_then(|h| h.pass.as_deref()).map(|p| pass_state(p, s.m, &folders, &msgs)) {
+                        println!("            {line}");
                     }
                 }
             }
@@ -1257,18 +1568,26 @@ pub async fn run(m: Mail, g: &Global) -> R {
             let msgs = read_all(&mut c, &channel.id).await?;
             let (_, t): (_, ChatTopicsDto) = ask(&mut c, Request::ChatTopics(ch(channel.id.clone()))).await?;
             let rows = known_projects(&t, &msgs);
+            // Which computers are reachable now (whether waiting for an answer makes sense).
+            let members: Vec<SyncMemberDto> = ask::<SyncMembersDto>(&mut c, Request::ChatMembers(ch(channel.id.clone()))).await.map(|(_, m)| m.members).unwrap_or_default();
+            let online = |computer: &str| members.iter().find(|m| m.name == computer).map(|m| if m.me { "this computer" } else if m.online { "online" } else { "offline" });
             if g.json {
                 print_json(&json!({ "channel": channel.name, "you": me, "projects": rows.iter().map(|r| json!({
-                    "name": r.name, "open": r.open, "computers": r.computers, "last_at": r.last_at, "inbox": r.inbox, "hook_on": r.hooks,
+                    "name": r.name, "open": r.open, "computers": r.computers, "online": r.computers.iter().filter_map(|c| online(c).map(|o| (c.clone(), Value::from(o)))).collect::<serde_json::Map<_, _>>(),
+                    "last_at": r.last_at, "inbox": r.inbox, "hook_on": r.hooks,
                 })).collect::<Vec<_>>() }));
             } else if rows.is_empty() {
                 println!("No projects in {} yet. A project is known once it checks its mail ({} mail inbox) or sends some.", channel.name, sw());
             } else {
                 println!("Projects in {} (you are {me}):", channel.name);
                 for r in &rows {
-                    let on = if r.computers.is_empty() { "no agent seen yet".to_string() } else { format!("on {}", r.computers.join(", ")) };
+                    let on = if r.computers.is_empty() {
+                        "no agent seen yet".to_string()
+                    } else {
+                        format!("on {}", r.computers.iter().map(|c| online(c).map_or_else(|| c.clone(), |o| format!("{c} ({o})"))).collect::<Vec<_>>().join(", "))
+                    };
                     let hook = if r.hooks.is_empty() { "no mail hook".to_string() } else { format!("mail hook on {}", r.hooks.join(", ")) };
-                    println!("  {:<24} {:>3} open   last post {:<19}  {on}; {hook}", r.name, r.open, r.last_at.map(time_s).unwrap_or_else(|| "-".into()));
+                    println!("  {:<24} {:>3} open   last active {:<19}  {on}; {hook}", r.name, r.open, r.last_at.map(time_s).unwrap_or_else(|| "-".into()));
                 }
             }
         }
@@ -1357,8 +1676,10 @@ fn news_parts(me: &str, m: &ChatMessageDto, all: &[ChatMessageDto]) -> (String, 
     let mut summary = header(m).and_then(|h| h.summary).unwrap_or_else(|| summary_of(&text_of(m)));
     // The step the project noted for itself when it sent the mail (`send --then`), with the news about it.
     if let Some(next) = about.filter(|a| by(a, me)).and_then(header).and_then(|h| h.then) {
-        text.push_str(&format!("\nYour next step (you noted it when you sent {}): {next}", about.map_or("", |a| short(&a.id))));
-        summary.push_str(&format!(" · your next step: {next}"));
+        // A final answer closed the thread already: what the step says about closing or answering is done.
+        let closed = if is_final(m) { " (the thread is closed already: nothing to send back)" } else { "" };
+        text.push_str(&format!("\nYour next step (you noted it when you sent {}): {next}{closed}", about.map_or("", |a| short(&a.id))));
+        summary.push_str(&format!(" · your next step: {next}{closed}"));
     }
     match kind_of(me, m) {
         News::Update => match header(m).and_then(|h| h.state).as_deref() {
@@ -1418,7 +1739,9 @@ pub fn record_hint(m: &ChatMessageDto, all: &[ChatMessageDto]) -> String {
 /// The record hint, only when the whole thread is settled for `me` (nothing of it open in its inbox, nothing it sent
 /// in it waiting), so it comes once, at the end.
 fn record_line(m: &ChatMessageDto, me: &str, all: &[ChatMessageDto]) -> Option<String> {
-    settled(m, me, all).then(|| record_hint(m, all))
+    // Only for a project that keeps such records (it has dev-docs/): elsewhere it is noise.
+    let keeps = project_root(&std::env::current_dir().unwrap_or_default()).join("dev-docs").is_dir();
+    (keeps && settled(m, me, all)).then(|| record_hint(m, all))
 }
 
 /// Nothing of `m`'s thread is open for `me`: its items in me's inbox are closed and what me sent in it is answered.
@@ -1431,7 +1754,8 @@ fn settled(m: &ChatMessageDto, me: &str, all: &[ChatMessageDto]) -> bool {
 fn record_after(export: &Option<String>, item: &ChatMessageDto, me: &str, all: &[ChatMessageDto]) -> R {
     match export {
         Some(dir) if settled(item, me, all) => println!("Record: {}", write_record(dir, item, all)?.display()),
-        Some(_) => println!("No record yet: part of the thread is still open (export it when it closes: {})", record_hint(item, all)),
+        // Part of it is still open: the record so far, and the same file again when it closes.
+        Some(dir) => println!("Record so far (part of the thread is still open; export again when it closes, into the same file): {}", write_record(dir, item, all)?.display()),
         None => {
             if let Some(line) = record_line(item, me, all) {
                 println!("{line}");
@@ -1586,6 +1910,9 @@ async fn close(c: &mut trs_control::client::Client, channel: &str, me: &str, ite
         state: Some(if done { "done" } else { "open" }.into()),
         summary: Some(summary_of(status)).filter(|s| !s.is_empty()),
         then: None,
+        tags: None,
+        pass: None,
+        commit: None,
     };
     let topic = project_topic(c, channel, me, Some(me)).await?.1;
     let (_, s): (_, ChatMessageDto) = ask(
@@ -1734,7 +2061,7 @@ fn print_thread(g: &Global, me: &str, t: &[&ChatMessageDto], all: &[ChatMessageD
     }
     for x in t {
         if is_status(x) {
-            println!("  {} (on {})", status_line(x), answers(x).map(|r| short(&r).to_string()).unwrap_or_default());
+            println!("  {} status, {} (on {})", short(&x.id), status_line(x), answers(x).map(|r| short(&r).to_string()).unwrap_or_default());
             continue;
         }
         let h = header(x).unwrap_or_default();
@@ -1743,9 +2070,31 @@ fn print_thread(g: &Global, me: &str, t: &[&ChatMessageDto], all: &[ChatMessageD
         let state = state_of(x).map(|w| format!("   [{w}]")).unwrap_or_default();
         println!("\n{}  {}  {} → {to}{kind}{state}", short(&x.id), time_s(x.at), from(x));
         println!("{}", without_attachments(&text_of(x)));
-        for a in attachments(&text_of(x)) {
-            println!("attached: {}", a.line());
-        }
+        files_hint(x);
+    }
+}
+
+/// The files a mail brings, and how to take them: attached (`read --save`) or passed (`receive`).
+fn files_hint(m: &ChatMessageDto) {
+    let list = attachments(&text_of(m));
+    for a in &list {
+        println!("attached: {}", a.line());
+    }
+    if !list.is_empty() {
+        println!("(save them: {} mail read {} --save DIR, each sha256 checked)", sw(), short(&m.id));
+    }
+    if let Some(c) = header(m).and_then(|h| h.commit).filter(|_| !list.is_empty() || header(m).is_some_and(|h| h.pass.is_some())) {
+        println!("from the sender's repository at {}", c.replace("+changes", ", with uncommitted changes"));
+    }
+    if let Some(p) = header(m).and_then(|h| h.pass).and_then(|v| crate::pass::Pass::of(&v, &text_of(m))) {
+        println!(
+            "passed: {} file{} ({}) — take them: {} mail receive {} --to DIR (checks them, then removes them from the pass-through folder on both computers)",
+            p.files.len(),
+            if p.files.len() == 1 { "" } else { "s" },
+            crate::pass::size(p.files.iter().map(|f| f.bytes).sum()),
+            sw(),
+            short(&m.id)
+        );
     }
 }
 
@@ -1786,9 +2135,7 @@ fn print_news(g: &Global, me: &str, m: &ChatMessageDto, all: &[ChatMessageDto]) 
             println!("{}   ({})", news_parts(me, m, all).0, m.trust);
             println!("{}", text.trim_end());
         }
-        for a in attachments(&text_of(m)) {
-            println!("attached: {}", a.line());
-        }
+        files_hint(m);
         // An item is yours to deal with: seen (its sender is told), and open until you close it.
         if kind_of(me, m) == News::Item {
             println!(
@@ -1806,7 +2153,18 @@ fn print_news(g: &Global, me: &str, m: &ChatMessageDto, all: &[ChatMessageDto]) 
 #[allow(clippy::too_many_arguments)]
 async fn watch_for(mut c: trs_control::client::Client, g: &Global, me: &str, channel: &ChatChannelDto, id: &str, of: Option<&str>, timeout: Option<Duration>, receipts: bool) -> R {
     let deadline = timeout.map(|t| tokio::time::Instant::now() + t);
-    let target = find(&read_all(&mut c, &channel.id).await?, id)?.id.clone();
+    let first = read_all(&mut c, &channel.id).await?;
+    let t = find(&first, id)?;
+    let target = t.id.clone();
+    // Whom it waits for, and whether that project is around: an agent that waits knows whether waiting makes sense.
+    let other = of.map(str::to_owned).or_else(|| if by(t, me) { t.topic_title.clone() } else { t.agent.clone() });
+    let about = match &other {
+        Some(o) => presence(&mut c, channel, o, &first).await,
+        None => String::new(),
+    };
+    if !g.json && !about.is_empty() {
+        eprintln!("Waiting for {}: {about}", other.as_deref().unwrap_or("an answer"));
+    }
     let answers_of = |all: &[ChatMessageDto]| -> Vec<ChatMessageDto> {
         all.iter()
             .filter(|m| m.id != target && !by(m, me) && answers(m).is_some_and(|r| names(&r, &target)) && of.is_none_or(|p| by(m, p)))
@@ -1839,7 +2197,10 @@ async fn watch_for(mut c: trs_control::client::Client, g: &Global, me: &str, cha
         }
         let left = deadline.map(|d| d.saturating_duration_since(tokio::time::Instant::now()));
         if left.is_some_and(|l| l.is_zero()) {
-            return Err(CliError::plain(6, format!("timed out: no answer to {} came in time", short(&target))));
+            return Err(CliError::plain(
+                6,
+                format!("timed out: no answer to {} came in time; when it comes, your next session's mail line says so (or `mail watch --for {}` again)", short(&target), short(&target)),
+            ));
         }
         let _ = c.next_event(left.unwrap_or(Duration::from_secs(60)).min(Duration::from_secs(60))).await?;
     }
@@ -2009,7 +2370,6 @@ pub fn known_projects(t: &ChatTopicsDto, msgs: &[ChatMessageDto]) -> Vec<Known> 
     for topic in &t.topics {
         let i = row(&topic.title, &mut rows);
         rows[i].inbox = true;
-        rows[i].last_at = rows[i].last_at.max(topic.last_message_at);
     }
     for m in msgs {
         let Some(a) = m.agent.as_deref() else { continue };
@@ -2026,6 +2386,7 @@ pub fn known_projects(t: &ChatTopicsDto, msgs: &[ChatMessageDto]) -> Vec<Known> 
                 rows[i].hooks.push(computer);
             }
         }
+        // Its own activity (a tag, a seen receipt too), never others' posts in its thread.
         rows[i].last_at = rows[i].last_at.max(Some(m.at));
     }
     for r in &mut rows {
@@ -2040,6 +2401,12 @@ fn is_hook_notice(m: &ChatMessageDto) -> bool {
     header(m).and_then(|h| h.kind).as_deref() == Some("hook")
 }
 
+/// Bookkeeping, news for nobody: a tag note (a seen receipt too) or a hook notice (an agent's chat watch and
+/// `--unread` leave it out).
+pub fn is_note(m: &ChatMessageDto) -> bool {
+    is_seen(m) || is_hook_notice(m)
+}
+
 /// Why posting as `me` (a name taken from the folder) is likely wrong: no project of that name is known in the
 /// channel while others are. `None`: fine.
 pub fn identity_problem(me: &str, known: &[Known], channel: &str) -> Option<String> {
@@ -2051,9 +2418,10 @@ pub fn identity_problem(me: &str, known: &[Known], channel: &str) -> Option<Stri
     let names: Vec<&str> = known.iter().map(|k| k.name.as_str()).collect();
     let like = similar(me, known);
     let hint = if like.is_empty() { String::new() } else { format!(" Did you mean --as {}?", like.join(" or --as ")) };
+    // Outside a repository the folder names no project at all.
+    let place = if folder.join(".git").exists() { format!("the folder {}", folder.display()) } else { format!("no git repository here, the folder {}", folder.display()) };
     Some(format!(
-        "You would post as {me} (the folder {}); no project of that name is known in {channel} (known: {}). Pass --as NAME, or run from your project's folder.{hint}",
-        folder.display(),
+        "You would post as {me} ({place}); no project of that name is known in {channel} (known: {}). Pass --as NAME, or run from your project's folder.{hint}",
         names.join(", ")
     ))
 }
@@ -2204,6 +2572,11 @@ mod tests {
         assert_eq!(k.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(), ["codingest", "kglite", "mcp-servers"], "one row per name, any case");
         let kg = &k[1];
         assert!(kg.inbox && kg.computers == ["Studio Mac"] && kg.last_at == Some(30));
+        // Another project's post in kglite's thread is not kglite being active.
+        let t2 = ChatTopicsDto { topics: vec![ChatTopicDto { title: "kglite".into(), last_message_at: Some(99), ..Default::default() }], ..Default::default() };
+        let mut later = msgs.clone();
+        later.push(ChatMessageDto { topic_title: Some("kglite".into()), ..post("codingest", "Laptop", 99) });
+        assert_eq!(known_projects(&t2, &later)[1].last_at, Some(30));
         assert!(!k[0].inbox && k[0].computers == ["Laptop"]);
         assert_eq!(similar("kglit", &k), ["kglite"]);
         assert_eq!(similar("codingests", &k), ["codingest"]);
@@ -2224,7 +2597,7 @@ mod tests {
         assert_eq!(k[0].hooks, ["Studio Mac"]);
         assert!(inbox("kglite", &msgs).is_empty(), "a notice is never an item");
         // Every command has help of its own.
-        for sub in ["send", "inbox", "read", "reply", "done", "sent", "watch", "check", "projects", "export", "hook"] {
+        for sub in ["send", "inbox", "read", "reply", "done", "sent", "watch", "check", "projects", "export", "hook", "tag", "receive", "passes"] {
             assert!(sub_help(sub).is_some_and(|h| h.starts_with(&format!("seedwell mail {sub}"))), "{sub}");
         }
         assert!(sub_help("frob").is_none());
@@ -2251,21 +2624,21 @@ mod tests {
     }
 
     fn mail(to: &str, kind: &str, re: Option<&str>, state: Option<&str>, text: &str) -> String {
-        format_mail(&Header { to: Some(to.into()), kind: Some(kind.into()), re: re.map(str::to_owned), state: state.map(str::to_owned), summary: None, then: None }, text)
+        format_mail(&Header { to: Some(to.into()), kind: Some(kind.into()), re: re.map(str::to_owned), state: state.map(str::to_owned), summary: None, then: None, tags: None, pass: None, commit: None }, text)
     }
 
     #[test]
     fn parses() {
         let m = parse(w("send kglite --type bug --re 0392ba7c --as mcp-servers -")).unwrap();
         assert_eq!(m.agent.as_deref(), Some("mcp-servers"));
-        assert_eq!(m.cmd, Cmd::Send { to: "kglite".into(), kind: Some("bug".into()), re: Some("0392ba7c".into()), summary: None, attach: vec![], then: None, body: "-".into() });
-        assert_eq!(parse(w("reply 0392ba7c --done shipped in 0.17.13 -")).unwrap().cmd, Cmd::Reply { id: "0392ba7c".into(), done: Some("shipped".into()), kind: None, attach: vec![], export: None, then: None, body: "in 0.17.13 -".into() });
-        assert_eq!(parse(w("inbox --all --channel Koding")).unwrap(), Mail { cmd: Cmd::Inbox { all: true }, agent: None, channel: Some("Koding".into()) });
+        assert_eq!(m.cmd, Cmd::Send { to: "kglite".into(), kind: Some("bug".into()), re: Some("0392ba7c".into()), summary: None, attach: vec![], pass: vec![], via: None, then: None, body: "-".into() });
+        assert_eq!(parse(w("reply 0392ba7c --done shipped in 0.17.13 -")).unwrap().cmd, Cmd::Reply { id: "0392ba7c".into(), done: Some("shipped".into()), kind: None, attach: vec![], pass: vec![], via: None, export: None, then: None, body: "in 0.17.13 -".into() });
+        assert_eq!(parse(w("inbox --all --channel Koding")).unwrap(), Mail { cmd: Cmd::Inbox { all: true, tag: None }, agent: None, channel: Some("Koding".into()) });
         assert_eq!(parse(w("done 0392ba7c --open working on it")).unwrap().cmd, Cmd::Done { id: "0392ba7c".into(), open: true, export: None, status: "working on it".into() });
         assert_eq!(parse(w("watch --timeout 8m")).unwrap().cmd, Cmd::Watch { timeout: Some(480), for_id: None, from: None });
         assert_eq!(parse(w("watch --for 0392ba7c --from kglite --timeout 60")).unwrap().cmd, Cmd::Watch { timeout: Some(60), for_id: Some("0392ba7c".into()), from: Some("kglite".into()) });
         assert!(matches!(parse(w("send kglite --attach a.py --attach b.txt -")).unwrap().cmd, Cmd::Send { ref attach, .. } if attach == &["a.py", "b.txt"]));
-        assert_eq!(parse(w("read 0392ba7c --save out --full")).unwrap().cmd, Cmd::Read { id: "0392ba7c".into(), full: true, save: Some("out".into()) });
+        assert_eq!(parse(w("read 0392ba7c --save out --full")).unwrap().cmd, Cmd::Read { id: "0392ba7c".into(), full: true, save: Some("out".into()), force: false });
         assert_eq!(parse(w("export --all")).unwrap().cmd, Cmd::Export { id: None, to: None });
         assert!(matches!(parse(w("reply 0392ba7c --type question -")).unwrap().cmd, Cmd::Reply { kind: Some(ref k), done: None, .. } if k == "question"));
         assert!(parse(w("reply 0392ba7c --type question --done x -")).is_err(), "a final answer asks nothing back");
@@ -2280,7 +2653,7 @@ mod tests {
 
     #[test]
     fn a_header_reads_back_and_a_plain_text_has_none() {
-        let h = Header { to: Some("kglite".into()), kind: Some("bug".into()), re: Some("0392ba7c".into()), state: None, summary: Some("Wrong\nrepo".into()), then: None };
+        let h = Header { to: Some("kglite".into()), kind: Some("bug".into()), re: Some("0392ba7c".into()), state: None, summary: Some("Wrong\nrepo".into()), then: None, tags: None, pass: None, commit: None };
         let t = format_mail(&h, "\n## Ask\n1. Fix it");
         assert_eq!(t, "---\nmail: 1\nto: kglite\ntype: bug\nre: 0392ba7c\nsummary: Wrong repo\n---\n## Ask\n1. Fix it");
         let (back, rest) = parse_header(&t).unwrap();
@@ -2427,7 +2800,7 @@ mod tests {
         assert_eq!(sha256_hex(b"abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
         assert!(fits(&"x".repeat(MAX_MAIL), true).is_ok());
         let e = fits(&"x".repeat(MAX_MAIL + 1), true).unwrap_err();
-        assert!(e.code == 2 && e.message.contains("synced folder"), "{}", e.message);
+        assert!(e.code == 2 && e.message.contains("--pass FILE"), "{}", e.message);
     }
 
     #[test]

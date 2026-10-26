@@ -511,3 +511,32 @@ fn the_grace_period_is_reported_and_now_skips_it() {
     assert!(row(&leech, &a.id).unwrap()["downloaded_total"] == 0 || row(&leech, &a.id).unwrap()["state"] != "pending");
     wait_until(30, "the pending torrent to start and finish", || row(&leech, &a.id).filter(is_done));
 }
+
+#[test]
+fn an_agent_keeps_the_mac_awake_for_as_long_as_it_says_and_lets_it_sleep_when_done() {
+    let root = tempfile::tempdir().unwrap();
+    let d = Daemon::start(root.path(), "kglite", "control");
+    let names = |v: &Value| v["leases"].as_array().unwrap().iter().map(|l| l["who"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+    let until = |v: &Value| v["leases"][0]["until_ms"].as_u64().unwrap();
+    let now = || std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+
+    // No default: the agent says how long.
+    let o = cli_text(&d.socket, &["awake", "on"]);
+    assert!(o.code != 0 && o.stderr.contains("--for"), "{}", o.stderr);
+    assert_eq!(names(&d.json(&["awake"])), Vec::<String>::new());
+
+    // The time it asked for, under the project's name. The headless daemon says it cannot hold the Mac awake itself.
+    let v = d.json(&["awake", "--for", "2h"]);
+    assert_eq!(names(&v), ["kglite"]);
+    assert!(until(&v).abs_diff(now() + 7_200_000) < 60_000, "about 2 h");
+    assert_eq!((v["setting"].as_bool(), v["host_keeps"].as_bool(), v["kept"].as_bool()), (Some(true), Some(false), Some(false)));
+    let t = cli_text(&d.socket, &["awake"]);
+    assert!(t.stdout.contains("kglite until") && t.stdout.contains("runs without the app"), "{}", t.stdout);
+
+    // Asking again replaces the time (shorter too); another agent has its own lease; `off` gives back only its own.
+    let v = d.json(&["awake", "--for", "20m"]);
+    assert!(until(&v).abs_diff(now() + 1_200_000) < 60_000, "about 20 min");
+    assert_eq!(names(&d.json(&["awake", "--for", "1h", "--as", "web"])), ["web", "kglite"], "the one that lasts longest first");
+    assert_eq!(names(&d.json(&["awake", "off"])), ["web"]);
+    assert_eq!(names(&d.json(&["awake", "--for", "0", "--as", "web"])), Vec::<String>::new());
+}

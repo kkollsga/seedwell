@@ -209,4 +209,19 @@ import Testing
         // Previews and banners use the line.
         #expect(ChatText.preview(Self.message(ChatSamples.bugMail)) == "Bug: The open-source graph serves the wrong repo after a switch")
     }
+
+    @Test func tagsAreALineOnTheirMessageByOwnerNotCards() {
+        let bug = Self.message(ChatSamples.bugMail, agent: "mcp-servers")
+        let re = String(bug.id.prefix(8)).lowercased()
+        let receipt = Self.message("---\nmail: 1\ntype: seen\nre: \(re)\n---\n", by: "D2", name: "Laptop", at: 1_800_000_060, agent: "kglite")
+        let kglite = Self.message(ChatTags.note(on: bug.id, ["seen", "backlog"]), by: "D2", name: "Laptop", at: 1_800_000_120, agent: "KGLite")
+        let mine = Self.message(ChatTags.note(on: bug.id, ["needs-triage"]), by: "D0", name: "Mac mini", at: 1_800_000_180, me: true)
+        let cleared = Self.message(ChatTags.note(on: bug.id, []), by: "D3", name: "Air", at: 1_800_000_240, agent: "codingest")
+        let (cards, tags) = ChatMail.cards([bug, receipt, kglite, mine, cleared])
+        #expect(cards.map(\.id) == [bug.id], "tag notes are no cards")
+        #expect(tags[re] == [ChatTags(owner: "kglite", isYou: false, tags: ["seen", "backlog"]), ChatTags(owner: "You", isYou: true, tags: ["needs-triage"])],
+                "one entry per owner, its newest set; an empty set is none")
+        #expect(ChatMail.parse(kglite.body)?.line == "Tagged Seen, Backlog")
+        #expect(ChatTags.label("needs-triage") == "Needs triage")
+    }
 }

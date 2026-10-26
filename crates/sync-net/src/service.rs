@@ -244,8 +244,8 @@ pub(crate) struct Inner {
     pub(crate) dial_tcp: bool,
     /// Relays and hole punching.
     pub(crate) net: crate::relay::Net,
-    /// Test switch: devices we neither dial nor accept directly (relayed sessions still work).
-    pub(crate) refuse_direct: Mutex<BTreeSet<DeviceId>>,
+    /// How long stopping a folder waits for it to let go ([`STOP_WAIT`]; shorter in tests).
+    pub(crate) stop_wait: Mutex<Duration>,
     /// The local UTC offset, when the caller gave one.
     pub(crate) utc_offset: Option<UtcOffset>,
     /// The runtime the service runs on (its synchronous methods are called from other threads too).
@@ -259,6 +259,9 @@ pub struct SyncHandle {
 }
 
 const DEVICE_KEY: &str = "device";
+
+/// How long stopping a folder waits for its runtime and its index to let go.
+const STOP_WAIT: Duration = Duration::from_secs(60);
 
 /// A folder public key from its hex form in `sync.toml`.
 pub(crate) fn public_key_from_hex(s: &str) -> Option<[u8; 32]> {
@@ -376,7 +379,7 @@ impl SyncHandle {
             utp,
             dial_tcp: opts.dial_tcp,
             net: crate::relay::Net::default(),
-            refuse_direct: Mutex::new(BTreeSet::new()),
+            stop_wait: Mutex::new(STOP_WAIT),
             utc_offset: opts.utc_offset,
             rt: tokio::runtime::Handle::current(),
         });
@@ -743,7 +746,8 @@ impl SyncHandle {
     /// files to the Trash is the app's job, which knows the user's Trash.)
     pub async fn remove_folder(&self, id: &FolderId) -> Result<PathBuf, SyncError> {
         let path = match self.stop_folder(id).await {
-            Ok(p) => p,
+            // Still open: its index file goes all the same (an open file can be removed), the rest as usual.
+            Ok((p, _)) => p,
             // In the configuration but not running (it could not open): only its entry and state go.
             Err(SyncError::NotFound) => lock(&self.inner.cfg).folder(&id.to_string()).map(|e| e.path.clone()).ok_or(SyncError::NotFound)?,
             Err(e) => return Err(e),
@@ -768,24 +772,25 @@ impl SyncHandle {
         Ok(path)
     }
 
-    async fn stop_folder(&self, id: &FolderId) -> Result<PathBuf, SyncError> {
+    /// Stops a folder's runtime and takes it out of the registry. Its root, and a flag that is up once its index is
+    /// closed: it waits (a minute at most) until nothing holds the folder any more, which on a loaded Mac takes a while.
+    async fn stop_folder(&self, id: &FolderId) -> Result<(PathBuf, Arc<AtomicBool>), SyncError> {
         let f = self.inner.ctx.registry.remove_folder(id).ok_or(SyncError::NotFound)?;
         let runner = lock(&self.inner.runners).remove(id);
+        let end = Instant::now() + *lock(&self.inner.stop_wait);
         if let Some(r) = runner {
             let _ = r.stop.send(true);
-            let _ = tokio::time::timeout(Duration::from_secs(10), r.task).await;
+            let _ = tokio::time::timeout_at(end.into(), r.task).await;
         }
         for p in self.inner.ctx.registry.peers() {
             p.folders.write().unwrap_or_else(|e| e.into_inner()).remove(id);
         }
-        // Moving or renaming opens the folder again right away: wait (10 s at most) until its index is closed.
         let (root, closed) = (f.root.clone(), f.closed.watch());
         drop(f);
-        let end = Instant::now() + Duration::from_secs(10);
         while !closed.load(Ordering::SeqCst) && Instant::now() < end {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        Ok(root)
+        Ok((root, closed))
     }
 
     /// Moves a folder on this Mac to `new_path` (a rename when only the last name changes). Sync stops for
@@ -800,7 +805,22 @@ impl SyncHandle {
         if new_path.starts_with(&entry.path) {
             return Err(invalid("a folder cannot move into itself"));
         }
-        self.stop_folder(id).await?;
+        let (_, closed) = self.stop_folder(id).await?;
+        if !closed.load(Ordering::SeqCst) {
+            // Its core still runs somewhere (a scan on a loaded Mac): moving the files under it would read as
+            // deletions. They stay, and the folder starts again where it is once its index is free.
+            let (me, entry) = (self.clone(), entry.clone());
+            tokio::spawn(async move {
+                let end = Instant::now() + Duration::from_secs(600);
+                while !closed.load(Ordering::SeqCst) && Instant::now() < end {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                if let Err(e) = me.open_folder(&entry).await {
+                    eprintln!("seedwell sync: {} could not start again after a refused move: {e}", entry.path.display());
+                }
+            });
+            return Err(invalid("the folder is still busy (a scan or a transfer); it stays where it is, try again in a moment"));
+        }
         let from = entry.path.clone();
         let to = new_path.clone();
         let moved = tokio::task::spawn_blocking(move || move_tree(&from, &to)).await.map_err(io::Error::other)?;
@@ -1515,7 +1535,7 @@ impl SyncHandle {
 
     /// Direct sessions with `device` are refused (the test switch).
     pub(crate) fn is_blocked(&self, device: DeviceId) -> bool {
-        lock(&self.inner.refuse_direct).contains(&device)
+        self.inner.ctx.registry.refuses_direct(&device)
     }
 
     /// Direct dials to `device` are not getting through: it has no known address, or each was tried and
@@ -1614,12 +1634,24 @@ impl SyncHandle {
         self.inner.ctx.registry.peers().iter().map(|p| (p.device, p.via)).collect()
     }
 
+    /// **Tests only:** something that holds the folder (as a scan in progress does) until it is dropped.
+    #[doc(hidden)]
+    pub fn test_hold_folder(&self, id: &FolderId) -> Option<Box<dyn std::any::Any + Send + Sync>> {
+        self.inner.ctx.registry.folder(id).map(|f| Box::new(f) as Box<dyn std::any::Any + Send + Sync>)
+    }
+
+    /// **Tests only:** how long stopping a folder waits for it to let go.
+    #[doc(hidden)]
+    pub fn test_stop_wait(&self, wait: Duration) {
+        *lock(&self.inner.stop_wait) = wait;
+    }
+
     /// **Tests only:** from now on, neither dial nor accept direct (TCP or uTP) sessions with `device`, and
     /// close the direct one that runs; relayed sessions still work. This is how tests make two devices on
     /// one loopback "unable to reach each other".
     #[doc(hidden)]
     pub fn test_refuse_direct(&self, device: DeviceId) {
-        lock(&self.inner.refuse_direct).insert(device);
+        self.inner.ctx.registry.refuse_direct(device);
         if let Some(p) = self.inner.ctx.registry.peer(&device)
             && p.via != Via::Relay
         {
@@ -1661,16 +1693,19 @@ impl SyncHandle {
         }
     }
 
-    /// Dials `addr` (for a known `device`, or for the folders in `candidates`).
-    fn dial(&self, addr: SocketAddr, device: Option<DeviceId>, candidates: Vec<FolderId>) {
+    /// Dials `addr` (for a known `device`, or for the folders in `candidates`), unless its backoff holds it back:
+    /// then when it may be dialed again.
+    fn dial(&self, addr: SocketAddr, device: Option<DeviceId>, candidates: Vec<FolderId>) -> Option<Instant> {
         {
             let mut book = lock(&self.inner.book);
             let now = Instant::now();
-            let (last, fails) = book.tried.get(&addr).copied().unwrap_or((now - Duration::from_secs(3600), 0));
-            let wait = Duration::from_secs(5u64 << fails.min(6));
-            if now.duration_since(last) < wait {
-                return;
+            if let Some((last, fails)) = book.tried.get(&addr).copied() {
+                let due = last + retry_after(fails);
+                if now < due {
+                    return Some(due);
+                }
             }
+            let fails = book.tried.get(&addr).map_or(0, |t| t.1);
             book.tried.insert(addr, (now, fails + 1));
         }
         let h = self.clone();
@@ -1691,7 +1726,15 @@ impl SyncHandle {
                 h.run_session(conn, candidates).await;
             }
         });
+        None
     }
+}
+
+/// How long an address waits after `fails` dials that did not connect: a second at first (a device that is just
+/// starting, a busy Mac), then longer, at most five minutes.
+fn retry_after(fails: u32) -> Duration {
+    const STEPS: [u64; 8] = [0, 1, 2, 5, 10, 30, 60, 120];
+    Duration::from_secs(STEPS.get(fails as usize).copied().unwrap_or(300))
 }
 
 /// The folders and channels shared with `device` as far as we know (it was seen as a member), and `hint`.
@@ -1910,11 +1953,14 @@ async fn access_clock(h: SyncHandle) {
 
 /// Dials every member of every folder that is not connected, and every address hint, with backoff.
 async fn dial_loop(h: SyncHandle) {
+    // The next round: when a held-back dial is due, else in 30 s (or when woken).
+    let mut next = Instant::now() + Duration::from_secs(30);
     loop {
         tokio::select! {
             _ = h.inner.wake_dialer.notified() => {}
-            _ = tokio::time::sleep(Duration::from_secs(30)) => {}
+            _ = tokio::time::sleep_until(next.into()) => {}
         }
+        next = Instant::now() + Duration::from_secs(30);
         if h.inner.stopping.load(Ordering::Relaxed) {
             return;
         }
@@ -1974,7 +2020,9 @@ async fn dial_loop(h: SyncHandle) {
                     folders.push(*c);
                 }
             }
-            h.dial(a, d, folders);
+            if let Some(due) = h.dial(a, d, folders) {
+                next = next.min(due);
+            }
         }
         // Members that direct dials do not reach: relay servers, hole punching, member relays.
         for d in wanted.keys() {

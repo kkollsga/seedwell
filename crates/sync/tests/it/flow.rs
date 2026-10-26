@@ -211,6 +211,31 @@ fn edits_and_deletes_flow_both_ways_and_the_archive_keeps_the_old_version() {
 }
 
 #[test]
+fn a_file_deleted_in_the_pass_through_folder_is_not_archived() {
+    let key = rw();
+    let (mut a, mut b) = (dev("A", 1, &key), dev("B", 2, &key));
+    let p = format!("{}/kglite/2026-10-26 08.05 from api/graph.bin", trs_sync::PASS_THROUGH);
+    let mut dir = String::new();
+    for part in ["Seedwell Pass-Through", "kglite", "2026-10-26 08.05 from api"] {
+        dir = if dir.is_empty() { part.to_string() } else { format!("{dir}/{part}") };
+        a.fs.create_dir(&dir).unwrap();
+    }
+    write_all(&a.fs, &p, b"a big file in transit").unwrap();
+    a.core.scan("").unwrap();
+    send(&a, &mut b);
+    pull(&mut b, &[&a]);
+    assert_eq!(read_all(&b.fs, &p).unwrap(), b"a big file in transit");
+    // B received it and deletes the copy: gone on A too, and no archive keeps it (the original stays with its sender).
+    b.fs.remove_file(&p).unwrap();
+    b.core.scan("").unwrap();
+    send(&b, &mut a);
+    pull(&mut a, &[&b]);
+    assert!(a.fs.lstat(&p).unwrap().is_none(), "the delete reached A");
+    assert!(a.fs.read_dir(".seedwell/Archive").map_or(true, |l| l.entries.is_empty()), "nothing archived");
+    assert!(trs_sync::in_pass_through(trs_sync::PASS_THROUGH) && !trs_sync::in_pass_through("Seedwell Pass-Through 2/x"));
+}
+
+#[test]
 fn concurrent_edits_keep_both_versions() {
     let key = rw();
     let (mut a, mut b) = (dev("A", 1, &key), dev("B", 2, &key));

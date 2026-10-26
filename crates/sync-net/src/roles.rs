@@ -148,9 +148,20 @@ pub(crate) async fn changed(ctx: &Arc<Ctx>, f: &Arc<Space>) {
     // A folder's core: who writes, and whether this device does.
     if let Some(folder) = ctx.registry.folder(&f.id) {
         let access = role.map_or(Access::Read, Role::access);
-        let set = tokio::task::spawn_blocking(move || lock(&folder.core).set_membership(&writers, access).map_err(|e| e.to_string())).await;
-        if let Ok(Err(e)) = set {
-            f.problem(format!("the folder's membership could not be applied: {e}"));
+        let f2 = folder.clone();
+        let set = tokio::task::spawn_blocking(move || {
+            let mut core = lock(&f2.core);
+            core.set_membership(&writers, access).map_err(|e| e.to_string())?;
+            Ok::<_, String>(core.index_state().map(|(_, s)| s).unwrap_or(0))
+        })
+        .await;
+        match set {
+            // Allowed to write now, its files only it had became its own: the sessions announce them.
+            Ok(Ok(seq)) => {
+                folder.local_seq.send_if_modified(|s| std::mem::replace(s, seq) != seq);
+            }
+            Ok(Err(e)) => f.problem(format!("the folder's membership could not be applied: {e}")),
+            Err(_) => {}
         }
     }
     // Admitted: the invitation has done its job.

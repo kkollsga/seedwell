@@ -84,6 +84,7 @@ fn config_strategy() -> impl Strategy<Value = Config> {
             menu_bar_show_speed: g.0[4],
             menu_bar_split_by_tracker: g.0[5],
             prevent_sleep_while_downloading: g.0[6],
+            keep_awake_for_agents: g.0[7],
             on_battery: g.1,
             play_with: "auto".to_owned(),
         };

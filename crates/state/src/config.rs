@@ -258,6 +258,8 @@ pub struct General {
     pub menu_bar_split_by_tracker: bool,
     /// Keep the Mac awake while downloading.
     pub prevent_sleep_while_downloading: bool,
+    /// Keep the Mac awake while an agent says it is working (SPEC 9A.7); the screen still locks.
+    pub keep_awake_for_agents: bool,
     /// Behaviour on battery.
     pub on_battery: OnBattery,
     /// Which app "Play" uses for videos (SPEC 7F.3): `"auto"` (IINA, VLC, Infuse, then QuickTime)
@@ -279,6 +281,7 @@ impl Default for General {
             menu_bar_show_speed: false,
             menu_bar_split_by_tracker: false,
             prevent_sleep_while_downloading: true,
+            keep_awake_for_agents: true,
             on_battery: OnBattery::Limit,
             play_with: PLAY_WITH_AUTO.to_owned(),
         }

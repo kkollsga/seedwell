@@ -368,9 +368,21 @@ pub struct Registry {
     folders: RwLock<BTreeMap<FolderId, Arc<FolderShared>>>,
     channels: RwLock<BTreeMap<FolderId, Arc<crate::chat::ChannelShared>>>,
     peers: RwLock<BTreeMap<DeviceId, Arc<PeerHandle>>>,
+    /// Test switch: devices with which direct (not relayed) sessions are refused.
+    refused: RwLock<BTreeSet<DeviceId>>,
 }
 
 impl Registry {
+    /// Refuses direct sessions with `device` from now on (the test switch), also one being set up right now.
+    pub fn refuse_direct(&self, device: DeviceId) {
+        self.refused.write().unwrap_or_else(|e| e.into_inner()).insert(device);
+    }
+
+    /// Direct sessions with `device` are refused.
+    pub fn refuses_direct(&self, device: &DeviceId) -> bool {
+        self.refused.read().unwrap_or_else(|e| e.into_inner()).contains(device)
+    }
+
     /// A channel.
     pub fn channel(&self, id: &FolderId) -> Option<Arc<crate::chat::ChannelShared>> {
         self.channels.read().unwrap_or_else(|e| e.into_inner()).get(id).cloned()
@@ -437,6 +449,9 @@ impl Registry {
     /// dialed by the device with the lower id stays, so both sides keep the same one. Returns false when
     /// `p` lost and must close.
     pub fn add_peer(&self, me: &DeviceId, p: Arc<PeerHandle>) -> bool {
+        if p.via != crate::session::Via::Relay && self.refuses_direct(&p.device) {
+            return false;
+        }
         let mut peers = self.peers.write().unwrap_or_else(|e| e.into_inner());
         if let Some(old) = peers.get(&p.device).filter(|o| !o.is_closed()) {
             let dialer_of = |h: &PeerHandle| if h.dialed { *me } else { h.device };

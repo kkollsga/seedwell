@@ -195,3 +195,48 @@ async fn when_the_folders_sharing_ends_the_others_are_cut_off_until_the_owner_ex
         d.h.shutdown().await;
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_folder_still_in_use_is_not_moved_and_starts_again_where_it_is() {
+    let a = device("Anna").await;
+    let root = tempfile::tempdir().unwrap();
+    let docs = root.path().join("Docs");
+    std::fs::create_dir(&docs).unwrap();
+    std::fs::write(docs.join("a.txt"), b"hello").unwrap();
+    let id: FolderId = a.h.add_folder(docs.clone()).await.unwrap().id.parse().unwrap();
+    // Something still holds the folder (a scan on a loaded Mac): the move waits, then leaves the files alone.
+    a.h.test_stop_wait(Duration::from_millis(300));
+    let hold = a.h.test_hold_folder(&id).unwrap();
+    let e = a.h.rename_folder(&id, "Papers").await.unwrap_err();
+    assert!(e.to_string().contains("still busy"), "{e}");
+    assert!(read(&docs.join("a.txt")).is_some() && !root.path().join("Papers").exists(), "the files stay");
+    // Let go: the folder runs again at its place, and the move then works.
+    drop(hold);
+    a.h.test_stop_wait(Duration::from_secs(60));
+    until(10, "the folder runs again", || a.h.snapshot().folders.iter().any(|f| f.id == id.to_string())).await;
+    let moved = a.h.rename_folder(&id, "Papers").await.unwrap();
+    assert!(moved.path.ends_with("/Papers"), "{}", moved.path);
+    assert_eq!(read(&root.path().join("Papers/a.txt")).as_deref(), Some(&b"hello"[..]));
+}
+
+
+/// A read-only member with a file only it has, made read & write while connected: the file reaches the others
+/// then, not at its next local change.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_member_made_read_write_while_connected_sends_the_files_only_it_had() {
+    let dirs: Vec<tempfile::TempDir> = (0..2).map(|_| tempfile::tempdir().unwrap()).collect();
+    let (a, id) = owner_with_folder(dirs[0].path()).await;
+    let b = device("Beta").await;
+    std::fs::create_dir(dirs[1].path().join("F")).unwrap();
+    std::fs::write(dirs[1].path().join("F/mine.txt"), b"only B had it").unwrap();
+    join(&b, &a.h.create_invite(&id, Role::ReadOnly, 1, 7).unwrap().link, dirs[1].path(), &id, &a).await;
+    until(30, "B has the owner's file", || read(&dirs[1].path().join("F/seed.txt")).is_some()).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(read(&dirs[0].path().join("mine.txt")).is_none(), "not while B may only read");
+
+    a.h.set_role(&id, &b.h.device_id(), Role::ReadWrite).unwrap();
+    until(20, "B's own file reaches the owner", || read(&dirs[0].path().join("mine.txt")).as_deref() == Some(&b"only B had it"[..])).await;
+    for d in [&a, &b] {
+        d.h.shutdown().await;
+    }
+}

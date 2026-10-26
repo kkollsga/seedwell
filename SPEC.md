@@ -911,7 +911,7 @@ baseline every later version must still sync with:
 - **Deletes** are versioned tombstones, kept one year. A device back after longer offers its unknown files as new;
   nothing deleted comes back silently.
 - **Archive:** a file replaced or deleted by another device is first moved to `.seedwell/Archive/` (a hard link or
-  rename, so it costs no space until the file is gone). Kept 30 days, staggered (hourly for a day, daily after), and
+  rename, so it costs no space until the file is gone; not below `Seedwell Pass-Through/`, §7G.10). Kept 30 days, staggered (hourly for a day, daily after), and
   at most 10 % of the folder's size, oldest first. Local edits are not archived.
 - **Writing safely:**
   - A file is built in `.seedwell.<name>.tmp` in its own directory, as a clone of the old version where possible,
@@ -939,8 +939,12 @@ baseline every later version must still sync with:
   - Symlinks are synced as links, never followed.
   - Roots inside iCloud Drive or `~/Library/CloudStorage` are refused, and dataless (not downloaded) files are never
     read.
-- **Watching:** FSEvents (inotify for the Linux daemon), started before a stat-only full scan at each start, 2 s of
-  quiet before a path is scanned, a jittered hourly stat-only scan as a safety net. An unchanged file (size, mtime, inode,
+- **Watching:** FSEvents (inotify for the Linux daemon), started alongside a stat-only full scan at each start, 2 s of
+  quiet before a path is scanned, a jittered hourly stat-only scan as a safety net. Starting FSEvents takes a second,
+  and many seconds when many streams start at once (many folders at login), so a folder never waits for it: it scans
+  and syncs at once, looks for changes itself every 3 s until the watcher runs, and scans once more when it does.
+  Moving or renaming a folder waits (a minute at most) until its index is closed; a folder still busy is not moved
+  (its files stay, it starts again where it is, and the user is told to try again). An unchanged file (size, mtime, inode,
   ctime) is never hashed again.
 
 ### 7G.3 Finding and reaching devices
@@ -961,6 +965,9 @@ baseline every later version must still sync with:
      carry channel sessions as they carry folder sessions.
 
   Relays carry only end-to-end-encrypted bytes. Seedwell runs no servers.
+- **Retries:** an address that did not connect is tried again after 1, 2, 5, 10, 30, 60 and 120 s, then every 5
+  minutes; the dialer wakes when the next one is due (a device that is just starting is not left waiting for a fixed
+  30 s round).
 - **Limits:** LAN unlimited by default; the Internet has its own up and down limits, separate from torrent limits.
 
 ### 7G.4 Budgets
@@ -1210,7 +1217,7 @@ without it reads mail as ordinary Markdown messages, and the protocol does not c
     then prints all of it and exits (exit 6 when the time runs out). From where it left off: nothing is missed or
     given twice, across restarts.
   - `check`: one line for a hook, only when there is something ("Seedwell mail for kglite: 2 open, 1 new —
-    seedwell mail inbox"); at session start a line even when there is nothing ("nothing open, nothing new"), so the agent knows the hook ran; with `--new` (each prompt) only when something is new; silent, and exit 0, when Seedwell is not running; at most 1 s. A recipient's inbox posts a `seen` receipt the first time it shows an item, so the sender's `sent` says "waiting on kglite, seen 00:41" or "not seen yet" (a receipt is never an item, status or news).
+    seedwell mail inbox"); at session start a line even when there is nothing ("nothing open, nothing new"), so the agent knows the hook ran; with `--new` (each prompt) only when something is new; silent, and exit 0, when Seedwell is not running; at most 1 s. A recipient's inbox posts a `seen` receipt the first time it shows an item, so the sender's `sent` says "waiting on kglite, seen 00:41" or "not seen yet" (a receipt is never an item, status or news). A receipt, like a hook notice, is no unread message (the app's and `chat list`'s counts, banners), the app shows it as "Seen by kglite 07:03" on the mail's card, and an agent's `chat read`/`watch` (`--lean`, `--unread`) leaves it out; no watch counts it for `--count`. A plain chat post in a project's thread is an item like a mail.
   - `projects`: the projects with an inbox in the channel, their open items and last activity.
   - `hook install|uninstall|show`: a Claude Code hook in the current project's `.claude/settings.local.json`
     (local, untracked): at session start `mail check` tells the agent about open mail, and on each prompt only
@@ -1268,6 +1275,67 @@ without it reads mail as ordinary Markdown messages, and the protocol does not c
   new message, then print all that are new and exit); a topic being made does not count as a message for `--count`
   or `--unread`; lean times have seconds; `@name` in a text reaches the agent named (`"mentions"` in lean output,
   and `watch --project P` shows messages that mention P); a post prints its short id.
+
+- **Who is around, and what came with a mail** (seventh blind round, 0.1.8): `mail projects` gives each project's
+  last own activity ("last active": its posts and tags, never others' posts in its thread) and whether each of its
+  computers is online, offline or this one; `watch --for` first says the same about whom it waits for (and that
+  nothing wakes a project with no session running). A mail with files carries `commit:` (the sender's git commit,
+  `+changes` for a working tree that differs), shown to the recipient. Wherever a mail is shown its files say how to
+  take them (`read --save DIR`, `--force` to replace a different file; `receive`). Thread views name every mail's id,
+  statuses too. A next step (`--then`) shown with a final answer says the thread is closed already. `--export` on a
+  thread that is still partly open writes the record so far (the same file again later); the record hint shows only
+  in a repository with `dev-docs/`. Closing an item names this project's own questions in the thread that stay open.
+
+### 7G.9 Tags (0.1.8)
+
+Agents, and the user in the app, tag messages to say what they made of them: `seen`, `actioned`, `backlog`,
+`needs-triage`, or a word of their own (lowercase, words joined by `-`, at most 32 characters, 8 per owner and
+message). **Each tag has an owner**, so with several agents in a channel everyone sees who has seen what and who put
+what in their backlog.
+
+- **A tag note** is a text message in the message's thread whose mail header (§7G.8) says `type: tag`, `re` (the
+  message, 8 characters) and `tags` (the owner's whole set, comma-separated; none: cleared). The protocol does not
+  change; devices without tags show the notes as small messages.
+- **The owner** is the note's agent name (a project, the same on every computer), else the user of the device that
+  posted it. An owner's newest note for a message is its set; nobody changes another owner's tags.
+- **Seen:** showing a mail in its recipient's inbox (and an answer to its sender) tags it `seen` for that project,
+  once; the sender's `mail sent` says "seen 07:03" from it. A seen receipt from before tags (`type: seen`) reads as the
+  tag `seen`.
+- **No news:** a tag note is never an item, a reply or a status; it counts as no unread message (the app's and `chat
+  list`'s counts, banners), and an agent's `chat read`/`watch` (`--lean`, `--unread`) leaves it out.
+- **CLI:** `seedwell mail tag <id> [TAG...] [--remove TAG]... [--clear]` and `seedwell chat tag <channel> <id> …`
+  (none given: the tags on it, by owner; `--json`: `{"id","yours","tags":[{"owner","agent","computer","tags","at"}]}`).
+  `mail inbox` lists each item's tags ("tags: yours backlog · codingest: seen"; your own `seen` goes without
+  saying), and `mail inbox --tag T` lists the mail you tagged T.
+- **App:** under each message a line of its tags by owner ("kglite: Seen, Backlog · You: Needs triage"); a tag button
+  on the card (on hover) switches your own tags (the four above) and clears them.
+
+### 7G.10 Passing files between agents (0.1.8)
+
+A file too big for a mail (16 KB in all) passes through a synced folder both computers have, and is gone once it
+is received, so passes never clog a disk.
+
+- **Where:** the synced folder that goes with the mail channel (§7G.7: one link for both), else `--via FOLDER`; this
+  Mac must be allowed to write it. At its root, `Seedwell Pass-Through/` (with a README saying what it is and that a
+  leftover is safe to delete), one folder per pass: `<to project>/<date time> from <sender>/`. The files are copied
+  (a clone on APFS) into the folder's `.seedwell/` first and moved in whole, so no half file is ever synced.
+- **The mail** (`mail send … --pass FILE`, also on `reply`; repeatable, files only) has `pass: <folder id>:<the
+  pass's folder>` in its header and says where the files are, with a block of `sha256 bytes name` lines.
+- **`mail receive <id> --to DIR [--wait S] [--force]`**, by the mail's recipient only: when every file is there with
+  its sha256, copies them into DIR (a different file of the same name is not replaced without `--force`), deletes the
+  pass's folder (the delete syncs: gone on both computers) and tags the mail `received` (§7G.9) for the sender to see.
+  Not all there yet: which are missing and that the folder is still syncing, exit 6; `--wait` waits for them.
+- **Not archived:** a file deleted below `Seedwell Pass-Through/` is not kept in the archive (§7G.2) of any device: it
+  is a copy in transit, and its original stays with its sender.
+- **Status, both ways, between any number of devices:** each device writes only its own `.status-<device>` in a
+  pass's folder (`computer:`, `state:`, `at:` lines), so no two ever write the same file. The sender's CLI writes
+  `state: sent` into the pass (the smallest file, so the pull planner brings it to the others first: they know a
+  pass is coming). Every other device's Seedwell, after each pull round, writes `receiving` while something below
+  the pass's folder is still to fetch and `arrived` once nothing is. The files sync like any other, so the sender's
+  `mail sent` says "pass: Laptop: receiving since 09:27" then "Laptop: arrived 09:28; web has not taken it yet" (or
+  "received by web, and removed") while no agent there has looked, and `mail passes` lists every device's status.
+- **Leftovers:** `mail passes` lists the passes still in this Mac's pass-through folders (to, from, size, age);
+  `--clean` removes those older than a week (`--older 1d`, `--older 0`).
 
 ## 8. User interface
 
@@ -1429,7 +1497,7 @@ Settings > Advanced > **Developer mode** (`advanced.developer_mode`, off by defa
 - `LSUIElement` app (no Dock icon). Launch at login via `SMAppService`.
 - Default handler for `.torrent` UTI and the `magnet:` URL scheme.
 - `UserNotifications`: download finished, errors. Optional "seeding goal reached".
-- `IOPMAssertion` blocks idle sleep while downloading (setting, on by default).
+- `IOPMAssertion` blocks idle sleep while downloading (setting, on by default), and while an agent works (§9A.7, setting "Keep awake while agents work", on by default). Both are `PreventUserIdleSystemSleep`: the display still sleeps and the screen still locks.
 - Logging through `os_log` (Console.app); no log files by default.
 - Distribution: curl installer with an ad-hoc signed app now, Developer ID-signed notarized DMG later (updates: §12A). Not sandboxed and not on the App Store, because the sandbox makes arbitrary download folders painful.
 - Target: Apple Silicon, macOS 15+ **[DECIDE: min version]**.
@@ -1462,7 +1530,7 @@ Agents like Claude should be able to operate Seedwell as easily as a person: "ad
 | Folder sync | `sync list\|status\|add\|join\|share [--role R] [--uses N\|unlimited] [--days N\|never] [--chat <channel>\|new]\|share-until <days>\|never [--extend]\|members\|invites\|revoke-invite\|role\|remove-device\|rename\|move\|pause\|resume\|rescan\|address\|remove\|settings` (§7G.5) · `relay [--port N]`. Read-only: `list`, `status`, `members`, `settings`; full: `share`, `share-until`, `invites`, `role`, `remove-device`, `rename`, `move`, changing `settings`, `remove --delete-files`; control: the rest |
 | Channels | `chat list\|new\|join\|share [--role R] [--uses N\|unlimited] [--days N\|never]\|members\|role\|remove-device\|share-until\|topics\|topic <title>\|send [--topic T] [--reply ID] [--as-json] -\|read [--topic T] [--since ID\|--last N]\|watch [<channel>...] [--topic T]\|dm list\|send <device> -\|read <device>\|watch\|agents off\|read\|post\|address\|rename <name>\|mute\|agents off\|read\|post\|wake <command>\|off\|leave` (§7G.7); `rename` names the channel on this Mac only, as a folder's name. Read-only: `list`, `members`, `topics`, `read`, `watch`, `dm list`, `dm read`, `dm watch` (and the channel's agent switch, or the Mac's for private messages, at read); full: `share`, `role`, `remove-device`, `share-until`, `agents`, `wake`, `dm agents`; control: the rest (`send`, `topic` and `dm send` also need the switch at post) |
 | Test | `sim ...` (§9A.6) · `daemon ...` |
-| Agents | `skill show\|install\|uninstall` · `help [command\|agents]` |
+| Agents | `skill show\|install\|uninstall` · `awake --for D\|off\|status` (§9A.7) · `help [command\|agents]` |
 
 - **Held torrents use the app's words.** A new or waiting torrent is confirmed with **Start** and dismissed with **Cancel** (§7A.6). `seedwell start` begins with every file ticked, like Start in the app (`--suggested` is the engine's preselection, `--files`/`--skip` choose); on a torrent in its start delay it starts at once. `seedwell cancel` removes the torrent and moves its `.torrent` file to the Trash (the engine's `held_source`, verified by info-hash); `--keep-file` keeps it, like ⇧-Cancel. Magnet links and web addresses have no file.
 - **Selecting torrents.** Every command that acts on torrents takes `<torrent>`: an id prefix (6+ hex characters), part of the name (title or raw name, any case), or filters `--all`, `--tracker X`, `--state S`, `--category C`. A term that matches several torrents is an error (exit 3) that lists the candidates; nothing is guessed. `pause --all` / `resume --all` use the engine's one-pass call.
@@ -1487,7 +1555,7 @@ Agents like Claude should be able to operate Seedwell as easily as a person: "ad
 
 ### 9A.4 The embedded skill and the command-line tool
 - `seedwell skill show` prints `SKILL.md` (frontmatter `name: seedwell` and a description that says when to use it, the rules of thumb, recipes) and `REFERENCE.md` (every command, usage, examples, JSON shape, units, exit codes). Both are generated from `trs_cli::help::COMMANDS`, the table the parser tests walk, so a command in the skill exists and every example in it parses (tests).
-- `seedwell skill install [--dir PATH] [--force]` writes the two files to `~/.claude/skills/seedwell/` (or `--dir`), **only when the user runs it**; a file that differs from what Seedwell wrote earlier is only replaced after asking (or with `--force`). `seedwell skill uninstall` removes them.
+- `seedwell skill install [--dir PATH] [--force]` writes the two files to `~/.claude/skills/seedwell/` (or `--dir`), and a second skill, `seedwell-agents` (`SKILL.md`: mail between projects, tags, passing files, chat; §7G.7–7G.10), beside it, **only when the user runs it**; two skills so an agent loads only what its task needs (a torrent task never loads the mail guide, an agent working with other projects never loads the torrent reference). A file that differs from what Seedwell wrote earlier is only replaced after asking (or with `--force`). `seedwell skill uninstall` removes both.
 - **Settings → Agents → Command line:** "Copy CLI Path"; "Install Command-Line Tool…" (shown only while no `seedwell` is on the PATH or in `/usr/local/bin`, `~/.local/bin`; asks which of the two folders, then makes a symlink to the copy in the app, never silently, never overwriting a link that points elsewhere); "Install Skill for Claude Code" / "Update Skill" / "Remove Skill" (run the bundled CLI; ask before replacing changed files). Buttons are normal buttons, right-aligned, each with hover text, and nothing is written until one is pressed.
 
 ### 9A.5 Debugging
@@ -1507,6 +1575,13 @@ For testing without real swarms. `sim add <kind>` (movie, season-pack, album, au
 - **Safety.** Needs Developer mode (`seedwell dev on`) or `--yes-i-know`; needs permission full (it sets the save path). Torrents carry the comment "Seedwell simulated torrent"; the downloaded data goes to a sim folder under the temp directory (`$TMPDIR/seedwell-sim/<hash of the socket>/simN/data`), never Downloads or a finished location. One small host process (`seedwell sim host`, started by the first `sim add`) serves the swarm; it ends when the app or daemon it serves is gone (checked every 2 s), on `sim clear`, and never listens on a non-loopback address. Memory is bounded: a piece request is answered with one block computed on the spot.
 - **Loopback trackers.** The engine refuses trackers on 127.0.0.1 for every torrent (§7C), Developer mode or not. Only torrents that `sim add` marks may announce there: the CLI calls the internal control method `sim_allow` (permission full, and it fails unless Developer mode is on) with the info-hash *before* adding, the engine keeps the marks in memory, and `sim clear` takes them back. A `.torrent` file's content can never set the mark. `seedwell daemon --allow-loopback-trackers` and the QA launch flag keep their global effect for tests. Without the mark a sim torrent still downloads through the direct peers given at add time, and its tracker row shows the refusal.
 - Not covered: `disk-full` (needs a disk image; use a small volume by hand).
+
+### 9A.7 Keeping the Mac awake while agents work (`seedwell awake`)
+An agent left working while the user is away must not stop because the Mac fell asleep. Seedwell keeps the Mac from **idle sleep** while an agent says it works; it never keeps the display on and never delays the lock screen (the user's screen locks as it always does, the agent goes on behind it).
+- **The agent decides.** There is no default and no automatic lease: the agent estimates how long its work needs and asks for that long, renews it if the work runs longer, and gives it back when done. A lease it forgets ends at its time.
+- **Leases.** `awake.set` (permission control; not in the activity log: it changes nothing Seedwell keeps) takes or renews a lease: a key (`agent:<name>`), what is working (the agent's name) and how long, at most a day; without a time it gives the lease back. Taking it again replaces the time. `awake.status` (read_only) lists the live leases, the setting, whether this Seedwell can hold the Mac awake (the app can; a headless daemon cannot, and says so) and whether it does now. Leases live in memory: a restart of Seedwell drops them.
+- **CLI.** `seedwell awake --for 40m` under the agent's name (`--as`, else the project); `seedwell awake off`; `seedwell awake` says who keeps the Mac awake until when, and why not when the setting is off or no app runs. `seedwell awake on` (no time) is an error that asks for one.
+- **App.** While a lease is live and the setting is on, the app holds an assertion named "Seedwell: kglite working" (`pmset -g assertions` shows it), looked at with every menu refresh (at least every 30 s). A lease that is over, given back or dropped lets go.
 
 ## 10. Persistence
 `~/Library/Application Support/Seedwell/`

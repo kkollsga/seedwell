@@ -1214,6 +1214,10 @@ impl Backend for MockBackend {
             .collect()
     }
 
+    fn agents_awake(&self) -> Option<crate::types::AgentsAwake> {
+        None
+    }
+
     fn agent_activity(&self, _limit: u32) -> Vec<AgentActivity> {
         let t = now() * 1000;
         [

@@ -201,6 +201,22 @@ async fn the_wake_up_command_gets_each_message_from_others_on_stdin() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_tag_seen_receipt_or_hook_notice_is_no_unread_message() {
+    let (a, b) = (device("Anna").await, device("Bo").await);
+    let id: FolderId = a.h.chat_new("Koding").await.unwrap().id.parse().unwrap();
+    join(&b.h, &a.h, &id, Role::ReadWrite, addr(&a)).await;
+    let t = b.h.chat_new_topic(&id, "kglite", None).await.unwrap();
+    for body in ["---\nmail: 1\ntype: seen\nre: 0392ba7c\n---\n", "---\nmail: 1\ntype: hook\nstate: on\n---\nhook on", "---\nmail: 1\ntype: tag\nre: 0392ba7c\ntags: backlog\n---\n", "---\nmail: 1\ntype: bug\n---\nreal work"] {
+        b.h.chat_send(&id, Some(&t.id), MessageKind::Text, body, None, Some("kglite")).await.unwrap();
+    }
+    until(20, "A has all four", || a.h.chat_topics(&id).is_ok_and(|v| v.len() == 1 && v[0].messages == 4)).await;
+    assert_eq!(a.h.chat_topics(&id).unwrap()[0].unread, 1, "only the bug is news");
+    assert_eq!(a.h.channel_status(&id).unwrap().unread, 1);
+    a.h.shutdown().await;
+    b.h.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn topics_hold_their_own_messages_and_unread_counts() {
     let (a, b, c) = (device("Anna").await, device("Bo").await, device("Cy").await);
     let id: FolderId = a.h.chat_new("Family").await.unwrap().id.parse().unwrap();

@@ -121,7 +121,11 @@ import SwiftUI
                         ChatMessageRow(message: SyncMessage(id: "S\(n)", channelId: "C", authorDevice: "D\(n)", authorName: s.computer, isMe: false,
                                                             agent: s.agent, atS: 1_792_953_675 + UInt64(n) * 60, replyTo: nil, topic: nil,
                                                             kind: .text, body: s.body),
-                                       header: true, reply: nil, onReply: nil)
+                                       header: true, reply: nil,
+                                       tags: s.body == ChatSamples.bugMail
+                                           ? [ChatTags(owner: "kglite", isYou: false, tags: ["seen", "backlog"]), ChatTags(owner: "You", isYou: true, tags: ["needs-triage"])]
+                                           : [],
+                                       onReply: nil)
                     }
                 }
                 .padding(.horizontal, 22).padding(.vertical, 12) }

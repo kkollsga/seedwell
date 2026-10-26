@@ -406,11 +406,12 @@ impl Store {
         self.msgs.iter().filter(move |(_, s)| s.msg.kind != MessageKind::Topic && self.topic_of(&s.msg) == topic)
     }
 
-    /// Messages of others under `topic` after `read`, and the newest one's key.
+    /// Messages of others under `topic` after `read`, and the newest one's key. A mail's note (a seen receipt, a
+    /// hook notice) is news for nobody: it counts neither way.
     fn unread_in(&self, topic: Option<[u8; 16]>, read: Key, me: &[u8; 32]) -> (u32, Option<Key>) {
         let mut n = 0;
         let mut last = None;
-        for (k, s) in self.shown_in(topic) {
+        for (k, s) in self.shown_in(topic).filter(|(_, s)| !is_note(&s.msg)) {
             last = Some(*k);
             if *k > read && s.msg.author != *me {
                 n += 1;
@@ -418,6 +419,16 @@ impl Store {
         }
         (n, last)
     }
+}
+
+/// A mail's bookkeeping (§7G.8, §7G.9): a text whose `---` header has `mail:` and `type: tag`, `seen` or `hook`.
+pub fn is_note(m: &ChatMessage) -> bool {
+    let Some(t) = m.text().filter(|_| m.kind == MessageKind::Text) else { return false };
+    let Some(head) = t.strip_prefix("---\n").or_else(|| t.strip_prefix("---\r\n")).and_then(|r| r.split("\n---").next()) else { return false };
+    let field = |name: &str| {
+        head.lines().find_map(|l| l.split_once(':').filter(|(k, _)| k.trim().eq_ignore_ascii_case(name)).map(|(_, v)| v.trim().to_ascii_lowercase()))
+    };
+    field("mail").is_some() && matches!(field("type").as_deref(), Some("tag" | "seen" | "hook"))
 }
 
 // --------------------------------------------------------------------------------------------- service API

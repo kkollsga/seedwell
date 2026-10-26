@@ -96,6 +96,7 @@ async fn permission_matrix_every_method_every_level() {
             Method::StopStream => json!({"token": "nope"}),
             Method::SettingsSet => json!({"changes": {"transfers.max_active_downloads": 4}}),
             Method::WaitFor => json!({"ids": ["bbbbbb"], "timeout_secs": 1}),
+            Method::AwakeSet => json!({"key": "matrix", "secs": 60}),
             Method::SyncStatus
             | Method::SyncShare
             | Method::SyncPause
@@ -158,6 +159,28 @@ async fn permission_matrix_every_method_every_level() {
             }
         }
     }
+}
+
+#[tokio::test]
+async fn an_agent_keeps_the_mac_awake_until_it_gives_the_lease_back() {
+    let rig = Rig::new(Permission::Control).await;
+    let mut c = rig.client("seedwell-cli").await;
+    let a: AwakeDto = serde_json::from_value(call(&mut c, "awake.set", json!({"key": "agent:kglite", "who": "kglite", "secs": 600})).await.unwrap()).unwrap();
+    assert_eq!(a.leases.len(), 1);
+    assert_eq!((a.leases[0].who.as_str(), a.leases[0].client.as_str()), ("kglite", "seedwell-cli"));
+    assert!(a.setting, "on by default");
+    // A headless server cannot hold a power assertion, and says so.
+    assert!(!a.host_keeps && !a.kept);
+    assert_eq!(rig.server.awake().leases().len(), 1, "the host sees it");
+    let e = call(&mut c, "awake.set", json!({"key": "", "secs": 60})).await.unwrap_err();
+    assert_eq!(e.code, ErrorCode::InvalidParams);
+    let a: AwakeDto = serde_json::from_value(call(&mut c, "awake.set", json!({"key": "agent:kglite"})).await.unwrap()).unwrap();
+    assert!(a.leases.is_empty(), "given back");
+    // Read-only agents may look, not take one.
+    let rig = Rig::new(Permission::ReadOnly).await;
+    let mut c = rig.client("x").await;
+    assert!(call(&mut c, "awake.status", json!({})).await.is_ok());
+    assert_eq!(call(&mut c, "awake.set", json!({"key": "k", "secs": 60})).await.unwrap_err().code, ErrorCode::PermissionDenied);
 }
 
 #[tokio::test]

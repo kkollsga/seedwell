@@ -102,6 +102,8 @@ pub struct GeneralSettings {
     pub menu_bar_show_speed: bool,
     pub menu_bar_split_by_tracker: bool,
     pub prevent_sleep_while_downloading: bool,
+    /// Keep the Mac awake while an agent says it is working (SPEC §9A.7).
+    pub keep_awake_for_agents: bool,
     pub on_battery: OnBatteryMode,
     /// "Play videos with": `"auto"` or a player's bundle identifier (SPEC §7F.3).
     pub play_with: String,
@@ -327,6 +329,7 @@ pub(crate) fn from_config(c: &Config) -> AppSettings {
             menu_bar_show_speed: c.general.menu_bar_show_speed,
             menu_bar_split_by_tracker: c.general.menu_bar_split_by_tracker,
             prevent_sleep_while_downloading: c.general.prevent_sleep_while_downloading,
+            keep_awake_for_agents: c.general.keep_awake_for_agents,
             on_battery: match c.general.on_battery {
                 OnBattery::KeepGoing => OnBatteryMode::KeepGoing,
                 OnBattery::Limit => OnBatteryMode::Limit,
@@ -444,6 +447,7 @@ pub(crate) fn apply_to_config(s: &AppSettings, c: &mut Config) {
     c.general.menu_bar_show_speed = g.menu_bar_show_speed;
     c.general.menu_bar_split_by_tracker = g.menu_bar_split_by_tracker;
     c.general.prevent_sleep_while_downloading = g.prevent_sleep_while_downloading;
+    c.general.keep_awake_for_agents = g.keep_awake_for_agents;
     c.general.play_with = g.play_with.clone();
     c.general.on_battery = match g.on_battery {
         OnBatteryMode::KeepGoing => OnBattery::KeepGoing,

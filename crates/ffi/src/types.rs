@@ -615,6 +615,15 @@ pub struct AgentActivity {
     pub outcome: String,
 }
 
+/// Agents that asked to keep the Mac awake while they work (SPEC §9A.7).
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
+pub struct AgentsAwake {
+    /// What is working ("kglite"), the one that lasts longest first, each once.
+    pub who: Vec<String>,
+    /// Unix milliseconds: when the last lease is over unless renewed.
+    pub until_ms: u64,
+}
+
 /// What a watch folder found that the user may want to add (SPEC §7A.1 "Ask first").
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct AddRequestInfo {

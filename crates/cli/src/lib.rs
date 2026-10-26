@@ -5,8 +5,10 @@
 #![warn(missing_docs)]
 
 pub mod args;
+pub mod awake;
 pub mod chat;
 pub mod mail;
+pub mod pass;
 pub mod cmd;
 pub mod commands;
 #[cfg(feature = "daemon")]
@@ -17,6 +19,7 @@ pub mod render;
 pub mod select;
 pub mod sim;
 pub mod skill;
+pub mod tags;
 pub mod sync;
 
 use std::path::PathBuf;

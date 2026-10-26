@@ -535,6 +535,12 @@ impl Core {
         self.backend.agent_activity(limit)
     }
 
+    /// Agents that asked to keep the Mac awake while they work (`None`: none). Cheap; the app holds a
+    /// power assertion while this is `Some` and "Keep awake while agents work" is on.
+    pub fn agents_awake(&self) -> Option<AgentsAwake> {
+        self.backend.agents_awake()
+    }
+
     /// Path of the control socket, or `None` when agents cannot connect.
     pub fn control_socket(&self) -> Option<String> {
         self.backend.control_socket()

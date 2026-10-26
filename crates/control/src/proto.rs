@@ -823,6 +823,20 @@ pub struct ActivityParams {
     pub limit: Option<u32>,
 }
 
+/// `awake.set`: keep the Mac awake while an agent works (SPEC 9A.7), or let it sleep again.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AwakeSetParams {
+    /// Which lease (`agent:<name>`). Taking it again replaces the time.
+    pub key: String,
+    /// What is working, as people read it ("kglite").
+    #[serde(default)]
+    pub who: Option<String>,
+    /// How long, in seconds (at most a day). Absent or 0: give the lease back.
+    #[serde(default)]
+    pub secs: Option<u64>,
+}
+
 /// `tracker_log`: the newest developer-mode tracker log entries (developer mode must be on to
 /// have any). Passkeys and other secrets are masked in the file itself.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -1407,6 +1421,10 @@ methods! {
     TrackerLog(TrackerLogParams) = "tracker_log", ReadOnly, false;
     /// The agent activity log.
     Activity(ActivityParams) = "activity", Full, false;
+    /// Keep the Mac awake while an agent works, or let it sleep again (not in the activity log: it changes nothing Seedwell keeps).
+    AwakeSet(AwakeSetParams) = "awake.set", Control, false;
+    /// Who keeps the Mac awake, until when, and whether this Seedwell can.
+    AwakeStatus(Empty) = "awake.status", ReadOnly, false;
     /// The structure and preselection of a torrent that is held (or running).
     Choice(ChoiceParams) = "choice", ReadOnly, false;
     /// Answer a held torrent's chooser: choose the files; it starts.

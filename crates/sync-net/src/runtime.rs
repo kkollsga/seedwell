@@ -27,6 +27,9 @@ use crate::status::FolderState;
 
 /// Full scan this often (± a quarter, so many folders do not scan at once).
 const FULL_SCAN: Duration = Duration::from_secs(3600);
+/// How often a folder looks for changes itself while its watcher is still starting (FSEvents can take many seconds
+/// when many streams start at once).
+const WATCHER_POLL: Duration = Duration::from_secs(3);
 /// After a pull that is waiting for data or failed, try again after this (doubling to 5 minutes).
 const RETRY_FIRST: Duration = Duration::from_secs(10);
 const RETRY_MAX: Duration = Duration::from_secs(300);
@@ -57,9 +60,17 @@ fn wire(rel: &Path) -> Option<String> {
 pub async fn run(ctx: Arc<Ctx>, f: Arc<FolderShared>, mut stop: watch::Receiver<bool>) {
     let (tx, rx) = mpsc::channel::<RawEvent>(1024);
     let mut events = Some(rx);
-    if !start_watcher(&f.root, tx) {
-        lock(&f.live).issues.push((String::new(), "changes are noticed only by the hourly scan (the watcher did not start)".into()));
-    }
+    // Starting FSEvents takes a second, and far longer when many streams start at once (a Mac with many folders, at
+    // login): it starts on its own thread (holding only the path) while the folder scans and syncs, and once it runs
+    // one more scan catches what changed before it was watching. Not on the blocking pool: shutting the runtime down
+    // (quitting) waits for that pool, and must not wait for FSEvents.
+    let root = f.root.clone();
+    let (started, watcher_rx) = tokio::sync::oneshot::channel();
+    let _ = std::thread::Builder::new().name("seedwell-sync-watch-start".into()).spawn(move || {
+        let _ = started.send(start_watcher(&root, tx));
+    });
+    let mut watcher = Some(watcher_rx);
+    let mut catch_up = false;
     let mut agg = Aggregator::new();
     let started = Instant::now();
     let ms = |at: Instant| at.duration_since(started).as_millis() as u64;
@@ -67,8 +78,15 @@ pub async fn run(ctx: Arc<Ctx>, f: Arc<FolderShared>, mut stop: watch::Receiver<
     let mut next_full = Instant::now() + jitter(FULL_SCAN, seed);
     let mut retry: Option<(Instant, Duration)> = None;
 
+    // A stop while starting (a folder renamed right after it was added) is noticed between the steps.
     scan(&ctx, &f, "").await;
+    if *stop.borrow() {
+        return;
+    }
     pull(&ctx, &f, &mut retry).await;
+    if *stop.borrow() {
+        return;
+    }
     housekeeping(&f).await;
 
     loop {
@@ -76,9 +94,19 @@ pub async fn run(ctx: Arc<Ctx>, f: Arc<FolderShared>, mut stop: watch::Receiver<
             break;
         }
         let deadline = agg.next_deadline().map(|d| started + Duration::from_millis(d));
-        let wake = [Some(next_full), deadline, retry.map(|(t, _)| t)].into_iter().flatten().min().unwrap_or(next_full);
+        // Until the watcher runs, the folder looks for changes itself every few seconds.
+        let poll = watcher.is_some().then(|| Instant::now() + WATCHER_POLL);
+        let wake = [Some(next_full), deadline, retry.map(|(t, _)| t), poll].into_iter().flatten().min().unwrap_or(next_full);
         tokio::select! {
             _ = stop.changed() => {}
+            w = async { watcher.as_mut().expect("guarded").await }, if watcher.is_some() => {
+                watcher = None;
+                if w.unwrap_or(false) {
+                    catch_up = true;
+                } else {
+                    lock(&f.live).issues.push((String::new(), "changes are noticed only by the hourly scan (the watcher did not start)".into()));
+                }
+            }
             ev = next_event(&mut events), if events.is_some() => match ev {
                 Some(ev) => agg.push(ev, ms(Instant::now())),
                 // The watcher thread ended (an error): the hourly scan still keeps the folder right.
@@ -100,6 +128,9 @@ pub async fn run(ctx: Arc<Ctx>, f: Arc<FolderShared>, mut stop: watch::Receiver<
         }
         let now = Instant::now();
         let mut changed = false;
+        if std::mem::take(&mut catch_up) || watcher.is_some() {
+            changed |= scan(&ctx, &f, "").await;
+        }
         for batch in agg.poll(ms(now)) {
             let scopes: Vec<String> = match batch {
                 Batch::All => vec![String::new()],
@@ -216,6 +247,10 @@ async fn pull(ctx: &Arc<Ctx>, f: &Arc<FolderShared>, retry: &mut Option<(Instant
                 let r = core.pull(&source, &names, PULL_WINDOW)?;
                 let done = r.done;
                 merge(&mut total, r);
+                // After each round, so the other devices hear "receiving" while big files still come.
+                if done > 0 {
+                    pass_status(&ctx2, &f2.root, &core);
+                }
                 lock(&f2.live).pending = sample_pending(&core);
                 if done == 0 {
                     break;
@@ -259,6 +294,34 @@ async fn pull(ctx: &Arc<Ctx>, f: &Arc<FolderShared>, retry: &mut Option<(Instant
         }
     }
     settle(f).await;
+}
+
+/// This device's status in each pass folder (SPEC §7G.10), `.status-<this device>`: `receiving` while something
+/// below it is still to fetch, `arrived` when nothing is. Each device writes only its own file, so any number of
+/// them report without ever writing the same one; it syncs, so the sender (whose CLI wrote `state: sent`) and every
+/// other device see how far each one is.
+fn pass_status(ctx: &Ctx, root: &Path, core: &FolderCore) {
+    let me = ctx.me.to_string();
+    let me = me.split('-').next().unwrap_or_default();
+    let Ok(projects) = std::fs::read_dir(root.join(trs_sync::PASS_THROUGH)) else { return };
+    for to in projects.flatten().filter(|e| e.path().is_dir()) {
+        for pass in std::fs::read_dir(to.path()).into_iter().flatten().flatten().filter(|e| e.path().is_dir()) {
+            let file = pass.path().join(format!(".status-{me}"));
+            let now = std::fs::read_to_string(&file).unwrap_or_default();
+            let state = now.lines().find_map(|l| l.strip_prefix("state: ")).unwrap_or_default().trim().to_string();
+            if state == "sent" || state == "arrived" {
+                continue;
+            }
+            // Below the pass's own folder (`after` it with the slash, so a sibling such as "… 2/" never counts).
+            let rel = format!("{}/{}/{}/", trs_sync::PASS_THROUGH, to.file_name().to_string_lossy(), pass.file_name().to_string_lossy());
+            let missing = core.store().needs(Some(&rel), 1).map_or(true, |n| n.first().is_some_and(|(p, _)| p.starts_with(&rel)));
+            let want = if missing { "receiving" } else { "arrived" };
+            if want != state {
+                let text = format!("computer: {}\nstate: {want}\nat: {}\n", lock(&ctx.device_name), crate::roles::now_s());
+                let _ = std::fs::write(&file, text);
+            }
+        }
+    }
 }
 
 fn merge(total: &mut PullReport, r: PullReport) {

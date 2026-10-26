@@ -7,7 +7,7 @@ use trs_control::proto::{AtGoalParam, FilePriorityParam, KindFilter, ListFilter,
 
 use crate::args::{Opts, Usage, parse_duration, parse_index_list, parse_rate};
 use crate::select::{Selection, parse_state};
-use crate::{chat, debug, mail, sim, skill, sync};
+use crate::{awake, chat, debug, mail, sim, skill, sync};
 
 /// What `start` does with the files.
 #[derive(Clone, Debug, PartialEq)]
@@ -204,6 +204,8 @@ pub enum Cmd {
     Chat(chat::Cmd),
     /// `mail …` (agents of different projects)
     Mail(mail::Mail),
+    /// `awake …` (keep the Mac awake while an agent works)
+    Awake(awake::Awake),
     /// `relay [--port N] [--bind ADDR] [--key-file PATH]`
     Relay(sync::RelayArgs),
     /// `help [x]`
@@ -533,6 +535,7 @@ pub fn parse(args: Vec<String>) -> Result<Cmd, Usage> {
         "sync" => Cmd::Sync(sync::parse(rest)?),
         "chat" => Cmd::Chat(chat::parse(rest)?),
         "mail" => Cmd::Mail(mail::parse(rest)?),
+        "awake" => Cmd::Awake(awake::parse(rest)?),
         "relay" => Cmd::Relay(sync::parse_relay(rest)?),
         "help" => {
             // Options an agent passes everywhere (`--as kglite`, `--channel C`) change nothing here.

@@ -12,10 +12,19 @@ struct ChatMail: Equatable {
     var state: String?
     /// The Markdown after the header.
     var body: String
+    /// A tag note's whole set, comma-separated (SPEC 7G.9).
+    var tags: String? = nil
 
     var isStatus: Bool { type?.lowercased() == "status" }
     /// Bookkeeping, shown as a small line: "seen" (a recipient saw a mail), "hook" (a project's mail hook changed).
-    var isNote: Bool { ["seen", "hook"].contains(type?.lowercased() ?? "") }
+    var isNote: Bool { ["seen", "hook", "tag"].contains(type?.lowercased() ?? "") }
+    /// Tags on the message `re` names (a seen receipt of mail before tags counts as the tag `seen`): shown on that
+    /// message's card, not as a card of its own.
+    var isTag: Bool { ["seen", "tag"].contains(type?.lowercased() ?? "") }
+    var tagList: [String] {
+        if type?.lowercased() == "seen" { return ["seen"] }
+        return (tags ?? "").split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces).lowercased() }.filter { !$0.isEmpty }
+    }
 
     /// The mail in a message's text; `nil` for a plain message.
     static func parse(_ text: String) -> ChatMail? {
@@ -35,7 +44,7 @@ struct ChatMail: Equatable {
         var after = rest[end.upperBound...]
         if let nl = after.firstIndex(of: "\n") { after = after[after.index(after: nl)...] } else { after = "" }
         return ChatMail(to: fields["to"], type: fields["type"], re: fields["re"], summary: fields["summary"], state: fields["state"],
-                        body: String(after).trimmingCharacters(in: .whitespacesAndNewlines))
+                        body: String(after).trimmingCharacters(in: .whitespacesAndNewlines), tags: fields["tags"])
     }
 
     /// "Bug", "Heads-up", "Request" for the chip.
@@ -46,7 +55,8 @@ struct ChatMail: Equatable {
 
     /// One line for previews, banners and reply quotes: "Bug: Recipe tool returns the wrong catalogue".
     var line: String {
-        if isNote { return type?.lowercased() == "seen" ? "Seen" : (summary ?? "Mail hook") }
+        if isTag { return "Tagged " + tagList.map(ChatTags.label).joined(separator: ", ") }
+        if isNote { return summary ?? "Mail hook" }
         if isStatus { return state?.lowercased() == "open" ? "Progress: \(ChatMarkdown.plain(body))" : "Done: \(ChatMarkdown.plain(body))" }
         let what = summary ?? ChatMarkdown.plain(body)
         return typeLabel.map { "\($0): \(what)" } ?? what
@@ -97,5 +107,49 @@ struct ChatMailHeader: View {
         case "reply": .teal
         default: .secondary
         }
+    }
+}
+
+/// One owner's tags on a message (SPEC 7G.9): an agent by its name, or the user of a device ("You" on this Mac).
+struct ChatTags: Equatable {
+    var owner: String
+    var isYou: Bool
+    var tags: [String]
+
+    /// The tags the menu offers.
+    static let known = ["seen", "actioned", "backlog", "needs-triage"]
+
+    /// "Needs triage" for `needs-triage`.
+    static func label(_ tag: String) -> String {
+        let words = tag.replacingOccurrences(of: "-", with: " ")
+        return words.prefix(1).uppercased() + words.dropFirst()
+    }
+
+    /// The text of a tag note: the whole set `tags` of whoever posts it, on the message `id`.
+    static func note(on id: String, _ tags: [String]) -> String {
+        "---\nmail: 1\ntype: tag\nre: \(id.prefix(8).lowercased())\ntags: \(tags.joined(separator: ", "))\n---\n"
+    }
+}
+
+extension ChatMail {
+    /// The messages that are cards (a tag note is not one), and the tags on each message by its short id (the first
+    /// 8 characters, as `re` gives it): each owner's newest note is its set, owners without tags left out.
+    static func cards(_ ms: [SyncMessage]) -> (cards: [SyncMessage], tags: [String: [ChatTags]]) {
+        var cards: [SyncMessage] = []
+        var tags: [String: [ChatTags]] = [:]
+        for m in ms {
+            guard m.kind == .text, let mail = parse(m.body), mail.isTag else { cards.append(m); continue }
+            guard let re = mail.re?.lowercased(), re.count >= 8 else { continue }
+            let key = String(re.prefix(8))
+            let owner = m.agent ?? (m.isMe ? "You" : ChatText.computer(m))
+            let isYou = m.agent == nil && m.isMe
+            var list = tags[key] ?? []
+            let i = list.firstIndex { $0.isYou == isYou && $0.owner.lowercased() == owner.lowercased() }
+            // A receipt adds `seen`; a tag note is the owner's whole set.
+            let set = mail.type?.lowercased() == "seen" ? Array(Set((i.map { list[$0].tags } ?? []) + ["seen"])).sorted() : mail.tagList
+            if let i { list[i].tags = set } else { list.append(ChatTags(owner: owner, isYou: isYou, tags: set)) }
+            tags[key] = list
+        }
+        return (cards, tags.mapValues { $0.filter { !$0.tags.isEmpty } })
     }
 }

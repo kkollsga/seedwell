@@ -453,7 +453,7 @@ impl Puller<'_> {
 
     /// Moves the current file at `p` into the archive (a delete) or links it there (a replace).
     fn archive_current(&self, p: &str, replace: bool) -> io::Result<()> {
-        if !self.archive {
+        if !self.archive || crate::in_pass_through(p) {
             if !replace {
                 self.fs.remove_file(p)?;
             }

@@ -974,6 +974,34 @@ pub struct EventsDto {
     pub oldest_available: u64,
 }
 
+/// One lease of `awake.status`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct AwakeLeaseDto {
+    /// The lease (`agent:<name>`).
+    pub key: String,
+    /// What is working.
+    pub who: String,
+    /// Client name from `hello`.
+    pub client: String,
+    /// Unix milliseconds: taken first.
+    pub since_ms: u64,
+    /// Unix milliseconds: over unless renewed.
+    pub until_ms: u64,
+}
+
+/// `awake.status` and `awake.set` result.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct AwakeDto {
+    /// The live leases, the one that lasts longest first.
+    pub leases: Vec<AwakeLeaseDto>,
+    /// The setting "Keep awake while agents work" (`general.keep_awake_for_agents`).
+    pub setting: bool,
+    /// This Seedwell can hold a power assertion (the app; a headless daemon cannot).
+    pub host_keeps: bool,
+    /// The Mac is kept from idle sleep now: a lease is live, the setting is on and the host can.
+    pub kept: bool,
+}
+
 /// One entry of the agent activity log.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ActivityDto {

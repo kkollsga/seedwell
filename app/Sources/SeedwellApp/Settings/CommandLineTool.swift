@@ -60,8 +60,10 @@ enum CommandLineTool {
     /// `~/.claude/skills/seedwell`.
     static func skillFolder(home: String) -> String { home + "/.claude/skills/seedwell" }
 
+    /// Both skills are there: `seedwell` and, beside it, `seedwell-agents` (since 0.1.8; one installed earlier has
+    /// only the first, and Install brings the second).
     static func skillInstalled(home: String, fm: FileManager = .default) -> Bool {
-        fm.fileExists(atPath: skillFolder(home: home) + "/SKILL.md")
+        [skillFolder(home: home), skillFolder(home: home) + "-agents"].allSatisfy { fm.fileExists(atPath: $0 + "/SKILL.md") }
     }
 
     struct Result: Equatable { var status: Int32; var out: String; var err: String }

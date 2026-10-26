@@ -19,6 +19,15 @@
 #![warn(missing_docs)]
 
 pub mod archive;
+
+/// The folder agents pass files through (SPEC §7G.10): a file there is a copy in transit whose original stays with
+/// its sender, so one deleted there (received, or cleaned up) is not archived.
+pub const PASS_THROUGH: &str = "Seedwell Pass-Through";
+
+/// `path` (wire form) is in the pass-through folder.
+pub fn in_pass_through(path: &str) -> bool {
+    path.strip_prefix(PASS_THROUGH).is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+}
 pub mod chunk;
 pub mod clock;
 pub mod conflict;

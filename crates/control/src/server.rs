@@ -20,6 +20,7 @@ use tokio::sync::{Semaphore, broadcast, watch};
 use tokio::task::JoinSet;
 
 use crate::activity::{ActivityLog, describe};
+use crate::awake::Awake;
 use crate::backend::{AddArgs, AddSource, Backend};
 use crate::confirm::{Confirmations, Plan, SyncPlan, TokenError};
 use crate::limits::{LineRead, RateLimiter, read_line};
@@ -55,6 +56,9 @@ pub struct ServerOptions {
     pub server_name: String,
     /// Consecutive unparseable lines before the connection is dropped.
     pub max_strikes: u32,
+    /// The host holds a power assertion while an agent's `awake.set` lease is live (the app does; a
+    /// headless daemon cannot, and says so).
+    pub keeps_awake: bool,
 }
 
 impl Default for ServerOptions {
@@ -69,6 +73,7 @@ impl Default for ServerOptions {
             write_timeout: Duration::from_secs(10),
             server_name: format!("seedwell {}", env!("CARGO_PKG_VERSION")),
             max_strikes: 8,
+            keeps_awake: false,
         }
     }
 }
@@ -163,6 +168,7 @@ struct Ctx<B> {
     perm: PermissionSource,
     opts: ServerOptions,
     activity: ActivityLog,
+    awake: Awake,
     confirms: Mutex<Confirmations>,
     /// `sync.remove` plans (their tokens never remove a torrent, and the other way round).
     #[cfg_attr(not(feature = "sync"), allow(dead_code))]
@@ -179,6 +185,7 @@ pub struct ServerHandle {
     ino: u64,
     warnings: Vec<String>,
     activity: ActivityLog,
+    awake: Awake,
     stop: watch::Sender<bool>,
     task: Option<tokio::task::JoinHandle<()>>,
     connections: Arc<dyn Fn() -> usize + Send + Sync>,
@@ -194,6 +201,11 @@ impl ServerHandle {
     /// The agent activity log (the app shows it in Settings -> Agents).
     pub fn activity(&self) -> &ActivityLog {
         &self.activity
+    }
+
+    /// Agents' leases on keeping the Mac awake (the app holds a power assertion while one is live).
+    pub fn awake(&self) -> &Awake {
+        &self.awake
     }
 
     /// Notes from startup (for example a loosely protected parent directory).
@@ -244,11 +256,13 @@ pub async fn serve_backend<B: Backend>(
     let bound = bind_secure(&path).await?;
     let (stop_tx, stop_rx) = watch::channel(false);
     let activity = ActivityLog::new();
+    let awake = Awake::new();
     let ctx = Arc::new(Ctx {
         backend,
         state,
         perm,
         activity: activity.clone(),
+        awake: awake.clone(),
         confirms: Mutex::new(Confirmations::new(opts.confirm_ttl)),
         sync_confirms: Mutex::new(Confirmations::new(opts.confirm_ttl)),
         hub: EventHub::new(),
@@ -288,6 +302,7 @@ pub async fn serve_backend<B: Backend>(
         ino: bound.ino,
         warnings: bound.warnings,
         activity,
+        awake,
         stop: stop_tx,
         task: Some(task),
         connections: Arc::new(move || c1.connections.load(Ordering::Relaxed)),
@@ -584,6 +599,14 @@ fn expand_save_path(p: &Option<String>, level: Permission) -> Result<Option<Path
     Ok(Some(path))
 }
 
+async fn awake_status<B: Backend>(ctx: &Arc<Ctx<B>>) -> Result<Reply, ApiError> {
+    let st = ctx.state.clone();
+    let setting = blocking(move || st.config().general.keep_awake_for_agents).await?;
+    let leases = ctx.awake.leases();
+    let host_keeps = ctx.opts.keeps_awake;
+    reply(&AwakeDto { kept: setting && host_keeps && !leases.is_empty(), leases, setting, host_keeps })
+}
+
 async fn dispatch<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &mut Conn, req: Request) -> Result<Reply, ApiError> {
     let b = &ctx.backend;
     match req {
@@ -692,6 +715,24 @@ async fn dispatch<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &mut Conn, req: Request) 
             reply(&ctx.hub.since(p.since, p.limit.unwrap_or(100).min(500) as usize, kinds.as_ref()))
         }
         Request::WaitFor(p) => wait_for(ctx, p).await,
+        Request::AwakeSet(p) => {
+            let key = p.key.trim();
+            if key.is_empty() || key.chars().count() > 128 || key.chars().any(char::is_control) {
+                return Err(ApiError::params("`key` must be 1-128 characters without control characters"));
+            }
+            match p.secs.filter(|&s| s > 0) {
+                Some(secs) => {
+                    let client = conn.client.clone().unwrap_or_default();
+                    let who = p.who.as_deref().map(str::trim).filter(|w| !w.is_empty()).unwrap_or(&client);
+                    ctx.awake.set(key, &clip(&scrub_urls(who), 64), &client, Duration::from_secs(secs));
+                }
+                None => {
+                    ctx.awake.release(key);
+                }
+            }
+            awake_status(ctx).await
+        }
+        Request::AwakeStatus(_) => awake_status(ctx).await,
         Request::TrackerLog(p) => {
             let st = ctx.state.clone();
             let out = blocking(move || {

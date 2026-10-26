@@ -133,6 +133,9 @@ struct GeneralTab: View {
             }
             SettingsGroup(title: "Power") {
                 SettingsRow(label: "Prevent sleep while downloading") { sw($model.app.general.preventSleepWhileDownloading) }
+                SettingsRow(label: "Keep awake while agents work", hint: "The screen still locks. Agents ask with seedwell awake") {
+                    sw($model.app.general.keepAwakeForAgents)
+                }
                 SettingsRow(label: "On battery", hint: "Applies the Limit Speed settings, or pauses downloads") {
                     Picker("", selection: $model.app.general.onBattery) {
                         Text("Keep going").tag(OnBatteryMode.keepGoing)
