@@ -487,6 +487,27 @@ pub fn reachability_dto(r: &trs_engine::api::Reachability) -> ReachabilityDto {
     })
 }
 
+/// The same for folder sync's port (the engine maps it beside its own). Sync does not count incoming
+/// connections, so the router's answer is all there is: "Opened on the router", "Checking", "Closed" or
+/// "Not known".
+pub fn sync_reachability_dto(r: &trs_engine::api::Reachability, sync_port: u16) -> ReachabilityDto {
+    let pm = r.portmap.clone().unwrap_or_default();
+    let mut d = crate::ops::reachability(ReachabilityDto {
+        port: sync_port,
+        mapping: r.mapping_enabled,
+        method: pm.method.map(str::to_owned),
+        external_port: pm.extra_external_tcp_port,
+        behind_cgnat: pm.behind_cgnat,
+        router_unavailable: pm.unavailable,
+        ..Default::default()
+    });
+    if d.state == "mapped" {
+        // Not the torrent wording: no device is waited for.
+        d.summary = d.summary.replace("; no peer from the Internet has connected in yet", ": your devices can reach this Mac");
+    }
+    d
+}
+
 impl Backend for EngineBackend {
     async fn snapshot(&self) -> Result<SnapshotDto, ApiError> {
         let s = self.engine.snapshot().await.map_err(err)?;
@@ -772,6 +793,10 @@ impl Backend for EngineBackend {
             ("peers_banned", d.peers_banned),
             ("incoming_accepted", d.incoming_accepted),
             ("incoming_refused", d.incoming_refused),
+            ("refused_busy", d.refused_busy),
+            ("refused_handshake", d.refused_handshake),
+            ("refused_torrent", d.refused_torrent),
+            ("refused_peer", d.refused_peer),
             ("rechecks", d.rechecks),
             ("utp_accepted", d.utp_accepted),
             ("utp_dialed", d.utp_dialed),
@@ -879,6 +904,12 @@ impl Backend for EngineBackend {
         self.sync.get()
     }
 
+    #[cfg(feature = "sync")]
+    fn sync_move_port(&self, port: u16) -> impl Future<Output = Result<u16, crate::sync::PortChange>> + Send {
+        let slot = self.sync.clone();
+        async move { slot.move_port(port).await }
+    }
+
     fn subscribe(&self) -> broadcast::Receiver<EventDto> {
         self.events.subscribe()
     }
@@ -964,5 +995,24 @@ fn start_for_app_inner(rt: &tokio::runtime::Handle, backend: EngineBackend, cfg:
 impl StoreRef for trs_engine::StateStore {
     fn store(&self) -> &trs_state::Store {
         self.state()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use trs_engine::api::{PortMapStatus, Reachability};
+
+    #[test]
+    fn the_sync_port_is_judged_by_the_routers_answer_for_it_alone() {
+        let pm = PortMapStatus { method: Some("upnp"), external_tcp_port: Some(55252), extra_external_tcp_port: Some(55799), ..Default::default() };
+        let r = Reachability { port: 55252, mapping_enabled: true, portmap: Some(pm), incoming: 10_000, last_incoming_at: None };
+        let d = sync_reachability_dto(&r, 55799);
+        assert_eq!(d.state, "mapped", "incoming torrent peers say nothing about the sync port");
+        assert_eq!(d.summary, "Opened on the router with UPnP: your devices can reach this Mac");
+        let asking = Reachability { portmap: Some(PortMapStatus { method: Some("upnp"), ..Default::default() }), ..r.clone() };
+        assert_eq!(sync_reachability_dto(&asking, 55799).summary, "Asking the router to open port 55799");
+        let off = Reachability { mapping_enabled: false, ..r };
+        assert_eq!(sync_reachability_dto(&off, 55799).state, "unknown");
     }
 }

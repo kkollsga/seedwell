@@ -163,6 +163,11 @@ async fn a_member_relays_a_channel_between_devices_that_cannot_reach_each_other(
     c.h.chat_leave(&id).unwrap();
     a.h.chat_send(&id, None, trs_sync_net::chat::MessageKind::Text, "over the relay", None, None).await.unwrap();
     until(30, "B has A's message", || texts(&b, &id) == ["over the relay"]).await;
+    // A private message never goes over a relayed session (SPEC §7G.7 *Direct messages*).
+    assert!(!a.h.test_direct_knows(&bi), "no key over a relay");
+    let e = a.h.chat_send_direct(&bi, trs_sync_net::chat::MessageKind::Text, "just us", None, None).await.unwrap_err().to_string();
+    assert!(e.contains("not connected to this Mac directly"), "{e}");
+    assert_eq!(b.h.test_direct_held() + c.h.test_direct_held(), 0);
     for d in [&a, &b, &c] {
         d.h.shutdown().await;
     }

@@ -12,13 +12,14 @@ pub fn process_stats() -> ProcessDto {
     let pid = std::process::id();
     let mut out = ProcessDto { pid, ..Default::default() };
     let ps = |args: &[&str]| -> Option<String> {
-        let o = Command::new("ps").args(args).arg("-p").arg(pid.to_string()).output().ok()?;
+        // The C locale: in a Norwegian one `ps` writes "0,0".
+        let o = Command::new("ps").env("LC_ALL", "C").args(args).arg("-p").arg(pid.to_string()).output().ok()?;
         o.status.success().then(|| String::from_utf8_lossy(&o.stdout).into_owned())
     };
     if let Some(t) = ps(&["-o", "rss=", "-o", "%cpu="]) {
         let mut it = t.split_whitespace();
         out.rss_bytes = it.next().and_then(|v| v.parse::<u64>().ok()).map(|kb| kb * 1024);
-        out.cpu_percent = it.next().and_then(|v| v.parse::<f64>().ok());
+        out.cpu_percent = it.next().and_then(decimal);
     }
     out.threads = if cfg!(target_os = "macos") {
         // One line per thread plus a header.
@@ -30,6 +31,11 @@ pub fn process_stats() -> ProcessDto {
     // The directory handle used for the listing is itself one descriptor.
     out.open_fds = std::fs::read_dir(fd_dir).ok().map(|d| d.count().saturating_sub(1) as u32);
     out
+}
+
+/// "12.5", or "12,5" from a `ps` that kept a locale's decimal comma.
+fn decimal(v: &str) -> Option<f64> {
+    v.replace(',', ".").parse().ok()
 }
 
 /// Why the next announce is when it is.
@@ -144,6 +150,13 @@ pub fn redact_addr(addr: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_process_is_measured_whatever_the_locale() {
+        assert_eq!((decimal("12.5"), decimal("0,0"), decimal("x")), (Some(12.5), Some(0.0), None));
+        let p = process_stats();
+        assert!(p.cpu_percent.is_some() && p.rss_bytes.is_some_and(|b| b > 0), "{p:?}");
+    }
 
     #[test]
     fn addresses_are_masked_on_request() {

@@ -26,7 +26,8 @@ import os
     private var signature = ""
     private var rowItems: [String: NSMenuItem] = [:]
     private var rows: [String: TransferRow] = [:]
-    private var sharingItem: NSMenuItem?
+    /// The Sharing line: a row of its own, so the rate sits at the right edge as plain text.
+    private var sharingRow: MenuCheckRow?
     /// The Folder Sync line and its submenu (SPEC 8.2 item 5).
     private var syncItem: NSMenuItem?
     private(set) lazy var menuSync = MenuSync(actions: commands.sync)
@@ -168,6 +169,7 @@ import os
 
     private var hoverRows: [any HoverRow] {
         var all: [any HoverRow] = rowItems.values.compactMap { $0.view as? MenuTorrentRow }
+        if let r = sharingRow { all.append(r) }
         all += menuFiles.hoverRows
         all += footerRow?.hoverRows ?? []
         return all
@@ -240,7 +242,9 @@ import os
 
     /// QA: the titles of the open menu, headers first ("Downloading|name|name||Recent|…").
     var qaTitles: String {
-        menu.items.filter { !$0.isHidden && ($0.view == nil || $0.view is MenuTorrentRow) }.map { $0.isSeparatorItem ? "-" : $0.attributedTitle?.string ?? $0.title }.joined(separator: "|")
+        menu.items.filter { !$0.isHidden && ($0.view == nil || $0.view is MenuTorrentRow || $0.view is MenuCheckRow) }
+            .map { ($0.view as? MenuCheckRow).map { "\($0.content.title) \($0.content.trailing)" } ?? ($0.isSeparatorItem ? "-" : $0.attributedTitle?.string ?? $0.title) }
+            .joined(separator: "|")
     }
 
     /// QA: the menu items (top level).
@@ -275,9 +279,10 @@ import os
         return [d, q, r, a, c].map { $0.joined(separator: ",") }.joined(separator: "|") + "|" + Self.syncSignature(core.syncSnapshot())
     }
 
-    /// The Folder Sync line is in the menu once sync runs or has folders. Its folders are the submenu's own
-    /// business (`MenuSync` rebuilds them in place), so only the line's presence is part of the menu's structure.
-    nonisolated static func showsSync(_ s: SyncSnapshot) -> Bool { s.running || !s.folders.isEmpty || s.problem != nil }
+    /// The Folder Sync line is in the menu only while there are synced folders (the user, 2026-10-26: with none it
+    /// is not shown; folders are added in the window). Its folders are the submenu's own business (`MenuSync`
+    /// rebuilds them in place), so only the line's presence is part of the menu's structure.
+    nonisolated static func showsSync(_ s: SyncSnapshot) -> Bool { !s.folders.isEmpty }
     nonisolated static func syncSignature(_ s: SyncSnapshot) -> String { showsSync(s) ? "sync" : "" }
 
     private func rebuild(_ s: Snapshot) {
@@ -286,6 +291,7 @@ import os
         let layout = Self.layout(s, arrivals: commands.arrivals.arrivals)
         syncItem?.submenu = nil  // the submenu is reused: it may hang under one item only
         syncItem = nil
+        sharingRow = nil
         menu.removeAllItems()
         rowItems = [:]
         rows = [:]
@@ -321,12 +327,15 @@ import os
         }
         if s.sharingTotal > 0 {
             if !menu.items.isEmpty { menu.addItem(.separator()) }
-            // A click opens Sharing in the window. No submenu (user, 2026-10-14): the line is the summary.
-            let item = ActionItem(title: "Sharing") { [commands] in commands.showMain(.sharing, nil) }
-            item.image = NSImage(systemSymbolName: "arrow.up", accessibilityDescription: nil)
-            sharingItem = item
+            // A click opens Sharing in the window. No submenu (user, 2026-10-14): the line is the summary, with the
+            // combined upload rate at its right edge (user, 2026-10-26).
+            let item = NSMenuItem()
+            let row = MenuCheckRow(content: Self.sharingContent(s), width: 220) { [commands, weak item] in
+                MenuSync.closeThen(item?.menu) { commands.showMain(.sharing, nil) }
+            }
+            item.view = row
+            sharingRow = row
             menu.addItem(item)
-            update(s)
         }
         let sync = core.syncSnapshot()
         if Self.showsSync(sync) {
@@ -383,7 +392,7 @@ import os
         for r in s.recent {
             rowItems[r.id]?.subtitle = Self.recentSubtitle(r)
         }
-        if let item = sharingItem { item.attributedTitle = Self.sharingTitle(s) }
+        sharingRow?.content = Self.sharingContent(s)
         if let item = syncItem {
             let line = SyncText.summary(core.syncSnapshot())
             if item.subtitle != line { item.subtitle = line }
@@ -392,20 +401,18 @@ import os
         refreshHover()
     }
 
-    /// "Sharing 2 torrents · 14 KB/s" (the rate only while uploading), plus "· 1 error" in the secondary colour (only problems that need the user count). No badge.
-    private static func sharingTitle(_ s: Snapshot) -> NSAttributedString {
-        var text = "Sharing \(Fmt.count(s.sharingTotal, "torrent"))"
-        if s.online, s.upRate > 0 { text += " · \(Fmt.rate(s.upRate))" }
-        let t = NSMutableAttributedString(string: text, attributes: [.font: NSFont.menuFont(ofSize: 0)])
-        if !s.online {
-            t.append(NSAttributedString(string: " · Offline", attributes: [.foregroundColor: NSColor.secondaryLabelColor, .font: NSFont.menuFont(ofSize: 0)]))
-        }
-        if s.errorCount > 0 {
-            t.append(NSAttributedString(string: " · \(s.errorCount) error\(s.errorCount == 1 ? "" : "s")",
-                                        attributes: [.foregroundColor: NSColor.secondaryLabelColor, .font: NSFont.menuFont(ofSize: 0)]))
-        }
-        return t
+    /// "Sharing 2 torrents", plus "· Offline" and "· 1 error" (only problems that need the user count), and the
+    /// combined upload rate at the right edge.
+    static func sharingContent(_ s: Snapshot) -> MenuCheckRow.Content {
+        var title = "Sharing \(Fmt.count(s.sharingTotal, "torrent"))"
+        if !s.online { title += " · Offline" }
+        if s.errorCount > 0 { title += " · \(s.errorCount) error\(s.errorCount == 1 ? "" : "s")" }
+        return MenuCheckRow.Content(title: title, trailing: sharingRate(s), rateActive: s.online && s.upRate > 0)
     }
+
+    /// The combined upload rate at the right edge of the Sharing line (the user, 2026-10-26): "↑ 14 KB/s", or a
+    /// bare "–" while nothing uploads.
+    static func sharingRate(_ s: Snapshot) -> String { Fmt.liveRate(s.online ? s.upRate : 0, "↑") }
 
     private static func recentSubtitle(_ r: TransferRow) -> String {
         [r.category.label, r.finishedAt.map { Fmt.ago($0, short: true) }].compactMap { $0 }.joined(separator: " · ")

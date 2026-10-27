@@ -62,6 +62,7 @@ pub enum Cmd {
     DmWatch { devices: Vec<String>, count: Option<u64> },
     /// `chat dm agents off|read|post`
     DmAgents { access: String },
+    DmDelete { device: String },
     /// `chat address <channel> <host:port>`
     Address { channel: String, address: String },
     /// `chat rename <channel> <name>`
@@ -87,7 +88,7 @@ pub const USAGE: &str = "usage: seedwell chat list | new <name> | join <link>|- 
 
 const READ_USAGE: &str = "read <channel> [--project P | --topic T] [--since ID | [--unread] [--last N]] [--as NAME] [--lean]";
 
-const DM_USAGE: &str = "usage: seedwell chat dm list | send <device> [--as NAME] [--reply ID] [--as-json] -|<text> | read <device> [--before ID] [--last N] | watch [<device>...] [--count N] | agents off|read|post";
+const DM_USAGE: &str = "usage: seedwell chat dm list | send <device> [--as NAME] [--reply ID] [--as-json] -|<text> | read <device> [--before ID] [--last N] | watch [<device>...] [--count N] | agents off|read|post | delete <device>";
 
 fn access(a: String, what: &str) -> Result<String, Usage> {
     if !matches!(a.as_str(), "off" | "read" | "post" | "read_post") {
@@ -128,6 +129,7 @@ fn parse_dm(mut it: impl Iterator<Item = String>) -> Result<Cmd, Usage> {
             Cmd::DmWatch { devices: o.finish()?, count }
         }
         "agents" => Cmd::DmAgents { access: access(args(o, 1, "dm agents off|read|post")?.remove(0), "agents")? },
+        "delete" | "rm" => Cmd::DmDelete { device: args(o, 1, "dm delete <device>")?.remove(0) },
         other => return Err(Usage(format!("unknown chat dm command `{other}`; {DM_USAGE}"))),
     })
 }
@@ -506,6 +508,10 @@ pub async fn run(cmd: Cmd, g: &Global) -> R {
             let (raw, l): (_, ChatMessagesDto) = ask(&mut c, Request::ChatDmRead(ChatDmParams { device, before, last })).await?;
             show(g, &raw, || if l.messages.is_empty() { format!("No private messages with {}.", if l.name.is_empty() { first_group(&l.id) } else { &l.name }) } else { messages(&l) });
         }
+        Cmd::DmDelete { device } => {
+            let (raw, _): (_, serde_json::Value) = ask(&mut c, Request::ChatDmDelete(ChatDmDeleteParams { device: device.clone() })).await?;
+            show(g, &raw, || format!("Deleted the private conversation with {device} on this Mac (the other device keeps its copy)."));
+        }
         Cmd::DmAgents { access } => {
             let (raw, _): (_, serde_json::Value) = ask(&mut c, Request::ChatDmSetAgents(ChatDmAgentsParams { agents: access.clone() })).await?;
             show(g, &raw, || format!("Agents on this Mac may {} with private messages.", agents(raw["agents"].as_str().unwrap_or(&access))));
@@ -519,7 +525,9 @@ pub async fn run(cmd: Cmd, g: &Global) -> R {
                 let mut ids = BTreeSet::new();
                 for q in &devices {
                     let lower = q.to_lowercase();
-                    let hit = l.conversations.iter().find(|d| d.device_id == *q || d.name.to_lowercase() == lower || (q.len() >= 4 && d.device_id.starts_with(q.as_str())));
+                    let hit = l.conversations.iter().find(|d| {
+                        d.device_id == *q || d.name.to_lowercase() == lower || (!d.user.is_empty() && d.user.to_lowercase() == lower) || (q.len() >= 4 && d.device_id.starts_with(q.as_str()))
+                    });
                     // A device not written with yet: taken as given (its id).
                     ids.insert(hit.map_or_else(|| q.clone(), |d| d.device_id.clone()));
                 }
@@ -806,11 +814,10 @@ impl Out<'_> {
 /// A message in few words, for an agent's context: a short id (`--reply` and `--since` take it), local time, who
 /// and where, then the text; what is empty or usual is left out (`kind` text, General, no reply).
 pub fn lean_message(m: &ChatMessageDto, with_channel: bool) -> Value {
-    let computer = if m.author_name.is_empty() { first_group(&m.author_device).to_string() } else { m.author_name.clone() };
     let from = match (&m.agent, m.me) {
-        (Some(a), _) => format!("{a} (agent) on {computer}"),
-        (None, true) => format!("the user on {computer}"),
-        (None, false) => computer,
+        (Some(a), _) => format!("{a} (agent) on {}", computer(m)),
+        (None, true) => format!("the user on {}", computer(m)),
+        (None, false) => person(m),
     };
     let mut o = serde_json::Map::new();
     o.insert("id".into(), Value::from(&m.id[..m.id.len().min(8)]));
@@ -879,6 +886,21 @@ pub fn mentions(text: &str) -> Vec<String> {
 
 pub(crate) fn first_group(id: &str) -> &str {
     id.split('-').next().unwrap_or(id)
+}
+
+/// A device's name with its user's before it: "Kari (Studio iMac)", or the name alone when it gave none.
+pub(crate) fn with_user(user: &str, name: &str) -> String {
+    if user.is_empty() { name.to_string() } else { format!("{user} ({name})") }
+}
+
+/// The device that wrote a message, by its name (its id's first group when it was never met).
+pub(crate) fn computer(m: &ChatMessageDto) -> String {
+    if m.author_name.is_empty() { first_group(&m.author_device).to_string() } else { m.author_name.clone() }
+}
+
+/// The person who wrote a message (not an agent): its user and device.
+pub(crate) fn person(m: &ChatMessageDto) -> String {
+    with_user(&m.author_user, &computer(m))
 }
 
 fn role(r: &str) -> &'static str {
@@ -981,11 +1003,10 @@ fn parse_offset(s: &str) -> Option<i32> {
 /// One message, for people: who (an agent's name and the computer it is on), where, the text. A text of several
 /// lines (Markdown, say) goes under its header line, indented.
 pub fn message(m: &ChatMessageDto) -> String {
-    let computer = if m.author_name.is_empty() { first_group(&m.author_device).to_string() } else { m.author_name.clone() };
     let who = match (&m.agent, m.me) {
-        (Some(a), _) => format!("{a} (agent) on {computer}"),
-        (None, true) => format!("{computer} (you)"),
-        (None, false) => computer,
+        (Some(a), _) => format!("{a} (agent) on {}", computer(m)),
+        (None, true) => format!("{} (you)", person(m)),
+        (None, false) => person(m),
     };
     let place = match (&m.topic_title, m.direct) {
         (_, true) => format!(" (private, {})", m.peer_device.as_deref().map_or("?", first_group)),
@@ -1043,7 +1064,7 @@ pub fn directs(l: &ChatDirectsDto) -> String {
             d.unread,
             if d.online { "yes" } else { "no" },
             d.last_message_at.map(time).unwrap_or_else(|| "-".into()),
-            if d.name.is_empty() { "?" } else { &d.name }
+            with_user(&d.user, if d.name.is_empty() { "?" } else { &d.name })
         ));
     }
     o.trim_end().to_owned()
@@ -1095,6 +1116,7 @@ mod tests {
         assert_eq!(parse(w("dm read QKZ4 --last 3")).unwrap(), Cmd::DmRead { device: "QKZ4".into(), before: None, last: Some(3) });
         assert_eq!(parse(w("dm watch --count 1")).unwrap(), Cmd::DmWatch { devices: vec![], count: Some(1) });
         assert_eq!(parse(w("dm agents read")).unwrap(), Cmd::DmAgents { access: "read".into() });
+        assert_eq!(parse(w("dm delete QKZ4")).unwrap(), Cmd::DmDelete { device: "QKZ4".into() });
         assert_eq!(parse(w("mute Plans")).unwrap(), Cmd::Mute { channel: "Plans".into(), on: true });
         assert_eq!(parse(w("rename Plans Trips")).unwrap(), Cmd::Rename { channel: "Plans".into(), name: "Trips".into() });
         assert!(matches!(parse(w("read Plans --unread --lean --as Seedwell")).unwrap(), Cmd::Read { unread: true, lean: true, agent: Some(ref a), .. } if a == "Seedwell"));
@@ -1137,6 +1159,11 @@ mod tests {
         assert_eq!(message(&pm), format!("[{}] Bo (private, QKZ4XNA): hi   #abababab", time(m.at)));
         let mine = ChatMessageDto { me: true, agent: None, author_name: "Studio iMac".into(), ..m.clone() };
         assert_eq!(message(&mine), format!("[{}] Studio iMac (you): hi   #abababab", time(m.at)));
+        // A user who gave a name: it comes first, with the device's; an agent keeps its own.
+        let kari = ChatMessageDto { agent: None, author_user: "Kari".into(), ..m.clone() };
+        assert_eq!(message(&kari), format!("[{}] Kari (Bo): hi   #abababab", time(m.at)));
+        assert_eq!(lean_message(&kari, false)["from"], "Kari (Bo)");
+        assert_eq!(message(&ChatMessageDto { author_user: "Kari".into(), ..m.clone() }), format!("[{}] claude (agent) on Bo: hi   #abababab", time(m.at)));
         let md = ChatMessageDto { body: "## Done\n\n1. built\n2. tested".into(), ..t };
         assert_eq!(message(&md), format!("[{}] claude (agent) on Bo › Lørdag:   #abababab\n  ## Done\n  \n  1. built\n  2. tested", time(m.at)));
     }

@@ -24,9 +24,10 @@ enum ChatText {
         "Topic by \(t.authorName.isEmpty ? "an unnamed device" : t.authorName) · \(Fmt.count(t.messages, "message"))"
     }
 
-    /// A private conversation's line: "Private · online · end-to-end encrypted".
+    /// A private conversation's line: "Private · connected · end-to-end encrypted" (connected directly: the only way
+    /// a private message goes).
     static func directLine(online: Bool) -> String {
-        "Private · \(online ? "online" : "offline") · end-to-end encrypted"
+        "Private · \(online ? "connected" : "not connected") · end-to-end encrypted"
     }
 
     /// A channel's unread messages under General: its total less its topics' (the core counts the total).
@@ -57,19 +58,26 @@ enum ChatText {
         return "\(SyncText.day(at)) \(clock)"
     }
 
-    /// "You", "Studio iMac", or for an agent its name and the computer it runs on: "Seedwell on Studio iMac".
+    /// "You", "Kari (Studio iMac)", or for an agent its name and the computer it runs on: "Seedwell on Studio iMac".
     static func author(_ m: SyncMessage) -> String {
         if let agent = m.agent { return "\(agent) on \(computer(m))" }
-        return m.isMe ? "You" : computer(m)
+        return m.isMe ? "You" : named(m.authorName, user: m.authorUser)
     }
 
     /// The device that sent it, by its name.
     static func computer(_ m: SyncMessage) -> String { m.authorName.isEmpty ? "Unnamed device" : m.authorName }
 
+    /// A device with its user, as every device names it (Settings › Folder Sync): "Kari (Studio iMac)", the device
+    /// alone when its user gave no name.
+    static func named(_ device: String, user: String) -> String {
+        let d = device.isEmpty ? "Unnamed device" : device
+        return user.isEmpty ? d : "\(user) (\(d))"
+    }
+
     /// One line of a message, for notifications, replies and the list: at most `limit` characters.
     static func preview(_ m: SyncMessage, limit: Int = 120) -> String {
         let text: String = switch m.kind {
-        case .text: ChatMail.parse(m.body)?.line ?? ChatMarkdown.plain(m.body)
+        case .text: chatMail(text: m.body)?.line ?? ChatMarkdown.plain(m.body)
         case .json: "JSON message"
         case .other: "A message this version cannot show"
         }

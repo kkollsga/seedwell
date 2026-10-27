@@ -92,9 +92,9 @@ struct SidebarView: View {
             if !directs.isEmpty {
                 Section("Direct Messages") {
                     ForEach(directs, id: \.deviceId) { d in
-                        ChatSidebarRow(icon: "person.crop.circle", name: d.name.isEmpty ? "Unnamed device" : d.name, unread: d.unread, online: d.online)
+                        ChatSidebarRow(icon: "person.crop.circle", name: ChatText.named(d.name, user: d.user), unread: d.unread, online: d.online)
                             .tag(LibraryModel.Section.direct(d.deviceId))
-                            .help("Private conversation with \(d.name.isEmpty ? "this device" : d.name)")
+                            .help("Private conversation with \(ChatText.named(d.name, user: d.user))")
                     }
                 }
             }
@@ -201,7 +201,10 @@ struct DetailView: View {
                 EmptyListNote(text: model.chat == nil ? "This channel is no longer on this Mac" : "This topic is no longer in the channel")
             }
         case .direct:
-            ChatConversationView(model: model, place: model.section, name: model.directName, canPost: true,
+            // Only while the two Macs are connected directly (a conversation just started from a channel's members
+            // is not listed yet: the core says why if it cannot be written to).
+            ChatConversationView(model: model, place: model.section, name: model.directName, canPost: model.direct?.online ?? true,
+                                 cannotPost: model.core.chatDirectOfflineText(),
                                  empty: "No messages yet. Only you and \(model.directName) can read what you write here.", actions: commands.chat)
         case .downloads:
             let groups = Lists.downloads(model, commands: commands)
@@ -250,7 +253,7 @@ struct ChatToolbarItem: ToolbarContent {
 
     @ViewBuilder private var controls: some View {
         if let c = model.chat { ChatToolbarControls(model: model, channel: c, actions: actions) }
-        else if model.directID != nil { ChatDirectToolbarControls(actions: actions) }
+        else if let d = model.directID { ChatDirectToolbarControls(actions: actions, device: d, name: model.directName) }
     }
 }
 

@@ -13,8 +13,9 @@
 //! may read it, a wake-up command can be set: the service runs it for each message from another device, with the
 //! message as JSON on its standard input (never in its arguments), one run at a time per channel, 30 s at most.
 //!
-//! On disk: `sync/<id>.chat`, `"SWCH" ‖ format varint (1) ‖ n × (varint length ‖ received_ms varint ‖ message)`,
-//! appended to as messages arrive and written anew when old ones are dropped.
+//! On disk: `sync/<id>.chat`, `"SWCH" ‖ format varint (2) ‖ n × (varint length ‖ sealed record)`, appended to as
+//! messages arrive and written anew when old ones are dropped. A record is `received_ms varint ‖ message`, sealed
+//! with the channel's own key ([`crate::at_rest`]); a format 1 file (records in the clear) is sealed when opened.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{self, Write as _};
@@ -32,9 +33,10 @@ use trs_sync_proto::msg::{ChatHave, ChatJoin, ChatMessages, JoinChannel, MAX_CHA
 
 pub use trs_sync_proto::chat::MessageKind;
 
+use crate::at_rest::{Sealer, channel_key_name};
 use crate::config::ChannelEntry;
 use crate::service::{SyncError, SyncHandle, invalid, public_key_from_hex, random_id};
-use crate::shared::{Ctx, HubMsg, PeerHandle, Space, SpaceKind, lock};
+use crate::shared::{Ctx, HubMsg, Names, PeerHandle, Space, SpaceKind, lock};
 
 /// Messages a channel keeps on each device.
 pub const MAX_MESSAGES: usize = 10_000;
@@ -50,7 +52,9 @@ const WAKE_QUEUE: usize = 100;
 const BATCH_BYTES: usize = 1 << 20;
 
 const MAGIC: &[u8] = b"SWCH";
-const FORMAT: u64 = 1;
+const FORMAT: u64 = 2;
+/// Records in the clear (before 0.1.9): read, then written again sealed.
+const FORMAT_CLEAR: u64 = 1;
 
 /// What agents on this Mac may do in a channel. The Mac's agent permission level still applies on top.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -98,6 +102,9 @@ pub struct MessageInfo {
     pub author_device: String,
     /// That device's name (empty when never met).
     pub author_name: String,
+    /// The name of that device's user (empty: none given).
+    #[serde(default)]
+    pub author_user: String,
     /// This device posted it.
     pub me: bool,
     /// The agent that posted it (the control client's name), if one did.
@@ -252,21 +259,14 @@ pub(crate) struct Store {
     /// The latest arrival: arrivals are kept strictly increasing, so they order what came in (an agent's place).
     last_received_ms: u64,
     cap: (usize, usize),
-}
-
-fn record(msg: &ChatMessage, received_ms: u64) -> Vec<u8> {
-    let mut rec = Vec::with_capacity(msg.body.len() + 200);
-    put_varint(&mut rec, received_ms);
-    msg.put(&mut rec);
-    let mut out = Vec::with_capacity(rec.len() + 4);
-    put_bytes(&mut out, &rec);
-    out
+    seal: Sealer,
 }
 
 impl Store {
-    /// Opens (or starts) the store at `path`. A damaged tail (a write cut off) is dropped.
-    pub(crate) fn open(path: PathBuf, cap: (usize, usize)) -> io::Result<Store> {
-        let mut s = Store { path, msgs: BTreeMap::new(), ids: HashMap::new(), seqs: HashMap::new(), topics: HashMap::new(), bytes: 0, floor_at_ms: 0, last_received_ms: 0, cap };
+    /// Opens (or starts) the store at `path`, its records sealed by `seal`. A damaged tail (a write cut off) is
+    /// dropped, and so are records that do not open (sealed with a key that is gone).
+    pub(crate) fn open(path: PathBuf, cap: (usize, usize), seal: Sealer) -> io::Result<Store> {
+        let mut s = Store { path, msgs: BTreeMap::new(), ids: HashMap::new(), seqs: HashMap::new(), topics: HashMap::new(), bytes: 0, floor_at_ms: 0, last_received_ms: 0, cap, seal };
         let bytes = match std::fs::read(&s.path) {
             Ok(b) => b,
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
@@ -278,18 +278,24 @@ impl Store {
         let bad = |why: &str| io::Error::new(io::ErrorKind::InvalidData, format!("{}: {why}", s.path.display()));
         let body = bytes.strip_prefix(MAGIC).ok_or_else(|| bad("not a channel file"))?;
         let mut r = Reader::new(body);
-        match r.varint("format") {
-            Ok(FORMAT) => {}
+        let clear = match r.varint("format") {
+            Ok(FORMAT) => false,
+            Ok(FORMAT_CLEAR) => true,
             Ok(n) => return Err(bad(&format!("written by a newer Seedwell (format {n}): update Seedwell"))),
             Err(e) => return Err(bad(&e.to_string())),
-        }
-        let mut damaged = false;
+        };
+        let mut damaged = clear;
         while r.remaining() > 0 {
             let Ok(rec) = r.bytes(usize::MAX >> 1, "record") else {
                 damaged = true;
                 break;
             };
-            let rr = &mut Reader::new(rec);
+            let opened = if clear { Some(rec.to_vec()) } else { s.seal.open(rec) };
+            let Some(rec) = opened else {
+                damaged = true;
+                continue;
+            };
+            let rr = &mut Reader::new(&rec);
             match (rr.varint("received"), ChatMessage::read(rr)) {
                 (Ok(received), Ok(msg)) => {
                     s.put(msg, received);
@@ -339,11 +345,22 @@ impl Store {
         true
     }
 
+    /// A message's record as written: sealed, with its length before it.
+    fn record(&self, msg: &ChatMessage, received_ms: u64) -> Vec<u8> {
+        let mut rec = Vec::with_capacity(msg.body.len() + 200);
+        put_varint(&mut rec, received_ms);
+        msg.put(&mut rec);
+        let sealed = self.seal.seal(&rec);
+        let mut out = Vec::with_capacity(sealed.len() + 4);
+        put_bytes(&mut out, &sealed);
+        out
+    }
+
     fn rewrite(&self) -> io::Result<()> {
         let mut out = MAGIC.to_vec();
         put_varint(&mut out, FORMAT);
         for s in self.msgs.values() {
-            out.extend_from_slice(&record(&s.msg, s.received_ms));
+            out.extend_from_slice(&self.record(&s.msg, s.received_ms));
         }
         let tmp = self.path.with_extension("chat.tmp");
         std::fs::write(&tmp, out)?;
@@ -357,7 +374,7 @@ impl Store {
         }
         // Each arrival after the last one, even within one millisecond.
         let received_ms = received_ms.max(self.last_received_ms + 1);
-        let rec = record(&msg, received_ms);
+        let rec = self.record(&msg, received_ms);
         if !self.put(msg, received_ms) {
             return Ok(false);
         }
@@ -530,7 +547,8 @@ impl SyncHandle {
         let members_path = self.members_path(&id);
         let membership = crate::roles::load(&members_path, pk)?;
         let path = self.chat_path(&id);
-        let store = tokio::task::spawn_blocking(move || Store::open(path, (MAX_MESSAGES, MAX_BYTES))).await.map_err(io::Error::other)??;
+        let seal = Sealer::load(&*self.inner.secrets, &channel_key_name(&id), MAGIC)?;
+        let store = tokio::task::spawn_blocking(move || Store::open(path, (MAX_MESSAGES, MAX_BYTES), seal)).await.map_err(io::Error::other)??;
         let space = Arc::new(Space::new(id, SpaceKind::Channel, FolderKey::Member(pk), secret, membership, members_path, invite, links, e.name.clone()));
         let ch = Arc::new(ChannelShared {
             space,
@@ -540,10 +558,9 @@ impl SyncHandle {
             wake_dir: self.inner.dir.clone(),
         });
         {
-            let cfg = lock(&self.inner.cfg);
             let mut members = ch.members.write().unwrap_or_else(|e| e.into_inner());
             let mut book = lock(&self.inner.book);
-            for d in cfg.devices.iter().filter(|d| d.folders.contains(&e.id)) {
+            for d in &e.devices {
                 let Ok(dev) = d.id.parse::<DeviceId>() else { continue };
                 members.insert(dev);
                 for a in &d.addresses {
@@ -639,11 +656,12 @@ impl SyncHandle {
         }
         lock(&self.inner.cfg).channels.retain(|c| c.id != id.to_string());
         self.save_config()?;
-        for name in [crate::roles::secret_name(id), crate::roles::invite_name(id), crate::roles::links_name(id)] {
+        for name in [crate::roles::secret_name(id), crate::roles::invite_name(id), crate::roles::links_name(id), channel_key_name(id)] {
             self.inner.secrets.delete(&name)?;
         }
         let _ = std::fs::remove_file(self.members_path(id));
         let _ = std::fs::remove_file(self.chat_path(id));
+        self.forget_strangers();
         Ok(())
     }
 
@@ -701,13 +719,10 @@ impl SyncHandle {
         }
     }
 
-    fn names(&self) -> HashMap<DeviceId, String> {
-        let mut out: HashMap<DeviceId, String> =
-            lock(&self.inner.cfg).devices.iter().filter_map(|d| Some((d.id.parse().ok()?, d.name.clone()))).collect();
-        for p in self.inner.ctx.registry.peers() {
-            out.insert(p.device, p.name.clone());
-        }
-        out.insert(self.inner.ctx.me, lock(&self.inner.ctx.device_name).clone());
+    pub(crate) fn names(&self) -> HashMap<DeviceId, Names> {
+        let mut out: HashMap<DeviceId, Names> =
+            lock(&self.inner.cfg).all_devices().filter_map(|d| Some((d.id.parse().ok()?, Names { device: d.name.clone(), user: String::new() }))).collect();
+        out.extend(seen_names(&self.inner.ctx));
         out
     }
 
@@ -832,7 +847,7 @@ impl SyncHandle {
                     id: hex(tid),
                     channel_id: c.id.to_string(),
                     title: t.title.clone(),
-                    author_name: names.get(&DeviceId::of_public_key(&t.author)).cloned().unwrap_or_default(),
+                    author_name: names.get(&DeviceId::of_public_key(&t.author)).map(|n| n.device.clone()).unwrap_or_default(),
                     created_s: t.created_ms / 1000,
                     last_message_s: last.map(|k| k.0 / 1000),
                     unread,
@@ -1007,8 +1022,6 @@ fn clean_name(name: &str) -> Option<String> {
     (!n.is_empty()).then_some(n)
 }
 
-/// A topic named by a caller (`None`, empty or `general`: General), which must exist: its id, a prefix of it (4 or
-/// more characters) or its title, when only one topic matches.
 /// A message by its id, or a prefix of it of at least 8 characters that only it has (`chat read` shows 8).
 fn message_id(store: &Store, s: &str) -> Result<[u8; 16], SyncError> {
     let s = s.trim().to_lowercase();
@@ -1026,6 +1039,8 @@ fn message_id(store: &Store, s: &str) -> Result<[u8; 16], SyncError> {
     }
 }
 
+/// A topic named by a caller (`None`, empty or `general`: General), which must exist: its id, a prefix of it (4 or
+/// more characters) or its title, when only one topic matches.
 fn topic_id(store: &Store, topic: Option<&str>) -> Result<Option<[u8; 16]>, SyncError> {
     let Some(t) = topic.map(str::trim).filter(|t| !t.is_empty() && !t.eq_ignore_ascii_case("general")) else { return Ok(None) };
     if let Some(id) = id_from_hex(t).filter(|id| store.topics.contains_key(id)) {
@@ -1056,7 +1071,7 @@ pub fn trust(mine: bool, by_agent: bool) -> &'static str {
     }
 }
 
-fn info(ctx: &Ctx, c: &ChannelShared, store: &Store, s: &Stored, names: &HashMap<DeviceId, String>) -> MessageInfo {
+fn info(ctx: &Ctx, c: &ChannelShared, store: &Store, s: &Stored, names: &HashMap<DeviceId, Names>) -> MessageInfo {
     let m = &s.msg;
     let author = DeviceId::of_public_key(&m.author);
     let me = author == ctx.me;
@@ -1073,7 +1088,8 @@ fn info(ctx: &Ctx, c: &ChannelShared, store: &Store, s: &Stored, names: &HashMap
         channel_id: c.id.to_string(),
         channel_name: lock(&c.name).clone(),
         author_device: author.to_string(),
-        author_name: names.get(&author).cloned().unwrap_or_default(),
+        author_name: names.get(&author).map(|n| n.device.clone()).unwrap_or_default(),
+        author_user: names.get(&author).map(|n| n.user.clone()).unwrap_or_default(),
         me,
         agent: m.agent.clone(),
         at: at_ms / 1000,
@@ -1091,7 +1107,7 @@ fn info(ctx: &Ctx, c: &ChannelShared, store: &Store, s: &Stored, names: &HashMap
 
 /// Tells watchers about new messages, wakes the agent of the channel, and passes them on to every other
 /// connected member (`from`: the device they came from, which has them).
-async fn announce(ctx: &Arc<Ctx>, c: &Arc<ChannelShared>, new: &[ChatMessage], from: Option<DeviceId>, names: &HashMap<DeviceId, String>) {
+async fn announce(ctx: &Arc<Ctx>, c: &Arc<ChannelShared>, new: &[ChatMessage], from: Option<DeviceId>, names: &HashMap<DeviceId, Names>) {
     if new.is_empty() {
         return;
     }
@@ -1271,8 +1287,6 @@ pub(crate) fn start_chat_link(ctx: &Arc<Ctx>, peer: &Arc<PeerHandle>, id: Folder
         let have = lock(&c.store).have(id);
         let _ = peer.control.send(Message::Members(Members { folder_id: id, statements })).await;
         let _ = peer.control.send(Message::ChatHave(have)).await;
-        // Private messages go over the sessions of shared channels: the keys and what we hold.
-        crate::direct::start(&ctx, &peer).await;
     })
 }
 
@@ -1307,9 +1321,20 @@ pub(crate) async fn on_messages(ctx: &Arc<Ctx>, from: DeviceId, c: &Arc<ChannelS
             Err(e) => c.problem(format!("the channel's messages could not be saved: {e}")),
         }
     }
-    let mut names: HashMap<DeviceId, String> = ctx.registry.peers().iter().map(|p| (p.device, p.name.clone())).collect();
-    names.insert(ctx.me, lock(&ctx.device_name).clone());
-    announce(ctx, c, &new, Some(from), &names).await;
+    announce(ctx, c, &new, Some(from), &seen_names(ctx)).await;
+}
+
+/// Devices' names as this device knows them now: as last seen in a private conversation, then from a session's
+/// Hello (and DirectJoin), then (over it) each device's own signed profile in the folders and channels, and this
+/// device's own names.
+pub(crate) fn seen_names(ctx: &Ctx) -> HashMap<DeviceId, Names> {
+    let mut out: HashMap<DeviceId, Names> = ctx.direct.names().into_iter().collect();
+    out.extend(ctx.registry.peers().iter().map(|p| (p.device, Names { device: p.name.clone(), user: lock(&p.user_name).clone() })));
+    for f in ctx.registry.spaces() {
+        out.extend(f.profile_names());
+    }
+    out.insert(ctx.me, Names { device: lock(&ctx.device_name).clone(), user: lock(&ctx.user_name).clone() });
+    out
 }
 
 #[cfg(test)]
@@ -1330,7 +1355,7 @@ mod tests {
         let p = dir.path().join("x.chat");
         let (a, b) = (DeviceKey::from_seed(&[1; 32]), DeviceKey::from_seed(&[2; 32]));
         let ch = FolderId([9; 32]);
-        let mut s = Store::open(p.clone(), (10, MAX_BYTES)).unwrap();
+        let mut s = Store::open(p.clone(), (10, MAX_BYTES), seal()).unwrap();
         assert!(s.insert(msg(&a, &ch, 1, 100, "one"), 100).unwrap());
         assert!(s.insert(msg(&b, &ch, 1, 90, "two"), 100).unwrap());
         assert!(!s.insert(msg(&b, &ch, 1, 90, "two"), 100).unwrap(), "known");
@@ -1342,7 +1367,7 @@ mod tests {
         assert_eq!(have.authors.iter().map(|h| h.ranges.len()).sum::<usize>(), 2);
         drop(s);
 
-        let mut s = Store::open(p.clone(), (10, MAX_BYTES)).unwrap();
+        let mut s = Store::open(p.clone(), (10, MAX_BYTES), seal()).unwrap();
         assert_eq!(s.msgs.len(), 3, "kept on disk");
         assert_eq!(s.highest(a.public_key()), 2);
         let theirs = ChatHave { channel_id: ch, floor_at_ms: 0, authors: vec![AuthorHave::of(*a.public_key(), [1])] };
@@ -1359,9 +1384,47 @@ mod tests {
         let mut bytes = std::fs::read(&p).unwrap();
         bytes.extend_from_slice(&[40, 1, 2]);
         std::fs::write(&p, &bytes).unwrap();
-        assert_eq!(Store::open(p.clone(), (10, MAX_BYTES)).unwrap().msgs.len(), n);
-        std::fs::write(&p, [&b"SWCH\x02"[..]].concat()).unwrap();
-        assert!(Store::open(p.clone(), (10, MAX_BYTES)).err().is_some_and(|e| e.to_string().contains("newer Seedwell")));
+        assert_eq!(Store::open(p.clone(), (10, MAX_BYTES), seal()).unwrap().msgs.len(), n);
+        std::fs::write(&p, [&b"SWCH\x03"[..]].concat()).unwrap();
+        assert!(Store::open(p.clone(), (10, MAX_BYTES), seal()).err().is_some_and(|e| e.to_string().contains("newer Seedwell")));
+    }
+
+    fn seal() -> Sealer {
+        Sealer::new([7; 32], MAGIC)
+    }
+
+    #[test]
+    fn messages_are_sealed_on_disk_and_a_file_in_the_clear_is_sealed_when_opened() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("x.chat");
+        let a = DeviceKey::from_seed(&[1; 32]);
+        let ch = FolderId([9; 32]);
+        let found = |needle: &[u8]| std::fs::read(&p).unwrap().windows(needle.len()).any(|w| w == needle);
+
+        // Format 1, as 0.1.8 wrote it: records in the clear.
+        let mut old = MAGIC.to_vec();
+        put_varint(&mut old, FORMAT_CLEAR);
+        for (seq, text) in [(1, "first secret words"), (2, "second secret words")] {
+            let mut rec = Vec::new();
+            put_varint(&mut rec, 100 + seq);
+            msg(&a, &ch, seq, 100 + seq, text).put(&mut rec);
+            put_bytes(&mut old, &rec);
+        }
+        std::fs::write(&p, &old).unwrap();
+        assert!(found(b"secret words"));
+        let mut s = Store::open(p.clone(), (10, MAX_BYTES), seal()).unwrap();
+        assert_eq!(s.msgs.len(), 2, "kept");
+        assert!(!found(b"secret words"), "sealed once opened");
+        s.insert(msg(&a, &ch, 3, 103, "third secret words"), 103).unwrap();
+        assert!(!found(b"secret words"), "a new message is appended sealed");
+        drop(s);
+
+        let texts = |s: &Store| s.msgs.values().map(|m| m.msg.text().unwrap().to_string()).collect::<Vec<_>>();
+        assert_eq!(texts(&Store::open(p.clone(), (10, MAX_BYTES), seal()).unwrap()), ["first secret words", "second secret words", "third secret words"]);
+        // Its key gone (the Keychain lost it): nothing can be read, the file starts over and the members send the
+        // messages again.
+        let s = Store::open(p.clone(), (10, MAX_BYTES), Sealer::new([8; 32], MAGIC)).unwrap();
+        assert!(s.msgs.is_empty());
     }
 
     #[test]
@@ -1395,7 +1458,7 @@ mod tests {
         let s = trs_sync_proto::keys::FolderSecret::from_bytes([3; 32]);
         let id = FolderId::of_public_key(s.public_key());
         let space = Space::new(id, SpaceKind::Channel, FolderKey::Member(*s.public_key()), None, Membership::new(*s.public_key()), dir.path().join("m"), None, BTreeMap::new(), "x".into());
-        let store = Store::open(dir.path().join("x.chat"), (10, MAX_BYTES)).unwrap();
+        let store = Store::open(dir.path().join("x.chat"), (10, MAX_BYTES), seal()).unwrap();
         let c = ChannelShared { space: Arc::new(space), store: Mutex::new(store), settings: Mutex::new(Settings::default()), wake: Mutex::new(None), wake_dir: dir.path().to_path_buf() };
         // More than a pipe holds, to a command that never reads: stopped after its time.
         let started = std::time::Instant::now();

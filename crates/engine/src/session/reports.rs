@@ -248,9 +248,9 @@ impl Session {
             return;
         }
         // A Cold torrent wakes for a tracker response only if the tracker knows of leechers.
+        // It keeps every address (its pool is bounded); its peer cap decides how many it dials.
         if e.cold.want == Want::Active && !e.cold.has(F_QUEUED) && incomplete.is_some_and(|n| n > 0) {
-            let cap = self.sh.cfg().warm_connections_per_torrent;
-            self.spawn_torrent(id, Vec::new(), peers.into_iter().take(cap).collect());
+            self.spawn_torrent(id, Vec::new(), peers);
         }
     }
 

@@ -66,6 +66,13 @@ async fn two_devices_chat_both_ways_and_a_read_only_member_reads() {
     until(20, "B has it", || texts(&b.h, &id) == ["hello Bo"]).await;
     let got: MessageInfo = b.h.chat_read(&id, None, None, None).unwrap().remove(0);
     assert_eq!((got.me, got.trust.as_str(), got.author_name.as_str(), got.id.as_str()), (false, "untrusted-peer", "Anna", hello.id.as_str()));
+    assert_eq!(got.author_user, "", "no user name given");
+    // The user names herself in Settings: every message of hers shows it, the earlier ones too.
+    let mut s = a.h.settings();
+    s.user_name = "Anna K".into();
+    a.h.set_settings(s).unwrap();
+    until(20, "B shows the user's name", || b.h.chat_read(&id, None, None, None).is_ok_and(|m| m[0].author_user == "Anna K")).await;
+    assert_eq!(a.h.chat_read(&id, None, None, None).unwrap()[0].author_user, "Anna K");
     assert_eq!(b.h.channel_status(&id).unwrap().unread, 1);
     b.h.chat_mark_read(&id, None).unwrap();
     assert_eq!(b.h.channel_status(&id).unwrap().unread, 0);
@@ -379,4 +386,33 @@ async fn a_late_message_written_earlier_is_still_given_to_an_agent() {
     assert!(a.h.chat_read_unread(&id, None, "api", 50, false).unwrap().is_empty());
     a.h.shutdown().await;
     b.h.shutdown().await;
+}
+
+/// What a device keeps of another lives in the folders and channels they share (SPEC §7G.1 *Devices*): leaving one
+/// keeps it in the others, leaving the last forgets the other device in `sync.toml`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn leaving_the_last_shared_channel_forgets_the_other_device() {
+    let dirs: Vec<tempfile::TempDir> = (0..2).map(|_| tempfile::tempdir().unwrap()).collect();
+    let a = start_at(dirs[0].path(), "Anna", |_| {}).await;
+    let b = start_at(dirs[1].path(), "Bo", |_| {}).await;
+    let mut ids = Vec::new();
+    for name in ["Team", "Other"] {
+        let id: FolderId = a.chat_new(name).await.unwrap().id.parse().unwrap();
+        join(&b, &a, &id, Role::ReadWrite, at(&a)).await;
+        ids.push(id);
+    }
+    let anna = a.device_id().to_string();
+    let toml = || std::fs::read_to_string(dirs[1].path().join("sync.toml")).unwrap();
+    until(20, "Anna is remembered in both channels", || toml().matches(&anna).count() == 2).await;
+    assert!(!toml().contains("[[device]]"), "no list outside the channels:\n{}", toml());
+
+    b.chat_leave(&ids[0]).unwrap();
+    assert_eq!(toml().matches(&anna).count(), 1, "still met in Other");
+    b.chat_leave(&ids[1]).unwrap();
+    assert!(!toml().contains(&anna), "forgotten:\n{}", toml());
+    b.shutdown().await;
+    let b = start_at(dirs[1].path(), "Bo", |_| {}).await;
+    assert!(b.chat_channels().is_empty() && !toml().contains(&anna));
+    a.shutdown().await;
+    b.shutdown().await;
 }

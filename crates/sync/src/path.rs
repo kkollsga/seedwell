@@ -37,9 +37,9 @@ pub fn is_nfc(s: &str) -> bool {
 /// NFC, and when `case_insensitive`, case-folded: each character's lowercase form, plus the handful of
 /// characters whose Unicode simple case folding differs from their lowercase form (final sigma, long
 /// s, micro sign, the Greek symbol variants; see [`fold_char`]). The gap to *full* case folding is the
-/// characters that fold to several (`ß` → `ss`, ligatures such as `ﬁ`): they keep their own key. That
-/// errs on the safe side: two names that APFS might treat as one but that have different keys show up
-/// as two files, and writing the second fails with "exists" instead of overwriting the first.
+/// characters that fold to several (`ß` → `ss`, ligatures such as `ﬁ`): they keep their own key. Where a
+/// disk folds further, the puller asks the disk itself (a name `lstat` finds that is not in the listing is
+/// a clash), so the second name is refused rather than written over the first.
 pub fn key(wire: &str, case_insensitive: bool) -> String {
     let nfc = wire_name(wire);
     if !case_insensitive {
@@ -133,6 +133,28 @@ pub fn probe_case_insensitive(fs: &dyn Fs) -> io::Result<bool> {
     Ok(found)
 }
 
+/// Finds out whether the folder's disk keeps the executable bit: sets and clears it on `.seedwell/exec-probe.tmp`
+/// and reads it back each time. exFAT and FAT on a Mac report every file executable, NTFS none; a disk that refuses
+/// the change (some network shares) does not keep it either. The folder marker must exist, as for
+/// [`probe_case_insensitive`].
+pub fn probe_exec_bits(fs: &dyn Fs) -> io::Result<bool> {
+    let p = format!("{STATE_DIR}/exec-probe.tmp");
+    drop(fs.open_rw(&p)?);
+    let mut keeps = true;
+    for want in [true, false] {
+        match fs.set_exec(&p, want) {
+            Ok(()) => keeps &= fs.lstat(&p)?.is_some_and(|m| m.exec == want),
+            Err(e) if matches!(e.kind(), io::ErrorKind::PermissionDenied | io::ErrorKind::Unsupported) => keeps = false,
+            Err(e) => {
+                let _ = fs.remove_file(&p);
+                return Err(e);
+            }
+        }
+    }
+    fs.remove_file(&p)?;
+    Ok(keeps)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -162,6 +184,16 @@ mod tests {
         assert_eq!(check_wire_path("Æøå/ü"), Ok(()));
         assert_eq!(check_wire_path("u\u{0308}"), Err(BadWirePath::NotNfc));
         assert_eq!(check_wire_path("../x"), Err(BadWirePath::Path(BadPath::Dots)));
+    }
+
+    #[test]
+    fn the_exec_probe_tells_disks_without_permissions_apart() {
+        for (fixed, keeps) in [(None, true), (Some(true), false), (Some(false), false)] {
+            let fs = MemFs::with_options(MemFsOptions { fixed_exec: fixed, ..MemFsOptions::default() });
+            fs.create_dir(STATE_DIR).unwrap();
+            assert_eq!(probe_exec_bits(&fs).unwrap(), keeps, "{fixed:?}");
+            assert!(fs.read_dir(STATE_DIR).unwrap().entries.is_empty(), "the probe file is gone");
+        }
     }
 
     #[test]

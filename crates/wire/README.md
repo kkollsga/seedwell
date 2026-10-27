@@ -59,7 +59,7 @@ offers obfuscation, not authentication.
 
 ## Per-connection memory
 
-Target: <= 2 KiB of protocol state per idle peer, socket buffers excluded. Measured with `cargo run --example sizes`:
+Target: <= 2 KiB of protocol state per idle peer, socket buffers excluded. Measured with `cargo run -p trs-wire --example peer_sizes`:
 
 | Item | Bytes | Notes |
 |---|---|---|

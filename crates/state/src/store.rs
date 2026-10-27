@@ -254,6 +254,8 @@ struct State {
     /// `.torrent` files written since the writer last took a batch. A commit that removed one of
     /// these torrents must not delete its file: it belongs to the re-add.
     rewritten: HashSet<InfoHash>,
+    /// Open [`WriteGroup`]s: the debounced commit waits until there are none.
+    groups: u32,
 }
 
 pub(crate) struct Shared {
@@ -283,6 +285,20 @@ impl Shared {
 pub struct Store {
     pub(crate) shared: Arc<Shared>,
     writer: Mutex<Option<JoinHandle<()>>>,
+}
+
+/// Writes that commit together; see [`Store::group`].
+#[must_use = "the group ends when the guard is dropped"]
+pub struct WriteGroup<'a>(&'a Store);
+
+impl Drop for WriteGroup<'_> {
+    fn drop(&mut self) {
+        let mut st = self.0.shared.lock();
+        st.groups -= 1;
+        if st.groups == 0 {
+            self.0.shared.wake.notify_one();
+        }
+    }
 }
 
 /// Torrent records read at startup.
@@ -649,6 +665,7 @@ impl Store {
                 roots_by_id,
                 next_root,
                 rewritten: HashSet::new(),
+                groups: 0,
             }),
             wake: Condvar::new(),
             done: Condvar::new(),
@@ -694,6 +711,16 @@ impl Store {
             self.shared.wake.notify_one();
         }
         Ok(())
+    }
+
+    /// Group the writes made while the returned guard lives: the debounced commit waits for the
+    /// guard, so they reach the database in one transaction (writes that belong together, such as
+    /// a torrent's counters and the statistics of the same transfer, never land apart in a crash).
+    /// An explicit flush still commits at once: [`Store::flush_now`] and every read, so a group
+    /// that reads is split there. Keep groups short; the debounce resumes when the last one ends.
+    pub fn group(&self) -> WriteGroup<'_> {
+        self.shared.lock().groups += 1;
+        WriteGroup(self)
     }
 
     /// Commit everything accepted so far and wait for it (SPEC: "explicit flush").
@@ -1264,10 +1291,15 @@ fn writer_loop(shared: &Shared) {
                 match deadline {
                     Some(dl) => {
                         let now = Instant::now();
-                        if now >= dl {
+                        if now >= dl && st.groups == 0 {
                             break;
                         }
-                        st = shared.wake.wait_timeout(st, dl - now).unwrap_or_else(|p| p.into_inner()).0;
+                        // Due while a group of writes is open: it commits as one when the group ends.
+                        st = if now >= dl {
+                            shared.wake.wait(st).unwrap_or_else(|p| p.into_inner())
+                        } else {
+                            shared.wake.wait_timeout(st, dl - now).unwrap_or_else(|p| p.into_inner()).0
+                        };
                     }
                     None => st = shared.wake.wait(st).unwrap_or_else(|p| p.into_inner()),
                 }

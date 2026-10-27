@@ -488,19 +488,21 @@ import AppKit
         case "collapse": store.collapse(row.id)
         case "folders":
             store.expand(row.id)
-            if let st = store.states[row.id], let t = st.tree { for f in t.folderIDs { st.setFolder(f, open: true) } }
+            if let st = store.states[row.id], let t = st.tree { for f in t.folderIds() { st.setFolder(f, open: true) } }
         case "filter": store.states[row.id]?.filter = rest
         default:
             guard let st = store.states[row.id], let tree = st.tree else { return report("files: \(row.name) is not open") }
             let fileWords = rest.split(separator: " ", maxSplits: 1).map(String.init)
-            guard let pat = fileWords.first, let node = tree.nodes.indices.dropFirst().first(where: { tree.nodes[$0].name.localizedCaseInsensitiveContains(pat) }) else { return report("files: no file \(rest)") }
+            guard let pat = fileWords.first,
+                  let file = tree.rows(expanded: tree.folderIds(), filter: "").first(where: { $0.name.localizedCaseInsensitiveContains(pat) }) else { return report("files: no file \(rest)") }
+            let node = file.id
             switch verb {
             case "select": store.select(torrent: row.id, node: node, command: false, shift: false)
             case "skip": st.toggle([node])
             case "high": st.setPriority([node], .high)
             case "menu":
                 store.select(torrent: row.id, node: node, command: false, shift: false)
-                var entries = FileRowView.menuEntries(row: row, commands: app.commands, state: st, store: store, tree: tree, node: node)
+                var entries = FileRowView.menuEntries(row: row, commands: app.commands, state: st, store: store, file: file)
                 if fileWords.count > 1 {
                     // The Priority submenu on its own (a hover-opened submenu is a window we cannot summon).
                     entries = entries.compactMap { if case let .submenu("Priority", c) = $0 { return c } else { return nil } }.first ?? []
@@ -636,7 +638,7 @@ import AppKit
         let sel = (m?.selection ?? []).map { String((names[$0] ?? $0).prefix(14)) }.sorted()
         let chev = (m?.visibleRows ?? []).filter { $0.fileCount > 1 && $0.kind == .torrent && !$0.isHeld }.map { String($0.displayName.prefix(10)) }
         let trees = f.states.sorted { $0.key < $1.key }.map { id, st in
-            "\(id.prefix(8)):\(st.tree.map { "\($0.wantedCount)/\($0.fileCount)" } ?? "-")\(st.hasPending ? "+pending" : "")"
+            "\(id.prefix(8)):\(st.totals.map { "\($0.wantedCount)/\($0.fileCount)" } ?? "-")\(st.hasPending ? "+pending" : "")"
         }
         return "state: events d\(QAClicks.downs) u\(QAClicks.ups) m\(QAClicks.moves) trees \(trees) chevrons \(chev) rows \(sel) files \(f.selectedTorrent.map { String($0.prefix(8)) } ?? "-") nodes \(f.selectedNodes.sorted()) expanded \(f.expanded.map { String($0.prefix(8)) }.sorted()) \(qaChoiceState)"
     }

@@ -293,6 +293,9 @@ pub struct EngineConfig {
     pub connect_timeout: Duration,
     /// Handshake must complete within this long.
     pub handshake_timeout: Duration,
+    /// Tests: a torrent's startup (reading its `.torrent`, checking its files) takes at least this long,
+    /// like a disk that has to spin up.
+    pub test_startup_delay: Duration,
     /// Persistence writes are batched for this long (ENGINE.md 7: 2 s).
     pub persist_debounce: Duration,
     /// Resume data of a downloading torrent is written at most this often.
@@ -417,6 +420,7 @@ impl Default for EngineConfig {
             client_version: env!("CARGO_PKG_VERSION").to_owned(),
             connect_timeout: Duration::from_secs(10),
             handshake_timeout: Duration::from_secs(10),
+            test_startup_delay: Duration::ZERO,
             persist_debounce: Duration::from_secs(2),
             resume_interval: Duration::from_secs(30),
             rechoke_interval: Duration::from_secs(10),

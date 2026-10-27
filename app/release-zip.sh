@@ -71,6 +71,29 @@ bash -n "$OUT/install.sh"
 [ -n "$MIN_MACOS" ] || { echo "no LSMinimumSystemVersion in the app" >&2; exit 1; }
 plutil -lint "$OUT/latest.json" >/dev/null 2>&1 || python3 -I -c 'import json,sys; json.load(open(sys.argv[1]))' "$OUT/latest.json"
 
+# The release notes' list: each public commit since `prev`, newest first. A release commit ("Seedwell X.Y.Z: …")
+# gives the bullets of its message (wrapped lines joined), or its subject when it has none; only the newest one per
+# version counts (a release cut again). Other commits (Dependabot's) give their subject.
+changes() {
+    local repo="$1" prev="$2" end="${3:-HEAD}" seen="" c subject key body
+    for c in $(git -C "$repo" rev-list "$prev..$end"); do
+        subject="$(git -C "$repo" log -1 --format=%s "$c")"
+        key="$(printf '%s' "$subject" | sed -nE 's/^(Seedwell [0-9]+\.[0-9]+\.[0-9]+).*/\1/p')"
+        if [ -z "$key" ]; then
+            echo "- $subject" | cut -c1-200
+            continue
+        fi
+        case "$seen" in *"|$key|"*) continue ;; esac
+        seen="$seen|$key|"
+        body="$(git -C "$repo" log -1 --format=%b "$c" | awk '
+            /^- / { if (b != "") print b; b = $0; next }
+            /^[ \t]+[^ \t]/ && b != "" { sub(/^[ \t]+/, ""); b = b " " $0; next }
+            { if (b != "") print b; b = "" }
+            END { if (b != "") print b }')"
+        if [ -n "$body" ]; then printf '%s\n' "$body"; else echo "- $subject" | cut -c1-200; fi
+    done
+}
+
 # The tag before this commit (on a tagged commit, describe of HEAD would name the commit's own tag).
 PREV="$(git -C "$REPO" describe --tags --abbrev=0 "HEAD^" 2>/dev/null || true)"
 {
@@ -84,7 +107,7 @@ PREV="$(git -C "$REPO" describe --tags --abbrev=0 "HEAD^" 2>/dev/null || true)"
     echo
     echo "## Changes"
     echo
-    if [ -n "$PREV" ]; then git -C "$REPO" log --format='- %s' "$PREV"..HEAD | cut -c1-200; else echo "- First release."; fi
+    if [ -n "$PREV" ]; then changes "$REPO" "$PREV"; else echo "- First release."; fi
     echo
     echo "## Checksums"
     echo

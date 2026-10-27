@@ -35,9 +35,14 @@ pub const MIN_PROTOCOL: u32 = 2;
 /// bit documents the mechanism). Sessions that both have it carry types 17 to 22. Sessions that both have it carry [`ChatJoin`], [`ChatHave`] and
 /// [`ChatMessages`]; a device without it is never sent them.
 pub const FEATURE_CHAT: u64 = 1 << 0;
+/// Feature bit 1 (0.1.9): private messages travel only between their two devices, over a session between them
+/// that no other device relays, and a conversation may hold a session of its own ([`DirectJoin`], type 23). A
+/// device with it takes a private message only from its author, sends one only to its recipient, and sends only
+/// its own key record. A device without it is not written to privately.
+pub const FEATURE_DIRECT: u64 = 1 << 1;
 /// The optional behaviours this build supports, one bit each; a session uses those both sides have (the AND). A new
 /// one takes the next free bit, documented here and in `PROTOCOL.md`; bits are never reused.
-pub const FEATURES: u64 = FEATURE_CHAT;
+pub const FEATURES: u64 = FEATURE_CHAT | FEATURE_DIRECT;
 /// Channels in one [`ChatJoin`].
 pub const MAX_JOIN_CHANNELS: usize = 1024;
 /// Messages in one [`ChatMessages`] (and [`DirectMessages`]).
@@ -468,6 +473,18 @@ pub struct DirectMessages {
     pub messages: Vec<crate::direct::DirectMessage>,
 }
 
+/// Type 23 (feature [`FEATURE_DIRECT`]): sent once while a session starts, after the [`ChatJoin`] (the dialer first,
+/// as for the Join), and again when the sender's user renames itself.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DirectJoin {
+    /// The sender keeps a private conversation with the receiver. When both do, the session stands for it even
+    /// with no folder or channel in common. The side that answers says so only when the dialer did.
+    pub conversation: bool,
+    /// The name of the sender's user (empty: none given; at most [`MAX_DEVICE_NAME`] characters), so a
+    /// conversation shows it without a channel in common.
+    pub user_name: String,
+}
+
 /// Every message, by frame type.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Message {
@@ -515,6 +532,8 @@ pub enum Message {
     DirectHave(DirectHave),
     /// 22.
     DirectMessages(DirectMessages),
+    /// 23.
+    DirectJoin(DirectJoin),
     /// A type this version does not know: skipped, not an error. Encodes as an empty frame of that type.
     Unknown(u8),
 }
@@ -545,6 +564,7 @@ impl Message {
             Message::DirectKeys(_) => 20,
             Message::DirectHave(_) => 21,
             Message::DirectMessages(_) => 22,
+            Message::DirectJoin(_) => 23,
             Message::Unknown(k) => *k,
         }
     }
@@ -667,6 +687,10 @@ impl Message {
             Message::DirectKeys(m) => put_records(out, &m.records, |out, k| k.put(out)),
             Message::DirectHave(m) => put_records(out, &m.authors, |out, a| a.put(out)),
             Message::DirectMessages(m) => put_records(out, &m.messages, |out, d| d.put(out)),
+            Message::DirectJoin(m) => {
+                put_bool(out, m.conversation);
+                put_str(out, &m.user_name);
+            }
         }
     }
 
@@ -758,6 +782,7 @@ impl Message {
             20 => Message::DirectKeys(DirectKeys { records: records(r, MAX_DIRECT_KEYS, "direct keys", crate::direct::DirectKey::read)? }),
             21 => Message::DirectHave(DirectHave { authors: records(r, crate::chat::MAX_AUTHORS, "authors", crate::chat::AuthorHave::read)? }),
             22 => Message::DirectMessages(DirectMessages { messages: records(r, MAX_CHAT_MESSAGES, "direct messages", crate::direct::DirectMessage::read)? }),
+            23 => Message::DirectJoin(DirectJoin { conversation: r.bool("conversation")?, user_name: device_name(r)? }),
             k => Message::Unknown(k),
         })
     }
@@ -1011,8 +1036,10 @@ mod tests {
         let me = hello(PROTOCOL, MIN_PROTOCOL, FEATURES);
         assert_eq!(agree(&me, &me), Ok(Agreed { protocol: PROTOCOL, features: FEATURES }));
         // A newer device that still speaks ours, with features we do not have.
-        let newer = hello(PROTOCOL + 3, PROTOCOL, 0b1010);
+        let newer = hello(PROTOCOL + 3, PROTOCOL, 0b1000);
         assert_eq!(agree(&me, &newer), Ok(Agreed { protocol: PROTOCOL, features: 0 }), "no chat bit: no chat");
+        // 0.1.8 has channels, not the direct bit.
+        assert_eq!(agree(&me, &hello(PROTOCOL, PROTOCOL, FEATURE_CHAT)), Ok(Agreed { protocol: PROTOCOL, features: FEATURE_CHAT }));
         let chat = hello(PROTOCOL, PROTOCOL, FEATURE_CHAT | 0b1000);
         assert_eq!(agree(&me, &chat), Ok(Agreed { protocol: PROTOCOL, features: FEATURE_CHAT }));
         assert_eq!(agree(&hello(5, 2, 0b0110), &hello(4, 3, 0b0011)), Ok(Agreed { protocol: 4, features: 0b0010 }));

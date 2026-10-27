@@ -312,19 +312,6 @@ private final class FlippedPanel: NSView { override var isFlipped: Bool { true }
         menu.removeAllItems()
         rows = [:]
         confirmItem = nil
-        if s.folders.isEmpty {
-            let note = NSMenuItem(title: "", action: nil, keyEquivalent: "")
-            note.attributedTitle = NSAttributedString(string: "Keep folders the same on your devices",
-                                                      attributes: [.foregroundColor: NSColor.secondaryLabelColor, .font: NSFont.menuFont(ofSize: 0)])
-            note.isEnabled = false
-            menu.addItem(note)
-            if let p = s.problem {
-                let why = NSMenuItem(title: "", action: nil, keyEquivalent: "")
-                why.attributedTitle = NSAttributedString(string: p, attributes: [.foregroundColor: NSColor.secondaryLabelColor, .font: NSFont.menuFont(ofSize: NSFont.smallSystemFontSize)])
-                why.isEnabled = false
-                menu.addItem(why)
-            }
-        }
         for f in s.folders {
             let item = ActionItem(title: f.name) { [weak self] in self?.reveal(f.id) }
             item.representedObject = f.id

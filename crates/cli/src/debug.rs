@@ -290,7 +290,7 @@ pub fn perf(p: &DebugPerfDto) -> String {
     let _ = writeln!(o, "        favorite-tracker caps in force: {}", pr.tracker_caps);
     let _ = writeln!(o, "PEERS   {} connected over {} torrents; {} open of {} allowed, {} handshaking (cap {})", p.peers, p.torrent_count, pr.connections_open.saturating_sub(pr.half_open), pr.max_connections, pr.half_open, pr.max_half_open);
     let c = |k: &str| pr.counters.get(k).copied().unwrap_or(0);
-    let _ = writeln!(o, "        incoming accepted {} refused {}; uTP in {} out {}; encrypted in {} out {} (fallbacks {})", c("incoming_accepted"), c("incoming_refused"), c("utp_accepted"), c("utp_dialed"), c("mse_accepted"), c("mse_dialed"), c("mse_fallbacks"));
+    let _ = writeln!(o, "        incoming accepted {} refused {} (busy {}, handshake {}, torrent not running {}, peer {}); uTP in {} out {}; encrypted in {} out {} (fallbacks {})", c("incoming_accepted"), c("incoming_refused"), c("refused_busy"), c("refused_handshake"), c("refused_torrent"), c("refused_peer"), c("utp_accepted"), c("utp_dialed"), c("mse_accepted"), c("mse_dialed"), c("mse_fallbacks"));
     let _ = writeln!(o, "        hash failures {}, peers banned {}, peer exchange in {} out {}", c("hash_failures"), c("peers_banned"), c("pex_received"), c("pex_sent"));
     let _ = writeln!(o, "DISK    verification slots {} of {} busy (peak {}); {} verifying now", pr.verify_slots - pr.verify_free.min(pr.verify_slots), pr.verify_slots, c("verify_peak"), p.torrents.iter().filter(|t| t.state == "checking").count());
     let _ = writeln!(o, "NETWORK {}; listening on {}{}", if pr.online { "online".to_owned() } else { "OFFLINE".to_owned() }, pr.listen_port, pr.port_fallback.as_deref().map(|f| format!(" ({f})")).unwrap_or_default());

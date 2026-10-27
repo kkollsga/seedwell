@@ -77,8 +77,9 @@ channel too), proof, channel message and private message, decoded and encoded ba
    cannot sync with: update this Mac" on the older one. A joining device shows that as the reason it waits;
    a folder the other device is a member of lists it with its issues until a session with it succeeds.
 
-2. **Join**, then, when both have the chat feature bit, **ChatJoin**. The dialing side proves first, for the
-   folders and channels it believes the other device shares. The other side answers only for those the dialer
+2. **Join**, then, when both have the chat feature bit, **ChatJoin**, then, when both have the direct bit,
+   **DirectJoin** (a private conversation the session may stand for, see [Private messages](#private-messages)).
+   The dialing side proves first, for the folders and channels it believes the other device shares. The other side answers only for those the dialer
    proved, so a stranger who connects learns nothing about which folders or channels a device has. A listener
    with nothing to share sends a Close instead (with an invitation's refusal, `link: <reason>`).
 3. Then, per shared folder: Members (the statements), the Index (full or the changes since what the peer
@@ -115,6 +116,7 @@ channel too), proof, channel message and private message, decoded and encoded ba
 | 20 | DirectKeys (chat bit) | records of key records for private messages (≤ 1024) |
 | 21 | DirectHave (chat bit) | records of authors as in ChatHave: what the sender holds of the private messages to it |
 | 22 | DirectMessages (chat bit) | records of private messages (≤ 1000, about 1 MiB) |
+| 23 | DirectJoin (direct bit) | `conversation` bool ‖ `user_name` str (≤ 64 characters): sent once while a session starts, after ChatJoin (the dialer first), and again when the user renames itself |
 | other | (unknown) | skipped |
 
 - **Version** (in entries and progress): `count ‖ n × (short device id, 8 bytes BE ‖ counter varint)`, sorted by
@@ -165,12 +167,18 @@ signed    = "seedwell-sync/v2/statement" ‖ folder_id ‖ kind ‖ body (with i
 | 3 | invite | invitation (published, so every owner and admin can show and count it) | its issuer |
 | 4 | revoke | invitation id (16) ‖ `at_s` varint | owners and admins |
 | 5 | share until | `until_s` varint (0 = no end) ‖ `serial` varint ‖ `at_s` varint | owners |
+| 6 | profile (0.1.9) | `device_name` str (1 to 64 characters, no control characters) ‖ `user_name` str (empty = none, else as `device_name`) ‖ `serial` varint ‖ `at_s` varint | the device it names, while a member; its latest (by `serial`, then signature bytes) replaces the older ones |
 
 - A kind a device does not know, or a body it cannot read (a role it does not know), is kept as it came,
   checked by its signature only, stored, passed on unchanged, and gives no role.
 - Bytes after a body a device knows are kept with the statement, so its signature still checks and it is
   passed on unchanged; the fields the device knows count.
 - Each device judges times (`at_s`, expiries, the share end) by its own clock.
+- **Names.** A device's name, as every member shows it (member lists, chat authors, conflict copies), is its latest
+  profile in the folder's or channel's membership; a name a device learned another way (a session's Hello) only
+  stands in until a profile arrives. A profile lives in its folder's or channel's membership, so it goes when that
+  goes. Devices before 0.1.9 keep a profile from an admin or owner as unknown and pass it on; others' they leave
+  out, and newer devices pass those on themselves.
 
 ## Invitations, links and proofs
 
@@ -241,9 +249,10 @@ message = fields (varint length ‖ bytes) ‖ signature (64)
 
 ## Private messages
 
-Two devices that share a channel can write to each other privately (`src/direct.rs`). The messages travel over
-the channels' sessions (the chat bit), and the members of the channels they share carry them: they keep and pass
-on messages they cannot read.
+Two devices write to each other privately (`src/direct.rs`). Since 0.1.9 (feature bit 1, *direct*) a private
+message travels only between its two devices, over a session between them that no other device relays; no device
+keeps or passes on another's private messages or key records. A device of 0.1.8 (chat bit only) passes them on to
+other members, so a device with the direct bit does not write to one.
 
 ```text
 direct key = device pk (32) ‖ x25519 pk (32) ‖ at_ms varint ‖ signature (64)
@@ -259,22 +268,23 @@ direct     = fields (varint length ‖ bytes) ‖ signature (64)
 ```
 
 - **Keys.** A device's X25519 key is derived from its device key (`HMAC-SHA256(device key, "seedwell-chat/v1/x25519")`
-  as the secret), so nothing more is stored; the record above carries its public half, signed by the device. A
-  device sends its record, and those it holds of the other members of the channels it shares with the peer, when a
-  channel starts over a session (DirectKeys), and again when a channel's members change. A newer record (by
-  `at_ms`) replaces an older one.
+  as the secret), so nothing more is stored; the record above carries its public half, signed by the device. When
+  a session with the direct bit starts and no device relays it, each side sends its own record (DirectKeys with
+  one record). A record of another device in DirectKeys is ignored.
 - **Sealing.** Each message has a fresh ephemeral X25519 key, so a key is never used twice and the nonce can be
-  fixed. Only the recipient can open it; the author keeps its own copy in the clear on its own disk. A message
-  that does not open for its recipient (changed, or sealed to another key) is dropped; one whose signature does
-  not check is not taken by anyone.
-- **Carrying.** A device takes a private message when its signature checks, its author is a member of a channel
-  the device is in, and it is to the device, or to another member of a channel the device is in. It passes a new
-  one to every connected device that is its recipient or shares a channel with it, but not back to where it came
-  from or to its author. When a channel starts over a session, each side says what it holds of the messages to it
-  (DirectHave: ranges of `seq` per author); the other sends what it lacks. A recipient that was away gets its
-  messages from whichever member carries them.
+  fixed. Only the recipient can open it; the author keeps its own copy. A message that does not open for its
+  recipient (changed, or sealed to another key) is dropped; so is one whose signature does not check.
+- **Delivery.** A device takes a private message only from its author, to itself, over such a session; the author
+  sends it only to the recipient. When the session starts, each side that keeps a conversation with the other says
+  what it holds of the other's messages (DirectHave: ranges of `seq` per author); the other sends what of its own it
+  lacks (a message written as an earlier session ended).
+- **Conversations.** A device takes the first message of a conversation only from a device that is a member of a
+  channel it is in; after that, the conversation stands on its own. DirectJoin's `conversation` says the sender
+  keeps one with the receiver; when both say so, the session stands even with no folder or channel in common. The
+  side that answers says so only when the dialer did, so a device that connects learns nothing it did not claim.
+  Over a relayed session `conversation` is false.
 - `seq` counts the author's private messages, to anyone (1, 2, …). Order and the cap are as for a channel (10 000
-  messages or 50 MB per device, the oldest dropped first).
+  messages or 50 MB per conversation, the oldest dropped first).
 
 ## Other formats
 
@@ -297,16 +307,22 @@ direct     = fields (varint length ‖ bytes) ‖ signature (64)
   file; the older one then refuses it.
 - **The index store** (redb, `crates/sync/src/store_redb.rs`): its own schema version and migration rule, as
   before. Entries are kept in the bare entry form.
-- **A channel's messages** (`sync/<channel id>.chat`): `"SWCH" ‖ format varint (1) ‖ n × (varint length ‖
-  received_ms varint ‖ message)`, appended to as messages arrive and written anew when old ones are dropped. A
-  file of a later format is refused; a cut-off last record is dropped. Its membership is a `.members` file as
+- **A channel's messages** (`sync/<channel id>.chat`): `"SWCH" ‖ format varint (2) ‖ n × (varint length ‖ sealed
+  record)`, a record being `received_ms varint ‖ message`, sealed with the channel's own key on this device
+  (ChaCha20-Poly1305, a random nonce first, the magic as associated data; the key is deleted with the channel).
+  Appended to as messages arrive and written anew when old ones are dropped. A file of format 1 (0.1.8: the
+  records in the clear) is sealed when opened; one of a later format is refused; a cut-off last record, or one
+  that does not open, is dropped. Its membership is a `.members` file as
   for folders; its settings on this device (name, muted, the agent switch, the wake-up command, what was read)
   are a `[[channel]]` entry in `sync.toml` (`topic_read` keeps what was read in each topic).
-- **Private messages** (`sync/direct.chat`): `"SWDM" ‖ format varint (1) ‖ n × (varint length ‖ received_ms
-  varint ‖ has_body u8 [‖ body bytes] ‖ direct message)`; the body only in the author's own copies (those to this
-  device are opened again when read). The key records it knows: `sync/direct.keys`, `"SWDK" ‖ format varint (1) ‖
-  records`. The settings (the agent switch, the next `seq`, what was read) are the `[direct]` table of
-  `sync.toml`.
+- **Private messages** (`sync/dm-<device id>.chat`, one per conversation): `"SWDM" ‖ format varint (2) ‖ n ×
+  (varint length ‖ sealed record)`, a record being `received_ms varint ‖ has_body u8 [‖ body bytes] ‖ direct
+  message` (the body only in the author's own copies; those to this device are opened again when read), sealed
+  with the conversation's own key (ChaCha20-Poly1305, a random nonce first, the magic as associated data). The
+  conversation is a `[[conversation]]` entry of `sync.toml` (the device, its names and last addresses, what was
+  read); the agent switch and the next `seq` are its `[direct]` table. 0.1.8's single `sync/direct.chat` (format 1,
+  in the clear, with messages carried for others) and `sync/direct.keys` are split into conversations when read,
+  the carried messages dropped, and both deleted.
 
 ## Evolution
 
@@ -328,6 +344,7 @@ What a later version may change, and how:
    | bit | feature | since |
    |---|---|---|
    | 0 | channels, their topics and private messages: types 17 to 22 | 0.1.6 |
+   | 1 | private messages only between their two devices, over a session no device relays; DirectJoin (type 23) | 0.1.9 |
 
 5. **Breaking changes** raise `PROTOCOL`, the highest version spoken. The new build keeps `MIN_PROTOCOL` one
    behind for at least one release (N-1), so devices a release apart still sync at the older version, and

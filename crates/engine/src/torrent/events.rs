@@ -11,7 +11,7 @@ use trs_wire::{Bitfield, BlockRequest, Handshake, allowed_fast_set};
 use super::{PeerEntry, PeerHave, Rate, Torrent, TorrentMsg, TorrentReport};
 use crate::api::EngineEvent;
 use crate::budget::{ConnPermit, HalfOpenPermit};
-use crate::peer::{BlockAck, Close, ExtInfo, HaveSummary, PeerCmd, PeerEvent, PeerKey, PeerShared, PeerSpawn, Welcome};
+use crate::peer::{BlockAck, Close, ExtInfo, HaveSummary, PeerCmd, PeerEvent, PeerKey, PeerShared, PeerSpawn, Refusal, Welcome};
 use crate::picker::{PickCtx, Received};
 
 /// Most peers we ever ban per torrent.
@@ -42,7 +42,8 @@ impl Torrent {
         self.banned.addrs.contains(&a) || (!a.ip().is_loopback() && self.banned.ips.contains(&a.ip()))
     }
 
-    pub(super) fn accept_incoming(&mut self, stream: PeerIo, hs: Handshake, addr: SocketAddr, permit: ConnPermit) {
+    pub(super) fn accept_incoming(&mut self, c: super::IncomingConn) {
+        let super::IncomingConn { stream, hs, addr, permit, answered } = c;
         // Proof the port is reachable from the Internet, even when this one is refused below.
         if !stream.is_utp() && crate::net::is_internet_v4(addr) {
             self.sh.incoming_public.fetch_add(1, Ordering::Relaxed);
@@ -54,22 +55,53 @@ impl Torrent {
             || self.is_banned(addr)
             || self.banned.ids.contains(&hs.peer_id)
         {
-            d.incoming_refused.fetch_add(1, Ordering::Relaxed);
+            d.refuse(Refusal::Peer);
             return;
         }
-        if self.peers.len() >= self.peer_cap() && !self.evict_for_newcomer() {
-            self.sh.diag.incoming_refused.fetch_add(1, Ordering::Relaxed);
+        if self.peers.len() >= self.peer_cap() && !self.drop_a_dial() && !self.evict_for_newcomer() {
+            self.sh.diag.refuse(Refusal::Peer);
             return;
         }
         let d = &self.sh.diag;
         d.incoming_accepted.fetch_add(1, Ordering::Relaxed);
-        self.spawn_peer(addr, Some((stream, hs)), permit, None);
+        self.spawn_peer(addr, Some((stream, hs, answered)), permit, None);
+    }
+
+    /// A peer that arrives while the torrent starts up (a Cold torrent woken by a peer reads its
+    /// `.torrent` and looks at its files first, which takes seconds on a disk that has to spin up) gets
+    /// our handshake at once, so that it does not give up on us (clients wait about 10 s for it, and back
+    /// off for minutes after a failure); it is served when the torrent is ready.
+    pub(super) fn answer_early(&mut self, c: Box<super::IncomingConn>) {
+        const MAX_EARLY: usize = 64;
+        if self.early.len() >= MAX_EARLY {
+            self.sh.diag.refuse(Refusal::Peer);
+            return;
+        }
+        let ours = Handshake { reserved: self.ctx.reserved, info_hash: self.ctx.ih, peer_id: self.ctx.our_id }.to_bytes();
+        self.early.push(tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            let mut c = c;
+            c.stream.set_nodelay();
+            tokio::time::timeout(Duration::from_secs(10), c.stream.write_all(&ours)).await.ok()?.ok()?;
+            c.answered = true;
+            Some(c)
+        }));
+    }
+
+    /// Serve the peers [`Self::answer_early`] answered.
+    pub(super) async fn serve_early(&mut self) {
+        for h in std::mem::take(&mut self.early) {
+            match h.await {
+                Ok(Some(c)) => self.accept_incoming(*c),
+                _ => self.sh.diag.refuse(Refusal::Handshake),
+            }
+        }
     }
 
     pub(super) fn spawn_peer(
         &mut self,
         addr: SocketAddr,
-        incoming: Option<(PeerIo, Handshake)>,
+        incoming: Option<(PeerIo, Handshake, bool)>,
         permit: ConnPermit,
         half_open: Option<HalfOpenPermit>,
     ) -> PeerKey {
@@ -87,7 +119,7 @@ impl Torrent {
                 addr,
                 listen_addr: (!is_in).then_some(addr),
                 incoming: is_in,
-                utp: incoming.as_ref().is_some_and(|(s, _)| s.is_utp()),
+                utp: incoming.as_ref().is_some_and(|(s, _, _)| s.is_utp()),
                 connected: false,
                 peer_id: [0; 20],
                 fast: false,
@@ -228,11 +260,26 @@ impl Torrent {
 
     fn on_connected(&mut self, key: PeerKey, peer_id: [u8; 20], reserved: trs_wire::Reserved, utp: bool) {
         self.sh.net.alive();
-        if self.banned.ids.contains(&peer_id)
-            || self.peers.iter().any(|(k, q)| *k != key && q.connected && q.peer_id == peer_id)
-        {
+        if self.banned.ids.contains(&peer_id) {
             self.disconnect(key);
             return;
+        }
+        if let Some((&old, q)) = self.peers.iter().find(|(k, q)| **k != key && q.connected && q.peer_id == peer_id) {
+            // The same client again. From the same host, over a connection of ours that has carried
+            // nothing for a while, it is back after losing it (a router forgot the connection, say): the
+            // old one is dead and only our idle timeout would notice, minutes later. Otherwise (both
+            // ends dialled at once, or somebody else with its id) the first connection stays.
+            const STALE_AFTER: Duration = Duration::from_secs(10);
+            let new_ip = self.peers.get(&key).map(|p| p.addr.ip());
+            let stale = new_ip == Some(q.addr.ip())
+                && q.up.per_sec == 0.0
+                && q.down.per_sec == 0.0
+                && Instant::now().saturating_duration_since(q.connected_at) >= STALE_AFTER;
+            if !stale {
+                self.disconnect(key);
+                return;
+            }
+            self.disconnect(old);
         }
         let fast = self.ctx.reserved.both_fast(&reserved);
         let (bytes, all, none) = self.bitfield_bytes();
@@ -436,6 +483,18 @@ impl Torrent {
     /// An upload-only torrent at its cap makes room for a newcomer (a leecher that just got our
     /// address from the tracker) by closing a redundant peer, else the longest-idle peer that is
     /// not interested in us. Returns whether room was made.
+    /// Make room for a peer that reached us by giving up one of our own dials that has not connected
+    /// yet: the peer that is here is worth more than one that may never answer.
+    fn drop_a_dial(&mut self) -> bool {
+        let Some(k) = self.peers.iter().filter(|(_, p)| !p.incoming && !p.connected).min_by_key(|(_, p)| p.connected_at).map(|(k, _)| *k) else {
+            return false;
+        };
+        if let Some(p) = self.peers.get(&k) {
+            p.shared.abort.notify_one();
+        }
+        true
+    }
+
     fn evict_for_newcomer(&mut self) -> bool {
         const STILL_DOWNLOADING: Duration = Duration::from_secs(300);
         if !self.upload_only_now() {

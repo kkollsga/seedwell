@@ -23,8 +23,8 @@ struct TrackerHeader: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .top, spacing: 16) {
-                stat("↓ " + Fmt.liveRate(down), "Download speed", sub: nil)
-                stat("↑ " + Fmt.liveRate(up), "Upload speed", sub: nil)
+                stat(Fmt.liveRate(down, "↓"), "Download speed", sub: nil)
+                stat(Fmt.liveRate(up, "↑"), "Upload speed", sub: nil)
                 stat(Fmt.bytes(week.up), "Uploaded", sub: "Last 7 days")
                 stat(Fmt.bytes(week.down), "Downloaded", sub: "Last 7 days")
                 stat(Fmt.ratio(week.ratio), "Ratio", sub: "Last 7 days")

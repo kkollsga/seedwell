@@ -21,8 +21,8 @@ use trs_sync_proto::ids::{DeviceId, FolderId, ShortId};
 use trs_sync_proto::keys::Access;
 use trs_sync_proto::model::FileKind;
 use trs_sync_proto::msg::{
-    Close, Hello, Incompatible, Index, Join, JoinFolder, MAX_INDEX_ENTRIES, Members, Message, Request, Response,
-    ResponseCode, agree,
+    Close, DirectJoin, Hello, Incompatible, Index, Join, JoinFolder, MAX_INDEX_ENTRIES, Members, Message, Request,
+    Response, ResponseCode, agree,
 };
 
 use crate::framed::{Reader, Writer};
@@ -80,6 +80,10 @@ pub async fn run(ctx: Arc<Ctx>, conn: Connected, candidates: Vec<FolderId>) -> i
             }
         };
         let chat = agreed.features & trs_sync_proto::msg::FEATURE_CHAT != 0;
+        // A conversation may stand for a session only when no other device relays it.
+        let direct = agreed.features & trs_sync_proto::msg::FEATURE_DIRECT != 0;
+        let conversation = direct && via != crate::session::Via::Relay && ctx.direct.has(&est.peer_pk);
+        let user_name = lock(&ctx.user_name).clone();
         let mut sent: BTreeSet<FolderId> = BTreeSet::new();
         let mut checked;
         if dialed {
@@ -90,6 +94,9 @@ pub async fn run(ctx: Arc<Ctx>, conn: Connected, candidates: Vec<FolderId>) -> i
                 let cj = own_chat_join(&ctx, &candidates, &est.exporter);
                 sent.extend(cj.channels.iter().map(|c| c.channel_id));
                 writer.send(&Message::ChatJoin(cj)).await?;
+            }
+            if direct {
+                writer.send(&Message::DirectJoin(DirectJoin { conversation, user_name: user_name.clone() })).await?;
             }
             match reader.next().await? {
                 Some(Message::Join(j)) => checked = check_join(&ctx, &j, &est, &sent, lan),
@@ -103,6 +110,16 @@ pub async fn run(ctx: Arc<Ctx>, conn: Connected, candidates: Vec<FolderId>) -> i
                     _ => return Err(bad("expected ChatJoin")),
                 }
             }
+            if direct {
+                match reader.next().await? {
+                    Some(Message::DirectJoin(j)) => {
+                        checked.conversation = conversation && j.conversation;
+                        checked.user_name = j.user_name;
+                    }
+                    Some(Message::Close(c)) => return Err(io::Error::new(io::ErrorKind::ConnectionAborted, c.reason)),
+                    _ => return Err(bad("expected DirectJoin")),
+                }
+            }
         } else {
             let proved = match reader.next().await? {
                 Some(Message::Join(j)) => check_join(&ctx, &j, &est, &BTreeSet::new(), lan),
@@ -113,6 +130,16 @@ pub async fn run(ctx: Arc<Ctx>, conn: Connected, candidates: Vec<FolderId>) -> i
                 match reader.next().await? {
                     Some(Message::ChatJoin(j)) => checked.add_chat(check_chat_join(&ctx, &j, &est.peer_pk, &est.exporter, &BTreeSet::new())),
                     _ => return Err(bad("expected ChatJoin")),
+                }
+            }
+            if direct {
+                match reader.next().await? {
+                    // Ours is said only to a dialer that said it keeps the conversation too.
+                    Some(Message::DirectJoin(j)) => {
+                        checked.conversation = conversation && j.conversation;
+                        checked.user_name = j.user_name;
+                    }
+                    _ => return Err(bad("expected DirectJoin")),
                 }
             }
             if checked.is_empty() {
@@ -130,6 +157,9 @@ pub async fn run(ctx: Arc<Ctx>, conn: Connected, candidates: Vec<FolderId>) -> i
                 let cj = own_chat_join(&ctx, &ids, &est.exporter);
                 sent.extend(cj.channels.iter().map(|c| c.channel_id));
                 writer.send(&Message::ChatJoin(cj)).await?;
+            }
+            if direct {
+                writer.send(&Message::DirectJoin(DirectJoin { conversation: checked.conversation, user_name })).await?;
             }
         }
         Ok::<_, io::Error>((hello, agreed, checked, sent))
@@ -156,6 +186,7 @@ pub async fn run(ctx: Arc<Ctx>, conn: Connected, candidates: Vec<FolderId>) -> i
     let channels = checked.channels;
 
     let (peer, crx, drx) = PeerHandle::new(est.peer_pk, hello.device_name, hello.client, agreed, remote, local, est.exporter, dialed, via);
+    *lock(&peer.user_name) = checked.user_name;
     if !ctx.registry.add_peer(&ctx.me, peer.clone()) {
         let _ = writer.send(&Message::Close(Close { reason: "already connected".into() })).await;
         return Ok(());
@@ -171,6 +202,11 @@ pub async fn run(ctx: Arc<Ctx>, conn: Connected, candidates: Vec<FolderId>) -> i
     for (channel, access) in channels {
         links.push(start_chat_link(&ctx, &peer, channel, access));
     }
+    // Private messages, over a direct session only: our key, and what we hold.
+    links.push({
+        let (ctx, peer) = (ctx.clone(), peer.clone());
+        tokio::spawn(async move { crate::direct::start(&ctx, &peer).await })
+    });
     offer_joining(&ctx, &peer, &sent).await;
     let result = read_loop(&ctx, &peer, &mut reader, &serve, &est, sent, &mut links).await;
     if let Err(e) = &result {
@@ -298,6 +334,10 @@ struct Checked {
     refused: Vec<String>,
     /// Folders and channels whose membership changed (its grants were new to us, or we admitted it).
     changed: Vec<FolderId>,
+    /// Both sides keep a private conversation with each other (and no device relays the session).
+    conversation: bool,
+    /// The peer's user's name, from its DirectJoin.
+    user_name: String,
 }
 
 impl Checked {
@@ -309,7 +349,7 @@ impl Checked {
 
     /// Nothing in common.
     fn is_empty(&self) -> bool {
-        self.shared.is_empty() && self.channels.is_empty()
+        self.shared.is_empty() && self.channels.is_empty() && !self.conversation
     }
 }
 
@@ -317,7 +357,7 @@ impl Checked {
 /// when this device is an owner or admin. `answered_only` (non-empty for a dialer) limits the answer to folders
 /// we asked about.
 fn check_join(ctx: &Ctx, j: &Join, est: &crate::tls::Established, answered_only: &BTreeSet<FolderId>, lan: bool) -> Checked {
-    let mut out = Checked { shared: Vec::new(), channels: Vec::new(), refused: Vec::new(), changed: Vec::new() };
+    let mut out = Checked { shared: Vec::new(), channels: Vec::new(), refused: Vec::new(), changed: Vec::new(), conversation: false, user_name: String::new() };
     for jf in &j.folders {
         if !answered_only.is_empty() && !answered_only.contains(&jf.folder_id) {
             continue;
@@ -504,7 +544,8 @@ async fn read_loop(
                 let (ctx2, peer2) = (ctx.clone(), peer.clone());
                 tokio::spawn(async move { crate::chat::on_have(&ctx2, &peer2, &c, h).await });
             }
-            Message::DirectKeys(k) if peer.chat() => crate::direct::on_keys(ctx, peer, k.records).await,
+            Message::DirectKeys(k) if peer.chat() => crate::direct::on_keys(peer, k.records),
+            Message::DirectJoin(j) => crate::direct::on_join(ctx, peer, j),
             Message::DirectHave(h) if peer.chat() => {
                 let (ctx2, peer2) = (ctx.clone(), peer.clone());
                 tokio::spawn(async move { crate::direct::on_have(&ctx2, &peer2, h).await });
@@ -640,7 +681,7 @@ async fn apply_loop(ctx: Arc<Ctx>, peer: Arc<PeerHandle>, mut queue: mpsc::Recei
                 continue;
             }
             Apply::Direct(msgs) => {
-                crate::direct::on_messages(&ctx, peer.device, msgs).await;
+                crate::direct::on_messages(&ctx, &peer, msgs).await;
                 continue;
             }
             a => a,

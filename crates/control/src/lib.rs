@@ -22,8 +22,10 @@ pub mod backend;
 pub mod client;
 pub mod confirm;
 pub mod debug;
+pub mod display;
 pub mod human;
 pub mod limits;
+pub mod mail;
 pub mod ops;
 pub mod perm;
 pub mod proto;
@@ -50,6 +52,6 @@ pub use socket::default_socket_path;
 pub use state::StateAccess;
 
 #[cfg(feature = "engine")]
-pub use engine_backend::{AppServerConfig, EngineBackend, reachability_dto, serve, serve_with, start_for_app};
+pub use engine_backend::{AppServerConfig, EngineBackend, reachability_dto, serve, serve_with, start_for_app, sync_reachability_dto};
 #[cfg(feature = "sync")]
 pub use engine_backend::start_for_app_with_sync;

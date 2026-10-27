@@ -92,6 +92,7 @@ pub(crate) async fn respond<F, Fut>(
     mut s: PeerIo,
     first: &[u8],
     policy: EncryptionPolicy,
+    cpu: &tokio::sync::Semaphore,
     find_torrent: F,
 ) -> io::Result<Accepted>
 where
@@ -106,10 +107,19 @@ where
     fill(&mut s, &mut buf, KEY_LEN).await?;
     let mut ya = [0u8; KEY_LEN];
     ya.copy_from_slice(&buf[..KEY_LEN]);
-    let x = random_secret()?;
-    let secret = mse::shared_secret(&x, &ya).ok_or_else(|| bad("invalid public value"))?;
+    // Two modular exponentiations (about a millisecond in a release build): `cpu` bounds the concurrent
+    // ones, so that garbage sent to the listen port cannot burn the CPU. Only the arithmetic holds a
+    // turn, never a round trip to the peer: a slow or silent peer must not hold up the others. Thirty
+    // leecher connections arrive in the same instant when a client with ten torrents starts, and each
+    // waits for a turn rather than being refused (a refused one is retried only after a back-off).
+    let (secret, yb) = {
+        let _turn = cpu.acquire().await.map_err(|_| bad("shutting down"))?;
+        let x = random_secret()?;
+        let secret = mse::shared_secret(&x, &ya).ok_or_else(|| bad("invalid public value"))?;
+        (secret, mse::public_key(&x))
+    };
     // 2. Yb + PadB
-    let mut out = mse::public_key(&x).to_vec();
+    let mut out = yb.to_vec();
     out.extend(random(pad_len()?)?);
     s.write_all(&out).await?;
     // 3. PadA, H("req1", S), H("req2", SKEY) ^ H("req3", S)
@@ -293,7 +303,7 @@ mod tests {
         let init = tokio::spawn(async move { initiate(c, &ih, &ours, initiator).await });
         let mut first = [0u8; 20];
         s.read_exact(&mut first).await.unwrap();
-        let acc = respond(s, &first, responder, |req2| async move {
+        let acc = respond(s, &first, responder, &tokio::sync::Semaphore::new(1), |req2| async move {
             (req2 == mse::hash(&[b"req2", &ih])).then_some(ih)
         })
         .await;
@@ -347,9 +357,42 @@ mod tests {
         let init = tokio::spawn(async move { initiate(c, &ih, &handshake(ih, b'I'), EncryptionPolicy::Prefer).await });
         let mut first = [0u8; 20];
         s.read_exact(&mut first).await.unwrap();
-        let r = respond(s, &first, EncryptionPolicy::Prefer, |_| async { None }).await;
+        let r = respond(s, &first, EncryptionPolicy::Prefer, &tokio::sync::Semaphore::new(1), |_| async { None }).await;
         assert!(r.is_err());
         assert!(init.await.unwrap().is_err());
+    }
+
+    #[tokio::test]
+    async fn a_silent_peer_does_not_hold_up_the_next_encrypted_handshake() {
+        // One turn for the arithmetic. Peer A sends its key and then nothing: it must not keep the turn
+        // while we wait for the rest of its handshake.
+        let cpu = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+        let (mut a, mut sa) = pair().await;
+        let x = random_secret().unwrap();
+        a.write_all(&mse::public_key(&x)).await.unwrap();
+        let mut first = [0u8; 20];
+        sa.read_exact(&mut first).await.unwrap();
+        let cpu2 = cpu.clone();
+        let stalled = tokio::spawn(async move { respond(sa, &first, EncryptionPolicy::Prefer, &cpu2, |_| async { None }).await });
+        let mut yb = [0u8; KEY_LEN];
+        a.read_exact(&mut yb).await.unwrap();
+        // A's answer came, so its arithmetic is done; B goes through within a moment.
+        let ih = [7u8; 20];
+        let (c, mut s) = pair().await;
+        let init = tokio::spawn(async move { initiate(c, &ih, &handshake(ih, b'B'), EncryptionPolicy::Prefer).await });
+        let mut first = [0u8; 20];
+        s.read_exact(&mut first).await.unwrap();
+        let acc = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            respond(s, &first, EncryptionPolicy::Prefer, &cpu, |req2| async move { (req2 == mse::hash(&[b"req2", &ih])).then_some(ih) }),
+        )
+        .await
+        .expect("B waited for A's silent handshake");
+        assert_eq!(acc.unwrap().handshake.info_hash, ih);
+        assert!(init.await.unwrap().is_ok());
+        assert!(!stalled.is_finished(), "A is still waiting for its peer");
+        stalled.abort();
+        drop(a);
     }
 
     #[tokio::test]
@@ -362,7 +405,7 @@ mod tests {
                 let _ = c.write_all(&junk).await;
                 let _ = c.shutdown().await;
             });
-            let r = respond(s, &first, EncryptionPolicy::Prefer, |_| async { None }).await;
+            let r = respond(s, &first, EncryptionPolicy::Prefer, &tokio::sync::Semaphore::new(1), |_| async { None }).await;
             assert!(r.is_err());
             let _ = w.await;
         }

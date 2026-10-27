@@ -24,9 +24,6 @@ impl Clock for Utc {
     fn now_ns(&self) -> i64 {
         1_792_938_725 * S
     }
-    fn local_offset_s(&self, _: i64) -> i32 {
-        0
-    }
 }
 
 struct Dev {
@@ -56,6 +53,7 @@ fn dev_on(name: &'static str, seed: u8, key: &Key, fs: MemFs, view: Arc<dyn Fs>,
         access: key.access(),
         case_insensitive: ci,
         byte_exact_names: false,
+        exec_bits: true,
         archive: true,
     };
     let ids = Arc::new(AtomicU64::new((u64::from(seed) << 32) + (index_id << 16)));

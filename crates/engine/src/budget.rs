@@ -1,6 +1,10 @@
 //! Connection budget: a global peer cap and a half-open cap (ENGINE.md 2). Per-torrent caps are
 //! enforced by the torrent actor, which knows its own peers.
 //!
+//! The half-open cap is for our own dials. Incoming connections still reading their handshake have a
+//! cap of their own ([`MAX_INCOMING_HANDSHAKES`]): a burst of dials to peers that never answer would
+//! otherwise turn away the peers that came to us, which a seed lives on.
+//!
 //! Permits are RAII: dropping one returns the slot, so a task that panics or is cancelled cannot
 //! leak capacity.
 
@@ -13,7 +17,11 @@ struct Inner {
     max_half_open: AtomicUsize,
     total: AtomicUsize,
     half_open: AtomicUsize,
+    incoming: AtomicUsize,
 }
+
+/// Incoming connections that may be reading their handshake at once.
+pub const MAX_INCOMING_HANDSHAKES: usize = 128;
 
 /// Shared budget.
 #[derive(Clone, Debug)]
@@ -27,6 +35,10 @@ pub struct ConnPermit(Arc<Inner>);
 #[derive(Debug)]
 pub struct HalfOpenPermit(Arc<Inner>);
 
+/// An incoming connection that has not sent its handshake yet.
+#[derive(Debug)]
+pub struct IncomingPermit(Arc<Inner>);
+
 impl ConnectionBudget {
     /// New budget.
     pub fn new(max_total: usize, max_half_open: usize) -> Self {
@@ -35,6 +47,7 @@ impl ConnectionBudget {
             max_half_open: AtomicUsize::new(max_half_open),
             total: AtomicUsize::new(0),
             half_open: AtomicUsize::new(0),
+            incoming: AtomicUsize::new(0),
         }))
     }
 
@@ -62,6 +75,11 @@ impl ConnectionBudget {
             .then(|| HalfOpenPermit(self.0.clone()))
     }
 
+    /// Reserve a slot for an incoming connection's handshake, or `None` when too many are pending.
+    pub fn try_incoming(&self) -> Option<IncomingPermit> {
+        Self::take(&self.0.incoming, MAX_INCOMING_HANDSHAKES).then(|| IncomingPermit(self.0.clone()))
+    }
+
     /// Connections currently open.
     pub fn connections(&self) -> usize {
         self.0.total.load(Ordering::Relaxed)
@@ -73,9 +91,9 @@ impl ConnectionBudget {
         self.connections().saturating_sub(self.half_open())
     }
 
-    /// Handshakes currently pending.
+    /// Handshakes currently pending, ours and incoming ones.
     pub fn half_open(&self) -> usize {
-        self.0.half_open.load(Ordering::Relaxed)
+        self.0.half_open.load(Ordering::Relaxed) + self.0.incoming.load(Ordering::Relaxed)
     }
 
     /// Whether another connection would be admitted right now.
@@ -93,6 +111,12 @@ impl Drop for ConnPermit {
 impl Drop for HalfOpenPermit {
     fn drop(&mut self) {
         self.0.half_open.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+impl Drop for IncomingPermit {
+    fn drop(&mut self) {
+        self.0.incoming.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -121,6 +145,19 @@ mod tests {
         drop(h);
         assert_eq!(b.half_open(), 0);
         assert!(b.try_half_open().is_some());
+    }
+
+    #[test]
+    fn pending_dials_leave_room_for_incoming_handshakes() {
+        let b = ConnectionBudget::new(1000, 2);
+        let _dials: Vec<_> = (0..2).map(|_| b.try_half_open().unwrap()).collect();
+        assert!(b.try_half_open().is_none(), "the dial cap is reached");
+        let incoming: Vec<_> = (0..MAX_INCOMING_HANDSHAKES).map(|_| b.try_incoming().unwrap()).collect();
+        assert!(b.try_incoming().is_none());
+        assert_eq!(b.half_open(), 2 + MAX_INCOMING_HANDSHAKES);
+        drop(incoming);
+        assert_eq!(b.half_open(), 2);
+        assert!(b.try_half_open().is_none(), "incoming slots are not dial slots");
     }
 
     #[test]

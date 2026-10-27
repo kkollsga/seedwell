@@ -36,6 +36,15 @@ pub enum SpaceKind {
     Channel,
 }
 
+/// A device's names: its own (Settings › Folder Sync) and its user's in chats (empty: none given).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Names {
+    /// The device's name.
+    pub device: String,
+    /// Its user's name.
+    pub user: String,
+}
+
 /// What a folder and a channel have in common: who is in it, and how it is found.
 pub struct Space {
     /// Its id (the SHA-256 of its public key).
@@ -107,6 +116,13 @@ impl Space {
             lan_only: AtomicBool::new(false),
             notes: Mutex::new(Notes::default()),
         }
+    }
+
+    /// The names each device gave itself in this folder's or channel's membership (its profile): what every member
+    /// shows for it.
+    pub fn profile_names(&self) -> Vec<(DeviceId, Names)> {
+        let m = self.membership.read().unwrap_or_else(|e| e.into_inner());
+        m.profiles().map(|(pk, device, user)| (DeviceId::of_public_key(pk), Names { device: device.into(), user: user.into() })).collect()
     }
 
     /// A device's role (`device_pk`: its public key), if it is a member.
@@ -275,6 +291,10 @@ pub struct PeerHandle {
     pub tx_bytes: AtomicU64,
     /// The session ended.
     pub closed: watch::Sender<bool>,
+    /// Its key for private messages, from this session (only over a direct one, `crate::direct::direct_ok`).
+    pub direct_key: Mutex<Option<trs_sync_proto::direct::DirectKey>>,
+    /// Its user's name, from its DirectJoin (empty: none given, or an older Seedwell).
+    pub user_name: Mutex<String>,
 }
 
 impl PeerHandle {
@@ -316,6 +336,8 @@ impl PeerHandle {
             rx_bytes: AtomicU64::new(0),
             tx_bytes: AtomicU64::new(0),
             closed,
+            direct_key: Mutex::new(None),
+            user_name: Mutex::new(String::new()),
         });
         (h, crx, drx)
     }
@@ -490,6 +512,8 @@ pub enum HubMsg {
     Addresses(Vec<trs_sync_proto::msg::AddressRecord>),
     /// A rendezvous or relay message from a peer.
     Relay(DeviceId, Box<Message>),
+    /// The private conversations changed (one started, its device's name or address changed): `sync.toml` gets them.
+    Conversations,
 }
 
 /// Everything a session needs from the service.
@@ -502,6 +526,8 @@ pub struct Ctx {
     pub client: String,
     /// The name other devices see.
     pub device_name: Mutex<String>,
+    /// The name this device's user goes by in chats, with the device's (empty: none given).
+    pub user_name: Mutex<String>,
     /// TLS configurations.
     pub tls: crate::tls::Tls,
     /// Folders and sessions.

@@ -159,7 +159,14 @@ impl Torrent {
                     Some(TorrentMsg::Cmd(TorrentCmd::Detail(reply))) => {
                         let _ = reply.send(self.detail());
                     }
-                    // Sockets that arrive before we can serve them are simply closed.
+                    Some(TorrentMsg::Incoming(c)) => self.answer_early(c),
+                    Some(TorrentMsg::TrackerPeers(v, incomplete)) => {
+                        self.no_leechers = incomplete == Some(0);
+                        for a in v {
+                            self.pool.add(a);
+                        }
+                    }
+                    // Nothing else can come before the torrent is ready.
                     Some(_) => {}
                 }
             }
@@ -170,7 +177,16 @@ impl Torrent {
         let Some(mut sp) = self.start.take() else {
             return Err(Fail::Error("torrent started twice".into()));
         };
-        let first = std::mem::take(&mut sp.first);
+        let mut first = std::mem::take(&mut sp.first);
+        if sp.has_metadata {
+            // The peer that woke us gets its answer before the files are looked at.
+            for m in std::mem::take(&mut first) {
+                match m {
+                    TorrentMsg::Incoming(c) => self.answer_early(c),
+                    m => first.push(m),
+                }
+            }
+        }
         if !sp.has_metadata {
             self.meta_fetch = Some(super::MetaFetch::new());
             self.after_ready(first).await;
@@ -185,6 +201,9 @@ impl Torrent {
             None => return Ok(Flow::Exit),
             Some(s) => s,
         };
+        if !self.cfg.test_startup_delay.is_zero() && self.interruptible(tokio::time::sleep(self.cfg.test_startup_delay)).await.is_none() {
+            return Ok(Flow::Exit);
+        }
         let store = self.sh.store.clone();
         let id = self.id;
         let parse = tokio::task::spawn_blocking(move || -> Result<Metainfo, String> {

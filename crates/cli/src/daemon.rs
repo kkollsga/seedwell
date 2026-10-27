@@ -123,7 +123,7 @@ pub async fn run(mut o: Opts, g: &Global) -> Result<(), CliError> {
         .with_tz_offset(|| trs_engine::util::local_utc_offset(trs_engine::util::unix_secs() as i64));
     let options = trs_control::ServerOptions::default().with_config(&state.config());
     let slot = SyncSlot::new();
-    let sync = if no_sync { None } else { start_folder_sync(&state_dir, &engine, bind).await };
+    let sync = if no_sync { None } else { start_folder_sync(&state_dir, &engine, bind, &slot).await };
     slot.set(sync.clone());
     let backend = Arc::new(EngineBackend::new(engine.clone()).with_sync(slot.clone()));
     let server = serve_backend(backend, state, &socket, perm, options).await.map_err(|e| fail(format!("cannot serve {}: {e}", socket.display())))?;
@@ -150,8 +150,9 @@ pub async fn run(mut o: Opts, g: &Global) -> Result<(), CliError> {
     }
     eprintln!("seedwell daemon: shutting down");
     server.shutdown().await;
-    slot.set(None);
-    if let Some(h) = sync {
+    // The slot's service: a port change may have started another one.
+    if let Some(h) = slot.get() {
+        slot.set(None);
         h.shutdown().await;
     }
     let r = host.shutdown(Duration::from_secs(shutdown_secs)).await;
@@ -161,15 +162,24 @@ pub async fn run(mut o: Opts, g: &Global) -> Result<(), CliError> {
 
 /// The folder sync service next to the engine. A failure is reported and the daemon runs on without
 /// it: a sync problem never stops torrents (SPEC 7G).
-async fn start_folder_sync(state_dir: &std::path::Path, engine: &trs_engine::EngineHandle, bind: std::net::Ipv4Addr) -> Option<trs_sync_net::SyncHandle> {
-    let secrets = Arc::new(FileSecrets::new(state_dir.join("sync").join("secrets")));
-    let client = format!("Seedwell {}", env!("CARGO_PKG_VERSION"));
-    let started = start_sync_with(state_dir, client, secrets, Some(engine), |o| {
-        o.bind = std::net::IpAddr::V4(bind);
-        // Announcing test daemons on the real LAN would only add noise.
-        o.lan_discovery = !bind.is_loopback();
-    })
-    .await;
+async fn start_folder_sync(state_dir: &std::path::Path, engine: &trs_engine::EngineHandle, bind: std::net::Ipv4Addr, slot: &SyncSlot) -> Option<trs_sync_net::SyncHandle> {
+    let secrets: Arc<dyn trs_sync_net::secrets::SecretStore> = Arc::new(FileSecrets::new(state_dir.join("sync").join("secrets")));
+    let (state_dir, engine) = (state_dir.to_path_buf(), engine.clone());
+    // The same start again when the port changes (`SyncSlot::move_port`).
+    let starter: trs_control::sync::Starter = Arc::new(move || {
+        let (state_dir, engine, secrets) = (state_dir.clone(), engine.clone(), secrets.clone());
+        Box::pin(async move {
+            let client = format!("Seedwell {}", env!("CARGO_PKG_VERSION"));
+            start_sync_with(&state_dir, client, secrets, Some(&engine), |o| {
+                o.bind = std::net::IpAddr::V4(bind);
+                // Announcing test daemons on the real LAN would only add noise.
+                o.lan_discovery = !bind.is_loopback();
+            })
+            .await
+        })
+    });
+    slot.set_starter(starter.clone());
+    let started = starter().await;
     match started {
         Ok(h) => Some(h),
         Err(e) => {

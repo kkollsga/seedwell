@@ -8,15 +8,20 @@ use core::ops::Range;
 
 /// Absolute ceiling for any frame: 2^17 bytes.
 pub const MAX_FRAME_LEN: u32 = 1 << 17;
+/// Default cap for the blocks a peer may ask of us (`request`, `cancel`): the norm is 16 KiB, some
+/// clients ask for more, and libtorrent drops anything above 128 KiB.
+pub const MAX_REQUEST_LEN: u32 = 128 * 1024;
 /// Default cap for extended-message frames (ut_metadata data is 16 KiB + a small dict).
 pub const DEFAULT_MAX_EXTENDED_LEN: u32 = 32 * 1024;
 
 /// Length caps enforced before any buffering happens.
-// size: 20 bytes
+// size: 24 bytes
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
-    /// Largest accepted block in `piece`/`request`/`cancel`/`reject` (default 16 KiB).
+    /// Largest accepted block in `piece` and `reject`, the answers to our own requests (default 16 KiB).
     pub max_block_len: u32,
+    /// Largest block a peer may ask for in `request`/`cancel` (default [`MAX_REQUEST_LEN`]).
+    pub max_request_len: u32,
     /// Largest accepted extended frame, including the 2-byte header.
     pub max_extended_len: u32,
     /// Largest accepted bitfield (bytes) while the piece count is unknown (magnet links).
@@ -29,6 +34,7 @@ impl Default for Limits {
     fn default() -> Self {
         Self {
             max_block_len: BLOCK_SIZE,
+            max_request_len: MAX_REQUEST_LEN,
             max_extended_len: DEFAULT_MAX_EXTENDED_LEN,
             max_bitfield_len: MAX_FRAME_LEN - 1,
             num_pieces: None,
@@ -51,7 +57,7 @@ impl Limits {
 /// Fast (BEP 6) and extended (BEP 10) frames are rejected with
 /// [`Error::NotNegotiated`] unless enabled, so a peer cannot use features it did
 /// not announce in the handshake.
-// size: 24 bytes
+// size: 28 bytes
 #[derive(Clone, Copy, Debug)]
 pub struct Decoder {
     limits: Limits,
@@ -169,13 +175,13 @@ impl Decoder {
         };
         // A block longer than the cap is a protocol violation; refusing it here
         // keeps the engine from ever reading an attacker-chosen amount from disk.
-        let block = || -> Result<BlockRequest> {
+        let block = |max: u32| -> Result<BlockRequest> {
             let r = BlockRequest {
                 index: at(0)?,
                 begin: at(4)?,
                 length: at(8)?,
             };
-            if r.length > self.limits.max_block_len {
+            if r.length > max {
                 return Err(Error::InvalidField("length"));
             }
             Ok(r)
@@ -188,13 +194,13 @@ impl Decoder {
             id::HAVE => Message::Have(at(0)?),
             id::BITFIELD => Message::Bitfield(5..total),
             id::REQUEST => {
-                let r = block()?;
+                let r = block(self.limits.max_request_len)?;
                 if r.length == 0 {
                     return Err(Error::InvalidField("length"));
                 }
                 Message::Request(r)
             }
-            id::CANCEL => Message::Cancel(block()?),
+            id::CANCEL => Message::Cancel(block(self.limits.max_request_len)?),
             id::PIECE => Message::Piece {
                 index: at(0)?,
                 begin: at(4)?,
@@ -207,7 +213,7 @@ impl Decoder {
             id::SUGGEST => Message::Suggest(at(0)?),
             id::HAVE_ALL => Message::HaveAll,
             id::HAVE_NONE => Message::HaveNone,
-            id::REJECT => Message::RejectRequest(block()?),
+            id::REJECT => Message::RejectRequest(block(self.limits.max_block_len)?),
             id::ALLOWED_FAST => Message::AllowedFast(at(0)?),
             id::EXTENDED => {
                 let eid = *body.first().ok_or(Error::InvalidLength { id: mid, len })?;
@@ -443,6 +449,21 @@ mod tests {
             assert_eq!(used, v.len());
             assert_eq!(d.map(|s| s.to_vec()), m);
         }
+    }
+
+    #[test]
+    fn requests_up_to_128_kib_are_read_but_blocks_we_get_stay_at_16_kib() {
+        let ask = |length: u32| BlockRequest { index: 1, begin: 0, length };
+        for (len, ok) in [(BLOCK_SIZE, true), (32 * 1024, true), (MAX_REQUEST_LEN, true), (MAX_REQUEST_LEN + 1, false)] {
+            for m in [Message::<Vec<u8>>::Request(ask(len)), Message::Cancel(ask(len))] {
+                let mut v = Vec::new();
+                m.encode(&mut v);
+                assert_eq!(dec().decode_ref(&v).is_ok(), ok, "{m:?}");
+            }
+        }
+        let mut v = Vec::new();
+        Message::<Vec<u8>>::RejectRequest(ask(32 * 1024)).encode(&mut v);
+        assert!(dec().decode_ref(&v).is_err(), "we never ask for more than 16 KiB");
     }
 
     #[test]

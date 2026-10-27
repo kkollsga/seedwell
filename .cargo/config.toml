@@ -1,0 +1,5 @@
+[env]
+# The app runs on macOS 15 and later (LSMinimumSystemVersion). Without this, rustc and the C and assembly code of
+# dependencies (ring) are built for the macOS of the build machine (26 on CI), which the linker warns about and an
+# older Mac may not load. Ignored on other systems.
+MACOSX_DEPLOYMENT_TARGET = "15.0"

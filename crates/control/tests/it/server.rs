@@ -135,6 +135,7 @@ async fn permission_matrix_every_method_every_level() {
             Method::ChatDmRead => json!({"device": "NOPE"}),
             Method::ChatDmSend => json!({"device": "NOPE", "body": "hi"}),
             Method::ChatDmSetAgents => json!({"agents": "read"}),
+            Method::ChatDmDelete => json!({"device": "NOPE"}),
             Method::ChatSetAgents => json!({"channel": "Plans", "agents": "read"}),
             Method::ChatSetWake => json!({"channel": "Plans", "command": "true"}),
             _ => json!({}),

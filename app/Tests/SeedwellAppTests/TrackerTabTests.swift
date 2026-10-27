@@ -55,12 +55,12 @@ struct TrackerTabTests {
     @Test func seedRowsShowTheirUploadRate() {
         let seeding = row("s", up: 2_000_000)
         #expect(seeding.rateSlot(.active)?.active == true && seeding.rateSlot(.active)?.text.hasPrefix("↑ ") == true)
-        #expect(row("i").rateSlot(.active)?.text == "↑ – KB/s" && row("i").rateSlot(.active)?.active == false)  // idle: still there
-        #expect(row("d", down: 1_000_000).rateSlot(.download)?.text == "↓ – KB/s")  // queued state: nothing flows
+        #expect(row("i").rateSlot(.active)?.text == "–" && row("i").rateSlot(.active)?.active == false)  // idle: still there
+        #expect(row("d", down: 1_000_000).rateSlot(.download)?.text == "–")  // queued state: nothing flows
     }
 
     @Test func summaryTextShowsCombinedRates() {
-        #expect(Fmt.liveRate(0) == "– KB/s" && Fmt.liveRate(2_100_000) == Fmt.rate(2_100_000))
+        #expect(Fmt.liveRate(0, "↑") == "–" && Fmt.liveRate(2_100_000, "↑") == "↑ " + Fmt.rate(2_100_000))
         let rows = [row("a", down: 100, up: 5), row("a", down: 100, up: 5), row("b", up: 7), row("c", tracker: "t2", up: 99)]
         let r = LibraryModel.sumRates(rows, tracker: "t1")  // a duplicate counts once; other trackers do not
         #expect(r.down == 100 && r.up == 12)

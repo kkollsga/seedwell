@@ -83,17 +83,17 @@ extension TransferRow {
     }
 
     /// The rate slot at the right of a row, always there for a download (↓) and a sharing row (↑): "↑ 1.2 MB/s" in
-    /// the primary colour while data flows, "↑ – KB/s" in the secondary colour when idle. Nil for rows without one
+    /// the primary colour while data flows, "–" in the secondary colour when idle. Nil for rows without one
     /// (held, queued, finished, errors).
     func rateSlot(_ style: RowStyle) -> (text: String, active: Bool)? {
         switch style {
         case .download:
             guard !isHeld, !awaitingChoice, pending == nil else { return nil }
             let on = state == .downloading && downRate > 0
-            return ("↓ " + Fmt.liveRate(on ? downRate : 0), on)
+            return (Fmt.liveRate(on ? downRate : 0, "↓"), on)
         case .popular, .active, .dormant, .stopped:
             let on = movingPercent == nil && upRate > 0
-            return ("↑ " + Fmt.liveRate(on ? upRate : 0), on)
+            return (Fmt.liveRate(on ? upRate : 0, "↑"), on)
         default: return nil
         }
     }

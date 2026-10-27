@@ -232,12 +232,14 @@ async fn pull(ctx: &Arc<Ctx>, f: &Arc<FolderShared>, retry: &mut Option<(Instant
         let rt = tokio::runtime::Handle::current();
         let res = tokio::task::spawn_blocking(move || {
             let source = NetSource::new(ctx2.clone(), f2.id, rt);
+            // The losing device's own signed name in this folder first, so every member names a conflict copy the same.
+            let profiles = ctx2.registry.space(&f2.id).map(|s| s.profile_names()).unwrap_or_default();
             let names = |id: ShortId| {
-                ctx2.registry
-                    .peers()
-                    .into_iter()
-                    .find(|p| p.device.short() == id)
-                    .map(|p| p.name.clone())
+                profiles
+                    .iter()
+                    .find(|(d, _)| d.short() == id)
+                    .map(|(_, n)| n.device.clone())
+                    .or_else(|| ctx2.registry.peers().into_iter().find(|p| p.device.short() == id).map(|p| p.name.clone()))
                     .unwrap_or_else(|| if id == ctx2.me.short() { lock(&ctx2.device_name).clone() } else { "another device".into() })
             };
             let mut core = lock(&f2.core);
@@ -407,7 +409,7 @@ async fn housekeeping(f: &Arc<FolderShared>) {
     }
     let f2 = f.clone();
     let pruned = tokio::task::spawn_blocking(move || {
-        lock(&f2.core).prune_archive(trs_sync::clock::Clock::now_ns(&SystemClock::default()), f2.retention)
+        lock(&f2.core).prune_archive(trs_sync::clock::Clock::now_ns(&SystemClock), f2.retention)
     })
     .await;
     if let Ok(Err(e)) = pruned {
@@ -478,6 +480,7 @@ mod tests {
             access: Access::Write,
             case_insensitive: false,
             byte_exact_names: false,
+            exec_bits: true,
             archive: true,
         };
         let ids = Arc::new(AtomicU64::new(u64::from(seed) << 32));
@@ -491,7 +494,7 @@ mod tests {
             Box::new(MemStore::new(u64::from(seed))),
             Arc::new(fs.clone()),
             Some(dk),
-            Arc::new(trs_sync::clock::SystemClock::default()),
+            Arc::new(trs_sync::clock::SystemClock),
             new_id,
             Ignore::defaults(),
         )

@@ -292,6 +292,53 @@ struct FileTable {
 }
 
 impl FileTable {
+    /// Gives distinct names to files whose paths differ from an earlier file's only by case or Unicode
+    /// normalization: on a case-insensitive disk (APFS, NTFS) they would be one file, and the torrent could never
+    /// complete. The later ones get " (2)", " (3)"… before the extension, chosen from the torrent alone so every
+    /// system lays the torrent out the same way. Returns how many were renamed.
+    fn disambiguate_folded(&mut self) -> usize {
+        use unicode_normalization::UnicodeNormalization;
+        let fold = |s: &str| s.to_lowercase().nfc().collect::<String>();
+        let path = |t: &Self, e: &FileEntry| t.arena[e.path_off as usize..(e.path_off + e.path_len) as usize].to_owned();
+        let real = |e: &FileEntry| e.flags & FLAG_PADDING == 0;
+        let all: HashSet<String> = self.entries.iter().filter(|e| real(e)).map(|e| fold(&path(self, e))).collect();
+        if all.len() == self.entries.iter().filter(|e| real(e)).count() {
+            return 0;
+        }
+        let mut taken: HashSet<String> = HashSet::with_capacity(all.len());
+        let mut renamed = 0;
+        for i in 0..self.entries.len() {
+            if !real(&self.entries[i]) {
+                continue;
+            }
+            let p = path(self, &self.entries[i]);
+            if taken.insert(fold(&p)) {
+                continue;
+            }
+            let (dir, file) = p.rsplit_once('/').map_or(("", p.as_str()), |(d, f)| (d, f));
+            let (stem, ext) = match file.rfind('.') {
+                Some(dot) if dot > 0 => (&file[..dot], &file[dot..]),
+                _ => (file, ""),
+            };
+            let at = |n: u32| {
+                let name = format!("{stem} ({n}){ext}");
+                if dir.is_empty() { name } else { format!("{dir}/{name}") }
+            };
+            let mut n = 2;
+            while all.contains(&fold(&at(n))) || taken.contains(&fold(&at(n))) {
+                n += 1;
+            }
+            let new = at(n);
+            taken.insert(fold(&new));
+            let e = &mut self.entries[i];
+            e.path_off = self.arena.len() as u32;
+            e.path_len = new.len() as u32;
+            self.arena.push_str(&new);
+            renamed += 1;
+        }
+        renamed
+    }
+
     fn note(&mut self, r: Repairs) {
         self.lossy += usize::from(r.lossy);
         self.colon += usize::from(r.colon);
@@ -463,6 +510,7 @@ fn parse_info(info: &Value<'_>, raw: &[u8], info_range: Range<usize>) -> Result<
         }
     }
     drop(seen);
+    let renamed = table.disambiguate_folded();
 
     let private = match info.get(b"private") {
         None => false,
@@ -476,6 +524,9 @@ fn parse_info(info: &Value<'_>, raw: &[u8], info_range: Range<usize>) -> Result<
     }
     if table.colon > 0 {
         warnings.push(Warning::ColonMappedComponents(table.colon));
+    }
+    if renamed > 0 {
+        warnings.push(Warning::FoldedDuplicatesRenamed(renamed));
     }
     if table.symlinks > 0 {
         warnings.push(Warning::SymlinkEntries(table.symlinks));

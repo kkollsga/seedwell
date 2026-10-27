@@ -17,6 +17,7 @@ use crate::api::*;
 use crate::config::{AfterAdd, EncryptionPolicy, EngineConfig};
 use crate::net::PeerIo;
 use crate::organize::{self, PlanCtx, Prepared};
+use crate::peer::Refusal;
 use crate::persist::Store;
 use crate::policy::PolicyData;
 use crate::session::{Cmd, Session, SessionMsg};
@@ -354,11 +355,11 @@ fn admit(sh: &Arc<Shared>, stream: PeerIo, addr: SocketAddr) {
     // Somebody reached us: the network works (and, during an outage, worth a probe).
     sh.net.alive();
     let Some(permit) = sh.budget.try_connection() else {
-        sh.diag.incoming_refused.fetch_add(1, Ordering::Relaxed);
+        sh.diag.refuse(Refusal::Busy);
         return;
     };
-    let Some(half) = sh.budget.try_half_open() else {
-        sh.diag.incoming_refused.fetch_add(1, Ordering::Relaxed);
+    let Some(half) = sh.budget.try_incoming() else {
+        sh.diag.refuse(Refusal::Busy);
         return;
     };
     let sh2 = sh.clone();
@@ -370,9 +371,7 @@ fn admit(sh: &Arc<Shared>, stream: PeerIo, addr: SocketAddr) {
             Ok(Some((stream, hs))) => {
                 let _ = sh2.session.send(SessionMsg::Incoming { stream, hs, addr, permit }).await;
             }
-            _ => {
-                sh2.diag.incoming_refused.fetch_add(1, Ordering::Relaxed);
-            }
+            _ => sh2.diag.refuse(Refusal::Handshake),
         }
     });
 }
@@ -404,14 +403,8 @@ async fn accept_handshake(mut stream: PeerIo, sh: &Arc<Shared>) -> Option<(PeerI
         reject(stream).await;
         return None;
     }
-    // Two modular exponentiations per attempt (about a millisecond in a release build): bound the
-    // concurrent ones, so that garbage sent to the listen port cannot burn the CPU, but wait for a
-    // turn instead of refusing. Thirty leecher connections arrive in the same instant when a
-    // client with ten torrents starts, and a refused one is retried only after a back-off.
-    // (The caller's handshake deadline bounds the wait; the half-open cap bounds the queue.)
-    let _slot = sh.mse_slots.acquire().await.ok()?;
     let tx = sh.session.clone();
-    let accepted = crate::mse::respond(stream, &first, policy, |req2| async move {
+    let accepted = crate::mse::respond(stream, &first, policy, &sh.mse_slots, |req2| async move {
         let (reply, rx) = oneshot::channel();
         tx.send(SessionMsg::MseLookup { target: req2, reply }).await.ok()?;
         rx.await.ok().flatten()
@@ -1173,6 +1166,10 @@ impl EngineHandle {
             wakeups: g(&d.wakeups),
             incoming_accepted: g(&d.incoming_accepted),
             incoming_refused: g(&d.incoming_refused),
+            refused_busy: g(&d.refused[Refusal::Busy as usize]),
+            refused_handshake: g(&d.refused[Refusal::Handshake as usize]),
+            refused_torrent: g(&d.refused[Refusal::Torrent as usize]),
+            refused_peer: g(&d.refused[Refusal::Peer as usize]),
             rechecks: g(&d.rechecks),
             utp_accepted: g(&d.utp_accepted),
             utp_dialed: g(&d.utp_dialed),

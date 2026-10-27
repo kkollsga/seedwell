@@ -69,6 +69,8 @@ pub(crate) struct IncomingConn {
     pub hs: Handshake,
     pub addr: SocketAddr,
     pub permit: ConnPermit,
+    /// Our handshake went out already (the peer arrived while the torrent was starting up).
+    pub answered: bool,
 }
 
 /// Commands from the session.
@@ -557,6 +559,9 @@ pub(crate) struct Torrent {
     pub pending_prios: Option<Vec<u8>>,
     /// A location switch that arrived while the actor was still starting up.
     pub pending_switch: Option<Box<Switch>>,
+    /// Peers that arrived while the actor was starting up: our handshake is on its way to each
+    /// ([`Torrent::answer_early`]); they are served once the torrent is ready.
+    pub early: Vec<tokio::task::JoinHandle<Option<Box<IncomingConn>>>>,
     /// Last known file fingerprints, kept so periodic resume data does not lose them.
     pub fps: Option<Vec<Option<[u8; 20]>>>,
     /// Present from the first stream on; a torrent nobody streams has `None` and pays nothing.
@@ -666,6 +671,7 @@ impl Torrent {
             }),
             pending_prios: None,
             pending_switch: None,
+            early: Vec::new(),
             fps: None,
             stream: None,
             stream_boost: false,
@@ -762,7 +768,7 @@ impl Torrent {
             TorrentMsg::Peer { key, ev } => self.on_peer_event(key, ev).await,
             TorrentMsg::PeerClosed { key, why, connected } => self.on_peer_closed(key, why, connected),
             TorrentMsg::PieceHashed { piece, result } => self.on_piece_hashed(piece, result),
-            TorrentMsg::Incoming(c) => self.accept_incoming(c.stream, c.hs, c.addr, c.permit),
+            TorrentMsg::Incoming(c) => self.accept_incoming(*c),
             TorrentMsg::NetRestored => {
                 if !self.peers.values().any(|p| p.connected) {
                     self.pool.clear_backoff();

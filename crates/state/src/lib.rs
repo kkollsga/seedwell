@@ -29,7 +29,7 @@ pub use error::{DecodeError, DocError, FieldError, StateError, Warning};
 pub use record::{Counters, ResumeData, TorrentFlags, TorrentRecord};
 pub use rules::RuleSet;
 pub use stats::{Day, StatsBucket, StatsScope, StatsSummary};
-pub use store::{InfoHash, Opened, OpenOptions, OpenReport, Store};
+pub use store::{InfoHash, Opened, OpenOptions, OpenReport, Store, WriteGroup};
 pub use timing::TimingHandle;
 pub use trackers::TrackerProfiles;
 pub use xref::cross_check;

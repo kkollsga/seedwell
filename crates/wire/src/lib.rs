@@ -31,7 +31,7 @@ pub mod pipeline;
 pub mod state;
 
 pub use bitfield::Bitfield;
-pub use codec::{Decoder, Encoder, Limits, MAX_FRAME_LEN};
+pub use codec::{Decoder, Encoder, Limits, MAX_FRAME_LEN, MAX_REQUEST_LEN};
 pub use error::{Error, Result};
 pub use extended::{
     ExtPolicy, ExtendedHandshake, ExtendedMessage, LOCAL_UT_METADATA_ID, LOCAL_UT_PEX_ID,

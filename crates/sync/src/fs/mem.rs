@@ -78,6 +78,13 @@ pub struct MemFsOptions {
     pub case_insensitive: bool,
     /// Lookups compare NFC forms (names keep their own form), like APFS. Off: names are bytes, like ext4.
     pub normalization_insensitive: bool,
+    /// Hard links work. Off: `hard_link` fails with `Unsupported`, like exFAT and FAT.
+    pub hard_links: bool,
+    /// With `case_insensitive`, `ß` folds to `ss` too: a disk folding further than [`path::key`] does.
+    pub full_case_folding: bool,
+    /// The disk has no Unix permissions: every file reads as executable (`Some(true)`: exFAT and FAT on a Mac) or
+    /// none does (`Some(false)`: NTFS), and `set_exec` changes nothing. `None`: the bit is kept.
+    pub fixed_exec: Option<bool>,
     /// The time source. The default ticks: it starts at 2026-01-01 and moves 1 µs on every call, so
     /// every change gets a new mtime and ctime.
     pub clock: Clock,
@@ -89,6 +96,9 @@ impl Default for MemFsOptions {
         MemFsOptions {
             case_insensitive: false,
             normalization_insensitive: false,
+            hard_links: true,
+            full_case_folding: false,
+            fixed_exec: None,
             clock: Arc::new(move || t.fetch_add(1_000, Ordering::SeqCst)),
         }
     }
@@ -99,6 +109,9 @@ impl fmt::Debug for MemFsOptions {
         f.debug_struct("MemFsOptions")
             .field("case_insensitive", &self.case_insensitive)
             .field("normalization_insensitive", &self.normalization_insensitive)
+            .field("hard_links", &self.hard_links)
+            .field("full_case_folding", &self.full_case_folding)
+            .field("fixed_exec", &self.fixed_exec)
             .finish_non_exhaustive()
     }
 }
@@ -344,7 +357,7 @@ impl MemFs {
 
     fn name_key(&self, name: &str) -> String {
         let o = &self.inner.opts;
-        match (o.case_insensitive, o.normalization_insensitive) {
+        let k = match (o.case_insensitive, o.normalization_insensitive) {
             (false, false) => name.to_owned(),
             (ci, true) => path::key(name, ci),
             (true, false) => {
@@ -354,7 +367,8 @@ impl MemFs {
                 }
                 s
             }
-        }
+        };
+        if o.case_insensitive && o.full_case_folding { k.replace('ß', "ss") } else { k }
     }
 
     fn keys(&self, rel: &str) -> io::Result<Vec<String>> {
@@ -450,7 +464,14 @@ impl Fs for MemFs {
     fn lstat(&self, rel: &str) -> io::Result<Option<Meta>> {
         let keys = self.keys(rel)?;
         let st = self.begin("lstat", &[rel])?;
-        Ok(st.live.find(&keys).map(|ino| meta(ino, st.live.node(ino))))
+        let fixed = self.inner.opts.fixed_exec;
+        Ok(st.live.find(&keys).map(|ino| {
+            let mut m = meta(ino, st.live.node(ino));
+            if m.kind == FileKind::File {
+                m.exec = fixed.unwrap_or(m.exec);
+            }
+            m
+        }))
     }
 
     fn read_dir(&self, rel: &str) -> io::Result<Listing> {
@@ -571,6 +592,9 @@ impl Fs for MemFs {
     }
 
     fn hard_link(&self, from: &str, to: &str) -> io::Result<()> {
+        if !self.inner.opts.hard_links {
+            return Err(err(io::ErrorKind::Unsupported, from, "hard links are not supported on this disk"));
+        }
         let (fk, tk) = (self.keys(from)?, self.keys(to)?);
         let now = self.now();
         let mut st = self.begin("hard_link", &[from, to])?;
@@ -646,6 +670,9 @@ impl Fs for MemFs {
     }
 
     fn set_exec(&self, rel: &str, exec: bool) -> io::Result<()> {
+        if self.inner.opts.fixed_exec.is_some() {
+            return self.lstat(rel)?.map(drop).ok_or_else(|| err(io::ErrorKind::NotFound, rel, "no such file"));
+        }
         let keys = self.keys(rel)?;
         let now = self.now();
         let mut st = self.begin("set_exec", &[rel])?;

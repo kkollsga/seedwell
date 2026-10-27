@@ -534,7 +534,9 @@ pub(crate) fn reach(h: &SyncHandle, target: DeviceId) {
             lock(&h.net().attempts).remove(&target);
             return;
         }
-        for url in h.relays_for(target) {
+        // Only for a folder or channel: a private conversation never goes through another device.
+        let in_a_space = h.ctx().registry.spaces().iter().any(|f| f.members.read().unwrap_or_else(|e| e.into_inner()).contains(&target));
+        for url in h.relays_for(target).into_iter().filter(|_| in_a_space) {
             crate::relay_server::join_soon(&h, url, target);
         }
         if let Some(via) = common_peer(&h, target) {

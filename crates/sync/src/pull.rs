@@ -111,6 +111,8 @@ pub struct Puller<'a> {
     pub device_name: &'a dyn Fn(ShortId) -> String,
     /// The folder is case-insensitive: refuse a new name that differs only in case from an existing one.
     pub case_insensitive: bool,
+    /// The disk keeps the executable bit (see [`crate::folder::FolderConfig::exec_bits`]).
+    pub exec_bits: bool,
     /// Archive replaced and deleted versions.
     pub archive: bool,
     /// Most bytes asked of the source in one call.
@@ -436,11 +438,19 @@ impl Puller<'_> {
         }
         let want = crate::path::key(name(p), true);
         let listing = self.fs.read_dir(dir)?;
-        Ok(listing
-            .entries
-            .into_iter()
-            .map(|e| e.name)
-            .find(|n| n != name(p) && crate::path::key(&crate::path::wire_name(n), true) == want))
+        if let Some(other) = listing.entries.iter().map(|e| &e.name).find(|n| *n != name(p) && crate::path::key(&crate::path::wire_name(n), true) == want) {
+            return Ok(Some(other.clone()));
+        }
+        // The disk's own answer: it finds something at `p` although no name in the folder is `p`'s. It folds
+        // further than `key` (`ß` and `ss`, ligatures, a volume's own case table), and writing `p` would replace
+        // that file. Which one it is, its inode tells.
+        let Some(m) = self.fs.lstat(p)? else { return Ok(None) };
+        if listing.entries.iter().any(|e| crate::path::wire_name(&e.name) == name(p)) {
+            return Ok(None);
+        }
+        let at = |n: &str| if dir.is_empty() { n.to_string() } else { format!("{dir}/{n}") };
+        let other = listing.entries.iter().find(|e| self.fs.lstat(&at(&e.name)).ok().flatten().is_some_and(|x| x.inode == m.inode));
+        Ok(Some(other.map_or_else(|| "another name on this disk".to_string(), |e| e.name.clone())))
     }
 
     /// The folder marker is there (else `NotFound`, *Folder missing*).
@@ -469,7 +479,22 @@ impl Puller<'_> {
             n += 1;
         }
         self.ensure_parents(&to)?;
-        if replace { self.fs.hard_link(p, &to)? } else { self.fs.rename(p, &to)? }
+        if replace {
+            // exFAT, FAT and some network shares have no hard links (macOS: ENOTSUP; Linux vfat: EPERM): the
+            // archive gets a copy instead (a clone where the disk can; a symlink as a symlink, not its target).
+            match self.fs.hard_link(p, &to) {
+                Err(e) if matches!(e.kind(), io::ErrorKind::Unsupported | io::ErrorKind::PermissionDenied) => {
+                    if self.fs.lstat(p)?.is_some_and(|m| m.kind == FileKind::Symlink) {
+                        self.fs.symlink(&self.fs.read_link(p)?, &to)?
+                    } else {
+                        self.fs.copy(p, &to)?
+                    }
+                }
+                r => r?,
+            }
+        } else {
+            self.fs.rename(p, &to)?
+        }
         // The archived version must be as durable as the record that replaces it.
         self.changed_dir(&to);
         self.changed_dir(p);
@@ -838,7 +863,7 @@ impl Puller<'_> {
     /// still to be made (false: it is here already, made here or synced from a device that made it).
     fn copy_name(&self, store: &mut dyn IndexStore, p: &str, loser: &FileInfo, mtime_ns: i64) -> Result<(String, bool), Skip> {
         let who = (self.device_name)(loser.modified_by);
-        let stamp = clock::readable_stamp(self.clock, mtime_ns);
+        let stamp = clock::utc_stamp(mtime_ns);
         let mut n = 1;
         loop {
             let copy = conflict::conflict_path(p, &who, &stamp, n);
@@ -977,7 +1002,9 @@ impl Puller<'_> {
         fh.sync_barrier()?;
         drop(fh);
         self.fs.set_mtime(tmp, want.mtime_ns)?;
-        self.fs.set_exec(tmp, want.exec)?;
+        if self.exec_bits {
+            self.fs.set_exec(tmp, want.exec)?;
+        }
         let prev = local.and_then(|l| l.tier).map(|t| (chunk::Tier { avg: t.avg }, t.chosen_at));
         let (tier, chosen_at) = chunk::choose_tier(want.size, prev);
         Ok(TierMemo { avg: tier.avg, chosen_at })

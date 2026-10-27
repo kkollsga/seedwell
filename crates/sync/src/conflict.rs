@@ -1,10 +1,10 @@
 //! Names for conflict copies and archived versions.
 //!
 //! A conflict copy sits next to the file it lost to, readable in Finder:
-//! `Report (conflict, MacBook Air, 2026-10-25 14.32).docx`. The time is the losing version's mtime in
-//! the device's local time (passed in already formatted, see [`crate::clock::Clock`]). Two devices that keep
-//! the same losing version usually pick the same name, and then the two copies are one file: same
-//! path, same content, no new conflict.
+//! `Report (conflict, MacBook Air, 2026-10-25 14.32z).docx`. The time is the losing version's mtime in UTC
+//! ([`crate::clock::utc_stamp`]; the app shows it in local time). Two devices that keep the same losing
+//! version pick the same name, whatever their time zones, and then the two copies are one file: same path,
+//! same content, no new conflict. Copies named before 0.1.9 carry the local time without the `z`.
 
 /// The last component's stem and extension: `a/b/Report.docx` → (`a/b/Report`, `.docx`). A leading dot
 /// is part of the name (`.profile` has no extension), and so is a trailing one.
@@ -65,24 +65,29 @@ pub struct ConflictName {
     pub original: String,
     /// The losing version's device, as cleaned for the name.
     pub device: String,
-    /// `2026-10-25 14.32`.
+    /// `2026-10-25 14.32z` (UTC), or `2026-10-25 14.32` (local time, copies named before 0.1.9).
     pub stamp: String,
+    /// The time a UTC stamp names, Unix seconds.
+    pub utc_s: Option<i64>,
 }
 
 /// Reads a [`conflict_path`] back (`None` for any other name). The device name may hold `, ` itself;
-/// the stamp is the 16 characters before the closing parenthesis (and the copy number, if any).
+/// the stamp is the 16 characters before the closing parenthesis (and the copy number, if any), plus the `z` of
+/// a UTC one.
 pub fn parse_conflict(path: &str) -> Option<ConflictName> {
     let (stem, ext) = split_ext(path);
     let inner = stem.strip_suffix(')')?;
     let start = inner.rfind(" (conflict, ")?;
     let (device, rest) = inner[start + " (conflict, ".len()..].rsplit_once(", ")?;
-    let stamp = rest.get(..16)?;
-    let number = &rest[16..];
+    let len = if rest.as_bytes().get(16) == Some(&b'z') { 17 } else { 16 };
+    let stamp = rest.get(..len)?;
+    let number = &rest[len..];
     let numbered = number.strip_prefix(' ').is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
     if !(number.is_empty() || numbered) || !stamp.as_bytes()[0].is_ascii_digit() || device.is_empty() {
         return None;
     }
-    Some(ConflictName { original: format!("{}{ext}", &inner[..start]), device: device.to_string(), stamp: stamp.to_string() })
+    let utc_s = crate::clock::parse_utc_stamp(stamp);
+    Some(ConflictName { original: format!("{}{ext}", &inner[..start]), device: device.to_string(), stamp: stamp.to_string(), utc_s })
 }
 
 /// Where an archived version goes: `.seedwell/Archive/<path>` with the time before the extension,
@@ -137,18 +142,21 @@ mod tests {
 
     #[test]
     fn conflict_names_are_read_back() {
-        let stamp = "2026-10-25 14.32";
+        let (stamp, utc_s) = ("2026-10-25 14.32z", Some(1_792_938_720));
         for (path, device, n) in [
             ("Docs/Report.docx", "MacBook Air", 1),
             ("notes", "Kim, the Mac", 2),
             (".profile", "iMac", 12),
             ("a.tar.gz", "x", 1),
-            ("a (conflict, X, 2026-10-25 14.28)", "Y", 1),
+            ("a (conflict, X, 2026-10-25 14.28z)", "Y", 1),
         ] {
             let copy = conflict_path(path, device, stamp, n);
             let got = parse_conflict(&copy).unwrap_or_else(|| panic!("{copy}"));
-            assert_eq!(got, ConflictName { original: path.into(), device: device.into(), stamp: stamp.into() }, "{copy}");
+            assert_eq!(got, ConflictName { original: path.into(), device: device.into(), stamp: stamp.into(), utc_s }, "{copy}");
         }
+        // Named before 0.1.9: local time, no `z`.
+        let old = parse_conflict("Docs/Report (conflict, iMac, 2026-10-25 15.32 2).docx").unwrap();
+        assert_eq!((old.original.as_str(), old.stamp.as_str(), old.utc_s), ("Docs/Report.docx", "2026-10-25 15.32", None));
         for not in ["Report.txt", "x (conflict, y).txt", "x (conflict, y, 2026-10-25 14.32 z)", "x (conflict, , 2026-10-25 14.32)"] {
             assert_eq!(parse_conflict(not), None, "{not}");
         }

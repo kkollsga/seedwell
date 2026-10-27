@@ -242,7 +242,7 @@ struct SyncFolderPage: View {
             Image(systemName: m.isMe ? "laptopcomputer" : d.map { $0.via == "LAN" ? "wifi" : $0.via == "Relay" ? "arrow.triangle.branch" : "globe" } ?? "moon.zzz")
                 .font(.system(size: 12)).foregroundStyle(.secondary).frame(width: 18)
             VStack(alignment: .leading, spacing: 1) {
-                Text(m.isMe ? "\(m.name.isEmpty ? "This Mac" : m.name) (this Mac)" : (m.name.isEmpty ? "Unnamed device" : m.name))
+                Text(m.isMe ? "\(ChatText.named(m.name.isEmpty ? "This Mac" : m.name, user: m.user)) (this Mac)" : ChatText.named(m.name, user: m.user))
                     .font(.system(size: 13))
                 let line = SyncText.memberLine(m, device: d)
                 if !line.isEmpty { Text(line).font(.system(size: 11.5)).foregroundStyle(.secondary) }

@@ -3,7 +3,8 @@
 //! * [`start_sync`]: the sync service for a Host, with the engine's DHT for discovery ([`DhtDiscovery`])
 //!   and its port mapper for the sync port (TCP and UDP). The engine lends sync these two things only.
 //! * [`SyncSlot`]: where the control server finds the running service (set once it has started, cleared
-//!   before it stops); the `sync.*` methods answer "folder sync is not running" while it is empty.
+//!   before it stops); the `sync.*` methods answer "folder sync is not running" while it is empty. It also
+//!   moves the service to another port ([`SyncSlot::move_port`]).
 //! * The mapping from the service's status to the protocol's DTOs, folder selection, the Trash.
 
 use std::io;
@@ -35,7 +36,51 @@ pub const MAX_PEERS: usize = 200;
 /// Where the control server finds the running sync service. Cheap to clone; the app or the daemon sets
 /// it once the service has started and clears it before stopping it.
 #[derive(Clone, Default)]
-pub struct SyncSlot(Arc<RwLock<Option<SyncHandle>>>);
+pub struct SyncSlot {
+    handle: Arc<RwLock<Option<SyncHandle>>>,
+    /// Starts the service again as it was started (set by whoever started it): a port change restarts it.
+    starter: Arc<RwLock<Option<Starter>>>,
+    /// One port change at a time.
+    moving: Arc<tokio::sync::Mutex<()>>,
+}
+
+/// Starts the sync service with the options it was first started with (the port comes from `sync.toml`).
+pub type Starter = Arc<dyn Fn() -> BoxFuture<'static, io::Result<SyncHandle>> + Send + Sync>;
+
+/// Why the sync port did not change.
+#[derive(Debug, PartialEq, Eq)]
+pub enum PortChange {
+    /// Below 1024.
+    Invalid,
+    /// Another app has the port (TCP or UDP).
+    InUse(u16),
+    /// No service runs, or it was not started through this slot.
+    NotRunning,
+    /// The service stopped and did not start again.
+    Failed(String),
+}
+
+impl std::fmt::Display for PortChange {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PortChange::Invalid => write!(f, "Use a port from 1024 to 65535."),
+            PortChange::InUse(p) => write!(f, "Port {p} is in use by another app."),
+            PortChange::NotRunning => write!(f, "Folder sync is not running."),
+            PortChange::Failed(e) => write!(f, "Folder sync could not start again: {e}"),
+        }
+    }
+}
+
+/// Whether `port` is free for sync on this Mac: TCP and its UDP twin, on every address (IPv4 and IPv6).
+pub fn port_free(port: u16) -> bool {
+    use std::net::{Ipv4Addr, Ipv6Addr, TcpListener, UdpSocket};
+    let taken = |r: io::Result<()>| r.is_err_and(|e| e.kind() == io::ErrorKind::AddrInUse);
+    let ips: [std::net::IpAddr; 2] = [Ipv4Addr::UNSPECIFIED.into(), Ipv6Addr::UNSPECIFIED.into()];
+    !ips.iter().any(|&ip| {
+        let a = SocketAddr::new(ip, port);
+        taken(TcpListener::bind(a).map(drop)) || taken(UdpSocket::bind(a).map(drop))
+    })
+}
 
 impl SyncSlot {
     /// An empty slot (sync not running).
@@ -52,12 +97,45 @@ impl SyncSlot {
 
     /// Put the service in (or take it out with `None`).
     pub fn set(&self, h: Option<SyncHandle>) {
-        *self.0.write().unwrap_or_else(|e| e.into_inner()) = h;
+        *self.handle.write().unwrap_or_else(|e| e.into_inner()) = h;
     }
 
     /// The service, when it runs.
     pub fn get(&self) -> Option<SyncHandle> {
-        self.0.read().unwrap_or_else(|e| e.into_inner()).clone()
+        self.handle.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// How to start the service again (for [`SyncSlot::move_port`]).
+    pub fn set_starter(&self, s: Starter) {
+        *self.starter.write().unwrap_or_else(|e| e.into_inner()) = Some(s);
+    }
+
+    /// Moves folder sync to `port` (0: a free one) now: the port is saved, the service stops and starts again
+    /// on it (folders, channels and sessions come back in a few seconds; devices find the new port as they
+    /// find any address). A port another app holds is refused and nothing changes. Returns the port in use.
+    pub async fn move_port(&self, port: u16) -> Result<u16, PortChange> {
+        if port != 0 && port < 1024 {
+            return Err(PortChange::Invalid);
+        }
+        let _one = self.moving.lock().await;
+        let h = self.get().ok_or(PortChange::NotRunning)?;
+        if port != 0 && h.port() == port {
+            return Ok(port);
+        }
+        let start = self.starter.read().unwrap_or_else(|e| e.into_inner()).clone().ok_or(PortChange::NotRunning)?;
+        if port != 0 && !port_free(port) {
+            return Err(PortChange::InUse(port));
+        }
+        let mut st = h.settings();
+        st.port = port;
+        h.set_settings(st).map_err(|e| PortChange::Failed(e.to_string()))?;
+        self.set(None);
+        h.shutdown().await;
+        drop(h);
+        let h = start().await.map_err(|e| PortChange::Failed(e.to_string()))?;
+        let now = h.port();
+        self.set(Some(h));
+        Ok(now)
     }
 }
 
@@ -251,6 +329,7 @@ pub fn member_dto(m: &trs_sync_net::MemberInfo) -> SyncMemberDto {
     SyncMemberDto {
         device_id: m.device.to_string(),
         name: clip(&ops::clean_name(&m.name), 100),
+        user: clip(&ops::clean_name(&m.user), 100),
         role: role_name(m.role).into(),
         online: m.online,
         me: m.is_me,
@@ -258,7 +337,7 @@ pub fn member_dto(m: &trs_sync_net::MemberInfo) -> SyncMemberDto {
     }
 }
 
-/// The member `q` names: its device id, an unambiguous prefix (4+ characters), or its name (any case).
+/// The member `q` names: its device id, an unambiguous prefix (4+ characters), its name or its user's (any case).
 pub fn resolve_member<'a>(members: &'a [trs_sync_net::MemberInfo], q: &str) -> Result<&'a trs_sync_net::MemberInfo, ApiError> {
     let q = q.trim();
     if q.is_empty() || q.len() > 200 {
@@ -270,7 +349,7 @@ pub fn resolve_member<'a>(members: &'a [trs_sync_net::MemberInfo], q: &str) -> R
         .iter()
         .filter(|m| {
             let id = norm_id(&m.device.to_string());
-            id == nq || (nq.len() >= MIN_FOLDER_PREFIX && id.starts_with(&nq)) || m.name.to_lowercase() == lower
+            id == nq || (nq.len() >= MIN_FOLDER_PREFIX && id.starts_with(&nq)) || m.name.to_lowercase() == lower || (!m.user.is_empty() && m.user.to_lowercase() == lower)
         })
         .collect();
     match hits.as_slice() {
@@ -520,6 +599,7 @@ pub fn message_dto(m: &trs_sync_net::chat::MessageInfo) -> ChatMessageDto {
         channel_name: clip(&ops::clean_name(&m.channel_name), 200),
         author_device: m.author_device.clone(),
         author_name: clip(&ops::clean_name(&m.author_name), 100),
+        author_user: clip(&ops::clean_name(&m.author_user), 100),
         me: m.me,
         agent: m.agent.clone(),
         at: m.at,
@@ -584,6 +664,7 @@ pub fn direct_dto(d: &trs_sync_net::direct::DirectStatus) -> ChatDirectDto {
     ChatDirectDto {
         device_id: d.device.to_string(),
         name: clip(&ops::clean_name(&d.name), 100),
+        user: clip(&ops::clean_name(&d.user), 100),
         online: d.online,
         unread: d.unread,
         last_message_at: d.last_message_s,

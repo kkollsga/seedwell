@@ -761,28 +761,27 @@ impl Session {
     // ---- incoming connections -----------------------------------------------------------
 
     pub(super) fn on_incoming(&mut self, stream: crate::net::PeerIo, hs: Handshake, addr: SocketAddr, permit: ConnPermit) {
+        use crate::peer::Refusal;
         let diag = self.sh.diag.clone();
-        let refuse = || {
-            diag.incoming_refused.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        };
+        let refuse = |why| diag.refuse(why);
         if self.shutting_down {
-            return refuse();
+            return refuse(Refusal::Torrent);
         }
         let id = hs.info_hash;
-        let Some(e) = self.table.get_mut(&id) else { return refuse() };
+        let Some(e) = self.table.get_mut(&id) else { return refuse(Refusal::Torrent) };
         if e.cold.want != Want::Active || e.cold.has(F_QUEUED) || e.cold.awaiting() || self.mover.blocks(&id) {
-            return refuse();
+            return refuse(Refusal::Torrent);
         }
         // A peer asking for a finished torrent is activity (Sharing groups); the tick refines it.
         if e.cold.finished() {
             e.cold.last_activity = unix_secs() as u32;
         }
-        let msg = TorrentMsg::Incoming(Box::new(crate::torrent::IncomingConn { stream, hs, addr, permit }));
+        let msg = TorrentMsg::Incoming(Box::new(crate::torrent::IncomingConn { stream, hs, addr, permit, answered: false }));
         match &e.live {
-            Some(l) if l.stopping => refuse(),
+            Some(l) if l.stopping => refuse(Refusal::Torrent),
             Some(l) => {
                 if l.tx.try_send(msg).is_err() {
-                    refuse();
+                    refuse(Refusal::Peer);
                 }
             }
             None => self.spawn_torrent(id, vec![msg], Vec::new()),

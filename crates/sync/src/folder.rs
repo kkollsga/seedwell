@@ -52,6 +52,10 @@ pub struct FolderConfig {
     pub case_insensitive: bool,
     /// Names compare byte for byte on this filesystem (Linux): names not in NFC are not synced.
     pub byte_exact_names: bool,
+    /// The disk keeps the executable bit ([`crate::path::probe_exec_bits`]). Off (exFAT, FAT, NTFS, many network
+    /// shares, which report every file executable or none): a file keeps the bit of the version this device has,
+    /// and a change of it is never read from the disk or written to it.
+    pub exec_bits: bool,
     /// Archive replaced and deleted versions.
     pub archive: bool,
 }
@@ -62,8 +66,6 @@ pub struct FolderConfig {
 pub enum RemoteError {
     /// An entry is not signed by a writer of this folder.
     BadSignature(String),
-    /// An entry's path is not acceptable.
-    BadPath(String),
     /// A writer could not be recorded.
     BadWriter(BadWriter),
     /// The index could not be stored.
@@ -80,7 +82,6 @@ impl std::fmt::Display for RemoteError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             RemoteError::BadSignature(p) => write!(f, "{p}: not signed by a writer of this folder"),
-            RemoteError::BadPath(p) => write!(f, "{p:?}: not an acceptable path"),
             RemoteError::BadWriter(e) => write!(f, "writer refused: {e}"),
             RemoteError::Io(e) => write!(f, "index: {e}"),
         }
@@ -194,6 +195,7 @@ impl FolderCore {
             ignore: &self.ignore,
             byte_exact_names: self.cfg.byte_exact_names,
             case_insensitive: self.cfg.case_insensitive,
+            exec_bits: self.cfg.exec_bits,
             now_s: (self.clock.now_ns() / 1_000_000_000).max(0) as u64,
             new_file_id: &*new_id,
             batch_size: 1000,
@@ -211,6 +213,7 @@ impl FolderCore {
             clock: &*self.clock,
             device_name,
             case_insensitive: self.cfg.case_insensitive,
+            exec_bits: self.cfg.exec_bits,
             archive: self.cfg.archive,
             window,
             round: Default::default(),
@@ -317,16 +320,15 @@ impl FolderCore {
         Ok(())
     }
 
-    /// A peer's index batch. Every entry is checked (path, signature) before any is stored: one bad entry
-    /// refuses the whole batch.
+    /// A peer's index batch. Every entry is checked before any is stored. An entry whose path this version does
+    /// not accept is skipped (a later version may send names this one refuses; the rest of the batch and the
+    /// session go on, as the protocol promises: `trs_sync_proto::msg`). An entry not signed by a writer refuses
+    /// the whole batch: the peer is misbehaving.
     pub fn apply_remote(&mut self, peer: ShortId, idx: RemoteIndex) -> Result<usize, RemoteError> {
-        for e in &idx.entries {
-            let p = &e.file.info.path;
-            if validate_path(p).is_err() || crate::path::check_wire_path(p).is_err() {
-                return Err(RemoteError::BadPath(p.clone()));
-            }
+        let path_ok = |p: &str| validate_path(p).is_ok() && crate::path::check_wire_path(p).is_ok();
+        for e in idx.entries.iter().filter(|e| path_ok(&e.file.info.path)) {
             if !self.writers.verify(&e.file) {
-                return Err(RemoteError::BadSignature(p.clone()));
+                return Err(RemoteError::BadSignature(e.file.info.path.clone()));
             }
         }
         let known = self.store.peer(peer)?.unwrap_or_default();
@@ -352,6 +354,9 @@ impl FolderCore {
                 continue;
             }
             max_seq = max_seq.max(e.sequence);
+            if !path_ok(&e.file.info.path) {
+                continue;
+            }
             batch.put_remote(peer, e);
             stored += 1;
         }

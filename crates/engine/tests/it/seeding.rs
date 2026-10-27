@@ -450,6 +450,100 @@ async fn a_cold_torrent_serves_its_first_block_fast() {
     assert!(took < Duration::from_millis(250), "{took:?}");
 }
 
+/// Some clients ask for blocks bigger than 16 KiB. They are served (up to 128 KiB, like libtorrent);
+/// the wire decoder once hung up on them before the request reached the torrent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_request_for_a_32_kib_block_is_served() {
+    let seeder = node(|_| {}).await;
+    let t = standard_torrent(2_000_000, None, false, 63);
+    t.write_to(seeder.dir.path());
+    seeder.h.add_torrent_file(t.bytes.clone(), AddOptions::default()).await.unwrap();
+    wait_done(&seeder, &t.id, 30).await;
+    let mut s = TcpStream::connect(seeder.addr()).await.unwrap();
+    let mut hs = vec![19u8];
+    hs.extend(b"BitTorrent protocol");
+    hs.extend([0u8; 8]);
+    hs.extend(t.id);
+    hs.extend(*b"-TR4130-bigblockbig1");
+    s.write_all(&hs).await.unwrap();
+    let mut theirs = [0u8; 68];
+    s.read_exact(&mut theirs).await.unwrap();
+    s.write_all(&[0, 0, 0, 1, 2]).await.unwrap(); // interested
+    let mut buf = Vec::new();
+    while !matches!(read_msg(&mut s, &mut buf).await.unwrap(), Some((1, _))) {}
+    let mut req = vec![0, 0, 0, 13, 6];
+    req.extend(0u32.to_be_bytes());
+    req.extend(0u32.to_be_bytes());
+    req.extend((32u32 * 1024).to_be_bytes());
+    s.write_all(&req).await.unwrap();
+    let n = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some((7, n)) = read_msg(&mut s, &mut buf).await.expect("the seeder hung up") {
+                return n;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(n, 9 + 32 * 1024);
+    assert_eq!(&buf[9..n], &t.files[0].1[..32 * 1024]);
+}
+
+/// A Cold torrent on a disk that has to spin up takes seconds to start. The peer that woke it, and
+/// every peer arriving meanwhile, gets our handshake at once (clients give up after about 10 s and
+/// back off for minutes) and is served once the torrent is ready. Peers arriving during the startup
+/// were once closed without a word.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn peers_reaching_a_waking_torrent_are_answered_at_once_and_served() {
+    let seeder = node(|c| {
+        c.tiers = TierTimings {
+            hot_to_warm: Duration::from_millis(100),
+            warm_to_cold: Duration::from_millis(300),
+            ..TierTimings::default()
+        };
+        c.test_startup_delay = Duration::from_secs(3);
+    })
+    .await;
+    let t = standard_torrent(2_000_000, None, false, 62);
+    t.write_to(seeder.dir.path());
+    seeder.h.add_torrent_file(t.bytes.clone(), AddOptions::default()).await.unwrap();
+    wait_done(&seeder, &t.id, 30).await;
+    wait_for("the torrent went Cold", 30, || async { (seeder.row(&t.id).await?.tier == Tier::Cold).then_some(()) }).await;
+
+    async fn hello(addr: std::net::SocketAddr, ih: [u8; 20], tag: u8) -> (TcpStream, Duration) {
+        let started = Instant::now();
+        let mut s = TcpStream::connect(addr).await.unwrap();
+        s.set_nodelay(true).unwrap();
+        let mut hs = vec![19u8];
+        hs.extend(b"BitTorrent protocol");
+        hs.extend([0u8; 8]);
+        hs.extend(ih);
+        hs.extend(*b"-TR4130-wakewakewak");
+        hs.push(tag);
+        s.write_all(&hs).await.unwrap();
+        let mut theirs = [0u8; 68];
+        tokio::time::timeout(Duration::from_secs(10), s.read_exact(&mut theirs)).await.expect("no handshake").unwrap();
+        assert_eq!(&theirs[28..48], &ih);
+        (s, started.elapsed())
+    }
+    let (mut a, took_a) = hello(seeder.addr(), t.id, b'a').await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let (mut b, took_b) = hello(seeder.addr(), t.id, b'b').await;
+    eprintln!("handshakes answered in {took_a:?} and {took_b:?}");
+    assert!(took_a < Duration::from_secs(1) && took_b < Duration::from_secs(1), "{took_a:?} {took_b:?}");
+    let refused = seeder.h.diagnostics().incoming_refused;
+    for s in [&mut a, &mut b] {
+        s.write_all(&[0, 0, 0, 1, 2]).await.unwrap(); // interested
+        let mut buf = Vec::new();
+        tokio::time::timeout(Duration::from_secs(15), async {
+            while !matches!(read_msg(s, &mut buf).await.unwrap(), Some((1, _))) {}
+        })
+        .await
+        .expect("not unchoked once the torrent was up");
+    }
+    assert_eq!(seeder.h.diagnostics().incoming_refused, refused);
+}
+
 /// A seeder is dialled by leechers; it does not chase every address a tracker or the DHT hands it.
 /// Forty silent hosts (accept, never answer) were once enough to hold 32 connection slots for
 /// as long as the torrent seeded, with nothing connected: now at most two attempts are in flight
@@ -502,6 +596,96 @@ async fn a_seeder_does_not_chase_every_address() {
         (snap.connections == 1).then_some(())
     })
     .await;
+}
+
+/// A peer that reaches us is not refused because our own dials fill the torrent's peer slots: a dial
+/// that has not connected yet gives way.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn our_pending_dials_give_way_to_a_peer_that_reached_us() {
+    let mut hosts = Vec::new();
+    for _ in 0..2 {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        hosts.push(l.local_addr().unwrap());
+        tokio::spawn(async move {
+            let mut keep = Vec::new();
+            while let Ok((s, _)) = l.accept().await {
+                keep.push(s); // silent: never answers, never closes
+            }
+        });
+    }
+    let seeder = node(|c| {
+        c.max_connections_per_torrent = 2;
+        c.warm_connections_per_torrent = 2;
+        c.handshake_timeout = Duration::from_secs(30);
+    })
+    .await;
+    let t = standard_torrent(300_000, None, false, 72);
+    t.write_to(seeder.dir.path());
+    seeder.h.add_torrent_file(t.bytes.clone(), AddOptions { peers: hosts, ..AddOptions::default() }).await.unwrap();
+    wait_done(&seeder, &t.id, 30).await;
+    wait_for("both dials pending", 10, || async { (seeder.h.totals().await.ok()?.half_open == 2).then_some(()) }).await;
+    let refused = seeder.h.diagnostics().incoming_refused;
+    let mut s = TcpStream::connect(seeder.addr()).await.unwrap();
+    let mut hs = vec![19u8];
+    hs.extend(b"BitTorrent protocol");
+    hs.extend([0u8; 8]);
+    hs.extend(t.id);
+    hs.extend(*b"-TR4130-herehereher1");
+    s.write_all(&hs).await.unwrap();
+    let mut theirs = [0u8; 68];
+    s.read_exact(&mut theirs).await.unwrap();
+    s.write_all(&[0, 0, 0, 1, 2]).await.unwrap(); // interested
+    let mut buf = Vec::new();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !matches!(read_msg(&mut s, &mut buf).await.expect("refused"), Some((1, _))) {}
+    })
+    .await
+    .expect("not unchoked");
+    assert_eq!(seeder.h.diagnostics().incoming_refused, refused);
+}
+
+/// A leecher whose connection died without a word (a router forgot it) reconnects with the same peer
+/// id. It is served on the new connection, and the old, idle one goes; it was once refused until our
+/// idle timeout noticed the old one, minutes later.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_peer_back_after_losing_its_connection_replaces_the_stale_one() {
+    let seeder = node(|_| {}).await;
+    let t = standard_torrent(300_000, None, false, 73);
+    t.write_to(seeder.dir.path());
+    seeder.h.add_torrent_file(t.bytes.clone(), AddOptions::default()).await.unwrap();
+    wait_done(&seeder, &t.id, 30).await;
+    async fn open(addr: std::net::SocketAddr, ih: [u8; 20]) -> TcpStream {
+        let mut s = TcpStream::connect(addr).await.unwrap();
+        let mut hs = vec![19u8];
+        hs.extend(b"BitTorrent protocol");
+        hs.extend([0u8; 8]);
+        hs.extend(ih);
+        hs.extend(*b"-TR4130-samesamesame");
+        s.write_all(&hs).await.unwrap();
+        let mut theirs = [0u8; 68];
+        s.read_exact(&mut theirs).await.unwrap();
+        s.write_all(&[0, 0, 0, 1, 2]).await.unwrap(); // interested
+        let mut buf = Vec::new();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !matches!(read_msg(&mut s, &mut buf).await.expect("hung up"), Some((1, _))) {}
+        })
+        .await
+        .expect("not unchoked");
+        s
+    }
+    let mut old = open(seeder.addr(), t.id).await;
+    tokio::time::sleep(Duration::from_secs(11)).await;
+    let _new = open(seeder.addr(), t.id).await;
+    let mut buf = Vec::new();
+    let closed = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if read_msg(&mut old, &mut buf).await.is_err() {
+                return;
+            }
+        }
+    })
+    .await;
+    assert!(closed.is_ok(), "the stale connection stayed");
 }
 
 /// More interested leechers than upload slots: when the leechers that hold the slots finish, the one

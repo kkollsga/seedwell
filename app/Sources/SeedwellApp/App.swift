@@ -45,6 +45,7 @@ import os
     private var powerOff = false
     private var sleepAssertion = SleepAssertion()
     private var agentsAssertion = SleepAssertion()
+    private var napGuard = NapGuard()
     private var power: PowerWatcher?
     /// The OS network path and sleep/wake, told to the engine (SPEC 7C.4c).
     private(set) var networkWatcher: NetworkWatcher?
@@ -189,7 +190,9 @@ import os
         statusMenu?.onRefresh = { [weak self] s in
             self?.commands.arrivals.note(s)
             UpdateCenter.shared.noteActivity(busy: s.allDownloading.contains { !$0.isHeld } || s.movingPercent != nil)
-            self?.sleepAssertion.update(downloading: s.allDownloading.contains { !$0.awaitingChoice && $0.state == .downloading })
+            let needs = powerNeeds(s: s)
+            self?.sleepAssertion.update(downloading: needs.downloading)
+            self?.napGuard.update(serving: needs.serving)
             self?.agentsAssertion.update(agents: self?.core.agentsAwake())
         }
         NSApp.mainMenu = MainMenu.make(commands: commands)
@@ -602,6 +605,23 @@ import os
             menu.delegate = limitSpeedChecker
         }
         return bar
+    }
+}
+
+/// Keeps App Nap away while peers are connected (`PowerNeeds.serving`): napping throttles the engine's timers and
+/// its disk and network work, which slows seeding. The Mac may still idle-sleep.
+@MainActor final class NapGuard {
+    private var activity: NSObjectProtocol?
+
+    func update(serving: Bool) {
+        if serving == (activity != nil) { return }
+        if serving {
+            activity = ProcessInfo.processInfo.beginActivity(options: .userInitiatedAllowingIdleSystemSleep,
+                                                             reason: "\(AppInfo.name) is sharing with peers")
+        } else if let a = activity {
+            ProcessInfo.processInfo.endActivity(a)
+            activity = nil
+        }
     }
 }
 

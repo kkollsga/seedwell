@@ -16,7 +16,7 @@ use trs_control::proto::*;
 use trs_control::types::*;
 
 use crate::args::{Opts, Usage};
-use crate::chat::{agent_name, ch, first_group, label, lost, mentions, project_topic, stdin_text, time_s};
+use crate::chat::{agent_name, ch, computer, first_group, label, lost, mentions, person, project_topic, stdin_text, time_s};
 use crate::commands::{CliError, Global, R, ask, connect};
 
 /// A `mail` command, with the options every one takes.
@@ -275,71 +275,7 @@ fn none_left(o: Opts, usage: &str) -> Result<(), Usage> {
 
 // ----------------------------------------------------------------------------- the header
 
-/// A mail's header. Every field may be missing; `type` is `kind` here.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Header {
-    pub to: Option<String>,
-    pub kind: Option<String>,
-    pub re: Option<String>,
-    pub state: Option<String>,
-    pub summary: Option<String>,
-    /// The sender's own next step when the answer comes (`send --then`): shown to it with the answer.
-    pub then: Option<String>,
-    /// A tag note's whole set (`type: tag`, §7G.9), comma-separated.
-    pub tags: Option<String>,
-    /// Files passed through a synced folder (§7G.10): `<folder id>:<the pass's folder in it>`.
-    pub pass: Option<String>,
-    /// The sender's git commit when the mail carries files (`d153c95`, `d153c95+changes` for a working tree that
-    /// differs from it), so the recipient can tell which version it got.
-    pub commit: Option<String>,
-}
-
-/// A text's mail header and the text after it; `None` when it does not start with one (`---` … `mail:` … `---`).
-pub fn parse_header(body: &str) -> Option<(Header, String)> {
-    let text = body.replace("\r\n", "\n");
-    let rest = text.strip_prefix("---\n")?;
-    let end = rest.lines().position(|l| l.trim() == "---")?;
-    let lines: Vec<&str> = rest.lines().collect();
-    let mut h = Header::default();
-    let mut is_mail = false;
-    for l in &lines[..end] {
-        let Some((k, v)) = l.split_once(':') else { continue };
-        let v = v.trim().trim_matches('"').trim();
-        let v = (!v.is_empty()).then(|| v.to_string());
-        match k.trim().to_ascii_lowercase().as_str() {
-            "mail" => is_mail = true,
-            "to" => h.to = v,
-            "type" => h.kind = v.map(|t| t.to_lowercase()),
-            "re" => h.re = v.map(|r| r.to_lowercase()),
-            "state" => h.state = v.map(|s| s.to_lowercase()),
-            "summary" => h.summary = v,
-            "then" => h.then = v,
-            "tags" => h.tags = v,
-            "pass" => h.pass = v,
-            "commit" => h.commit = v,
-            _ => {}
-        }
-    }
-    if !is_mail {
-        return None;
-    }
-    let after = lines[end + 1..].join("\n");
-    Some((h, after.trim_start_matches('\n').to_string()))
-}
-
-/// The text of a mail: its header, then `body`.
-pub fn format_mail(h: &Header, body: &str) -> String {
-    let one = |v: &str| v.replace(['\n', '\r'], " ").trim().to_string();
-    let mut o = String::from("---\nmail: 1\n");
-    for (k, v) in [("to", &h.to), ("type", &h.kind), ("re", &h.re), ("state", &h.state), ("summary", &h.summary), ("then", &h.then), ("tags", &h.tags), ("pass", &h.pass), ("commit", &h.commit)] {
-        if let Some(v) = v.as_deref().map(one).filter(|v| !v.is_empty()) {
-            o.push_str(&format!("{k}: {v}\n"));
-        }
-    }
-    o.push_str("---\n");
-    o.push_str(body.trim_start_matches('\n'));
-    o
-}
+pub use trs_control::mail::{Header, format_mail, parse_header};
 
 /// One line for a mail that has no summary: its first heading or line, without Markdown marks, at most 200 characters.
 pub fn summary_of(body: &str) -> String {
@@ -815,11 +751,10 @@ pub fn pick_channel(channels: &[ChatChannelDto], given: Option<&str>) -> Result<
 // ----------------------------------------------------------------------------- output
 
 fn from(m: &ChatMessageDto) -> String {
-    let computer = if m.author_name.is_empty() { first_group(&m.author_device).to_string() } else { m.author_name.clone() };
     match (&m.agent, m.me) {
-        (Some(a), _) => format!("{a} (agent) on {computer}"),
-        (None, true) => format!("the user on {computer}"),
-        (None, false) => computer,
+        (Some(a), _) => format!("{a} (agent) on {}", computer(m)),
+        (None, true) => format!("the user on {}", computer(m)),
+        (None, false) => person(m),
     }
 }
 
@@ -884,7 +819,7 @@ pub fn status_line(s: &ChatMessageDto) -> String {
         Some("done") => "closed",
         _ => "in progress",
     };
-    let who = s.agent.clone().unwrap_or_else(|| if s.author_name.is_empty() { first_group(&s.author_device).to_string() } else { s.author_name.clone() });
+    let who = s.agent.clone().unwrap_or_else(|| person(s));
     format!("{state} by {who}, {}: {}", time_s(s.at), text_of(s).trim())
 }
 
@@ -1223,7 +1158,7 @@ pub async fn run(m: Mail, g: &Global) -> R {
             let status = if status == "-" { stdin_text("Status")? } else { status };
             let was_closed = inbox(&me, &msgs).iter().any(|i| i.m.id == item.id && i.done);
             let s = close(&mut c, &channel.id, &me, item, &status, !open).await?;
-            let sender = item.agent.clone().unwrap_or_else(|| if item.author_name.is_empty() { "the sender".into() } else { item.author_name.clone() });
+            let sender = item.agent.clone().unwrap_or_else(|| if item.author_name.is_empty() { "the sender".into() } else { person(item) });
             if g.json {
                 print_json(&json!({ "id": s, "re": short(&item.id), "state": if open { "open" } else { "done" } }));
             } else if open {
@@ -1665,7 +1600,7 @@ pub fn news_line(me: &str, m: &ChatMessageDto, all: &[ChatMessageDto]) -> String
 
 /// `news_line` in two: what happened, and the summary or text after it (`watch` prints the head, then the text).
 fn news_parts(me: &str, m: &ChatMessageDto, all: &[ChatMessageDto]) -> (String, String) {
-    let who = m.agent.clone().unwrap_or_else(|| if m.author_name.is_empty() { first_group(&m.author_device).to_string() } else { m.author_name.clone() });
+    let who = m.agent.clone().unwrap_or_else(|| person(m));
     let about = answers(m).and_then(|r| all.iter().find(|x| names(&r, &x.id)));
     let what = about.map_or_else(
         || answers(m).map_or_else(|| "mail".to_string(), |r| format!("mail {}", short(&r))),

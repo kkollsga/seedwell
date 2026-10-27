@@ -38,11 +38,14 @@ fn crash_child_entry() {
     let mut k = store.get_counters(id(1)).expect("child: counters").uploaded;
     loop {
         k += 1;
-        // One logical event touches counters and statistics: they must always agree.
+        // One logical event touches counters and statistics: they must always agree, so they are
+        // written as one group (the engine does the same for each of its batches).
+        let group = store.group();
         store.add_counters(id(1), Counters { downloaded: 2, uploaded: 1, seed_secs: 1 }).unwrap();
         store
             .record_stats(&StatsScope::Profile("p".into()), Day(200 + (k % 5) as u32), &StatsBucket { downloaded: 2, uploaded: 1, torrents_added: 1, ..Default::default() })
             .unwrap();
+        drop(group);
         if k.is_multiple_of(7) {
             let mut r = TorrentRecord::new(format!("torrent {k}"), k, k as i64);
             r.piece_count = 8;

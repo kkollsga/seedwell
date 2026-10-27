@@ -135,6 +135,8 @@ pub struct Scanner<'a> {
     /// The disk finds names whatever their case (APFS default), so `lstat` alone does not tell that a
     /// name is gone after a case-only rename.
     pub case_insensitive: bool,
+    /// The disk keeps the executable bit (see [`crate::folder::FolderConfig::exec_bits`]).
+    pub exec_bits: bool,
     /// Now, Unix seconds (for version counters).
     pub now_s: u64,
     /// Random bytes for new file ids.
@@ -309,7 +311,7 @@ impl Scanner<'_> {
                 o.stamp.is_some_and(|s| s == stamp || meta.kind == FileKind::Dir)
             } else {
                 !o.file.info.deleted && o.file.info.kind == meta.kind && match meta.kind {
-                    FileKind::File => o.stamp == Some(stamp) && o.file.info.exec == meta.exec,
+                    FileKind::File => o.stamp == Some(stamp) && (!self.exec_bits || o.file.info.exec == meta.exec),
                     // Directories have no content; symlinks are re-read (cheap) below.
                     FileKind::Dir => true,
                     FileKind::Symlink => o.stamp == Some(stamp),
@@ -366,7 +368,8 @@ impl Scanner<'_> {
             kind: meta.kind,
             size,
             mtime_ns: if meta.kind == FileKind::Dir { 0 } else { meta.mtime_ns },
-            exec: meta.kind == FileKind::File && meta.exec,
+            // Where the disk does not keep the bit, the version we have says it.
+            exec: meta.kind == FileKind::File && if self.exec_bits { meta.exec } else { base.is_some_and(|b| !b.deleted && b.exec) },
             deleted: false,
             version: Version::new(),
             modified_by: self.me,

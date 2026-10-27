@@ -5,6 +5,7 @@ import SwiftUI
 /// limits and where joined folders go. These are folder sync's own (`sync.toml`), separate from the torrent settings.
 struct SyncTab: View {
     @Bindable var model: SettingsModel
+    @State private var portError: String?
     @State private var finderOn = FinderStatusWriter.extensionEnabled
     @State private var shareOn = ShareMenu.enabled
 
@@ -16,10 +17,16 @@ struct SyncTab: View {
                     SettingsRow(label: "Device name", hint: "What your other devices and the people you share with see") {
                         DeviceNameField(name: b.deviceName, placeholder: s.defaultDeviceName)
                     }
-                    SettingsRow(label: "Sync port", hint: "Picked at the first start and kept. Separate from the torrent port.") {
-                        Text(s.port == 0 ? "Not listening" : String(s.port)).monospacedDigit().foregroundStyle(.secondary)
-                            .textSelection(.enabled)
-                            .accessibilityIdentifier("sync-port")
+                    SettingsRow(label: "Your name", hint: "Shown with the device name in chats. Every member sees the change.") {
+                        DeviceNameField(name: b.userName, placeholder: "None", identifier: "sync-user-name")
+                    }
+                    SettingsRow(label: "Sync port", hint: portHint) {
+                        SyncPortField(port: s.port) { port in portError = model.setSyncPort(port) } invalid: {
+                            portError = "Use a port from 1024 to 65535."
+                        }
+                    }
+                    if let r = model.syncReachability {
+                        SettingsRow(label: "From the Internet", hint: r.summary) { ReachabilityLabel(state: r.state) }
                     }
                 }
                 SettingsGroup(title: "Finding devices") {
@@ -74,6 +81,7 @@ struct SyncTab: View {
                 }
             }
         }
+        .task { await model.watchSync() }
         .onAppear { model.reloadSync(); finderOn = FinderStatusWriter.extensionEnabled; shareOn = ShareMenu.enabled }
         // Switched in System Settings: seen when the app comes back.
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
@@ -87,6 +95,7 @@ struct SyncTab: View {
 struct DeviceNameField: View {
     @Binding var name: String
     let placeholder: String
+    var identifier = "sync-device-name"
     @State private var text = ""
     @FocusState private var focused: Bool
 
@@ -98,12 +107,52 @@ struct DeviceNameField: View {
             .onChange(of: name) { if !focused { text = name } }
             .onChange(of: focused) { if !focused { commit() } }
             .onSubmit(commit)
-            .accessibilityIdentifier("sync-device-name")
+            .accessibilityIdentifier(identifier)
     }
 
     private func commit() {
         let t = String(text.trimmingCharacters(in: .whitespaces).prefix(64))
         text = t
         if t != name { name = t }
+    }
+}
+
+extension SyncTab {
+    /// Why a port was refused, that sync is moving, or what the port is.
+    private var portHint: String {
+        if let e = portError { return e }
+        if let p = model.syncPortMovingTo { return "Starting folder sync on port \(p)…" }
+        return "Picked at the first start and kept. Separate from the torrent port."
+    }
+}
+
+/// The sync port: always a number (sync keeps the port it has). Committed on Return or when it loses focus; an
+/// empty field goes back to the port in use.
+struct SyncPortField: View {
+    let port: UInt16
+    let commit: (UInt16) -> Void
+    let invalid: () -> Void
+    @State private var text = ""
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        TextField("Port", text: $text)
+            .textFieldStyle(.roundedBorder).frame(width: 90)
+            .monospacedDigit()
+            .focused($focused)
+            .disabled(port == 0)
+            .onAppear { text = PortEntry.text(port) }
+            .onChange(of: port) { if !focused { text = PortEntry.text(port) } }
+            .onChange(of: focused) { if !focused { done() } }
+            .onSubmit { done() }
+            .accessibilityIdentifier("sync-port")
+    }
+
+    private func done() {
+        switch PortEntry.parse(text) {
+        case .automatic: text = PortEntry.text(port)
+        case .manual(let v): if v != port { commit(v) }
+        case .invalid: invalid(); text = PortEntry.text(port)
+        }
     }
 }

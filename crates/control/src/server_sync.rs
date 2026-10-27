@@ -223,7 +223,22 @@ pub(super) async fn call<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &Conn, req: Reques
         Request::SyncRemove(p) => remove_plan(ctx, conn, &h, p).await,
         Request::SyncRemoveConfirm(p) => remove_confirm(ctx, conn, &h, p).await,
         Request::SyncSettings(_) => reply(&settings_dto(&h.settings(), Vec::new(), String::new())),
-        Request::SyncSetSettings(p) => set_settings(&h, p),
+        Request::SyncSetSettings(p) => {
+            // The port first: sync starts again on it, and the rest goes to the new service.
+            let h = match p.port {
+                Some(port) if port != 0 && port < 1024 => return Err(ApiError::params("`port` is 0 (choose one) or 1024-65535")),
+                Some(port) => {
+                    ctx.backend.sync_move_port(port).await.map_err(|e| match e {
+                        s::PortChange::Invalid => ApiError::params("`port` is 0 (choose one) or 1024-65535"),
+                        s::PortChange::NotRunning => s::not_running(),
+                        e => ApiError::new(ErrorCode::Engine, e.to_string()),
+                    })?;
+                    ctx.backend.sync().ok_or_else(s::not_running)?
+                }
+                None => h,
+            };
+            set_settings(&h, p)
+        }
         _ => Err(ApiError::internal("not a sync method")),
     }
 }
@@ -327,6 +342,7 @@ fn settings_dto(st: &trs_sync_net::config::Settings, changed: Vec<String>, note:
     let lim = |kib: u32| (kib != 0).then(|| u64::from(kib) * 1024);
     SyncSettingsDto {
         device_name: st.device_name.clone(),
+        user_name: st.user_name.clone(),
         port: st.port,
         lan_discovery: st.lan_discovery,
         dht_discovery: st.dht_discovery,
@@ -356,13 +372,18 @@ fn set_settings(h: &SyncHandle, p: SyncSettingsParams) -> Result<Reply, ApiError
         st.device_name = n;
         changed.push("device_name");
     }
-    if let Some(port) = p.port {
-        if port != 0 && port < 1024 {
-            return Err(ApiError::params("`port` is 0 (choose one) or 1024-65535"));
+    if let Some(n) = &p.user_name {
+        let n: String = n.trim().chars().filter(|c| !c.is_control()).collect();
+        if n.chars().count() > 64 {
+            return Err(ApiError::params("`user_name` is at most 64 characters"));
         }
-        st.port = port;
+        st.user_name = n;
+        changed.push("user_name");
+    }
+    if p.port.is_some() {
+        // Already moved (`call`): sync listens on it now.
         changed.push("port");
-        note.push("the port applies at the next start");
+        note.push(format!("folder sync listens on port {} now", h.port()));
     }
     for (v, slot, name) in [
         (p.lan_discovery, &mut st.lan_discovery, "lan_discovery"),
@@ -376,7 +397,7 @@ fn set_settings(h: &SyncHandle, p: SyncSettingsParams) -> Result<Reply, ApiError
         }
     }
     if p.lan_discovery.is_some() {
-        note.push("LAN discovery follows at the next start");
+        note.push("LAN discovery follows at the next start".to_owned());
     }
     let kib = |b: u64, what: &str| -> Result<u32, ApiError> {
         if b > trs_state::config::MAX_RATE {

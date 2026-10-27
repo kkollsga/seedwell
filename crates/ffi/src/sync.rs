@@ -155,6 +155,8 @@ pub struct SyncMember {
     pub device_id: String,
     /// Its name (empty when never met).
     pub name: String,
+    /// Its user's name (empty: none given).
+    pub user: String,
     pub role: SyncRole,
     /// A session with it is open now for this folder.
     pub online: bool,
@@ -232,6 +234,8 @@ pub struct SyncMessage {
     pub author_device: String,
     /// The author's device name (empty when never met).
     pub author_name: String,
+    /// The name of the author's user (empty: none given).
+    pub author_user: String,
     pub is_me: bool,
     /// The agent (control client) that posted it, if one did: shown as a small label.
     pub agent: Option<String>,
@@ -264,6 +268,8 @@ pub struct SyncTopic {
 pub struct SyncDirect {
     pub device_id: String,
     pub name: String,
+    /// Its user's name (empty: none given).
+    pub user: String,
     pub online: bool,
     pub unread: u32,
     pub last_message_s: Option<u64>,
@@ -289,7 +295,7 @@ pub struct SyncLinkInfo {
     pub channel_joined: bool,
 }
 
-/// A conflict copy in a folder: `Report (conflict, MacBook, 2026-10-25 14.32).txt`.
+/// A conflict copy in a folder: `Report (conflict, MacBook, 2026-10-25 14.32z).txt`.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct SyncConflict {
     /// The copy, absolute.
@@ -300,7 +306,7 @@ pub struct SyncConflict {
     pub original: String,
     /// The device whose version it is.
     pub device: String,
-    /// `2026-10-25 14.32`, as in the name.
+    /// When the losing version was made, in local time (`2026-10-25 15.32`; the name says it in UTC).
     pub when: String,
 }
 
@@ -325,7 +331,7 @@ pub enum SyncKeep {
     Original,
     /// The conflict copy: it replaces the original.
     Copy,
-    /// Both: the copy becomes an ordinary file (`Report (MacBook, 2026-10-25 14.32).txt`).
+    /// Both: the copy becomes an ordinary file (`Report (MacBook, 2026-10-25 14.32z).txt`).
     Both,
 }
 
@@ -336,6 +342,8 @@ pub struct SyncSettings {
     pub device_name: String,
     /// The computer's name (the placeholder of an empty device name).
     pub default_device_name: String,
+    /// The name this Mac's user goes by in chats, shown with the device name; empty = none.
+    pub user_name: String,
     /// The sync port in use (read only in the app).
     pub port: u16,
     /// Applies at the next start.
@@ -444,6 +452,11 @@ pub trait SyncBackend: Send + Sync {
     fn set_lan_only(&self, id: &str, lan_only: bool) -> Result<(), CoreError>;
     fn settings(&self) -> SyncSettings;
     fn set_settings(&self, s: &SyncSettings) -> Result<(), CoreError>;
+    /// Moves sync to `port` now (SPEC 7G.5): refused at once when the port is taken; otherwise the service
+    /// starts again on it in the background (a few seconds).
+    fn set_port(&self, port: u16) -> Result<(), CoreError>;
+    /// Whether the router opened the sync port. Cheap: the settings page polls it.
+    fn port_reachability(&self) -> Option<crate::types::ReachabilityInfo>;
     fn default_location(&self) -> String;
     /// Every channel, by name. Cheap: called once a second.
     fn chat_channels(&self) -> Vec<SyncChannel>;
@@ -461,6 +474,7 @@ pub trait SyncBackend: Send + Sync {
     fn chat_direct_messages(&self, device_id: &str, before: Option<&str>, limit: u32) -> Vec<SyncMessage>;
     fn chat_send_direct(&self, device_id: &str, body: &str, reply_to: Option<&str>) -> Result<SyncMessage, CoreError>;
     fn chat_mark_direct_read(&self, device_id: &str);
+    fn chat_delete_direct(&self, device_id: &str) -> Result<(), CoreError>;
     fn chat_direct_agents(&self) -> SyncAgentAccess;
     fn chat_set_direct_agents(&self, access: SyncAgentAccess);
     fn chat_set_muted(&self, id: &str, muted: bool);
@@ -469,6 +483,10 @@ pub trait SyncBackend: Send + Sync {
     fn chat_leave(&self, id: &str) -> Result<(), CoreError>;
     fn chat_rename(&self, id: &str, name: &str) -> Result<(), CoreError>;
 }
+
+/// Why a private message cannot be written now (`SyncDirect::online` is false).
+const DIRECT_OFFLINE: &str =
+    "Private messages go only over a direct connection between the two Macs, never through another device. You can write once both are online and can reach each other.";
 
 /// A sentence for people: the service's lowercase reasons get a capital and a full stop.
 pub fn readable(msg: &str) -> String {
@@ -647,6 +665,7 @@ fn message_of(m: &MessageInfo) -> SyncMessage {
         channel_id: m.channel_id.clone(),
         author_device: m.author_device.clone(),
         author_name: m.author_name.clone(),
+        author_user: m.author_user.clone(),
         is_me: m.me,
         agent: m.agent.clone(),
         at_s: m.at,
@@ -675,7 +694,7 @@ fn topic_of(t: &trs_sync_net::chat::TopicStatus) -> SyncTopic {
 }
 
 fn direct_of(d: &trs_sync_net::direct::DirectStatus) -> SyncDirect {
-    SyncDirect { device_id: d.device.to_string(), name: d.name.clone(), online: d.online, unread: d.unread, last_message_s: d.last_message_s }
+    SyncDirect { device_id: d.device.to_string(), name: d.name.clone(), user: d.user.clone(), online: d.online, unread: d.unread, last_message_s: d.last_message_s }
 }
 
 /// A pasted channel link, decoded (nothing is joined).
@@ -701,7 +720,11 @@ fn conflict_of(root: &Path, copy: String, original: String) -> SyncConflict {
         copy,
         original,
         device: name.as_ref().map(|n| n.device.clone()).unwrap_or_default(),
-        when: name.map(|n| n.stamp).unwrap_or_default(),
+        when: name.map(|n| match n.utc_s {
+            Some(t) => trs_sync::clock::local_stamp(t, trs_engine::util::local_utc_offset(t)),
+            None => n.stamp,
+        })
+        .unwrap_or_default(),
     }
 }
 
@@ -716,6 +739,7 @@ fn default_location_of(setting: &str) -> String {
 pub struct RealSync {
     rt: tokio::runtime::Handle,
     slot: SyncSlot,
+    engine: EngineHandle,
     /// Why the service is not running, once its start failed.
     problem: Arc<Mutex<Option<String>>>,
     default_name: String,
@@ -732,22 +756,29 @@ impl RealSync {
         let slot = SyncSlot::new();
         let problem = Arc::new(Mutex::new(None));
         let default_name = trs_control::sync::default_device_name();
-        let me = Arc::new(RealSync { rt: rt.clone(), slot: slot.clone(), problem: problem.clone(), default_name: default_name.clone() });
+        let me = Arc::new(RealSync { rt: rt.clone(), slot: slot.clone(), engine: engine.clone(), problem: problem.clone(), default_name: default_name.clone() });
         let secrets = secret_store(vault, dir);
         let (engine, dir) = (engine.clone(), dir.to_path_buf());
-        rt.spawn(async move {
-            let client = format!("Seedwell {}", env!("CARGO_PKG_VERSION"));
-            let started = start_sync_with(&dir, client, secrets, Some(&engine), |o| {
-                o.default_device_name = default_name;
-                o.utc_offset = Some(Arc::new(trs_engine::util::local_utc_offset));
-                if is_test_run() {
-                    o.bind = std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
-                    o.lan_discovery = false;
-                } else {
-                    o.bind = std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED);
-                }
+        // The same start again when the port changes (`SyncSlot::move_port`).
+        let starter: trs_control::sync::Starter = Arc::new(move || {
+            let (dir, secrets, engine, default_name) = (dir.clone(), secrets.clone(), engine.clone(), default_name.clone());
+            Box::pin(async move {
+                let client = format!("Seedwell {}", env!("CARGO_PKG_VERSION"));
+                start_sync_with(&dir, client, secrets, Some(&engine), |o| {
+                    o.default_device_name = default_name;
+                    if is_test_run() {
+                        o.bind = std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
+                        o.lan_discovery = false;
+                    } else {
+                        o.bind = std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED);
+                    }
+                })
+                .await
             })
-            .await;
+        });
+        slot.set_starter(starter.clone());
+        rt.spawn(async move {
+            let started = starter().await;
             match started {
                 Ok(h) => slot.set(Some(h)),
                 Err(e) => {
@@ -851,6 +882,12 @@ impl SyncBackend for RealSync {
         if let (Some(h), Ok(dev)) = (self.slot.get(), device_id.parse()) {
             let _ = h.chat_mark_direct_read(&dev);
         }
+    }
+
+    fn chat_delete_direct(&self, device_id: &str) -> Result<(), CoreError> {
+        let h = self.handle()?;
+        let dev = device_id.parse().map_err(|_| failed("Not a device"))?;
+        h.chat_delete_direct(&dev).map_err(sync_err)
     }
 
     fn chat_direct_agents(&self) -> SyncAgentAccess {
@@ -962,6 +999,7 @@ impl SyncBackend for RealSync {
             .map(|m| SyncMember {
                 device_id: m.device.to_string(),
                 name: m.name,
+                user: m.user,
                 role: role_of(m.role),
                 online: m.online,
                 is_me: m.is_me,
@@ -1084,6 +1122,7 @@ impl SyncBackend for RealSync {
         SyncSettings {
             device_name: s.device_name,
             default_device_name: self.default_name.clone(),
+            user_name: s.user_name,
             port: if port != 0 { port } else { s.port },
             lan_discovery: s.lan_discovery,
             dht_discovery: s.dht_discovery,
@@ -1099,6 +1138,7 @@ impl SyncBackend for RealSync {
         let h = self.handle()?;
         let mut st = h.settings();
         st.device_name = s.device_name.trim().chars().filter(|c| !c.is_control()).take(64).collect();
+        st.user_name = s.user_name.clone();
         st.lan_discovery = s.lan_discovery;
         st.dht_discovery = s.dht_discovery;
         st.relay_own_devices = s.relay_own_devices;
@@ -1111,6 +1151,34 @@ impl SyncBackend for RealSync {
             folder_path(&s.default_location, "the default location").map_err(api_err)?.display().to_string()
         };
         h.set_settings(st).map_err(sync_err)
+    }
+
+    fn set_port(&self, port: u16) -> Result<(), CoreError> {
+        use trs_control::sync::PortChange;
+        if port < 1024 {
+            return Err(failed(PortChange::Invalid.to_string()));
+        }
+        let h = self.handle()?;
+        if h.port() == port {
+            return Ok(());
+        }
+        if !trs_control::sync::port_free(port) {
+            return Err(failed(PortChange::InUse(port).to_string()));
+        }
+        let (slot, problem) = (self.slot.clone(), self.problem.clone());
+        self.rt.spawn(async move {
+            if let Err(e) = slot.move_port(port).await {
+                eprintln!("seedwell: folder sync did not move to port {port}: {e}");
+                *lock(&problem) = Some(readable(&e.to_string()));
+            }
+        });
+        Ok(())
+    }
+
+    fn port_reachability(&self) -> Option<crate::types::ReachabilityInfo> {
+        let h = self.slot.get()?;
+        let r = trs_control::sync_reachability_dto(&self.engine.reachability(), h.port());
+        Some(crate::types::ReachabilityInfo { state: r.state, summary: r.summary })
     }
 
     fn default_location(&self) -> String {
@@ -1164,6 +1232,9 @@ impl SyncBackend for NoSync {
         Err(failed("Channels are not available"))
     }
     fn chat_mark_direct_read(&self, _: &str) {}
+    fn chat_delete_direct(&self, _: &str) -> Result<(), CoreError> {
+        Err(failed("Channels are not available"))
+    }
     fn chat_direct_agents(&self) -> SyncAgentAccess {
         SyncAgentAccess::Off
     }
@@ -1255,6 +1326,12 @@ impl SyncBackend for NoSync {
     }
     fn set_settings(&self, _: &SyncSettings) -> Result<(), CoreError> {
         Err(failed("Folder sync is not available"))
+    }
+    fn set_port(&self, _: u16) -> Result<(), CoreError> {
+        Err(failed("Folder sync is not available"))
+    }
+    fn port_reachability(&self) -> Option<crate::types::ReachabilityInfo> {
+        None
     }
     fn default_location(&self) -> String {
         default_location_of("")
@@ -1355,12 +1432,18 @@ fn mock_invite(n: u32, k: u32, name: &str, role: SyncRole, max_uses: u32, valid_
     }
 }
 
+/// A mock device's user: "Ola" for "Ola's MacBook Air", none for "Studio iMac".
+fn mock_user(device: &str) -> String {
+    device.split_once("'s ").map(|(u, _)| u.to_string()).unwrap_or_default()
+}
+
 /// The mock devices of a folder: this Mac at `mine`, and `others` (name, role, online).
 fn mock_members(mine: SyncRole, others: &[(&str, SyncRole, bool)], share_until_s: Option<u64>) -> Vec<SyncMember> {
     let ends = |role: SyncRole| share_until_s.filter(|_| role != SyncRole::Owner);
     let mut out = vec![SyncMember {
         device_id: "HTU7WQB-QKZ4XNA-MFZWI3D-YLTMRWG".into(),
         name: "Kristian's MacBook Pro".into(),
+        user: "Kristian".into(),
         role: mine,
         online: true,
         is_me: true,
@@ -1368,7 +1451,7 @@ fn mock_members(mine: SyncRole, others: &[(&str, SyncRole, bool)], share_until_s
     }];
     for (i, (name, role, online)) in others.iter().enumerate() {
         let groups = ["MFZWI3D-BONSGYC-YLTMRWG-QKZ4XNA", "P2RFOJE-HTU7WQB-MFZWI3D-BONSGYC", "QKZ4XNA-YLTMRWG-P2RFOJE-HTU7WQB"];
-        out.push(SyncMember { device_id: groups[i % 3].into(), name: (*name).into(), role: *role, online: *online, is_me: false, expires_s: ends(*role) });
+        out.push(SyncMember { device_id: groups[i % 3].into(), name: (*name).into(), user: mock_user(name), role: *role, online: *online, is_me: false, expires_s: ends(*role) });
     }
     out
 }
@@ -1450,6 +1533,7 @@ impl MockSync {
             channel_id: String::new(),
             author_device: if from_me { "HTU7WQB-QKZ4XNA-MFZWI3D-YLTMRWG".into() } else { ola.into() },
             author_name: if from_me { "Kristian's MacBook Pro".into() } else { "Ola's MacBook Air".into() },
+            author_user: if from_me { "Kristian".into() } else { "Ola".into() },
             is_me: from_me,
             agent: None,
             at_s: now.saturating_sub(ago),
@@ -1482,6 +1566,7 @@ impl MockSync {
             channel_id: ch.into(),
             author_device: who.into(),
             author_name: name.into(),
+            author_user: mock_user(name),
             is_me: who == me,
             agent: agent.map(str::to_string),
             at_s: now.saturating_sub(ago),
@@ -1581,6 +1666,7 @@ impl MockSync {
         SyncSettings {
             device_name: String::new(),
             default_device_name: "Kristian's MacBook Pro".into(),
+            user_name: "Kristian".into(),
             port: 22_100,
             lan_discovery: true,
             dht_discovery: true,
@@ -1770,6 +1856,7 @@ impl SyncBackend for MockSync {
             .map(|d| SyncDirect {
                 device_id: d.device_id.clone(),
                 name: d.name.clone(),
+                user: mock_user(&d.name),
                 online: d.online,
                 unread: d.messages.iter().skip(d.read).filter(|m| !m.is_me).count() as u32,
                 last_message_s: d.messages.last().map(|m| m.at_s),
@@ -1791,6 +1878,9 @@ impl SyncBackend for MockSync {
             return Err(failed("Nothing to send"));
         }
         let mut s = lock(&self.state);
+        if s.directs.iter().any(|d| d.device_id == device_id && !d.online) {
+            return Err(failed(readable(DIRECT_OFFLINE)));
+        }
         // Any member of a mock channel can be written to.
         let name = s
             .channels
@@ -1804,6 +1894,7 @@ impl SyncBackend for MockSync {
             channel_id: String::new(),
             author_device: "HTU7WQB-QKZ4XNA-MFZWI3D-YLTMRWG".into(),
             author_name: "Kristian's MacBook Pro".into(),
+            author_user: "Kristian".into(),
             is_me: true,
             agent: None,
             at_s: now_s(),
@@ -1825,6 +1916,13 @@ impl SyncBackend for MockSync {
         if let Some(d) = lock(&self.state).directs.iter_mut().find(|d| d.device_id == device_id) {
             d.read = d.messages.len();
         }
+    }
+
+    fn chat_delete_direct(&self, device_id: &str) -> Result<(), CoreError> {
+        let mut s = lock(&self.state);
+        let before = s.directs.len();
+        s.directs.retain(|d| d.device_id != device_id);
+        if s.directs.len() == before { Err(failed("There is no conversation with that device on this Mac")) } else { Ok(()) }
     }
 
     fn chat_direct_agents(&self) -> SyncAgentAccess {
@@ -1849,6 +1947,7 @@ impl SyncBackend for MockSync {
                 channel_id: m.f.id.clone(),
                 author_device: "HTU7WQB-QKZ4XNA-MFZWI3D-YLTMRWG".into(),
                 author_name: "Kristian's MacBook Pro".into(),
+                author_user: "Kristian".into(),
                 is_me: true,
                 agent: None,
                 at_s: now_s(),
@@ -2168,7 +2267,7 @@ impl SyncBackend for MockSync {
         let Some(m) = s.folders.iter().find(|m| m.f.id == id && m.f.conflicts > 0) else { return Vec::new() };
         vec![conflict_of(
             Path::new(&m.f.path),
-            "Plans/Budget 2027 (conflict, Studio iMac, 2026-10-24 18.05).numbers".into(),
+            "Plans/Budget 2027 (conflict, Studio iMac, 2026-10-24 18.05z).numbers".into(),
             "Plans/Budget 2027.numbers".into(),
         )]
     }
@@ -2181,7 +2280,7 @@ impl SyncBackend for MockSync {
         let s = lock(&self.state);
         let Some(m) = s.folders.iter().find(|m| m.f.id == id) else { return SyncActivity::default() };
         let pending = if m.f.state == SyncState::Syncing { vec!["Scans/2026/Receipts.pdf".into()] } else { Vec::new() };
-        let conflicts = if m.f.conflicts > 0 { vec!["Plans/Budget 2027 (conflict, Studio iMac, 2026-10-24 18.05).numbers".into()] } else { Vec::new() };
+        let conflicts = if m.f.conflicts > 0 { vec!["Plans/Budget 2027 (conflict, Studio iMac, 2026-10-24 18.05z).numbers".into()] } else { Vec::new() };
         SyncActivity { pending, pending_more: false, conflicts, own_ignores: false }
     }
 
@@ -2198,6 +2297,18 @@ impl SyncBackend for MockSync {
         let port = st.settings.port;
         st.settings = SyncSettings { port, default_device_name: st.settings.default_device_name.clone(), ..s.clone() };
         Ok(())
+    }
+
+    fn set_port(&self, port: u16) -> Result<(), CoreError> {
+        if port < 1024 {
+            return Err(failed(trs_control::sync::PortChange::Invalid.to_string()));
+        }
+        lock(&self.state).settings.port = port;
+        Ok(())
+    }
+
+    fn port_reachability(&self) -> Option<crate::types::ReachabilityInfo> {
+        Some(crate::types::ReachabilityInfo { state: "mapped".into(), summary: "Opened on the router with UPnP: your devices can reach this Mac".into() })
     }
 
     fn default_location(&self) -> String {
@@ -2312,8 +2423,9 @@ impl Core {
         self.backend.sync().chat_direct_messages(&device_id, before.as_deref(), limit)
     }
 
-    /// Writes a private message (end-to-end encrypted) to a device that shares a channel with this Mac. Refused,
-    /// with a plain reason, when none is shared or its key is not known yet.
+    /// Writes a private message (end-to-end encrypted) to a device this Mac has a conversation with or shares a
+    /// channel with, while the two are connected directly (`SyncDirect::online`). Refused, with a plain reason,
+    /// otherwise.
     pub fn chat_send_direct(&self, device_id: String, body: String, reply_to: Option<String>) -> Result<SyncMessage, CoreError> {
         self.backend.sync().chat_send_direct(&device_id, &body, reply_to.as_deref())
     }
@@ -2321,6 +2433,18 @@ impl Core {
     /// Every private message from the device is read.
     pub fn chat_mark_direct_read(&self, device_id: String) {
         self.backend.sync().chat_mark_direct_read(&device_id)
+    }
+
+    /// Deletes the private conversation with a device on this Mac: its messages and all this Mac knows of the
+    /// device through it (the other device keeps its copy).
+    pub fn chat_delete_direct(&self, device_id: String) -> Result<(), CoreError> {
+        self.backend.sync().chat_delete_direct(&device_id)
+    }
+
+    /// The line a private conversation's page shows instead of the message field while the other device is not
+    /// connected directly.
+    pub fn chat_direct_offline_text(&self) -> String {
+        DIRECT_OFFLINE.into()
     }
 
     /// What agents on this Mac may do with private messages.
@@ -2464,6 +2588,17 @@ impl Core {
         self.backend.sync().set_settings(&settings)
     }
 
+    /// Moves folder sync to `port` (1024-65535) now: refused at once when another app has it; otherwise sync
+    /// starts again on it in the background, and `sync_settings().port` shows it a few seconds later.
+    pub fn set_sync_port(&self, port: u16) -> Result<(), CoreError> {
+        self.backend.sync().set_port(port)
+    }
+
+    /// Whether the router opened the sync port (`None` while sync is not running).
+    pub fn sync_reachability(&self) -> Option<crate::types::ReachabilityInfo> {
+        self.backend.sync().port_reachability()
+    }
+
     /// Where joined folders go: the setting, else `~/Seedwell`.
     pub fn sync_default_location(&self) -> String {
         self.backend.sync().default_location()
@@ -2473,6 +2608,16 @@ impl Core {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_conflict_named_in_utc_is_shown_in_local_time() {
+        let at = 1_792_938_720; // 2026-10-25 14:32 UTC
+        let c = conflict_of(Path::new("/d"), "a (conflict, iMac, 2026-10-25 14.32z).txt".into(), "a.txt".into());
+        let local = trs_sync::clock::local_stamp(at, trs_engine::util::local_utc_offset(at));
+        assert_eq!((c.device.as_str(), c.when.as_str()), ("iMac", local.as_str()));
+        let old = conflict_of(Path::new("/d"), "a (conflict, iMac, 2026-10-25 15.32).txt".into(), "a.txt".into());
+        assert_eq!(old.when, "2026-10-25 15.32", "named before 0.1.9: local time already");
+    }
 
     #[test]
     fn messages_read_as_sentences() {

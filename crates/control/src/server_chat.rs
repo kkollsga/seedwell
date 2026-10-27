@@ -102,7 +102,7 @@ fn pick_device(h: &SyncHandle, q: &str) -> Result<trs_sync_proto::ids::DeviceId,
     }
     for d in h.chat_directs() {
         if !members.iter().any(|m| m.device == d.device) {
-            members.push(trs_sync_net::MemberInfo { device: d.device, name: d.name, role: trs_sync_proto::members::Role::ReadOnly, online: d.online, is_me: false, expires_s: None });
+            members.push(trs_sync_net::MemberInfo { device: d.device, name: d.name, user: d.user, role: trs_sync_proto::members::Role::ReadOnly, online: d.online, is_me: false, expires_s: None });
         }
     }
     let mut seen = std::collections::BTreeSet::new();
@@ -230,6 +230,16 @@ pub(super) async fn call<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &Conn, req: Reques
             let m = h.chat_send_direct(&dev, kind, &p.body, p.reply_to.as_deref(), Some(&agent)).await.map_err(chat_err)?;
             let mut r = reply(&message_dto(&m))?;
             r.note = Some(format!("wrote {} privately to {}", short(&m.id), short(&dev.to_string())));
+            Ok(r)
+        }
+        Request::ChatDmDelete(p) => {
+            let dev = pick_device(&h, &p.device)?;
+            h.chat_delete_direct(&dev).map_err(|e| match e {
+                trs_sync_net::SyncError::NotFound => ApiError::not_found("no private conversation with that device (see `seedwell chat dm list`)"),
+                e => chat_err(e),
+            })?;
+            let mut r = reply(&json!({ "deleted": true, "device_id": dev.to_string() }))?;
+            r.note = Some(format!("deleted the private conversation with {}", short(&dev.to_string())));
             Ok(r)
         }
         Request::ChatDmSetAgents(p) => {

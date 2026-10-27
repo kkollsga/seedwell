@@ -174,6 +174,11 @@ pub trait Backend: Send + Sync + 'static {
     fn sync(&self) -> Option<trs_sync_net::SyncHandle> {
         None
     }
+    /// Moves folder sync to `port` now ([`crate::sync::SyncSlot::move_port`]); the port in use.
+    #[cfg(feature = "sync")]
+    fn sync_move_port(&self, _port: u16) -> impl Future<Output = Result<u16, crate::sync::PortChange>> + Send {
+        async { Err(crate::sync::PortChange::NotRunning) }
+    }
     /// Engine events, already mapped (the server assigns `seq` and `at`).
     fn subscribe(&self) -> broadcast::Receiver<EventDto>;
 }

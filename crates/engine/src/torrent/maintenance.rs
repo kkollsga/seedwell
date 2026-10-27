@@ -31,6 +31,7 @@ impl Torrent {
             self.switch_location(*sw);
         }
         self.publish_stats();
+        self.serve_early().await;
         for m in first {
             self.handle(m).await;
         }
@@ -656,6 +657,7 @@ impl Torrent {
             }
             Err(e) => {
                 self.finalizing = false;
+                self.ctx.hold_uploads.store(false, Ordering::Relaxed);
                 self.report(TorrentReport::Fault {
                     kind: crate::peer::FaultKind::Other,
                     message: format!("moving the finished files failed: {e}"),

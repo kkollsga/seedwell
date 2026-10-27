@@ -1041,8 +1041,8 @@ pub struct ChatDmParams {
     pub last: Option<u32>,
 }
 
-/// `chat.dm_send`: a private message to a device that shares a channel with this Mac. Needs control, and the
-/// Mac's switch for private messages at Read and post.
+/// `chat.dm_send`: a private message to a device this Mac has a conversation with or shares a channel with, while
+/// the two are connected directly. Needs control, and the Mac's switch for private messages at Read and post.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ChatDmSendParams {
@@ -1059,6 +1059,15 @@ pub struct ChatDmSendParams {
     /// The agent name it is posted under (1 to 64 characters, e.g. the project's); absent: the client's name.
     #[serde(default)]
     pub agent: Option<String>,
+}
+
+/// `chat.dm_delete`: deletes a private conversation on this Mac (its messages, their key and what this Mac knows of
+/// the device through it).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChatDmDeleteParams {
+    /// The device: its id, a prefix of it, or its name.
+    pub device: String,
 }
 
 /// `chat.dm_set_agents`: what agents on this Mac may do with private messages.
@@ -1259,7 +1268,10 @@ pub struct SyncSettingsParams {
     /// The name other devices see (empty = the computer's name).
     #[serde(default)]
     pub device_name: Option<String>,
-    /// The sync port (0 = choose one); applies at the next start.
+    /// The name this Mac's user goes by in chats, shown with the device name (empty = none).
+    #[serde(default)]
+    pub user_name: Option<String>,
+    /// The sync port (0 = choose one): sync starts again on it at once (`SyncSlot::move_port`).
     #[serde(default)]
     pub port: Option<u16>,
     /// Find devices on the local network.
@@ -1543,6 +1555,8 @@ methods! {
     ChatDmSend(ChatDmSendParams) = "chat.dm_send", Control, true;
     /// Private messages: what agents on this Mac may do with them.
     ChatDmSetAgents(ChatDmAgentsParams) = "chat.dm_set_agents", Full, true;
+    /// Private messages: delete a conversation on this Mac.
+    ChatDmDelete(ChatDmDeleteParams) = "chat.dm_delete", Full, true;
 }
 
 fn short_serde_error(e: &serde_json::Error) -> String {

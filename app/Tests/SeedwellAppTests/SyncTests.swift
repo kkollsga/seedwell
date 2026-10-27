@@ -57,9 +57,11 @@ import Testing
         let starting = Self.snap([], running: false)
         #expect(!StatusMenuController.showsSync(starting))
         #expect(StatusMenuController.syncSignature(starting) == "")
-        // The line appears once sync runs: the menu is rebuilt.
-        #expect(StatusMenuController.syncSignature(Self.snap([])) == "sync")
-        #expect(StatusMenuController.syncSignature(Self.snap([Self.folder()])) == StatusMenuController.syncSignature(Self.snap([])),
+        // Running with no folders: no line. The first folder brings it in: the menu is rebuilt.
+        #expect(!StatusMenuController.showsSync(Self.snap([])))
+        #expect(StatusMenuController.syncSignature(Self.snap([])) == "")
+        #expect(StatusMenuController.syncSignature(Self.snap([Self.folder("A")])) == "sync")
+        #expect(StatusMenuController.syncSignature(Self.snap([Self.folder("A"), Self.folder("B")])) == StatusMenuController.syncSignature(Self.snap([Self.folder("A")])),
                 "folders are the submenu's, not the menu's structure")
         // The submenu rebuilds for a folder added, removed or renamed; a state change only updates the rows.
         let one = MenuSync.structureOf(Self.snap([Self.folder("A")]))
@@ -133,12 +135,12 @@ import Testing
     @Test func rolesDecideWhoSharesAndMembersAreListedMineFirstThenByRole() {
         #expect(SyncText.canShare(.owner) && SyncText.canShare(.admin))
         #expect(!SyncText.canShare(.readWrite) && !SyncText.canShare(.readOnly))
-        let m = { (name: String, role: SyncRole, me: Bool) in SyncMember(deviceId: name, name: name, role: role, online: true, isMe: me, expiresS: nil) }
+        let m = { (name: String, role: SyncRole, me: Bool) in SyncMember(deviceId: name, name: name, user: "", role: role, online: true, isMe: me, expiresS: nil) }
         let ordered = SyncText.ordered([m("Zed", .readOnly, false), m("Bo", .admin, false), m("Me", .readWrite, true), m("Al", .owner, false), m("Ann", .admin, false)])
         #expect(ordered.map(\.name) == ["Me", "Al", "Ann", "Bo", "Zed"])
         #expect(SyncText.memberLine(m("Me", .readWrite, true), device: nil) == "", "this Mac's role is on the right already")
-        #expect(SyncText.memberLine(SyncMember(deviceId: "X", name: "X", role: .readOnly, online: false, isMe: false, expiresS: nil), device: nil) == "Offline")
-        let guest = SyncMember(deviceId: "G", name: "G", role: .readWrite, online: false, isMe: false, expiresS: 1_800_000_000)
+        #expect(SyncText.memberLine(SyncMember(deviceId: "X", name: "X", user: "", role: .readOnly, online: false, isMe: false, expiresS: nil), device: nil) == "Offline")
+        let guest = SyncMember(deviceId: "G", name: "G", user: "", role: .readWrite, online: false, isMe: false, expiresS: 1_800_000_000)
         #expect(SyncText.memberLine(guest, device: nil).hasPrefix("Offline · until "), "time-limited access shows its end")
     }
 

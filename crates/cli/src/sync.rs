@@ -71,7 +71,7 @@ pub enum Cmd {
 }
 
 /// The one-line usage.
-pub const USAGE: &str = "usage: seedwell sync list | status <folder> | add <path> | join <link> [--to <path>] | share <folder> [--role read_write|read_only|admin|owner] [--uses N|unlimited] [--days N|never] [--chat <channel>|new] | share-until <folder> <days>|never [--extend] | members <folder> | invites <folder> | revoke-invite <folder> <invite-id> | role <folder> <device> owner|admin|read_write|read_only | remove-device <folder> <device> | rename <folder> <name> | move <folder> <path> | pause <folder> | resume <folder> | rescan <folder> | lan-only <folder> on|off | conflicts <folder> | resolve <folder> <copy> --keep original|copy|both | address <folder> <host:port> | remove <folder> [--delete-files] [-y] | remove-confirm <token> | settings [--device-name N] [--port N] [--lan on|off] [--dht on|off] [--relay-own on|off] [--relay-everyone on|off] [--up R] [--down R] [--default-location PATH]";
+pub const USAGE: &str = "usage: seedwell sync list | status <folder> | add <path> | join <link> [--to <path>] | share <folder> [--role read_write|read_only|admin|owner] [--uses N|unlimited] [--days N|never] [--chat <channel>|new] | share-until <folder> <days>|never [--extend] | members <folder> | invites <folder> | revoke-invite <folder> <invite-id> | role <folder> <device> owner|admin|read_write|read_only | remove-device <folder> <device> | rename <folder> <name> | move <folder> <path> | pause <folder> | resume <folder> | rescan <folder> | lan-only <folder> on|off | conflicts <folder> | resolve <folder> <copy> --keep original|copy|both | address <folder> <host:port> | remove <folder> [--delete-files] [-y] | remove-confirm <token> | settings [--device-name N] [--user-name N] [--port N] [--lan on|off] [--dht on|off] [--relay-own on|off] [--relay-everyone on|off] [--up R] [--down R] [--default-location PATH]";
 
 fn on_off(v: Option<String>, name: &str) -> Result<Option<bool>, Usage> {
     match v.as_deref() {
@@ -198,6 +198,7 @@ pub fn parse(args_in: Vec<String>) -> Result<Cmd, Usage> {
         "settings" => {
             let p = SyncSettingsParams {
                 device_name: o.value(&["--device-name", "--name"])?,
+                user_name: o.value(&["--user-name"])?,
                 port: o.number::<u16>(&["--port"])?,
                 lan_discovery: on_off(o.value(&["--lan"])?, "--lan")?,
                 dht_discovery: on_off(o.value(&["--dht", "--internet"])?, "--dht")?,
@@ -207,7 +208,7 @@ pub fn parse(args_in: Vec<String>) -> Result<Cmd, Usage> {
                 down_limit: o.value(&["--down"])?.map(|v| parse_rate(&v)).transpose()?,
                 default_location: o.value(&["--default-location"])?,
             };
-            args(o, 0, "settings [--device-name N] [--port N] [--lan on|off] [--dht on|off] [--relay-own on|off] [--relay-everyone on|off] [--up R] [--down R] [--default-location PATH]")?;
+            args(o, 0, "settings [--device-name N] [--user-name N] [--port N] [--lan on|off] [--dht on|off] [--relay-own on|off] [--relay-everyone on|off] [--up R] [--down R] [--default-location PATH]")?;
             if p.is_empty() { Cmd::Settings } else { Cmd::SetSettings(p) }
         }
         other => return Err(Usage(format!("unknown sync command `{other}`. {USAGE}"))),
@@ -666,7 +667,7 @@ pub fn members(m: &SyncMembersDto) -> String {
     let mut o = String::new();
     let _ = writeln!(o, "Devices of {}:", m.name);
     for d in &m.members {
-        let name = if d.name.is_empty() { "(not met yet)" } else { &d.name };
+        let name = crate::chat::with_user(&d.user, if d.name.is_empty() { "(not met yet)" } else { &d.name });
         let tail = if d.me { "  (this Mac)" } else if d.online { "  (online)" } else { "" };
         let until = d.expires_at.map(|t| format!("  ({})", shared_until(t))).unwrap_or_default();
         let _ = writeln!(o, "  {:<7}  {:<13} {name}{tail}{until}", first_group(&d.device_id), role(&d.role));
@@ -683,6 +684,7 @@ pub fn settings(s: &SyncSettingsDto) -> String {
         let _ = writeln!(o, "changed: {}{}", s.changed.join(", "), if s.note.is_empty() { String::new() } else { format!(" ({})", s.note) });
     }
     let _ = writeln!(o, "device name       {}", if s.device_name.is_empty() { "(the computer's name)" } else { &s.device_name });
+    let _ = writeln!(o, "user name         {}", if s.user_name.is_empty() { "(none)" } else { &s.user_name });
     let _ = writeln!(o, "port              {}", if s.port == 0 { "automatic".to_owned() } else { s.port.to_string() });
     let _ = writeln!(o, "find on the LAN   {}", yn(s.lan_discovery));
     let _ = writeln!(o, "find on Internet  {}", yn(s.dht_discovery));
@@ -749,6 +751,8 @@ mod tests {
         assert_eq!(parse(w("settings")).unwrap(), Cmd::Settings);
         let Cmd::SetSettings(p) = parse(w("settings --device-name 'Studio Mac' --lan off --up 1MB/s --down unlimited")).unwrap() else { panic!() };
         assert_eq!((p.device_name.as_deref(), p.lan_discovery, p.up_limit, p.down_limit), (Some("Studio Mac"), Some(false), Some(1_000_000), Some(0)));
+        let Cmd::SetSettings(p) = parse(w("settings --user-name Kari")).unwrap() else { panic!() };
+        assert_eq!((p.user_name.as_deref(), p.device_name), (Some("Kari"), None));
         for bad in ["share Docs --access-days 30", "share-until Docs", "share-until Docs 0", "share-until Docs never --extend", "share-until Docs soon", "share Docs --role boss", "share Docs --uses 0", "share Docs --uses 1001", "share Docs --days 0", "role Docs X chief", "role Docs X", "remove-device Docs", "", "frob", "status", "status a b", "rename Docs", "move Docs", "address Docs", "remove", "settings --lan maybe", "settings extra", "list x", "join", "lan-only Docs", "lan-only Docs maybe", "conflicts", "resolve Docs x", "resolve Docs x --keep neither", "resolve Docs --keep copy"] {
             assert!(parse(w(bad)).is_err(), "`sync {bad}` should be a usage error");
         }

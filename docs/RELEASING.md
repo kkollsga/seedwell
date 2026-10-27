@@ -29,8 +29,10 @@ git tag v0.2.0 "$c" && git push origin v0.2.0           # starts the release wor
 gh run watch                                            # wait for CI and the release build
 ```
 
-Then read the draft on GitHub and press **Publish**. The release notes list the public commits since the previous
-tag, so give the public commit a message that says what changed.
+Then read the draft on GitHub and press **Publish**. The release notes' Changes are the bullets of the public
+commit's message (`- …` lines; a title alone is listed as one), so write what changed for users there. When a
+release is cut again, only the newest "Seedwell X.Y.Z" commit counts; Dependabot merges since the previous tag are
+listed by their titles.
 
 Dependabot (`.github/dependabot.yml`) opens weekly pull requests for Cargo and Actions updates; CI tests each one.
 

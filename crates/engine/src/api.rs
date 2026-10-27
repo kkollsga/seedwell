@@ -1812,6 +1812,14 @@ pub struct Diagnostics {
     pub incoming_accepted: u64,
     /// Incoming connections refused (budget, unknown torrent, bad handshake).
     pub incoming_refused: u64,
+    /// Of `incoming_refused`: no room (connection cap, too many handshakes pending).
+    pub refused_busy: u64,
+    /// Of `incoming_refused`: the handshake timed out or failed.
+    pub refused_handshake: u64,
+    /// Of `incoming_refused`: the torrent is unknown or not running.
+    pub refused_torrent: u64,
+    /// Of `incoming_refused`: the torrent refused the peer (banned, checking, full).
+    pub refused_peer: u64,
     /// Full rechecks run (a clean restart runs none).
     pub rechecks: u64,
     /// Incoming uTP connections that completed the BitTorrent handshake.

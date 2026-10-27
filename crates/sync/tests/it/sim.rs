@@ -222,7 +222,7 @@ impl SimFs {
         } else if let Some(rest) = path.strip_prefix(".seedwell/") {
             let archive = rest == "Archive" || rest.starts_with("Archive/");
             let ok = archive
-                && (op == "lstat" || op == "create_dir" || op == "sync_dir" || (dest && (op == "rename" || op == "hard_link")));
+                && (op == "lstat" || op == "create_dir" || op == "sync_dir" || (dest && matches!(op, "rename" | "hard_link" | "copy" | "symlink")));
             if !ok {
                 v.push(format!("{op} {path:?} inside .seedwell"));
             }
@@ -326,7 +326,7 @@ impl Fs for SimFs {
     }
     fn copy(&self, from: &str, to: &str) -> io::Result<()> {
         self.check("copy", from, false)?;
-        self.check("copy", to, false)?;
+        self.check("copy", to, true)?;
         self.cur().copy(from, to)
     }
     fn set_mtime(&self, rel: &str, mtime_ns: i64) -> io::Result<()> {
@@ -339,7 +339,7 @@ impl Fs for SimFs {
         self.cur().set_exec(rel, exec)
     }
     fn symlink(&self, target: &str, rel: &str) -> io::Result<()> {
-        self.check("symlink", rel, false)?;
+        self.check("symlink", rel, true)?;
         self.cur().symlink(target, rel)
     }
     fn read_link(&self, rel: &str) -> io::Result<String> {
@@ -436,9 +436,6 @@ impl trs_sync::clock::Clock for SimClock {
     fn now_ns(&self) -> i64 {
         self.base.load(Ordering::SeqCst) + self.skew
     }
-    fn local_offset_s(&self, _: i64) -> i32 {
-        0
-    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -500,6 +497,7 @@ fn open_core(
         access,
         case_insensitive,
         byte_exact_names: false,
+        exec_bits: true,
         archive: true,
     };
     let ids = ids.clone();
@@ -744,6 +742,10 @@ impl Sim {
             let real = MemFs::with_options(MemFsOptions {
                 case_insensitive: cfg.case_insensitive,
                 normalization_insensitive: false,
+                // Every third device is on a disk without hard links (exFAT, FAT): its archive copies.
+                hard_links: i % 3 != 2,
+                fixed_exec: None,
+                full_case_folding: false,
                 clock: Arc::new(move || b.fetch_add(1_000, Ordering::SeqCst) + skew),
             });
             real.create_dir(STATE_DIR).unwrap();

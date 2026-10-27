@@ -31,6 +31,13 @@ release procedure.
 - Agents do not commit unless the coordinator asks. Commit messages end with the attribution trailer the session
   specifies.
 
+## Windows and Linux
+
+- Windows and Linux apps with the same features are coming (`docs/CROSS-PLATFORM.md`). **Rust decides, the host
+  draws:** user-visible text, formatting, ordering, state machines, validation and polling policy belong in Rust and
+  reach the app as ready view models. Swift keeps drawing and OS services only; a rule moved to Rust is deleted in
+  Swift. Nothing outside a platform seam names an operating system.
+
 ## Bugs
 
 - **No bugs left behind.** Fix every bug as it appears, whether it is related to the current work or not: a test that
@@ -48,6 +55,13 @@ release procedure.
   - Run the plain `tools/check.sh` once when the work is done, before handing it back.
   - `tools/check.sh --full` is the whole workspace, which is what GitHub CI runs on every push to `main`. Do not run
     it locally unless the coordinator asks; never run the whole suite more than once per task.
+- **Clear the build cache as you go.** `tools/check.sh` removes, once a day, the build artifacts no build has
+  used for 3 days (`cargo sweep --time 3`, plus the `target/*/incremental` folders of that age, which cargo sweep
+  leaves; it says so if cargo-sweep is missing). After a toolchain or dependency change, or when `target/` grows
+  past about 50 GB, sweep by hand: `tools/sysguard/heavy.sh cargo sweep --time 1 .` and delete the incremental
+  folders older than a day. Do not `cargo clean`: `target/` also holds other sessions'
+  files (`target/two-mac/`). An oversized cache breaks things, not only the disk: with 860 000 files in
+  `target/debug/deps`, a test binary started from there waited 21 s for FSEvents and the file watcher tests failed.
 - Each crate's integration tests are one binary (`tests/it/`). A fresh test binary can wait for a macOS security
   scan on its first run; that is not a hang.
 

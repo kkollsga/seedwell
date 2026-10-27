@@ -119,6 +119,22 @@ import SwiftUI
         }
     }
 
+    /// Deletes the private conversation with a device on this Mac (asks first), and goes to Folder Sync. The other
+    /// device keeps its copy.
+    func deleteDirect(_ device: String, name: String) {
+        let a = NSAlert()
+        a.messageText = "Delete the conversation with \(name)?"
+        a.informativeText = "Its messages are removed from this Mac, with everything this Mac knows of that device through it. \(name) keeps its copy."
+        a.addButton(withTitle: "Delete")
+        a.addButton(withTitle: "Cancel")
+        NSApp.activate()
+        guard a.runModal() == .alertFirstButtonReturn else { return }
+        do {
+            try core.chatDeleteDirect(deviceId: device)
+            show(.folderSync)
+        } catch { sync.alert("Couldn't delete the conversation", SyncText.message(error)) }
+    }
+
     /// Leaves the channel on this Mac (asks first). The others keep it.
     func leave(_ c: SyncChannel) {
         let a = NSAlert()

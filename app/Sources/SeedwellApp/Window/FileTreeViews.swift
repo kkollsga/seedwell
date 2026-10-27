@@ -56,25 +56,25 @@ struct FileTreeBlock: View {
     var body: some View {
         if let st = store.states[row.id] {
             FilesHeader(state: st)
-            if let tree = st.tree {
-                if st.visible.isEmpty {
+            if st.tree != nil {
+                if st.rows.isEmpty {
                     Text(st.filter.isEmpty ? "No files." : "No files match.")
                         .font(.system(size: 12)).foregroundStyle(.secondary)
                         .padding(.leading, FileLayout.iconX + 4).padding(.vertical, 6)
                 }
                 // Its own height, known from the fixed row height, so the inner scroll view takes no more
                 // room than the rows need; the rows stay lazy inside it.
-                let height = min((FileLayout.maxListHeight / FileLayout.rowHeight).rounded(.down) * FileLayout.rowHeight, CGFloat(st.visible.count) * FileLayout.rowHeight)
-                if st.visible.count > 0, showAll {
+                let height = min((FileLayout.maxListHeight / FileLayout.rowHeight).rounded(.down) * FileLayout.rowHeight, CGFloat(st.rows.count) * FileLayout.rowHeight)
+                if st.rows.count > 0, showAll {
                     // No inner scroll: the rows are children of the outer list (still lazy there).
-                    ForEach(st.visible) { v in
-                        FileRowView(row: row, commands: commands, state: st, store: store, tree: tree, node: v.id, depth: v.depth, selection: $selection)
+                    ForEach(st.rows, id: \.id) { f in
+                        FileRowView(row: row, commands: commands, state: st, store: store, file: f, selection: $selection)
                     }
-                } else if st.visible.count > 0 {
+                } else if st.rows.count > 0 {
                     ScrollView {
                         LazyVStack(spacing: 0) {
-                            ForEach(st.visible) { v in
-                                FileRowView(row: row, commands: commands, state: st, store: store, tree: tree, node: v.id, depth: v.depth, selection: $selection)
+                            ForEach(st.rows, id: \.id) { f in
+                                FileRowView(row: row, commands: commands, state: st, store: store, file: f, selection: $selection)
                             }
                         }
                     }
@@ -97,15 +97,15 @@ struct FilesHeader: View {
     @Bindable var state: FileTreeState
 
     var body: some View {
-        if let t = state.tree {
+        if let t = state.totals {
             HStack(alignment: .center, spacing: 10) {
-                Text(String(t.wantedCount) + " of " + String(t.fileCount) + " files · \(Fmt.bytes(t.wantedLength)) of \(Fmt.bytes(t.totalLength)) selected")
+                Text(t.summary)
                     .font(.system(size: 11)).monospacedDigit().foregroundStyle(Color.secondary)
                     .lineLimit(1)
                     .help("Skipped files stay on disk")
                 Spacer(minLength: 8)
                 if t.fileCount > 20 { filterField }
-                ShowAllButton(overflows: CGFloat(state.visible.count) * FileLayout.rowHeight > FileLayout.maxListHeight)
+                ShowAllButton(overflows: CGFloat(state.rows.count) * FileLayout.rowHeight > FileLayout.maxListHeight)
                 Button("Select All") { state.selectAll(true) }.disabled(t.wantedCount == t.fileCount && state.filter.isEmpty)
                     .help("Download every file")
                 Button("Select None") { state.selectAll(false) }.disabled(t.wantedCount == 0 && state.filter.isEmpty)
@@ -155,63 +155,62 @@ struct FileRowView: View {
     let commands: Commands
     let state: FileTreeState
     let store: FilesStore
-    let tree: FileTree
-    let node: Int
-    let depth: Int
+    /// The row as the core lays it out.
+    let file: FileRow
     @Binding var selection: Set<String>
 
     var body: some View {
-        let n = tree.nodes[node]
-        let selected = store.isSelected(torrent: row.id, node: node)
-        let open = state.expandedFolders.contains(node) || !state.filter.isEmpty
+        let f = file
+        let selected = store.isSelected(torrent: row.id, node: f.id)
+        let skipped = f.check == .off
         HStack(spacing: 6) {
-            if n.isFolder {
-                Button { state.toggleFolder(node) } label: {
+            if f.isFolder {
+                Button { state.toggleFolder(f.id) } label: {
                     Image(systemName: "chevron.right")
                         .font(.system(size: 8.5, weight: .bold)).foregroundStyle(.secondary)
-                        .rotationEffect(.degrees(open ? 90 : 0))
+                        .rotationEffect(.degrees(f.isOpen ? 90 : 0))
                         .frame(width: 12, height: 18).contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .help(open ? "Collapse this folder" : "Expand this folder")
-                .accessibilityLabel(open ? "Collapse" : "Expand")
+                .help(f.isOpen ? "Collapse this folder" : "Expand this folder")
+                .accessibilityLabel(f.isOpen ? "Collapse" : "Expand")
             } else {
                 Color.clear.frame(width: 12, height: 1)
             }
             checkbox
-            Image(nsImage: FileIcons.icon(ext: n.isFolder ? "" : n.ext)).resizable().frame(width: 14, height: 14)
-                .opacity(tree.check(node) == .off ? 0.5 : 1)
-            Text(n.name)
+            Image(nsImage: FileIcons.icon(ext: f.isFolder ? "" : f.ext)).resizable().frame(width: 14, height: 14)
+                .opacity(skipped ? 0.5 : 1)
+            Text(f.name)
                 .font(.system(size: 11.5))
-                .foregroundStyle(tree.check(node) == .off ? .tertiary : .secondary)
+                .foregroundStyle(skipped ? .tertiary : .secondary)
                 .lineLimit(1).truncationMode(.middle)
                 .frame(maxWidth: .infinity, alignment: .leading)
-            Text(tree.rateLabel(node) ?? "")
+            Text(f.rate)
                 .font(.system(size: 9.5)).monospacedDigit().foregroundStyle(.tertiary)
                 .lineLimit(1)
                 .frame(width: FileLayout.rateWidth, alignment: .trailing)
-            SizeCapsule(text: Fmt.bytes(n.length), fraction: tree.fillFraction(node))
+            SizeCapsule(text: f.size, fraction: f.fill)
             progress
             priorityMenu
             playSlot
         }
-        .padding(.leading, FileLayout.iconX + CGFloat(depth) * FileLayout.indent)
+        .padding(.leading, FileLayout.iconX + CGFloat(f.depth) * FileLayout.indent)
         .padding(.trailing, 10)
         .frame(height: FileLayout.rowHeight)
         .background(RoundedRectangle(cornerRadius: 6).fill(selected ? Color.accentColor.opacity(0.22) : .clear))
         .contentShape(Rectangle())
         .onTapGesture {
-            let f = NSEvent.clickModifiers
+            let m = NSEvent.clickModifiers
             selection = []
-            store.select(torrent: row.id, node: node, command: f.contains(.command), shift: f.contains(.shift))
+            store.select(torrent: row.id, node: f.id, command: m.contains(.command), shift: m.contains(.shift))
         }
-        .contextMenu { menu(n) }
+        .contextMenu { MenuEntriesView(entries: Self.menuEntries(row: row, commands: commands, state: state, store: store, file: f)) }
         .accessibilityElement(children: .combine)
     }
 
     private var checkbox: some View {
-        let c = tree.check(node)
-        return Button { state.toggle(store.targets(torrent: row.id, node: node)) } label: {
+        let c = file.check
+        return Button { state.toggle(store.targets(torrent: row.id, node: file.id)) } label: {
             Image(systemName: c == .on ? "checkmark.square.fill" : c == .mixed ? "minus.square.fill" : "square")
                 .font(.system(size: 12.5))
                 .foregroundStyle(c == .off ? Color.secondary : Color.accentColor)
@@ -219,24 +218,22 @@ struct FileRowView: View {
         }
         .buttonStyle(.plain)
         .help(c == .on ? "Skip this; the file stays on disk if already downloaded" : "Download this")
-        .accessibilityLabel(tree.nodes[node].name)
+        .accessibilityLabel(file.name)
         .accessibilityValue(c == .on ? "Downloading" : c == .mixed ? "Some files" : "Skipped")
     }
 
     /// A check mark when everything wanted is here, else a thin bar and the percent.
     @ViewBuilder private var progress: some View {
-        let skipped = tree.check(node) == .off
         HStack(spacing: 5) {
-            if skipped {
+            if file.check == .off {
                 Text("").frame(width: FileLayout.progressWidth)
-            } else if tree.isComplete(node) {
+            } else if file.complete {
                 Image(systemName: "checkmark").font(.system(size: 9.5, weight: .semibold)).foregroundStyle(.secondary)
                     .frame(width: FileLayout.progressWidth, alignment: .trailing)
                     .accessibilityLabel("Complete")
             } else {
-                let p = tree.progress(node)
-                ThinProgress(value: p).frame(width: 30)
-                Text("\(Int((p * 100).rounded(.down)))%").font(.system(size: 10)).monospacedDigit().foregroundStyle(.secondary)
+                ThinProgress(value: file.progress).frame(width: 30)
+                Text("\(file.percent)%").font(.system(size: 10)).monospacedDigit().foregroundStyle(.secondary)
                     .frame(width: 28, alignment: .trailing)
             }
         }
@@ -244,11 +241,10 @@ struct FileRowView: View {
     }
 
     private var priorityMenu: some View {
-        let shown = tree.shownPriority(node)
-        return Menu {
+        Menu {
             priorityButtons
         } label: {
-            Text(Self.label(shown)).font(.system(size: 10.5)).foregroundStyle(shown == .skip ? .tertiary : .secondary)
+            Text(file.priorityLabel).font(.system(size: 10.5)).foregroundStyle(file.priority == .skip ? .tertiary : .secondary)
         }
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
@@ -258,10 +254,9 @@ struct FileRowView: View {
     }
 
     @ViewBuilder private var priorityButtons: some View {
-        let shown = tree.shownPriority(node)
         ForEach([FilePriority.high, .normal, .low], id: \.self) { p in
-            Button { state.setPriority(store.targets(torrent: row.id, node: node), p) } label: {
-                if shown == p { Label(Self.label(p), systemImage: "checkmark") } else { Text(Self.label(p)) }
+            Button { state.setPriority(store.targets(torrent: row.id, node: file.id), p) } label: {
+                if file.priority == p { Label(filePriorityLabel(p: p), systemImage: "checkmark") } else { Text(filePriorityLabel(p: p)) }
             }
         }
     }
@@ -270,7 +265,7 @@ struct FileRowView: View {
     /// skipped one) and opens a finished one.
     @ViewBuilder private var playSlot: some View {
         ZStack {
-            if let f = tree.torrentFile(node), f.isVideo {
+            if file.isVideo, let f = state.tree?.torrentFile(id: file.id) {
                 Button { commands.play(row, file: f) } label: {
                     PlayGlyph(size: 10.5)
                         .frame(width: FileLayout.playWidth, height: 19).contentShape(Rectangle())
@@ -283,22 +278,17 @@ struct FileRowView: View {
         .frame(width: FileLayout.playWidth)
     }
 
-    @ViewBuilder private func menu(_ n: FileTree.Node) -> some View {
-        MenuEntriesView(entries: Self.menuEntries(row: row, commands: commands, state: state, store: store, tree: tree, node: node))
-    }
-
     /// The context menu of a file or folder row (also what QA shows as a native menu).
-    static func menuEntries(row: TransferRow, commands: Commands, state: FileTreeState, store: FilesStore, tree: FileTree, node: Int) -> [MenuEntry] {
-        let n = tree.nodes[node]
-        let targets = store.targets(torrent: row.id, node: node)
-        var out: [MenuEntry] = [.item("Show in Finder") { reveal(row, n, tree: tree, node: node, commands) }]
-        if let f = tree.torrentFile(node), f.isVideo { out += commands.playEntries(row: row, videos: [f]) }
+    static func menuEntries(row: TransferRow, commands: Commands, state: FileTreeState, store: FilesStore, file: FileRow) -> [MenuEntry] {
+        let targets = store.targets(torrent: row.id, node: file.id)
+        var out: [MenuEntry] = [.item("Show in Finder") { reveal(row, state.tree?.diskLocation(id: file.id), commands) }]
+        if file.isVideo, let f = state.tree?.torrentFile(id: file.id) { out += commands.playEntries(row: row, videos: [f]) }
         out.append(.separator)
         out.append(priorityMenu(state, targets))
         return out
     }
 
-    static func priorityMenu(_ state: FileTreeState, _ targets: [Int]) -> MenuEntry {
+    static func priorityMenu(_ state: FileTreeState, _ targets: [UInt32]) -> MenuEntry {
         .submenu("Priority", [
             .item("High") { state.setPriority(targets, .high) },
             .item("Normal") { state.setPriority(targets, .normal) },
@@ -308,22 +298,9 @@ struct FileRowView: View {
         ])
     }
 
-    static func label(_ p: FilePriority?) -> String {
-        switch p {
-        case .high: "High"
-        case .normal: "Normal"
-        case .low: "Low"
-        case .skip: "Skipped"
-        case nil: "Mixed"
-        }
-    }
-
-    /// The file or folder in Finder; the torrent's own folder when it is not on disk (yet).
-    static func reveal(_ row: TransferRow, _ n: FileTree.Node, tree: FileTree, node: Int, _ commands: Commands) {
-        // A file: its own location. A folder: the folder holding its first file.
-        var target = URL(fileURLWithPath: row.savePath)
-        if !n.disk.isEmpty { target = URL(fileURLWithPath: n.disk) }
-        else if n.isFolder, let first = tree.fileNodes(under: [node]).first { target = URL(fileURLWithPath: tree.nodes[first].disk).deletingLastPathComponent() }
+    /// The file or folder in Finder (where the core says it is); the torrent's own folder when it is not on disk (yet).
+    static func reveal(_ row: TransferRow, _ location: String?, _ commands: Commands) {
+        let target = URL(fileURLWithPath: location ?? row.savePath)
         if FileManager.default.fileExists(atPath: target.path) {
             NSWorkspace.shared.activateFileViewerSelecting([target])
         } else {
@@ -335,7 +312,7 @@ struct FileRowView: View {
 extension NSEvent {
     /// The modifier keys of the click being handled: the event itself when there is one (so a posted
     /// click carries its own flags), else the keys held right now.
-    static var clickModifiers: ModifierFlags {
+    @MainActor static var clickModifiers: ModifierFlags {
         if let e = NSApp.currentEvent, e.type == .leftMouseUp || e.type == .leftMouseDown { return e.modifierFlags }
         return modifierFlags
     }

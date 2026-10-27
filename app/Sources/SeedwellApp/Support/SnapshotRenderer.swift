@@ -118,12 +118,12 @@ import SwiftUI
                 // Complex messages (ChatSamples) as the conversation shows them: in a scroll view, as there.
                 ScrollView { VStack(alignment: .leading, spacing: 0) {
                     ForEach(Array(ChatSamples.messages.enumerated()), id: \.offset) { n, s in
-                        ChatMessageRow(message: SyncMessage(id: "S\(n)", channelId: "C", authorDevice: "D\(n)", authorName: s.computer, isMe: false,
+                        ChatMessageRow(message: SyncMessage(id: "S\(n)", channelId: "C", authorDevice: "D\(n)", authorName: s.computer, authorUser: "", isMe: false,
                                                             agent: s.agent, atS: 1_792_953_675 + UInt64(n) * 60, replyTo: nil, topic: nil,
                                                             kind: .text, body: s.body),
                                        header: true, reply: nil,
                                        tags: s.body == ChatSamples.bugMail
-                                           ? [ChatTags(owner: "kglite", isYou: false, tags: ["seen", "backlog"]), ChatTags(owner: "You", isYou: true, tags: ["needs-triage"])]
+                                           ? [ChatTagOwner(owner: "kglite", isYou: false, tags: ["seen", "backlog"]), ChatTagOwner(owner: "You", isYou: true, tags: ["needs-triage"])]
                                            : [],
                                        onReply: nil)
                     }

@@ -196,12 +196,44 @@ enum SettingsTab: String, CaseIterable, Identifiable {
     var sync: SyncSettings? {
         didSet { if !loading, let s = sync, s != oldValue { scheduleSyncSave() } }
     }
+    /// Whether the router opened the sync port (nil while sync is not running).
+    private(set) var syncReachability: ReachabilityInfo?
+    /// A new sync port was set and sync is starting again on it.
+    private(set) var syncPortMovingTo: UInt16?
     @ObservationIgnored private var syncSaveTask: Task<Void, Never>?
 
     func reloadSync() {
         loading = true
         sync = core.syncSettings()
         loading = false
+    }
+
+    /// Moves folder sync to `port` now. A port another app has is refused at once (the message is returned);
+    /// otherwise sync starts again on it and `watchSync` sees it arrive.
+    func setSyncPort(_ port: UInt16) -> String? {
+        do {
+            try core.setSyncPort(port: port)
+            if port != sync?.port { syncPortMovingTo = port }
+            return nil
+        } catch {
+            return SyncText.message(error)
+        }
+    }
+
+    /// While Settings › Folder Sync is open: the port in use (a new one arrives a few seconds after it is set) and
+    /// the router's answer for it, every second.
+    func watchSync() async {
+        while !Task.isCancelled {
+            syncReachability = core.syncReachability()
+            let port = core.syncSettings().port
+            if port != 0, port != sync?.port {
+                loading = true
+                sync?.port = port
+                loading = false
+            }
+            if let want = syncPortMovingTo, port == want || core.syncSnapshot().problem != nil { syncPortMovingTo = nil }
+            try? await Task.sleep(for: .seconds(1))
+        }
     }
 
     private func scheduleSyncSave() {

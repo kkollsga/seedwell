@@ -80,6 +80,20 @@ if [ -z "${CHECK_INNER:-}" ]; then
   echo "check: ok in $(( $(date +%s) - start )) s"
   exit 0
 fi
+# Build artifacts pile up (every feature set, lock file and toolchain leaves its own): once a day, remove the
+# ones no build has touched for 3 days, and the incremental caches likewise (cargo sweep leaves those). A huge
+# target/debug/deps is not only disk: with 860 000 files there, a test binary started from it waited 21 s for
+# FSEvents to accept a stream, and the file watcher tests timed out.
+stamp=target/.check-swept
+if [ -z "$(find "$stamp" -mtime -1 2>/dev/null)" ]; then
+  if command -v cargo-sweep >/dev/null; then
+    cargo sweep --time 3 . >/dev/null
+    find target/*/incremental -mindepth 1 -maxdepth 1 -mtime +3 -exec rm -rf {} + 2>/dev/null || true
+    mkdir -p target && touch "$stamp"
+  else
+    echo "check: install cargo-sweep (cargo install cargo-sweep) so old build artifacts are removed as you go"
+  fi
+fi
 if [ ${#args[@]} -gt 0 ]; then
   cargo clippy "${args[@]}" --all-targets --locked -q -- -D warnings
   cargo nextest run "${args[@]}" --locked --status-level fail --final-status-level slow ${extra[@]+"${extra[@]}"}

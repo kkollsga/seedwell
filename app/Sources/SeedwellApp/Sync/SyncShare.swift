@@ -178,9 +178,10 @@ struct ShareTarget: Equatable {
                 actions.copy(i.link)
                 copied = true
                 copiedTask?.cancel()
-                copiedTask = Task { [weak self] in
+                // The enclosing Task already holds `self`; this one keeps it 3 s at most.
+                copiedTask = Task {
                     try? await Task.sleep(for: .seconds(3))
-                    if !Task.isCancelled { self?.copied = false }
+                    if !Task.isCancelled { self.copied = false }
                 }
                 reload()
             case .failure(let e):

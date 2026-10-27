@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use trs_sync::clock::Clock;
 use trs_sync::folder::{FolderConfig, FolderCore, RemoteIndex};
-use trs_sync::fs::{Fs, MemFs, read_all, write_all};
+use trs_sync::fs::{Fs, MemFs, MemFsOptions, read_all, write_all};
 use trs_sync::ignore::Ignore;
 use trs_sync::index::MemStore;
 use trs_sync::pull::{ChunkRequest, ChunkSource, FetchError};
@@ -65,9 +65,6 @@ impl Clock for Utc {
     fn now_ns(&self) -> i64 {
         1_792_938_725_000_000_000
     }
-    fn local_offset_s(&self, _: i64) -> i32 {
-        0
-    }
 }
 
 struct Dev {
@@ -98,15 +95,19 @@ impl ChunkSource for Disks<'_> {
 }
 
 fn dev(name: &'static str, seed: u8, key: &Key) -> Dev {
-    let fs = MemFs::new();
+    dev_on(MemFs::new(), name, seed, key)
+}
+
+fn dev_on(fs: MemFs, name: &'static str, seed: u8, key: &Key) -> Dev {
     fs.create_dir(".seedwell").unwrap();
     let dk = Arc::new(DeviceKey::from_seed(&[seed; 32]));
     let cfg = FolderConfig {
         me: dk.device_id(),
         folder_pk: *key.public_key(),
         access: key.access(),
-        case_insensitive: false,
+        case_insensitive: trs_sync::path::probe_case_insensitive(&fs).unwrap(),
         byte_exact_names: false,
+        exec_bits: trs_sync::path::probe_exec_bits(&fs).unwrap(),
         archive: true,
     };
     let ids = Arc::new(AtomicU64::new(u64::from(seed) << 32));
@@ -208,6 +209,109 @@ fn edits_and_deletes_flow_both_ways_and_the_archive_keeps_the_old_version() {
     pull(&mut b, &[&a]);
     assert!(b.fs.lstat("f").unwrap().is_none(), "the delete reached B");
     assert_eq!(b.fs.read_dir(".seedwell/Archive").unwrap().entries.len(), 1, "and B archived its copy");
+}
+
+#[test]
+fn on_a_disk_without_hard_links_a_replaced_version_is_archived_as_a_copy() {
+    // exFAT and FAT drives: replacing a file used to fail at every try.
+    let key = rw();
+    let exfat = MemFs::with_options(MemFsOptions { hard_links: false, ..MemFsOptions::default() });
+    let (mut a, mut b) = (dev_on(exfat, "A", 1, &key), dev("B", 2, &key));
+    write_all(&a.fs, "f", b"one").unwrap();
+    a.core.scan("").unwrap();
+    send(&a, &mut b);
+    pull(&mut b, &[&a]);
+    write_all(&b.fs, "f", b"two, longer").unwrap();
+    b.core.scan("").unwrap();
+    send(&b, &mut a);
+    let p = pull(&mut a, &[&b]);
+    assert!(p.conflicts.is_empty() && p.failed.is_empty(), "{p:?}");
+    assert_eq!(read_all(&a.fs, "f").unwrap(), b"two, longer");
+    let archived = a.fs.read_dir(".seedwell/Archive").unwrap();
+    assert_eq!(archived.entries.len(), 1, "the replaced version is archived");
+    let old = format!(".seedwell/Archive/{}", archived.entries[0].name);
+    assert_eq!(read_all(&a.fs, &old).unwrap(), b"one", "a copy of the old version, not a link to the new one");
+}
+
+#[test]
+fn a_disk_without_permissions_keeps_each_files_exec_bit_as_synced() {
+    // exFAT on a Mac reads every file executable, NTFS none: neither may re-version files or flip the bit for
+    // the other devices.
+    for fixed in [true, false] {
+        let key = rw();
+        let odd = MemFs::with_options(MemFsOptions { fixed_exec: Some(fixed), ..MemFsOptions::default() });
+        let (mut a, mut b) = (dev("A", 1, &key), dev_on(odd, "B", 2, &key));
+        write_all(&a.fs, "run.sh", b"#!/bin/sh").unwrap();
+        a.fs.set_exec("run.sh", true).unwrap();
+        write_all(&a.fs, "notes.txt", b"plain").unwrap();
+        a.core.scan("").unwrap();
+        send(&a, &mut b);
+        let p = pull(&mut b, &[&a]);
+        assert!(p.failed.is_empty(), "{p:?}");
+        let r = b.core.scan("").unwrap();
+        assert_eq!((r.changed, r.hashed_bytes), (0, 0), "nothing re-versioned (fixed exec {fixed})");
+
+        // An edit on B keeps the bit each file had.
+        write_all(&b.fs, "run.sh", b"#!/bin/sh\necho hi").unwrap();
+        write_all(&b.fs, "notes.txt", b"plain, edited").unwrap();
+        b.core.scan("").unwrap();
+        send(&b, &mut a);
+        let p = pull(&mut a, &[&b]);
+        assert!(p.conflicts.is_empty() && p.failed.is_empty(), "{p:?}");
+        assert_eq!(read_all(&a.fs, "notes.txt").unwrap(), b"plain, edited");
+        assert!(a.fs.lstat("run.sh").unwrap().unwrap().exec, "still executable on A (fixed exec {fixed})");
+        assert!(!a.fs.lstat("notes.txt").unwrap().unwrap().exec, "still not executable on A (fixed exec {fixed})");
+    }
+}
+
+#[test]
+fn a_name_the_disk_folds_onto_another_is_refused_not_written_over_it() {
+    // A case-sensitive device has `strasse.txt` and `straße.txt`; a disk that folds `ß` to `ss` holds one of them.
+    let key = rw();
+    let folding = MemFs::with_options(MemFsOptions { case_insensitive: true, full_case_folding: true, ..MemFsOptions::default() });
+    let mut a = dev("A", 1, &key);
+    let mut b = dev_on(folding, "B", 2, &key);
+    write_all(&a.fs, "strasse.txt", b"first").unwrap();
+    a.core.scan("").unwrap();
+    send(&a, &mut b);
+    assert!(pull(&mut b, &[&a]).failed.is_empty());
+    write_all(&a.fs, "stra\u{df}e.txt", b"second").unwrap();
+    a.core.scan("").unwrap();
+    send(&a, &mut b);
+    let p = pull(&mut b, &[&a]);
+    assert_eq!(read_all(&b.fs, "strasse.txt").unwrap(), b"first", "not written over");
+    assert_eq!(p.failed.len(), 1, "{p:?}");
+    assert!(format!("{:?}", p.failed[0]).contains("strasse.txt"), "{p:?}");
+}
+
+#[test]
+fn an_entry_with_a_path_this_version_refuses_is_skipped_not_the_batch() {
+    // A later version may send names this one does not accept: the rest of the batch still arrives.
+    let key = rw();
+    let (mut a, mut b) = (dev("A", 1, &key), dev("B", 2, &key));
+    write_all(&a.fs, "good.txt", b"fine").unwrap();
+    write_all(&a.fs, "odd.txt", b"odd").unwrap();
+    a.core.scan("").unwrap();
+    let mut entries = a.core.announce_since(0, usize::MAX).unwrap();
+    let odd = entries.iter_mut().find(|e| e.file.info.path == "odd.txt").unwrap();
+    let mut info = odd.file.info.clone();
+    info.path = "../outside.txt".into();
+    // Signed by a real writer: only the path is wrong.
+    odd.file = trs_sync_proto::sign::sign_file(&DeviceKey::from_seed(&[1; 32]), &a.core.folder_id(), info);
+    learn_writers(&mut b.core, &a.core.writers()).unwrap();
+    let (index_id, _) = a.core.index_state().unwrap();
+    let stored = b.core.apply_remote(short(&a), RemoteIndex { index_id, full: true, done: true, entries }).unwrap();
+    assert_eq!(stored, 1, "the good entry is stored");
+    let p = pull(&mut b, &[&a]);
+    assert!(p.failed.is_empty(), "{p:?}");
+    assert_eq!(read_all(&b.fs, "good.txt").unwrap(), b"fine");
+    assert!(b.fs.lstat("../outside.txt").is_err() || b.fs.lstat("../outside.txt").unwrap().is_none());
+
+    // A forged signature still refuses the whole batch.
+    let mut entries = a.core.announce_since(0, usize::MAX).unwrap();
+    entries[0].file.info.size += 1;
+    let (index_id, _) = a.core.index_state().unwrap();
+    assert!(b.core.apply_remote(short(&a), RemoteIndex { index_id, full: true, done: true, entries }).is_err());
 }
 
 #[test]

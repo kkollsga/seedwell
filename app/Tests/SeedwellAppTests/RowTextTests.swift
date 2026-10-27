@@ -47,12 +47,27 @@ struct RowTextTests {
         #expect(LibraryModel.rates(s) == "↓ 2.1 MB/s · ↑ 340 KB/s")
     }
 
+    @Test @MainActor func theMenusSharingLineEndsWithTheCombinedUploadRate() {
+        func snap(up: UInt64, online: Bool = true, errors: UInt32 = 0) -> Snapshot {
+            Snapshot(downRate: 0, upRate: up, downloading: [], queued: [], recent: [], sharingBusiest: [],
+                     sharing: SharingCounts(popular: 0, active: 5, dormant: 0, error: 0, dead: 0, stopped: 0), sharingTotal: 5, trackers: [],
+                     altSpeed: false, downLimit: nil, upLimit: nil, errorCount: errors, movingPercent: nil, attention: false, listenPort: 0,
+                     connections: 0, online: online, offlineSinceMs: nil)
+        }
+        let busy = StatusMenuController.sharingContent(snap(up: 340_000))
+        #expect(busy.title == "Sharing 5 torrents" && busy.trailing == "↑ 340 KB/s" && busy.rateActive == true)
+        let idle = StatusMenuController.sharingContent(snap(up: 0, errors: 1))
+        #expect(idle.title == "Sharing 5 torrents · 1 error" && idle.trailing == "–" && idle.rateActive == false)
+        let offline = StatusMenuController.sharingContent(snap(up: 9_000, online: false))
+        #expect(offline.title == "Sharing 5 torrents · Offline" && offline.trailing == "–")
+    }
+
     @Test func theLiveRateStandsOutAtTheRightOfTheName() {
         #expect(row(peers: 4, up: 45_000).headlineRate(.popular) == "↑ 45 KB/s")
         #expect(row(up: 1_200_000).headlineRate(.active) == "↑ 1.2 MB/s")
         #expect(row(up: 0).headlineRate(.active) == nil)
-        #expect(row(up: 0).rateSlot(.active)?.text == "↑ – KB/s")
-        #expect(row(state: .downloading, group: nil, down: 0).rateSlot(.download)?.text == "↓ – KB/s")
+        #expect(row(up: 0).rateSlot(.active)?.text == "–")
+        #expect(row(state: .downloading, group: nil, down: 0).rateSlot(.download)?.text == "–")
         #expect(row(up: 1_000).rateSlot(.recent) == nil)
         #expect(row(state: .downloading, group: nil, down: 2_100_000).headlineRate(.download) == "↓ 2.1 MB/s")
         #expect(row(state: .downloading, group: nil, down: 0).headlineRate(.download) == nil)

@@ -9,11 +9,12 @@
 //! * [`lan`]: finding devices on the local network.
 //! * [`relay`], [`punch`], [`relay_server`]: reaching devices behind NATs: member relays, hole punching
 //!   through a common peer, and the stand-alone `seedwell relay` server ([`relay_server::run_relay`]).
-//! * [`config`], [`secrets`]: `sync.toml`, and where keys are kept.
+//! * [`config`], [`secrets`]: `sync.toml`, and where keys are kept; `at_rest`: messages encrypted on disk.
 //! * [`status`]: what the UI sees.
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+mod at_rest;
 pub mod chat;
 pub mod config;
 pub mod describe;

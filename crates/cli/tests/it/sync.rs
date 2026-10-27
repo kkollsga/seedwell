@@ -64,6 +64,38 @@ fn folder_sync_runs_in_the_daemon() {
     assert!(std::fs::read_dir(root.path().join("home")).unwrap().next().is_none());
 }
 
+#[test]
+fn the_sync_port_moves_at_once_and_a_port_in_use_is_refused() {
+    let root = tempfile::tempdir().unwrap();
+    let d = Daemon::start(root.path(), "p", "full");
+    let docs = root.path().join("Docs");
+    std::fs::create_dir_all(&docs).unwrap();
+    d.json(&["sync", "add", docs.to_str().unwrap()]);
+    let before = d.json(&["sync", "list"])["port"].as_u64().unwrap() as u16;
+
+    // A free port: sync starts again on it, with its folder, and the old port is let go.
+    let want = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let st = d.json(&["sync", "settings", "--port", &want.to_string()]);
+    assert_eq!(st["port"].as_u64(), Some(u64::from(want)), "{st}");
+    assert!(st["note"].as_str().is_some_and(|n| n.contains(&format!("port {want} now"))), "{st}");
+    let l = d.json(&["sync", "list"]);
+    assert_eq!(l["port"].as_u64(), Some(u64::from(want)), "{l}");
+    assert_eq!(l["folders"][0]["name"], "Docs", "{l}");
+    assert!(std::net::TcpStream::connect(("127.0.0.1", want)).is_ok(), "sync listens on the new port");
+    assert!(std::fs::read_to_string(d.state.join("sync.toml")).unwrap().contains(&format!("port = {want}")), "kept for the next start");
+    assert!(std::net::TcpStream::connect(("127.0.0.1", before)).is_err(), "the old port is let go");
+
+    // A port another app has: refused, and sync stays where it is.
+    let taken = std::net::TcpListener::bind("0.0.0.0:0").unwrap();
+    let busy = taken.local_addr().unwrap().port();
+    let o = d.cli(&["sync", "settings", "--port", &busy.to_string()]);
+    assert_ne!(o.code, 0);
+    assert!(o.stderr.contains(&format!("Port {busy} is in use")), "{}", o.stderr);
+    assert_eq!(d.json(&["sync", "list"])["port"].as_u64(), Some(u64::from(want)));
+    let o = d.cli(&["sync", "settings", "--port", "80"]);
+    assert_eq!(o.code, 2, "below 1024 is a usage error: {}", o.stderr);
+}
+
 /// Starts `seedwell relay` and returns it with its ready line.
 fn relay(key: &std::path::Path) -> (std::process::Child, String) {
     let mut child = Command::new(BIN)

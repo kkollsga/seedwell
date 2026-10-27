@@ -4,16 +4,34 @@
 pub trait Clock: Send + Sync {
     /// Now, Unix nanoseconds.
     fn now_ns(&self) -> i64;
-    /// Seconds to add to UTC for the local time at `unix_ns` (daylight saving included). Only used for
-    /// names people read (conflict copies).
-    fn local_offset_s(&self, unix_ns: i64) -> i32;
 }
 
-/// `2026-10-25 14.32`: the local minute, for conflict copy names (no `:`, which Finder shows as `/`).
-pub fn readable_stamp(clock: &dyn Clock, unix_ns: i64) -> String {
-    let local = unix_ns.div_euclid(1_000_000_000) + i64::from(clock.local_offset_s(unix_ns));
-    let (y, mo, d, h, mi, _) = civil(local);
+/// `2026-10-25 14.32z`: the UTC minute, for conflict copy names (no `:`, which Finder shows as `/`). UTC, so
+/// that every device names the same losing version the same way, whatever its time zone
+/// (docs/CROSS-PLATFORM.md §3.2).
+pub fn utc_stamp(unix_ns: i64) -> String {
+    minute(unix_ns.div_euclid(1_000_000_000)) + "z"
+}
+
+/// `2026-10-25 15.32`: a minute for people, `offset_s` east of UTC (the app shows conflict copies in local
+/// time).
+pub fn local_stamp(unix_s: i64, offset_s: i32) -> String {
+    minute(unix_s + i64::from(offset_s))
+}
+
+fn minute(secs: i64) -> String {
+    let (y, mo, d, h, mi, _) = civil(secs);
     format!("{y:04}-{mo:02}-{d:02} {h:02}.{mi:02}")
+}
+
+/// The time a [`utc_stamp`] names, Unix seconds (`None` when it is not one).
+pub fn parse_utc_stamp(s: &str) -> Option<i64> {
+    let b = s.as_bytes();
+    if b.len() != 17 || b[16] != b'z' || b[4] != b'-' || b[7] != b'-' || b[10] != b' ' || b[13] != b'.' {
+        return None;
+    }
+    let compact = format!("{}{}{}-{}{}00", &s[0..4], &s[5..7], &s[8..10], &s[11..13], &s[14..16]);
+    parse_compact_stamp(&compact).map(|ns| ns / 1_000_000_000)
 }
 
 /// `20261025-143205`: UTC to the second, for archived versions (sorts by time).
@@ -61,21 +79,14 @@ fn civil(secs: i64) -> (i64, u32, u32, u32, u32, u32) {
     (y, m, d, (rem / 3600) as u32, (rem % 3600 / 60) as u32, (rem % 60) as u32)
 }
 
-/// The system clock with a fixed UTC offset (the driver refreshes it; the simulator uses 0).
+/// The system clock.
 #[derive(Clone, Copy, Debug, Default)]
-pub struct SystemClock {
-    /// Seconds east of UTC.
-    pub offset_s: i32,
-}
+pub struct SystemClock;
 
 impl Clock for SystemClock {
     fn now_ns(&self) -> i64 {
         let d = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
         i64::try_from(d.as_nanos()).unwrap_or(i64::MAX)
-    }
-
-    fn local_offset_s(&self, _unix_ns: i64) -> i32 {
-        self.offset_s
     }
 }
 
@@ -83,23 +94,18 @@ impl Clock for SystemClock {
 mod tests {
     use super::*;
 
-    struct Fixed(i32);
-    impl Clock for Fixed {
-        fn now_ns(&self) -> i64 {
-            0
-        }
-        fn local_offset_s(&self, _: i64) -> i32 {
-            self.0
-        }
-    }
-
     #[test]
     fn stamps() {
         // 2026-10-25 14:32:05 UTC
         let t = 1_792_938_725 * 1_000_000_000;
         assert_eq!(compact_stamp(t), "20261025-143205");
-        assert_eq!(readable_stamp(&Fixed(0), t), "2026-10-25 14.32");
-        assert_eq!(readable_stamp(&Fixed(3600), t), "2026-10-25 15.32");
+        assert_eq!(utc_stamp(t), "2026-10-25 14.32z");
+        assert_eq!(parse_utc_stamp("2026-10-25 14.32z"), Some(1_792_938_720));
+        assert_eq!(local_stamp(1_792_938_725, 3600), "2026-10-25 15.32");
+        assert_eq!(local_stamp(1_792_938_725, -16 * 3600), "2026-10-24 22.32");
+        for bad in ["2026-10-25 14.32", "2026-10-25 14.32Z", "2026-13-25 14.32z", "2026-10-25 14:32z"] {
+            assert_eq!(parse_utc_stamp(bad), None, "{bad}");
+        }
         assert_eq!(compact_stamp(0), "19700101-000000");
         assert_eq!(compact_stamp(-1_000_000_000), "19691231-235959");
         assert_eq!(compact_stamp(951_782_400 * 1_000_000_000), "20000229-000000", "leap day");

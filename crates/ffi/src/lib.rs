@@ -7,9 +7,13 @@
 //! rules and tracker profiles are read and written straight through `trs-state`, in both modes.
 
 mod backend;
+mod display;
 mod favorites;
+mod files;
+mod mail;
 mod mock;
 mod play;
+mod power;
 mod real;
 mod rows;
 mod settings;

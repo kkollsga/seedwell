@@ -182,7 +182,7 @@ import Observation
     /// The sidebar's private conversations: every one with messages, plus the one just started (no message yet).
     var directRows: [SyncDirect] {
         guard let id = directID, !directs.contains(where: { $0.deviceId == id }) else { return directs }
-        return [SyncDirect(deviceId: id, name: directName, online: false, unread: 0, lastMessageS: nil)] + directs
+        return [SyncDirect(deviceId: id, name: directName, user: "", online: false, unread: 0, lastMessageS: nil)] + directs
     }
 
     /// The device whose private conversation is shown.
@@ -196,7 +196,7 @@ import Observation
     /// The name of the device of the shown private conversation.
     var directName: String {
         guard let id = directID else { return "" }
-        return direct?.name ?? directNames[id] ?? "Unnamed device"
+        return direct.map { ChatText.named($0.name, user: $0.user) } ?? directNames[id] ?? "Unnamed device"
     }
 
     /// Reads the shown conversation's latest messages, and marks them read (the page is on screen when this runs).

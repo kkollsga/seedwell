@@ -424,6 +424,33 @@ fn torrent_repairs_are_reported() {
 }
 
 #[test]
+fn names_one_file_on_a_case_insensitive_disk_get_distinct_names() {
+    // `A.txt`/`a.txt` and NFC/NFD `é` are one file on APFS and NTFS: the later ones are renamed, the same way on
+    // every system. A name the torrent already holds (`a (2).txt`) is not taken twice.
+    let files = vec![
+        file(1, &[b"A.txt"]),
+        file(1, &[b"a.txt"]),
+        file(1, &[b"a (2).txt"]),
+        file(1, &["caf\u{e9}".as_bytes()]),
+        file(1, &["cafe\u{301}".as_bytes()]),
+        file(1, &[b"Dir", b"x"]),
+        file(1, &[b"dir", b"y"]),
+        file(1, &[b"README"]),
+        file(1, &[b"readme"]),
+    ];
+    let m = parse(info_multi(b"r", files, 9));
+    let paths: Vec<_> = m.files().map(|f| f.path.to_string()).collect();
+    assert_eq!(
+        paths,
+        ["A.txt", "a (3).txt", "a (2).txt", "caf\u{e9}", "cafe\u{301} (2)", "Dir/x", "dir/y", "README", "readme (2)"]
+    );
+    assert!(m.warnings.contains(&Warning::FoldedDuplicatesRenamed(3)));
+    // Nothing to rename: no warning.
+    let m = parse(info_multi(b"r", vec![file(1, &[b"a"]), file(1, &[b"b"])], 2));
+    assert!(!m.warnings.iter().any(|w| matches!(w, Warning::FoldedDuplicatesRenamed(_))));
+}
+
+#[test]
 fn utf8_variants_are_preferred() {
     let info = d(&[
         (

@@ -19,7 +19,7 @@ Session (actor)
  ├── Listeners (TCP, and uTP on the same port number's UDP socket, which the DHT shares) ── incoming handshake → lookup → promote tier → hand socket to torrent
  ├── TrackerDriver (trs-tracker HostGate + transports + AnnounceMachines for ALL torrents)
  ├── RateLimiter (global ↓/↑ token buckets, priority weights 4:2:1, alt-speed schedule)
- ├── ConnectionBudget (global peer cap, per-torrent caps, half-open cap)
+ ├── ConnectionBudget (global peer cap, per-torrent caps, half-open cap for dials, own cap for incoming handshakes)
  ├── QueueManager (max active downloads; torrents + direct downloads)
  ├── Rules + TrackerProfiles (match on add / on edit; §7, §7E)
  ├── Stats (per tracker profile daily buckets; §7E.2)

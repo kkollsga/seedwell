@@ -238,9 +238,13 @@ impl StateStore {
 
 // ---- record mapping ---------------------------------------------------------------------------
 
+fn piece_count(r: &TorrentRecord) -> u32 {
+    if r.piece_length > 0 { r.total_length.div_ceil(u64::from(r.piece_length)).min(u64::from(u32::MAX)) as u32 } else { 0 }
+}
+
 fn to_state_record(r: &TorrentRecord, root: u32) -> SRecord {
     let mut rec = SRecord::new(r.name.clone(), r.total_length, r.added_at as i64);
-    rec.piece_count = if r.piece_length > 0 { r.total_length.div_ceil(u64::from(r.piece_length)).min(u64::from(u32::MAX)) as u32 } else { 0 };
+    rec.piece_count = piece_count(r);
     rec.file_count = r.file_priorities.len().clamp(1, MAX_FILES) as u32;
     rec.completed_at = r.finished_at.map(|t| t as i64);
     rec.save_root = root;
@@ -835,6 +839,21 @@ impl Store for StateStore {
         // Removals first: a torrent removed and added again within one batch (remove, then re-add
         // before the debounced write) must end up stored, not deleted with its new .torrent file.
         // A removal after an add in the same batch never carries the add (`dirty_remove` drops it).
+        // The piece counts that resume data needs and nothing in memory knows are read first: a read
+        // flushes, and the batch is written as one group so a crash never keeps half of it (counters
+        // without the statistics of the same transfer).
+        let stored_pieces = {
+            let known = self.pieces.lock().map(|p| p.clone()).unwrap_or_default();
+            let mut out = HashMap::new();
+            for (id, r) in &batch.resume {
+                let in_batch = batch.removed.contains(id) || batch.torrents.iter().any(|t| t.id == *id);
+                if r.is_some() && !in_batch && !known.contains_key(id) {
+                    out.insert(*id, self.inner.get_torrent(*id).map_err(se)?.map_or(0, |t| t.piece_count));
+                }
+            }
+            out
+        };
+        let _group = self.inner.group();
         for id in &batch.removed_directs {
             let _ = std::fs::remove_file(self.direct_path(id));
         }
@@ -902,10 +921,10 @@ impl Store for StateStore {
             match r {
                 Some(r) => {
                     let pc = self.pieces.lock().ok().and_then(|p| p.get(id).copied());
-                    let pc = match pc {
-                        Some(pc) => pc,
-                        None => self.inner.get_torrent(*id).map_err(se)?.map_or(0, |t| t.piece_count),
-                    };
+                    let pc = pc
+                        .or_else(|| batch.torrents.iter().find(|t| t.id == *id).map(piece_count))
+                        .or_else(|| stored_pieces.get(id).copied())
+                        .unwrap_or(0);
                     match to_resume_data(r, pc) {
                         Ok(rd) => self.inner.put_resume(*id, &rd).map_err(se)?,
                         // Unusable resume data is dropped: the next start rechecks instead.

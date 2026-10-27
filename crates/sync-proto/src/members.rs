@@ -15,6 +15,8 @@
 //!   3 invite  : invite                     (published, so every owner and admin knows it)
 //!   4 revoke  : invite id(16) ‖ at_s varint
 //!   5 share   : until_s varint (0 = no end) ‖ serial varint ‖ at_s varint     (owners only)
+//!   6 profile : device name str ‖ user name str (empty = none) ‖ serial varint ‖ at_s varint
+//!               (signed by the device it names, a member)
 //! invite = version u8 (1) ‖ folder pk(32) ‖ id(16) ‖ role u8 ‖ max_uses varint (0 = unlimited)
 //!          ‖ expires_s varint (0 = never) ‖ at_s varint ‖ issuer (signer) ‖ token pk(32) ‖ signature(64)
 //!   signed  = "seedwell-sync/v2/invite" ‖ everything before the signature
@@ -35,10 +37,11 @@ use std::fmt;
 use ring::digest::{SHA256, digest};
 
 use crate::base32;
-use crate::codec::{DecodeError, Reader, put_bytes, put_varint};
+use crate::codec::{DecodeError, Reader, put_bytes, put_str, put_varint};
 use crate::device::{self, DeviceKey};
 use crate::ids::FolderId;
 use crate::keys::{Access, FolderSecret, KeyError, MAX_LINK_NAME, percent_decode, percent_encode};
+use crate::msg::MAX_DEVICE_NAME;
 
 const STATEMENT: &str = "seedwell-sync/v2/statement";
 const INVITE: &str = "seedwell-sync/v2/invite";
@@ -313,6 +316,19 @@ pub enum Body {
         /// When it was made.
         at_s: u64,
     },
+    /// How the signing device is called here: its device name, and the name of the person using it (empty =
+    /// none yet). Signed by that device; its latest (by serial) counts, and older ones are dropped. Every member
+    /// shows the same names, also for a device it has never met (conflict copies are named with it).
+    Profile {
+        /// The device's name, at most [`MAX_DEVICE_NAME`] characters.
+        device_name: String,
+        /// The user's name, at most [`MAX_DEVICE_NAME`] characters; empty = none.
+        user_name: String,
+        /// Orders the device's profiles (higher wins).
+        serial: u64,
+        /// When it was made.
+        at_s: u64,
+    },
     /// A kind this version does not know, or a body it cannot read (a role it does not know): kept and passed
     /// on unchanged, never counted for roles.
     Unknown {
@@ -325,6 +341,15 @@ pub enum Body {
 
 /// Longest statement body.
 const MAX_BODY: usize = 1024;
+
+/// A name in a [`Body::Profile`]: at most [`MAX_DEVICE_NAME`] characters, no control characters, not blank (a user
+/// name may be empty: none yet).
+pub fn profile_name_ok(name: &str, may_be_empty: bool) -> bool {
+    if name.is_empty() {
+        return may_be_empty;
+    }
+    name.chars().count() <= MAX_DEVICE_NAME && !name.chars().any(char::is_control) && !name.trim().is_empty()
+}
 
 /// A signed statement about a folder's membership.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -381,6 +406,13 @@ impl Statement {
                 put_varint(&mut out, *serial);
                 put_varint(&mut out, *at_s);
                 5
+            }
+            Body::Profile { device_name, user_name, serial, at_s } => {
+                put_str(&mut out, device_name);
+                put_str(&mut out, user_name);
+                put_varint(&mut out, *serial);
+                put_varint(&mut out, *at_s);
+                6
             }
             Body::Unknown { kind, data } => {
                 out.extend_from_slice(data);
@@ -460,6 +492,14 @@ impl Statement {
             3 => Body::Invite(Invite::read(r).ok()?),
             4 => Body::Revoke { id: r.array("invite id").ok()?, at_s: r.varint("time").ok()? },
             5 => Body::ShareUntil { until_s: r.varint("share end").ok()?, serial: r.varint("serial").ok()?, at_s: r.varint("time").ok()? },
+            6 => {
+                let device_name = r.str(MAX_DEVICE_NAME * 4, "device name").ok()?;
+                let user_name = r.str(MAX_DEVICE_NAME * 4, "user name").ok()?;
+                if !profile_name_ok(&device_name, false) || !profile_name_ok(&user_name, true) {
+                    return None;
+                }
+                Body::Profile { device_name, user_name, serial: r.varint("serial").ok()?, at_s: r.varint("time").ok()? }
+            }
             _ => return None,
         };
         let used = data.len() - r.remaining();
@@ -484,6 +524,8 @@ impl Statement {
             Body::Remove { .. } | Body::ShareUntil { .. } => self.signer == Signer::Folder,
             Body::Grant { invite: None, .. } => self.signer == Signer::Folder,
             Body::Revoke { .. } => true,
+            // A device names only itself.
+            Body::Profile { .. } => matches!(self.signer, Signer::Device(_)),
             // Only the signature can be checked; it gives no role.
             Body::Unknown { .. } => true,
         };
@@ -641,10 +683,14 @@ impl Membership {
     /// the folder with statements until an owner's could not be kept any more. Roles only ever count a current
     /// admin's statements, so leaving the others out changes no role; a statement left out now comes again with the
     /// full set a peer sends when a session starts and after every change.
+    ///
+    /// A device's [`Body::Profile`] goes in while it is a member, and replaces its older one: one per device.
     pub fn add(&mut self, statements: impl IntoIterator<Item = Statement>) -> bool {
         let (mut by_owner, mut by_device): (Vec<Statement>, Vec<Statement>) =
             statements.into_iter().filter(|st| st.verify(&self.folder_pk)).partition(|st| st.signer == Signer::Folder);
-        let before = (self.members.clone(), self.invites.clone(), self.share_until);
+        // Profiles last: a grant in the same batch may make their signer a member.
+        by_device.sort_by_key(|st| matches!(st.body, Body::Profile { .. }));
+        let before = (self.members.clone(), self.invites.clone(), self.share_until, self.profile_hashes());
         let mut new = false;
         for st in by_owner.drain(..) {
             new |= self.statements.insert(st.hash(), st).is_none();
@@ -656,6 +702,21 @@ impl Membership {
         let mut more = false;
         for st in by_device.drain(..) {
             let Signer::Device(pk) = st.signer else { continue };
+            if let Body::Profile { serial, .. } = st.body {
+                if !self.members.contains_key(&pk) {
+                    continue;
+                }
+                match self.profile_statement(&pk) {
+                    Some((_, cur)) if (profile_serial(cur), &cur.sig) >= (serial, &st.sig) => continue,
+                    Some((h, _)) => {
+                        self.statements.remove(&h);
+                    }
+                    None if self.statements.len() >= MAX_STATEMENTS => continue,
+                    None => {}
+                }
+                more |= self.statements.insert(st.hash(), st).is_none();
+                continue;
+            }
             if self.statements.len() >= MAX_STATEMENTS || !self.role(&pk).is_some_and(Role::admits) {
                 continue;
             }
@@ -664,7 +725,42 @@ impl Membership {
         if more {
             self.resolve();
         }
-        (new || more) && before != (self.members.clone(), self.invites.clone(), self.share_until)
+        (new || more) && before != (self.members.clone(), self.invites.clone(), self.share_until, self.profile_hashes())
+    }
+
+    /// The latest profile statement of a device, and its hash.
+    fn profile_statement(&self, device_pk: &[u8; 32]) -> Option<([u8; 32], &Statement)> {
+        self.statements
+            .iter()
+            .filter(|(_, st)| st.signer == Signer::Device(*device_pk) && matches!(st.body, Body::Profile { .. }))
+            .max_by(|(_, a), (_, b)| (profile_serial(a), &a.sig).cmp(&(profile_serial(b), &b.sig)))
+            .map(|(h, st)| (*h, st))
+    }
+
+    fn profile_hashes(&self) -> Vec<[u8; 32]> {
+        self.statements.iter().filter(|(_, st)| matches!(st.body, Body::Profile { .. })).map(|(h, _)| *h).collect()
+    }
+
+    /// How a device calls itself here: (device name, user name; empty = none). Also kept for a device that left,
+    /// so its old versions keep their name.
+    pub fn profile(&self, device_pk: &[u8; 32]) -> Option<(&str, &str)> {
+        match &self.profile_statement(device_pk)?.1.body {
+            Body::Profile { device_name, user_name, .. } => Some((device_name.as_str(), user_name.as_str())),
+            _ => None,
+        }
+    }
+
+    /// Every device's latest profile: (device key, device name, user name).
+    pub fn profiles(&self) -> impl Iterator<Item = (&[u8; 32], &str, &str)> {
+        self.statements.values().filter_map(|st| match (&st.body, &st.signer) {
+            (Body::Profile { device_name, user_name, .. }, Signer::Device(pk)) => Some((pk, device_name.as_str(), user_name.as_str())),
+            _ => None,
+        })
+    }
+
+    /// The serial a device's next profile gets.
+    pub fn next_profile_serial(&self, device_pk: &[u8; 32]) -> u64 {
+        self.profile_statement(device_pk).map_or(0, |(_, st)| profile_serial(st)) + 1
     }
 
     /// Tells the membership the time (this device's clock). True when the folder's sharing ended (or counts
@@ -933,6 +1029,13 @@ impl Membership {
 }
 
 /// The device and serial of an owner's grant or removal.
+fn profile_serial(st: &Statement) -> u64 {
+    match st.body {
+        Body::Profile { serial, .. } => serial,
+        _ => 0,
+    }
+}
+
 fn owner_target(st: &Statement) -> Option<([u8; 32], u64)> {
     match (&st.body, st.signer) {
         (Body::Grant { device, serial, .. } | Body::Remove { device, serial, .. }, Signer::Folder) => Some((*device, *serial)),
@@ -1204,6 +1307,47 @@ mod tests {
         let mut m = Membership::new(*s.public_key());
         assert!(m.add([grant(&s, &me, Role::Owner, 1)]));
         (s, m, me)
+    }
+
+    fn profile(d: &DeviceKey, fid: &FolderId, name: &str, user: &str, serial: u64) -> Statement {
+        Statement::by_device(d, fid, Body::Profile { device_name: name.into(), user_name: user.into(), serial, at_s: NOW })
+    }
+
+    #[test]
+    fn a_member_names_itself_and_its_latest_profile_counts() {
+        let (s, mut m, me) = base();
+        let fid = m.folder_id();
+        let (a, stranger) = (dev(2), dev(3));
+        // Every order gives the same names: a profile before its signer's grant waits for the grant.
+        let p1 = profile(&a, &fid, "Studio iMac", "", 1);
+        assert!(m.add([p1.clone(), grant(&s, &a, Role::ReadWrite, 2)]));
+        assert_eq!(m.profile(a.public_key()), Some(("Studio iMac", "")));
+        assert_eq!(Statement::from_bytes(&p1.to_bytes()).unwrap(), p1, "it round-trips");
+        // A newer one replaces it; an older one, or the same again, changes nothing.
+        assert!(m.add([profile(&a, &fid, "Kim's iMac", "kim", 2)]));
+        assert!(!m.add([p1.clone()]));
+        assert_eq!(m.profile(a.public_key()), Some(("Kim's iMac", "kim")));
+        assert_eq!(m.profiles().count(), 1, "one per device");
+        assert_eq!(m.next_profile_serial(a.public_key()), 3);
+        // Not a member: left out. Nobody names another device: the folder key cannot sign a profile.
+        assert!(!m.add([profile(&stranger, &fid, "x", "", 1)]));
+        let forged = Statement::by_owner(&s, Body::Profile { device_name: "y".into(), user_name: String::new(), serial: 9, at_s: NOW });
+        assert!(!forged.verify(s.public_key()));
+        assert!(m.profile(stranger.public_key()).is_none() && m.profile(me.public_key()).is_none());
+        // Removed, it keeps its name (its old versions are still called by it).
+        assert!(m.add([Statement::by_owner(&s, Body::Remove { device: *a.public_key(), serial: 3, at_s: NOW })]));
+        assert_eq!(m.profile(a.public_key()).map(|p| p.0), Some("Kim's iMac"));
+    }
+
+    #[test]
+    fn a_profile_with_a_bad_name_is_unknown() {
+        let fid = FolderId::of_public_key(owner().public_key());
+        for (name, user) in [("", ""), ("   ", ""), ("a\u{7}b", ""), ("ok", "\n"), (&"x".repeat(65)[..], "")] {
+            let st = profile(&dev(2), &fid, name, user, 1);
+            let back = Statement::from_bytes(&st.to_bytes()).unwrap();
+            assert!(matches!(back.body, Body::Unknown { kind: 6, .. }), "{name:?} {user:?}");
+        }
+        assert!(profile_name_ok(&"æ".repeat(64), false) && profile_name_ok("", true));
     }
 
     #[test]

@@ -1059,7 +1059,8 @@ async fn dispatch<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &mut Conn, req: Request) 
         | Request::ChatDmList(_)
         | Request::ChatDmRead(_)
         | Request::ChatDmSend(_)
-        | Request::ChatDmSetAgents(_)) => chat_call(ctx, conn, r).await,
+        | Request::ChatDmSetAgents(_)
+        | Request::ChatDmDelete(_)) => chat_call(ctx, conn, r).await,
         Request::SettingsSet(p) => {
             let st = ctx.state.clone();
             let changes = p.changes;

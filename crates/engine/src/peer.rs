@@ -174,6 +174,8 @@ pub(crate) struct Diag {
     pub wakeups: AtomicU64,
     pub incoming_accepted: AtomicU64,
     pub incoming_refused: AtomicU64,
+    /// `incoming_refused` by [`Refusal`].
+    pub refused: [AtomicU64; 4],
     pub rechecks: AtomicU64,
     pub utp_accepted: AtomicU64,
     pub utp_dialed: AtomicU64,
@@ -184,6 +186,27 @@ pub(crate) struct Diag {
     pub boot_waiting: AtomicU64,
     pub verify_peak: AtomicU64,
     pub replans: AtomicU64,
+}
+
+/// Why an incoming connection was refused (`seedwell debug perf`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Refusal {
+    /// The connection cap, or too many handshakes pending.
+    Busy,
+    /// The handshake timed out or was not a BitTorrent one (plain or encrypted).
+    Handshake,
+    /// The torrent is unknown here, or not running (stopped, queued, moving, shutting down).
+    Torrent,
+    /// The torrent refused the peer: banned, checking, full, or its queue full.
+    Peer,
+}
+
+impl Diag {
+    /// Count a refused incoming connection.
+    pub fn refuse(&self, why: Refusal) {
+        self.incoming_refused.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.refused[why as usize].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 /// Per-torrent context shared by all its peer tasks.
@@ -244,6 +267,8 @@ impl PeerCtx {
 pub(crate) struct PeerShared {
     pub down: AtomicU64,
     pub up: AtomicU64,
+    /// Give up the connection while it is still being opened (the peer task reads no commands yet).
+    pub abort: tokio::sync::Notify,
 }
 
 /// Our pieces, as told to a new peer.
@@ -348,7 +373,8 @@ pub(crate) struct PeerSpawn {
     pub key: PeerKey,
     pub addr: SocketAddr,
     /// An accepted socket together with the peer's handshake, or `None` to connect out.
-    pub incoming: Option<(PeerIo, Handshake)>,
+    /// An accepted connection, its handshake, and whether ours went out already.
+    pub incoming: Option<(PeerIo, Handshake, bool)>,
     /// How to connect out (ignored for incoming connections).
     pub dial: Dial,
     pub ctx: Arc<PeerCtx>,
@@ -367,7 +393,14 @@ pub(crate) async fn run(p: Box<PeerSpawn>) {
     let events = p.events.clone();
     // Boxed: the connect/handshake state is big and only needed for the first moments; it must
     // not be part of the future that an idle connection keeps for hours.
-    let (why, connected) = match Box::pin(Peer::establish(*p)).await {
+    let shared = p.shared.clone();
+    let opening = Box::pin(Peer::establish(*p));
+    let opened = tokio::select! {
+        r = opening => r,
+        () = shared.abort.notified() => Err(Close::Local),
+    };
+    drop(shared);
+    let (why, connected) = match opened {
         Ok(mut peer) => {
             let r = peer.main_loop().await;
             peer.release_rx();
@@ -611,8 +644,6 @@ struct Peer {
 /// Peers may queue this many outstanding requests with us (twice our advertised `reqq`, for requests that
 /// cross a cancel on the wire).
 const MAX_QUEUED_READS: usize = 2 * trs_wire::extended::DEFAULT_REQQ as usize;
-/// Largest block a peer may ask for (the norm is 16 KiB; libtorrent drops anything above 128 KiB).
-const MAX_REQUEST_LEN: u32 = 128 * 1024;
 /// Blocks that arrive without a matching request before we hang up.
 const MAX_UNWANTED_BLOCKS: u32 = 64;
 const KEEPALIVE_AFTER: Duration = Duration::from_secs(90);
@@ -634,7 +665,7 @@ impl Peer {
         };
         // `sent`: an encrypted dial carries our handshake as its initial payload.
         let (mut stream, remote, is_incoming, sent) = match incoming {
-            Some((s, hs)) => (s, hs, true, false),
+            Some((s, hs, answered)) => (s, hs, true, answered),
             None => {
                 let (s, sent) = dial_out(&ctx, addr, dial, &ours).await?;
                 (s, Handshake::new([0; 20], [0; 20], false), false, sent)
@@ -1049,9 +1080,6 @@ impl Peer {
         }
         if self.reads.len() >= MAX_QUEUED_READS {
             return Err(Close::Protocol("too many queued requests"));
-        }
-        if r.length > MAX_REQUEST_LEN {
-            return Err(Close::Protocol("request too large"));
         }
         // Not read yet: the reads of one batch of requests are grouped in `assign_runs`.
         self.reads.push_back(ReadJob { req: r, run: NO_RUN });

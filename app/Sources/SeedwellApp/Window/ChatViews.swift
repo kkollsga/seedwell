@@ -41,7 +41,7 @@ struct ChatToolbarControls: View {
                 .popover(isPresented: $showMembers, arrowEdge: .bottom) {
                     ChatMembersView(model: model, channel: channel, actions: actions) { m in
                         showMembers = false
-                        actions.showDirect(m.deviceId, name: m.name)
+                        actions.showDirect(m.deviceId, name: ChatText.named(m.name, user: m.user))
                     }
                 }
             if SyncText.canShare(channel.role) {
@@ -70,9 +70,12 @@ struct ChatToolbarControls: View {
     }
 }
 
-/// A private conversation's control in the toolbar: what agents on this Mac may do with private messages.
+/// A private conversation's control in the toolbar: what agents on this Mac may do with private messages, and
+/// deleting the conversation.
 struct ChatDirectToolbarControls: View {
     let actions: ChatActions
+    let device: String
+    let name: String
     @State private var access: SyncAgentAccess = .off
 
     var body: some View {
@@ -84,9 +87,11 @@ struct ChatDirectToolbarControls: View {
                     }
                 }
             }
+            Divider()
+            Button("Delete Conversation…") { actions.deleteDirect(device, name: name) }
         } label: { Image(systemName: "ellipsis.circle") }
             .menuIndicator(.hidden).fixedSize()
-            .help("What agents on this Mac may do with private messages (one setting for all of them)")
+            .help("What agents on this Mac may do with private messages, and deleting this conversation")
             .accessibilityIdentifier("chat-direct-menu")
             .onAppear { access = actions.directAgents }
     }
@@ -100,6 +105,8 @@ struct ChatConversationView: View {
     /// The field's placeholder names it: "Message Team", "Message Dinner", "Message Kari's iPhone".
     let name: String
     let canPost: Bool
+    /// What shows instead of the message field when it cannot post.
+    var cannotPost = "Read only: you see the messages but cannot post."
     var empty = "No messages yet."
     let actions: ChatActions
     @State private var draft = ""
@@ -111,7 +118,7 @@ struct ChatConversationView: View {
             messages
             Divider()
             if canPost { composer.padding(12) } else {
-                Text("Read only: you see the messages but cannot post.").font(.system(size: 12)).foregroundStyle(.secondary).padding(12)
+                Text(cannotPost).font(.system(size: 12)).foregroundStyle(.secondary).padding(12)
             }
         }
     }
@@ -174,7 +181,7 @@ struct ChatConversationView: View {
 
     /// Your tags on `m` are now `set` (a note in its conversation; others keep theirs).
     private func tag(_ m: SyncMessage, _ set: [String]) {
-        actions.send(to: place, ChatTags.note(on: m.id, set), replyTo: nil) { [model] sent in
+        actions.send(to: place, chatTagNote(messageId: m.id, tags: set), replyTo: nil) { [model] sent in
             if sent { model.loadChatMessages() }
         }
     }
@@ -195,7 +202,7 @@ struct ChatMessageRow: View {
     let header: Bool
     let reply: SyncMessage?
     /// Its tags, by owner: shown as a line under the text.
-    var tags: [ChatTags] = []
+    var tags: [ChatTagOwner] = []
     /// Sets your tags on it (the whole set); `nil` where you cannot post.
     var onTag: (([String]) -> Void)? = nil
     let onReply: (() -> Void)?
@@ -204,7 +211,8 @@ struct ChatMessageRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
             if header {
-                // A person: their device ("You" for this Mac). An agent: its name, a badge, and the computer it runs on.
+                // A person: their name and device, or the device alone ("You" for this Mac). An agent: its name, a
+                // badge, and the computer it runs on.
                 HStack(spacing: 6) {
                     if let agent = message.agent {
                         Text(agent).font(.system(size: 12.5, weight: .semibold))
@@ -213,6 +221,10 @@ struct ChatMessageRow: View {
                             .background(Capsule().fill(Color.secondary.opacity(0.16)))
                             .foregroundStyle(.secondary)
                             .help("Sent by an agent through Seedwell on \(ChatText.computer(message))")
+                        Label(ChatText.computer(message), systemImage: "desktopcomputer").labelStyle(.titleAndIcon)
+                            .font(.system(size: 11.5)).foregroundStyle(.secondary)
+                    } else if !message.isMe, !message.authorUser.isEmpty {
+                        Text(message.authorUser).font(.system(size: 12.5, weight: .semibold))
                         Label(ChatText.computer(message), systemImage: "desktopcomputer").labelStyle(.titleAndIcon)
                             .font(.system(size: 11.5)).foregroundStyle(.secondary)
                     } else {
@@ -230,7 +242,7 @@ struct ChatMessageRow: View {
                 Group {
                     switch message.kind {
                     case .text:
-                        if let mail = ChatMail.parse(message.body) {
+                        if let mail = chatMail(text: message.body) {
                             // A mail between projects: its header as a line, then its text.
                             VStack(alignment: .leading, spacing: 6) {
                                 ChatMailHeader(mail: mail)
@@ -266,7 +278,7 @@ struct ChatMessageRow: View {
     private var tagsLine: some View {
         HStack(spacing: 10) {
             ForEach(tags, id: \.owner) { t in
-                Label("\(t.owner): \(t.tags.map(ChatTags.label).joined(separator: ", "))", systemImage: t.tags == ["seen"] ? "eye" : "tag")
+                Label("\(t.owner): \(t.tags.map { chatTagLabel(tag: $0) }.joined(separator: ", "))", systemImage: t.tags == ["seen"] ? "eye" : "tag")
             }
         }
         .font(.system(size: 11)).foregroundStyle(.secondary)
@@ -277,8 +289,8 @@ struct ChatMessageRow: View {
     private func tagMenu(_ onTag: @escaping ([String]) -> Void) -> some View {
         let yours = tags.first { $0.isYou }?.tags ?? []
         return Menu {
-            ForEach(ChatTags.known, id: \.self) { t in
-                Toggle(ChatTags.label(t), isOn: Binding(get: { yours.contains(t) },
+            ForEach(chatKnownTags(), id: \.self) { t in
+                Toggle(chatTagLabel(tag: t), isOn: Binding(get: { yours.contains(t) },
                                                         set: { on in onTag(on ? yours + [t] : yours.filter { $0 != t }) }))
             }
             if !yours.isEmpty {
@@ -310,7 +322,7 @@ struct ChatMembersView: View {
             ForEach(SyncText.ordered(model.chatMembers), id: \.deviceId) { m in
                 HStack(spacing: 10) {
                     Circle().fill(m.online || m.isMe ? Color.green : Color.secondary.opacity(0.4)).frame(width: 7, height: 7)
-                    Text(m.isMe ? "\(m.name) (this Mac)" : (m.name.isEmpty ? "Unnamed device" : m.name)).font(.system(size: 13))
+                    Text(m.isMe ? "\(ChatText.named(m.name, user: m.user)) (this Mac)" : ChatText.named(m.name, user: m.user)).font(.system(size: 13))
                     Spacer(minLength: 12)
                     if channel.role == .owner, !m.isMe {
                         Menu(SyncText.role(m.role)) {
@@ -329,7 +341,7 @@ struct ChatMembersView: View {
                     }
                     if !m.isMe {
                         Button { message(m) } label: { Image(systemName: "envelope") }
-                            .buttonStyle(.borderless).help("Message \(m.name.isEmpty ? "this device" : m.name) privately")
+                            .buttonStyle(.borderless).help("Message \(ChatText.named(m.name, user: m.user)) privately")
                             .accessibilityLabel("Message Privately")
                     }
                 }

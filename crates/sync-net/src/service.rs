@@ -30,7 +30,7 @@ use trs_sync_proto::msg::{AddressRecord, Addresses, Message};
 use crate::config::{FolderEntry, Settings, SyncConfig};
 use crate::secrets::SecretStore;
 use crate::session::{self, Accepted, Via};
-use crate::shared::{Ctx, FolderShared, HubMsg, Live, Registry, Space, SpaceKind, lock};
+use crate::shared::{Ctx, FolderShared, HubMsg, Live, Names, Registry, Space, SpaceKind, lock};
 use crate::status::{DeviceStatus, FolderState, FolderStatus, Snapshot};
 use crate::tls::Tls;
 
@@ -71,18 +71,12 @@ pub struct Options {
     pub utp: bool,
     /// Dial over TCP (tests turn it off to force uTP).
     pub dial_tcp: bool,
-    /// Seconds east of UTC at a Unix time (daylight saving included), for the names of conflict copies.
-    /// `None`: read once per folder start from `date +%z`.
-    pub utc_offset: Option<UtcOffset>,
     /// The protocol versions to speak, lowest and highest ([`trs_sync_proto::msg::MIN_PROTOCOL`],
     /// [`trs_sync_proto::msg::PROTOCOL`]); tests play older or newer devices with others.
     pub protocol: (u32, u32),
     /// The feature bits to offer ([`trs_sync_proto::msg::FEATURES`]).
     pub features: u64,
 }
-
-/// The local UTC offset at a Unix time, in seconds (the app passes the engine's).
-pub type UtcOffset = Arc<dyn Fn(i64) -> i32 + Send + Sync>;
 
 impl Options {
     /// The defaults for a state directory.
@@ -99,7 +93,6 @@ impl Options {
             lan_targets: Vec::new(),
             utp: true,
             dial_tcp: true,
-            utc_offset: None,
             protocol: (trs_sync_proto::msg::MIN_PROTOCOL, trs_sync_proto::msg::PROTOCOL),
             features: trs_sync_proto::msg::FEATURES,
         }
@@ -169,8 +162,10 @@ pub struct Activity {
 pub struct MemberInfo {
     /// Its id.
     pub device: DeviceId,
-    /// Its name (from its Hello, or as remembered; empty when never met).
+    /// Its name: its own signed profile in the membership, else from its Hello or as remembered; empty when unknown.
     pub name: String,
+    /// Its user's name, from the same profile (empty: none given).
+    pub user: String,
     /// Its role.
     pub role: Role,
     /// A session with it is open now for this folder.
@@ -246,8 +241,6 @@ pub(crate) struct Inner {
     pub(crate) net: crate::relay::Net,
     /// How long stopping a folder waits for it to let go ([`STOP_WAIT`]; shorter in tests).
     pub(crate) stop_wait: Mutex<Duration>,
-    /// The local UTC offset, when the caller gave one.
-    pub(crate) utc_offset: Option<UtcOffset>,
     /// The runtime the service runs on (its synchronous methods are called from other threads too).
     pub(crate) rt: tokio::runtime::Handle,
 }
@@ -281,39 +274,16 @@ fn random_u64() -> u64 {
     u64::from_be_bytes(b)
 }
 
+/// A user name as typed: control characters dropped, trimmed, at most 64 characters; empty = none.
+fn clean_user_name(name: &str) -> String {
+    let name: String = name.chars().filter(|c| !c.is_control()).collect();
+    name.trim().chars().take(trs_sync_proto::msg::MAX_DEVICE_NAME).collect::<String>().trim_end().to_string()
+}
+
 pub(crate) fn random_id() -> [u8; 16] {
     let mut b = [0u8; 16];
     let _ = ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut b);
     b
-}
-
-/// The UTC offset in seconds, read from `date` once a start (Rust has no local time without `unsafe`;
-/// the value only names conflict copies).
-fn local_offset_s() -> i32 {
-    let out = std::process::Command::new("date").arg("+%z").output();
-    let Ok(out) = out else { return 0 };
-    let s = String::from_utf8_lossy(&out.stdout);
-    let s = s.trim();
-    if s.len() != 5 {
-        return 0;
-    }
-    let sign = if s.starts_with('-') { -1 } else { 1 };
-    let h: i32 = s[1..3].parse().unwrap_or(0);
-    let m: i32 = s[3..5].parse().unwrap_or(0);
-    sign * (h * 3600 + m * 60)
-}
-
-/// The system clock with the caller's time zone (the offset follows daylight saving).
-struct ZonedClock(UtcOffset);
-
-impl trs_sync::clock::Clock for ZonedClock {
-    fn now_ns(&self) -> i64 {
-        trs_sync::clock::Clock::now_ns(&SystemClock::default())
-    }
-
-    fn local_offset_s(&self, unix_ns: i64) -> i32 {
-        (self.0)(unix_ns.div_euclid(1_000_000_000))
-    }
 }
 
 impl SyncHandle {
@@ -344,12 +314,17 @@ impl SyncHandle {
         let name = if cfg.settings.device_name.is_empty() { opts.default_device_name.clone() } else { cfg.settings.device_name.clone() };
 
         let (hub_tx, hub_rx) = mpsc::unbounded_channel();
-        let direct = crate::direct::Direct::open(&dir, &key, &cfg.direct)?;
+        let direct = crate::direct::Direct::open(&dir, &key, &mut cfg, opts.secrets.clone())?;
+        if cfg.upgraded {
+            cfg.upgraded = false;
+            cfg.save(&cfg_path)?;
+        }
         let ctx = Arc::new(Ctx {
             me: key.device_id(),
             key,
             client: opts.client.clone(),
             device_name: Mutex::new(name),
+            user_name: Mutex::new(clean_user_name(&cfg.settings.user_name)),
             tls,
             registry: Registry::default(),
             hub: hub_tx,
@@ -380,7 +355,6 @@ impl SyncHandle {
             dial_tcp: opts.dial_tcp,
             net: crate::relay::Net::default(),
             stop_wait: Mutex::new(STOP_WAIT),
-            utc_offset: opts.utc_offset,
             rt: tokio::runtime::Handle::current(),
         });
         let h = SyncHandle { inner };
@@ -449,7 +423,21 @@ impl SyncHandle {
         for url in h.relay_urls() {
             crate::relay_server::ensure_registered(&h, &url);
         }
+        h.publish_profiles();
+        // The first round of dials now (opening a folder or channel wakes it too; a Mac with only private
+        // conversations has none).
+        h.inner.wake_dialer.notify_one();
         Ok(h)
+    }
+
+    /// Signs this device's current names (its own and its user's) into every folder and channel it is a member of,
+    /// where they differ from the ones published there, and sends them round.
+    fn publish_profiles(&self) {
+        for f in self.inner.ctx.registry.spaces() {
+            if crate::roles::publish_profile(&self.inner.ctx, &f) {
+                self.spawn_changed(&f);
+            }
+        }
     }
 
     /// This device's id.
@@ -578,12 +566,14 @@ impl SyncHandle {
         let index = self.index_path(&id);
         let ctx = self.inner.ctx.clone();
         let entry = e.clone();
-        let tz = self.inner.utc_offset.clone();
         let core = tokio::task::spawn_blocking(move || -> Result<(FolderCore, RedbReader), SyncError> {
             let fs = StdFs::new(root.clone());
-            let case_insensitive = match fs.lstat(STATE_DIR) {
-                Ok(Some(_)) => trs_sync::path::probe_case_insensitive(&fs).unwrap_or(true),
-                _ => cfg!(target_os = "macos"),
+            let (case_insensitive, exec_bits) = match fs.lstat(STATE_DIR) {
+                Ok(Some(_)) => (
+                    trs_sync::path::probe_case_insensitive(&fs).unwrap_or(true),
+                    trs_sync::path::probe_exec_bits(&fs).unwrap_or(cfg!(unix)),
+                ),
+                _ => (cfg!(target_os = "macos"), cfg!(unix)),
             };
             let store = RedbStore::open(&index, random_u64())?;
             let reader = store.reader();
@@ -594,13 +584,11 @@ impl SyncHandle {
                 access,
                 case_insensitive,
                 byte_exact_names: !cfg!(target_os = "macos"),
+                exec_bits,
                 archive: entry.archive,
             };
             let ignore = load_ignore(&fs, &entry.ignore);
-            let clock: Arc<dyn trs_sync::clock::Clock> = match tz {
-                Some(tz) => Arc::new(ZonedClock(tz)),
-                None => Arc::new(SystemClock { offset_s: local_offset_s() }),
-            };
+            let clock: Arc<dyn trs_sync::clock::Clock> = Arc::new(SystemClock);
             let mut core = FolderCore::new(cfg, Box::new(store), Arc::new(fs), Some(ctx.key.clone()), clock, Arc::new(random_id), ignore)
                 .map_err(|e| invalid(e.to_string()))?;
             core.set_membership(&writers, access).map_err(|e| invalid(e.to_string()))?;
@@ -631,10 +619,9 @@ impl SyncHandle {
         });
         // Devices met in this folder before are members to dial, at the addresses they had.
         {
-            let cfg = lock(&self.inner.cfg);
             let mut members = shared.members.write().unwrap_or_else(|e| e.into_inner());
             let mut book = lock(&self.inner.book);
-            for d in cfg.devices.iter().filter(|d| d.folders.contains(&e.id)) {
+            for d in &e.devices {
                 let Ok(dev) = d.id.parse::<DeviceId>() else { continue };
                 members.insert(dev);
                 for a in &d.addresses {
@@ -769,6 +756,7 @@ impl SyncHandle {
         } else {
             let _ = std::fs::remove_dir_all(&state);
         }
+        self.forget_strangers();
         Ok(path)
     }
 
@@ -905,7 +893,7 @@ impl SyncHandle {
             if fs.lstat(STATE_DIR)?.is_none() {
                 return Err(io::Error::other("the folder is missing"));
             }
-            let stamp = trs_sync::clock::compact_stamp(trs_sync::clock::Clock::now_ns(&SystemClock::default()));
+            let stamp = trs_sync::clock::compact_stamp(trs_sync::clock::Clock::now_ns(&SystemClock));
             let to_archive = |p: &str| -> io::Result<()> {
                 if fs.lstat(p)?.is_none() {
                     return Ok(());
@@ -970,21 +958,31 @@ impl SyncHandle {
             .filter(|p| p.access(id).is_some())
             .map(|p| (p.device, p.name.clone()))
             .collect();
-        let remembered: BTreeMap<String, String> = lock(&self.inner.cfg).devices.iter().map(|d| (d.id.clone(), d.name.clone())).collect();
+        let remembered: BTreeMap<String, String> = lock(&self.inner.cfg).all_devices().map(|d| (d.id.clone(), d.name.clone())).collect();
         let my_name = lock(&self.inner.ctx.device_name).clone();
+        let my_user = lock(&self.inner.ctx.user_name).clone();
+        let profiles: BTreeMap<DeviceId, Names> = f.profile_names().into_iter().collect();
         let m = f.membership.read().unwrap_or_else(|e| e.into_inner());
         let mut out: Vec<MemberInfo> = m
             .members()
             .map(|(pk, mem)| {
                 let device = DeviceId::of_public_key(pk);
-                let name = if device == me {
-                    my_name.clone()
+                let (name, user) = if device == me {
+                    (my_name.clone(), my_user.clone())
                 } else {
-                    online.get(&device).cloned().or_else(|| remembered.get(&device.to_string()).cloned()).unwrap_or_default()
+                    let name = profiles
+                        .get(&device)
+                        .map(|n| &n.device)
+                        .or_else(|| online.get(&device))
+                        .cloned()
+                        .or_else(|| remembered.get(&device.to_string()).cloned())
+                        .unwrap_or_default();
+                    (name, profiles.get(&device).map(|n| n.user.clone()).unwrap_or_default())
                 };
                 MemberInfo {
                     device,
                     name,
+                    user,
                     role: mem.role,
                     online: device == me || online.contains_key(&device),
                     is_me: device == me,
@@ -1000,7 +998,7 @@ impl SyncHandle {
     /// admits; 0 = no expiry). Owners invite at any role, admins at Read & write or Read only. The link is a
     /// secret: the caller treats it as one (the agent interface returns it only with Full permission).
     pub fn create_invite(&self, id: &FolderId, role: Role, max_uses: u32, valid_days: u32) -> Result<InviteInfo, SyncError> {
-        self.make_invite(id, role, max_uses, valid_days, None)
+        self.make_invite(id, role, max_uses, valid_days, crate::roles::now_s(), None)
     }
 
     /// Makes one link for a folder and a channel: an invitation to each, with the same role, uses and expiry. This
@@ -1012,9 +1010,11 @@ impl SyncHandle {
         self.may_invite(&f, role, max_uses)?;
         let name = lock(&c.name).clone();
         self.may_invite(&c, role, max_uses).map_err(|e| invalid(format!("this Mac may not share the channel {name} at that role ({e})")))?;
-        let ci = self.make_invite(channel, role, max_uses, valid_days, None)?;
+        // One clock reading for both halves: read twice, they could expire a second apart.
+        let now = crate::roles::now_s();
+        let ci = self.make_invite(channel, role, max_uses, valid_days, now, None)?;
         let cl = InviteLink::parse_chat(&ci.link).map_err(|e| invalid(e.to_string()))?;
-        let fi = match self.make_invite(id, role, max_uses, valid_days, Some(&cl)) {
+        let fi = match self.make_invite(id, role, max_uses, valid_days, now, Some(&cl)) {
             Ok(i) => i,
             Err(e) => {
                 let _ = self.revoke_invite(channel, &ci.id);
@@ -1063,14 +1063,13 @@ impl SyncHandle {
         Ok(())
     }
 
-    /// Makes an invitation (see [`SyncHandle::create_invite`]); with `bundle`, the folder's link also carries that
-    /// channel's invitation.
-    fn make_invite(&self, id: &FolderId, role: Role, max_uses: u32, valid_days: u32, bundle: Option<&InviteLink>) -> Result<InviteInfo, SyncError> {
+    /// Makes an invitation (see [`SyncHandle::create_invite`]) made at `now` (Unix seconds); with `bundle`, the
+    /// folder's link also carries that channel's invitation.
+    fn make_invite(&self, id: &FolderId, role: Role, max_uses: u32, valid_days: u32, now: u64, bundle: Option<&InviteLink>) -> Result<InviteInfo, SyncError> {
         let f = self.inner.ctx.registry.space(id).ok_or(SyncError::NotFound)?;
         self.may_invite(&f, role, max_uses)?;
         let me = *self.inner.ctx.key.public_key();
         let mine = f.role_of(&me);
-        let now = crate::roles::now_s();
         let expires_s = if valid_days == 0 { 0 } else { now + u64::from(valid_days) * 86_400 };
         let mut seed = [0u8; 32];
         ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut seed).map_err(|_| invalid("no random numbers"))?;
@@ -1308,14 +1307,21 @@ impl SyncHandle {
         lock(&self.inner.cfg).settings.clone()
     }
 
-    /// Changes the device-wide settings (the port takes effect at the next start).
+    /// Changes the device-wide settings (the port takes effect at the next start; `trs_control::sync::SyncSlot::move_port` starts the service again on it).
     pub fn set_settings(&self, s: Settings) -> Result<(), SyncError> {
-        if !s.device_name.is_empty() {
-            *lock(&self.inner.ctx.device_name) = s.device_name.chars().take(64).collect();
-        }
+        let renamed = !s.device_name.is_empty() && {
+            let name: String = s.device_name.chars().take(64).collect();
+            std::mem::replace(&mut *lock(&self.inner.ctx.device_name), name.clone()) != name
+        };
+        let user = clean_user_name(&s.user_name);
+        let renamed = std::mem::replace(&mut *lock(&self.inner.ctx.user_name), user.clone()) != user || renamed;
         self.inner.ctx.limits.set_kib(s.up_kib, s.down_kib);
         lock(&self.inner.cfg).settings = s;
         self.save_config()?;
+        if renamed {
+            self.publish_profiles();
+            self.send_direct_joins();
+        }
         Ok(())
     }
 
@@ -1668,29 +1674,66 @@ impl SyncHandle {
         AddressRecord::sign(&self.inner.ctx.key, addrs, relay, now)
     }
 
-    /// Remembers a device met in folders (its name, folders and an address), in `sync.toml`.
+    /// Remembers a device met in a folder or channel (`folder`: it was met there now), and its name and an address
+    /// in every folder and channel it was met in: in their own entries in `sync.toml`, nowhere else.
     fn remember_device(&self, device: DeviceId, name: Option<&str>, folder: Option<FolderId>, addr: Option<SocketAddr>) {
+        let id = device.to_string();
         let mut cfg = lock(&self.inner.cfg);
-        let d = cfg.device_mut(&device.to_string());
         let mut changed = false;
-        if let Some(n) = name.filter(|n| !n.is_empty() && *n != d.name) {
-            d.name = n.to_string();
+        if let Some(list) = folder.and_then(|f| cfg.devices_of_mut(&f.to_string()))
+            && !list.iter().any(|d| d.id == id)
+        {
+            // Met there now: with the name and addresses it has in this session.
+            let name = self.inner.ctx.registry.peer(&device).map(|p| p.name.clone()).unwrap_or_default();
+            let mut addresses: Vec<String> = lock(&self.inner.book).by_device.get(&device).into_iter().flatten().map(|a| a.to_string()).collect();
+            addresses.truncate(8);
+            list.push(crate::config::SpaceDevice { id: id.clone(), name, addresses });
             changed = true;
         }
-        if let Some(f) = folder.map(|f| f.to_string()).filter(|f| !d.folders.contains(f)) {
-            d.folders.push(f);
-            changed = true;
-        }
-        if let Some(a) = addr.map(|a| a.to_string()).filter(|a| d.addresses.first() != Some(a)) {
-            d.addresses.retain(|x| *x != a);
-            d.addresses.insert(0, a);
-            d.addresses.truncate(8);
-            changed = true;
+        for d in cfg.all_devices_mut().filter(|d| d.id == id) {
+            if let Some(n) = name.filter(|n| !n.is_empty() && *n != d.name) {
+                d.name = n.to_string();
+                changed = true;
+            }
+            if let Some(a) = addr.map(|a| a.to_string()).filter(|a| d.addresses.first() != Some(a)) {
+                d.addresses.retain(|x| *x != a);
+                d.addresses.insert(0, a);
+                d.addresses.truncate(8);
+                changed = true;
+            }
         }
         drop(cfg);
+        if self.inner.ctx.direct.note(&device, name, None, addr) {
+            let _ = self.save_conversations();
+        }
         if changed {
             let _ = self.save_config();
         }
+    }
+
+    /// After a folder, channel or conversation is gone from this device: what it knew of devices that share no
+    /// other one with it goes too (their addresses and address records), so nothing about a device outlives every
+    /// place it was met in.
+    pub(crate) fn forget_strangers(&self) {
+        let known = self.known_devices();
+        let mut book = lock(&self.inner.book);
+        book.by_device.retain(|d, _| known.contains(d));
+        book.records.retain(|d, _| known.contains(d));
+    }
+
+    /// Every device in a folder, channel or conversation on this device: a member of it, or met there.
+    fn known_devices(&self) -> BTreeSet<DeviceId> {
+        let mut out: BTreeSet<DeviceId> = self.inner.ctx.direct.devices().into_iter().map(|(d, _)| d).collect();
+        for f in self.inner.ctx.registry.spaces() {
+            out.extend(f.membership.read().unwrap_or_else(|e| e.into_inner()).members().map(|(pk, _)| DeviceId::of_public_key(pk)));
+        }
+        for f in self.inner.ctx.registry.folders() {
+            out.extend(f.members.read().unwrap_or_else(|e| e.into_inner()).iter().copied());
+        }
+        for c in self.inner.ctx.registry.channels() {
+            out.extend(c.members.read().unwrap_or_else(|e| e.into_inner()).iter().copied());
+        }
+        out
     }
 
     /// Dials `addr` (for a known `device`, or for the folders in `candidates`), unless its backoff holds it back:
@@ -1900,17 +1943,23 @@ async fn hub_loop(h: SyncHandle, mut rx: mpsc::UnboundedReceiver<HubMsg>) {
     while let Some(msg) = rx.recv().await {
         match msg {
             HubMsg::PeerUp(d) => {
-                // Tell the new peer where we are, and pass on what we know of other devices (peer
-                // exchange: records are signed by their devices, so passing them on cannot forge them).
+                // Tell the new peer where we are, and pass on what we know of the other members of the folders and
+                // channels it shares with us (peer exchange: records are signed by their devices, so passing them
+                // on cannot forge them). Devices of other folders and channels stay out of it.
                 if let Some(p) = h.inner.ctx.registry.peer(&d) {
                     h.remember_device(d, Some(&p.name), None, None);
+                    let shared: Vec<Arc<Space>> = h.inner.ctx.registry.spaces().into_iter().filter(|f| f.role_of(&p.device_pk).is_some()).collect();
+                    let fellow = |pk: &[u8; 32]| shared.iter().any(|f| f.role_of(pk).is_some());
                     let mut records = vec![h.own_record(p.local)];
-                    records.extend(lock(&h.inner.book).records.values().filter(|r| DeviceId::of_public_key(&r.device_pk) != d).take(64).cloned());
+                    records.extend(lock(&h.inner.book).records.values().filter(|r| DeviceId::of_public_key(&r.device_pk) != d && fellow(&r.device_pk)).take(64).cloned());
                     let _ = p.control.send(Message::Addresses(Addresses { records })).await;
                 }
             }
             HubMsg::PeerDown(_) => h.inner.wake_dialer.notify_one(),
             HubMsg::MemberSeen { folder, device } => h.remember_device(device, None, Some(folder), None),
+            HubMsg::Conversations => {
+                let _ = h.save_conversations();
+            }
             HubMsg::Addresses(records) => {
                 for r in records {
                     if !r.verify() {
@@ -1925,10 +1974,16 @@ async fn hub_loop(h: SyncHandle, mut rx: mpsc::UnboundedReceiver<HubMsg>) {
                         }
                         book.records.insert(dev, r.clone());
                     }
+                    let mut noted = false;
                     for a in &r.addrs {
                         if let Ok(sa) = a.parse::<SocketAddr>() {
                             h.learn_address(Some(dev), None, sa);
+                            // Signed by the device itself: where a conversation's device can be reached.
+                            noted |= h.inner.ctx.direct.note(&dev, None, None, Some(sa));
                         }
+                    }
+                    if noted {
+                        let _ = h.save_conversations();
                     }
                 }
             }
@@ -1978,6 +2033,13 @@ async fn dial_loop(h: SyncHandle) {
             }
             if let Some(addrs) = lock(&h.inner.book).hints.get(&f.id) {
                 hints.extend(addrs.iter().map(|a| (*a, f.id)));
+            }
+        }
+        // The devices of the private conversations, at the addresses they last had.
+        for (d, addrs) in ctx.direct.devices() {
+            if ctx.registry.peer(&d).is_none() {
+                wanted.insert(d, ());
+                lock(&h.inner.book).by_device.entry(d).or_default().extend(addrs);
             }
         }
         let by_device: Vec<(DeviceId, Vec<SocketAddr>)> = {

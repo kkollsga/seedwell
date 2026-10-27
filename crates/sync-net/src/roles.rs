@@ -124,9 +124,33 @@ pub(crate) fn by_owner(f: &Space, body: Body) -> Option<Statement> {
     Some(Statement::by_owner(&secret, body))
 }
 
+/// Signs this device's name and its user's into the membership when it is a member there and they differ from what
+/// it published (or it published none): every member then shows them, also one that never met this device. True
+/// when it added one (call [`changed`] then, so the sessions get it).
+pub(crate) fn publish_profile(ctx: &Ctx, f: &Space) -> bool {
+    use trs_sync_proto::members::profile_name_ok;
+    let me = *ctx.key.public_key();
+    let name = lock(&ctx.device_name).clone();
+    let user = lock(&ctx.user_name).clone();
+    if !profile_name_ok(&name, false) || !profile_name_ok(&user, true) {
+        return false;
+    }
+    let serial = {
+        let m = f.membership.read().unwrap_or_else(|e| e.into_inner());
+        if m.role(&me).is_none() || m.profile(&me) == Some((name.as_str(), user.as_str())) {
+            return false;
+        }
+        m.next_profile_serial(&me)
+    };
+    let st = Statement::by_device(&ctx.key, &f.id, Body::Profile { device_name: name, user_name: user, serial, at_s: now_s() });
+    add(f, [st])
+}
+
 /// The membership changed: bring a folder's core, the sessions and this device's duties in line.
 pub(crate) async fn changed(ctx: &Arc<Ctx>, f: &Arc<Space>) {
     let me = *ctx.key.public_key();
+    // Admitted (or not named here yet): the others learn this device's name with the statements below.
+    publish_profile(ctx, f);
     // An owner signs again what admins admitted, so those devices stay if that admin is later demoted.
     if f.role_of(&me) == Some(Role::Owner) {
         let todo = f.membership.read().unwrap_or_else(|e| e.into_inner()).to_confirm();
@@ -199,11 +223,6 @@ pub(crate) async fn changed(ctx: &Arc<Ctx>, f: &Arc<Space>) {
                 }
             }
         }
-    }
-    // A channel's members changed: the keys for private messages go round again, so a new member's key (taken only
-    // from members) reaches the others.
-    if f.kind == SpaceKind::Channel {
-        crate::direct::members_changed(ctx, &f.id).await;
     }
 }
 

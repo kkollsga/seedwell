@@ -12,8 +12,8 @@ import Observation
     private(set) var states: [String: FileTreeState] = [:]
     /// The selected rows of one open list (Space toggles them, ← → fold folders).
     private(set) var selectedTorrent: String?
-    private(set) var selectedNodes: Set<Int> = []
-    @ObservationIgnored private var anchor: Int?
+    private(set) var selectedNodes: Set<UInt32> = []
+    @ObservationIgnored private var anchor: UInt32?
     @ObservationIgnored var core: Core?
     /// Told after an edit reached the engine, so the list's rows pick up the new wanted sizes.
     @ObservationIgnored var onEdited: () -> Void = {}
@@ -73,12 +73,12 @@ import Observation
 
     func clearSelection() { selectedTorrent = nil; selectedNodes = []; anchor = nil }
 
-    func select(torrent: String, node: Int, command: Bool, shift: Bool) {
+    func select(torrent: String, node: UInt32, command: Bool, shift: Bool) {
         guard let st = states[torrent] else { return }
         if selectedTorrent != torrent { selectedNodes = []; anchor = nil }
         selectedTorrent = torrent
-        if shift, let a = anchor, let ia = st.visible.firstIndex(where: { $0.id == a }), let ib = st.visible.firstIndex(where: { $0.id == node }) {
-            selectedNodes = Set(st.visible[min(ia, ib)...max(ia, ib)].map(\.id))
+        if shift, let a = anchor, let ia = st.rows.firstIndex(where: { $0.id == a }), let ib = st.rows.firstIndex(where: { $0.id == node }) {
+            selectedNodes = Set(st.rows[min(ia, ib)...max(ia, ib)].map(\.id))
         } else if command {
             if selectedNodes.contains(node) { selectedNodes.remove(node) } else { selectedNodes.insert(node) }
             anchor = node
@@ -88,10 +88,10 @@ import Observation
         }
     }
 
-    func isSelected(torrent: String, node: Int) -> Bool { selectedTorrent == torrent && selectedNodes.contains(node) }
+    func isSelected(torrent: String, node: UInt32) -> Bool { selectedTorrent == torrent && selectedNodes.contains(node) }
 
     /// The rows an action on `node` covers: the whole selection when `node` is in it, else just `node`.
-    func targets(torrent: String, node: Int) -> [Int] {
+    func targets(torrent: String, node: UInt32) -> [UInt32] {
         isSelected(torrent: torrent, node: node) ? Array(selectedNodes) : [node]
     }
 
@@ -112,23 +112,25 @@ import Observation
     /// Returns the torrent id to select when the selection moves to its row.
     func closeSelected() -> (handled: Bool, selectTorrent: String?) {
         guard let id = selectedTorrent, let st = states[id], let node = selectedNodes.first, selectedNodes.count == 1,
-              let tree = st.tree else { return (false, nil) }
-        if tree.nodes[node].isFolder, st.expandedFolders.contains(node) { st.setFolder(node, open: false); return (true, nil) }
-        let parent = tree.nodes[node].parent
+              let row = st.rows.first(where: { $0.id == node }) else { return (false, nil) }
+        if row.isFolder, st.expandedFolders.contains(node) { st.setFolder(node, open: false); return (true, nil) }
+        let parent = row.parent
         if parent > 0 { selectedNodes = [parent]; anchor = parent; return (true, nil) }
         clearSelection()
         return (true, id)
     }
 }
 
-/// One torrent's open list: the tree, which folders are open, the filter, and the edits on their way
-/// to the engine.
+/// One torrent's open list: the tree (the core's `FileTreeModel`), which folders are open, the filter, the rows the
+/// core lays out from them, and the edits on their way to the engine.
 @MainActor @Observable final class FileTreeState {
     let id: String
-    private(set) var tree: FileTree?
-    private(set) var expandedFolders: Set<Int> = []
+    private(set) var tree: FileTreeModel?
+    private(set) var expandedFolders: Set<UInt32> = []
     var filter = "" { didSet { if filter != oldValue { reflow() } } }
-    private(set) var visible: [FileTree.Visible] = []
+    /// The rows to draw, in order, with everything each shows.
+    private(set) var rows: [FileRow] = []
+    private(set) var totals: FileTotals?
     private(set) var failed = false
     @ObservationIgnored private unowned let store: FilesStore
     @ObservationIgnored private var refreshing = false
@@ -149,12 +151,12 @@ import Observation
         guard let core = store.core else { return }
         let id = id
         Task { [weak self] in
-            let built: FileTree? = await Task.detached { (try? core.files(id: id)).map { FileTree(files: $0) } }.value
+            let built: FileTreeModel? = await Task.detached { (try? core.files(id: id)).map { FileTreeModel(files: $0) } }.value
             guard let self else { return }
             guard let built else { failed = true; return }
             failed = false
             tree = built
-            expandedFolders = built.initiallyExpanded
+            expandedFolders = Set(built.initiallyExpanded())
             reflow()
             onChange?()
         }
@@ -164,7 +166,7 @@ import Observation
     @discardableResult func loadNow() -> Bool {
         guard let core = store.core, let files = try? core.files(id: id) else { failed = true; return false }
         failed = false
-        tree = FileTree(files: files)
+        tree = FileTreeModel(files: files)
         reflow()
         return true
     }
@@ -181,13 +183,13 @@ import Observation
             let files: [TorrentFile]? = await Task.detached { try? core.files(id: id) }.value
             guard let self else { return }
             refreshing = false
-            guard let files, var t = tree, !hasPending else { return }
-            let before = (t.nodes[0].done, t.wantedCount, t.nodes[0].prioMask, t.nodes[0].uploaded, t.nodes[0].downRate, t.nodes[0].upRate)
-            if t.refresh(from: files, keepPriorities: false) {
-                if (t.nodes[0].done, t.wantedCount, t.nodes[0].prioMask, t.nodes[0].uploaded, t.nodes[0].downRate, t.nodes[0].upRate) != before { tree = t }
-            } else {
+            guard let files, let t = tree, !hasPending else { return }
+            switch t.refresh(files: files, keepPriorities: false, nowMs: UInt64(Date().timeIntervalSince1970 * 1000)) {
+            case .same: break
+            case .changed: reflow()
+            case .rebuild:
                 // The list changed shape: build it again.
-                tree = FileTree(files: files)
+                tree = FileTreeModel(files: files)
                 reflow()
             }
         }
@@ -195,56 +197,51 @@ import Observation
 
     // MARK: Folders
 
-    func setFolder(_ node: Int, open: Bool) {
-        guard let t = tree, t.nodes[node].isFolder else { return }
+    func setFolder(_ node: UInt32, open: Bool) {
+        guard tree != nil else { return }
         if open { expandedFolders.insert(node) } else { expandedFolders.remove(node) }
         reflow()
     }
 
-    func toggleFolder(_ node: Int) { setFolder(node, open: !expandedFolders.contains(node)) }
+    func toggleFolder(_ node: UInt32) { setFolder(node, open: !expandedFolders.contains(node)) }
 
     private func reflow() {
-        guard let t = tree else { visible = []; return }
-        visible = t.visible(expanded: expandedFolders, filter: filter)
+        guard let t = tree else { rows = []; totals = nil; return }
+        rows = t.rows(expanded: Array(expandedFolders), filter: filter)
+        totals = t.totals()
     }
 
     // MARK: Edits
 
     /// The checkbox of these rows.
-    func toggle(_ nodes: [Int]) {
+    func toggle(_ nodes: [UInt32]) {
         guard let t = tree else { return }
-        edit(t.toggleChanges(nodes))
+        edit(t.toggleChanges(nodes: nodes))
     }
 
-    func setPriority(_ nodes: [Int], _ p: FilePriority) {
+    func setPriority(_ nodes: [UInt32], _ p: FilePriority) {
         guard let t = tree else { return }
-        edit(t.priorityChanges(nodes, p))
+        edit(t.priorityChanges(nodes: nodes, priority: p))
     }
 
     /// Select All / Select None on what the filter shows (everything without one).
     func selectAll(_ on: Bool) {
         guard let t = tree else { return }
-        let shown = filter.isEmpty ? t.top : visible.map(\.id)
-        let files = t.fileNodes(under: shown)
-        edit(files.compactMap { i in
-            guard let idx = t.nodes[i].file else { return nil }
-            let skipped = t.nodes[i].priority == .skip
-            return on == skipped ? (idx, on ? .normal : .skip) : nil
-        })
+        edit(t.wantChanges(nodes: filter.isEmpty ? t.top() : rows.map(\.id), on: on))
     }
 
     /// Check (`on`) or skip every file under these rows (the menu bar's Select All / None for a folder).
-    func setWanted(_ nodes: [Int], _ on: Bool) {
+    func setWanted(_ nodes: [UInt32], _ on: Bool) {
         guard let t = tree else { return }
-        edit(t.wantChanges(under: nodes, on))
+        edit(t.wantChanges(nodes: nodes, on: on))
     }
 
     /// Applied at once on screen; sent to the engine as one call after a quiet moment, so a run of
     /// clicks is one change.
-    private func edit(_ changes: [FileTree.Change]) {
-        guard !changes.isEmpty, var t = tree else { return }
-        t.apply(changes)
-        tree = t
+    private func edit(_ changes: [FilePriorityChange]) {
+        guard !changes.isEmpty, let t = tree else { return }
+        t.apply(changes: changes)
+        reflow()
         for c in changes { pending[c.index] = c.priority }
         onChange?()
         flushTask?.cancel()

@@ -9,9 +9,9 @@ import Testing
                     lastMessageS: nil, muted: muted, agents: .off, wakeCommand: nil)
     }
 
-    static func message(_ body: String, by device: String = "D1", name: String = "Studio iMac", at: UInt64 = 1_800_000_000,
+    static func message(_ body: String, by device: String = "D1", name: String = "Studio iMac", user: String = "", at: UInt64 = 1_800_000_000,
                         me: Bool = false, agent: String? = nil, reply: String? = nil, kind: SyncMessageKind = .text) -> SyncMessage {
-        SyncMessage(id: "M-\(at)-\(body.count)", channelId: "C-Team", authorDevice: device, authorName: name, isMe: me, agent: agent,
+        SyncMessage(id: "M-\(at)-\(body.count)", channelId: "C-Team", authorDevice: device, authorName: name, authorUser: user, isMe: me, agent: agent,
                     atS: at, replyTo: reply, topic: nil, kind: kind, body: body)
     }
 
@@ -36,6 +36,11 @@ import Testing
         #expect(ChatText.author(Self.message("hi", agent: "Seedwell")) == "Seedwell on Studio iMac")
         #expect(ChatText.author(Self.message("hi", me: true, agent: "Seedwell")) == "Seedwell on Studio iMac", "an agent on this Mac names the Mac too")
         #expect(ChatText.author(Self.message("hi", name: "")) == "Unnamed device")
+        // A person's name with the device's, as every member sees them; an agent keeps its own name.
+        #expect(ChatText.author(Self.message("hi", user: "Kari")) == "Kari (Studio iMac)")
+        #expect(ChatText.author(Self.message("hi", user: "Kari", me: true)) == "You")
+        #expect(ChatText.author(Self.message("hi", user: "Kari", agent: "Seedwell")) == "Seedwell on Studio iMac")
+        #expect(ChatText.named("", user: "Kari") == "Kari (Unnamed device)")
     }
 
     @Test func previewsAreOneShortLine() {
@@ -68,7 +73,7 @@ import Testing
 
     @Test func topicsAndPrivateConversations() {
         #expect(ChatText.topicLine(Self.topic()) == "Topic by Kari's iPhone · 12 messages")
-        #expect(ChatText.directLine(online: false) == "Private · offline · end-to-end encrypted")
+        #expect(ChatText.directLine(online: false) == "Private · not connected · end-to-end encrypted")
         #expect(ChatText.topicTitle("  Dinner on Saturday \n") == "Dinner on Saturday")
         #expect(ChatText.topicTitle(" ") == nil)
         #expect(ChatText.topicTitle(String(repeating: "x", count: 200))?.count == 100)
@@ -194,18 +199,18 @@ import Testing
     }
 
     @Test func mailsShowTheirHeaderAsALine() {
-        let bug = ChatMail.parse(ChatSamples.bugMail)
-        #expect(bug?.to == "kglite" && bug?.type == "bug" && bug?.typeLabel == "Bug" && bug?.isStatus == false)
+        let bug = chatMail(text: ChatSamples.bugMail)
+        #expect(bug?.to == "kglite" && bug?.kind == "bug" && bug?.typeLabel == "Bug" && bug?.isStatus == false)
         #expect(bug?.summary == "The open-source graph serves the wrong repo after a switch")
         #expect(bug?.body.hasPrefix("After `repo_management") == true, "the header is not text")
         #expect(bug?.line == "Bug: The open-source graph serves the wrong repo after a switch")
-        let status = ChatMail.parse(ChatSamples.statusMail)
+        let status = chatMail(text: ChatSamples.statusMail)
         #expect(status?.isStatus == true && status?.re == "7f1b588c" && status?.state == "done")
         #expect(status?.line.hasPrefix("Done: Fixed in 0.17.13") == true)
-        #expect(ChatMail.parse("---\nnot a mail\n---\nhi") == nil, "a rule, not a mail header")
-        #expect(ChatMail.parse("plain text") == nil)
-        #expect(ChatMail.parse("---\nmail: 1\nsummary: Only a header\n---")?.body == "")
-        #expect(ChatMail.parse("---\r\nmail: 1\r\ntype: request\r\n---\r\nPlease")?.body == "Please")
+        #expect(chatMail(text: "---\nnot a mail\n---\nhi") == nil, "a rule, not a mail header")
+        #expect(chatMail(text: "plain text") == nil)
+        #expect(chatMail(text: "---\nmail: 1\nsummary: Only a header\n---")?.body == "")
+        #expect(chatMail(text: "---\r\nmail: 1\r\ntype: request\r\n---\r\nPlease")?.body == "Please")
         // Previews and banners use the line.
         #expect(ChatText.preview(Self.message(ChatSamples.bugMail)) == "Bug: The open-source graph serves the wrong repo after a switch")
     }
@@ -214,14 +219,14 @@ import Testing
         let bug = Self.message(ChatSamples.bugMail, agent: "mcp-servers")
         let re = String(bug.id.prefix(8)).lowercased()
         let receipt = Self.message("---\nmail: 1\ntype: seen\nre: \(re)\n---\n", by: "D2", name: "Laptop", at: 1_800_000_060, agent: "kglite")
-        let kglite = Self.message(ChatTags.note(on: bug.id, ["seen", "backlog"]), by: "D2", name: "Laptop", at: 1_800_000_120, agent: "KGLite")
-        let mine = Self.message(ChatTags.note(on: bug.id, ["needs-triage"]), by: "D0", name: "Mac mini", at: 1_800_000_180, me: true)
-        let cleared = Self.message(ChatTags.note(on: bug.id, []), by: "D3", name: "Air", at: 1_800_000_240, agent: "codingest")
+        let kglite = Self.message(chatTagNote(messageId: bug.id, tags: ["seen", "backlog"]), by: "D2", name: "Laptop", at: 1_800_000_120, agent: "KGLite")
+        let mine = Self.message(chatTagNote(messageId: bug.id, tags: ["needs-triage"]), by: "D0", name: "Mac mini", at: 1_800_000_180, me: true)
+        let cleared = Self.message(chatTagNote(messageId: bug.id, tags: []), by: "D3", name: "Air", at: 1_800_000_240, agent: "codingest")
         let (cards, tags) = ChatMail.cards([bug, receipt, kglite, mine, cleared])
         #expect(cards.map(\.id) == [bug.id], "tag notes are no cards")
-        #expect(tags[re] == [ChatTags(owner: "kglite", isYou: false, tags: ["seen", "backlog"]), ChatTags(owner: "You", isYou: true, tags: ["needs-triage"])],
+        #expect(tags[re] == [ChatTagOwner(owner: "kglite", isYou: false, tags: ["seen", "backlog"]), ChatTagOwner(owner: "You", isYou: true, tags: ["needs-triage"])],
                 "one entry per owner, its newest set; an empty set is none")
-        #expect(ChatMail.parse(kglite.body)?.line == "Tagged Seen, Backlog")
-        #expect(ChatTags.label("needs-triage") == "Needs triage")
+        #expect(chatMail(text: kglite.body)?.line == "Tagged Seen, Backlog")
+        #expect(chatTagLabel(tag: "needs-triage") == "Needs triage")
     }
 }

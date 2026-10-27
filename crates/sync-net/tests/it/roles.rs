@@ -240,3 +240,32 @@ async fn a_member_made_read_write_while_connected_sends_the_files_only_it_had() 
         d.h.shutdown().await;
     }
 }
+
+/// Each device names itself in the membership (a signed profile): a new name reaches every member while the
+/// sessions stay open (a Hello is not sent again), also a member that reaches the device only through another.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_new_device_name_reaches_every_member_through_the_membership() {
+    let dirs: Vec<tempfile::TempDir> = (0..3).map(|_| tempfile::tempdir().unwrap()).collect();
+    let (a, id) = owner_with_folder(dirs[0].path()).await;
+    let (b, c) = (device("Beta").await, device("Gamma").await);
+    for (d, dir) in [(&b, &dirs[1]), (&c, &dirs[2])] {
+        join(d, &a.h.create_invite(&id, Role::ReadWrite, 1, 7).unwrap().link, dir.path(), &id, &a).await;
+        until(30, "joined", || role_of(&a, &id, d).is_some()).await;
+    }
+    let name_of = |on: &Device, who: &Device| on.h.members(&id).ok()?.into_iter().find(|m| m.device == who.h.device_id()).map(|m| m.name);
+    until(20, "everyone knows Beta", || [&a, &c].iter().all(|d| name_of(d, &b).as_deref() == Some("Beta"))).await;
+    let mut s = b.h.settings();
+    s.device_name = "Beta Studio".into();
+    b.h.set_settings(s).unwrap();
+    until(20, "the new name went round", || [&a, &c].iter().all(|d| name_of(d, &b).as_deref() == Some("Beta Studio"))).await;
+    // The user's name the same way; the device name stays.
+    let user_of = |on: &Device, who: &Device| on.h.members(&id).ok()?.into_iter().find(|m| m.device == who.h.device_id()).map(|m| (m.name, m.user));
+    let mut s = b.h.settings();
+    s.user_name = "  Bea\n ".into();
+    b.h.set_settings(s).unwrap();
+    let want = Some(("Beta Studio".to_string(), "Bea".to_string()));
+    until(20, "the user's name went round", || [&a, &b, &c].iter().all(|d| user_of(d, &b) == want)).await;
+    for d in [&a, &b, &c] {
+        d.h.shutdown().await;
+    }
+}

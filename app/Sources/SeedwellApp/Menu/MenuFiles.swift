@@ -4,86 +4,10 @@ import AppKit
 // a checklist right under the row, and ticking a file keeps the menu open. The list is fetched when it opens
 // and dropped when the menu closes.
 
-/// What the inline list shows, as plain data (no AppKit): the visible rows of a torrent (folders open or
-/// closed), at most `cap` of them, and the footer line. Folders come first, then files, in the window's order.
-struct MenuFileList: Equatable {
-    struct Entry: Equatable {
-        let node: Int
-        let depth: Int
-        let title: String
-        /// "1.2 GB", or "42% · 1.2 GB" for a wanted file that is partly downloaded.
-        let size: String
-        let check: FileTree.Check
-        let isFolder: Bool
-        let isOpen: Bool
-        /// A video file: the row gets a Play icon.
-        var isVideo = false
-    }
-
-    /// Rows drawn before "Show All in Seedwell…" (the list scrolls; this only bounds a huge archive).
-    static let cap = 500
-
-    let entries: [Entry]
-    /// Visible rows left out by the cap.
-    let hidden: Int
-    /// "8 of 13 files · 16 MB of 17 MB".
-    let footer: String
-
-    /// The node whose children are the torrent's top level: a lone wrapper folder ("Show.S01/") is
-    /// stepped into, so the list starts at the seasons or episodes.
-    static func start(of tree: FileTree) -> Int {
-        var n = 0
-        while tree.nodes[n].children.count == 1, tree.nodes[tree.nodes[n].children[0]].isFolder { n = tree.nodes[n].children[0] }
-        return n
-    }
-
-    /// Folders that start open: every one when the whole torrent is small, else none.
-    static func initiallyOpen(_ tree: FileTree, limit: Int = 14) -> Set<Int> {
-        tree.nodes.count - 1 <= limit ? Set(tree.folderIDs) : []
-    }
-
-    init(tree: FileTree, open: Set<Int>, cap: Int = MenuFileList.cap) {
-        let start = Self.start(of: tree)
-        var out: [Entry] = []
-        var hidden = 0
-        var stack: [(Int, Int)] = tree.nodes[start].children.reversed().map { ($0, 0) }
-        while let (id, depth) = stack.popLast() {
-            let n = tree.nodes[id]
-            if out.count < cap {
-                var size = Fmt.bytes(n.length)
-                if !n.isFolder, n.priority != .skip, n.done > 0, n.done < n.length {
-                    size = "\(Int(Double(n.done) / Double(n.length) * 100))% · \(size)"
-                }
-                out.append(Entry(node: id, depth: depth, title: n.name, size: size, check: tree.check(id), isFolder: n.isFolder, isOpen: open.contains(id), isVideo: n.isVideo))
-            } else {
-                hidden += 1
-            }
-            if n.isFolder, open.contains(id) { for c in n.children.reversed() { stack.append((c, depth + 1)) } }
-        }
-        entries = out
-        self.hidden = hidden
-        footer = Self.footer(tree, start)
-    }
-
-    static func footer(_ tree: FileTree, _ node: Int) -> String {
-        let n = tree.nodes[node]
-        return "\(n.wantedCount) of \(n.fileCount) file\(n.fileCount == 1 ? "" : "s") · \(Fmt.bytes(n.wantedLength)) of \(Fmt.bytes(n.length))"
-    }
-
-    /// Whether a row gets the chevron: a multi-file torrent that is not held for the user's choice (that has the chooser).
-    static func offers(_ r: TransferRow) -> Bool {
-        r.kind == .torrent && r.fileCount > 1 && r.pending == nil && !r.awaitingChoice
-    }
-}
-
-extension FileTree {
-    /// Select All / Select None under these rows: skipped files become Normal (`on`), or wanted ones are skipped.
-    func wantChanges(under ids: [Int], _ on: Bool) -> [Change] {
-        fileNodes(under: ids).compactMap { i in
-            guard let idx = nodes[i].file else { return nil }
-            return (nodes[i].priority == .skip) == on ? (idx, on ? .normal : .skip) : nil
-        }
-    }
+extension TransferRow {
+    /// The row gets the chevron for its inline file list: a multi-file torrent that is not held for the user's choice
+    /// (that has the chooser).
+    var offersMenuFiles: Bool { kind == .torrent && fileCount > 1 && pending == nil && !awaitingChoice }
 }
 
 // MARK: Hover
@@ -100,7 +24,7 @@ extension FileTree {
 enum MenuCheckbox {
     static let size: CGFloat = 14
 
-    static func draw(at origin: NSPoint, state: FileTree.Check, hovered: Bool) {
+    static func draw(at origin: NSPoint, state: FileCheck, hovered: Bool) {
         let box = NSRect(origin: origin, size: NSSize(width: size, height: size))
         let path = NSBezierPath(roundedRect: box.insetBy(dx: 0.5, dy: 0.5), xRadius: 4, yRadius: 4)
         // On a lit row the accent is the background: the box turns white there.
@@ -155,7 +79,7 @@ extension NSView {
         var title: String
         var trailing = ""
         /// nil: a plain command ("Select All").
-        var check: FileTree.Check?
+        var check: FileCheck?
         /// A folder: open or closed. nil for a file.
         var disclosure: Bool?
         var indent = 0
@@ -165,6 +89,9 @@ extension NSView {
         var reservesPlay = false
         /// The file type's icon (the folder icon for a folder), as in the window's file list. nil for a command.
         var iconExt: String?
+        /// The trailing text is a live rate (the Sharing line): the menu's font, the label colour while data
+        /// flows (true), the secondary one when idle (false). nil: a size.
+        var rateActive: Bool?
     }
 
     var content: Content { didSet { if content != oldValue { needsDisplay = true; refreshAccessibility() } } }
@@ -279,7 +206,12 @@ extension NSView {
         }
         var textRight = right
         if !content.trailing.isEmpty {
-            let attrs: [NSAttributedString.Key: Any] = [.font: isFile ? Self.fileSize : Self.small, .foregroundColor: faint]
+            let attrs: [NSAttributedString.Key: Any] = if let active = content.rateActive {
+                [.font: NSFont.monospacedDigitSystemFont(ofSize: Self.font.pointSize, weight: .regular),
+                 .foregroundColor: hovered ? NSColor.selectedMenuItemTextColor : active ? NSColor.labelColor : NSColor.secondaryLabelColor]
+            } else {
+                [.font: isFile ? Self.fileSize : Self.small, .foregroundColor: faint]
+            }
             let size = (content.trailing as NSString).size(withAttributes: attrs)
             (content.trailing as NSString).draw(at: NSPoint(x: right - size.width, y: (bounds.height - size.height) / 2), withAttributes: attrs)
             textRight = right - size.width - 12
@@ -452,21 +384,21 @@ private final class FlippedView: NSView { override var isFlipped: Bool { true } 
     private static let rowHeight: CGFloat = 20
     /// Visible height of the list: about seven rows, so an open list never takes over the menu.
     static let maxList: CGFloat = 144
-    private(set) var open: Set<Int>
+    private(set) var open: Set<UInt32>
     private(set) var rows: [MenuCheckRow] = []
-    private let state: () -> FileTree?
-    private let toggleNode: (Int) -> Void
+    private let state: () -> FileTreeModel?
+    private let toggleNode: (UInt32) -> Void
     private let setAll: (Bool) -> Void
     private let more: () -> Void
-    private let play: (Int) -> Void
+    private let play: (UInt32) -> Void
     /// The rows moved under the pointer (a scroll, a rebuild): the controller looks at the hover again.
     var onMoved: (() -> Void)?
 
-    init(tree: FileTree, width: CGFloat, state: @escaping () -> FileTree?, toggleNode: @escaping (Int) -> Void,
-         setAll: @escaping (Bool) -> Void, more: @escaping () -> Void, play: @escaping (Int) -> Void) {
-        open = MenuFileList.initiallyOpen(tree)
+    init(tree: FileTreeModel, width: CGFloat, state: @escaping () -> FileTreeModel?, toggleNode: @escaping (UInt32) -> Void,
+         setAll: @escaping (Bool) -> Void, more: @escaping () -> Void, play: @escaping (UInt32) -> Void) {
+        open = Set(tree.menuInitiallyOpen(limit: 14))
         self.state = state; self.toggleNode = toggleNode; self.setAll = setAll; self.more = more; self.play = play
-        let n = min(tree.nodes.count - 1, MenuFileList.cap + 1)
+        let n = min(Int(tree.nodeCount()), Int(fileMenuCap()) + 1)
         let list = min(Self.maxList, CGFloat(n) * Self.rowHeight + 4)
         super.init(frame: NSRect(x: 0, y: 0, width: width, height: headerHeight + list + footerHeight))
         autoresizingMask = .width
@@ -504,7 +436,7 @@ private final class FlippedView: NSView { override var isFlipped: Bool { true } 
 
     required init?(coder: NSCoder) { fatalError("not used") }
 
-    func toggleFolder(_ node: Int) {
+    func toggleFolder(_ node: UInt32) {
         if open.contains(node) { open.remove(node) } else { open.insert(node) }
         rebuild()
     }
@@ -512,7 +444,7 @@ private final class FlippedView: NSView { override var isFlipped: Bool { true } 
     /// All rows again (a folder opened or closed, or the list changed shape).
     func rebuild() {
         guard let tree = state() else { return }
-        let list = MenuFileList(tree: tree, open: open)
+        let list = tree.menuRows(open: Array(open), cap: fileMenuCap())
         // Replacing the rows must not send the list back to its top: keep where the clip view was.
         let keptY = scroll.contentView.bounds.origin.y
         doc.subviews.forEach { $0.removeFromSuperview() }
@@ -521,14 +453,14 @@ private final class FlippedView: NSView { override var isFlipped: Bool { true } 
         // The document has its final width before rows go in: its autoresizing would stretch them otherwise.
         doc.frame.size.width = w
         var y: CGFloat = 2
-        let reservesPlay = list.entries.contains(where: \.isVideo)
-        for e in list.entries {
-            let row = MenuCheckRow(content: Self.content(e, reservesPlay: reservesPlay), width: w) { [toggleNode] in toggleNode(e.node) }
-            row.onDisclosure = { [weak self] in self?.toggleFolder(e.node) }
-            row.onPlay = { [play] in play(e.node) }
+        let reservesPlay = list.rows.contains(where: \.isVideo)
+        for e in list.rows {
+            let row = MenuCheckRow(content: Self.content(e, reservesPlay: reservesPlay), width: w) { [toggleNode] in toggleNode(e.id) }
+            row.onDisclosure = { [weak self] in self?.toggleFolder(e.id) }
+            row.onPlay = { [play] in play(e.id) }
             row.frame = NSRect(x: 0, y: y, width: w, height: Self.rowHeight)
             row.autoresizingMask = .width
-            row.identifier = NSUserInterfaceItemIdentifier(String(e.node))
+            row.identifier = NSUserInterfaceItemIdentifier(String(e.id))
             doc.addSubview(row)
             rows.append(row)
             y += Self.rowHeight
@@ -544,24 +476,23 @@ private final class FlippedView: NSView { override var isFlipped: Bool { true } 
         let maxY = max(0, doc.frame.height - scroll.contentView.bounds.height)
         scroll.contentView.scroll(to: NSPoint(x: 0, y: min(keptY, maxY)))
         scroll.reflectScrolledClipView(scroll.contentView)
-        footer.stringValue = list.footer
+        footer.stringValue = tree.totals().menuFooter
         DispatchQueue.main.async { [weak self] in self?.onMoved?() }
     }
 
-    private static func content(_ e: MenuFileList.Entry, reservesPlay: Bool) -> MenuCheckRow.Content {
-        .init(title: e.title, trailing: e.size, check: e.check, disclosure: e.isFolder ? e.isOpen : nil, indent: e.depth,
-              playable: e.isVideo, reservesPlay: reservesPlay,
-              iconExt: e.isFolder ? "" : (e.title as NSString).pathExtension.lowercased())
+    private static func content(_ e: FileRow, reservesPlay: Bool) -> MenuCheckRow.Content {
+        .init(title: e.name, trailing: e.menuSize, check: e.check, disclosure: e.isFolder ? e.isOpen : nil, indent: Int(e.depth),
+              playable: e.isVideo, reservesPlay: reservesPlay, iconExt: e.isFolder ? "" : e.ext)
     }
 
     /// A tick changed (an edit, the engine's answer): checks and footer follow the tree.
     func refreshChecks() {
         guard let tree = state() else { return }
         for r in rows {
-            guard let id = r.identifier.flatMap({ Int($0.rawValue) }), id < tree.nodes.count else { continue }
-            r.content.check = tree.check(id)
+            guard let id = r.identifier.flatMap({ UInt32($0.rawValue) }), let f = tree.row(id: id) else { continue }
+            r.content.check = f.check
         }
-        footer.stringValue = MenuFileList.footer(tree, MenuFileList.start(of: tree))
+        footer.stringValue = tree.totals().menuFooter
     }
 
     /// QA: the row of a file or folder by (part of) its name, or the Select All / Select None command.
@@ -616,7 +547,7 @@ private final class FlippedView: NSView { override var isFlipped: Bool { true } 
     /// check and the Play icon). A Recent row without a file list keeps the plain item.
     func decorate(_ item: NSMenuItem, row r: TransferRow, revealOnClick: Bool, interactive: Bool = false,
                   onActivate: (@MainActor () -> Void)? = nil, running: Bool? = nil, onCheck: (@MainActor () -> Void)? = nil) {
-        let expands = MenuFileList.offers(r)
+        let expands = r.offersMenuFiles
         guard expands || interactive else { return }
         let view = MenuTorrentRow()
         view.canExpand = expands
@@ -649,7 +580,7 @@ private final class FlippedView: NSView { override var isFlipped: Bool { true } 
                                    toggleNode: { [weak self] node in self?.store.states[id]?.toggle([node]) },
                                    setAll: { [weak self] on in
                                        guard let st = self?.store.states[id], let t = st.tree else { return }
-                                       st.setWanted([MenuFileList.start(of: t)], on)
+                                       st.setWanted([t.menuStart()], on)
                                    },
                                    more: { [weak self] in
                                        let section: LibraryModel.Section = sharing ? .sharing : .downloads
@@ -658,7 +589,7 @@ private final class FlippedView: NSView { override var isFlipped: Bool { true } 
                                        menu.cancelTracking()
                                    },
                                    play: { [weak self] node in
-                                       guard let self, let file = self.store.states[id]?.tree?.torrentFile(node) else { return }
+                                       guard let self, let file = self.store.states[id]?.tree?.torrentFile(id: node) else { return }
                                        menu.cancelTracking()
                                        let commands = self.commands
                                        DispatchQueue.main.async { MainActor.assumeIsolated { commands.play(row, file: file) } }

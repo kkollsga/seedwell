@@ -12,6 +12,10 @@ pub enum Warning {
     LossyPathComponents(usize),
     /// Count of path components in which `:` was replaced by `_`.
     ColonMappedComponents(usize),
+    /// Count of files renamed because their path differs from an earlier file's only by case or Unicode
+    /// normalization (one file on APFS, NTFS and other case-insensitive disks): `a.txt` after `A.txt` is
+    /// `a (2).txt`.
+    FoldedDuplicatesRenamed(usize),
     /// Count of BEP 47 symlink entries. They are listed but must never be
     /// materialised as symlinks (a symlink can point anywhere on disk).
     SymlinkEntries(usize),

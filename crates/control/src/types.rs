@@ -1435,7 +1435,8 @@ pub struct SyncConflictDto {
     pub original: String,
     /// The device that made the losing version (empty when the name does not say).
     pub device: String,
-    /// When, as the copy's name says it (`2026-10-25 14.32`; empty when it does not).
+    /// When, as the copy's name says it (`2026-10-25 14.32z`, UTC; copies named before 0.1.9 say local time
+    /// without the `z`; empty when the name does not say).
     pub when: String,
 }
 
@@ -1532,6 +1533,9 @@ pub struct ChatMessageDto {
     pub author_device: String,
     /// That device's name (empty when never met).
     pub author_name: String,
+    /// The name of that device's user (empty: none given).
+    #[serde(default)]
+    pub author_user: String,
     /// This Mac posted it.
     pub me: bool,
     /// The agent (control client) that posted it, if one did.
@@ -1607,6 +1611,9 @@ pub struct ChatDirectDto {
     pub device_id: String,
     /// Its name.
     pub name: String,
+    /// Its user's name (empty: none given).
+    #[serde(default)]
+    pub user: String,
     /// Connected now.
     pub online: bool,
     /// Its messages since the last read on this Mac.
@@ -1701,6 +1708,9 @@ pub struct SyncMemberDto {
     pub device_id: String,
     /// Its name (empty when never met).
     pub name: String,
+    /// Its user's name (empty: none given).
+    #[serde(default)]
+    pub user: String,
     /// `owner`, `admin`, `read_write` or `read_only`.
     pub role: String,
     /// Connected now for this folder.
@@ -1728,6 +1738,9 @@ pub struct SyncMembersDto {
 pub struct SyncSettingsDto {
     /// The name other devices see (empty = the computer's name).
     pub device_name: String,
+    /// The name this Mac's user goes by in chats, shown with the device name (empty = none).
+    #[serde(default)]
+    pub user_name: String,
     /// The configured sync port (0 = chosen at first start).
     pub port: u16,
     /// Find devices on the local network.
@@ -1749,7 +1762,7 @@ pub struct SyncSettingsDto {
     /// The settings that were changed by this call.
     #[serde(default)]
     pub changed: Vec<String>,
-    /// What to know (a port change applies at the next start).
+    /// What to know ("folder sync listens on port N now").
     #[serde(default)]
     pub note: String,
 }

@@ -101,6 +101,30 @@ fn writes_are_debounced_then_committed_without_a_flush() {
 }
 
 #[test]
+fn a_write_group_commits_as_one_when_it_ends() {
+    let dir = TempDir::new("group");
+    let o = Store::open_with(dir.path(), &OpenOptions { debounce: Duration::from_millis(20), ..Default::default() }).unwrap();
+    let s = o.store;
+    let g = s.group();
+    s.add_counters(id(1), Counters { downloaded: 2, uploaded: 1, seed_secs: 1 }).unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+    s.record_stats(&StatsScope::Public, Day(1), &StatsBucket { uploaded: 1, ..Default::default() }).unwrap();
+    assert_eq!(s.pending_calls(), 2, "the debounce waits while the group is open");
+    drop(g);
+    let t = Instant::now();
+    while s.pending_calls() > 0 {
+        assert!(t.elapsed() < Duration::from_secs(5), "never committed after the group ended");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    // An explicit flush inside a group still commits at once.
+    let _g = s.group();
+    s.add_counters(id(1), Counters { downloaded: 2, uploaded: 1, seed_secs: 1 }).unwrap();
+    s.flush_now().unwrap();
+    assert_eq!(s.pending_calls(), 0);
+    assert_eq!(s.get_counters(id(1)).unwrap().uploaded, 2);
+}
+
+#[test]
 fn many_calls_coalesce_into_one_row_per_key() {
     let dir = TempDir::new("coalesce");
     let s = open(dir.path()).store;
