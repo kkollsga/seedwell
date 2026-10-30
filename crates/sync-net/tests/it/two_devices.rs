@@ -484,7 +484,9 @@ async fn nested_deletes_and_creates_travel_by_the_watcher() {
 }
 
 /// A burst the folder watcher cannot keep up with (on Windows its reads held back until the system's
-/// buffer overflows) becomes a full rescan, and the other device still ends up with every file.
+/// buffer overflows) becomes a full rescan, and the other device still ends up with every file. The system's buffer
+/// is as large as the backend's read (64 KiB) and each file of the burst takes about 256 bytes of it (added, then
+/// modified, ~60-character names in UTF-16): 1000 files overflow it about four times over, which the test checks.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_burst_that_overflows_the_watcher_still_syncs_every_file() {
     let (a, b) = (device("Alpha").await, device("Beta").await);
@@ -504,14 +506,18 @@ async fn a_burst_that_overflows_the_watcher_still_syncs_every_file() {
     // The folder first, synced, so nothing but the overflow's rescan can bring what comes next.
     std::fs::create_dir(fa.path().join("burst")).unwrap();
     until(30, "B has the folder", || dest.join("burst").is_dir()).await;
-    let n = 3000;
+    let n = 1000;
+    let overflows = trs_fswatch::debug::overflows();
     trs_fswatch::debug::hold_reads(true);
     for i in 0..n {
         std::fs::write(fa.path().join("burst").join(format!("file-{i:05}-with-a-name-long-enough-to-fill-the-buffer.txt")), i.to_string()).unwrap();
     }
     trs_fswatch::debug::hold_reads(false);
     until(180, "B has every file of the burst", || std::fs::read_dir(dest.join("burst")).is_ok_and(|d| d.count() == n)).await;
-    assert_eq!(read(&dest.join("burst").join("file-02999-with-a-name-long-enough-to-fill-the-buffer.txt")).as_deref(), Some(&b"2999"[..]));
+    assert_eq!(read(&dest.join("burst").join("file-00999-with-a-name-long-enough-to-fill-the-buffer.txt")).as_deref(), Some(&b"999"[..]));
+    if cfg!(windows) {
+        assert!(trs_fswatch::debug::overflows() > overflows, "the burst overflowed the system's buffer");
+    }
     a.h.shutdown().await;
     b.h.shutdown().await;
 }

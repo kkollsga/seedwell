@@ -49,6 +49,12 @@
     font: inherit; font-size: 14px; font-weight: 600; padding: 0 16px; cursor: pointer; white-space: nowrap;
   }
   kbd { font: 13px ui-monospace, Menlo, Consolas, monospace; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 5px; padding: 0 5px; }
+  .download {
+    display: inline-block; background: var(--accent); color: var(--accent-text); text-decoration: none;
+    font-size: 17px; font-weight: 600; padding: 12px 26px; border-radius: 10px; margin: 4px 0 6px;
+  }
+  .download:hover, .download:focus-visible { filter: brightness(1.08); }
+  .small { font-size: 14px; margin: 0 0 14px; }
   details { margin-top: 14px; border-top: 1px solid var(--line); padding-top: 12px; }
   summary { cursor: pointer; color: var(--muted); }
   details p, details li { font-size: 15px; }
@@ -83,23 +89,38 @@
     <div id="mac" role="tabpanel" aria-labelledby="tab-mac" hidden>
       <h2>Install on your Mac</h2>
       <p class="req">macOS 15 or later, on a Mac with Apple silicon (M1 or later).</p>
-      <ol>
-        <li>Open <b>Terminal</b>: press <kbd>⌘</kbd> <kbd>Space</kbd>, type <i>Terminal</i> and press <kbd>Return</kbd>.</li>
-        <li>Paste this and press <kbd>Return</kbd>:
-          <div class="cmd"><code>curl -fsSL https://github.com/kkollsga/seedwell/releases/latest/download/install.sh | bash</code><button type="button">Copy</button></div>
-        </li>
-        <li>Seedwell opens and its icon appears in the menu bar.</li>
-      </ol>
-      <details>
-        <summary>What the command does, updating and uninstalling</summary>
-        <p>It downloads the latest release from GitHub, checks its SHA-256 checksum, installs Seedwell in your
-          Applications folder and opens it. Nothing else on your Mac is changed.</p>
+      <div id="mac-download">
+        <a class="download" href="https://github.com/kkollsga/seedwell/releases/latest/download/Seedwell.dmg">Download for Mac</a>
+        <p class="note small">Seedwell.dmg, signed and notarized by Apple.</p>
+        <ol>
+          <li>Open <b>Seedwell.dmg</b> from your Downloads.</li>
+          <li>Drag <b>Seedwell</b> onto the <b>Applications</b> folder.</li>
+          <li>Open Seedwell from Applications. Its icon appears in the menu bar.</li>
+        </ol>
+      </div>
+      <details id="mac-terminal">
+        <summary>Prefer Terminal?</summary>
+        <ol>
+          <li>Open <b>Terminal</b>: press <kbd>⌘</kbd> <kbd>Space</kbd>, type <i>Terminal</i> and press <kbd>Return</kbd>.</li>
+          <li>Paste this and press <kbd>Return</kbd>:
+            <div class="cmd"><code>curl -fsSL https://github.com/kkollsga/seedwell/releases/latest/download/install.sh | bash</code><button type="button">Copy</button></div>
+          </li>
+          <li>Seedwell opens and its icon appears in the menu bar.</li>
+        </ol>
+        <p>The command downloads the latest release from GitHub, checks its SHA-256 checksum and its Developer ID
+          signature, installs Seedwell in your Applications folder and opens it. Nothing else on your Mac is changed.</p>
         <ul>
-          <li><b>Updates:</b> Seedwell checks for them itself (Settings › General › Updates). Running the command again
-            also updates it.</li>
           <li><b>The <code>seedwell</code> command for Terminal:</b> add <code>-s -- --cli</code> after <code>bash</code>.</li>
           <li><b>Uninstall:</b> the same command with <code>bash -s -- --uninstall</code>. It asks before deleting your
             torrent list and settings; downloaded files are never touched.</li>
+        </ul>
+      </details>
+      <details>
+        <summary>Updating and uninstalling</summary>
+        <ul>
+          <li><b>Updates:</b> Seedwell checks for them itself (Settings › General › Updates).</li>
+          <li><b>Uninstall:</b> quit Seedwell and move it from Applications to the Trash. Your torrent list and settings
+            stay in <code>~/Library/Application Support/Seedwell</code>; downloaded files are never touched.</li>
         </ul>
       </details>
     </div>
@@ -211,6 +232,10 @@
       line.appendChild(notes);
       var hasWindows = (rel.assets || []).some(function (a) { return /-windows-x64\.zip$/.test(a.name); });
       document.getElementById('windows-missing').hidden = hasWindows;
+      // Releases before the first signed one have no disk image: the Terminal command is the way in for those.
+      var hasDmg = (rel.assets || []).some(function (a) { return a.name === 'Seedwell.dmg'; });
+      document.getElementById('mac-download').hidden = !hasDmg;
+      document.getElementById('mac-terminal').open = !hasDmg;
     })
     .catch(function () {});
 })();

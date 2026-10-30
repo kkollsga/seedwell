@@ -6,6 +6,7 @@
 
 pub mod args;
 pub mod awake;
+pub mod update;
 pub mod chat;
 pub mod mail;
 pub mod pass;

@@ -288,7 +288,7 @@ impl Default for General {
     }
 }
 
-/// Updates (Settings > General). Both only act in release builds of the app.
+/// Updates (Settings > General). The first two only act in release builds of the app.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Updates {
@@ -296,11 +296,15 @@ pub struct Updates {
     pub check: bool,
     /// Install a found update by itself when nothing is downloading.
     pub auto_install: bool,
+    /// Follow `dev_folder` instead of GitHub: install each newer development build put there (SPEC 12A).
+    pub dev_builds: bool,
+    /// The folder development builds are put in (empty: none chosen yet).
+    pub dev_folder: String,
 }
 
 impl Default for Updates {
     fn default() -> Self {
-        Updates { check: true, auto_install: false }
+        Updates { check: true, auto_install: false, dev_builds: false, dev_folder: String::new() }
     }
 }
 
@@ -1172,11 +1176,13 @@ mod tests {
         let old = Config::parse_str("version = 6\n[general]\nlaunch_at_login = true\n").unwrap();
         assert!(old.value.updates.check && !old.value.updates.auto_install, "absent section means defaults");
         assert!(old.warnings.is_empty(), "{:?}", old.warnings);
-        let c = Config { updates: Updates { check: false, auto_install: true }, ..Config::default() };
+        assert!(!old.value.updates.dev_builds && old.value.updates.dev_folder.is_empty());
+        let u = Updates { check: false, auto_install: true, dev_builds: true, dev_folder: "/Users/a b/builds".into() };
+        let c = Config { updates: u.clone(), ..Config::default() };
         let out = c.render().unwrap();
-        assert!(out.contains("[updates]") && out.contains("auto_install = true"), "{out}");
+        assert!(out.contains("[updates]") && out.contains("auto_install = true") && out.contains("dev_builds = true"), "{out}");
         let again = Config::parse_str(&out).unwrap();
-        assert_eq!(again.value.updates, Updates { check: false, auto_install: true });
+        assert_eq!(again.value.updates, u);
         assert!(again.warnings.is_empty(), "{:?}", again.warnings);
     }
 

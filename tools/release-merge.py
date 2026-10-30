@@ -3,7 +3,8 @@
 
     python3 -I tools/release-merge.py <mac dir> <windows dir>
 
-<mac dir> holds app/release-zip.sh's output (Seedwell-X.Y.Z.zip, install.sh, SHA256SUMS, latest.json, NOTES.md),
+<mac dir> holds app/release-zip.sh's output (Seedwell-X.Y.Z.zip, Seedwell-X.Y.Z.dmg, Seedwell.dmg, install.sh,
+SHA256SUMS, latest.json, NOTES.md),
 <windows dir> app-windows/release-zip.ps1's (Seedwell-X.Y.Z-windows-x64.zip, install.ps1, SHA256SUMS-windows,
 latest-windows.json). The files in <mac dir> are rewritten in place:
 
@@ -12,7 +13,8 @@ latest-windows.json). The files in <mac dir> are rewritten in place:
   "windows": {"zip", "sha256", "minimum_windows"} (what the Windows app reads; crates/ffi/src/updates.rs).
 - NOTES.md: the Install section for both systems, and the Checksums block from the merged SHA256SUMS.
 
-Refuses (exit 1) when the two builds are not of the same version or a checksum does not match its file.
+Refuses (exit 1) when the two builds are not of the same version, a checksum does not match its file, an asset is
+missing, or Seedwell.dmg (the stable "latest" link) is not the same file as Seedwell-X.Y.Z.dmg.
 """
 import hashlib
 import json
@@ -76,16 +78,18 @@ def main() -> None:
             if not (d / name).is_file() or sha256(d / name) != digest:
                 die(f"{f} lists {name} with a checksum its file does not have")
             merged[name] = digest
-    for name in (f"Seedwell-{version}.zip", "install.sh", zip_name, "install.ps1"):
+    for name in (f"Seedwell-{version}.zip", f"Seedwell-{version}.dmg", "Seedwell.dmg", "install.sh", zip_name, "install.ps1"):
         if name not in merged:
             die(f"no checksum for {name}")
+    if merged["Seedwell.dmg"] != merged[f"Seedwell-{version}.dmg"]:
+        die(f"Seedwell.dmg is not the same file as Seedwell-{version}.dmg")
     sums_text = "".join(f"{digest}  {name}\n" for name, digest in merged.items())
     (mac / "SHA256SUMS").write_text(sums_text)
 
     latest["windows"] = {"zip": zip_name, "sha256": windows["sha256"].lower(), "minimum_windows": windows["minimum_windows"]}
     (mac / "latest.json").write_text(json.dumps(latest, separators=(",", ":")) + "\n")
 
-    # NOTES.md: the Mac's Install section gets the Windows one after it; the Checksums block lists all four files.
+    # NOTES.md: the Mac's Install section gets the Windows one after it; the Checksums block lists every file.
     notes = (mac / "NOTES.md").read_text()
     install = re.search(r"(## Install\n)(.*?)(\n## )", notes, re.S)
     if not install:

@@ -61,3 +61,21 @@ fn watching_a_file_or_a_missing_path_fails() {
     assert!(watch(&r.join("f"), opts(Backend::Auto)).is_err());
     assert!(watch(&r.join("missing"), opts(Backend::Auto)).is_err());
 }
+
+#[test]
+fn a_split_watcher_reports_on_its_channel_and_dropping_the_guard_ends_it() {
+    let (_t, r) = root();
+    let (events, guard) = watch(&r, opts(Backend::Auto)).expect("watch").split();
+    assert_eq!(guard.root(), std::fs::canonicalize(&r).expect("canonicalize"));
+    std::fs::write(r.join("latest.json"), b"{}").expect("write");
+    let got = events.recv_timeout(std::time::Duration::from_secs(10));
+    assert!(got.is_ok(), "an event for the new file: {got:?}");
+    drop(guard);
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match events.recv_timeout(std::time::Duration::from_millis(200)) {
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            _ => assert!(std::time::Instant::now() < until, "the channel stays open after the guard is dropped"),
+        }
+    }
+}

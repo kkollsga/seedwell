@@ -58,6 +58,8 @@ pub struct ServerOptions {
     /// The host holds a power assertion while an agent's `awake.set` lease is live (the app does; a
     /// headless daemon cannot, and says so).
     pub keeps_awake: bool,
+    /// The app's updater (`update.*`); a daemon leaves it empty.
+    pub builds: crate::builds::BuildsSlot,
 }
 
 impl Default for ServerOptions {
@@ -73,6 +75,7 @@ impl Default for ServerOptions {
             server_name: format!("seedwell {}", env!("CARGO_PKG_VERSION")),
             max_strikes: 8,
             keeps_awake: false,
+            builds: crate::builds::BuildsSlot::new(),
         }
     }
 }
@@ -594,6 +597,20 @@ fn expand_save_path(p: &Option<String>, level: Permission) -> Result<Option<Path
     Ok(Some(path))
 }
 
+/// The app's updater, for `update.*`.
+fn updater<B: Backend>(ctx: &Ctx<B>) -> Result<std::sync::Arc<dyn crate::builds::Builds>, ApiError> {
+    ctx.opts.builds.get().ok_or_else(|| ApiError::new(ErrorCode::Unsupported, "this Seedwell installs no builds (the app does; a daemon does not)"))
+}
+
+/// A path given to `update.*`: absolute, no `..`.
+fn absolute(p: &str) -> Result<PathBuf, ApiError> {
+    let path = PathBuf::from(p.trim());
+    if !path.is_absolute() || path.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+        return Err(ApiError::params("give an absolute path without `..`"));
+    }
+    Ok(path)
+}
+
 async fn awake_status<B: Backend>(ctx: &Arc<Ctx<B>>) -> Result<Reply, ApiError> {
     let st = ctx.state.clone();
     let setting = blocking(move || st.config().general.keep_awake_for_agents).await?;
@@ -728,6 +745,30 @@ async fn dispatch<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &mut Conn, req: Request) 
             awake_status(ctx).await
         }
         Request::AwakeStatus(_) => awake_status(ctx).await,
+        Request::UpdateStatus(_) => {
+            let b = updater(ctx)?;
+            reply(&blocking(move || b.status()).await?)
+        }
+        Request::UpdateInstall(p) => {
+            let b = updater(ctx)?;
+            let path = absolute(&p.path)?;
+            let out = blocking(move || -> Result<UpdateStatusDto, ApiError> {
+                let note = b.install(&path, p.sha256.as_deref().map(str::trim).filter(|s| !s.is_empty())).map_err(ApiError::invalid)?;
+                Ok(UpdateStatusDto { note, ..b.status() })
+            })
+            .await??;
+            reply(&out)
+        }
+        Request::UpdateWatch(p) => {
+            let b = updater(ctx)?;
+            let folder = p.folder.as_deref().map(absolute).transpose()?;
+            let out = blocking(move || -> Result<UpdateStatusDto, ApiError> {
+                let note = b.watch(folder.as_deref()).map_err(ApiError::invalid)?;
+                Ok(UpdateStatusDto { note, ..b.status() })
+            })
+            .await??;
+            reply(&out)
+        }
         Request::TrackerLog(p) => {
             let st = ctx.state.clone();
             let out = blocking(move || {

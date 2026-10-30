@@ -1,15 +1,22 @@
 # Builds Seedwell for Windows from a clean clone, in one command:
-#   1. the Rust core as a DLL (trs-ffi as a cdylib, release),
+#   1. the Rust core as a DLL (trs-ffi as a cdylib, release; debug with -CoreProfile Debug),
 #   2. its C# bindings (uniffi-bindgen-cs, library mode),
 #   3. the .ico from Assets/icon/*.png,
 #   4. the WinUI 3 app (unpackaged, self-contained, x64).
 # Generated/ and bin/ obj/ are build output (not committed), like the Mac app's app/Generated.
 #
-#   powershell -ExecutionPolicy Bypass -File app-windows\build.ps1 [-Configuration Debug|Release]
+#   powershell -ExecutionPolicy Bypass -File app-windows\build.ps1 [-Configuration Debug|Release] [-CoreProfile Debug|Release]
+#
+# -CoreProfile Debug builds the core in cargo's dev profile, from what a `cargo test`/`nextest` build of the
+# workspace already compiled (CI's app and QA job, as the Mac's app step reuses the test build); a release is always
+# built with the release core (release-zip.ps1).
 #
 # Needs: Rust (rustup), the .NET 10 SDK, and
 #   cargo install uniffi-bindgen-cs --git https://github.com/NordSecurity/uniffi-bindgen-cs --tag v0.11.1+v0.31.0
-param([ValidateSet('Debug', 'Release')] [string]$Configuration = 'Release')
+param(
+    [ValidateSet('Debug', 'Release')] [string]$Configuration = 'Release',
+    [ValidateSet('Debug', 'Release')] [string]$CoreProfile = 'Release'
+)
 $ErrorActionPreference = 'Stop'
 
 $app = $PSScriptRoot
@@ -20,13 +27,15 @@ New-Item -ItemType Directory -Force $gen | Out-Null
 function Step($what) { Write-Host "== $what" }
 function Check($what) { if ($LASTEXITCODE -ne 0) { throw "$what failed (exit $LASTEXITCODE)" } }
 
-Step 'core DLL (cargo rustc -p trs-ffi --crate-type cdylib, release)'
+$coreDir = if ($CoreProfile -eq 'Release') { 'release' } else { 'debug' }
+Step "core DLL (cargo rustc -p trs-ffi --crate-type cdylib, $coreDir)"
 Push-Location $repo
 try {
-    cargo rustc -p trs-ffi --lib --release --crate-type cdylib
+    $profileArgs = if ($CoreProfile -eq 'Release') { @('--release') } else { @() }
+    cargo rustc -p trs-ffi --lib @profileArgs --crate-type cdylib
     Check 'cargo rustc'
 } finally { Pop-Location }
-$dll = Join-Path $repo 'target\release\trs_ffi.dll'
+$dll = Join-Path $repo "target\$coreDir\trs_ffi.dll"
 Copy-Item $dll (Join-Path $gen 'trs_ffi.dll') -Force
 
 Step 'C# bindings (uniffi-bindgen-cs --library)'

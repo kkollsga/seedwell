@@ -1,7 +1,9 @@
 # One build, every test, on the Mac and on Windows. On the Mac the Rust test build (debug) is reused by the app
-# build and the Swift tests; on Windows the app is built and its QA run (app-windows/qa/run.ps1: the renders and the
-# behaviour checks, quiet). Clippy runs beside them on both, so the cfg(windows) code is linted too. A release starts
-# only when this passed on the tagged commit (release.yml). Documentation-only changes do not run CI.
+# build and the Swift tests. On Windows the app and its QA (app-windows/qa/run.ps1: the renders and the behaviour
+# checks, quiet) run in a job of their own beside the Rust tests, from the same debug build cache and a debug core
+# (a release always builds the release core). Clippy runs beside them on both, so the cfg(windows) code is linted
+# too. A release starts only when all of this passed on the tagged commit (release.yml). Documentation-only changes
+# do not run CI.
 name: CI
 
 on:
@@ -24,6 +26,8 @@ env:
   CARGO_INCREMENTAL: "0"
   # Tests refuse to touch the real home folder.
   TRS_FORBID_REAL_HOME: "1"
+  # The C# bindings' generator, pinned (the same in release.yml); its build is cached by this tag.
+  UNIFFI_CS_TAG: v0.11.1+v0.31.0
 
 jobs:
   test:
@@ -72,13 +76,14 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
   windows:
-    name: Windows build and test
+    name: Windows tests
     runs-on: windows-latest
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7
       - name: Rust (version pinned in rust-toolchain.toml)
         run: rustup show active-toolchain || rustup toolchain install
+      # The debug build cache the app job reads too: saved here only, on main.
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: windows
@@ -88,11 +93,20 @@ jobs:
           tool: cargo-nextest
       - name: Rust tests
         run: cargo nextest run --workspace --locked --profile ci
-      - uses: actions/setup-dotnet@v6
+
+  windows-app:
+    name: Windows app and QA
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - name: Rust (version pinned in rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+      # The test job's debug build (dependencies) from main; this job saves nothing, so the two never race for it.
+      - uses: Swatinem/rust-cache@v2
         with:
-          dotnet-version: "10.0.x"
-      - name: uniffi-bindgen-cs (the C# bindings' generator)
-        run: cargo install uniffi-bindgen-cs --git https://github.com/NordSecurity/uniffi-bindgen-cs --tag v0.11.1+v0.31.0
+          shared-key: windows
+          save-if: "false"
       - name: PowerShell scripts parse
         shell: powershell
         run: |
@@ -103,9 +117,23 @@ jobs:
             if ($errors) { Write-Host "::error file=$f::$($errors[0].Message)"; $bad++ }
           }
           if ($bad) { exit 1 }
-      - name: App and QA (renders and behaviour checks, quiet)
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: "10.0.x"
+      - name: uniffi-bindgen-cs from the cache
+        id: uniffi-cs
+        uses: actions/cache@v6
+        with:
+          path: ~/.uniffi-bindgen-cs
+          key: uniffi-bindgen-cs-${{ runner.os }}-${{ env.UNIFFI_CS_TAG }}
+      - name: uniffi-bindgen-cs (the C# bindings' generator), when not cached
+        if: steps.uniffi-cs.outputs.cache-hit != 'true'
+        run: cargo install uniffi-bindgen-cs --git https://github.com/NordSecurity/uniffi-bindgen-cs --tag "$env:UNIFFI_CS_TAG" --root "$HOME/.uniffi-bindgen-cs"
+      - name: uniffi-bindgen-cs on PATH
+        run: Add-Content $env:GITHUB_PATH "$HOME\.uniffi-bindgen-cs\bin"
+      - name: App and QA (debug core; renders and behaviour checks, quiet)
         shell: powershell
-        run: app-windows\qa\run.ps1 all -Build
+        run: app-windows\qa\run.ps1 all -Build -CoreProfile Debug
 
   clippy-windows:
     name: Clippy (Windows)

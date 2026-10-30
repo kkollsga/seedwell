@@ -2,6 +2,7 @@ use super::*;
 use crate::CoreOptions;
 use std::io::{Read, Write};
 use std::net::TcpListener;
+use std::path::Path;
 
 const T0: u64 = 1_800_000_000_000;
 const MIN: u64 = 60_000;
@@ -47,7 +48,22 @@ fn serve(status: u16, body: String) -> String {
 }
 
 fn updates(core: &Arc<Core>, release: bool, repo: &str, now: u64) -> Arc<Updates> {
-    Updates::new(core.clone(), release, Some(repo.to_owned()), os_version().into(), now)
+    Updates::new(core.clone(), release, Some(repo.to_owned()), os_version().into(), None, "/Applications".into(), String::new(), vec!["--background".into()], now)
+}
+
+/// A development build `<current>.<n>` of this updater, with `installer` as the app's own installer.
+fn dev_updates(core: &Arc<Core>, n: u32, repo: &str, installer: &Path, now: u64) -> Arc<Updates> {
+    Updates::new(
+        core.clone(),
+        true,
+        Some(repo.to_owned()),
+        os_version().into(),
+        Some(format!("{}.{n}", current())),
+        "/Applications".into(),
+        installer.display().to_string(),
+        vec!["--background".into()],
+        now,
+    )
 }
 
 /// A system version new enough for the test releases on either system.
@@ -93,7 +109,7 @@ fn latest_json_gives_each_system_its_own_entry_and_refuses_anything_else() {
 
 #[test]
 fn a_release_is_offered_when_it_is_newer_and_this_system_is_new_enough() {
-    let l = |v: &str, min| Latest { version: v.into(), notes_url: None, minimum_system: min };
+    let l = |v: &str, min| Latest { version: v.into(), sha256: String::new(), notes_url: None, minimum_system: min };
     assert!(l("0.2.0", Some((15, 0, 0))).offered("0.1.9", "15.4"));
     assert!(!l("0.1.9", None).offered("0.1.9", "15.4"), "the same version");
     assert!(!l("0.1.8", None).offered("0.1.9", "15.4"), "an older one");
@@ -252,7 +268,7 @@ fn an_isolated_run_never_checks_the_real_update_server() {
         forbidden_root: Some(home.path().display().to_string()),
     })
     .unwrap();
-    let u = Updates::new(core, true, None, os_version().into(), T0);
+    let u = Updates::new(core, true, None, os_version().into(), None, String::new(), String::new(), vec![], T0);
     assert_eq!(u.next_due_ms(T0), None, "no automatic check");
     u.check(false, T0);
     assert_eq!(u.model(T0).status, "Couldn't check: a test run reaches no update server");
@@ -295,7 +311,299 @@ fn a_version_remembered_from_an_earlier_run_is_not_installed_before_a_check_conf
 fn the_texts_of_a_development_build() {
     let (core, _d) = mock();
     let m = updates(&core, false, "http://127.0.0.1:9", T0).model(T0);
-    assert_eq!((m.check_hint.as_str(), m.switches_enabled), ("Development build: checks only when you ask", false));
+    assert_eq!((m.check_hint.as_str(), m.switches_enabled), ("Local build: checks only when you ask", false));
     assert_eq!((m.check_now.title.as_str(), m.check_now.enabled), ("Check Now", true));
     assert!(m.install.is_none() && m.show_log.is_none() && m.notes_url.is_none());
+}
+
+// MARK: Development builds
+
+fn set_dev(core: &Arc<Core>, on: bool, folder: Option<&Path>) {
+    let mut s = core.settings_load();
+    s.updates.dev_builds = on;
+    s.updates.dev_folder = folder.map(|f| f.display().to_string()).unwrap_or_default();
+    core.settings_save(s).unwrap();
+}
+
+/// Nothing downloading or moving in the mock (an install waits for both): every torrent removed.
+fn idle(core: &Arc<Core>) {
+    for _ in 0..100 {
+        let s = core.snapshot();
+        let q = crate::RowQuery { group: None, tracker_id: None, text: String::new(), category: None, offset: 0, limit: 10_000 };
+        let mut ids: Vec<String> = s.downloading.iter().chain(&s.hidden_downloading).map(|r| r.id.clone()).collect();
+        ids.extend(core.sharing_rows(q).into_iter().map(|r| r.id));
+        if ids.is_empty() && s.moving_percent.is_none() {
+            return;
+        }
+        core.remove(ids, false);
+    }
+    panic!("the mock still downloads or moves");
+}
+
+/// A stand-in for the app's installer: it writes its arguments and the state folder it was given to `ran`.
+#[cfg(unix)]
+fn fake_installer(dir: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
+    let script = dir.join("install.sh");
+    let ran = dir.join("ran");
+    // Written aside and renamed: a reader never sees half of it.
+    let r = ran.display();
+    std::fs::write(&script, format!("printf '%s\\n' \"$@\" \"$SEEDWELL_INSTALL_STATE_DIR\" > '{r}.part' && mv '{r}.part' '{r}'\n")).unwrap();
+    (script, ran)
+}
+
+#[cfg(unix)]
+fn wait_for(p: &Path) -> String {
+    for _ in 0..300 {
+        if let Ok(t) = std::fs::read_to_string(p)
+            && !t.is_empty()
+        {
+            return t;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    panic!("{} never written", p.display());
+}
+
+#[test]
+fn a_development_build_sorts_after_its_release_and_before_the_next() {
+    assert_eq!(version_order("0.1.10"), Some((0, 1, 10, 0)));
+    assert_eq!(version_order("0.1.10.3"), Some((0, 1, 10, 3)));
+    assert!(version_order("0.1.10") < version_order("0.1.10.1"));
+    assert!(version_order("0.1.10.9") < version_order("0.1.10.10"), "numbers, not text");
+    assert!(version_order("0.1.10.99") < version_order("0.1.11"));
+    for bad in ["0.1.10.0", "0.1.10.", "0.1.10.x", "0.1.10.3.1", "v0.1.10.3", "0.1"] {
+        assert_eq!(version_order(bad), None, "{bad}");
+    }
+    assert!(is_development("0.1.10.3") && !is_development("0.1.10"));
+    assert_eq!(shown("0.1.10.3"), "0.1.10.3 (development build)");
+    assert_eq!(shown("0.1.10"), "0.1.10");
+    assert_eq!(zip_version(&os::release_zip("0.1.10.3")).as_deref(), Some("0.1.10.3"));
+    assert_eq!(zip_version(&os::release_zip("0.2.0")).as_deref(), Some("0.2.0"));
+    for bad in ["Seedwell-0.1.10.3.tar.gz", "Other-0.1.10.zip", "Seedwell-.zip", "Seedwell-0.1.zip"] {
+        assert_eq!(zip_version(bad), None, "{bad}");
+    }
+}
+
+#[test]
+fn a_release_never_offers_a_development_version_and_a_folder_may() {
+    let sha = "a".repeat(64);
+    let v = format!("{}.4", current());
+    let doc = format!(
+        r#"{{"version":"{v}","zip":"Seedwell-{v}.zip","sha256":"{sha}","minimum_macos":"15.0","windows":{{"zip":"Seedwell-{v}-windows-x64.zip","sha256":"{sha}","minimum_windows":"10.0"}}}}"#
+    );
+    let release = parse_latest(doc.as_bytes(), os::RELEASE_SECTION, os::MINIMUM_SYSTEM_KEY, os::release_zip);
+    assert!(release.is_none(), "four parts, no tag: not a release");
+    let tagged = doc.replacen(&format!(r#""version":"{v}""#), &format!(r#""version":"{v}","tag":"v{v}""#), 1);
+    assert!(parse_latest(tagged.as_bytes(), os::RELEASE_SECTION, os::MINIMUM_SYSTEM_KEY, os::release_zip).is_none());
+    let build = parse_build(doc.as_bytes(), os::RELEASE_SECTION, os::MINIMUM_SYSTEM_KEY, os::release_zip).unwrap();
+    assert_eq!((build.version.as_str(), build.sha256.as_str()), (v.as_str(), sha.as_str()));
+    assert!(build.offered(&current(), os_version()), "newer than the release it builds on");
+    assert!(!build.offered(&format!("{}.4", current()), os_version()), "not the running build itself");
+    let wrong_tag = doc.replacen(&format!(r#""version":"{v}""#), &format!(r#""version":"{v}","tag":"v9.9.9""#), 1);
+    assert!(parse_build(wrong_tag.as_bytes(), os::RELEASE_SECTION, os::MINIMUM_SYSTEM_KEY, os::release_zip).is_none());
+}
+
+#[test]
+fn installing_a_build_needs_the_switch_and_a_real_build_of_another_version() {
+    let (core, dir) = mock();
+    let u = updates(&core, true, "http://127.0.0.1:9", T0);
+    let zip = dir.path().join(os::release_zip(&format!("{}.1", current())));
+    std::fs::write(&zip, b"zip").unwrap();
+    let e = u.install_build_at(&zip, None, T0).unwrap_err();
+    assert!(e.contains("Settings › General › Updates › Allow development builds"), "{e}");
+    assert!(core.builds.get().is_some(), "the control server finds the updater");
+    let refused = core.builds.get().unwrap().watch(Some(dir.path())).unwrap_err();
+    assert!(refused.contains("Allow development builds"), "{refused}");
+    set_dev(&core, true, None);
+    let other = dir.path().join("build.zip");
+    std::fs::write(&other, b"zip").unwrap();
+    assert!(u.install_build_at(&other, None, T0).unwrap_err().contains("is not a build"));
+    assert!(u.install_build_at(&dir.path().join(os::release_zip("9.9.9")), None, T0).unwrap_err().contains("no such file"));
+    let same = dir.path().join(os::release_zip(&current()));
+    std::fs::write(&same, b"zip").unwrap();
+    assert!(u.install_build_at(&same, None, T0).unwrap_err().contains("already running"));
+    let e = u.install_build_at(&zip, Some(&"0".repeat(64)), T0).unwrap_err();
+    assert!(e.contains("nothing was installed"), "{e}");
+    assert!(u.install_build_at(&zip, None, T0).unwrap_err().contains("no installer"), "this updater was given none");
+    assert_eq!(u.model(T0).install_build.map(|b| b.title), Some("Install Build…".into()));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_handed_over_build_runs_the_apps_installer_with_its_checksum_and_the_state_folder() {
+    let (core, dir) = mock();
+    set_dev(&core, true, None);
+    let (script, ran) = fake_installer(dir.path());
+    let u = dev_updates(&core, 1, "http://127.0.0.1:9", &script, T0);
+    let v = format!("{}.2", current());
+    let zip = dir.path().join(os::release_zip(&v));
+    std::fs::write(&zip, b"the build").unwrap();
+    // The running build started fine: it is the one that comes back.
+    u.started();
+    let note = u.install_build_at(&zip, None, T0).unwrap();
+    assert!(note.starts_with(&format!("Installing {v} (development build)")), "{note}");
+    assert!(note.contains(&format!("{}.1 comes back", current())), "{note}");
+    let args = wait_for(&ran);
+    let sha = sha256_of(&zip).unwrap();
+    assert_eq!(args, format!("--zip\n{}\n--sha256\n{sha}\n{}\n", zip.display(), dir.path().display()));
+    assert_eq!(u.model(T0).status, format!("Installing {v} (development build)…"));
+    assert!(u.install_build_at(&zip, None, T0).unwrap_err().contains("already running"));
+    // The next launch is the old build (the new one did not start): it says so and never takes that build again.
+    let back = dev_updates(&core, 1, "http://127.0.0.1:9", &script, T0 + MIN);
+    assert_eq!(back.model(T0 + MIN).status, format!("{v} didn't start; back on {}.1", current()));
+    assert!(back.model(T0 + MIN).show_log.is_some());
+    assert_eq!(back.lock().saved.failed, vec![v]);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_watched_folder_installs_a_newer_build_as_it_appears_and_not_a_failed_one() {
+    let (core, dir) = mock();
+    idle(&core);
+    let (script, ran) = fake_installer(dir.path());
+    let builds = dir.path().join("builds");
+    std::fs::create_dir(&builds).unwrap();
+    set_dev(&core, true, Some(&builds));
+    let u = dev_updates(&core, 1, "http://127.0.0.1:9", &script, T0);
+    assert_eq!(u.next_due_ms(T0), None, "no timer: the watcher reads the folder");
+    assert_eq!(u.model(T0).watching, Some(builds.display().to_string()));
+    let put = |n: u32| {
+        let v = format!("{}.{n}", current());
+        let zip = builds.join(os::release_zip(&v));
+        std::fs::write(&zip, format!("build {n}")).unwrap();
+        let sha = sha256_of(&zip).unwrap();
+        let doc = format!(
+            r#"{{"version":"{v}","zip":"{}","sha256":"{sha}","minimum_macos":"15.0","windows":{{"zip":"{}","sha256":"{sha}","minimum_windows":"10.0"}}}}"#,
+            os::release_zip(&v),
+            os::release_zip(&v)
+        );
+        std::fs::write(builds.join("latest.json.tmp"), doc).unwrap();
+        std::fs::rename(builds.join("latest.json.tmp"), builds.join("latest.json")).unwrap();
+        (v, zip)
+    };
+    // An older build is not taken.
+    put(1);
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    assert!(!ran.exists(), "the running build itself is not installed again");
+    let (v, zip) = put(2);
+    let args = wait_for(&ran);
+    assert!(args.starts_with(&format!("--zip\n{}\n", zip.display())), "{args}");
+    // The watcher runs on the real clock.
+    assert_eq!(u.model(unix_ms()).status, format!("Installing {v} (development build)…"));
+    // It did not start: the next launch remembers it, and the folder does not offer it again.
+    std::fs::remove_file(&ran).unwrap();
+    drop(u);
+    let back = dev_updates(&core, 1, "http://127.0.0.1:9", &script, T0 + MIN);
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    assert!(!ran.exists(), "a failed build is not retried");
+    assert_eq!(back.model(T0 + MIN).status, format!("{v} didn't start; back on {}.1", current()));
+    // Stop Watching stops it.
+    back.stop_watching();
+    assert_eq!(back.model(T0 + MIN).watching, None);
+    put(3);
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    assert!(!ran.exists(), "no longer watched");
+}
+
+#[test]
+fn turning_development_builds_off_while_one_runs_goes_back_to_the_release() {
+    let (core, dir) = mock();
+    set_dev(&core, true, None);
+    let repo = serve(200, latest(&current()));
+    let u = dev_updates(&core, 3, &repo, dir.path(), T0);
+    assert_eq!(u.model(T0).version, format!("{}.3 (development build)", current()));
+    assert_ne!(u.next_due_ms(T0), Some(0), "nothing to do while the switch is on");
+    set_dev(&core, false, None);
+    assert_eq!(u.next_due_ms(T0 + 1), Some(0), "the way back is checked at once");
+    u.check(true, T0 + 1);
+    let m = u.model(T0 + 1);
+    assert_eq!(m.available_version, Some(current()), "the release, older than the build");
+    assert_eq!(m.install.map(|b| b.title), Some(format!("Install {}", current())));
+    assert!(u.confirmed_offer(), "installed by itself once nothing downloads, whatever the install switch says");
+    // It survives a relaunch before the install, and turning the switch on again ends it.
+    let again = dev_updates(&core, 3, &repo, dir.path(), T0 + MIN);
+    assert!(again.lock().saved.back_to_release_ms.is_some());
+    set_dev(&core, true, None);
+    again.next_due_ms(T0 + MIN);
+    assert!(again.lock().saved.back_to_release_ms.is_none());
+    // Releases newer than a build are offered as usual; older ones are not, with the switch never turned off.
+    let (core, dir) = mock();
+    let u = dev_updates(&core, 3, &serve(200, latest(&current())), dir.path(), T0);
+    u.check(false, T0);
+    assert_eq!(u.available_version(), None);
+    let u = dev_updates(&core, 3, &serve(200, latest(&newer())), dir.path(), T0);
+    u.check(false, T0);
+    assert_eq!(u.available_version(), Some(newer()));
+}
+
+#[test]
+fn started_marks_the_version_and_three_launches_without_it_go_back_to_the_kept_app() {
+    let (core, dir) = mock();
+    let state = dir.path().display().to_string();
+    let dev = format!("{}.5", current());
+    let relaunch = vec!["--background".to_owned()];
+    // Nothing kept: launches are counted, nothing else.
+    for _ in 0..4 {
+        assert_eq!(launch_guard(state.clone(), dev.clone(), "/Applications".into(), relaunch.clone()), None);
+    }
+    // A clean quit (the app's own, SIGTERM included) does not count, started or not.
+    assert_eq!(launch_guard(state.clone(), dev.clone(), "/Applications".into(), relaunch.clone()), None);
+    let u = dev_updates(&core, 5, "http://127.0.0.1:9", dir.path(), T0);
+    assert!(u.lock().saved.unstarted > 0);
+    u.quitting();
+    assert_eq!(u.lock().saved.unstarted, 0);
+    u.started();
+    assert_eq!(std::fs::read_to_string(dir.path().join("launch-ok")).unwrap(), format!("{dev}\n"));
+    assert_eq!(u.lock().saved.unstarted, 0);
+    drop(u);
+    // An app kept to go back to (the installer writes it).
+    let kept = dir.path().join("previous");
+    std::fs::create_dir_all(&kept).unwrap();
+    std::fs::write(kept.join("Seedwell.zip"), b"zip").unwrap();
+    std::fs::write(kept.join(os::INSTALLER), b"#").unwrap();
+    std::fs::write(kept.join("previous.json"), format!(r#"{{"version":"{}.4"}}"#, current())).unwrap();
+    assert_eq!(launch_guard(state.clone(), dev.clone(), "/Applications".into(), relaunch.clone()), None);
+    assert_eq!(launch_guard(state.clone(), dev.clone(), "/Applications".into(), relaunch.clone()), None);
+    let c = launch_guard(state.clone(), dev.clone(), "/Applications".into(), relaunch.clone()).expect("the third goes back");
+    assert!(c.argv.iter().any(|a| a.ends_with(os::INSTALLER)) && c.argv.iter().any(|a| a.contains("Rollback") || a == "--rollback"), "{c:?}");
+    assert!(c.env.iter().any(|e| e.name == "SEEDWELL_INSTALL_STATE_DIR" && e.value == state));
+    assert_eq!(launch_guard(state.clone(), dev.clone(), "/Applications".into(), relaunch.clone()), None, "counted from zero again");
+    // A release never goes back by itself.
+    for _ in 0..4 {
+        assert_eq!(launch_guard(state.clone(), current(), "/Applications".into(), relaunch.clone()), None);
+    }
+    // The recovery window: back to the kept app, or the release.
+    let r = recovery_actions(state.clone(), "/Applications".into(), Some("http://127.0.0.1:9".into()), relaunch.clone());
+    assert_eq!(r.iter().map(|a| a.title.as_str()).collect::<Vec<_>>(), [format!("Go Back to {}.4", current()).as_str(), "Install the Release"]);
+    let all = r[1].command.argv.join(" ") + &r[1].command.env.iter().map(|e| e.value.clone()).collect::<String>();
+    assert!(all.contains(&format!("http://127.0.0.1:9/releases/latest/download/{}", os::INSTALLER)), "{all}");
+    std::fs::remove_dir_all(&kept).unwrap();
+    let r = recovery_actions(state, "/Applications".into(), None, relaunch);
+    assert_eq!(r.iter().map(|a| a.title.as_str()).collect::<Vec<_>>(), ["Install the Release"]);
+}
+
+#[test]
+fn a_development_version_that_is_not_this_releases_build_is_ignored() {
+    let (core, dir) = mock();
+    let u = Updates::new(core.clone(), true, None, os_version().into(), Some("9.9.9.1".into()), String::new(), String::new(), vec![], T0);
+    assert_eq!(u.current_version(), current(), "a build names the release it builds on");
+    let u = dev_updates(&core, 2, "http://127.0.0.1:9", dir.path(), T0);
+    assert_eq!(u.current_version(), format!("{}.2", current()));
+}
+
+
+#[test]
+fn the_way_back_to_the_release_is_checked_at_once_then_backs_off_like_any_check() {
+    let (core, dir) = mock();
+    set_dev(&core, true, None);
+    let u = dev_updates(&core, 3, &serve(500, String::new()), dir.path(), T0);
+    // An automatic check a moment ago, before the switch: it does not hold the way back.
+    u.check(true, T0);
+    set_dev(&core, false, None);
+    assert_eq!(u.next_due_ms(T0 + 1), Some(0));
+    u.check(true, T0 + 1);
+    // Two failures in a row (one before the switch): two hours, as for any check that keeps failing.
+    assert_eq!(u.next_due_ms(T0 + 1), Some(2 * HOUR), "failed since the switch: backed off");
+    u.check(true, T0 + 2 * HOUR + 1);
+    assert_eq!(u.next_due_ms(T0 + 2 * HOUR + 1), Some(4 * HOUR), "then doubling");
 }

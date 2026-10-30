@@ -28,7 +28,18 @@ if [ -z "$SPARKLE_KEY" ] && [ -f "$APP_DIR/sparkle_public_key" ]; then SPARKLE_K
 # (release-zip.sh exports SEEDWELL_RELEASE=1; only release builds check and install by themselves).
 REPO_URL="${SEEDWELL_REPO_URL:-https://github.com/kkollsga/seedwell}"
 if [ "${SEEDWELL_RELEASE:-0}" = "1" ]; then RELEASE_BUILD=true; else RELEASE_BUILD=false; fi
-echo "==> Seedwell $VERSION (build $BUILD_NUMBER)"
+# A development build (SPEC 12A): X.Y.Z.N, N counted by tools/dev-build.sh. It must build on this version.
+DEV_VERSION="${SEEDWELL_DEV_VERSION:-}"
+if [ -n "$DEV_VERSION" ]; then
+    case "$DEV_VERSION" in
+        "$VERSION".[1-9]*) [[ "${DEV_VERSION#"$VERSION".}" =~ ^[0-9]+$ ]] || { echo "SEEDWELL_DEV_VERSION must be $VERSION.N" >&2; exit 1; } ;;
+        *) echo "SEEDWELL_DEV_VERSION must be $VERSION.N, not $DEV_VERSION" >&2; exit 1 ;;
+    esac
+    DEV_PLIST="<key>SeedwellDevVersion</key><string>$DEV_VERSION</string>"
+else
+    DEV_PLIST=""
+fi
+echo "==> Seedwell ${DEV_VERSION:-$VERSION} (build $BUILD_NUMBER)"
 
 # SEEDWELL_FAST=1: skip fat LTO for quick development builds (never for measurements or releases).
 if [ "${SEEDWELL_FAST:-0}" = "1" ]; then
@@ -98,6 +109,8 @@ echo "==> App icon"
 swiftc -O "$APP_DIR/Resources/make_icon.swift" -o "$BUILD/make_icon" 2>&1 | tail -3
 rm -rf "$BUILD/AppIcon.iconset" && "$BUILD/make_icon" "$BUILD/AppIcon.iconset"
 iconutil -c icns "$BUILD/AppIcon.iconset" -o "$APP/Contents/Resources/AppIcon.icns"
+# The app installs builds with its own installer (SPEC 12A) and keeps it to go back with.
+cp "$REPO/install.sh" "$APP/Contents/Resources/install.sh"
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -126,6 +139,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <!-- The GitHub-release updater, used when Sparkle is not configured. -->
     <key>SeedwellRepoURL</key><string>$REPO_URL</string>
     <key>SeedwellReleaseBuild</key><$RELEASE_BUILD/>
+    $DEV_PLIST
     <key>SUFeedURL</key><string>$FEED_URL</string>
     <key>SUPublicEDKey</key><string>$SPARKLE_KEY</string>
     <key>SUEnableAutomaticChecks</key><false/>

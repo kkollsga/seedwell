@@ -162,6 +162,11 @@ CHANNEL: mail goes through --channel C, else $SEEDWELL_MAIL_CHANNEL, else the on
         concat!("You decide how long: before you leave work running (a long build, a test run, a wait for mail), estimate how long it needs and take a lease for that long with `--for` (at most a day). Taking it again replaces the time, so renew it if the work runs longer; give it back with `off` as soon as you are done. A lease you forget ends at its time. The app holds the ", trs_platform::computer!(), " from idle sleep while any lease is live and its setting \"Keep awake while agents work\" is on; the display still sleeps and the screen still locks. `seedwell awake` says who keeps the ", trs_platform::computer!(), " awake until when."),
         ["seedwell awake --for 40m", "seedwell awake --for 3h", "seedwell awake off", "seedwell awake"],
         r#"{"v","leases":[{"key","who","client","since_ms","until_ms"}],"setting","host_keeps","kept"}"#, "control"),
+    c!("update", "Agents", "update [status] | install <zip> [--sha256 HEX] | watch <folder> | watch --off",
+        "what this Seedwell runs, and installing development builds (X.Y.Z.N) without a release",
+        "Needs Settings › General › Updates › Allow development builds; only the user turns that on, and only on the user's word do you install. `install` hands over a build's zip (tools/dev-build.sh makes one: Seedwell-X.Y.Z.N.zip); `watch` makes the app install each newer build put in the folder (tools/dev-build.sh --to <folder> writes the zip first, then latest.json). The app quits, is replaced and reopens with the same settings, torrents, folders and chats; a build that does not start within 2 minutes is replaced by the one before. Turning the switch off goes back to the latest release.",
+        ["seedwell update", "seedwell update install app/build/dev/Seedwell-0.1.10.3.zip", "seedwell update watch ~/SeedwellBuilds", "seedwell update watch --off"],
+        r#"{"v","version","development","dev_builds","watching","kept","status","note"}"#, "control"),
     c!("help", "Agents", "help [command | agents]", "this overview, one command's help, or the compact guide for AI agents", "", ["seedwell help", "seedwell help agents", "seedwell help pause"], "(text)", "none"),
     c!("daemon", "Test", "daemon --state-dir D --download-dir X [--listen-port P] [--ask] [--grace S] [--allow-lan-trackers] [--dev-mode] [--no-sync]",
         "a headless engine with its own control socket, for tests and CI", "Run the other commands against it with --socket D/control.sock.", [], "(prints one `seedwell daemon ready socket=… port=… pid=…` line)", "none"),
@@ -397,6 +402,7 @@ Wait for mail:           seedwell mail watch --timeout 10m   (prints all new mai
 Long work, user away:    seedwell awake --for <what it needs>   (the ", trs_platform::computer!(), " does not fall asleep)   then   seedwell awake off
 Talk with everyone:      seedwell chat send <channel> -   then   seedwell chat watch <channel> --unread --lean --batch --timeout 10m
 Answer privately:        seedwell chat dm send <peer_device> --reply <id> -
+Run a build in the app:  seedwell update install app/build/dev/Seedwell-X.Y.Z.N.zip   (only when the user asks; needs their switch Allow development builds)
 
 TESTING WITH SIMULATED TORRENTS (needs Developer mode: `seedwell dev on`, or --yes-i-know)
   seedwell dev on                                                        once; `seedwell dev status` shows the tracker log

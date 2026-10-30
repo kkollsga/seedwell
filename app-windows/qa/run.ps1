@@ -13,10 +13,16 @@
 
   Checks: render, handoff, separate, gate, selection, removal, info, alert, trash, choice, notray, settings, quit (all
   of them: all, the default).
-  -Build builds the app first (build.ps1). -Out keeps the pictures in <dir> (default: a temp folder, printed).
+  -Build builds the app first (build.ps1; -CoreProfile Debug builds its core from the debug test build, as CI does).
+  -Out keeps the pictures in <dir> (default: a temp folder, printed).
   Needs the seedwell CLI: target\debug\seedwell.exe (built with cargo when missing).
 #>
-param([Parameter(Position = 0, ValueFromRemainingArguments = $true)][string[]]$Names = @('all'), [switch]$Build, [string]$Out)
+param(
+  [Parameter(Position = 0, ValueFromRemainingArguments = $true)][string[]]$Names = @('all'),
+  [switch]$Build,
+  [ValidateSet('Debug', 'Release')][string]$CoreProfile = 'Release',
+  [string]$Out
+)
 
 # The CLI writes to stderr while the app starts; PowerShell 5.1 would make that a terminating error. Checks throw their own.
 $ErrorActionPreference = 'Continue'
@@ -28,7 +34,7 @@ $Fixtures = Join-Path $Repo 'crates\metainfo\tests\fixtures'
 $All = @('render', 'handoff', 'separate', 'gate', 'selection', 'removal', 'info', 'alert', 'trash', 'choice', 'notray', 'settings', 'quit')
 
 if ($Build) {
-  & powershell -NoProfile -File (Join-Path $App 'build.ps1') | Out-Host
+  & powershell -NoProfile -File (Join-Path $App 'build.ps1') -CoreProfile $CoreProfile | Out-Host
   if ($LASTEXITCODE -ne 0) { Write-Host 'The build failed (is the app running from bin\? Quit it with Seedwell.exe --quit).'; exit 1 }
 }
 if (-not (Test-Path $Exe)) { throw "No app at ${Exe}: run with -Build" }

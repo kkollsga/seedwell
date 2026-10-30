@@ -203,6 +203,8 @@ pub struct StartOptions {
     pub forbidden_root: Option<PathBuf>,
     /// The Keychain for folder sync's keys (`None`: a 0600 file in the state folder).
     pub secret_vault: Option<Arc<dyn crate::sync::SecretVault>>,
+    /// Where the control server finds the app's updater (`update.*`).
+    pub builds: trs_control::BuildsSlot,
 }
 
 /// A folder an isolated run must not use: inside `forbidden` (the real home) and not in a temporary folder (Windows
@@ -313,7 +315,7 @@ impl RealBackend {
                 state_dir: o.dir.clone(),
                 store: Some(store.clone()),
                 permission: PermissionSource::from_config_dir(&o.dir),
-                options: ServerOptions::default().with_config(&cfg),
+                options: ServerOptions { builds: o.builds.clone(), ..ServerOptions::default().with_config(&cfg) },
                 tz_offset: Some(Arc::new(|| trs_engine::util::local_utc_offset(trs_engine::util::unix_secs() as i64))),
             },
             sync.slot(),
@@ -1752,6 +1754,7 @@ mod isolation_tests {
                 allow_loopback_trackers: false,
                 forbidden_root: Some(home.clone()),
                 secret_vault: None,
+                builds: trs_control::BuildsSlot::new(),
             };
             let e = super::RealBackend::start(o).err().expect("refused");
             assert!(e.to_string().contains("Refusing to start"), "{e}");

@@ -130,7 +130,8 @@ gh pr list --state open --json number,title,author,headRefName,statusCheckRollup
   git tag -a vX.Y.Z "$c" -m "Seedwell X.Y.Z"
   git push origin vX.Y.Z
   ```
-  This starts `.github/workflows/release.yml`: CI gate, the Mac and Windows builds side by side, then one draft.
+  This starts `.github/workflows/release.yml`: CI gate, the Mac (signed and notarized: it needs the signing secrets,
+  docs/RELEASING.md) and Windows builds side by side, then one draft.
   It is all or nothing: if either build fails, the run is cancelled and the tag (and any draft) is deleted again.
   Then stop and report: fix the failure on master, go back to step 4, and tag the same version again.
 
@@ -146,8 +147,12 @@ gh pr list --state open --json number,title,author,headRefName,statusCheckRollup
   gh release view vX.Y.Z --json isDraft,assets,body
   ```
   - It is a draft.
-  - Its assets are `Seedwell-X.Y.Z.zip`, `install.sh`, `Seedwell-X.Y.Z-windows-x64.zip`, `install.ps1`,
-    `SHA256SUMS` and `latest.json`.
+  - Its assets are `Seedwell-X.Y.Z.zip`, `Seedwell-X.Y.Z.dmg`, `Seedwell.dmg`, `install.sh`,
+    `Seedwell-X.Y.Z-windows-x64.zip`, `install.ps1`, `SHA256SUMS` and `latest.json`.
+  - The Mac's are Developer ID signed and notarized: download the dmg and the zip into a scratch folder and check
+    `spctl --assess --type open --context context:primary-signature -v Seedwell-X.Y.Z.dmg`, and for the app unzipped
+    from the zip `spctl --assess --type execute -v` and `codesign -dv` (TeamIdentifier is install.sh's TEAM_ID).
+    `Seedwell.dmg` is the same file as `Seedwell-X.Y.Z.dmg`.
   - `latest.json` names X.Y.Z, both zips' SHA-256 match `SHA256SUMS` (the Mac's at the top level, the Windows one
     under `"windows"`). Download them into a scratch folder to compare.
   - The notes read sensibly.

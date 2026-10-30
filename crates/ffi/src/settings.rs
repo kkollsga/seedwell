@@ -115,6 +115,10 @@ pub struct UpdatePreferences {
     pub check: bool,
     /// Install it by itself when nothing is downloading (release builds only).
     pub auto_install: bool,
+    /// Install each newer development build put in `dev_folder`, instead of releases (SPEC 12A).
+    pub dev_builds: bool,
+    /// Where development builds are put (empty: none chosen yet).
+    pub dev_folder: String,
 }
 
 #[derive(Clone, Debug, PartialEq, uniffi::Record)]
@@ -423,7 +427,12 @@ pub(crate) fn from_config(c: &Config) -> AppSettings {
             },
             notify_changes: c.agents.notify_changes,
         },
-        updates: UpdatePreferences { check: c.updates.check, auto_install: c.updates.auto_install },
+        updates: UpdatePreferences {
+            check: c.updates.check,
+            auto_install: c.updates.auto_install,
+            dev_builds: c.updates.dev_builds,
+            dev_folder: c.updates.dev_folder.clone(),
+        },
         advanced: AdvancedSettings {
             write_cache_mib: c.advanced.write_cache_mib,
             preallocation: match c.advanced.preallocation {
@@ -537,6 +546,8 @@ pub(crate) fn apply_to_config(s: &AppSettings, c: &mut Config) {
     c.agents.notify_changes = s.agents.notify_changes;
     c.updates.check = s.updates.check;
     c.updates.auto_install = s.updates.auto_install;
+    c.updates.dev_builds = s.updates.dev_builds;
+    c.updates.dev_folder = s.updates.dev_folder.clone();
 
     c.advanced.write_cache_mib = s.advanced.write_cache_mib;
     c.advanced.preallocation = match s.advanced.preallocation {

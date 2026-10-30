@@ -70,7 +70,21 @@ import os
         let launchedByUser = Self.isUserLaunch(notification)
         log.notice("launch: by user \(launchedByUser), background \(self.options.background)")
         userLaunch = launchedByUser && !options.background && options.stateDir == nil && options.qaControl == nil
+        if goBackAfterFailedLaunches() { return }
         startCore(waitedSecs: 0)
+    }
+
+    /// A development build launched three times in a row without starting fine goes back to the app kept before it
+    /// (SPEC 12A, Recovery): the core says so before it starts, since it may be what fails.
+    private func goBackAfterFailedLaunches() -> Bool {
+        guard !options.mock, options.renderSnapshots == nil,
+              let c = launchGuard(stateDir: options.resolvedStateDir(), version: UpdateCenter.runningVersion,
+                                  installDir: UpdateCenter.installDir, relaunch: options.relaunchArgs) else { return false }
+        log.error("launch: three launches without starting fine; going back to the kept app")
+        let logURL = URL(fileURLWithPath: c.log)
+        try? FileManager.default.createDirectory(at: logURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if (try? Spawn.detached(argv: c.argv, env: c.env.map { ($0.name, $0.value) }, log: logURL)) != nil { exit(0) }
+        return false
     }
 
     /// Launched like an app by the user, rather than at login (`keyAELaunchedAsLogInItem`) or to open
@@ -111,7 +125,7 @@ import os
                 }
                 return
             }
-            return fatal("\(AppInfo.name) could not start", "\(error)")
+            return fatal("\(AppInfo.name) could not start", "\(error)", recovery: true)
         }
         commands = Commands(core: core)
         settings = SettingsModel(core: core)
@@ -125,7 +139,9 @@ import os
         start()
     }
 
-    private func fatal(_ title: String, _ text: String) {
+    /// Says why the app cannot start, and ends. `recovery`: the core could not start; the window also offers going
+    /// back to the app kept before this one and installing the release (SPEC 12A), neither of which touches data.
+    private func fatal(_ title: String, _ text: String, recovery: Bool = false) {
         // A QA-control run shows no window the user could answer: it says why on stderr and ends.
         if QuietRun.on {
             FileHandle.standardError.write(Data("\(title): \(text)\n".utf8))
@@ -135,13 +151,26 @@ import os
         let a = NSAlert()
         a.messageText = title
         a.informativeText = text
+        a.addButton(withTitle: "Quit")
+        let actions = recovery
+            ? recoveryActions(stateDir: options.resolvedStateDir(), installDir: UpdateCenter.installDir,
+                              repoUrl: Bundle.main.object(forInfoDictionaryKey: "SeedwellRepoURL") as? String,
+                              relaunch: options.relaunchArgs)
+            : []
+        for action in actions { a.addButton(withTitle: action.title).toolTip = action.help }
         NSApp.activate()
-        a.runModal()
+        let chosen = a.runModal().rawValue - NSApplication.ModalResponse.alertFirstButtonReturn.rawValue - 1
+        if actions.indices.contains(chosen) {
+            let c = actions[chosen].command
+            let logURL = URL(fileURLWithPath: c.log)
+            try? FileManager.default.createDirectory(at: logURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try? Spawn.detached(argv: c.argv, env: c.env.map { ($0.name, $0.value) }, log: logURL)
+        }
         exit(1)
     }
 
     private func start() {
-        UpdateCenter.shared.start(core: core)
+        UpdateCenter.shared.start(core: core, relaunchArgs: options.relaunchArgs)
         let main = MainWindowController(commands: commands, settings: settings, defaultSize: options.showWindowSize)
         mainWindow = main
         main.onOpenChange = { [weak self] in self?.refreshActivationPolicy() }
@@ -236,6 +265,13 @@ import os
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in MainActor.assumeIsolated { self?.startingNotifier?.refresh(launch: true) } }
         if options.showWindow || userLaunch { main.show() }
         if let tab = options.showSettings { main.show(settings: SettingsTab(rawValue: tab), openSettings: true) }
+        // Opened from its disk image or Downloads: offer the move to Applications. Only in the user's own runs, never
+        // in tests, QA or a --state-dir run.
+        if options.stateDir == nil, !options.mock, options.qaControl == nil, !QuietRun.on {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+                MainActor.assumeIsolated { MoveToApplications.offer { self?.quitForReal() } }
+            }
+        }
     }
 
     /// Seedwell in Finder (badges and the Share menu) is offered once ever, when there is a synced folder and either
@@ -517,6 +553,8 @@ import os
             return .terminateCancel
         }
         quitting = true
+        // A clean quit: this launch does not count toward a crash loop (SPEC 12A).
+        UpdateCenter.shared.quitting()
         finderStatus?.stop()
         settings.save()
         startingNotifier?.close()

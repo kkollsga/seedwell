@@ -86,8 +86,15 @@ impl Rig {
     }
 }
 
-fn within(got: f64, want: f64, tol: f64) -> bool {
-    (got - want).abs() / want <= tol
+/// Seconds of each measurement (`up_rate`, `down_rate`).
+const WINDOW_S: f64 = 5.0;
+
+/// A rate measured over `WINDOW_S` under a cap of `cap` B/s: never under 90 % of it, and never over the cap plus the
+/// one second of burst the bucket may hold (`TorrentLimit`, `RateLimiter`), spent at once when the transfer fell
+/// behind just before the window (a loaded CI runner), with 5 % to spare. Far from what an unshared cap of three
+/// torrents gives (three times the cap).
+fn capped(got: f64, cap: f64) -> bool {
+    got >= cap * 0.90 && got <= cap * (WINDOW_S + 1.0) / WINDOW_S * 1.05
 }
 
 /// The cap is for the three torrents together, and a changed cap reaches the running torrents.
@@ -95,15 +102,15 @@ fn within(got: f64, want: f64, tol: f64) -> bool {
 async fn the_trackers_upload_cap_is_shared_by_its_torrents_and_changes_live() {
     let r = rig(7100, policy(None, Some(1_000_000)), |_| {}).await;
     tokio::time::sleep(Duration::from_secs(2)).await;
-    let a = r.up_rate(5).await;
+    let a = r.up_rate(WINDOW_S as u64).await;
     eprintln!("tracker cap 1.0 MB/s -> {a:.0} B/s over 3 torrents");
-    assert!(within(a, 1_000_000.0, 0.10), "{a}");
+    assert!(capped(a, 1_000_000.0), "{a}");
     // Halve it live.
     r.seeder.h.apply_policy(policy(None, Some(500_000)));
     tokio::time::sleep(Duration::from_millis(2500)).await;
-    let b = r.up_rate(5).await;
+    let b = r.up_rate(WINDOW_S as u64).await;
     eprintln!("tracker cap 0.5 MB/s -> {b:.0} B/s");
-    assert!(within(b, 500_000.0, 0.10), "{b}");
+    assert!(capped(b, 500_000.0), "{b}");
     // Remove it: the favorite has no bucket any more and the torrents run free.
     // About 20 MB are left: 40 s at the old cap, a moment without one.
     r.seeder.h.apply_policy(policy(None, None));
@@ -120,15 +127,15 @@ async fn the_trackers_upload_cap_is_shared_by_its_torrents_and_changes_live() {
 async fn the_global_cap_applies_on_top_of_the_trackers() {
     let r = rig(7200, policy(None, Some(2_000_000)), |c| c.up_limit = Some(600_000)).await;
     tokio::time::sleep(Duration::from_secs(2)).await;
-    let a = r.up_rate(5).await;
+    let a = r.up_rate(WINDOW_S as u64).await;
     eprintln!("global 0.6 MB/s under tracker 2 MB/s -> {a:.0} B/s");
-    assert!(within(a, 600_000.0, 0.10), "{a}");
+    assert!(capped(a, 600_000.0), "{a}");
     // A tracker cap below the global one wins.
     r.seeder.h.apply_policy(policy(None, Some(300_000)));
     tokio::time::sleep(Duration::from_millis(2500)).await;
-    let b = r.up_rate(5).await;
+    let b = r.up_rate(WINDOW_S as u64).await;
     eprintln!("tracker 0.3 MB/s under global 0.6 MB/s -> {b:.0} B/s");
-    assert!(within(b, 300_000.0, 0.10), "{b}");
+    assert!(capped(b, 300_000.0), "{b}");
 }
 
 /// The download cap is shared too (measured at the downloading node).
@@ -152,9 +159,9 @@ async fn the_trackers_download_cap_is_shared_by_its_torrents() {
     }
     let r = Rig { seeder, leech, ids };
     tokio::time::sleep(Duration::from_secs(2)).await;
-    let a = r.down_rate(5).await;
+    let a = r.down_rate(WINDOW_S as u64).await;
     eprintln!("tracker download cap 0.8 MB/s -> {a:.0} B/s over 3 torrents");
-    assert!(within(a, 800_000.0, 0.10), "{a}");
+    assert!(capped(a, 800_000.0), "{a}");
 }
 
 /// A favorite whose addresses stop matching lets its torrents out of the cap, and one that starts
@@ -163,9 +170,9 @@ async fn the_trackers_download_cap_is_shared_by_its_torrents() {
 async fn torrents_move_between_groups_when_the_favorites_addresses_change() {
     let r = rig(7400, policy(None, Some(400_000)), |_| {}).await;
     tokio::time::sleep(Duration::from_secs(2)).await;
-    let a = r.up_rate(4).await;
+    let a = r.up_rate(WINDOW_S as u64).await;
     eprintln!("capped -> {a:.0} B/s");
-    assert!(within(a, 400_000.0, 0.10), "{a}");
+    assert!(capped(a, 400_000.0), "{a}");
     // The favorite now claims another host: the torrents are nobody's and run free.
     let mut moved = policy(None, Some(400_000));
     moved.profiles.profiles[0].urls = vec![UrlPattern::parse("elsewhere.test").unwrap()];

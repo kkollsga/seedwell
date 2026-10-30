@@ -336,6 +336,7 @@ pub(crate) fn start(root: PathBuf, since: Option<ResumeToken>) -> io::Result<Sta
             }
             match done {
                 Ok(0) | Err(ERROR_NOTIFY_ENUM_DIR) => {
+                    crate::debug::OVERFLOWS.fetch_add(1, Ordering::SeqCst);
                     if !sink.send(RawEvent::Rescan { rel: None, reason: RescanReason::Dropped }) {
                         break 'run;
                     }

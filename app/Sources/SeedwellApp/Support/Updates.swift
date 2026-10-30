@@ -18,8 +18,16 @@ import Sparkle
     enum Backend { case sparkle, github }
 
     let backend: Backend
-    /// Release builds check and install by themselves; development builds only when asked.
+    /// Release builds check and install by themselves; local builds only when asked.
     let releaseBuild: Bool
+    /// A development build's version (`X.Y.Z.N`, Info.plist `SeedwellDevVersion`); nil for a release.
+    static let devVersion = Bundle.main.object(forInfoDictionaryKey: "SeedwellDevVersion") as? String
+    /// The version this app is, as the installer and `launch-ok` name it.
+    static var runningVersion: String {
+        devVersion ?? (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "0.0.0"
+    }
+    /// The folder that holds the app.
+    static var installDir: String { Bundle.main.bundleURL.deletingLastPathComponent().path }
     /// What Settings › General › Updates draws (GitHub back end), from the core.
     private(set) var model: UpdatesModel?
 
@@ -29,6 +37,7 @@ import Sparkle
     private let relaunch = Relaunch()
     private var schedule: Task<Void, Never>?
     private var refresher: Task<Void, Never>?
+    private var startedMark: Task<Void, Never>?
 
     /// Called just before an update quits the app (Sparkle's relaunch): quitting is allowed then.
     var willRelaunch: () -> Void {
@@ -54,8 +63,8 @@ import Sparkle
 
     // MARK: Launch
 
-    /// Called once at launch.
-    func start(core: Core) {
+    /// Called once at launch. `relaunchArgs`: the arguments an installer reopens the app with.
+    func start(core: Core, relaunchArgs: [String]) {
         switch backend {
         case .sparkle:
             guard sparkle == nil else { return }
@@ -63,13 +72,54 @@ import Sparkle
         case .github:
             guard updates == nil else { return }
             let v = ProcessInfo.processInfo.operatingSystemVersion
+            let installer = Bundle.main.url(forResource: "install", withExtension: "sh")?.path ?? ""
             let u = Updates(core: core, releaseBuild: releaseBuild, repoUrl: repoURL,
-                            systemVersion: "\(v.majorVersion).\(v.minorVersion).\(v.patchVersion)", nowMs: Self.nowMs)
+                            systemVersion: "\(v.majorVersion).\(v.minorVersion).\(v.patchVersion)",
+                            devVersion: Self.devVersion, installDir: Self.installDir, installer: installer,
+                            relaunch: relaunchArgs, nowMs: Self.nowMs)
             updates = u
             importEarlier(u)
             refresh()
             reschedule()
         }
+        // Up for 30 s: this version started fine (an installer waits for that, and keeps this app to go back to).
+        startedMark = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(30))
+            guard !Task.isCancelled else { return }
+            self?.updates?.started()
+        }
+    }
+
+    /// Install Build…: a build's zip chosen by the user, installed by the core (it quits and reopens this app).
+    func chooseBuild() {
+        guard let updates else { return }
+        let panel = NSOpenPanel()
+        panel.title = "Install a Build of \(AppInfo.name)"
+        panel.allowedContentTypes = [.zip]
+        panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            _ = try updates.installBuild(zip: url.path, sha256: nil, nowMs: Self.nowMs)
+        } catch {
+            let a = NSAlert()
+            a.messageText = "The build was not installed"
+            a.informativeText = "\(error)"
+            a.runModal()
+        }
+        refresh()
+    }
+
+    /// The app quits the proper way: the core stops counting this launch toward a crash loop.
+    func quitting() {
+        startedMark?.cancel()
+        updates?.quitting()
+    }
+
+    /// Stop Watching: the folder's builds are no longer installed.
+    func stopWatching() {
+        updates?.stopWatching()
+        refresh()
+        reschedule()
     }
 
     /// Before 0.1.10 this app kept its update state in its user defaults: handed to the core once (it takes it only

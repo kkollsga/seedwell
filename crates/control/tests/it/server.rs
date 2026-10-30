@@ -97,6 +97,7 @@ async fn permission_matrix_every_method_every_level() {
             Method::SettingsSet => json!({"changes": {"transfers.max_active_downloads": 4}}),
             Method::WaitFor => json!({"ids": ["bbbbbb"], "timeout_secs": 1}),
             Method::AwakeSet => json!({"key": "matrix", "secs": 60}),
+            Method::UpdateInstall => json!({"path": "/tmp/Seedwell-0.0.1.1.zip"}),
             Method::SyncStatus
             | Method::SyncShare
             | Method::SyncPause
@@ -943,4 +944,63 @@ async fn debug_methods_answer_at_read_only_and_never_leak_a_secret() {
         assert!(!v.contains("SECRETKEY") && !v.contains("0123456789abcdef"), "{m}: {v}");
     }
     assert_eq!(call(&mut c, "debug_peers", json!({"id": "dddddd"})).await.unwrap_err().code, ErrorCode::NotFound);
+}
+
+/// A stand-in for the app's updater: it refuses unless "on", and remembers what it was asked.
+struct FakeBuilds {
+    on: bool,
+    asked: std::sync::Mutex<Vec<String>>,
+}
+
+impl trs_control::Builds for FakeBuilds {
+    fn status(&self) -> UpdateStatusDto {
+        UpdateStatusDto { version: "0.1.10.3".into(), development: true, dev_builds: self.on, status: "fine".into(), ..Default::default() }
+    }
+    fn install(&self, zip: &std::path::Path, sha256: Option<&str>) -> Result<String, String> {
+        if !self.on {
+            return Err("development builds are off".into());
+        }
+        self.asked.lock().unwrap().push(format!("{} {sha256:?}", zip.display()));
+        Ok("Installing".into())
+    }
+    fn watch(&self, folder: Option<&std::path::Path>) -> Result<String, String> {
+        self.asked.lock().unwrap().push(format!("watch {folder:?}"));
+        Ok("Watching".into())
+    }
+}
+
+#[tokio::test]
+async fn update_calls_reach_the_apps_updater_and_a_daemon_says_it_has_none() {
+    let rig = Rig::new(Permission::Control).await;
+    let mut c = rig.client("seedwell-cli").await;
+    let e = call(&mut c, "update.status", json!({})).await.unwrap_err();
+    assert_eq!(e.code, ErrorCode::Unsupported, "{e}");
+
+    for on in [false, true] {
+        let fake = std::sync::Arc::new(FakeBuilds { on, asked: Default::default() });
+        let opts = ServerOptions::default();
+        opts.builds.set(fake.clone());
+        let rig = Rig::with(Permission::Control, opts, vec![]).await;
+        let mut c = rig.client("seedwell-cli").await;
+        let s: UpdateStatusDto = serde_json::from_value(call(&mut c, "update.status", json!({})).await.unwrap()).unwrap();
+        assert_eq!((s.version.as_str(), s.dev_builds), ("0.1.10.3", on));
+        assert_eq!(call(&mut c, "update.install", json!({"path": "relative.zip"})).await.unwrap_err().code, ErrorCode::InvalidParams);
+        assert_eq!(call(&mut c, "update.install", json!({"path": "/a/../b.zip"})).await.unwrap_err().code, ErrorCode::InvalidParams);
+        let r = call(&mut c, "update.install", json!({"path": "/b/Seedwell-0.1.10.4.zip", "sha256": " AB "})).await;
+        if on {
+            let s: UpdateStatusDto = serde_json::from_value(r.unwrap()).unwrap();
+            assert_eq!(s.note, "Installing");
+            assert_eq!(*fake.asked.lock().unwrap(), ["/b/Seedwell-0.1.10.4.zip Some(\"AB\")"]);
+        } else {
+            let e = r.unwrap_err();
+            assert_eq!((e.code, e.message.as_str()), (ErrorCode::Invalid, "development builds are off"));
+        }
+    }
+    // Read-only agents may look, not install.
+    let opts = ServerOptions::default();
+    opts.builds.set(std::sync::Arc::new(FakeBuilds { on: true, asked: Default::default() }));
+    let rig = Rig::with(Permission::ReadOnly, opts, vec![]).await;
+    let mut c = rig.client("seedwell-cli").await;
+    assert!(call(&mut c, "update.status", json!({})).await.is_ok());
+    assert_eq!(call(&mut c, "update.watch", json!({"folder": "/b"})).await.unwrap_err().code, ErrorCode::PermissionDenied);
 }

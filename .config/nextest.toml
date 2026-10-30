@@ -12,6 +12,35 @@ slow-timeout = { period = "60s", terminate-after = 5 }
 filter = 'binary(scale) | binary(scale_redb) | binary(seek_storm) | (package(trs-tracker) & test(/^memory::/))'
 test-group = "measure"
 
+# The longest tests start first, so that none of them is left running alone at the end: on a 3- or 4-core CI runner
+# a run takes the work spread over the cores plus whatever is still running last (it was the 40-130 s burst test).
+# Measured on the Mac and the CI runners; keep the slowest here when that changes.
+[[profile.default.overrides]]
+filter = """
+binary(scale)
+| test(/tracker_audit::regular_announce_follows_the_interval$/)
+| test(/two_devices::a_burst_that_overflows_the_watcher_still_syncs_every_file$/)
+| test(/simulation::two_thousand_nodes_converge_and_find_announced_peers$/)
+| test(/moves::a_crash_at_every_step_of_/)
+"""
+priority = 100
+
+[[profile.default.overrides]]
+filter = """
+binary(scale_redb)
+| test(/idle_stop::an_idle_seed_stops_/)
+| test(/^redownload::/)
+| test(/sync::the_cross_version_harness_passes/)
+| test(/^live_port::/)
+| test(/cli::only_sim_torrents_may_announce_to_a_loopback_tracker$/)
+| test(/utp::the_dht_works_on_the_shared_port$/)
+| test(/redb_store::redb_matches_memstore$/)
+| test(/relay::a_member_refuses_to_relay_without_the_access_it_requires$/)
+| test(/lifecycle::pex_connects_leechers_to_each_other$/)
+| test(/mail::a_big_file_passes_through_the_synced_folder/)
+"""
+priority = 50
+
 [profile.ci]
 fail-fast = false
 # A test that fails and then passes is reported as FLAKY (a real problem to fix, but not a red build).

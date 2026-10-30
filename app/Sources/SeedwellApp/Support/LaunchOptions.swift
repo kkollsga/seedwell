@@ -36,6 +36,16 @@ struct LaunchOptions {
         }
     }
 
+    /// The arguments an installer reopens this app with (SPEC 12A): the menu bar only, and an isolated run's own
+    /// folders, so a test copy comes back on its own state.
+    var relaunchArgs: [String] {
+        var a = ["--background"]
+        if let stateDir, let homeRoot { a += ["--state-dir", stateDir, "--home-root", homeRoot] }
+        if let qaControl { a += ["--qa-control", qaControl] }
+        if allowLoopbackTrackers { a.append("--qa-loopback-trackers") }
+        return a
+    }
+
     /// True when the run is isolated from the user's real folders.
     var isolated: Bool { stateDir != nil && homeRoot != nil }
 

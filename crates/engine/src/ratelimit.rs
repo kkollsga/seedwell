@@ -468,3 +468,71 @@ mod tests {
         assert_eq!(lim.charge(Dir::Down, Priority::High, 1 << 20, now), Duration::ZERO);
     }
 }
+
+#[cfg(test)]
+mod shared_cap_tests {
+    use super::*;
+
+    /// Virtual clock: `readers` share one cap; each moves `chunk` bytes, charges them and sleeps what the cap answers
+    /// plus up to `late_ms` (a coarse system timer: Windows wakes up to ~16 ms late). Nobody reads during `stall`
+    /// (`(ms, ending at ms)`). Returns bytes per second moved in [2 s, 7 s].
+    fn window_rate(rate: u64, readers: usize, chunk: u64, late_ms: u64, seed: u64, stall: Option<(u64, u64)>) -> f64 {
+        let lim = TorrentLimit::default();
+        lim.set(Some(rate));
+        let t0 = Instant::now();
+        let mut next = vec![0u64; readers]; // µs
+        let mut rng = seed;
+        let mut rand = move || {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            rng
+        };
+        let (from, to) = (2_000_000u64, 7_000_000u64);
+        let mut window = 0u64;
+        loop {
+            let (i, &t) = next.iter().enumerate().min_by_key(|(_, t)| **t).expect("readers");
+            if t >= to {
+                break;
+            }
+            if let Some((len, end)) = stall
+                && t + len * 1000 >= end * 1000
+                && t < end * 1000
+            {
+                next[i] = end * 1000;
+                continue;
+            }
+            let wait = lim.charge(chunk, t0 + Duration::from_micros(t));
+            if t >= from {
+                window += chunk;
+            }
+            let late = if late_ms == 0 { 0 } else { rand() % (late_ms * 1000) };
+            next[i] = t + wait.as_micros() as u64 + late + 50;
+        }
+        window as f64 / 5.0
+    }
+
+    #[test]
+    fn late_wake_ups_are_made_up_so_the_cap_holds_on_a_coarse_timer() {
+        for late in [0, 16, 32] {
+            for chunk in [16_384, 65_536] {
+                for seed in 1..=20 {
+                    let r = window_rate(800_000, 6, chunk, late, seed, None);
+                    assert!((r - 800_000.0).abs() / 800_000.0 < 0.02, "late {late} ms, chunk {chunk}: {r:.0} B/s");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn after_a_pause_at_most_one_second_of_the_rate_comes_at_once() {
+        for stall in [500, 1000, 3000] {
+            let r = window_rate(800_000, 6, 65_536, 16, 1, Some((stall, 2000)));
+            // The window gets its five seconds at the cap, plus no more than the one second banked in the pause, plus
+            // what each reader moved last and pays for after the window (it is charged after it moved).
+            let most = (800_000.0 * 6.0 + 6.0 * 65_536.0) / 5.0;
+            assert!(r <= most * 1.001, "after a {stall} ms pause: {r:.0} B/s, at most {most:.0}");
+            assert!(r >= 800_000.0 * 0.99, "{r:.0}");
+        }
+    }
+}

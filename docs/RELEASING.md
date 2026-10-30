@@ -1,17 +1,22 @@
 # Releasing Seedwell
 
-Two routes. **Now:** an ad-hoc signed app installed with `curl … install.sh | bash` (no Apple Developer ID needed; see
-below). **Later:** a Developer ID-signed, notarized `.dmg` with Sparkle updates (SPEC §12 #19), from "One-time setup" on.
-The scripts do the work; this page lists the steps only you can do. Nothing here changes your keychain or publishes
-anything until you run the commands yourself.
+On the Mac a release is **Developer ID signed and notarized** (from 0.1.11; the ones before were ad hoc): a disk image
+to download and drag to Applications, and the same app as a zip for `install.sh` and the in-app updater. Windows
+ships a zip and `install.ps1`. The release workflow builds both, with the signing certificate and the notarization
+key from the repository's secrets ("One-time setup" below: the steps only you can do). Nothing here changes your
+keychain or publishes anything until you run the commands yourself.
 
-## Now: the curl installer (no Developer ID)
+## Installing (what users get)
 
-macOS blocks unsigned apps downloaded in a browser. Files fetched with `curl` aren't marked as downloaded from the internet,
-so an app installed by a script opens normally. `install.sh` (repo root) downloads a GitHub release, checks its SHA-256
-against the release's `SHA256SUMS`, verifies the code signature, quits a running Seedwell cleanly, installs to
-`/Applications` (else `~/Applications`) and opens it. `--cli` links the `seedwell` command, `--version X` picks a release,
-`--uninstall` removes the app (and asks before deleting `~/Library/Application Support/Seedwell`).
+- **The disk image** (`Seedwell.dmg`, also as `Seedwell-X.Y.Z.dmg`): open it, drag Seedwell onto Applications.
+  Opened straight from the disk image or from Downloads instead, the app offers to move itself to Applications
+  (SPEC 12).
+- **`install.sh`** (repo root): `curl … install.sh | bash` downloads a GitHub release, checks its SHA-256 against the
+  release's `SHA256SUMS`, its code signature, that it is signed by Seedwell's Developer ID (`TEAM_ID` in install.sh)
+  and that Gatekeeper accepts it (notarized), quits a running Seedwell cleanly, installs to `/Applications` (else
+  `~/Applications`) and opens it. `--cli` links the `seedwell` command, `--version X` picks a release (one from
+  before signing only this way), `--uninstall` removes the app (and asks before deleting
+  `~/Library/Application Support/Seedwell`). `app/qa/install_signature.sh` tests the signature rule.
 
 ### Release with GitHub Actions (the usual way)
 
@@ -21,8 +26,10 @@ the PowerShell scripts parsed). `.github/workflows/release.yml` runs when a `vX.
 
 1. *Tag and CI*: the tag matches `Cargo.toml`, and CI passed on the tagged commit (it waits up to an hour for CI to
    finish).
-2. *Mac build* (`app/release-zip.sh`, build number 100 + the run number) and *Windows build*
-   (`app-windows\release-zip.ps1`) side by side, each checking its own zip; a failure in one cancels the other.
+2. *Mac build* (`app/release-zip.sh --signed`, build number 100 + the run number: signed with the Developer ID,
+   notarized and stapled, zip and disk image, each checked with Gatekeeper) and *Windows build*
+   (`app-windows\release-zip.ps1`) side by side, each checking its own assets; a failure in one cancels the other.
+   Without the signing secrets the Mac build fails at once: there is no unsigned release.
 3. *Draft release*, only when both succeeded: `tools/release-merge.py` makes one `SHA256SUMS`, one `latest.json` (the
    Mac's fields unchanged, plus `"windows"`) and one set of notes (both installers, all checksums), and the draft gets
    `Seedwell-X.Y.Z.zip`, `install.sh`, `Seedwell-X.Y.Z-windows-x64.zip`, `install.ps1`, `SHA256SUMS` and `latest.json`.
@@ -52,8 +59,13 @@ Dependabot (`.github/dependabot.yml`) opens weekly pull requests for Cargo and A
 ```sh
 git status                                              # must be clean
 tools/sysguard/heavy.sh app/release-zip.sh              # full LTO build → app/build/release/
-#   Seedwell-<version>.zip  install.sh  SHA256SUMS  latest.json  NOTES.md   (checked locally: checksum, signature, script syntax)
+#   Seedwell-<version>.zip  Seedwell-<version>.dmg  Seedwell.dmg  install.sh  SHA256SUMS  latest.json  NOTES.md
+#   (checked locally: checksums, signature, the disk image's contents, script syntax)
 ```
+
+Without `--signed` it signs ad hoc and does not notarize, whatever your environment says: a check of the build, the
+zip and the disk image's layout. `--signed` (what the workflow runs) needs the identity and a notary profile in
+your keychain (`SEEDWELL_SIGN_IDENTITY`, `SEEDWELL_NOTARY_PROFILE`, see `app/release-zip.sh --help`).
 
 This builds and checks the Mac's assets only; it never creates a release. A release is always the Mac's and the
 Windows build together, made by the release workflow when both succeeded: a Mac-only release would leave every
@@ -126,55 +138,59 @@ One source: `version` under `[workspace.package]` in `Cargo.toml`. It becomes `C
 `seedwell --version`, the User-Agent and the peer id. The build number (`CFBundleVersion`) is the git commit count.
 Settings › General shows both ("Seedwell 0.1.0 (build 86)"). To release: bump the version, commit, run the script.
 
-## One-time setup
+## One-time setup (the Mac's signing secrets)
 
-1. **Apple Developer Program.** Enroll at <https://developer.apple.com/programs/enroll/> (99 USD/year). Wait for approval.
-2. **Developer ID Application certificate.** Xcode › Settings › Accounts › your team › Manage Certificates › `+` ›
-   *Developer ID Application*. (Without Xcode: developer.apple.com › Certificates › `+` › Developer ID Application, upload a
-   CSR made in Keychain Access, download and open the `.cer`.) Check:
+Done once, by you: the certificate and the key are tied to your Apple account. Never paste a password or a key into a
+chat or a command line; the commands below read them from files or ask for them without echoing.
+
+1. **Apple Developer Program.** Done (individual, Team ID `6GND8Z2C7Z`, `TEAM_ID` in `install.sh`).
+2. **Developer ID Application certificate.** Xcode › Settings › Accounts › your Apple ID › Manage Certificates › `+` ›
+   *Developer ID Application*. It is made in this Mac's login keychain. Check:
    ```sh
    security find-identity -v -p codesigning
-   # 1) ABCD...  "Developer ID Application: Your Name (TEAMID)"
+   #   1) ABCD…  "Developer ID Application: <your name> (6GND8Z2C7Z)"
    ```
-3. **Notarization credentials.** Create an app-specific password at <https://account.apple.com> › Sign-In and Security ›
-   App-Specific Passwords, then store a keychain profile:
+3. **Export it for CI.** Keychain Access › login › My Certificates › *Developer ID Application: … (6GND8Z2C7Z)* ›
+   right-click › Export… › format *Personal Information Exchange (.p12)*, saved as `~/Desktop/seedwell-developer-id.p12`
+   with a new, strong password (it protects the private key inside).
+4. **Notarization key.** <https://appstoreconnect.apple.com> › Users and Access › Integrations › App Store Connect API ›
+   Team Keys › `+`, name "Seedwell notarization", access *Developer*. Download the `AuthKey_<KEY ID>.p8` (only once
+   possible) and note the **Key ID** and, above the list, the **Issuer ID**.
+5. **The five secrets** (GitHub CLI; `gh secret set NAME` without a value asks for it, hidden):
    ```sh
-   xcrun notarytool store-credentials "seedwell-notary" \
-       --apple-id "you@example.com" --team-id "TEAMID" --password "xxxx-xxxx-xxxx-xxxx"
+   base64 -i ~/Desktop/seedwell-developer-id.p12 | gh secret set MACOS_CERT_P12 --repo kkollsga/seedwell
+   gh secret set MACOS_CERT_PASSWORD --repo kkollsga/seedwell      # the .p12's password
+   base64 -i ~/Downloads/AuthKey_<KEY ID>.p8 | gh secret set NOTARY_KEY_P8 --repo kkollsga/seedwell
+   gh secret set NOTARY_KEY_ID --repo kkollsga/seedwell            # the Key ID
+   gh secret set NOTARY_ISSUER_ID --repo kkollsga/seedwell         # the Issuer ID
+   gh secret list --repo kkollsga/seedwell                         # the five names (values are never shown)
    ```
-4. **Sparkle EdDSA keys.** This writes a private key to your login keychain, so it is yours to run, once:
-   ```sh
-   app/fetch-sparkle.sh             # downloads the pinned Sparkle 2.10.1 into app/.sparkle (once)
-   app/.sparkle/bin/generate_keys   # prints the public key; export a backup with: generate_keys -x seedwell-private.key
-   ```
-   Put the printed public key in `app/sparkle_public_key` (one line; add it to git, it is public) or in `SEEDWELL_SPARKLE_PUBLIC_KEY`.
-   Losing the private key means installed copies can never update again. Builds without a public key never start Sparkle;
-   the GitHub-release updater drives those.
-5. **Environment** (for example in `~/.zshrc`):
-   ```sh
-   export SEEDWELL_SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)"
-   export SEEDWELL_NOTARY_PROFILE="seedwell-notary"
-   ```
+   Then keep the `.p12` (with its password) and the `.p8` somewhere safe, such as a password manager, and delete
+   them from Desktop and Downloads. A lost `.p8` is replaced by a new key in App Store Connect; a leaked one is
+   revoked there.
 
-## Every release
+The release workflow's Mac job imports the certificate into a keychain of its own, stores the notarization key as a
+`notarytool` profile in it, runs `app/release-zip.sh --signed` and deletes the keychain again. A certificate expires
+after five years; renew it in Xcode and repeat steps 3 and 5 for `MACOS_CERT_P12` and `MACOS_CERT_PASSWORD`.
 
+**Signing on this Mac instead** (a test of `--signed`, never a release): with the certificate from step 2 in your
+keychain, store the key as a profile once and run the script:
 ```sh
-git status                                  # must be clean; the script refuses a dirty tree (--allow-dirty for test builds)
-tools/sysguard/heavy.sh app/release.sh      # full LTO build, signs, dmg, notarizes, staples, verifies
+xcrun notarytool store-credentials seedwell-notary --key ~/path/AuthKey_<KEY ID>.p8 --key-id <KEY ID> --issuer <ISSUER ID>
+SEEDWELL_SIGN_IDENTITY="Developer ID Application: <your name> (6GND8Z2C7Z)" SEEDWELL_NOTARY_PROFILE=seedwell-notary \
+    tools/sysguard/heavy.sh app/release-zip.sh --signed
 ```
+`app/release.sh` (a disk image only, the older local route) uses the same two variables.
 
-It prints version and build, then writes `app/build/release/Seedwell-<version>.dmg`. Without `SEEDWELL_SIGN_IDENTITY` it
-signs ad-hoc and says clearly that the result is NOT distributable; without `SEEDWELL_NOTARY_PROFILE` it skips notarization.
-
-What gets signed, inside-out, all with the hardened runtime (`--options runtime`) and a secure timestamp: the bundled CLI
-(`Contents/MacOS/seedwell`, identifier `io.github.kkollsga.Seedwell.cli`), Sparkle's XPC services, `Autoupdate`,
-`Updater.app` and `Sparkle.framework`, then `Seedwell.app`. Then the dmg itself is signed, submitted with
-`notarytool submit --wait`, stapled, and checked with `spctl -a -vv -t install`, `stapler validate` and
-`codesign --verify --deep --strict`.
+**What signing changes for users.** The first signed release (0.1.11) is a new code identity to macOS: things it
+remembered for the ad-hoc app may be asked for once more (opening at login, notifications, access to folders that
+needed permission). Updates after that keep the identity.
 
 **Entitlements** (`app/Seedwell.entitlements`): none. Seedwell is not sandboxed, so the network client/server and
-user-selected-files entitlements, which only exist inside a sandbox, would do nothing. Peer/tracker/DHT/uTP sockets and file
-access work under the hardened runtime as is. No JIT, no DYLD variables, no Apple events.
+user-selected-files entitlements, which only exist inside a sandbox, would do nothing. Peer/tracker/DHT/uTP sockets and
+file access work under the hardened runtime as is. No JIT, no DYLD variables, no Apple events. The data protection
+keychain for Folder Sync's keys needs a keychain entitlement with a provisioning profile, which this build does not
+have yet, so the keys stay in their 0600 file (SPEC 7G.1).
 
 ## Updates
 
@@ -190,7 +206,14 @@ configured; Sparkle, used only by a build that carries `SUPublicEDKey` and `SUFe
   resolves `latest` to the previous release on some requests, so an immediate Check Now can report "up to date". A draft, or a release marked as pre-release,
   is never offered. A bad release is withdrawn by deleting it or by marking the previous release as Latest.
 - Only release builds (`SEEDWELL_RELEASE=1`, set by `release-zip.sh`) check and install by themselves; your own
-  development builds (`build.sh`, `tools/install-local.sh`) only check when you press Check Now.
+  local builds (`build.sh`, `tools/install-local.sh`) only check when you press Check Now.
+- **Development builds** (SPEC 12A) are how the installed app runs work in progress without a release: with
+  Settings › General › Updates › Allow development builds on, `tools/sysguard/heavy.sh tools/dev-build.sh` makes
+  `app/build/dev/Seedwell-X.Y.Z.N.zip` (the next number for Cargo.toml's version) and `seedwell update install <zip>`
+  installs it; `tools/dev-build.sh --to <folder>` puts it in a folder the app watches (`seedwell update watch
+  <folder>`), which installs it as it appears. The app keeps the build it replaces in `previous/` in its state folder
+  and goes back to it when a build does not start within two minutes. Turning the switch off installs the latest
+  release. A release is never `X.Y.Z.N`: the release workflow builds without `SEEDWELL_DEV_VERSION`.
 - `build.sh` writes `SeedwellRepoURL` into Info.plist (default `https://github.com/kkollsga/seedwell`; `SEEDWELL_REPO_URL` overrides).
   For tests, launch the app with `SEEDWELL_UPDATE_REPO=http://127.0.0.1:PORT` and serve `/releases/latest/download/latest.json`
   and `/releases/download/v<version>/install.sh` (plus the installer's own files) from there.

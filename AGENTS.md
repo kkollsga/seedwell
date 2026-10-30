@@ -71,6 +71,11 @@ release procedure.
   data (`~/Library/Application Support/Seedwell`). Use temporary state folders.
 - Do not touch, signal or reconfigure the user's installed `/Applications/Seedwell.app`. Read-only `seedwell`
   CLI commands are fine. `seedwell debug announce` is not read-only.
+- **Development builds** (SPEC 12A) are the one way a build reaches the user's installed app, and only when the user
+  has turned on Settings › General › Updates › Allow development builds (never turn it on yourself) and asked for
+  it: build with `tools/sysguard/heavy.sh tools/dev-build.sh`, then `seedwell update install <zip>`, or put it in a
+  folder the app watches (`tools/dev-build.sh --to <folder>` after `seedwell update watch <folder>`). Never replace
+  the app any other way. Tests and QA stay isolated as above.
 - Never contact private trackers from tests or tools. Tests use only legal torrents and loopback trackers.
 - Seedwell always identifies as itself (peer id, User-Agent). Never spoof another client.
 - **Agents drive the app only through tool calls**: the `seedwell` CLI and the QA control commands

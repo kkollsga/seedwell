@@ -1002,6 +1002,28 @@ pub struct AwakeDto {
     pub kept: bool,
 }
 
+/// `update.status`, and the result of `update.install` and `update.watch`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct UpdateStatusDto {
+    /// The running version: `X.Y.Z`, or `X.Y.Z.N` for a development build.
+    pub version: String,
+    /// The running version is a development build.
+    pub development: bool,
+    /// "Allow development builds" (Settings › General › Updates) is on.
+    pub dev_builds: bool,
+    /// The folder whose builds are installed as they appear (only while `dev_builds` is on).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watching: Option<String>,
+    /// The version kept to go back to, if a build does not start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kept: Option<String>,
+    /// The Updates status line ("Installing 0.1.10.4…").
+    pub status: String,
+    /// What the call did, as a sentence (`update.install`, `update.watch`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub note: String,
+}
+
 /// One entry of the agent activity log.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ActivityDto {

@@ -434,6 +434,7 @@ pub async fn run(cmd: Cmd, g: &Global) -> R {
         Cmd::Chat(s) => chat::run(s, g).await?,
         Cmd::Mail(m) => crate::mail::run(m, g).await?,
         Cmd::Awake(a) => crate::awake::run(a, g).await?,
+        Cmd::Update(u) => crate::update::run(u, g).await?,
         Cmd::Relay(a) => sync::relay(a).await?,
         Cmd::Help(topic) => crate::print_help(topic.as_deref())?,
         Cmd::Daemon(_) => unreachable!("handled in lib.rs"),

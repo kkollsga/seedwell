@@ -837,6 +837,26 @@ pub struct AwakeSetParams {
     pub secs: Option<u64>,
 }
 
+/// `update.install`: install a build handed over as a zip (SPEC 12A, Development builds).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateInstallParams {
+    /// The zip, an absolute path (`Seedwell-X.Y.Z.N.zip`; `-windows-x64.zip` on Windows).
+    pub path: String,
+    /// Its SHA-256 (hex): refused when the file has another.
+    #[serde(default)]
+    pub sha256: Option<String>,
+}
+
+/// `update.watch`: install each newer build that appears in a folder, or stop.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateWatchParams {
+    /// The folder, an absolute path; absent: stop watching.
+    #[serde(default)]
+    pub folder: Option<String>,
+}
+
 /// `tracker_log`: the newest developer-mode tracker log entries (developer mode must be on to
 /// have any). Passkeys and other secrets are masked in the file itself.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -1437,6 +1457,12 @@ methods! {
     AwakeSet(AwakeSetParams) = "awake.set", Control, false;
     /// Who keeps the Mac awake, until when, and whether this Seedwell can.
     AwakeStatus(Empty) = "awake.status", ReadOnly, false;
+    /// The running version (a release or a development build), the development-builds switch and what the updater does.
+    UpdateStatus(Empty) = "update.status", ReadOnly, false;
+    /// Install a build handed over as a zip; needs "Allow development builds" on. The app quits, is replaced and reopens; a build that does not start is replaced by the one before.
+    UpdateInstall(UpdateInstallParams) = "update.install", Control, true;
+    /// Install each newer build that appears in a folder (or stop); needs "Allow development builds" on.
+    UpdateWatch(UpdateWatchParams) = "update.watch", Control, true;
     /// The structure and preselection of a torrent that is held (or running).
     Choice(ChoiceParams) = "choice", ReadOnly, false;
     /// Answer a held torrent's chooser: choose the files; it starts.

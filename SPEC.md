@@ -889,7 +889,8 @@ baseline every later version must still sync with:
   two places.
   - **The Keychain:** a build with a keychain entitlement uses the data protection keychain. The app probes this
     with a write, because without the entitlement a read only answers "not found".
-  - **A 0600 file in the state folder:** used by ad-hoc builds (the curl-installed releases), isolated runs and
+  - **A 0600 file in the state folder:** used by builds without that entitlement (every release so far, ad hoc and
+    Developer ID signed alike: the entitlement needs a provisioning profile they do not carry), isolated runs and
     the Linux daemon. The login keychain is not used: it ties an item to the exact build, so macOS would ask for
     the password after every update.
   - Either way, the keys are never written into the synced folder, never logged, and returned through the agent
@@ -1544,7 +1545,9 @@ Settings > Advanced > **Developer mode** (`advanced.developer_mode`, off by defa
 - `UserNotifications`: download finished, errors. Optional "seeding goal reached".
 - `IOPMAssertion` blocks idle sleep while downloading (setting, on by default), and while an agent works (§9A.7, setting "Keep awake while agents work", on by default). Both are `PreventUserIdleSystemSleep`: the display still sleeps and the screen still locks. Seeding alone never keeps the Mac awake. While peers are connected or data flows the app holds an activity that keeps App Nap away (it would throttle timers and disk and network work) but allows idle sleep; the core decides both (`power_needs`).
 - Logging through `os_log` (Console.app); no log files by default.
-- Distribution: curl installer with an ad-hoc signed app now, Developer ID-signed notarized DMG later (updates: §12A). Not sandboxed and not on the App Store, because the sandbox makes arbitrary download folders painful.
+- Distribution: Developer ID signed and notarized (Team ID `6GND8Z2C7Z`, from 0.1.11; earlier releases were signed ad hoc), as a disk image (`Seedwell.dmg`: the app, a link to Applications, a background with an arrow) and as a zip for `install.sh` and the updater (updates: §12A). `install.sh` installs a release from GitHub only when it is signed by that team and Gatekeeper accepts it (a `--zip` test build and a local test server excepted; a release from before signing only when pinned with `--version`). Not sandboxed and not on the App Store, because the sandbox makes arbitrary download folders painful.
+- Opened straight from its disk image, from App Translocation's copy or from Downloads, the app asks once per launch "Move Seedwell to Applications?" (Move to Applications / Not Now; Replace when one is there, which goes to the Trash with its data kept). The rule and the words are the core's (`move_to_applications_offer`); the host copies the app into Applications without the download's quarantine mark, quits, ejects the disk image and opens the copy. Never in tests, QA or a `--state-dir` run.
+- The first signed release is a new code identity to macOS: what it remembered for the ad-hoc app (opening at login, notifications, folder access) may be asked for once more.
 - Target: Apple Silicon, macOS 15+ **[DECIDE: min version]**.
 
 ## 9A. Agent interface (CLI + embedded skill)
@@ -1669,7 +1672,7 @@ These were taken by the build coordinator for the autonomous build. Each can be 
 | 16 | Quit with many torrents | **Linger hidden, short.** On Quit the menu bar icon and windows go away at once, and the process stays until every `stopped` announce has been sent and answered or given up, at most 10 s (the former 120 s linger is gone). Quit-time `stopped` announces are the exception to the per-host cap and the token bucket (§7B.3, §7C.2): all go out together, up to 50 in flight over all hosts, each with 3 s to connect and 2 s to answer once the request is written (libtorrent/qBittorrent do the same); one attempt per tracker, no retry. A request already in flight when the quit begins gets 3 s more. Port-mapping removal and the DHT's last save run beside the tracker wait, and state is written to disk before it. A dead tracker costs about 5 s, a slow one 2 s per wave of 50 (the developer log ends the quit with a line "quit: N stopped sent, M timed out"). On logout or shutdown the window is the 3 s best effort |
 | 17 | Recent rows in the menu | **Click reveals in Finder** (with a checkmark image; plain rows, no submenu, also for videos). Downloading and queued rows have a check (pause / resume) and, for video, a Play icon; their commands are on right-click (§8.2; no hover submenu since 2026-10-18). Right-click inside an `NSMenu` was not reliably deliverable in the first spike (`StatusMenuController`); it is to be verified on hardware" |
 | 18 | Tracker wire format | Aligned with captured announces of mainstream clients: upper-case hex, Transmission-style parameter order, `numwant=0` on `stopped`, no `ip`/`ipv4`/`ipv6`, no `corrupt`/`redundant`/`no_peer_id`, per-process `key` and `peer_id`, per-`started` counters; encryption advertised after `compact` (2026-10-13): `network.encryption` prefer = `supportcrypto=1`, require = `supportcrypto=1&requirecrypto=1`, off = nothing (HTTP only, applied from the next announce) |
-| 19 | Distribution | **Developer ID signing, notarization, direct download, optional Homebrew cask. Updates (§12A): Sparkle when a Developer ID key exists, until then the GitHub-release updater with the curl installer.** No Mac App Store: Apple has historically refused general BitTorrent clients, and the sandbox would cut watch folders and the agent socket. A later App Store variant would have to describe BitTorrent openly |
+| 19 | Distribution | **Developer ID signing, notarization, direct download (a disk image), the curl installer, optional Homebrew cask. Updates (§12A): the GitHub-release updater; Sparkle only in a build that carries its key and feed (none does).** No Mac App Store: Apple has historically refused general BitTorrent clients, and the sandbox would cut watch folders and the agent socket. A later App Store variant would have to describe BitTorrent openly |
 | 20 | Product name and identity | **Seedwell** (chosen 2026-10-11 over Dispatch, which was hard to search for). User-Agent `Seedwell/<ver>`, BEP 10 `v` = `Seedwell <ver>`, peer id `-SW<major><minor><patch>0-`, one character per part, `0`-`9` then `A`-`Z` for 10-35 as libtorrent does (0.1.0 → `-SW0100-`, 0.1.10 → `-SW01A0-`) + 12 random alphanumerics for releases (built by `app/release-zip.sh`, which sets `SEEDWELL_RELEASE`), `-SX0001-` for every other build. `SW` and `SX` checked free in the libtorrent, WebTorrent and Transmission 4.0.6 client tables. App `Seedwell.app` (Swift target stays internal), bundle id `io.github.kkollsga.Seedwell` (2026-10-13; no domain, so the GitHub namespace; fixed from the first release on, since changing it resets settings), Application Support `Seedwell/`, CLI `seedwell`. Internal crates keep the `trs-` prefix. Replaces the working names TorrentRS and Dispatch everywhere users, trackers or peers can see them |
 | 21 | Streaming | **In scope (2026-10-11), §7F.** Play while downloading in the user's own player over loopback HTTP with ranges; the player's range requests are the playhead, so no control channel. Urgent window ahead of each read, rarest-first elsewhere; never pure sequential |
 
@@ -1694,9 +1697,80 @@ Two back ends, picked once at launch; the Settings group, its two switches and t
 
 **Menu bar.** While an update is waiting, one row "Update to Seedwell 0.2.0" (arrow.down.circle) sits in the footer section just above "Open Seedwell…". It is read when the menu is built; there is no timer. A click starts the install.
 
-**Install.** A detached shell (`posix_spawn` with its own session, stdin /dev/null, stdout and stderr appended to `logs/update.log` in the state folder) runs `curl -fsSL <repo>/releases/download/v<version>/install.sh | bash -s -- --version <version>` with the install folder (the folder holding the running app) and the repo passed as arguments, never interpolated into the script text. `install.sh` checks the zip's SHA-256 against `SHA256SUMS`, verifies the signature, sends the running app SIGTERM (handled like a real quit: trackers get `stopped`), replaces the bundle and reopens it. The version is recorded as pending before the spawn. On the next launch, a running version equal to the pending one clears it ("Updated to 0.2.0"); otherwise the status is "Update to 0.2.0 failed" with **Show Log**, which reveals `update.log`. An app still running 90 s after the spawn shows the same failed state.
+**Install.** A detached shell (`posix_spawn` with its own session, stdin /dev/null, stdout and stderr appended to `logs/update.log` in the state folder) runs `curl -fsSL <repo>/releases/download/v<version>/install.sh | bash -s -- --version <version>` with the install folder (the folder holding the running app) and the repo passed as arguments, never interpolated into the script text. `install.sh` checks the zip's SHA-256 against `SHA256SUMS`, verifies the signature (and, for a release from 0.1.11 on, that it is Seedwell's Developer ID and notarized: an update never puts an unsigned or foreign app in place), sends the running app SIGTERM (handled like a real quit: trackers get `stopped`), replaces the bundle and reopens it. The version is recorded as pending before the spawn. On the next launch, a running version equal to the pending one clears it ("Updated to 0.2.0"); otherwise the status is "Update to 0.2.0 failed" with **Show Log**, which reveals `update.log`. An app still running 90 s after the spawn shows the same failed state.
 
 **Automatic install.** Release builds with both switches on install an update that is waiting when nothing is downloading and no file move is running: checked when the update is found and whenever the menu bar refresh reports idle. Seeding torrents do not block it; they resume after the relaunch.
+
+**Development builds.** Settings › General › Updates has a third switch, **Allow development builds** (default off;
+`config.toml` `[updates] dev_builds`, absent means off, no format version change). With it on, the one installed
+copy, with the user's own settings, torrents, folders and chats, can run a build that is not a release. Agents never
+turn it on: the switch is the user's consent, and with it an agent installs a build only when the user asks.
+
+- **Versions.** A development build is `X.Y.Z.N`: the release it builds on (`Cargo.toml`'s version, which moves only
+  at a release) and a fourth number counted by `tools/dev-build.sh` from 1 for each version. So `0.1.10` <
+  `0.1.10.1` < `0.1.10.2` < `0.1.11`: a build is newer than its release and older than the next. Releases stay plain
+  `X.Y.Z` (a release's `latest.json` with four parts offers nothing). The Mac app carries it as `SeedwellDevVersion`
+  in Info.plist (`CFBundleShortVersionString` stays `X.Y.Z`; the Windows app: its own version file, to come), the
+  host passes it to the core, which takes it only when it builds on the core's own version. The app shows "0.1.10.3
+  (development build)" in the Updates group. The peer id names the release (`-SW<X.Y.Z>-`).
+- **Handing over a build.** `seedwell update install <Seedwell-X.Y.Z.N.zip> [--sha256 HEX]` (control method
+  `update.install`, Control permission) or **Install Build…** (a file chooser, shown while the switch is on). The
+  core checks the switch, that the name is this system's zip (`Seedwell-<version>.zip`, `-windows-x64.zip` on
+  Windows) of another version than the running one, and the file's SHA-256 (against `--sha256` when given); then it
+  starts the running app's own installer (`install.sh` in the bundle's Resources; `install.ps1` next to the exe) on
+  it, itself, detached (`trs_platform::update::spawn`), output to `logs/update.log`. Refusals say why ("development
+  builds are off: turn on Settings › General › Updates › Allow development builds"). A build installed over a Seedwell signed with a Developer ID
+  must be signed by the same team (`tools/dev-build.sh` signs with `SEEDWELL_SIGN_IDENTITY`; it needs no
+  notarization): the Folder Sync and chat keys are in that team's Keychain, which an ad-hoc build cannot read, and it
+  would start as a new device; the installer refuses it.
+- **A watched folder (optional, for fast iteration).** `seedwell update watch <folder>` (`update.watch`; `--off` to
+  stop; `[updates] dev_folder`, acting only while the switch is on; Settings shows the folder with **Stop
+  Watching**). The core watches it with `trs-fswatch` (FSEvents, ReadDirectoryChangesW, inotify; polling only where
+  native watching cannot start) on a thread of its own while it is set and the switch is on, and stops the watcher
+  when either goes off. No timer: the folder is read once when watching starts (at launch, when the switch or the
+  folder changes) and on file-change notifications, each a hint (a rescan too) to read `<folder>/latest.json` again
+  and believe the disk. `latest.json` is a release's format (`version`, this system's `zip` and `sha256`, `minimum_*`;
+  Windows under `"windows"`; `commit` for information, no `tag` needed), written by `tools/dev-build.sh --to <folder>`
+  after the zip and renamed into place, so a half-copied build is never seen. One folder per system: a Mac and a
+  Windows build in one folder would overwrite each other's `latest.json`. A build there is
+  installed by the core when it is newer than the running version, not marked failed, its zip is there and nothing is
+  downloading or being moved (else at the next notification or look).
+- **Back to the release.** Turning the switch off while a development build runs stops watching and checks GitHub at
+  once, then installs the latest release by itself (neither of the other two switches is needed) although it is
+  older than the build; a check that fails tries again 10 minutes later. The way back survives a relaunch; turning
+  the switch on again ends it. While the switch stays on, GitHub releases newer than the build are offered as usual
+  (and not checked while a folder is watched).
+
+**Recovery: a build that does not start never costs the user their app or their data.**
+
+1. **Started fine.** The host calls `Updates::started` once the app has run 30 s; it writes `launch-ok` in the state
+   folder (the running version) and clears the count of launches without it.
+2. **Keep the last good app.** Every install from this version on is given the state folder and the arguments to
+   reopen the app with, as environment variables (`SEEDWELL_INSTALL_STATE_DIR`, `SEEDWELL_RELAUNCH_ARGS`, one
+   argument a line; an older installer ignores them). Before replacing the app, the installer keeps it in
+   `<state>/previous/` as a zip (not an app bundle, so the system never registers a second Seedwell for .torrent files
+   and magnet links), with that app's own installer and its version (`previous.json`), but only when `launch-ok`
+   names it: a copy that never started fine is never kept as the good one.
+3. **Watchdog.** After the swap the installer removes `launch-ok`, opens the new app (an isolated run with its own
+   `--state-dir`, directly) and waits up to 120 s for `launch-ok` to name the new version. If it does not (the app
+   did not start, crashed, or is stuck), the installer quits it, puts the kept app back and opens it. That app's
+   launch finds the install pending for another version and says "0.1.10.4 didn't start; back on 0.1.10.3" (Show
+   Log); a development build that failed is remembered in `updates.json` and never installed from a watched folder
+   again (a newer one is).
+4. **Crash loop.** Before the core starts, the host calls `trs_ffi::launch_guard(state_dir, version, …)`: each launch
+   counts; `started` and a clean quit (the app's own quit path, SIGTERM included: `Updates::quitting`) clear the
+   count. The third launch in a row that ended neither way, of a development build with a kept app, starts the
+   installer that puts the kept app back, and the app quits instead of starting.
+5. **Data.** Nothing above writes the user's data: the installer swaps only the app. A build that cannot read the
+   data refuses it rather than changing it: the torrent database refuses a newer schema (`StateError::NewerSchema`,
+   untouched; a schema upgrade first backs the file up to `backups/state.redb.v<N>.<stamp>`), and `config.toml` of a
+   newer format is never half-read (the last good backup is used and the file is left alone; unknown keys of a
+   newer build survive a save).
+6. **Recovery window.** When the core cannot start (any reason), the start-failure window offers, besides Quit,
+   **Go Back to <kept version>** while an app is kept, and **Install the Release** (the latest from GitHub). Both
+   start the installer (`trs_ffi::recovery_actions`, no core needed); neither touches data.
+7. **Last resort**, from outside the app: the install page's one-line installer puts the latest release back over
+   any build and never touches data; `install.sh --rollback --state-dir <state>` puts the kept app back.
 
 ## 13. Open questions (original list)
 1. **Engine:** build from scratch (A) or on librqbit (B)? (§3.2)

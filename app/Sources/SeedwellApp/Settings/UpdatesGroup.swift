@@ -25,6 +25,17 @@ struct UpdatesGroup: View {
                         if let b = m.showLog { Button(b.title) { center.revealLog() }.buttonStyle(.link).help(b.help) }
                     }
                 }
+                SettingsRow(label: m.devLabel, hint: m.devHint) {
+                    sw($model.app.updates.devBuilds)
+                }
+                if let b = m.installBuild {
+                    SettingsRow(label: "Running \(m.version)", hint: m.watching.map { "Watching \($0)" }) {
+                        HStack(spacing: 8) {
+                            Button(b.title) { center.chooseBuild() }.disabled(!b.enabled).help(b.help)
+                            if let s = m.stopWatching { Button(s.title) { center.stopWatching() }.help(s.help) }
+                        }
+                    }
+                }
             }
         } else if center.backend == .sparkle {
             SettingsGroup(title: "Updates") {

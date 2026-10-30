@@ -6,6 +6,7 @@
 //! (`trs_engine::Host`, in-process) in the app, a simulated library behind `--mock`. Settings,
 //! rules and tracker profiles are read and written straight through `trs-state`, in both modes.
 
+mod app_place;
 mod backend;
 mod battery;
 mod chat_text;
@@ -107,6 +108,8 @@ pub struct Core {
     isolated: bool,
     /// "On battery" (SPEC §8.4), fed by `power_changed` and by changes of `config.toml`.
     battery: Arc<battery::Battery>,
+    /// Where the control server finds the updater (`update.*`), once the host has made one.
+    builds: trs_control::BuildsSlot,
 }
 
 impl Core {
@@ -114,6 +117,7 @@ impl Core {
     /// (`None`: a 0600 file in the state folder).
     fn open(options: CoreOptions, vault: Option<Arc<dyn SecretVault>>) -> Result<Arc<Self>, CoreError> {
         let dir = PathBuf::from(&options.config_dir);
+        let builds = trs_control::BuildsSlot::new();
         let backend: Arc<dyn Backend> = if options.mock {
             let _ = std::fs::create_dir_all(&dir);
             mock::MockBackend::start(options.config_dir.clone())
@@ -124,11 +128,12 @@ impl Core {
                 allow_loopback_trackers: options.allow_loopback_trackers,
                 forbidden_root: options.forbidden_root.clone().map(PathBuf::from),
                 secret_vault: vault,
+                builds: builds.clone(),
             })?
         };
         let battery = Arc::new(battery::Battery::new(backend.clone(), dir.clone()));
         let isolated = options.forbidden_root.is_some();
-        Ok(Arc::new(Self { backend, settings: SettingsStore::new(&dir), dir, isolated, battery }))
+        Ok(Arc::new(Self { backend, settings: SettingsStore::new(&dir), dir, isolated, battery, builds }))
     }
 
 }

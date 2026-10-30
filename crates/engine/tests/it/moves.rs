@@ -355,10 +355,21 @@ async fn crash_case(force_copy: bool, stop_at: u32) -> Option<bool> {
 /// A crash at every step of a move, on both methods, is resolved at the next start: the move is
 /// finished or rolled back, never half, and the torrent seeds correct bytes afterwards. Steps
 /// 1.. are the storage layer's file-system changes; `MOVE_STEP_BEFORE_MARK` and
-/// `MOVE_STEP_BEFORE_COMMIT` are after the switch (the record points at the new place).
+/// `MOVE_STEP_BEFORE_COMMIT` are after the switch (the record points at the new place). One test per method, so
+/// the two run side by side.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_crash_at_every_step_is_resolved_at_the_next_start() {
-    for force_copy in [false, true] {
+async fn a_crash_at_every_step_of_a_rename_is_resolved_at_the_next_start() {
+    crash_at_every_step(false).await;
+}
+
+/// [`a_crash_at_every_step_of_a_rename_is_resolved_at_the_next_start`], for a move by copy.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_crash_at_every_step_of_a_copy_is_resolved_at_the_next_start() {
+    crash_at_every_step(true).await;
+}
+
+async fn crash_at_every_step(force_copy: bool) {
+    {
         let (mut finished_n, mut rolled_back_n) = (0, 0);
         let mut step = 1u32;
         let mut tally = |outcome: bool| if outcome { finished_n += 1 } else { rolled_back_n += 1 };

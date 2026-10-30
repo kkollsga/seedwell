@@ -252,6 +252,15 @@ impl Watcher {
         self.shutdown();
     }
 
+    /// The events, and a guard that keeps the watcher running until it is dropped: for a consumer that blocks on
+    /// the channel on a thread of its own while its owner holds the guard. Dropping the guard stops the watcher (as
+    /// [`Watcher::stop`]), which ends the channel, which ends the consumer's wait.
+    pub fn split(mut self) -> (Receiver<RawEvent>, WatchGuard) {
+        let (_, closed) = std::sync::mpsc::sync_channel(0);
+        let events = std::mem::replace(&mut self.events, closed);
+        (events, WatchGuard(self))
+    }
+
     fn shutdown(&mut self) {
         if let Some(stop) = self.stop.take() {
             stop();
@@ -261,6 +270,17 @@ impl Watcher {
             // to recover here.
             let _ = t.join();
         }
+    }
+}
+
+/// Keeps a [`Watcher`] split with [`Watcher::split`] running; dropping it stops the watcher.
+#[derive(Debug)]
+pub struct WatchGuard(Watcher);
+
+impl WatchGuard {
+    /// The root as watched ([`Watcher::root`]).
+    pub fn root(&self) -> &Path {
+        self.0.root()
     }
 }
 
@@ -358,6 +378,7 @@ pub mod debug {
     pub(crate) static LIVE_STREAMS: AtomicU64 = AtomicU64::new(0);
 
     pub(crate) static HOLD_READS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    pub(crate) static OVERFLOWS: AtomicU64 = AtomicU64::new(0);
 
     /// Tests only: while on, the Windows backend posts no new read after the one that completes, so the
     /// system's buffer fills and overflows as under a burst. Off by default; process-wide.
@@ -369,6 +390,12 @@ pub mod debug {
     #[cfg_attr(not(windows), allow(dead_code))]
     pub(crate) fn reads_held() -> bool {
         HOLD_READS.load(Ordering::SeqCst)
+    }
+
+    /// Times the Windows backend found the system's buffer overflowed (a completion with no records) and sent a full
+    /// rescan instead: a test that holds reads back (`hold_reads`) checks its burst really overflowed.
+    pub fn overflows() -> u64 {
+        OVERFLOWS.load(Ordering::SeqCst)
     }
 
     /// Backend callbacks entered so far (FSEvents and the Windows backend's completions).
