@@ -72,12 +72,11 @@ pub fn mount_roots() -> &'static [&'static str] {
 }
 
 /// Whether `path` is inside a temporary folder of this system: the process's (`std::env::temp_dir`), `/tmp` on Unix,
-/// and the per-user ones under `/var/folders` on macOS, each also as its real path (`/private/tmp`). For QA switches
-/// that must never point at a user's own folders. `path` must be absolute and have no `..` in it.
+/// and the per-user ones under `/var/folders` on macOS. Both sides are also compared as real paths (`/private/tmp`;
+/// on Windows the long form, so a TEMP written with 8.3 short names, `C:\Users\RUNNER~1\...`, still matches the same
+/// folder written out). For QA switches that must never point at a user's own folders. `path` must be absolute and
+/// have no `..` in it.
 pub fn in_temp_folder(path: &Path) -> bool {
-    if !path.is_absolute() || path.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
-        return false;
-    }
     let mut roots = vec![std::env::temp_dir()];
     if cfg!(unix) {
         roots.push(PathBuf::from("/tmp"));
@@ -85,9 +84,26 @@ pub fn in_temp_folder(path: &Path) -> bool {
     if cfg!(target_os = "macos") {
         roots.push(PathBuf::from("/var/folders"));
     }
+    inside_any(path, &roots)
+}
+
+fn inside_any(path: &Path, roots: &[PathBuf]) -> bool {
+    if !path.is_absolute() || path.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+        return false;
+    }
+    let mut roots = roots.to_vec();
     let real: Vec<PathBuf> = roots.iter().filter_map(|r| r.canonicalize().ok()).collect();
     roots.extend(real);
-    roots.iter().any(|r| r.parent().is_some() && path.starts_with(r))
+    let inside = |p: &Path| roots.iter().any(|r| r.parent().is_some() && p.starts_with(r));
+    inside(path) || real_path(path).is_some_and(|p| inside(&p))
+}
+
+/// `path` as a real path: its deepest existing folder resolved (links, `/private`, Windows' long names and `\\?\`
+/// form, as `canonicalize` gives the roots), the rest joined as it is.
+fn real_path(path: &Path) -> Option<PathBuf> {
+    let base = path.ancestors().find(|a| a.exists())?;
+    let rest = path.strip_prefix(base).ok()?;
+    Some(base.canonicalize().ok()?.join(rest))
 }
 
 /// True when `path` (or the folder it would be made in) is inside a folder another sync engine
@@ -121,9 +137,35 @@ pub fn in_cloud_storage(path: &Path) -> bool {
 mod tests {
     use super::*;
 
+    /// GitHub's Windows runner has TEMP as `C:\Users\RUNNER~1\AppData\Local\Temp` while the same folder written out
+    /// is `C:\Users\runneradmin\...`: an isolated run in its temp folder was refused as inside the user's profile.
+    #[cfg(windows)]
+    #[test]
+    fn a_folder_written_out_is_inside_its_root_written_with_short_names() {
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+        let dir = tempfile::tempdir().unwrap();
+        let long = dir.path().join("a-long-folder-name");
+        std::fs::create_dir(&long).unwrap();
+        let wide: Vec<u16> = long.as_os_str().encode_wide().chain([0]).collect();
+        let mut buf = vec![0u16; 1024];
+        // SAFETY: `wide` is NUL-terminated and `buf` has room for 1024 units, which is its length passed.
+        let n = unsafe { windows_sys::Win32::Storage::FileSystem::GetShortPathNameW(wide.as_ptr(), buf.as_mut_ptr(), 1024) };
+        assert!(n > 0 && (n as usize) < buf.len());
+        let short = PathBuf::from(std::ffi::OsString::from_wide(&buf[..n as usize]));
+        if short == long {
+            return; // 8.3 names are off on this volume: nothing to tell apart
+        }
+        assert!(inside_any(&long.join("state"), &[short.clone()]), "{} in {}", long.display(), short.display());
+        assert!(inside_any(&short.join("state"), &[long.clone()]));
+        assert!(!inside_any(&dir.path().join("elsewhere"), &[short]));
+    }
+
     #[test]
     fn temporary_folders_are_told_apart_from_the_users_own() {
         assert!(in_temp_folder(&std::env::temp_dir().join("seedwell-qa/bin")));
+        // The same folder written as its real path, and through a resolved link, is inside too.
+        let real = std::env::temp_dir().canonicalize().unwrap();
+        assert!(in_temp_folder(&real.join("seedwell-qa/bin")));
         assert!(!in_temp_folder(&std::env::temp_dir().join("../escape")), "no way out with ..");
         assert!(!in_temp_folder(Path::new("bin")), "relative");
         assert!(!in_temp_folder(Path::new(if cfg!(windows) { r"C:\Users\me\Downloads" } else { "/home/me/Downloads" })));
