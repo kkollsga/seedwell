@@ -522,7 +522,7 @@ async fn clear(g: &Global, dir: &Path) -> R {
         }
     let mut folders = 0usize;
     for m in &manifest.sims {
-        if m.dir.starts_with(std::env::temp_dir()) && std::fs::remove_dir_all(&m.dir).is_ok() {
+        if trs_platform::dirs::in_temp_folder(&m.dir) && std::fs::remove_dir_all(&m.dir).is_ok() {
             folders += 1;
         }
     }

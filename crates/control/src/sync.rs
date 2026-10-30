@@ -491,7 +491,7 @@ fn guard(what: &str, p: &Path) -> Result<(), ApiError> {
     }
     let Some(home) = trs_platform::dirs::home().filter(|h| h.is_absolute() && h.parent().is_some()) else { return Ok(()) };
     // The temporary folder is inside the home folder on Windows.
-    if p.starts_with(&home) && !p.starts_with(std::env::temp_dir()) {
+    if p.starts_with(&home) && !trs_platform::dirs::in_temp_folder(p) {
         return Err(ApiError::invalid(format!(
             "refusing to use {what} {} inside the real home directory while running under test (set HOME to a temporary folder)",
             p.display()

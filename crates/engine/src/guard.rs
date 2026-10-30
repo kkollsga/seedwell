@@ -30,9 +30,10 @@ fn home() -> Option<PathBuf> {
     trs_platform::dirs::home().filter(|h| h.is_absolute() && h.parent().is_some())
 }
 
-/// Inside `home`, and not in the temporary folder (which is inside the home folder on Windows).
+/// Inside `home`, and not in a temporary folder (which is inside the home folder on Windows; compared as real paths, so
+/// a TEMP written with 8.3 short names still matches).
 fn inside(p: &Path, home: &Path) -> bool {
-    p.starts_with(home) && !p.starts_with(std::env::temp_dir())
+    p.starts_with(home) && !trs_platform::dirs::in_temp_folder(p)
 }
 
 /// `Err(text)` if `p` is inside the real home directory while the guard is on (a runtime

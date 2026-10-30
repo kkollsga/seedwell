@@ -278,7 +278,7 @@ pub fn is_sensitive_dir(p: &Path) -> bool {
     if p.parent().is_none() {
         return true;
     }
-    if p.starts_with(std::env::temp_dir()) {
+    if trs_platform::dirs::in_temp_folder(p) {
         return false;
     }
     if trs_platform::dirs::sensitive_dirs().iter().any(|d| p.starts_with(d)) {
