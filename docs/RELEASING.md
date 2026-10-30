@@ -144,7 +144,7 @@ Settings › General shows both ("Seedwell 0.1.0 (build 86)"). To release: bump 
    ```
 4. **Sparkle EdDSA keys.** This writes a private key to your login keychain, so it is yours to run, once:
    ```sh
-   app/fetch-sparkle.sh             # downloads the pinned Sparkle 2.9.6 into app/.sparkle (once)
+   app/fetch-sparkle.sh             # downloads the pinned Sparkle 2.10.1 into app/.sparkle (once)
    app/.sparkle/bin/generate_keys   # prints the public key; export a backup with: generate_keys -x seedwell-private.key
    ```
    Put the printed public key in `app/sparkle_public_key` (one line; add it to git, it is public) or in `SEEDWELL_SPARKLE_PUBLIC_KEY`.
@@ -219,7 +219,7 @@ After the first notarized release, a cask in a tap (`kkollsga/homebrew-tap`) is 
 
 ## Sparkle pin
 
-Sparkle 2.9.6 is pinned by version and SHA-256 in `app/fetch-sparkle.sh` (used by `build.sh`, `make-appcast.sh`; run it once
+Sparkle 2.10.1 is pinned by version and SHA-256 in `app/fetch-sparkle.sh` (used by `build.sh`, `make-appcast.sh`; run it once
 before `swift test`/`swift build` in `app/`). Package.swift links the result as a binary target. A plain
 `.package(url:, exact:)` dependency hung in "Downloading binary artifact" with the macOS 27 Command Line Tools SwiftPM; if yours
 works, you can switch back, and `build.sh` only needs the framework path adjusted.

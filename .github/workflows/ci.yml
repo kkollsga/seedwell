@@ -88,7 +88,7 @@ jobs:
           tool: cargo-nextest
       - name: Rust tests
         run: cargo nextest run --workspace --locked --profile ci
-      - uses: actions/setup-dotnet@v5
+      - uses: actions/setup-dotnet@v6
         with:
           dotnet-version: "10.0.x"
       - name: uniffi-bindgen-cs (the C# bindings' generator)

@@ -10,7 +10,7 @@ let package = Package(
     name: "SeedwellApp",
     platforms: [.macOS(.v15)],
     targets: [
-        // Sparkle 2.9.6 (SPEC 12 #19), fetched and checksum-pinned by fetch-sparkle.sh; build.sh embeds it in Contents/Frameworks.
+        // Sparkle 2.10.1 (SPEC 12 #19), fetched and checksum-pinned by fetch-sparkle.sh; build.sh embeds it in Contents/Frameworks.
         .binaryTarget(name: "Sparkle", path: ".sparkle/Sparkle.xcframework"),
         .target(name: "trs_ffiFFI", path: "Sources/trs_ffiFFI", publicHeadersPath: "include"),
         // The status file and badge rules shared by the app and its Finder extension (SPEC 7G.5).
