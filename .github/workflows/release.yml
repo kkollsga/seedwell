@@ -63,7 +63,7 @@ jobs:
           # Build numbers keep rising past the ones built locally before CI existed (0.1.0 was build 88).
           export SEEDWELL_BUILD=$((100 + GITHUB_RUN_NUMBER))
           app/release-zip.sh
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         with:
           name: mac
           path: |
@@ -101,7 +101,7 @@ jobs:
         run: |
           app-windows\qa\install-test.ps1
           if ($LASTEXITCODE -ne 0) { exit 1 }
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         with:
           name: windows
           path: |
