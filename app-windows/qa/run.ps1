@@ -103,12 +103,17 @@ function List([string]$dir) { @(& $Cli --socket "$dir\state\control.sock" list 2
 function Start-App([string]$dir, [switch]$QaControl, [string[]]$extra = @()) {
   $args = @('--state-dir', "$dir\state") + $(if ($QaControl) { @('--qa-control') } else { @() }) + $extra
   $p = Start-Process $Exe -ArgumentList $args -PassThru
+  $script:cliSaid = ''
   try {
-    WaitFor { & $Cli --socket "$dir\state\control.sock" status *> $null; $LASTEXITCODE -eq 0 } 20000 'the core to answer' | Out-Null
+    WaitFor { $script:cliSaid = (& $Cli --socket "$dir\state\control.sock" status 2>&1 | Out-String).Trim(); $LASTEXITCODE -eq 0 } 20000 'the core to answer' | Out-Null
   } catch {
+    # Say why, so a failure on a machine nobody can look at (CI) can be read from its log: whether the app is still
+    # running or ended (and how), what the CLI last said, and the end of the app's own log.
+    $state = if ($p.HasExited) { "it ended with exit code $($p.ExitCode)" } else { 'it is still running' }
+    $tail = (Log $dir | Select-Object -Last 8) -join ' | '
     # Never leave an instance behind: one that does not answer is ended here.
     if (-not $p.HasExited) { $p.Kill(); $p.WaitForExit(5000) | Out-Null }
-    throw
+    Fail "the core did not answer within 20 s: $state; the CLI said: $script:cliSaid; app.log: $(if ($tail) { $tail } else { '(none)' })"
   }
   $p
 }
