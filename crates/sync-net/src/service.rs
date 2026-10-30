@@ -561,6 +561,8 @@ impl SyncHandle {
         let members_path = self.members_path(&id);
         let membership = crate::roles::load(&members_path, pk)?;
         let role = membership.role(self.inner.ctx.key.public_key());
+        // Joined with write access and not admitted yet: its changes meanwhile become its own once it is.
+        let awaiting = role.is_none() && invite.as_ref().is_some_and(|i| i.invite.role.access() == Access::Write);
         let writers = membership.writers();
         let root = e.path.clone();
         let index = self.index_path(&id);
@@ -592,6 +594,7 @@ impl SyncHandle {
             let mut core = FolderCore::new(cfg, Box::new(store), Arc::new(fs), Some(ctx.key.clone()), clock, Arc::new(random_id), ignore)
                 .map_err(|e| invalid(e.to_string()))?;
             core.set_membership(&writers, access).map_err(|e| invalid(e.to_string()))?;
+            core.set_awaiting_write(awaiting);
             Ok((core, reader))
         })
         .await

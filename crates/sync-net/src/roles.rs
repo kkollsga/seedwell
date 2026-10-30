@@ -164,25 +164,41 @@ pub(crate) async fn changed(ctx: &Arc<Ctx>, f: &Arc<Space>) {
         }
         add(f, confirmed);
     }
-    let (role, writers, statements) = {
+    let (role, statements) = {
         let m = f.membership.read().unwrap_or_else(|e| e.into_inner());
-        (m.role(&me), m.writers(), m.statements().cloned().collect::<Vec<_>>())
+        (m.role(&me), m.statements().cloned().collect::<Vec<_>>())
     };
 
     // A folder's core: who writes, and whether this device does.
     if let Some(folder) = ctx.registry.folder(&f.id) {
-        let access = role.map_or(Access::Read, Role::access);
-        let f2 = folder.clone();
+        let (f2, space) = (folder.clone(), f.clone());
         let set = tokio::task::spawn_blocking(move || {
             let mut core = lock(&f2.core);
+            // The membership as it is now, read under the core's lock: calls of this function overlap, and one that
+            // read it earlier must not apply an older membership after a newer one (a device just admitted would be
+            // told it may only read again, and its edits kept as a reader's).
+            let (role, writers) = {
+                let m = space.membership.read().unwrap_or_else(|e| e.into_inner());
+                (m.role(&me), m.writers())
+            };
+            let access = role.map_or(Access::Read, Role::access);
+            // Joining with write access, not admitted yet: what it changes meanwhile is its own once it is.
+            let awaiting = role.is_none() && lock(&space.invite).as_ref().is_some_and(|i| i.invite.role.access() == Access::Write);
+            let signed = core.signs();
+            // With the flag as it was while it waited: admitted now, its changes made meanwhile become its versions.
             core.set_membership(&writers, access).map_err(|e| e.to_string())?;
-            Ok::<_, String>(core.index_state().map(|(_, s)| s).unwrap_or(0))
+            core.set_awaiting_write(awaiting);
+            Ok::<_, String>((core.index_state().map(|(_, s)| s).unwrap_or(0), !signed && core.signs()))
         })
         .await;
         match set {
-            // Allowed to write now, its files only it had became its own: the sessions announce them.
-            Ok(Ok(seq)) => {
+            // Allowed to write now, its files only it had became its own: the sessions announce them, and a scan
+            // reads the changes it made while it waited into its own versions.
+            Ok(Ok((seq, began_signing))) => {
                 folder.local_seq.send_if_modified(|s| std::mem::replace(s, seq) != seq);
+                if began_signing {
+                    folder.rescan.notify_one();
+                }
             }
             Ok(Err(e)) => f.problem(format!("the folder's membership could not be applied: {e}")),
             Err(_) => {}

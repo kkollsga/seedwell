@@ -519,6 +519,84 @@ fn files_scanned_before_a_device_may_write_are_sent_once_it_may() {
     assert_eq!(names(&a.fs).iter().filter(|n| n.starts_with("plan (conflict")).count(), 1, "one copy of the difference: {:?}", names(&a.fs));
 }
 
+/// A device that joins with write access receives the folder before it is admitted (the owner's grant comes later):
+/// an edit it makes meanwhile is its user's change as a writer. It is not kept as a read-only device's conflict copy
+/// when another device's older edit arrives; once admitted it is this device's own version, which wins by its newer
+/// mtime, and the other edit becomes the one conflict copy, named after the device that made it.
+#[test]
+fn an_edit_made_while_waiting_to_be_admitted_with_write_access_becomes_this_devices_version() {
+    let key = rw();
+    let (mut a, mut b) = (dev("A", 1, &key), dev("B", 2, &key.read_only().unwrap()));
+    b.core.set_awaiting_write(true);
+    write_all(&a.fs, "plan.txt", b"v1").unwrap();
+    a.core.scan("").unwrap();
+    send(&a, &mut b);
+    pull(&mut b, &[&a]);
+    assert_eq!(read_all(&b.fs, "plan.txt").unwrap(), b"v1");
+
+    write_all(&a.fs, "plan.txt", b"from A").unwrap();
+    a.core.scan("").unwrap();
+    write_all(&b.fs, "plan.txt", b"from B, later").unwrap();
+    b.core.scan("").unwrap();
+    assert!(!b.core.signs(), "not admitted yet: B's edit is a local difference for now");
+    send(&a, &mut b);
+    let r = pull(&mut b, &[&a]);
+    assert!(r.conflicts.is_empty() && r.waiting == 1, "it waits instead of keeping B's edit as a copy: {r:?}");
+    assert_eq!(read_all(&b.fs, "plan.txt").unwrap(), b"from B, later");
+
+    // Admitted with write access: B's key joins the writers; the driver clears the flag after applying it.
+    let mut writers: Vec<[u8; 32]> = a.core.writers().iter().map(|w| w.device_pk).collect();
+    writers.push(*DeviceKey::from_seed(&[2; 32]).public_key());
+    writers.sort_unstable();
+    b.core.set_membership(&writers, Access::Write).unwrap();
+    b.core.set_awaiting_write(false);
+    a.core.set_membership(&writers, Access::Write).unwrap();
+    assert!(b.core.signs());
+    b.core.scan("").unwrap();
+    let mine = b.core.announce_since(0, usize::MAX).unwrap().into_iter().find(|e| e.file.info.path == "plan.txt").unwrap();
+    assert!(!mine.invalid && mine.file.info.modified_by == short(&b) && mine.file.info.size == 13, "B's own version now: {mine:?}");
+
+    for _ in 0..3 {
+        send(&a, &mut b);
+        send(&b, &mut a);
+        pull(&mut a, &[&b]);
+        pull(&mut b, &[&a]);
+        a.core.scan("").unwrap();
+        b.core.scan("").unwrap();
+    }
+    for d in [&a, &b] {
+        assert_eq!(read_all(&d.fs, "plan.txt").unwrap(), b"from B, later", "the newer edit wins on {}", d.name);
+        let copies: Vec<String> = d.fs.read_dir("").unwrap().entries.into_iter().map(|e| e.name).filter(|n| n.contains("(conflict, ")).collect();
+        assert_eq!(copies.len(), 1, "one copy on {}: {copies:?}", d.name);
+        assert!(!copies[0].contains("(conflict, B,"), "the copy is A's edit, not B's: {copies:?}");
+        assert_eq!(read_all(&d.fs, &copies[0]).unwrap(), b"from A");
+    }
+}
+
+/// A read-only device's own change that loses to an arriving version is kept as a conflict copy named after this
+/// device (whose user made it), not after the device that wrote the version it was made over.
+#[test]
+fn a_read_only_devices_own_change_is_kept_under_its_own_name() {
+    let key = rw();
+    let (mut a, mut r) = (dev("A", 1, &key), dev("R", 3, &key.read_only().unwrap()));
+    write_all(&a.fs, "f", b"v1").unwrap();
+    a.core.scan("").unwrap();
+    send(&a, &mut r);
+    pull(&mut r, &[&a]);
+    write_all(&r.fs, "f", b"changed on R").unwrap();
+    r.core.scan("").unwrap();
+    write_all(&a.fs, "f", b"v2 from A").unwrap();
+    a.core.scan("").unwrap();
+    send(&a, &mut r);
+    let (ra, rr) = (short(&a), short(&r));
+    let name = move |id: ShortId| if id == ra { "A".to_string() } else if id == rr { "R".to_string() } else { "?".to_string() };
+    let report = r.core.pull(&Disks(vec![&a.fs]), &name, 64 << 20).unwrap();
+    assert_eq!(report.conflicts.len(), 1, "{report:?}");
+    assert!(report.conflicts[0].starts_with("f (conflict, R, "), "{:?}", report.conflicts);
+    assert_eq!(read_all(&r.fs, &report.conflicts[0]).unwrap(), b"changed on R");
+    assert_eq!(read_all(&r.fs, "f").unwrap(), b"v2 from A");
+}
+
 /// A FolderCore over a real folder on this system's disk.
 fn core_on_disk(fs: trs_sync::fs::StdFs, seed: u8, key: &Key) -> FolderCore {
     fs.create_dir(".seedwell").unwrap();

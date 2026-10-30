@@ -142,7 +142,7 @@ fn bash() -> std::path::PathBuf {
     {
         let git = ["ProgramW6432", "ProgramFiles"]
             .iter()
-            .filter_map(|v| std::env::var_os(v))
+            .filter_map(std::env::var_os)
             .map(|d| std::path::Path::new(&d).join("Git").join("bin").join("bash.exe"))
             .find(|p| p.is_file());
         if let Some(b) = git {

@@ -1015,7 +1015,9 @@ baseline every later version must still sync with:
       by a folder that is not synced (left from an earlier join, say), Location offers that folder too, and a note
       says so. Syncing into it keeps its files and shares them; where they differ from the others', both versions
       are kept, and where they are the same they merge. (A joining Mac scans them before it may write; once it may,
-      the files only it has become its own versions and are sent.)
+      the files only it has become its own versions and are sent. Joining with write access, it may change files
+      before the owner's admission reaches it: those changes wait, and once it is admitted they are its own versions
+      too, a conflict decided as for any writer.)
   - Opening a `seedwell://sync/…` link opens the same modal, filled in.
 - **Share…** opens the Share dialog, for owners and admins only. It is in the folder list's right-click menu, the
   folder page, the edit modal, and Finder's right-click menu on synced items.

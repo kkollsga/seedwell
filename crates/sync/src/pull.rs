@@ -134,6 +134,10 @@ pub struct Puller<'a> {
     /// Steps found unsupported before, by path: skipped (and reported again) while the wanted version
     /// is the same one.
     pub unsupported: &'a BTreeMap<String, Unsupported>,
+    /// This device joins with write access but is not admitted yet ([`crate::folder::FolderCore::set_awaiting_write`]):
+    /// its own changes (invalid records) become its versions once it may sign, so a step over one waits instead of
+    /// keeping it as a read-only device's conflict copy.
+    pub awaiting_write: bool,
     /// Records waiting for their directories to be durable (start with `Default::default()`).
     pub(crate) round: RefCell<Round>,
 }
@@ -262,6 +266,13 @@ impl Puller<'_> {
             // A step reads the records of its paths: those must not be waiting.
             if self.pending(&path) || other.is_some_and(|f| self.pending(f)) {
                 self.commit(store)?;
+            }
+            // Not admitted yet, with write access to come: a change of ours there waits to become our version.
+            if self.awaiting_write
+                && (store.local(&path)?.is_some_and(|l| l.invalid) || other.map(|f| store.local(f)).transpose()?.flatten().is_some_and(|l| l.invalid))
+            {
+                report.waiting += 1;
+                continue;
             }
             match self.run(store, &needs, &step, &mut report) {
                 Ok(()) => report.done += 1,
@@ -868,7 +879,7 @@ impl Puller<'_> {
             return Ok(());
         };
         if want.kind == FileKind::File {
-            if let (copy, true) = self.copy_name(store, p, want, want.mtime_ns)? {
+            if let (copy, true) = self.copy_name(store, p, want, want.modified_by, want.mtime_ns)? {
                 let tmp = temp_path(&copy);
                 let tier = self.build(store, p, &tmp, None, n, report)?;
                 let placed = self.fs.lstat(&tmp)?;
@@ -886,7 +897,7 @@ impl Puller<'_> {
         } else {
             // A symlink: nothing to fetch; the scanner would make it anew anyway. It is kept as a
             // conflict copy too.
-            if let (copy, true) = self.copy_name(store, p, want, want.mtime_ns)? {
+            if let (copy, true) = self.copy_name(store, p, want, want.modified_by, want.mtime_ns)? {
                 self.fs.symlink(&want.symlink_target, &copy)?;
                 let file = signer.sign(self.copy_info(&copy, p, want));
                 let stamp = self.fs.lstat(&copy)?.as_ref().map(stamp_of);
@@ -902,8 +913,8 @@ impl Puller<'_> {
 
     /// The conflict copy of `loser` at `p`, as every device that keeps it names it, and whether it is
     /// still to be made (false: it is here already, made here or synced from a device that made it).
-    fn copy_name(&self, store: &mut dyn IndexStore, p: &str, loser: &FileInfo, mtime_ns: i64) -> Result<(String, bool), Skip> {
-        let who = (self.device_name)(loser.modified_by);
+    fn copy_name(&self, store: &mut dyn IndexStore, p: &str, loser: &FileInfo, by: ShortId, mtime_ns: i64) -> Result<(String, bool), Skip> {
+        let who = (self.device_name)(by);
         let stamp = clock::utc_stamp(mtime_ns);
         let mut n = 1;
         loop {
@@ -1074,7 +1085,9 @@ impl Puller<'_> {
         meta: &Meta,
     ) -> Result<String, Skip> {
         let loser = &ours.file.info;
-        let (copy, fresh) = self.copy_name(store, p, loser, meta.mtime_ns)?;
+        // A read-only device's own change is this device's, whoever wrote the version it was made over.
+        let by = if ours.invalid { self.me } else { loser.modified_by };
+        let (copy, fresh) = self.copy_name(store, p, loser, by, meta.mtime_ns)?;
         if !fresh {
             // The copy is here already (another device that kept the same loser made it, and it
             // synced): the loser is kept, `p` is only replaced.

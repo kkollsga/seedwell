@@ -188,11 +188,16 @@ async fn concurrent_edits_make_one_conflict_copy_that_either_device_resolves() {
     b.h.add_address(&id, addr(&a)).unwrap();
     until(20, "B has the file", || read(&dest.join("plan.txt")).as_deref() == Some(b"v1")).await;
 
-    // Both edit while B is paused; B's edit is newer, so A's becomes the conflict copy.
+    // Both edit while B is paused; B's edit is newer (its mtime, set here rather than waited for), so A's becomes the
+    // conflict copy. B may not be admitted as a writer yet when it scans its edit (the owner's grant arrives on its own
+    // schedule): the edit is B's own version all the same.
     b.h.set_paused(&id, true).await.unwrap();
-    std::fs::write(fa.path().join("plan.txt"), b"from A").unwrap();
-    tokio::time::sleep(Duration::from_millis(1100)).await;
-    std::fs::write(dest.join("plan.txt"), b"from B").unwrap();
+    let edit = |p: &Path, body: &[u8], age: Duration| {
+        std::fs::write(p, body).unwrap();
+        std::fs::File::options().write(true).open(p).unwrap().set_modified(std::time::SystemTime::now() - age).unwrap();
+    };
+    edit(&fa.path().join("plan.txt"), b"from A", Duration::from_secs(60));
+    edit(&dest.join("plan.txt"), b"from B", Duration::ZERO);
     b.h.set_paused(&id, false).await.unwrap();
 
     let copy_on = |root: &Path| -> Option<String> {

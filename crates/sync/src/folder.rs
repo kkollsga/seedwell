@@ -118,6 +118,8 @@ pub struct FolderCore {
     /// Needed paths this system cannot make at the version they were tried at (see
     /// [`Puller::unsupported`]); kept until the folder restarts or [`Self::retry_unsupported`].
     unsupported: BTreeMap<String, Unsupported>,
+    /// Joining with write access, not admitted yet (see [`FolderCore::set_awaiting_write`]).
+    awaiting_write: bool,
 }
 
 impl FolderCore {
@@ -152,6 +154,7 @@ impl FolderCore {
             ignore,
             receiving_full: BTreeMap::new(),
             unsupported: BTreeMap::new(),
+            awaiting_write: false,
         };
         if core.cfg.access == Access::Write
             && let Some(key) = core.device_key.clone()
@@ -221,6 +224,7 @@ impl FolderCore {
             archive: self.cfg.archive,
             window,
             unsupported: &self.unsupported,
+            awaiting_write: self.awaiting_write && self.signer.is_none(),
             round: Default::default(),
         };
         let report = puller.pull(&mut *self.store)?;
@@ -300,19 +304,35 @@ impl FolderCore {
             self.cfg.access = access;
             self.signer = signs.then(|| self.device_key.clone()).flatten().map(|k| DeviceSigner::new(k, self.writers.folder_id()));
             if !could_sign && self.signer.is_some() {
-                self.claim_local_only()?;
+                self.claim_local_only(self.awaiting_write)?;
             }
             changed = true;
         }
         Ok(changed)
     }
 
+    /// This device joined with an invitation that gives it write access and waits to be admitted: until it is, it
+    /// cannot sign, so what it scans is recorded as local differences. Those are its user's changes as a writer: the
+    /// puller leaves them alone meanwhile (it does not keep them as a read-only device's conflict copies), and once
+    /// admitted they all become this device's versions ([`FolderCore::set_membership`]). The driver sets it while the
+    /// invitation is pending.
+    pub fn set_awaiting_write(&mut self, on: bool) {
+        self.awaiting_write = on;
+    }
+
+    /// This device signs its versions (it may write and is admitted).
+    pub fn signs(&self) -> bool {
+        self.signer.is_some()
+    }
+
     /// Files this device recorded while it could not write and that no device has a version of: a joining device
     /// scans the folder it joins into before it is admitted, so the files already there were kept as local
     /// differences. Now that it may write they become its own: they are sent, and one with the content another device
-    /// has is merged when that version arrives, not made a conflict copy. (What a read-only member recorded of files it
-    /// had received stays a local difference.)
-    fn claim_local_only(&mut self) -> io::Result<()> {
+    /// has is merged when that version arrives, not made a conflict copy. With `all` (it waited to be admitted with
+    /// write access) its changes to files it had received become its own too: the received version is kept as the
+    /// base without a stamp, so the next scan reads the disk into this device's version (or only restamps it, when
+    /// nothing changed). Otherwise what a read-only member recorded of files it had received stays a local difference.
+    fn claim_local_only(&mut self, all: bool) -> io::Result<()> {
         let Some(signer) = self.signer.as_ref() else { return Ok(()) };
         let now_s = (self.clock.now_ns() / 1_000_000_000).max(0) as u64;
         let mut after: Option<String> = None;
@@ -322,7 +342,16 @@ impl FolderCore {
             let mut batch = Batch::new(&*self.store, self.me)?;
             for p in &paths {
                 let Some(rec) = self.store.local(p)? else { continue };
-                if !rec.invalid || !rec.file.info.version.is_empty() || rec.file.info.deleted {
+                if !rec.invalid {
+                    continue;
+                }
+                if !rec.file.info.version.is_empty() {
+                    if all {
+                        batch.put_local(crate::index::LocalRecord { invalid: false, stamp: None, ..rec });
+                    }
+                    continue;
+                }
+                if rec.file.info.deleted {
                     continue;
                 }
                 let mut info = rec.file.info.clone();
