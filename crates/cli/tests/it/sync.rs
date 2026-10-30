@@ -135,12 +135,29 @@ fn the_relay_starts_and_keeps_its_id() {
     let _ = b.wait();
 }
 
+/// The bash that runs the repo's scripts: on Windows Git's, never `System32\bash.exe` (WSL's launcher, which a
+/// machine without a Linux distribution answers with an error), wherever PATH puts it.
+fn bash() -> std::path::PathBuf {
+    #[cfg(windows)]
+    {
+        let git = ["ProgramW6432", "ProgramFiles"]
+            .iter()
+            .filter_map(|v| std::env::var_os(v))
+            .map(|d| std::path::Path::new(&d).join("Git").join("bin").join("bash.exe"))
+            .find(|p| p.is_file());
+        if let Some(b) = git {
+            return b;
+        }
+    }
+    "bash".into()
+}
+
 /// `tools/sync-compat.sh` with this build on both sides: both daemons share, join, sync, change a role and
 /// remove a device, each the owner in turn. From 0.1.7 on it runs against the latest release too (PROTOCOL.md).
 #[test]
 fn the_cross_version_harness_passes_with_this_build_on_both_sides() {
     let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/sync-compat.sh");
-    let o = Command::new("bash").arg(&script).args(["--this", BIN, BIN]).env_remove("SEEDWELL_SOCKET").output().unwrap();
+    let o = Command::new(bash()).arg(&script).args(["--this", BIN, BIN]).env_remove("SEEDWELL_SOCKET").output().unwrap();
     let out = String::from_utf8_lossy(&o.stdout);
     assert!(o.status.success() && out.contains("sync-compat: PASS"), "{out}\n{}", String::from_utf8_lossy(&o.stderr));
     assert!(!out.contains("FAIL"), "{out}");

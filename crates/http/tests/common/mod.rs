@@ -466,7 +466,7 @@ pub async fn wait_until(task: &trs_http::DownloadTask, what: &str, cond: impl Fn
     }
 }
 
-/// A rate gate written independently of `TokenBucket`: strict serial pacing.
+/// A rate gate written independently of `TokenBucket`: serial pacing against a schedule.
 pub struct PacedGate {
     bps: f64,
     next: Mutex<Instant>,
@@ -485,7 +485,9 @@ impl RateGate for PacedGate {
         let wait = {
             let mut n = self.next.lock().unwrap();
             let now = Instant::now();
-            let start = (*n).max(now);
+            // A late wake-up (Windows timers fire up to ~16 ms late) may be made up within a 50 ms window, so the
+            // pace is the rate asked for, not that minus every timer's lateness; beyond that, idle time is lost.
+            let start = (*n).max(now.checked_sub(Duration::from_millis(50)).unwrap_or(now));
             *n = start + Duration::from_secs_f64(bytes as f64 / self.bps);
             start.saturating_duration_since(now)
         };
