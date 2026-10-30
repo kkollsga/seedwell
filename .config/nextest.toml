@@ -3,6 +3,10 @@
 [test-groups]
 measure = { max-threads = 1 }
 
+[profile.default]
+# A hung test is killed after 5 minutes, as on CI, instead of holding the run (and the heavy lock) for hours.
+slow-timeout = { period = "60s", terminate-after = 5 }
+
 [[profile.default.overrides]]
 # Memory and scale measurements run one at a time, not beside CPU-heavy tests.
 filter = 'binary(scale) | binary(scale_redb) | binary(seek_storm) | (package(trs-tracker) & test(/^memory::/))'

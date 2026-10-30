@@ -765,6 +765,16 @@ impl Document for RuleSet {
 mod tests {
     use super::*;
 
+    /// A Unix-style absolute test path made absolute on this system: unchanged on Unix, a drive letter in front on Windows.
+    fn abs(p: &str) -> String {
+        if cfg!(windows) { format!("C:{p}") } else { p.to_string() }
+    }
+
+    /// A TOML test document whose quoted Unix-style absolute paths (`"/x"`) are made absolute on this system.
+    fn win(doc: &str) -> String {
+        if cfg!(windows) { doc.replace("\"/", "\"C:/") } else { doc.to_string() }
+    }
+
     const EXAMPLE: &str = r##"
 version = 1
 
@@ -1046,8 +1056,8 @@ finished_dir = "~/Software"
 
     #[test]
     fn a_rule_template_of_an_older_file_becomes_a_plain_folder() {
-        let old = "[default]\ntemplate = \"~/Seeding/{name}/\"\n[[rule]]\nid = \"a\"\nname = \"A\"\ntemplate = \"~/Software/{name}\"\n\
-                   [[rule]]\nid = \"b\"\nname = \"B\"\ntemplate = \"{name}\"\n[[rule]]\nid = \"c\"\nname = \"C\"\ntemplate = \"/data/plain\"\n";
+        let old = &win("[default]\ntemplate = \"~/Seeding/{name}/\"\n[[rule]]\nid = \"a\"\nname = \"A\"\ntemplate = \"~/Software/{name}\"\n\
+                   [[rule]]\nid = \"b\"\nname = \"B\"\ntemplate = \"{name}\"\n[[rule]]\nid = \"c\"\nname = \"C\"\ntemplate = \"/data/plain\"\n");
         assert!(RuleSet::file_is_outdated(old));
         let p = RuleSet::parse_str(old).unwrap();
         assert!(p.warnings.iter().all(|w| !w.path.contains("template")), "{:?}", p.warnings);
@@ -1055,7 +1065,7 @@ finished_dir = "~/Software"
         assert_eq!(rs.default.finished_dir.as_deref(), Some("~/Seeding"));
         assert_eq!(rs.get("a").unwrap().finished_dir.as_deref(), Some("~/Software"));
         assert_eq!(rs.get("b").unwrap().finished_dir, None, "nothing fixed in front: the default");
-        assert_eq!(rs.get("c").unwrap().finished_dir.as_deref(), Some("/data/plain"));
+        assert_eq!(rs.get("c").unwrap().finished_dir.as_deref(), Some(abs("/data/plain").as_str()));
         let out = rs.render().unwrap();
         assert!(!out.contains("template"), "{out}");
         assert!(!RuleSet::file_is_outdated(&out));

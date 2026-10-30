@@ -4,7 +4,6 @@
 use std::sync::{Arc, Mutex};
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
 use tokio::sync::broadcast;
 use trs_control::backend::{AddArgs, AddSource, Backend};
 use trs_control::proto::*;
@@ -355,14 +354,14 @@ impl Rig {
 
 /// A raw line-level connection for protocol abuse tests.
 pub struct Raw {
-    pub rd: BufReader<tokio::net::unix::OwnedReadHalf>,
-    pub wr: tokio::net::unix::OwnedWriteHalf,
+    pub rd: BufReader<tokio::io::ReadHalf<trs_control::transport::Conn>>,
+    pub wr: tokio::io::WriteHalf<trs_control::transport::Conn>,
 }
 
 impl Raw {
     pub async fn connect(path: &std::path::Path) -> Raw {
-        let s = UnixStream::connect(path).await.unwrap();
-        let (rd, wr) = s.into_split();
+        let s = trs_control::transport::connect(path).await.unwrap();
+        let (rd, wr) = tokio::io::split(s);
         Raw { rd: BufReader::new(rd), wr }
     }
 

@@ -69,6 +69,32 @@ async fn the_alt_speed_schedule_follows_the_clock() {
     wait_for("manual off", 5, || async { (limits(&n.h).await == normal).then_some(()) }).await;
 }
 
+/// The app's own Limit Speed (on battery) is not the user's toggle: the user's toggle, either way,
+/// ends it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_apps_own_limit_yields_to_the_users_toggle() {
+    let n = node(|c| {
+        c.down_limit = Some(9_000_000);
+        c.alt_down_limit = Some(1_000_000);
+    })
+    .await;
+    let on = |l: (Option<u64>, Option<u64>, bool, bool)| l.0 == Some(1_000_000) && l.2 && !l.3;
+    n.h.set_alt_speed_by_app(true);
+    wait_for("the app's limit", 5, || async { on(limits(&n.h).await).then_some(()) }).await;
+    // A reload of the settings applies the file's toggle (off) and keeps the app's.
+    n.h.update_config(|c| c.alt_speed = false);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(on(limits(&n.h).await));
+    n.h.set_alt_speed_by_app(false);
+    wait_for("off", 5, || async { (limits(&n.h).await.0 == Some(9_000_000)).then_some(()) }).await;
+    // The user's toggle off ends the app's limit at once.
+    n.h.set_alt_speed_by_app(true);
+    wait_for("the app's limit again", 5, || async { on(limits(&n.h).await).then_some(()) }).await;
+    n.h.set_alt_speed(false);
+    wait_for("the user turned it off", 5, || async { (!limits(&n.h).await.2).then_some(()) }).await;
+    assert!(!n.h.config().await.unwrap().alt_by_app);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_window_across_midnight_and_the_timer_that_opens_it() {
     // Friday 22:00 to 06:00 (belongs to Friday, so Saturday 03:00 is inside).
@@ -314,6 +340,37 @@ async fn the_real_home_is_off_limits_under_test() {
     assert_ne!(n.h.config().await.unwrap().default_save_dir, std::path::PathBuf::from(std::env::var_os("HOME").unwrap()).join("Downloads"));
 }
 
+/// A `config.toml` with one bad value: the engine runs on every other value of it, the bad one is
+/// named in the host's warnings, and the file is not rewritten (the watch folder baseline is not
+/// saved into it, which would write the default over the user's value).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_config_with_one_bad_value_keeps_the_rest_and_is_not_rewritten() {
+    use trs_state::config::{AfterAdd as SAfter, WatchFolder};
+    let e = env();
+    let w = tempfile::tempdir().unwrap();
+    let mut c = base_config(&e);
+    c.transfers.max_active_downloads = 7;
+    c.folders.torrent_after_add = SAfter::Leave;
+    c.folders.watch = vec![WatchFolder { path: w.path().to_string_lossy().into_owned(), after_add: SAfter::Leave, ..WatchFolder::default() }];
+    let docs = DocStore::<Config>::new(e.state.path());
+    docs.save(&c).unwrap();
+    let good = std::fs::read_to_string(docs.path()).unwrap();
+    assert!(good.contains("play_with = \"auto\""), "{good}");
+    let text = good.replace("play_with = \"auto\"", "play_with = 5");
+    std::fs::write(docs.path(), &text).unwrap();
+
+    let host = host(&e).await;
+    let w: Vec<&String> = host.warnings.iter().filter(|w| w.contains("play_with")).collect();
+    assert_eq!(w.len(), 1, "{:?}", host.warnings);
+    assert!(w[0].starts_with("config.toml: general.play_with: 5 is not a valid value (") && w[0].ends_with("the default \"auto\" is used until it is fixed"), "{}", w[0]);
+    let ec = host.handle().config().await.unwrap();
+    assert_eq!(ec.max_active_downloads, 7, "the file's other values are in force");
+    assert_eq!(ec.torrent_after_add, trs_engine::config::AfterAdd::Leave);
+    assert_eq!(ec.watch.len(), 1);
+    assert_eq!(std::fs::read_to_string(docs.path()).unwrap(), text, "the user's file is left as it is");
+    host.shutdown(Duration::from_secs(3)).await;
+}
+
 /// The Host stamps every watch folder with the moment it joined the list, keeps that across
 /// restarts, and a folder added by editing `config.toml` gets its own baseline: old `.torrent`
 /// files are never mass-added.
@@ -337,7 +394,7 @@ async fn host_stamps_watch_baselines_and_ignores_old_torrents() {
         ..WatchFolder::default()
     };
     c.folders.watch = vec![entry(w1.path())];
-    c.folders.torrent_after_add = SAfter::Leave; // the default (Trash) would be the real ~/.Trash
+    c.folders.torrent_after_add = SAfter::Leave; // the default (Trash) would be the real Trash
     docs.save(&c).unwrap();
     assert_eq!(docs.read_strict().unwrap().value.folders.watch[0].since, None);
 

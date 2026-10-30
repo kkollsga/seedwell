@@ -55,6 +55,7 @@ fn rec(t: &TestTorrent, dir: &std::path::Path) -> TorrentRecord {
         pinned: false,
         awaiting_choice: false,
         pending_start: false,
+        pending_stopped: false,
         title: None,
         idle: None,
     }
@@ -237,6 +238,44 @@ async fn records_round_trip_through_the_adapter() {
     assert!(!g.seed_goal.any);
     assert_eq!((got[0].counters.uploaded, got[0].counters.downloaded, got[0].counters.seeded_secs), (77, 88, 99));
     assert_eq!(got[0].counters.done_bytes, t.total(), "complete");
+}
+
+/// A pause stored by a build before 2026-10-28 (which ended every pause at quit) loads as running,
+/// so nothing that was running before an upgrade comes back paused; a pause stored now is kept,
+/// and so is a grace countdown the user stopped.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_older_builds_pause_loads_as_running_and_a_new_one_is_kept() {
+    let (t, u) = (standard_torrent(0, None, false, 255), standard_torrent(0, None, false, 257));
+    let state = tempfile::tempdir().unwrap();
+    let dl = tempfile::tempdir().unwrap();
+    let (store, _) = StateStore::open(state.path()).unwrap();
+    let mut held = rec(&u, dl.path());
+    (held.awaiting_choice, held.pending_start, held.pending_stopped) = (true, true, true);
+    let paused = TorrentRecord { state: StoredState::Paused, ..rec(&t, dl.path()) };
+    store
+        .commit(Batch {
+            torrent_files: vec![(t.id, Arc::from(t.bytes.clone())), (u.id, Arc::from(u.bytes.clone()))],
+            torrents: vec![paused, held],
+            ..Batch::default()
+        })
+        .unwrap();
+    let load = |store: &StateStore| {
+        let mut v = store.load_torrents().unwrap();
+        v.sort_by_key(|s| s.record.id != t.id);
+        v
+    };
+    let got = load(&store);
+    assert_eq!(got[0].record.state, StoredState::Paused, "kept");
+    assert!(got[1].record.pending_start && got[1].record.pending_stopped, "the stopped countdown is kept");
+    // The same record as an older build wrote it: `PAUSED` without the mark.
+    let mut old = store.state().get_torrent(t.id).unwrap().unwrap();
+    assert!(old.flags.has(trs_state::TorrentFlags::PAUSED) && old.pause_kept);
+    old.pause_kept = false;
+    store.state().put_torrent(t.id, &old).unwrap();
+    store.state().flush_now().unwrap();
+    drop(store);
+    let (store, _) = StateStore::open(state.path()).unwrap();
+    assert_eq!(load(&store)[0].record.state, StoredState::Active, "an older build's pause ended at quit");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

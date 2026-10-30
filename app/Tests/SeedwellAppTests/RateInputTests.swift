@@ -54,22 +54,5 @@ struct RateInputTests {
         // Existing values convert: what the old MB/s field wrote reads back the same.
         #expect(RateText.parse(RateText.number(1_230_000, unit: .mb), unit: .mb) == 1_230_000)
     }
-
-    @Test func labelsNameTheUnit() {
-        #expect(RateText.label(5_000_000) == "5 MB/s")
-        #expect(RateText.label(2_500_000) == "2.5 MB/s")
-        #expect(RateText.label(500_000) == "500 KB/s")
-        #expect(RateText.label(0) == "Unlimited")
-    }
-
-    @Test func theSpeedLineMarksALimit() {
-        #expect(RateText.line(rate: 2_000_000, limit: 5_000_000) == "2.0 / 5 MB/s")
-        #expect(RateText.line(rate: 850_000, limit: 5_000_000) == "850 KB/s / 5 MB/s")
-        #expect(RateText.line(rate: 120_000, limit: 500_000) == "120 / 500 KB/s")
-        #expect(RateText.limitHelp("Download", limit: 18_000_000, altSpeed: false) == "Download limit: 18 MB/s")
-        #expect(RateText.limitHelp("Upload", limit: nil, altSpeed: false) == "No upload limit")
-        #expect(RateText.limitHelp("Upload", limit: 500_000, altSpeed: true) == "Upload limit: 500 KB/s (Limit Speed)")
-        #expect(RateText.line(rate: 2_000_000, limit: nil) == "2.0 MB/s")
-        #expect(RateText.line(rate: 2_000_000, limit: 0) == "2.0 MB/s")
-    }
+    // The labels, the speed line and its tooltip are the core's (crates/ffi/src/display.rs).
 }

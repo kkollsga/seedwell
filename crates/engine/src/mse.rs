@@ -316,6 +316,7 @@ mod tests {
         let p2 = payload.clone();
         let w = tokio::spawn(async move {
             a.write_all(&p2).await.unwrap();
+            a.flush().await.unwrap();
             let mut back = vec![0u8; 5];
             a.read_exact(&mut back).await.unwrap();
             assert_eq!(&back, b"pong!");
@@ -324,6 +325,7 @@ mod tests {
         b.read_exact(&mut got).await.unwrap();
         assert!(got == payload);
         b.write_all(b"pong!").await.unwrap();
+        b.flush().await.unwrap();
         w.await.unwrap();
     }
 

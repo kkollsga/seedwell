@@ -17,7 +17,6 @@
 use std::ffi::OsStr;
 use std::fmt;
 use std::ops::Range;
-use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 
 /// Standard BitTorrent block size.
@@ -183,7 +182,7 @@ impl Layout {
                     }
                 }
                 FilePath::Absolute(p) => {
-                    let b = p.as_os_str().as_bytes();
+                    let b = p.as_os_str().as_encoded_bytes();
                     if !p.is_absolute()
                         || b.contains(&0)
                         || p.components()
@@ -289,7 +288,9 @@ impl Layout {
         } else {
             self.files[i - 1].path_end as usize
         };
-        let s = OsStr::from_bytes(&self.paths[begin..self.files[i].path_end as usize]);
+        // SAFETY: `paths` holds only whole `str`s, `/` and whole `as_encoded_bytes` of paths (see
+        // `new`), cut at those boundaries: valid encoded bytes on every system.
+        let s = unsafe { OsStr::from_encoded_bytes_unchecked(&self.paths[begin..self.files[i].path_end as usize]) };
         if self.files[i].flags & FLAG_ABSOLUTE != 0 {
             PathRef::Absolute(s)
         } else {
@@ -473,6 +474,11 @@ mod tests {
         }
     }
 
+    /// A Unix-style absolute test path made absolute on this system (a drive in front on Windows).
+    fn abs(p: &str) -> String {
+        if cfg!(windows) { format!("C:{p}") } else { p.to_string() }
+    }
+
     fn build(piece_len: u32, files: Vec<FileSpec>) -> Layout {
         let total: u64 = files.iter().map(|f| f.length).sum();
         let count = total.div_ceil(u64::from(piece_len)) as u32;
@@ -548,7 +554,7 @@ mod tests {
         };
         assert!(Layout::new(4, 1, 1, [rel_abs]).is_err());
         let dotdot = FileSpec {
-            path: FilePath::Absolute("/a/../x".into()),
+            path: FilePath::Absolute(abs("/a/../x").into()),
             length: 1,
             is_padding: false,
         };
@@ -567,7 +573,7 @@ mod tests {
                 is_padding: false,
             },
             FileSpec {
-                path: FilePath::Absolute("/Volumes/X/lib/f2.bin".into()),
+                path: FilePath::Absolute(abs("/Volumes/X/lib/f2.bin").into()),
                 length: 2,
                 is_padding: false,
             },
@@ -577,7 +583,7 @@ mod tests {
         assert_eq!(l.file_path(0), PathRef::Relative(OsStr::new("dir/f.bin")));
         assert_eq!(
             l.file_path(1),
-            PathRef::Absolute(OsStr::new("/Volumes/X/lib/f2.bin"))
+            PathRef::Absolute(OsStr::new(&abs("/Volumes/X/lib/f2.bin")))
         );
         assert!(l.file_is_padding(2) && !l.file_is_padding(0));
         let segs: Vec<_> = l.segments(0, 10).unwrap().collect();
@@ -604,7 +610,7 @@ mod tests {
                     .enumerate()
                     .map(|(i, (len, pad, kind))| FileSpec {
                         path: if kind == 0 {
-                            FilePath::Absolute(format!("/x/{i}").into())
+                            FilePath::Absolute(abs(&format!("/x/{i}")).into())
                         } else {
                             FilePath::Relative(vec![format!("f{i}")])
                         },

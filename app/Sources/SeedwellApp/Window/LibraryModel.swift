@@ -1,50 +1,36 @@
 import Foundation
 import Observation
+import SwiftUI
 
-/// View model of one main window. It polls the core once a second, only between `start()` and
-/// `stop()`, and is dropped (with its timer) when the window closes (SPEC §2, §8.3).
+/// View model of one main window: the core's `Library` decides the sidebar, the title bar and the lists (what is
+/// listed, every text, the folds and pages, where the window goes when its place disappears, how often it refreshes),
+/// and the window's state machines (the selection, Get Info, the Remove… question, the keys, the new-download takeover,
+/// the add sheet); this holds its latest model, asks again after `refreshMs` (only between `start()` and `stop()`) and
+/// after every change, and runs what the core leaves to it: the file lists under the rows. It is dropped (with its
+/// timer) when the window closes (SPEC §2, §8.3); the `Library` lives on with the app.
 ///
-/// Sidebar: Downloads, Sharing and each tracker are places (sections). A tracker tab shows every
-/// torrent of that tracker, downloads and seeds, as collapsible groups (SPEC §8.3).
+/// Still here for now: the pages' own reads (Folder Sync's folder, a conversation's messages and members, a tracker's
+/// statistics).
 @MainActor @Observable final class LibraryModel {
-    /// A channel's page is its General (`topic: nil`) or one of its topics; `direct` is a private conversation with a
+    /// A channel's page is its General (`topicId: nil`) or one of its topics; `direct` is a private conversation with a
     /// device (SPEC 7G.7).
-    enum Section: Hashable { case downloads, sharing, folderSync, chat(String, topic: String?), direct(String), settings, tracker(String) }
+    typealias Section = LibraryPlace
 
     let core: Core
-    var section: Section
-    /// The row a ⇧-click range starts from: the last plainly or ⌘-clicked row.
-    var selectionAnchor: String?
-    var snapshot: Snapshot
-    var selection: Set<String> = []
-    var search = "" { didSet { if search != oldValue { refresh() } } }
-    var infoID: String?
-    /// Only torrents of this category are listed (the pill on a row sets it, the chip above the list clears it).
-    /// Combines with the search text and the tracker; a tab switch clears it.
-    var categoryFilter: Category? { didSet { if categoryFilter != oldValue { refresh() } } }
-    /// The tracker's Info page is shown instead of its torrent list (the sidebar item stays selected).
-    var trackerInfo = false
-    /// Group headers the user folded ("sharing.dormant", "downloads.recent"). Remembered per Mac, a
-    /// convenience only: lost defaults just mean everything opens unfolded.
-    var collapsed: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "collapsedGroups") ?? []) {
-        didSet { UserDefaults.standard.set(Array(collapsed).sorted(), forKey: "collapsedGroups") }
-    }
-    /// The "Add a Download" sheet (File › Add Magnet Link or URL…).
-    var adding = false
-    /// A new download arrived while the user was busy (Settings, an inline edit): Downloads in the sidebar
-    /// carries a quiet dot until the user goes there.
-    var downloadsFlag = false
-    /// Asks the list to scroll a row into view (a new download); the number makes every request distinct.
-    struct ScrollRequest: Equatable { let id: String; let n: Int }
-    private(set) var scrollRequest: ScrollRequest?
-    @ObservationIgnored private var scrollCount = 0
-    /// True while the user is in the middle of something the window must not be taken from (an inline
-    /// edit, a remove question). Set by the window controller; Settings counts on its own.
-    @ObservationIgnored var isBusy: () -> Bool = { false }
+    @ObservationIgnored let library: Library
+    /// The window as the core decided it at the last refresh.
+    private(set) var view: LibraryViewModel
+    /// The snapshot the window was built from.
+    private(set) var snapshot: Snapshot
+    /// The texts of the add sheet, kept while it closes (the sheet animates out with them).
+    private(set) var addSheet: AddLinkSheet?
+    /// True while the user is in an inline edit of the app's own (a favorite tracker's rename or removal question):
+    /// a new download must not take the window. Set by the window controller.
+    @ObservationIgnored var editing: () -> Bool = { false }
     /// Every snapshot the model polls, for the app's new-download watcher.
     @ObservationIgnored var onSnapshot: (Snapshot) -> Void = { _ in }
-    /// Folder sync (SPEC 7G.5): every folder and device, read with each refresh (cheap).
-    var sync: SyncSnapshot
+    /// Folder sync (SPEC 7G.5): every folder and device, read with each refresh of its page (cheap).
+    private(set) var sync: SyncSnapshot
     /// The folder whose page is shown on Folder Sync.
     var syncSelection: String? { didSet { if syncSelection != oldValue { syncAskRemove = nil; syncMembers = []; loadConflicts(); loadMembers() } } }
     /// The conflict copies of the selected folder (read when it is selected, then every 10 s, off the main
@@ -53,17 +39,13 @@ import Observation
     /// The selected folder's members with their roles (read every 2 s, off the main thread; the core keeps them
     /// apart from the folder's index, so this never waits for a pull).
     private(set) var syncMembers: [SyncMember] = []
-    /// Channels (SPEC 7G.7), listed in the sidebar under Chats: every channel, read with each refresh (cheap), and the
-    /// shown one's messages (newest last) and members. Shown messages count as read.
+    /// Channels (SPEC 7G.7), read with each refresh of a conversation or Folder Sync, and the shown one's messages (newest
+    /// last) and members. Shown messages count as read.
     private(set) var chats: [SyncChannel] = []
-    /// Each channel's topics, newest activity first (its General is not one).
+    /// The shown channel's topics, newest activity first (its General is not one).
     private(set) var chatTopics: [String: [SyncTopic]] = [:]
-    /// The devices this Mac has private conversations with.
+    /// The devices this Mac has private conversations with (read on a private conversation's page).
     private(set) var directs: [SyncDirect] = []
-    /// Names of devices a private conversation was just started with (no message yet, so not in `directs`).
-    var directNames: [String: String] = [:]
-    /// The channels open in the sidebar (their topics shown under them).
-    var chatExpanded: Set<String> = []
     private(set) var chatMessages: [SyncMessage] = []
     private(set) var chatMembers: [SyncMember] = []
     /// The conversation `chatMessages` and `chatMembers` are of.
@@ -71,22 +53,28 @@ import Observation
     /// The folder whose "Stop syncing" question is open under its page header, and its Trash choice.
     var syncAskRemove: String?
     var syncTrash = false
-    /// Sharing rows per group, newest page only.
-    private(set) var groups: [SeedGroup: [TransferRow]] = [:]
-    private(set) var counts = SharingCounts(popular: 0, active: 0, dormant: 0, error: 0, dead: 0, stopped: 0)
     private(set) var trackerStats: TrackerStats?
     private(set) var daily: [DailyStat] = []
-    /// How many rows of a group are fetched; "Show more" raises it by a page.
-    private var shown: [SeedGroup: Int] = [:]
-    static let page = 150
     @ObservationIgnored private var timer: Timer?
+    @ObservationIgnored private var polling = false
     @ObservationIgnored private var statsFor: String?
     @ObservationIgnored private var ticks = 0
 
-    init(core: Core, section: Section = .downloads) {
+    /// The group folds are remembered per Mac, a convenience only: lost defaults just mean everything opens unfolded.
+    private static let foldsKey = "collapsedGroups"
+
+    /// The app's `Library` (the window controller's), or one of its own (the snapshot renderer, tests).
+    static func makeLibrary(core: Core) -> Library {
+        Library(core: core, folded: UserDefaults.standard.stringArray(forKey: Self.foldsKey) ?? [], clock: MacClock())
+    }
+
+    init(core: Core, library: Library? = nil, section: Section = .downloads) {
         self.core = core
-        self.section = section
-        snapshot = core.snapshot()
+        self.library = library ?? Self.makeLibrary(core: core)
+        self.library.setOpen(open: true)
+        if section != .downloads { self.library.selectPlace(place: section) }
+        view = self.library.model(nowUnixMs: Date().unixMs)
+        snapshot = self.library.snapshot()
         sync = core.syncSnapshot()
         FilesStore.shared.core = core
         FilesStore.shared.onEdited = { [weak self] in self?.refresh() }
@@ -94,60 +82,54 @@ import Observation
     }
 
     func start() {
-        guard timer == nil else { return }
+        guard !polling else { return }
+        polling = true
+        library.setVisible(visible: true)
         FilesStore.shared.resume()
         refresh()
-        let t = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.refresh() }
-        }
-        t.tolerance = 0.2
-        RunLoop.main.add(t, forMode: .common)
-        timer = t
     }
 
     func stop() {
         FilesStore.shared.suspend()
+        polling = false
+        library.setVisible(visible: false)
         timer?.invalidate()
         timer = nil
     }
 
+    /// The window closed: the library forgets what it showed (it opens again as new).
+    func close() {
+        stop()
+        library.setOpen(open: false)
+    }
+
+    var section: Section { view.place }
+
     func refresh() {
-        snapshot = core.snapshot()
-        sync = core.syncSnapshot()
-        let channels = core.chatChannels()
-        if channels != chats { chats = channels }
-        let topics = Dictionary(uniqueKeysWithValues: channels.map { ($0.id, core.chatTopics(channelId: $0.id)) })
-        if topics != chatTopics { chatTopics = topics }
-        let ds = core.chatDirects()
-        if ds != directs { directs = ds }
+        let shown = view.place
+        let next = library.model(nowUnixMs: Date().unixMs)
+        if next.removal != view.removal {
+            // The Remove… question slides in under its row, and out.
+            withAnimation(.snappy(duration: next.removal == nil ? 0.18 : 0.22)) { view = next }
+        } else if next != view {
+            view = next
+        }
+        if let sheet = view.addSheet, sheet != addSheet { addSheet = sheet }
+        snapshot = library.snapshot()
+        // Another place (a click, a new download, a tracker deleted, a channel left): its own state goes.
+        if view.place != shown { placeChanged() }
+        readPages()
         onSnapshot(snapshot)
         ticks += 1
-        if section == .folderSync {
+        if view.page == .folderSync {
             if syncSelection.map({ id in !sync.folders.contains { $0.id == id } }) ?? true { syncSelection = sync.folders.first?.id }
             else {
                 if ticks % 10 == 0 { loadConflicts() }
                 if ticks % 2 == 0 { loadMembers() }
             }
         }
-        if let id = chatID {
-            // A channel left (here or by removal elsewhere) takes its page with it.
-            if chats.contains(where: { $0.id == id }) { loadChatMessages() } else { select(.downloads) }
-        } else if directID != nil {
-            loadChatMessages()
-        }
+        if chatID != nil || directID != nil { loadChatMessages() }
         FilesStore.shared.tick()
-        if let id = trackerID, !snapshot.trackers.contains(where: { $0.id == id }) {
-            select(.sharing)  // the profile was deleted while its tab was open
-            return
-        }
-        guard section == .sharing || trackerID != nil else { return }
-        counts = core.sharingCounts(trackerId: trackerID, category: categoryFilter, text: search)
-        var next: [SeedGroup: [TransferRow]] = [:]
-        for g in SeedGroup.allCases where counts.count(g) > 0 {
-            let limit = UInt32(shown[g] ?? Self.page)
-            next[g] = core.sharingRows(query: RowQuery(group: g, trackerId: trackerID, text: search, category: categoryFilter, offset: 0, limit: limit))
-        }
-        groups = next
         if let id = trackerID {
             // Lifetime totals change slowly and reading them forces a database flush: every 5 s.
             if statsFor != id || ticks % 5 == 0 {
@@ -158,6 +140,42 @@ import Observation
         } else {
             statsFor = nil
             trackerStats = nil
+        }
+        schedule()
+    }
+
+    /// The next refresh, as the model asks (none while the window cannot be seen).
+    private func schedule() {
+        timer?.invalidate()
+        timer = nil
+        guard polling, let ms = view.refreshMs else { return }
+        let t = Timer(timeInterval: Double(ms) / 1000, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated { self?.refresh() }
+        }
+        t.tolerance = Double(view.refreshLeewayMs) / 1000
+        RunLoop.main.add(t, forMode: .common)
+        timer = t
+    }
+
+    /// What the page shown reads for itself: Folder Sync its folders (and the channels for Open Chat), a conversation
+    /// its channel and topics, a private conversation the devices.
+    private func readPages() {
+        switch view.page {
+        case .folderSync:
+            sync = core.syncSnapshot()
+            let channels = core.chatChannels()
+            if channels != chats { chats = channels }
+        case .conversation, .missing:
+            let channels = core.chatChannels()
+            if channels != chats { chats = channels }
+            let topics = chatID.map { [$0: core.chatTopics(channelId: $0)] } ?? [:]
+            if topics != chatTopics { chatTopics = topics }
+            if directID != nil {
+                let ds = core.chatDirects()
+                if ds != directs { directs = ds }
+            }
+        default:
+            break
         }
     }
 
@@ -179,12 +197,6 @@ import Observation
 
     var chatTopic: SyncTopic? { chatTopicID.flatMap { t in chatID.flatMap { chatTopics[$0] }?.first { $0.id == t } } }
 
-    /// The sidebar's private conversations: every one with messages, plus the one just started (no message yet).
-    var directRows: [SyncDirect] {
-        guard let id = directID, !directs.contains(where: { $0.deviceId == id }) else { return directs }
-        return [SyncDirect(deviceId: id, name: directName, user: "", online: false, unread: 0, lastMessageS: nil)] + directs
-    }
-
     /// The device whose private conversation is shown.
     var directID: String? {
         if case .direct(let id) = section { return id }
@@ -193,11 +205,18 @@ import Observation
 
     var direct: SyncDirect? { directID.flatMap { id in directs.first { $0.deviceId == id } } }
 
-    /// The name of the device of the shown private conversation.
-    var directName: String {
-        guard let id = directID else { return "" }
-        return direct.map { ChatText.named($0.name, user: $0.user) } ?? directNames[id] ?? "Unnamed device"
+    /// The name of the device of the shown private conversation (the page's title).
+    var directName: String { directID == nil ? "" : view.title }
+
+    /// Opens or closes a channel in the sidebar (its topics under it).
+    func setChannelOpen(_ place: Section, _ open: Bool) {
+        guard case .chat(let id, _) = place else { return }
+        library.setChannelOpen(channelId: id, open: open)
+        refresh()
     }
+
+    /// A private conversation was just started with this device (no message yet): its name until the core lists it.
+    func noteDirectName(_ device: String, _ name: String) { library.noteDirectName(deviceId: device, name: name) }
 
     /// Reads the shown conversation's latest messages, and marks them read (the page is on screen when this runs).
     func loadChatMessages() {
@@ -206,7 +225,7 @@ import Observation
         let list: [SyncMessage]
         switch place {
         case .chat(let id, let topic):
-            if topic != nil, !chatExpanded.contains(id) { chatExpanded.insert(id) }  // a topic shown has its channel open
+            guard chat != nil else { return }
             list = core.chatMessages(id: id, topic: topic, before: nil, limit: 300)
             let unread = topic == nil ? chat.map { ChatText.generalUnread($0, chatTopics[id] ?? []) } ?? 0 : (chatTopic?.unread ?? 0)
             if unread > 0 { core.chatMarkRead(id: id, topic: topic) }
@@ -254,85 +273,160 @@ import Observation
         syncAskRemove = askRemove ? id : nil
     }
 
+    /// "Show more" under a Sharing group: another page of its rows.
     func showMore(_ g: SeedGroup) {
-        shown[g] = (shown[g] ?? Self.page) + Self.page
+        library.showMore(group: g)
         refresh()
     }
 
-    func remaining(_ g: SeedGroup) -> Int { max(0, counts.count(g) - (groups[g]?.count ?? 0)) }
+    /// A new download arrived while the user was in Settings or editing: Downloads in the sidebar carries a quiet dot.
+    var downloadsFlag: Bool { view.sidebar.places.first?.flag != nil }
 
-    /// A torrent became a download (SPEC 8.3): the window goes to Downloads, selects its row and scrolls to
-    /// it, with Get Info and the sheets closed. Not while the user is in Settings or in the middle of an
-    /// edit: then only Downloads in the sidebar is flagged. Returns whether the window switched.
-    @discardableResult func showNewDownload(_ id: String) -> Bool {
-        if section == .settings || isBusy() {
-            downloadsFlag = true
-            return false
-        }
-        // The user is ticking files in this torrent's open list and the torrent stays in this tab (Downloads, or
-        // its own tracker's): the window must not jump, scroll to the row or clear the file selection under them.
-        if Self.staysInPlace(id, section: section, trackerInfo: trackerInfo, open: FilesStore.shared.isExpanded(id), snapshot: snapshot) { return false }
-        if !search.isEmpty { search = "" }
-        adding = false
-        if section != .downloads || trackerInfo { select(.downloads) } else { FilesStore.shared.clearSelection(); infoID = nil }
-        selection = [id]
-        selectionAnchor = id
-        scrollCount += 1
-        scrollRequest = ScrollRequest(id: id, n: scrollCount)
-        return true
+    /// What the app knows that the core does not: its own inline edits and the file lists under the rows.
+    var context: WindowContext {
+        let files = FilesStore.shared
+        return WindowContext(editing: editing(), openLists: Array(files.expanded), fileTorrent: files.selectedTorrent,
+                             fileRows: UInt32(files.selectedNodes.count))
     }
 
-    /// Whether a download that arrives because its files were ticked in the window's own open list needs no
-    /// takeover: it will be listed in the tab already shown.
-    static func staysInPlace(_ id: String, section: Section, trackerInfo: Bool, open: Bool, snapshot s: Snapshot) -> Bool {
-        guard open, !trackerInfo else { return false }
-        switch section {
-        case .downloads: return true
-        case .tracker(let t): return (s.allDownloading + s.allQueued).contains { $0.id == id && $0.trackerId == t }
-        default: return false
-        }
+    /// A torrent became a download (SPEC 8.3): the core decides whether the window goes to it or only flags Downloads.
+    @discardableResult func newDownload(_ id: String) -> NewDownloadOutcome {
+        let outcome = library.newDownload(rowId: id, context: context)
+        if outcome == .shown { FilesStore.shared.clearSelection() }
+        refresh()
+        return outcome
     }
 
-    func scrollDone(_ r: ScrollRequest) { if scrollRequest == r { scrollRequest = nil } }
+    /// A click on the torrent's title in the notifier: as a new download, but Settings gives way (an open add sheet
+    /// keeps the window and its text).
+    @discardableResult func showTorrent(_ id: String) -> NewDownloadOutcome {
+        let outcome = library.showTorrent(rowId: id, context: context)
+        if outcome == .shown { FilesStore.shared.clearSelection() }
+        refresh()
+        return outcome
+    }
+
+    /// The window just opened (`plain`: with no place, row or Settings asked for): on the download that arrived meanwhile.
+    func takeArrival(plain: Bool) {
+        if library.takeArrival(plain: plain, context: context) == .shown { FilesStore.shared.clearSelection() }
+        refresh()
+    }
+
+    func scrollDone(_ request: UInt32) { library.scrollDone(request: request) }
 
     func select(_ s: Section) {
-        if s == .downloads { downloadsFlag = false }
-        if s != section {
-            statsFor = nil; trackerStats = nil; groups = [:]
-            FilesStore.shared.collapseAll()  // a tab opens with every torrent closed (SPEC 8.3)
-        }
-        section = s
-        trackerInfo = false
-        selection = []
+        library.selectPlace(place: s)
         FilesStore.shared.clearSelection()  // a file picked in the list that just left is not selected any more
-        selectionAnchor = nil
-        infoID = nil
-        shown = [:]
-        categoryFilter = nil  // like the open file lists, a filter does not follow to another tab
         refresh()
     }
 
-    /// The section Get Info for `id` belongs in. Only a torrent that is still downloading or queued is
-    /// Downloads' own; one that just finished is listed in both sections ("Recently Finished" and Sharing),
-    /// so the user stays where they are. (This used to ask "is it in downloading + queued + recent?",
-    /// which sent every recently finished seed to Downloads.)
-    func section(forInfo id: String) -> Section {
-        let s = snapshot
-        if case .tracker(let t) = section,
-           (s.allDownloading + s.allQueued + s.allRecent + visibleRows).contains(where: { $0.id == id && $0.trackerId == t }) { return section }
-        if (s.downloading + s.queued).contains(where: { $0.id == id }) { return .downloads }
-        if s.recent.contains(where: { $0.id == id }) { if case .sharing = section { return .sharing }
-            return .downloads
-        }
-        return .sharing
+    /// Another place is shown: every torrent closes (a tab opens with every torrent closed, SPEC 8.3) and the tracker's
+    /// statistics go.
+    private func placeChanged() {
+        statsFor = nil; trackerStats = nil
+        FilesStore.shared.collapseAll()
     }
 
-    /// Selects the row and opens its Get Info in the section it belongs to (usually the one already shown).
+    // MARK: Selection, Get Info, Remove… and keys (the core's rules)
+
+    /// The selected rows on screen, in list order.
+    var selection: [String] { view.selection }
+
+    /// A click on a row (`group`: the group it is listed in); a file row picked before is deselected.
+    func click(group: String, id: String, command: Bool, shift: Bool) {
+        FilesStore.shared.clearSelection()
+        library.clickRow(groupKey: group, rowId: id, command: command, shift: shift)
+        refresh()
+    }
+
+    func setSelection(_ ids: [String]) {
+        library.setSelection(rowIds: ids)
+        refresh()
+    }
+
+    /// The transfers a context menu on this row acts on.
+    func menuRows(_ id: String) -> [TransferRow] { library.menuRows(rowId: id) }
+
+    /// The row whose Get Info is open.
+    var infoRow: String? { view.list?.groups.lazy.flatMap(\.rows).first { $0.infoOpen }?.id }
+
+    func openInfo(_ id: String?) {
+        library.setInfo(rowId: id)
+        refresh()
+    }
+
+    /// The popover of this row was dismissed.
+    func infoClosed(_ id: String) {
+        library.infoClosed(rowId: id)
+        refresh()
+    }
+
+    func askRemoval(_ rows: [TransferRow], deleteFiles: Bool) {
+        library.askRemoval(rows: rows, deleteFiles: deleteFiles)
+        refresh()
+    }
+
+    func cancelRemoval() {
+        library.cancelRemoval()
+        refresh()
+    }
+
+    func confirmRemoval() {
+        library.confirmRemoval()
+        refresh()
+    }
+
+    /// A key press as the core decides it; the parts about the file lists are run here. Returns whether it was handled.
+    func key(_ key: LibraryKey, _ modifiers: KeyModifiers = KeyModifiers(shift: false, command: false, option: false, control: false),
+             scope: KeyScope) -> Bool {
+        let outcome = library.key(key: key, modifiers: modifiers, scope: scope, context: context)
+        let files = FilesStore.shared
+        switch outcome.action {
+        case .toggleFileRows: files.toggleSelected()
+        case .openFileFolder: _ = files.openSelected()
+        case .closeFileFolder: if let id = files.closeSelected().selectTorrent { library.setSelection(rowIds: [id]) }
+        case let .openFiles(id): files.expand(id)
+        case let .closeFiles(id): files.collapse(id)
+        case .clearFileSelection: files.clearSelection()
+        case nil: break
+        }
+        refresh()
+        return outcome.handled
+    }
+
+    /// The search text of the lists.
+    func setSearch(_ text: String) {
+        library.setSearch(text: text)
+        refresh()
+    }
+
+    func showAddSheet() {
+        library.showAddSheet()
+        refresh()
+    }
+
+    func closeAddSheet() {
+        library.closeAddSheet()
+        refresh()
+    }
+
+    /// The sheet's field changed.
+    func setAddSheetText(_ text: String) {
+        library.setAddSheetText(text: text)
+        refresh()
+    }
+
+    /// The tracker's Info page is shown instead of its torrent list (the sidebar item stays selected).
+    var trackerInfo: Bool {
+        get { view.page == .trackerInfo }
+        set { library.setTrackerInfo(on: newValue); refresh() }
+    }
+
+    /// Selects the row in the place its Get Info belongs to (usually the one already shown).
     func reveal(id: String) {
-        let target = section(forInfo: id)
-        if target != section { select(target) }
-        selection = [id]
-        selectionAnchor = id
+        library.revealRow(rowId: id)
+        FilesStore.shared.clearSelection()
+        refresh()
     }
 
     var tracker: TrackerSummary? {
@@ -345,151 +439,26 @@ import Observation
         return nil
     }
 
-    var title: String {
-        switch section {
-        case .tracker: tracker?.name ?? "Tracker"
-        case .downloads: "Downloads"
-        case .sharing: "Sharing"
-        case .folderSync: "Folder Sync"
-        case .chat: [chat?.name ?? "Channel", chatTopic?.title].compactMap { $0 }.joined(separator: " › ")
-        case .direct: directName
-        case .settings: "Settings"
-        }
-    }
-
-    /// The calm line under the page title: "Favorite tracker" / "Tracker" on a tracker tab (no count: its
-    /// figures are in the header), else the section's own line.
-    var summary: String {
-        switch section {
-        case .tracker(let id):
-            guard let t = tracker else { return id }
-            if trackerInfo { return "Info" }
-            return t.favorite ? "Favorite tracker" : "Tracker"
-        case .downloads:
-            let s = snapshot
-            let held = s.downloading.filter(\.awaitingChoice).count
-            let starting = s.downloading.filter { $0.pending != nil }.count
-            var parts = ["\(s.downloading.count - held - starting) active", "\(s.queued.count) up next"]
-            if held > 0 { parts.append("\(held) to choose") }
-            if starting > 0 { parts.append("\(starting) starting") }
-            let today = s.recent.count
-            if today > 0 { parts.append("\(today) finished today") }
-            parts.append(Self.rates(s))
-            return parts.joined(separator: " · ")
-        case .sharing:
-            return "\(Fmt.count(snapshot.sharingTotal, "torrent")) · \(Self.rates(snapshot))"
-        case .folderSync:
-            return SyncText.summary(sync) + (sync.deviceName.isEmpty ? "" : " · This Mac: \(sync.deviceName)")
-        case .chat:
-            if let t = chatTopic { return ChatText.topicLine(t) }
-            return chat.map(ChatText.header) ?? "No longer on this Mac"
-        case .direct:
-            return ChatText.directLine(online: direct?.online ?? false)
-        case .settings:
-            return "Settings"
-        }
-    }
-
-    /// The tracker's torrents moving now, bytes/s: its downloads and the sharing rows fetched for the tab (the
-    /// same rows the tab lists, so the line agrees with them).
-    var trackerRates: (down: UInt64, up: UInt64) {
-        guard let id = trackerID else { return (0, 0) }
-        let s = snapshot
-        let rows = (s.allDownloading + s.allQueued + SeedGroup.allCases.flatMap { groups[$0] ?? [] })
-        return Self.sumRates(rows, tracker: id)
-    }
-
-    static func sumRates(_ rows: [TransferRow], tracker: String) -> (down: UInt64, up: UInt64) {
-        var seen = Set<String>()
-        var down: UInt64 = 0, up: UInt64 = 0
-        for r in rows where r.trackerId == tracker && r.kind == .torrent && seen.insert(r.id).inserted {
-            down += r.downRate
-            up += r.upRate
-        }
-        return (down, up)
-    }
-
-    /// "↓ 2.1 MB/s · ↑ 340 KB/s": both rates in the toolbar line of Downloads and Sharing.
-    static func rates(_ s: Snapshot) -> String { "↓ \(Fmt.rate(s.downRate)) · ↑ \(Fmt.rate(s.upRate))" }
+    /// The list is filtered to this category (the pill on a row sets it, the chip above the list clears it).
+    var categoryFilter: Category? { view.list?.filterChip?.category }
 
     /// A click on a row's category pill: filter to it, or clear when it already is the filter.
-    func toggleCategory(_ c: Category) { categoryFilter = categoryFilter == c ? nil : c }
-
-    func matches(_ row: TransferRow) -> Bool {
-        (categoryFilter == nil || row.category == categoryFilter)
-            && (search.isEmpty || row.name.localizedCaseInsensitiveContains(search) || row.displayName.localizedCaseInsensitiveContains(search))
-            && (trackerID == nil || row.trackerId == trackerID)
+    func toggleCategory(_ c: Category) {
+        library.toggleCategory(category: c)
+        refresh()
     }
 
-    /// All rows currently on screen, for resolving selections to rows.
-    var visibleRows: [TransferRow] {
-        let s = snapshot
-        switch section {
-        case .downloads: return (s.downloading + s.queued + s.recent).filter(matches)
-        case .sharing: return SeedGroup.allCases.flatMap { groups[$0] ?? [] }
-        case .tracker:
-            let seeds = SeedGroup.allCases.flatMap { groups[$0] ?? [] }
-            let seeding = Set(seeds.map(\.id))
-            // As the tab lists them: a finished torrent is in Sharing; only a finished direct download stays under Recently Finished.
-            let top = (s.allDownloading + s.allQueued + s.allRecent.filter { $0.kind != .torrent && !seeding.contains($0.id) }).filter(matches)
-            return top + seeds
-        case .settings, .folderSync, .chat, .direct: return []
-        }
+    func clearCategory() {
+        library.clearCategory()
+        refresh()
     }
 
-    /// "sharing.dormant", "downloads.recent"; every tracker tab shares "tracker.<group>".
-    func collapseKey(_ group: String) -> String {
-        if case .tracker = section { return "tracker.\(group)" }
-        return "\(section).\(group)"
-    }
-    func isCollapsed(_ group: String) -> Bool { collapsed.contains(collapseKey(group)) }
+    /// The rows on screen (QA).
+    var visibleRows: [TransferRow] { view.list?.groups.flatMap { $0.rows.map(\.transfer) } ?? [] }
+
+    /// Folds or unfolds a group of the list shown; the folds are remembered. Its rows leave the selection.
     func toggleCollapsed(_ group: String) {
-        let k = collapseKey(group)
-        if collapsed.contains(k) { collapsed.remove(k) } else { collapsed.insert(k) }
+        UserDefaults.standard.set(library.toggleFold(key: group), forKey: Self.foldsKey)
+        refresh()
     }
-
-    func rows(for ids: Set<String>) -> [TransferRow] {
-        visibleRows.filter { ids.contains($0.id) }
-    }
-}
-
-extension LibraryModel {
-    /// ⇧-click: the ids from the anchor's row to the clicked occurrence, in list order. `order` lists the
-    /// visible rows as (group, id) pairs, so a torrent shown twice resolves to the occurrence clicked.
-    /// With no (visible) anchor the clicked row alone is selected.
-    nonisolated static func range(order: [(group: String, id: String)], anchor: String?, clicked: (group: String, id: String)) -> Set<String> {
-        guard let b = order.firstIndex(where: { $0.group == clicked.group && $0.id == clicked.id }) else { return [clicked.id] }
-        // The anchor's occurrence nearest the click (a duplicate in another group must not stretch the range).
-        let anchors = order.indices.filter { order[$0].id == anchor }
-        guard let a = anchors.min(by: { abs($0 - b) < abs($1 - b) }) else { return [clicked.id] }
-        return Set(order[min(a, b)...max(a, b)].map(\.id))
-    }
-
-    /// A click on a row: plain selects it, ⌘ toggles it, ⇧ extends from the anchor. `order` is the visible rows.
-    func click(group: String, id: String, command: Bool, shift: Bool, order: [(group: String, id: String)]) {
-        if command {
-            if selection.contains(id) { selection.remove(id) } else { selection.insert(id) }
-            selectionAnchor = id
-        } else if shift, let anchor = selectionAnchor, order.contains(where: { $0.id == anchor }) {
-            selection = Self.range(order: order, anchor: anchor, clicked: (group, id))
-        } else {
-            selection = [id]
-            selectionAnchor = id
-        }
-    }
-
-    /// Selection after rows left the screen (a folded group): they are dropped, and so is an anchor among them.
-    func drop(_ ids: [String]) {
-        selection.subtract(ids)
-        if let a = selectionAnchor, ids.contains(a) { selectionAnchor = nil }
-    }
-}
-
-extension Snapshot {
-    /// Every download, including those of a tracker in hidden mode (SPEC 7E.5). `downloading`, `queued`
-    /// and `recent` are what the Downloads tab and the menu list; a tracker's own tab, the sleep assertion,
-    /// the chooser and the notifications need all of them.
-    var allDownloading: [TransferRow] { downloading + hiddenDownloading }
-    var allQueued: [TransferRow] { queued + hiddenQueued }
-    var allRecent: [TransferRow] { recent + hiddenRecent }
 }

@@ -65,9 +65,9 @@ struct TrackerInfoPage: View {
     @State private var seeding = 0
     @State private var downloading = 0
     @State private var busiest: TransferRow?
-    /// The tracker's torrents moving now, bytes/s, against its shared caps.
-    @State private var nowDown: UInt64 = 0
-    @State private var nowUp: UInt64 = 0
+    /// The tracker's torrents moving now, bytes/s, against its shared caps (all of them: the core counts).
+    private var nowDown: UInt64 { model.view.trackerRates?.down ?? 0 }
+    private var nowUp: UInt64 { model.view.trackerRates?.up ?? 0 }
     /// The folders being edited, until saved or reverted (a path typed half way must not move anything).
     @State private var folderDraft: ProfileRecord?
     /// Peer exchange for this private tracker (SPEC 7B.4) and the master switch in Settings > Network.
@@ -111,12 +111,6 @@ struct TrackerInfoPage: View {
             while !Task.isCancelled {
                 load()
                 try? await Task.sleep(for: .seconds(10))
-            }
-        }
-        .task(id: tracker.id) {
-            while !Task.isCancelled {
-                rates()
-                try? await Task.sleep(for: .seconds(2))
             }
         }
         .onChange(of: model.snapshot.trackers.map(\.count)) { _, _ in tally() }
@@ -209,7 +203,7 @@ struct TrackerInfoPage: View {
         HStack(alignment: .firstTextBaseline, spacing: 10) {
             Text(k).font(.system(size: 12)).foregroundStyle(.secondary).frame(width: 120, alignment: .leading)
             RateField(bytes: limit)
-            Text(RateText.line(rate: now, limit: limit.wrappedValue))
+            Text(rateWithLimitLine(rate: now, limit: limit.wrappedValue))
                 .font(.system(size: 12)).monospacedDigit().foregroundStyle(.secondary)
         }
     }
@@ -303,19 +297,11 @@ struct TrackerInfoPage: View {
         facts = TrackerFacts.summarize(lines)
     }
 
-    private func rates() {
-        let s = model.snapshot
-        let rows = s.allDownloading + s.allQueued + commands.core.sharingRows(query: RowQuery(group: nil, trackerId: tracker.id, text: "", offset: 0, limit: 200))
-        let mine = rows.filter { $0.trackerId == tracker.id && $0.kind == .torrent }
-        nowDown = mine.reduce(0) { $0 + $1.downRate }
-        nowUp = mine.reduce(0) { $0 + $1.upRate }
-    }
-
     private func tally() {
         let s = model.snapshot
         downloading = (s.allDownloading + s.allQueued).filter { $0.trackerId == tracker.id }.count
         let c = commands.core.sharingCounts(trackerId: tracker.id, category: nil, text: "")
-        seeding = SeedGroup.allCases.reduce(0) { $0 + c.count($1) }
+        seeding = c.total
     }
 
     static func ago(_ unix: UInt64) -> String {

@@ -91,8 +91,22 @@ pub struct PullReport {
     pub waiting: u64,
     /// Steps that failed, and why (retried later).
     pub failed: Vec<(String, String)>,
+    /// Steps this system cannot do (a symbolic link where this user may not make one). Not retried
+    /// while the path's version stays the same: see [`Puller::unsupported`].
+    pub unsupported: Vec<Unsupported>,
     /// Conflict copies made (their paths).
     pub conflicts: Vec<String>,
+}
+
+/// A step this system cannot do, at the version it was tried at.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Unsupported {
+    /// The path.
+    pub path: String,
+    /// The version that was wanted.
+    pub version: Version,
+    /// Why, for the folder's issues.
+    pub why: String,
 }
 
 /// Everything a pull needs.
@@ -117,6 +131,9 @@ pub struct Puller<'a> {
     pub archive: bool,
     /// Most bytes asked of the source in one call.
     pub window: u64,
+    /// Steps found unsupported before, by path: skipped (and reported again) while the wanted version
+    /// is the same one.
+    pub unsupported: &'a BTreeMap<String, Unsupported>,
     /// Records waiting for their directories to be durable (start with `Default::default()`).
     pub(crate) round: RefCell<Round>,
 }
@@ -137,11 +154,17 @@ enum Skip {
     Rescan,
     Waiting,
     Failed(String),
+    /// The system cannot do it; trying again would fail the same way.
+    Unsupported(String),
 }
 
 impl From<io::Error> for Skip {
     fn from(e: io::Error) -> Self {
-        Skip::Failed(e.to_string())
+        if e.kind() == io::ErrorKind::Unsupported {
+            Skip::Unsupported(e.to_string())
+        } else {
+            Skip::Failed(e.to_string())
+        }
     }
 }
 
@@ -222,6 +245,20 @@ impl Puller<'_> {
                 Step::MkDir(p) | Step::Fetch(p) | Step::Delete(p) | Step::Absorb(p) => (p.clone(), None),
                 Step::Rename { from, to } => (to.clone(), Some(from.as_str())),
             };
+            let wanted = needs.get(&path).map(|n| &n.file.info.version);
+            if let Some(u) = self.unsupported.get(&path).filter(|u| Some(&u.version) == wanted) {
+                report.unsupported.push(u.clone());
+                continue;
+            }
+            // A name this disk cannot hold is not tried: it would fail on every round, and a folder
+            // with a trailing dot or space would even be made under another name on Windows.
+            if !matches!(step, Step::Delete(_))
+                && let Some(v) = wanted
+                && let Some(why) = path.split('/').find_map(|c| self.fs.name_problem(c))
+            {
+                report.unsupported.push(Unsupported { path, version: v.clone(), why: why.to_owned() });
+                continue;
+            }
             // A step reads the records of its paths: those must not be waiting.
             if self.pending(&path) || other.is_some_and(|f| self.pending(f)) {
                 self.commit(store)?;
@@ -231,6 +268,10 @@ impl Puller<'_> {
                 Err(Skip::Rescan) => report.rescan.push(path),
                 Err(Skip::Waiting) => report.waiting += 1,
                 Err(Skip::Failed(why)) => report.failed.push((path, why)),
+                Err(Skip::Unsupported(why)) => match wanted {
+                    Some(v) => report.unsupported.push(Unsupported { path, version: v.clone(), why }),
+                    None => report.failed.push((path, why)),
+                },
             }
             if self.round.borrow().records.len() >= COMMIT_EVERY {
                 self.commit(store)?;

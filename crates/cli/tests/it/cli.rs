@@ -136,7 +136,7 @@ fn dev_mode_from_the_cli() {
     let d = Daemon::start(root.path(), "d", "full");
     let s = d.json(&["dev", "status"]);
     assert_eq!(s["developer_mode"], false);
-    assert!(s["log_path"].as_str().unwrap().ends_with("logs/trackers.log"));
+    assert!(std::path::Path::new(s["log_path"].as_str().unwrap()).ends_with(std::path::Path::new("logs").join("trackers.log")));
     let on = d.json(&["dev", "on"]);
     assert_eq!(on["developer_mode"], true);
     let cfg = std::fs::read_to_string(d.state.join("config.toml")).unwrap();
@@ -396,7 +396,7 @@ fn only_sim_torrents_may_announce_to_a_loopback_tracker() {
     // Without Developer mode the app refuses to mark anything.
     assert_eq!(d.cli(&["dev", "off"]).code, 0);
     let mut c = std::process::Command::new(BIN);
-    c.arg("--socket").arg(&d.socket).args(["--json", "--yes-i-know", "sim", "add", "single", "--size", "50KB"]).env("HOME", root.path().join("home")).env("TMPDIR", root.path().join("tmp"));
+    c.arg("--socket").arg(&d.socket).args(["--json", "--yes-i-know", "sim", "add", "single", "--size", "50KB"]).env("HOME", root.path().join("home")).env("TMPDIR", root.path().join("tmp")).env("TMP", root.path().join("tmp")).env("TEMP", root.path().join("tmp"));
     let o = c.output().unwrap();
     assert!(String::from_utf8_lossy(&o.stderr).contains("Developer mode"), "{}", String::from_utf8_lossy(&o.stderr));
     sim(root.path(), &d, &["sim", "clear"]);
@@ -408,9 +408,9 @@ fn sim_host_ends_with_its_daemon() {
     let mut d = sim_daemon(root.path(), "o");
     assert_eq!(sim(root.path(), &d, &["sim", "add", "single", "--size", "100KB"]).code, 0);
     let host_sock = std::fs::read_dir(root.path().join("tmp").join("seedwell-sim")).unwrap().next().unwrap().unwrap().path().join("host.sock");
-    assert!(host_sock.exists());
+    assert!(trs_platform::ipc::is_served(&host_sock));
     d.terminate();
-    wait_until(30, "the sim host to follow the daemon", || (!host_sock.exists()).then_some(()));
+    wait_until(30, "the sim host to follow the daemon", || (!trs_platform::ipc::is_served(&host_sock)).then_some(()));
 }
 
 fn tree_files(dir: &Path) -> Vec<String> {

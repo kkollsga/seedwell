@@ -18,6 +18,7 @@ mod net;
 mod ranges;
 mod session;
 mod sidecar;
+mod small;
 mod task;
 mod types;
 mod util;
@@ -26,6 +27,7 @@ pub use error::Error;
 pub use gate::{BoxFuture, RateGate, TokenBucket, Unlimited};
 pub use ranges::RangeSet;
 pub use sidecar::Sidecar;
+pub use small::{SmallResponse, get_small};
 pub use task::{DownloadTask, Downloader, discard_staged, list_staged};
 pub use types::{
     DownloadRequest, DownloaderConfig, Event, ProbeInfo, Progress, RestartReason, StagedInfo, State,

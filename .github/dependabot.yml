@@ -9,6 +9,11 @@ updates:
         update-types: [minor, patch]
     # Major versions come as one pull request per crate, so CI shows which one breaks the build.
     open-pull-requests-limit: 10
+    ignore:
+      # UniFFI stays at what uniffi-bindgen-cs (the Windows app's C# bindings) supports: 0.31 for now.
+      # Remove this when a uniffi-bindgen-cs release supports a newer UniFFI, and move both together.
+      - dependency-name: uniffi
+        versions: [">=0.32"]
   - package-ecosystem: github-actions
     directory: /
     schedule:

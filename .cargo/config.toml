@@ -3,3 +3,9 @@
 # dependencies (ring) are built for the macOS of the build machine (26 on CI), which the linker warns about and an
 # older Mac may not load. Ignored on other systems.
 MACOSX_DEPLOYMENT_TARGET = "15.0"
+
+# Windows: the C runtime linked into every Rust binary (trs_ffi.dll, seedwell.exe). Without it they need
+# VCRUNTIME140.dll, which the release zip does not carry and a PC without the Visual C++ Redistributable lacks: the app
+# could not load its core and the CLI would not start. Static, they need only Windows' own DLLs.
+[target.'cfg(all(windows, target_env = "msvc"))']
+rustflags = ["-C", "target-feature=+crt-static"]

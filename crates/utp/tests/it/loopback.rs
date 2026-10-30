@@ -337,8 +337,13 @@ async fn readiness_api_behaves_like_a_tcp_stream() {
 async fn a_peer_on_one_of_our_own_addresses_counts_as_this_host() {
     // The benchmark harness dials the machine's LAN address, which the kernel routes over lo0.
     let Some(lan) = lan_address() else { return };
-    let a = UtpSocket::bind("0.0.0.0:0".parse().unwrap(), Config::default()).await.unwrap();
-    let b = UtpSocket::bind("0.0.0.0:0".parse().unwrap(), Config::default()).await.unwrap();
+    // A socket the LAN can reach makes Windows Firewall ask: there only when asked for.
+    if cfg!(windows) && std::env::var_os("SEEDWELL_TEST_LAN").is_none() {
+        eprintln!("skipped on Windows (it listens on {lan}); SEEDWELL_TEST_LAN=1 runs it");
+        return;
+    }
+    let a = UtpSocket::bind(SocketAddr::new(lan, 0), Config::default()).await.unwrap();
+    let b = UtpSocket::bind(SocketAddr::new(lan, 0), Config::default()).await.unwrap();
     let to = SocketAddr::new(lan, b.local_addr().port());
     let (c, s) = tokio::join!(a.connect(to), b.accept());
     let (c, s) = (c.unwrap(), s.unwrap().0);

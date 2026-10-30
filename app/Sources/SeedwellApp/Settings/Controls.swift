@@ -89,7 +89,7 @@ enum GoalTag: String, CaseIterable, Identifiable {
 extension GoalKind {
     var tag: GoalTag {
         switch self {
-        case .ratio: .ratio
+        case .ratioOnly: .ratio
         case .time: .time
         case .ratioOrTime: .either
         case .ratioAndTime: .both
@@ -99,7 +99,7 @@ extension GoalKind {
     }
     var ratioValue: Double {
         switch self {
-        case .ratio(let r), .ratioOrTime(let r, _), .ratioAndTime(let r, _): r
+        case .ratioOnly(let r), .ratioOrTime(let r, _), .ratioAndTime(let r, _): r
         default: 1.0
         }
     }
@@ -112,7 +112,7 @@ extension GoalKind {
     func with(tag: GoalTag) -> GoalKind {
         let (r, s) = (ratioValue, secsValue)
         switch tag {
-        case .ratio: return .ratio(ratio: r)
+        case .ratio: return .ratioOnly(ratio: r)
         case .time: return .time(secs: s)
         case .either: return .ratioOrTime(ratio: r, secs: s)
         case .both: return .ratioAndTime(ratio: r, secs: s)
@@ -122,7 +122,7 @@ extension GoalKind {
     }
     func with(ratio: Double) -> GoalKind {
         switch self {
-        case .ratio: .ratio(ratio: ratio)
+        case .ratioOnly: .ratioOnly(ratio: ratio)
         case .ratioOrTime(_, let s): .ratioOrTime(ratio: ratio, secs: s)
         case .ratioAndTime(_, let s): .ratioAndTime(ratio: ratio, secs: s)
         default: self
@@ -141,7 +141,7 @@ extension GoalKind {
     var summary: String {
         func d(_ s: UInt64) -> String { s % 86_400 == 0 ? "\(s / 86_400) days" : "\(max(1, s / 3600)) h" }
         switch self {
-        case .ratio(let r): return "ratio \(Fmt.goal(r))"
+        case .ratioOnly(let r): return "ratio \(Fmt.goal(r))"
         case .time(let s): return d(s)
         case .ratioOrTime(let r, let s): return "ratio \(Fmt.goal(r)) or \(d(s))"
         case .ratioAndTime(let r, let s): return "ratio \(Fmt.goal(r)) and \(d(s))"

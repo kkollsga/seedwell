@@ -145,7 +145,7 @@ pub fn pick<'a>(all: &'a [SyncFolderDto], channel_id: &str, channel_name: &str, 
         Some(v) => {
             let v = v.trim();
             all.iter().find(|f| f.id == v || f.name.eq_ignore_ascii_case(v)).or_else(|| all.iter().find(|f| v.len() >= 4 && f.id.starts_with(v))).ok_or_else(|| {
-                CliError::plain(3, format!("no synced folder {v} on this Mac (seedwell sync list: {})", all.iter().map(|f| f.name.as_str()).collect::<Vec<_>>().join(", ")))
+                CliError::plain(3, format!(concat!("no synced folder {v} on this ", trs_platform::computer!(), " (seedwell sync list: {})"), all.iter().map(|f| f.name.as_str()).collect::<Vec<_>>().join(", "), v = v))
             })?
         }
         None => all.iter().find(|f| f.channel_id.as_deref() == Some(channel_id)).ok_or_else(|| {
@@ -159,7 +159,7 @@ pub fn pick<'a>(all: &'a [SyncFolderDto], channel_id: &str, channel_name: &str, 
         })?,
     };
     if f.access == "read_only" || f.access == "read" {
-        return Err(CliError::plain(2, format!("this Mac may only read {}: pass the files through a folder it may write (--via FOLDER)", f.name)));
+        return Err(CliError::plain(2, format!(concat!("this ", trs_platform::computer!(), " may only read {}: pass the files through a folder it may write (--via FOLDER)"), f.name)));
     }
     Ok(f)
 }
@@ -327,7 +327,7 @@ mod tests {
         let files = [src.path().join("graph.bin").display().to_string(), src.path().join("notes.md").display().to_string()];
         let pass = put(&folder, "AJA5NYA-X2SCCL3", "Studio Mac", "kglite", "mcp-servers", &files).unwrap();
         let dir = synced.path().join(&pass.rel);
-        assert_eq!(statuses(&dir).iter().map(|s| (s.computer.as_str(), s.state.as_str())).collect::<Vec<_>>(), [("Studio Mac", "sent")], "this Mac sent it");
+        assert_eq!(statuses(&dir).iter().map(|s| (s.computer.as_str(), s.state.as_str())).collect::<Vec<_>>(), [("Studio Mac", "sent")], concat!("this ", trs_platform::computer!(), " sent it"));
         assert_eq!(words(&statuses(&dir)), "", "nobody else yet");
         std::fs::write(dir.join(".status-K2MSCFE"), "computer: Laptop\nstate: arrived\nat: 1800000000\n").unwrap();
         std::fs::write(dir.join(".status-QKZ4XNA"), "computer: iMac\nstate: receiving\nat: 1800000001\n").unwrap();

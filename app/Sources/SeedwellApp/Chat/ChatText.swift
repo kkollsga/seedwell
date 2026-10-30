@@ -4,48 +4,16 @@ import Foundation
 // with no AppKit, so they can be tested.
 
 enum ChatText {
-    /// What agents on this Mac may do in a channel.
-    static func agents(_ a: SyncAgentAccess) -> String {
-        switch a {
-        case .off: "Off"
-        case .read: "Read"
-        case .readPost: "Read and post"
-        }
-    }
+    /// What agents on this Mac may do in a channel (the core's words).
+    static func agents(_ a: SyncAgentAccess) -> String { chatAgentsLabel(access: a) }
 
-    /// A channel page's line under its name: "Owner · 2 of 3 online · shared until 1 Nov · agents: read".
-    static func header(_ c: SyncChannel) -> String {
-        [SyncText.role(c.role), subtitle(c), c.shareUntilS.map { "shared until \(SyncText.day($0))" },
-         c.agents == .off ? nil : "agents: \(agents(c.agents).lowercased())"].compactMap { $0 }.joined(separator: " · ")
-    }
-
-    /// A topic page's line: "Topic by Kari's iPhone · 12 messages".
-    static func topicLine(_ t: SyncTopic) -> String {
-        "Topic by \(t.authorName.isEmpty ? "an unnamed device" : t.authorName) · \(Fmt.count(t.messages, "message"))"
-    }
-
-    /// A private conversation's line: "Private · connected · end-to-end encrypted" (connected directly: the only way
-    /// a private message goes).
-    static func directLine(online: Bool) -> String {
-        "Private · \(online ? "connected" : "not connected") · end-to-end encrypted"
-    }
-
-    /// A channel's unread messages under General: its total less its topics' (the core counts the total).
-    static func generalUnread(_ c: SyncChannel, _ topics: [SyncTopic]) -> UInt32 {
-        c.unread - min(c.unread, topics.reduce(0) { $0 + $1.unread })
-    }
+    /// A channel's unread messages under General: its total less its topics' (the core's rule).
+    static func generalUnread(_ c: SyncChannel, _ topics: [SyncTopic]) -> UInt32 { chatGeneralUnread(channel: c, topics: topics) }
 
     /// A topic name as typed: trimmed, at most 100 characters; `nil` when empty.
     static func topicTitle(_ text: String) -> String? {
         let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
         return t.isEmpty ? nil : String(t.prefix(100))
-    }
-
-    /// A channel's grey line in the list: "2 of 3 online", or "Muted".
-    static func subtitle(_ c: SyncChannel) -> String {
-        var parts = [c.members > 1 ? "\(c.online) of \(c.members) online" : "Only this Mac"]
-        if c.muted { parts.append("Muted") }
-        return parts.joined(separator: " · ")
     }
 
     /// A message's time: "14.32" today, "Yesterday 14.32", "1 Nov 14.32" before.
@@ -55,7 +23,7 @@ enum ChatText {
         let clock = d.formatted(.dateTime.hour().minute())
         if cal.isDate(d, inSameDayAs: now) { return clock }
         if let y = cal.date(byAdding: .day, value: -1, to: now), cal.isDate(d, inSameDayAs: y) { return "Yesterday \(clock)" }
-        return "\(SyncText.day(at)) \(clock)"
+        return "\(Fmt.day(at)) \(clock)"
     }
 
     /// "You", "Kari (Studio iMac)", or for an agent its name and the computer it runs on: "Seedwell on Studio iMac".
@@ -67,12 +35,8 @@ enum ChatText {
     /// The device that sent it, by its name.
     static func computer(_ m: SyncMessage) -> String { m.authorName.isEmpty ? "Unnamed device" : m.authorName }
 
-    /// A device with its user, as every device names it (Settings › Folder Sync): "Kari (Studio iMac)", the device
-    /// alone when its user gave no name.
-    static func named(_ device: String, user: String) -> String {
-        let d = device.isEmpty ? "Unnamed device" : device
-        return user.isEmpty ? d : "\(user) (\(d))"
-    }
+    /// A device with its user, as every device names it (Settings › Folder Sync): "Kari (Studio iMac)" (the core's words).
+    static func named(_ device: String, user: String) -> String { chatNamed(device: device, user: user) }
 
     /// One line of a message, for notifications, replies and the list: at most `limit` characters.
     static func preview(_ m: SyncMessage, limit: Int = 120) -> String {

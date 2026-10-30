@@ -274,7 +274,7 @@ fn reason_dto(r: &ChoiceReason) -> ChoiceReasonDto {
     let (kind, text) = match r {
         ChoiceReason::SeveralItems { items } => ("several_items", format!("{items} items to choose from")),
         ChoiceReason::InLibrary { items } => ("in_library", format!("{items} items are already in the library")),
-        ChoiceReason::PlatformVariants => ("platform_variants", "builds for several systems; this Mac's build is preselected".to_owned()),
+        ChoiceReason::PlatformVariants => ("platform_variants", concat!("builds for several systems; this ", trs_platform::computer!(), "'s build is preselected").to_owned()),
         ChoiceReason::VeryLarge { bytes, limit } => ("very_large", format!("{} is over the {} limit", b(*bytes), b(*limit))),
         ChoiceReason::NotEnoughSpace { needed, free } => ("not_enough_space", format!("needs {}, only {} free", b(*needed), b(*free))),
         ChoiceReason::Unsure { confidence } => ("unsure", format!("the category is only {:.0}% certain", f64::from(*confidence) * 100.0)),
@@ -503,7 +503,7 @@ pub fn sync_reachability_dto(r: &trs_engine::api::Reachability, sync_port: u16) 
     });
     if d.state == "mapped" {
         // Not the torrent wording: no device is waited for.
-        d.summary = d.summary.replace("; no peer from the Internet has connected in yet", ": your devices can reach this Mac");
+        d.summary = d.summary.replace("; no peer from the Internet has connected in yet", concat!(": your devices can reach this ", trs_platform::computer!()));
     }
     d
 }
@@ -647,7 +647,9 @@ impl Backend for EngineBackend {
                 c.alt_up_limit = nz(v);
             }
             if let Some(v) = p.alt_speed {
+                // The user's toggle; it also ends the app's own (on battery).
                 c.alt_speed = v;
+                c.alt_by_app = false;
             }
         });
         // `config()` queues behind the update, so this reads the new values.
@@ -938,7 +940,7 @@ pub async fn serve_with(
 
 /// Everything the app passes to start the control server.
 pub struct AppServerConfig {
-    /// Socket path; `None` is `~/Library/Application Support/Seedwell/control.sock`.
+    /// Socket path; `None` is [`crate::default_socket_path`].
     pub socket_path: Option<PathBuf>,
     /// Directory with `config.toml`, `rules.toml`, `trackers.toml`.
     pub state_dir: PathBuf,
@@ -1009,7 +1011,7 @@ mod tests {
         let r = Reachability { port: 55252, mapping_enabled: true, portmap: Some(pm), incoming: 10_000, last_incoming_at: None };
         let d = sync_reachability_dto(&r, 55799);
         assert_eq!(d.state, "mapped", "incoming torrent peers say nothing about the sync port");
-        assert_eq!(d.summary, "Opened on the router with UPnP: your devices can reach this Mac");
+        assert_eq!(d.summary, concat!("Opened on the router with UPnP: your devices can reach this ", trs_platform::computer!()));
         let asking = Reachability { portmap: Some(PortMapStatus { method: Some("upnp"), ..Default::default() }), ..r.clone() };
         assert_eq!(sync_reachability_dto(&asking, 55799).summary, "Asking the router to open port 55799");
         let off = Reachability { mapping_enabled: false, ..r };

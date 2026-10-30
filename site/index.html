@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Seedwell</title>
+<meta name="description" content="Seedwell, a light BitTorrent client for the Mac menu bar and the Windows notification area. Install it with one command.">
+<link rel="icon" href="icon.png">
+<style>
+  :root {
+    --bg: #f6f6f4; --card: #ffffff; --text: #1d1d1f; --muted: #6e6e73; --line: #e3e3e0;
+    --accent: #2f7d4f; --accent-text: #ffffff; --code-bg: #f0f0ed; --badge: #fff1d6; --badge-text: #7a5300;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #161617; --card: #1f1f21; --text: #f2f2f2; --muted: #a1a1a6; --line: #333336;
+      --accent: #4fb57a; --accent-text: #0d1f14; --code-bg: #2a2a2d; --badge: #3a2f17; --badge-text: #f3cf7e;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 16px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  }
+  main { max-width: 760px; margin: 0 auto; padding: 48px 16px 64px; }
+  header { display: flex; align-items: center; gap: 18px; margin-bottom: 8px; }
+  header img { width: 72px; height: 72px; }
+  h1 { font-size: 40px; line-height: 1.1; margin: 0; letter-spacing: -0.02em; }
+  .tagline { color: var(--muted); font-size: 18px; margin: 12px 0 32px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 24px; }
+  .tabs { display: flex; gap: 6px; margin-bottom: 18px; flex-wrap: wrap; }
+  .tab {
+    border: 1px solid var(--line); background: transparent; color: var(--text); border-radius: 999px;
+    padding: 6px 14px; font: inherit; font-size: 14px; cursor: pointer;
+  }
+  .tab[aria-selected="true"] { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+  h2 { font-size: 22px; margin: 0 0 4px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .badge { font-size: 12px; font-weight: 600; background: var(--badge); color: var(--badge-text); border-radius: 6px; padding: 2px 8px; }
+  .req { color: var(--muted); margin: 0 0 18px; font-size: 15px; }
+  ol { padding-left: 22px; margin: 0 0 4px; }
+  ol li { margin: 0 0 12px; }
+  .cmd { display: flex; align-items: stretch; margin-top: 8px; border-radius: 10px; overflow: hidden; border: 1px solid var(--line); }
+  .cmd code {
+    flex: 1; min-width: 0; background: var(--code-bg); padding: 12px 14px; overflow-x: auto; white-space: nowrap;
+    font: 14px/1.4 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  .cmd button {
+    border: 0; border-left: 1px solid var(--line); background: var(--accent); color: var(--accent-text);
+    font: inherit; font-size: 14px; font-weight: 600; padding: 0 16px; cursor: pointer; white-space: nowrap;
+  }
+  kbd { font: 13px ui-monospace, Menlo, Consolas, monospace; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 5px; padding: 0 5px; }
+  details { margin-top: 14px; border-top: 1px solid var(--line); padding-top: 12px; }
+  summary { cursor: pointer; color: var(--muted); }
+  details p, details li { font-size: 15px; }
+  .note { color: var(--muted); font-size: 15px; }
+  .latest { color: var(--muted); font-size: 14px; margin-top: 16px; min-height: 1.5em; }
+  a { color: var(--accent); }
+  .features { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr)); gap: 14px; margin-top: 32px; }
+  .features div { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px; font-size: 15px; }
+  .features b { display: block; margin-bottom: 4px; }
+  footer { margin-top: 40px; color: var(--muted); font-size: 14px; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <img src="icon.png" alt="">
+    <h1>Seedwell</h1>
+  </header>
+  <p class="tagline">A light BitTorrent client that lives in the menu bar on the Mac and in the notification area on
+    Windows. Install it with one command.</p>
+
+  <section class="card" aria-label="Install">
+    <div class="tabs" role="tablist">
+      <button class="tab" role="tab" id="tab-mac" aria-controls="mac" aria-selected="false">Mac</button>
+      <button class="tab" role="tab" id="tab-windows" aria-controls="windows" aria-selected="false">Windows</button>
+    </div>
+
+    <p class="note" id="elsewhere" hidden>Seedwell runs on a Mac or a Windows PC. Open this page there, or
+      <a href="#" id="copy-link">copy its link</a> to send it to yourself.</p>
+
+    <div id="mac" role="tabpanel" aria-labelledby="tab-mac" hidden>
+      <h2>Install on your Mac</h2>
+      <p class="req">macOS 15 or later, on a Mac with Apple silicon (M1 or later).</p>
+      <ol>
+        <li>Open <b>Terminal</b>: press <kbd>⌘</kbd> <kbd>Space</kbd>, type <i>Terminal</i> and press <kbd>Return</kbd>.</li>
+        <li>Paste this and press <kbd>Return</kbd>:
+          <div class="cmd"><code>curl -fsSL https://github.com/kkollsga/seedwell/releases/latest/download/install.sh | bash</code><button type="button">Copy</button></div>
+        </li>
+        <li>Seedwell opens and its icon appears in the menu bar.</li>
+      </ol>
+      <details>
+        <summary>What the command does, updating and uninstalling</summary>
+        <p>It downloads the latest release from GitHub, checks its SHA-256 checksum, installs Seedwell in your
+          Applications folder and opens it. Nothing else on your Mac is changed.</p>
+        <ul>
+          <li><b>Updates:</b> Seedwell checks for them itself (Settings › General › Updates). Running the command again
+            also updates it.</li>
+          <li><b>The <code>seedwell</code> command for Terminal:</b> add <code>-s -- --cli</code> after <code>bash</code>.</li>
+          <li><b>Uninstall:</b> the same command with <code>bash -s -- --uninstall</code>. It asks before deleting your
+            torrent list and settings; downloaded files are never touched.</li>
+        </ul>
+      </details>
+    </div>
+
+    <div id="windows" role="tabpanel" aria-labelledby="tab-windows" hidden>
+      <h2>Install on Windows <span class="badge" id="windows-preview">Preview</span></h2>
+      <p class="req">64-bit Windows 10 (version 1809 or later) or Windows 11.</p>
+      <p class="note" id="windows-missing" hidden>The latest release has no Windows build yet.</p>
+      <ol>
+        <li>Open <b>PowerShell</b>: press <kbd>Start</kbd>, type <i>PowerShell</i> and press <kbd>Enter</kbd>.</li>
+        <li>Paste this and press <kbd>Enter</kbd>:
+          <div class="cmd"><code>irm https://github.com/kkollsga/seedwell/releases/latest/download/install.ps1 | iex</code><button type="button">Copy</button></div>
+        </li>
+        <li>Seedwell starts and its icon appears in the notification area (click <kbd>^</kbd> next to the clock if
+          you don't see it).</li>
+      </ol>
+      <details>
+        <summary>What the command does, updating and uninstalling</summary>
+        <p>It downloads the latest release from GitHub, checks its SHA-256 checksum and installs Seedwell for your user
+          only, in <code>%LOCALAPPDATA%\Programs\Seedwell</code>: no administrator rights. It adds a Start menu entry,
+          opens <code>.torrent</code> files and magnet links with Seedwell, and lists it under Settings › Apps.</p>
+        <ul>
+          <li><b>Updates:</b> Seedwell checks for them itself (Settings › General › Updates). Running the command again
+            also updates it.</li>
+          <li><b>Uninstall:</b> Settings › Apps › Installed apps › Seedwell › Uninstall. It asks before deleting your
+            torrent list and settings; downloaded files are never touched.</li>
+        </ul>
+      </details>
+    </div>
+
+    <p class="latest" id="latest"></p>
+  </section>
+
+  <div class="features">
+    <div><b>Out of the way</b>Progress, speeds and what needs you, one click away in the menu bar or the
+      notification area.</div>
+    <div><b>Light</b>A seeding torrent nobody is downloading costs almost nothing: no idle connections, no
+      timers.</div>
+    <div><b>Kind to trackers</b>Announces follow the tracker's intervals, failures back off, quitting says
+      stopped. Seedwell always says it is Seedwell.</div>
+    <div><b>Tidy</b>Movies, TV, music, books, apps and games are recognised and filed into your folders when they
+      finish.</div>
+  </div>
+
+  <footer>
+    <a href="https://github.com/kkollsga/seedwell">Source on GitHub</a> ·
+    <a href="https://github.com/kkollsga/seedwell/releases">All releases</a> ·
+    MIT or Apache-2.0
+  </footer>
+</main>
+<script>
+(function () {
+  var REPO = 'kkollsga/seedwell';
+
+  function detect() {
+    var ua = navigator.userAgent || '';
+    var platform = (navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || '';
+    if (/iPhone|iPad|iPod|Android/i.test(ua)) return 'elsewhere';
+    if (/Win/i.test(platform) || /Windows/i.test(ua)) return 'windows';
+    if (/Mac/i.test(platform) || /Mac OS X/i.test(ua)) return navigator.maxTouchPoints > 1 ? 'elsewhere' : 'mac';
+    return 'elsewhere';
+  }
+
+  function show(os) {
+    ['mac', 'windows'].forEach(function (id) {
+      document.getElementById(id).hidden = id !== os;
+      document.getElementById('tab-' + id).setAttribute('aria-selected', String(id === os));
+    });
+  }
+
+  var os = detect();
+  document.getElementById('elsewhere').hidden = os !== 'elsewhere';
+  show(os === 'elsewhere' ? 'mac' : os);
+  ['mac', 'windows'].forEach(function (id) {
+    document.getElementById('tab-' + id).addEventListener('click', function () { show(id); });
+  });
+
+  function copy(text, button) {
+    var done = function () {
+      var was = button.textContent;
+      button.textContent = 'Copied';
+      setTimeout(function () { button.textContent = was; }, 1600);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(done, function () {});
+    }
+  }
+  Array.prototype.forEach.call(document.querySelectorAll('.cmd'), function (box) {
+    var button = box.querySelector('button');
+    button.addEventListener('click', function () { copy(box.querySelector('code').textContent, button); });
+  });
+  document.getElementById('copy-link').addEventListener('click', function (e) {
+    e.preventDefault();
+    copy(location.href.split('#')[0], e.target);
+  });
+
+  // The latest release, from GitHub's API (60 requests an hour per address; without it the page still works).
+  fetch('https://api.github.com/repos/' + REPO + '/releases/latest', { headers: { Accept: 'application/vnd.github+json' } })
+    .then(function (r) { return r.ok ? r.json() : null; })
+    .then(function (rel) {
+      if (!rel || !rel.tag_name) return;
+      var version = rel.tag_name.replace(/^v/, '');
+      var date = new Date(rel.published_at).toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' });
+      var line = document.getElementById('latest');
+      line.textContent = 'Latest: Seedwell ' + version + ', ' + date + ' · ';
+      var notes = document.createElement('a');
+      notes.href = rel.html_url;
+      notes.textContent = 'Release notes';
+      line.appendChild(notes);
+      var hasWindows = (rel.assets || []).some(function (a) { return /-windows-x64\.zip$/.test(a.name); });
+      document.getElementById('windows-missing').hidden = hasWindows;
+    })
+    .catch(function () {});
+})();
+</script>
+</body>
+</html>

@@ -21,13 +21,18 @@ fn is_test_binary() -> bool {
         .unwrap_or(false)
 }
 
-fn active() -> bool {
+pub(crate) fn active() -> bool {
     (cfg!(test) || is_test_binary() || std::env::var_os("TRS_FORBID_REAL_HOME").is_some())
         && std::env::var_os("TRS_ALLOW_REAL_HOME").is_none()
 }
 
 fn home() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from).filter(|h| h.is_absolute() && h.parent().is_some())
+    trs_platform::dirs::home().filter(|h| h.is_absolute() && h.parent().is_some())
+}
+
+/// Inside `home`, and not in the temporary folder (which is inside the home folder on Windows).
+fn inside(p: &Path, home: &Path) -> bool {
+    p.starts_with(home) && !p.starts_with(std::env::temp_dir())
 }
 
 /// `Err(text)` if `p` is inside the real home directory while the guard is on (a runtime
@@ -37,7 +42,7 @@ pub(crate) fn check_path(what: &str, p: &Path) -> Result<(), String> {
         return Ok(());
     }
     let Some(home) = home() else { return Ok(()) };
-    if p.starts_with(&home) {
+    if inside(p, &home) {
         return Err(format!(
             "refusing to use {what} {} inside the real home directory while running under test (set HOME to a temporary folder)",
             p.display()
@@ -53,7 +58,7 @@ pub(crate) fn check_config(cfg: &EngineConfig) -> Result<(), String> {
     }
     let Some(home) = home() else { return Ok(()) };
     let bad = |what: &str, p: &Path| -> Result<(), String> {
-        if p.starts_with(&home) {
+        if inside(p, &home) {
             Err(format!(
                 "refusing to use {what} {} inside the real home directory while running under test; \
                  point the folders into a temporary directory or set HOME (TRS_ALLOW_REAL_HOME=1 overrides)",
@@ -78,9 +83,24 @@ pub(crate) fn check_config(cfg: &EngineConfig) -> Result<(), String> {
     if let AfterAdd::Archive(d) = &cfg.torrent_after_add {
         bad("the archive folder", d)?;
     }
+    const THE_TRASH: &str = concat!("the ", trs_platform::trash!());
     match &cfg.trash_dir {
-        Some(t) => bad("the Trash", t)?,
-        None if needs_trash => bad("the Trash", &expand_tilde("~/.Trash"))?,
+        Some(t) => bad(THE_TRASH, t)?,
+        None if needs_trash => match trs_platform::fs::system_trash() {
+            Some(trs_platform::fs::TrashPlace::Folder(t)) => bad(THE_TRASH, &t)?,
+            // Not a folder in the home folder, but the user's all the same (the Mac's own Trash is the real one
+            // whatever HOME says).
+            Some(trs_platform::fs::TrashPlace::RecycleBin | trs_platform::fs::TrashPlace::VolumeTrash) => {
+                return Err(concat!(
+                    "refusing to use ",
+                    "the ",
+                    trs_platform::trash!(),
+                    " while running under test; set trash_dir to a temporary folder (TRS_ALLOW_REAL_HOME=1 overrides)"
+                )
+                .into());
+            }
+            None => {}
+        },
         None => {}
     }
     for (i, l) in cfg.category_locations.iter().enumerate() {
@@ -105,7 +125,7 @@ pub(crate) fn check_profiles(profiles: &trs_state::TrackerProfiles) -> Result<()
     for p in &profiles.profiles {
         for d in p.folders() {
             let d = expand_tilde(d);
-            if d.starts_with(&home) {
+            if inside(&d, &home) {
                 return Err(format!(
                     "refusing to use the folder {} of tracker {} inside the real home directory while running under test; \
                      point the folders into a temporary directory or set HOME (TRS_ALLOW_REAL_HOME=1 overrides)",
@@ -139,6 +159,6 @@ mod tests {
             since: None,
         };
         let trash = EngineConfig { default_save_dir: "/tmp/x".into(), watch: vec![w], ..EngineConfig::default() };
-        assert!(check_config(&trash).is_err(), "~/.Trash would be used");
+        assert!(check_config(&trash).is_err(), "the real Trash would be used");
     }
 }

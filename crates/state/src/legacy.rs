@@ -63,9 +63,7 @@ pub(crate) fn convert(dir: &Path, path: &Path, opts: &OpenOptions) -> Result<Pat
     fs::create_dir_all(&backups).map_err(io_err("create backups directory"))?;
     let backup = unique_stamped(&backups, "state.redb.redb2.", "");
     fs::copy(path, &backup).map_err(io_err("back up the database before converting it"))?;
-    if let Ok(f) = fs::File::open(&backup) {
-        let _ = f.sync_all();
-    }
+    let _ = trs_platform::fs::sync_file(&backup);
 
     let tmp = dir.join("state.redb.convert");
     let _ = fs::remove_file(&tmp);
@@ -92,7 +90,7 @@ pub(crate) fn convert(dir: &Path, path: &Path, opts: &OpenOptions) -> Result<Pat
         return Err(e);
     }
 
-    fs::File::open(&tmp).and_then(|f| f.sync_all()).map_err(io_err("sync the converted database"))?;
+    trs_platform::fs::sync_file(&tmp).map_err(io_err("sync the converted database"))?;
     fs::rename(&tmp, path).map_err(io_err("move the converted database into place"))?;
     sync_dir(dir).map_err(io_err("sync the data directory"))?;
     Ok(backup)

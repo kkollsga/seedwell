@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import SeedwellApp
 
-// Favorite trackers (SPEC 7E.1, 8.3): the sidebar order and the inline editing of a favorite.
+// Favorite trackers (SPEC 7E.1, 8.3): the inline editing of a favorite.
 
 private func t(_ id: String, _ name: String, _ count: UInt32, fav: Bool = false, hidden: Bool = false, onlySeeding: Bool = false) -> TrackerSummary {
     TrackerSummary(id: id, name: name, count: count, favorite: fav, hidden: hidden, hideOnlySeeding: onlySeeding)
@@ -18,45 +18,7 @@ private func check(_ raw: String) -> UrlCheck {
     return UrlCheck(pattern: raw.lowercased(), passkeyRemoved: false, error: nil)
 }
 
-@Suite("Tracker order")
-struct TrackerOrderTests {
-    @Test func favoritesThenBusiestThenPublic() {
-        let list = [
-            t("public", "Public", 40),
-            t("debian.org", "Debian", 3),
-            t("zeta.org", "Zeta", 30, fav: true),
-            t("other-private", "Other private", 1),
-            t("127.0.0.1", "127.0.0.1", 9),
-            t("alpha.org", "alpha", 1, fav: true),
-            t("b.test", "Bee", 3),
-        ]
-        #expect(TrackerOrder.sorted(list).map(\.id) == ["alpha.org", "zeta.org", "127.0.0.1", "b.test", "debian.org", "other-private", "public"])
-    }
-
-    @Test func equalCountsFallBackToTheName() {
-        let list = [t("b.org", "Bravo", 2), t("a.org", "alpha", 2), t("c.org", "Charlie", 2)]
-        #expect(TrackerOrder.sorted(list).map(\.name) == ["alpha", "Bravo", "Charlie"])
-    }
-
-    @Test func publicIsLastEvenWhenItIsTheBusiest() {
-        #expect(TrackerOrder.sorted([t("public", "Public", 99), t("a.org", "A", 0)]).last?.id == "public")
-    }
-}
-
-@Suite("Hidden trackers")
-struct HiddenTrackerTests {
-    @Test func aHiddenTrackerIsNotInTheSidebarUnlessItsTabIsOpen() {
-        let list = [t("public", "Public", 4), t("h.org", "Hush", 3, fav: true, hidden: true), t("a.org", "A", 2, fav: true)]
-        #expect(TrackerOrder.visible(list, selected: nil).map(\.id) == ["a.org", "public"])
-        #expect(TrackerOrder.visible(list, selected: "h.org").map(\.id) == ["a.org", "h.org", "public"])
-    }
-
-    @Test func aTrackerWithoutTorrentsStaysOutUnlessSelected() {
-        let list = [t("e.org", "Empty", 0, fav: true), t("public", "Public", 1)]
-        #expect(TrackerOrder.visible(list, selected: nil).map(\.id) == ["public"])
-        #expect(TrackerOrder.visible(list, selected: "e.org").map(\.id) == ["e.org", "public"])
-    }
-}
+// The sidebar's order of the trackers is the core's (crates/ffi/src/sidebar.rs, library_tests.rs).
 
 @Suite("Hidden notices")
 struct HiddenNoticesTests {
@@ -304,14 +266,5 @@ struct TrackerFactsTests {
     @Test func spans() {
         #expect(TrackerInfoPage.span(45) == "45 s" && TrackerInfoPage.span(1800) == "30 min")
         #expect(TrackerInfoPage.span(7200) == "2 h" && TrackerInfoPage.span(259_200) == "3 days")
-    }
-}
-
-@Suite("Sidebar shows only trackers with torrents")
-struct SidebarVisibleTrackersTests {
-    @Test func emptyTrackersAreHiddenUnlessOpen() {
-        let list = [t("public", "Public", 0), t("debian.org", "Debian", 2), t("fav", "Fav", 0, fav: true)]
-        #expect(TrackerOrder.visible(list, selected: nil).map(\.id) == ["debian.org"])
-        #expect(TrackerOrder.visible(list, selected: "public").map(\.id) == ["debian.org", "public"])
     }
 }

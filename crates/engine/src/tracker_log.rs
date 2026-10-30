@@ -76,7 +76,7 @@ pub(crate) fn error_text(e: &AnnounceError) -> String {
             TransportError::Connect => "connection failed or refused".into(),
             TransportError::ConnectTimeout => "connect timed out".into(),
             TransportError::Tls => "TLS handshake or certificate failure".into(),
-            TransportError::Forbidden => "destination not allowed by the network policy".into(),
+            TransportError::Forbidden(r) => format!("destination not allowed by the network policy: {r}"),
             TransportError::NotSent => "not sent (a local write failed)".into(),
             TransportError::Io => "connection reset or I/O error".into(),
             TransportError::Redirect => "too many or refused redirects".into(),

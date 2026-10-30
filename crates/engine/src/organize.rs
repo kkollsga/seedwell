@@ -85,8 +85,8 @@ pub(crate) fn junk_name(k: JunkKind) -> &'static str {
 /// `~` and `~/x` expanded with `$HOME`; other strings are used as they are.
 pub(crate) fn expand_tilde(s: &str) -> PathBuf {
     if (s == "~" || s.starts_with("~/"))
-        && let Some(home) = std::env::var_os("HOME") {
-            let mut p = PathBuf::from(home);
+        && let Some(home) = trs_platform::dirs::home() {
+            let mut p = home;
             if let Some(rest) = s.strip_prefix("~/") {
                 p.push(rest);
             }
@@ -548,19 +548,15 @@ pub(crate) fn move_unique(file: &Path, dir: &Path) -> std::io::Result<PathBuf> {
 
 /// Apply the "after adding" choice to the `.torrent` at `path`. Returns where the file lies afterwards
 /// when it is still the user's to deal with: `path` itself for "leave", the archive copy for "archive";
-/// `None` when it was deleted or put in the trash folder.
+/// `None` when it was deleted or put in the Trash (`trash_dir`, else the system's: `trs_platform::fs::move_to_trash`;
+/// a file on another volume than a Trash folder is copied there).
 pub(crate) fn finish_file(path: &Path, action: &AfterAdd, trash_dir: Option<&Path>) -> std::io::Result<Option<PathBuf>> {
+    use trs_platform::fs::{OtherVolume, move_to_trash};
     match action {
         AfterAdd::Leave => Ok(Some(path.to_path_buf())),
         AfterAdd::Delete => std::fs::remove_file(path).map(|()| None),
         AfterAdd::Archive(dir) => move_unique(path, dir).map(Some),
-        AfterAdd::Trash => {
-            let dir = match trash_dir {
-                Some(d) => d.to_path_buf(),
-                None => expand_tilde("~/.Trash"),
-            };
-            move_unique(path, &dir).map(|_| None)
-        }
+        AfterAdd::Trash => move_to_trash(path, trash_dir, OtherVolume::Copy).map(|_| None).map_err(Into::into),
     }
 }
 
@@ -601,6 +597,13 @@ pub(crate) fn prune_empty_dirs(file: &Path, stop: &Path) {
 mod tests {
     use super::*;
 
+    /// A Unix-style absolute test path made absolute on this system: unchanged on Unix, a drive letter in front on Windows.
+    macro_rules! abs {
+        ($p:literal) => {
+            if cfg!(windows) { concat!("C:", $p) } else { $p }
+        };
+    }
+
     fn tiny_torrent() -> Metainfo {
         let b = b"d8:announce25:http://t.example/announce4:infod6:lengthi1000e4:name4:test12:piece lengthi16384e6:pieces20:AAAAAAAAAAAAAAAAAAAAee";
         Metainfo::from_bytes(b).unwrap()
@@ -614,12 +617,12 @@ mod tests {
         }
         let pol = PolicyData { rules, profiles, private_min_seed: None, idle: None };
         let mut cfg = EngineConfig {
-            default_save_dir: "/app/default".into(),
-            incomplete_dir: Some("/app/inc".into()),
+            default_save_dir: abs!("/app/default").into(),
+            incomplete_dir: Some(abs!("/app/inc").into()),
             ..EngineConfig::default()
         };
         cfg.category_locations[Category::Movie.index()] =
-            crate::config::CategoryLocation { incomplete: Some("/app/movie-inc".into()), finished: Some("/app/movies".into()) };
+            crate::config::CategoryLocation { incomplete: Some(abs!("/app/movie-inc").into()), finished: Some(abs!("/app/movies").into()) };
         plan(&tiny_torrent(), &opts, &PlanCtx { cfg: &cfg, policy: Some(&pol), choice: false, folder_ask: false })
     }
 
@@ -645,36 +648,36 @@ mod tests {
         use trs_state::RuleSet;
         // No tracker folders: the app's category folder.
         let p = placed(Some(tracker(None, None, None)), RuleSet::default(), movie());
-        assert_eq!((p.finished_base.as_path(), p.stage_root.as_deref()), (Path::new("/app/movies"), Some(Path::new("/app/movie-inc"))));
+        assert_eq!((p.finished_base.as_path(), p.stage_root.as_deref()), (Path::new(abs!("/app/movies")), Some(Path::new(abs!("/app/movie-inc")))));
         // The tracker's folders replace the category's.
-        let p = placed(Some(tracker(Some("/t/all/"), Some("/t/inc"), None)), RuleSet::default(), movie());
-        assert_eq!((p.finished_base.as_path(), p.stage_root.as_deref()), (Path::new("/t/all"), Some(Path::new("/t/inc"))));
+        let p = placed(Some(tracker(Some(abs!("/t/all/")), Some(abs!("/t/inc")), None)), RuleSet::default(), movie());
+        assert_eq!((p.finished_base.as_path(), p.stage_root.as_deref()), (Path::new(abs!("/t/all")), Some(Path::new(abs!("/t/inc")))));
         // Its category entry wins for that category only.
-        let t = tracker(Some("/t/all"), None, Some("/t/movies"));
+        let t = tracker(Some(abs!("/t/all")), None, Some(abs!("/t/movies")));
         let p = placed(Some(t.clone()), RuleSet::default(), movie());
-        assert_eq!(p.finished_base, Path::new("/t/movies"));
-        assert_eq!(p.stage_root.as_deref(), Some(Path::new("/app/movie-inc")), "incomplete falls back to the app's category");
+        assert_eq!(p.finished_base, Path::new(abs!("/t/movies")));
+        assert_eq!(p.stage_root.as_deref(), Some(Path::new(abs!("/app/movie-inc"))), "incomplete falls back to the app's category");
         let p = placed(Some(t), RuleSet::default(), AddOptions { category: Some(Category::Tv), ..AddOptions::default() });
-        assert_eq!((p.finished_base.as_path(), p.stage_root.as_deref()), (Path::new("/t/all"), Some(Path::new("/app/inc"))));
+        assert_eq!((p.finished_base.as_path(), p.stage_root.as_deref()), (Path::new(abs!("/t/all")), Some(Path::new(abs!("/app/inc")))));
     }
 
     #[test]
     fn the_default_rule_folder_loses_to_the_tracker_but_a_rules_own_folder_wins() {
         use trs_state::rules::{DefaultRule, Rule};
         let mut rs = trs_state::RuleSet::default();
-        rs.set_default(DefaultRule { finished_dir: Some("/rule/default".into()), ..DefaultRule::default() }).unwrap();
-        rs.add_rule(Rule { id: "own".into(), name: "own".into(), enabled: false, finished_dir: Some("/rule/own".into()), ..Rule::default() }, None).unwrap();
+        rs.set_default(DefaultRule { finished_dir: Some(abs!("/rule/default").into()), ..DefaultRule::default() }).unwrap();
+        rs.add_rule(Rule { id: "own".into(), name: "own".into(), enabled: false, finished_dir: Some(abs!("/rule/own").into()), ..Rule::default() }, None).unwrap();
         rs.add_rule(Rule { id: "plain".into(), name: "plain".into(), enabled: false, ..Rule::default() }, None).unwrap();
         // The two rules are off, so only a forced one applies. Default rule only: it beats the app category, the tracker beats it.
-        assert_eq!(placed(Some(tracker(None, None, None)), rs.clone(), movie()).finished_base, Path::new("/rule/default"));
-        assert_eq!(placed(Some(tracker(Some("/t/all"), None, None)), rs.clone(), movie()).finished_base, Path::new("/t/all"));
+        assert_eq!(placed(Some(tracker(None, None, None)), rs.clone(), movie()).finished_base, Path::new(abs!("/rule/default")));
+        assert_eq!(placed(Some(tracker(Some(abs!("/t/all")), None, None)), rs.clone(), movie()).finished_base, Path::new(abs!("/t/all")));
         // A rule without a folder of its own inherits the Default rule's: still weaker than the tracker.
         let with = |rule: &str| AddOptions { rule: Some(rule.into()), ..movie() };
-        assert_eq!(placed(Some(tracker(Some("/t/all"), None, None)), rs.clone(), with("plain")).finished_base, Path::new("/t/all"));
+        assert_eq!(placed(Some(tracker(Some(abs!("/t/all")), None, None)), rs.clone(), with("plain")).finished_base, Path::new(abs!("/t/all")));
         // A rule's own folder beats the tracker's, and an explicit save path beats everything.
-        assert_eq!(placed(Some(tracker(Some("/t/all"), None, Some("/t/movies"))), rs.clone(), with("own")).finished_base, Path::new("/rule/own"));
-        let explicit = AddOptions { save_path: Some("/explicit".into()), ..with("own") };
-        assert_eq!(placed(Some(tracker(Some("/t/all"), None, None)), rs, explicit).save_path, Path::new("/explicit"));
+        assert_eq!(placed(Some(tracker(Some(abs!("/t/all")), None, Some(abs!("/t/movies")))), rs.clone(), with("own")).finished_base, Path::new(abs!("/rule/own")));
+        let explicit = AddOptions { save_path: Some(abs!("/explicit").into()), ..with("own") };
+        assert_eq!(placed(Some(tracker(Some(abs!("/t/all")), None, None)), rs, explicit).save_path, Path::new(abs!("/explicit")));
     }
 
     #[test]
@@ -702,8 +705,8 @@ mod tests {
     #[test]
     fn tilde_expands_only_at_the_start() {
         assert_eq!(expand_tilde("/a/~/b"), PathBuf::from("/a/~/b"));
-        if let Some(home) = std::env::var_os("HOME") {
-            assert_eq!(expand_tilde("~/x"), PathBuf::from(home).join("x"));
+        if let Some(home) = trs_platform::dirs::home() {
+            assert_eq!(expand_tilde("~/x"), home.join("x"));
         }
     }
 

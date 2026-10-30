@@ -442,8 +442,8 @@ pub trait SyncBackend: Send + Sync {
     fn revoke_invite(&self, id: &str, invite_id: &str) -> Result<(), CoreError>;
     fn rename(&self, id: &str, name: &str) -> Result<SyncFolder, CoreError>;
     fn move_to(&self, id: &str, path: &str) -> Result<SyncFolder, CoreError>;
-    /// Stops syncing; returns where the folder is (the app moves it to the Trash when asked to).
-    fn remove(&self, id: &str, trash_files: bool) -> Result<String, CoreError>;
+    /// Stops syncing; returns where the folder is (`Core::sync_remove` then moves it to the Trash when asked to).
+    fn remove(&self, id: &str) -> Result<String, CoreError>;
     fn pause(&self, id: &str, paused: bool) -> Result<(), CoreError>;
     fn rescan(&self, id: &str) -> Result<(), CoreError>;
     fn conflicts(&self, id: &str) -> Vec<SyncConflict>;
@@ -486,7 +486,7 @@ pub trait SyncBackend: Send + Sync {
 
 /// Why a private message cannot be written now (`SyncDirect::online` is false).
 const DIRECT_OFFLINE: &str =
-    "Private messages go only over a direct connection between the two Macs, never through another device. You can write once both are online and can reach each other.";
+    "Private messages go only over a direct connection between the two devices, never through another device. You can write once both are online and can reach each other.";
 
 /// A sentence for people: the service's lowercase reasons get a capital and a full stop.
 pub fn readable(msg: &str) -> String {
@@ -506,7 +506,7 @@ fn failed(msg: impl AsRef<str>) -> CoreError {
 }
 
 fn gone() -> CoreError {
-    CoreError::Failed { message: "This folder is no longer synced on this Mac.".into() }
+    CoreError::Failed { message: concat!("This folder is no longer synced on this ", trs_platform::computer!(), ".").into() }
 }
 
 fn sync_err(e: SyncError) -> CoreError {
@@ -1066,8 +1066,7 @@ impl SyncBackend for RealSync {
         Ok(folder_of(&f))
     }
 
-    fn remove(&self, id: &str, _trash_files: bool) -> Result<String, CoreError> {
-        // Moving the files to the Trash is the app's (it knows the user's Trash): only stop here.
+    fn remove(&self, id: &str) -> Result<String, CoreError> {
         let h = self.handle()?;
         let fid = folder_id(id)?;
         let path = self.rt.block_on(h.remove_folder(&fid)).map_err(sync_err)?;
@@ -1300,7 +1299,7 @@ impl SyncBackend for NoSync {
     fn move_to(&self, _: &str, _: &str) -> Result<SyncFolder, CoreError> {
         Err(gone())
     }
-    fn remove(&self, _: &str, _: bool) -> Result<String, CoreError> {
+    fn remove(&self, _: &str) -> Result<String, CoreError> {
         Err(gone())
     }
     fn pause(&self, _: &str, _: bool) -> Result<(), CoreError> {
@@ -1703,7 +1702,7 @@ impl MockSync {
 
     fn with_chat<T>(&self, id: &str, f: impl FnOnce(&mut MockFolder) -> T) -> Result<T, CoreError> {
         let mut s = lock(&self.state);
-        s.channels.iter_mut().find(|m| m.f.id == id).map(f).ok_or_else(|| failed("This channel is no longer on this Mac"))
+        s.channels.iter_mut().find(|m| m.f.id == id).map(f).ok_or_else(|| failed(concat!("This channel is no longer on this ", trs_platform::computer!())))
     }
 
     fn add(&self, name: String, path: String, role: SyncRole, joining: bool) -> SyncFolder {
@@ -1784,7 +1783,7 @@ impl SyncBackend for MockSync {
         InviteLink::parse_chat(link).map_err(|e| failed(e.to_string()))?;
         let info = parse_chat_link(link).ok_or_else(|| failed("Not a channel link"))?;
         if lock(&self.state).channels.iter().any(|m| m.f.id == info.folder_id) {
-            return Err(failed("This channel is already on this Mac"));
+            return Err(failed(concat!("This channel is already on this ", trs_platform::computer!())));
         }
         let mut c = self.chat_new(info.name.as_deref().unwrap_or("Channel"))?;
         self.with_chat(&c.id, |m| m.f.role = SyncRole::ReadOnly)?;
@@ -1888,7 +1887,7 @@ impl SyncBackend for MockSync {
             .flat_map(|c| c.members.iter())
             .find(|m| m.device_id == device_id && !m.is_me)
             .map(|m| m.name.clone())
-            .ok_or_else(|| failed("This Mac shares no channel with that device"))?;
+            .ok_or_else(|| failed(concat!("This ", trs_platform::computer!(), " shares no channel with that device")))?;
         let msg = SyncMessage {
             id: format!("{:032x}", now_s() as u128 * 1000 + 7),
             channel_id: String::new(),
@@ -1922,7 +1921,7 @@ impl SyncBackend for MockSync {
         let mut s = lock(&self.state);
         let before = s.directs.len();
         s.directs.retain(|d| d.device_id != device_id);
-        if s.directs.len() == before { Err(failed("There is no conversation with that device on this Mac")) } else { Ok(()) }
+        if s.directs.len() == before { Err(failed(concat!("There is no conversation with that device on this ", trs_platform::computer!()))) } else { Ok(()) }
     }
 
     fn chat_direct_agents(&self) -> SyncAgentAccess {
@@ -2007,7 +2006,7 @@ impl SyncBackend for MockSync {
         let mut s = lock(&self.state);
         let before = s.channels.len();
         s.channels.retain(|m| m.f.id != id);
-        if s.channels.len() == before { Err(failed("This channel is no longer on this Mac")) } else { Ok(()) }
+        if s.channels.len() == before { Err(failed(concat!("This channel is no longer on this ", trs_platform::computer!()))) } else { Ok(()) }
     }
 
     fn snapshot(&self) -> SyncSnapshot {
@@ -2114,7 +2113,7 @@ impl SyncBackend for MockSync {
         if let Some(c) = channel_id
             && !lock(&self.state).channels.iter().any(|m| m.f.id == c)
         {
-            return Err(failed("No such channel on this Mac"));
+            return Err(failed(concat!("No such channel on this ", trs_platform::computer!())));
         }
         self.with(id, |m| m.f.channel_id = channel_id.map(str::to_string))
     }
@@ -2122,8 +2121,8 @@ impl SyncBackend for MockSync {
     fn join_path(&self, key_or_link: &str) -> Option<String> {
         let (info, _) = parse_link(key_or_link)?;
         let name = info.name.unwrap_or_else(|| info.folder_id.split('-').next().unwrap_or("Folder").to_owned());
-        let name: String = name.chars().filter(|c| !c.is_control() && *c != '/' && *c != ':').collect();
-        Some(format!("{}/{}", self.default_location(), name.trim().trim_start_matches('.')))
+        let name = trs_platform::fs::clean_name(&name);
+        Some(std::path::Path::new(&self.default_location()).join(name.trim().trim_start_matches('.')).display().to_string())
     }
 
     fn members(&self, id: &str) -> Vec<SyncMember> {
@@ -2148,7 +2147,7 @@ impl SyncBackend for MockSync {
                 return Err(failed("Only the folder's owner can change roles"));
             }
             if m.members.iter().any(|d| d.device_id == device_id && d.is_me) {
-                return Err(failed("To stop syncing on this Mac, remove the folder instead"));
+                return Err(failed(concat!("To stop syncing on this ", trs_platform::computer!(), ", remove the folder instead")));
             }
             m.members.retain(|d| d.device_id != device_id);
             Ok(())
@@ -2181,8 +2180,8 @@ impl SyncBackend for MockSync {
         let chat = match channel_id {
             None => None,
             Some(c) => {
-                let ch = s.channels.iter_mut().find(|m| m.f.id == c).ok_or_else(|| failed("No such channel on this Mac"))?;
-                may(ch, "channel").map_err(|e| failed(format!("This Mac may not share the channel {} at that role ({e})", ch.f.name)))?;
+                let ch = s.channels.iter_mut().find(|m| m.f.id == c).ok_or_else(|| failed(concat!("No such channel on this ", trs_platform::computer!())))?;
+                may(ch, "channel").map_err(|e| failed(format!(concat!("This ", trs_platform::computer!(), " may not share the channel {} at that role ({e})"), ch.f.name, e = e)))?;
                 let i = mock_invite(ch.n, ch.invites.len() as u32 + 3, &ch.f.name, role, max_uses, valid_days, true);
                 ch.invites.insert(0, i.clone());
                 Some((i, ch.f.id.clone(), ch.f.name.clone()))
@@ -2248,7 +2247,7 @@ impl SyncBackend for MockSync {
         })
     }
 
-    fn remove(&self, id: &str, _trash_files: bool) -> Result<String, CoreError> {
+    fn remove(&self, id: &str) -> Result<String, CoreError> {
         let mut s = lock(&self.state);
         let i = s.folders.iter().position(|m| m.f.id == id).ok_or_else(gone)?;
         Ok(s.folders.remove(i).f.path)
@@ -2308,7 +2307,7 @@ impl SyncBackend for MockSync {
     }
 
     fn port_reachability(&self) -> Option<crate::types::ReachabilityInfo> {
-        Some(crate::types::ReachabilityInfo { state: "mapped".into(), summary: "Opened on the router with UPnP: your devices can reach this Mac".into() })
+        Some(crate::types::ReachabilityInfo { state: "mapped".into(), summary: concat!("Opened on the router with UPnP: your devices can reach this ", trs_platform::computer!()).into() })
     }
 
     fn default_location(&self) -> String {
@@ -2543,10 +2542,14 @@ impl Core {
         self.backend.sync().move_to(&id, &path)
     }
 
-    /// Stops syncing the folder on this Mac and returns its path. Other devices keep their copy. With
-    /// `trash_files` the app moves the folder to the Trash itself (`FileManager.trashItem`).
-    pub fn sync_remove(&self, id: String, trash_files: bool) -> Result<String, CoreError> {
-        self.backend.sync().remove(&id, trash_files)
+    /// Stops syncing the folder on this computer; other devices keep their copy. With `trash_files` the folder then
+    /// goes to the Trash (the Recycle Bin on Windows), checked first: a folder that cannot go there (one the Recycle Bin
+    /// would delete at once; with a stand-in Trash folder, one on another volume) stays synced, and the error says why
+    /// and what to do.
+    /// `Some`: the folder stopped syncing but the move failed afterwards; the alert to show. A folder no longer on disk
+    /// has nothing to move. Blocks while the folder stops and moves: call it off the main thread.
+    pub fn sync_remove(&self, id: String, trash_files: bool) -> Result<Option<crate::sync_text::SyncAlert>, CoreError> {
+        crate::sync_removal::sync_remove(&*self.backend, &id, trash_files)
     }
 
     pub fn sync_pause(&self, id: String, paused: bool) -> Result<(), CoreError> {
@@ -2726,7 +2729,7 @@ mod tests {
         assert_eq!(core.sync_link_problem("SWW-AAAA".into()).as_deref(), Some("Folder keys are no longer shared: ask for a link to the folder."));
         assert_eq!(core.sync_link_problem(format!("{}X", &rw[..40])).as_deref(), Some("The folder link is damaged or incomplete."));
         let place = core.sync_join_path(rw.clone()).unwrap();
-        assert!(place.ends_with("/Seedwell/Notes"), "{place}");
+        assert!(std::path::Path::new(&place).ends_with("Seedwell/Notes"), "{place}");
         let j = core.sync_join(ro.link.clone(), "/tmp/seedwell-mock/Joined".into()).unwrap();
         assert_eq!((j.access, j.state), (SyncAccess::ReadOnly, SyncState::WaitingForAdmin));
         // Roles: the mock's own device is the owner of what it adds.
@@ -2831,10 +2834,10 @@ mod tests {
         core.sync_pause(f.id.clone(), true).unwrap();
         assert_eq!(core.sync_snapshot().folders.iter().find(|x| x.id == f.id).unwrap().state, SyncState::Paused);
         core.sync_rescan(f.id.clone()).unwrap();
-        assert_eq!(core.sync_remove(f.id.clone(), true).unwrap(), "/tmp/elsewhere/Notebook");
+        assert_eq!(core.sync_remove(f.id.clone(), true).unwrap(), None, "not on disk: nothing to move");
         assert_eq!(core.sync_snapshot().folders.len(), n + 1, "the joined one stays");
         let e = core.sync_remove(f.id.clone(), false).unwrap_err();
-        assert_eq!(e.to_string(), "This folder is no longer synced on this Mac.");
+        assert_eq!(e.to_string(), concat!("This folder is no longer synced on this ", trs_platform::computer!(), "."));
         let mut st = core.sync_settings();
         assert!(st.lan_discovery && st.relay_own_devices && !st.relay_everyone && st.port > 0);
         st.device_name = "Desk".into();
@@ -2842,7 +2845,7 @@ mod tests {
         core.set_sync_settings(st.clone()).unwrap();
         assert_eq!(core.sync_settings(), st);
         assert_eq!(core.sync_snapshot().device_name, "Desk");
-        assert!(core.sync_default_location().ends_with("/Seedwell"));
+        assert!(std::path::Path::new(&core.sync_default_location()).ends_with("Seedwell"));
     }
 
     #[test]
@@ -2957,9 +2960,12 @@ mod tests {
         assert_eq!(core.sync_snapshot().device_name, "Test Mac");
         assert_eq!(core.sync_default_location(), home.path().join("Seedwell").display().to_string());
 
-        let path = core.sync_remove(f.id.clone(), false).unwrap();
-        assert_eq!(path, work.path().join("Papers").display().to_string());
-        assert!(work.path().join("Papers/a.txt").exists(), "the files stay");
+        // Removed with its files: the folder goes to the Trash (the QA one: a test never uses the real Trash).
+        let bin = work.path().join("bin");
+        // SAFETY: nextest runs each test in a process of its own; the core reads it only during the removal.
+        unsafe { std::env::set_var("SEEDWELL_QA_TRASH_DIR", &bin) };
+        assert_eq!(core.sync_remove(f.id.clone(), true).unwrap(), None);
+        assert!(bin.join("Papers/a.txt").is_file() && !work.path().join("Papers").exists(), "in the Trash");
         assert!(core.sync_snapshot().folders.is_empty());
         assert!(core.sync_create_invite(f.id, SyncRole::ReadOnly, 1, 7, None).is_err());
         assert!(core.shutdown(5).finished);

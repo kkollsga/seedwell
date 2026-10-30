@@ -50,7 +50,9 @@ pub struct TorrentFlags(pub u16);
 impl TorrentFlags {
     /// BEP 27 private torrent.
     pub const PRIVATE: u16 = 1;
-    /// User paused it.
+    /// Paused by the user. Kept across a restart only together with
+    /// [`TorrentRecord::pause_kept`]: builds before 2026-10-28 ended every pause at quit, so their
+    /// `PAUSED` alone loads as running.
     pub const PAUSED: u16 = 1 << 1;
     /// All wanted data verified.
     pub const FINISHED: u16 = 1 << 2;
@@ -122,6 +124,9 @@ pub struct TorrentRecord {
     /// Cleaned display title ("Sintel (2010)"), computed once by the engine from the name, the
     /// file list and the category; `None` = not computed yet (records written before it existed).
     pub title: Option<String>,
+    /// The user's pause (`TorrentFlags::PAUSED`) outlives a restart (SPEC §10). Written by builds
+    /// that keep it (`opts2` bit 2, no payload; older builds ignore the bit and resume the torrent).
+    pub pause_kept: bool,
 }
 
 impl TorrentRecord {
@@ -145,6 +150,7 @@ impl TorrentRecord {
             skipped_files: None,
             stage_root: None,
             title: None,
+            pause_kept: false,
         }
     }
 
@@ -162,7 +168,7 @@ impl TorrentRecord {
             | u8::from(self.skipped_files.is_some()) << 6
             | u8::from(!self.rel_path.is_empty()) << 7;
         w.u8(opts);
-        w.u8(u8::from(self.stage_root.is_some()) | u8::from(self.title.is_some()) << 1);
+        w.u8(u8::from(self.stage_root.is_some()) | u8::from(self.title.is_some()) << 1 | u8::from(self.pause_kept) << 2);
         w.varint(self.total_size);
         w.varint(u64::from(self.piece_count));
         w.varint(u64::from(self.file_count));
@@ -249,6 +255,7 @@ impl TorrentRecord {
         };
         let stage_root = if opts2 & 1 != 0 { Some(r.u32()?) } else { None };
         let title = if opts2 & 2 != 0 { Some(r.string(MAX_TITLE)?.to_string()) } else { None };
+        let pause_kept = opts2 & 4 != 0;
         r.finish()?;
         Ok(TorrentRecord {
             name,
@@ -268,6 +275,7 @@ impl TorrentRecord {
             skipped_files,
             stage_root,
             title,
+            pause_kept,
         })
     }
 }
@@ -578,6 +586,7 @@ mod tests {
             skipped_files: Some(vec![0b100, 0].into_boxed_slice()),
             stage_root: Some(9),
             title: Some("Night of the Living Dead (1968)".into()),
+            pause_kept: false,
         }
     }
 
@@ -624,6 +633,17 @@ mod tests {
         with.title = Some("é".repeat(MAX_TITLE));
         let cut = TorrentRecord::decode(&with.encode()).unwrap().title.unwrap();
         assert!(cut.len() <= MAX_TITLE && cut.chars().all(|c| c == 'é'));
+    }
+
+    #[test]
+    fn a_kept_pause_round_trips_and_older_records_have_none() {
+        let mut r = full();
+        r.flags.set(TorrentFlags::PAUSED, true);
+        assert!(!TorrentRecord::decode(&r.encode()).unwrap().pause_kept, "a record without the bit (older builds)");
+        r.pause_kept = true;
+        let back = TorrentRecord::decode(&r.encode()).unwrap();
+        assert!(back.pause_kept && back.flags.has(TorrentFlags::PAUSED));
+        assert_eq!(back, r);
     }
 
     #[test]

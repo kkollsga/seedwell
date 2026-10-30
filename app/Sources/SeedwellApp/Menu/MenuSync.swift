@@ -2,7 +2,8 @@ import AppKit
 
 // The menu bar's Folder Sync submenu (SPEC 8.2 item 5, 7G.5): one row per folder (status image, name, grey line,
 // Edit and Delete at the right edge on hover), a delete confirmation that slides out under its row while the menu
-// stays open (the same mechanism as the inline file list), and Add Folder… last.
+// stays open (the same mechanism as the inline file list), and Add Folder… last. What it shows is the core's
+// `SyncMenuModel` (trs-ffi `sync_menu.rs`); this draws it and handles hover, the keyboard and the clicks.
 
 extension SyncBadge {
     /// The row's status image, 16 pt: the green tick, a progress ring, or a symbol.
@@ -15,19 +16,10 @@ extension SyncBadge {
         switch self {
         case .upToDate: return Drawing.check()
         case .progress(let f): return Drawing.ring(f).tinted(hovered ? .selectedMenuItemTextColor : .labelColor)
+        case .waiting: return symbol("clock.fill", ink)
         case .paused: return symbol("pause.circle.fill", ink)
         case .attention: return symbol("exclamationmark.triangle.fill", hovered ? .selectedMenuItemTextColor : .systemOrange)
         case .missing: return symbol("questionmark.folder.fill", ink)
-        }
-    }
-
-    var accessibilityWord: String {
-        switch self {
-        case .upToDate: "up to date"
-        case .progress: "syncing"
-        case .paused: "paused"
-        case .attention: "needs attention"
-        case .missing: "folder missing"
         }
     }
 }
@@ -50,7 +42,7 @@ extension NSImage {
 /// (trash) at the right edge while the pointer is over the row (or the keyboard has it). A click elsewhere reveals
 /// the folder in Finder. Both buttons are accessibility elements of their own ("Edit Photos", "Remove Photos").
 @MainActor final class MenuSyncRow: NSView, HoverRow {
-    private(set) var folder: SyncFolder
+    private(set) var row: SyncMenuRow
     var onReveal: @MainActor () -> Void = {}
     var onEdit: @MainActor () -> Void = {}
     var onDelete: @MainActor () -> Void = {}
@@ -64,8 +56,9 @@ extension NSImage {
     private let editElement = NSAccessibilityElement()
     private let deleteElement = NSAccessibilityElement()
 
-    init(folder: SyncFolder) {
-        self.folder = folder
+    init(row: SyncMenuRow) {
+        self.row = row
+        confirming = row.confirming
         super.init(frame: NSRect(x: 0, y: 0, width: Self.width, height: Self.height))
         autoresizingMask = .width
         setAccessibilityElement(true)
@@ -80,24 +73,22 @@ extension NSImage {
 
     required init?(coder: NSCoder) { fatalError("not used") }
 
-    func update(_ f: SyncFolder) {
-        guard f != folder else { return }
-        folder = f
+    func update(_ r: SyncMenuRow) {
+        guard r != row else { return }
+        row = r
+        confirming = r.confirming
         refreshAccessibility()
         needsDisplay = true
     }
 
-    private var title: String { Fmt.middleTruncated(folder.name, to: SyncText.titleLimit) }
-    private var subtitle: String { SyncText.subtitle(folder) }
-
     private func refreshAccessibility() {
-        setAccessibilityLabel("\(folder.name), \(subtitle)")
+        setAccessibilityLabel(row.accessibilityLabel)
         setAccessibilityHelp("Show in Finder")
-        editElement.setAccessibilityLabel("Edit \(folder.name)")
-        deleteElement.setAccessibilityLabel("Remove \(folder.name)")
+        editElement.setAccessibilityLabel(row.editLabel)
+        deleteElement.setAccessibilityLabel(row.removeLabel)
         setAccessibilityCustomActions([
-            NSAccessibilityCustomAction(name: "Edit \(folder.name)") { [weak self] in self?.press(edit: true); return true },
-            NSAccessibilityCustomAction(name: "Remove \(folder.name)") { [weak self] in self?.press(edit: false); return true },
+            NSAccessibilityCustomAction(name: row.editLabel) { [weak self] in self?.press(edit: true); return true },
+            NSAccessibilityCustomAction(name: row.removeLabel) { [weak self] in self?.press(edit: false); return true },
         ])
     }
 
@@ -155,8 +146,7 @@ extension NSImage {
         let ink: NSColor = hovered ? .selectedMenuItemTextColor : .labelColor
         let faint: NSColor = hovered ? .selectedMenuItemTextColor : .secondaryLabelColor
         var x = Self.edge + 10
-        let badge = SyncText.badge(folder)
-        if let img = badge.image(hovered: hovered) {
+        if let img = row.badge.image(hovered: hovered) {
             let s = NSSize(width: 16, height: 16)
             img.draw(in: NSRect(x: x, y: ((bounds.height - s.height) / 2).rounded(), width: s.width, height: s.height))
         }
@@ -177,6 +167,7 @@ extension NSImage {
         style.lineBreakMode = .byTruncatingTail
         let tAttrs: [NSAttributedString.Key: Any] = [.font: NSFont.menuFont(ofSize: 0), .foregroundColor: ink, .paragraphStyle: style]
         let sAttrs: [NSAttributedString.Key: Any] = [.font: NSFont.menuFont(ofSize: NSFont.smallSystemFontSize), .foregroundColor: faint, .paragraphStyle: style]
+        let (title, subtitle) = (row.title, row.subtitle)
         let th = (title as NSString).size(withAttributes: tAttrs).height
         let sh = (subtitle as NSString).size(withAttributes: sAttrs).height
         let total = th + sh + 1
@@ -193,16 +184,16 @@ private final class FlippedPanel: NSView { override var isFlipped: Bool { true }
 /// bottom right. Real controls: they work in a menu item's view, and the menu stays open while they are used.
 @MainActor final class SyncConfirmPanel: NSView {
     private let question = NSTextField(wrappingLabelWithString: "")
-    let trash = NSButton(checkboxWithTitle: SyncRemoval.trashLabel, target: nil, action: nil)
-    let cancel = NSButton(title: "Cancel", target: nil, action: nil)
-    let remove = NSButton(title: "Remove", target: nil, action: nil)
+    let trash = NSButton(checkboxWithTitle: "", target: nil, action: nil)
+    let cancel = NSButton(title: "", target: nil, action: nil)
+    let remove = NSButton(title: "", target: nil, action: nil)
     var onTrash: (Bool) -> Void = { _ in }
     var onCancel: () -> Void = {}
     var onRemove: () -> Void = {}
     private static let pad: CGFloat = 20
     static let height: CGFloat = 104
 
-    init(name: String, trashOn: Bool, width: CGFloat) {
+    init(confirm c: SyncMenuConfirm, width: CGFloat) {
         super.init(frame: NSRect(x: 0, y: 0, width: width, height: Self.height))
         autoresizingMask = .width
         // NSMenu highlights the whole item under the pointer; the menu's own material keeps that from showing.
@@ -216,13 +207,16 @@ private final class FlippedPanel: NSView { override var isFlipped: Bool { true }
         content.autoresizingMask = [.width, .height]
         addSubview(content)
 
-        question.stringValue = SyncRemoval.question(name)
+        question.stringValue = c.question
+        trash.title = c.trashLabel
+        cancel.title = c.cancelTitle
+        remove.title = c.removeTitle
         question.font = .menuFont(ofSize: NSFont.smallSystemFontSize + 0.5)
         question.textColor = .secondaryLabelColor
         question.maximumNumberOfLines = 2
         question.lineBreakMode = .byWordWrapping
         trash.font = .menuFont(ofSize: NSFont.smallSystemFontSize + 0.5)
-        trash.state = trashOn ? .on : .off
+        trash.state = c.trash ? .on : .off
         trash.controlSize = .small
         for b in [cancel, remove] {
             b.bezelStyle = .push
@@ -230,8 +224,8 @@ private final class FlippedPanel: NSView { override var isFlipped: Bool { true }
             b.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         }
         remove.hasDestructiveAction = true
-        cancel.toolTip = "Keep syncing this folder"
-        remove.toolTip = "Stop syncing this folder on this Mac"
+        cancel.toolTip = c.cancelHelp
+        remove.toolTip = c.removeHelp
         trash.target = self; trash.action = #selector(trashChanged)
         cancel.target = self; cancel.action = #selector(cancelPressed)
         remove.target = self; remove.action = #selector(removePressed)
@@ -259,20 +253,26 @@ private final class FlippedPanel: NSView { override var isFlipped: Bool { true }
         cancel.frame = NSRect(x: remove.frame.minX - 8 - bw, y: 70, width: bw, height: cancel.frame.height)
     }
 
+    /// QA: what the panel shows.
+    var qaText: String { "\(question.stringValue) / \(trash.title) \(trash.state == .on ? "on" : "off") / \(cancel.title) / \(remove.title)" }
+
     @objc private func trashChanged() { onTrash(trash.state == .on) }
     @objc private func cancelPressed() { onCancel() }
     @objc private func removePressed() { onRemove() }
 }
 
 /// Owns the Folder Sync submenu. Built when the menu opens, refreshed once a second while it is open: the rows'
-/// texts change in place; a folder added or removed rebuilds the submenu's items (the open confirmation is kept).
+/// texts change in place; when the core's signature changes (a folder added, removed or renamed) the submenu's items
+/// are rebuilt (the open confirmation is kept).
 @MainActor final class MenuSync: NSObject, NSMenuDelegate {
     let menu = NSMenu(title: "Folder Sync")
     private let actions: SyncActions
-    private(set) var removal = SyncRemoval()
+    /// The delete confirmation that is open (the core's state).
+    let removal = SyncRemoval()
     private var rows: [String: MenuSyncRow] = [:]
-    private var folders: [SyncFolder] = []
-    private var structure = ""
+    private var snapshot: SyncSnapshot?
+    private var folders: [SyncFolder] { snapshot?.folders ?? [] }
+    private var signature = ""
     private var confirmItem: NSMenuItem?
     /// The folder the keyboard (or the pointer) has: ⌘E and ⌘⌫ act on it.
     private var highlighted: String?
@@ -287,50 +287,48 @@ private final class FlippedPanel: NSView { override var isFlipped: Bool { true }
     /// The rows (hover).
     var hoverRows: [MenuSyncRow] { Array(rows.values) }
 
-    /// What decides the submenu's items: the folders and their names (texts change in place).
-    nonisolated static func structureOf(_ s: SyncSnapshot) -> String {
-        s.folders.map { "\($0.id):\($0.name)" }.joined(separator: ",")
-    }
+    private func model(_ s: SyncSnapshot) -> SyncMenuModel { syncMenuModel(snapshot: s, removal: removal) }
 
     /// The whole menu opened: every confirmation starts closed (SPEC 8.2 item 5).
     func menuOpened(_ s: SyncSnapshot) {
         removal.close()
-        rebuild(s)
+        rebuild(s, model(s))
     }
 
     /// The once-a-second refresh.
     func update(_ s: SyncSnapshot) {
-        removal.keep(only: Set(s.folders.map(\.id)))
-        if Self.structureOf(s) != structure || (confirmItem == nil) != (removal.open == nil) { rebuild(s); return }
-        folders = s.folders
-        for f in s.folders { rows[f.id]?.update(f) }
+        let m = model(s)
+        if m.signature != signature { rebuild(s, m); return }
+        snapshot = s
+        for r in m.rows { rows[r.id]?.update(r) }
     }
 
-    private func rebuild(_ s: SyncSnapshot) {
-        structure = Self.structureOf(s)
-        folders = s.folders
+    private func rebuild(_ s: SyncSnapshot, _ m: SyncMenuModel) {
+        signature = m.signature
+        snapshot = s
         menu.removeAllItems()
         rows = [:]
         confirmItem = nil
-        for f in s.folders {
-            let item = ActionItem(title: f.name) { [weak self] in self?.reveal(f.id) }
-            item.representedObject = f.id
-            let row = MenuSyncRow(folder: f)
-            row.onReveal = { [weak self] in self?.reveal(f.id) }
-            row.onEdit = { [weak self] in self?.actions.showEdit(f.id) }
-            row.onDelete = { [weak self] in self?.toggleConfirm(f.id) }
-            row.confirming = removal.isOpen(f.id)
+        let names = Dictionary(s.folders.map { ($0.id, $0.name) }, uniquingKeysWith: { a, _ in a })
+        for r in m.rows {
+            let id = r.id
+            let item = ActionItem(title: names[id] ?? r.title) { [weak self] in self?.reveal(id) }
+            item.representedObject = id
+            let row = MenuSyncRow(row: r)
+            row.onReveal = { [weak self] in self?.reveal(id) }
+            row.onEdit = { [weak self] in self?.actions.showEdit(id) }
+            row.onDelete = { [weak self] in self?.toggleConfirm(id) }
             item.view = row
-            rows[f.id] = row
+            rows[id] = row
             menu.addItem(item)
-            if removal.isOpen(f.id) { menu.addItem(makeConfirm(f)) }
+            if let c = m.confirm, c.folderId == id { menu.addItem(makeConfirm(c)) }
         }
         menu.addItem(.separator())
-        let add = ActionItem(title: "Add Folder…") { [actions] in actions.showAdd(nil) }
-        add.toolTip = "Sync a folder of this Mac, or one shared with you"
+        let add = ActionItem(title: m.add.title) { [actions] in actions.showAdd(nil) }
+        add.toolTip = m.add.help
         menu.addItem(add)
         // The keyboard's way to the hover buttons: ⌘E edits and ⌘⌫ asks to remove the highlighted folder.
-        for (title, key, edit) in [("Edit Folder…", "e", true), ("Remove Folder…", "\u{8}", false)] {
+        for (title, key, edit) in [(m.editTitle, "e", true), (m.removeTitle, "\u{8}", false)] {
             let item = ActionItem(title: title, key: key) { [weak self] in self?.keyboard(edit: edit) }
             item.isHidden = true
             item.allowsKeyEquivalentWhenHidden = true
@@ -339,14 +337,15 @@ private final class FlippedPanel: NSView { override var isFlipped: Bool { true }
         refreshHover()
     }
 
-    private func makeConfirm(_ f: SyncFolder) -> NSMenuItem {
+    private func makeConfirm(_ c: SyncMenuConfirm) -> NSMenuItem {
         let width = max(MenuSyncRow.width, menu.size.width)
-        let panel = SyncConfirmPanel(name: f.name, trashOn: removal.trash, width: width)
-        panel.onTrash = { [weak self] on in self?.removal.trash = on }
+        let panel = SyncConfirmPanel(confirm: c, width: width)
+        let id = c.folderId
+        panel.onTrash = { [weak self] on in self?.removal.setTrash(on: on) }
         panel.onCancel = { [weak self] in self?.closeConfirm() }
         panel.onRemove = { [weak self] in
-            guard let self else { return }
-            let trash = self.removal.trash
+            guard let self, let f = self.folders.first(where: { $0.id == id }) else { return }
+            let trash = self.removal.trash()
             self.removal.close()
             Self.closeThen(self.menu) { [actions = self.actions] in actions.remove(f, trash: trash) }
         }
@@ -358,18 +357,22 @@ private final class FlippedPanel: NSView { override var isFlipped: Bool { true }
 
     /// The trash button: the confirmation slides out under this row (another one closes), or closes again.
     func toggleConfirm(_ id: String) {
-        removal.toggle(id)
+        removal.toggle(id: id)
         if let ci = confirmItem, ci.menu === menu { menu.removeItem(ci) }
         confirmItem = nil
-        for (fid, row) in rows { row.confirming = removal.isOpen(fid) }
-        guard let f = folders.first(where: { $0.id == id }), removal.isOpen(id),
-              let rowItem = menu.items.first(where: { ($0.representedObject as? String) == id }) else { refreshHover(); return }
-        menu.insertItem(makeConfirm(f), at: menu.index(of: rowItem) + 1)
+        guard let s = snapshot else { return }
+        // Changed in place (the highlight stays put): the signature follows, so the next refresh does not rebuild.
+        let m = model(s)
+        signature = m.signature
+        for r in m.rows { rows[r.id]?.confirming = r.confirming }
+        guard let c = m.confirm, let rowItem = menu.items.first(where: { ($0.representedObject as? String) == c.folderId })
+        else { refreshHover(); return }
+        menu.insertItem(makeConfirm(c), at: menu.index(of: rowItem) + 1)
         DispatchQueue.main.async { [weak self] in self?.refreshHover() }
     }
 
     private func closeConfirm() {
-        guard let id = removal.open else { return }
+        guard let id = removal.openFolder() else { return }
         toggleConfirm(id)
     }
 
@@ -418,14 +421,26 @@ private final class FlippedPanel: NSView { override var isFlipped: Bool { true }
 
     // MARK: QA
 
-    /// QA: presses Edit or Delete on the row whose name contains `key`.
+    /// QA: presses Edit or Delete on the row whose folder's name contains `key`.
     func qaPress(_ key: String, edit: Bool) -> Bool {
-        guard let row = rows.values.first(where: { $0.folder.name.localizedCaseInsensitiveContains(key) }) else { return false }
+        guard let f = folders.first(where: { $0.name.localizedCaseInsensitiveContains(key) }), let row = rows[f.id] else { return false }
         row.press(edit: edit)
         return true
     }
 
     var qaState: String {
-        "rows \(rows.count), confirm \(removal.open.flatMap { id in folders.first { $0.id == id }?.name } ?? "none"), trash \(removal.trash)"
+        "rows \(rows.count), confirm \(removal.openFolder().flatMap { id in folders.first { $0.id == id }?.name } ?? "none"), trash \(removal.trash())"
+    }
+
+    /// QA: the submenu's items as drawn, top to bottom ("Photos — Up to date [up to date]|confirm: …|-|Add Folder…").
+    var qaItems: String {
+        menu.items.filter { !$0.isHidden }.map { item -> String in
+            if item.isSeparatorItem { return "-" }
+            if let r = item.view as? MenuSyncRow {
+                return "\(r.row.title) — \(r.row.subtitle) [\(r.row.badge.accessibilityWord)]\(r.confirming ? " (confirming)" : "")"
+            }
+            if let p = item.view as? SyncConfirmPanel { return "confirm: \(p.qaText)" }
+            return item.title
+        }.joined(separator: "|")
     }
 }

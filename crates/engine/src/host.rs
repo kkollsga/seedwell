@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use trs_state::doc::POLL_INTERVAL;
-use trs_state::{Config, DocStore, PollEvent, Poller, RuleSet, TrackerProfiles, WatchHandle, spawn_watcher};
+use trs_state::{Config, DocStore, LoadSource, PollEvent, Poller, RuleSet, TrackerProfiles, WatchHandle, spawn_watcher};
 
 use crate::api::{EngineError, EngineEvent, ShutdownReport};
 use crate::config::{ClockFn, EngineConfig};
@@ -18,6 +18,9 @@ use crate::state_store::StateStore;
 
 /// Adjusts the engine configuration before it starts.
 pub type ConfigTweak = Box<dyn FnOnce(&mut EngineConfig) + Send>;
+
+/// Changes `config.toml` as loaded, at start and at every hot reload, in memory only.
+pub type ConfigAdjust = Arc<dyn Fn(&mut Config) + Send + Sync>;
 
 /// How to start a [`Host`].
 pub struct HostOptions {
@@ -33,11 +36,14 @@ pub struct HostOptions {
     pub poll_interval: Duration,
     /// Developer mode forced on for this process, whatever `config.toml` says (`seedwell daemon --dev-mode`).
     pub developer_mode: bool,
+    /// Applied to `config.toml` as loaded, at start and at every hot reload, before anything uses
+    /// it; never written (`seedwell daemon`: its options, over a file it must not rewrite).
+    pub adjust_config: Option<ConfigAdjust>,
 }
 
 impl Default for HostOptions {
     fn default() -> Self {
-        Self { tweak: None, time_zone: None, hot_reload: true, poll_interval: POLL_INTERVAL, developer_mode: false }
+        Self { tweak: None, time_zone: None, hot_reload: true, poll_interval: POLL_INTERVAL, developer_mode: false, adjust_config: None }
     }
 }
 
@@ -89,26 +95,26 @@ impl Host {
         let rules_docs = DocStore::<RuleSet>::new(&dir);
         let prof_docs = DocStore::<TrackerProfiles>::new(&dir);
         let (lc, lr, lp) = (cfg_docs.load(), rules_docs.load(), prof_docs.load());
-        for (name, err, w) in [
-            ("config.toml", &lc.error, &lc.warnings),
-            ("rules.toml", &lr.error, &lr.warnings),
-            ("trackers.toml", &lp.error, &lp.warnings),
-        ] {
-            if let Some(e) = err {
-                warnings.push(format!("{name}: {e}"));
-            }
-            warnings.extend(msgs(w).into_iter().map(|m| format!("{name}: {m}")));
-        }
+        warnings.extend(lc.notes().into_iter().chain(lr.notes()).chain(lp.notes()));
         let mut docs = Docs { cfg: lc.value, rules: lr.value, profiles: lp.value };
+        if let Some(adjust) = &opts.adjust_config {
+            adjust(&mut docs.cfg);
+        }
         // Watch folders only pick up files that arrive after they joined the list (SPEC 7A.1):
-        // stamp the entries that have no baseline yet (first launch, upgrade) and remember it.
-        if docs.cfg.stamp_watch_baselines(None, baseline_now()) && lc.error.is_none()
+        // stamp the entries that have no baseline yet (first launch, upgrade) and remember it. Not
+        // into a file with a bad value: that save would write the default over the user's value.
+        if docs.cfg.stamp_watch_baselines(None, baseline_now()) && lc.error.is_none() && lc.source != LoadSource::Repaired
             && let Err(e) = cfg_docs.save(&docs.cfg) {
                 warnings.push(format!("config.toml: cannot save the watch folder baselines: {e}"));
             }
         warnings.extend(msgs(&trs_state::cross_check(&docs.cfg, &docs.rules, &docs.profiles)));
 
         let mut base = EngineConfig::default();
+        // Under test (the real-home guard's rule) the engine listens on loopback only, never on the network.
+        if crate::guard::active() {
+            base.listen_addr = std::net::Ipv4Addr::LOCALHOST;
+            base.dht_bind = std::net::SocketAddrV4::new(std::net::Ipv4Addr::LOCALHOST, 0);
+        }
         if let Some(tz) = &opts.time_zone {
             let tz = tz.clone();
             base.clock = Some(ClockFn(Arc::new(move || {
@@ -152,10 +158,14 @@ impl Host {
                 let (h, rt, shared) = (h.clone(), rt.clone(), shared.clone());
                 let running = shared.lock().map(|d| d.cfg.clone()).unwrap_or_default();
                 let cfg_save = cfg_docs.clone();
+                let adjust = opts.adjust_config.clone();
                 let p = Poller::new(cfg_docs, running);
                 watchers.extend(spawn_watcher(p, iv, move |ev| match ev {
                     PollEvent::Reloaded(mut parsed) => {
                         let (h, shared, cfg_save) = (h.clone(), shared.clone(), cfg_save.clone());
+                        if let Some(adjust) = &adjust {
+                            adjust(&mut parsed.value);
+                        }
                         // A watch folder that is new (or was switched on again) starts its baseline
                         // now; the stamped file is saved so the baseline survives a restart.
                         let prev = shared.lock().map(|d| d.cfg.clone()).unwrap_or_default();

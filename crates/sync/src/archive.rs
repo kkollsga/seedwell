@@ -30,6 +30,10 @@ impl Default for Retention {
     }
 }
 
+/// The size cap is never below this, so a small folder still keeps its versions (10 % of a folder
+/// of notes would be a few kilobytes, less than one version).
+pub const MIN_CAP: u64 = 100 << 20;
+
 const HOUR: i64 = 3600 * 1_000_000_000;
 const DAY: i64 = 24 * HOUR;
 
@@ -38,7 +42,8 @@ const DAY: i64 = 24 * HOUR;
 /// - older than `max_age_s`: gone;
 /// - per file, in the last day one version per hour is kept, before that one per day (the newest
 ///   version of each hour or day: the state the file was in at the end of it);
-/// - then, while the archive is over the size cap, the oldest go first.
+/// - then, while the archive is over the size cap (`max_percent` of the folder, at least
+///   [`MIN_CAP`]), the oldest go first.
 pub fn prune(items: &[Archived], folder_size: u64, now_ns: i64, r: Retention) -> Vec<String> {
     let max_age = r.max_age_s.saturating_mul(1_000_000_000);
     let mut keep: Vec<&Archived> = Vec::new();
@@ -64,7 +69,8 @@ pub fn prune(items: &[Archived], folder_size: u64, now_ns: i64, r: Retention) ->
     }
 
     if r.max_percent > 0 {
-        let cap = folder_size / 100 * u64::from(r.max_percent);
+        let cap = (u128::from(folder_size) * u128::from(r.max_percent) / 100).max(u128::from(MIN_CAP));
+        let cap = u64::try_from(cap).unwrap_or(u64::MAX);
         let mut total: u64 = keep.iter().map(|a| a.size).sum();
         keep.sort_by_key(|a| a.at_ns);
         for a in keep {
@@ -108,10 +114,21 @@ mod tests {
 
     #[test]
     fn the_size_cap_drops_the_oldest_first() {
+        const MB: u64 = 1 << 20;
         let now = 10 * DAY;
-        let items = [item("a", now - 3 * DAY, 60), item("b", now - 2 * DAY, 30), item("c", now - DAY - HOUR, 30)];
-        // Folder 1000 bytes, 10 % cap = 100 bytes; 120 archived → the oldest (60) goes.
-        assert_eq!(prune(&items, 1000, now, Retention::default()), vec![items[0].stored_at.clone()]);
+        let items = [item("a", now - 3 * DAY, 600 * MB), item("b", now - 2 * DAY, 300 * MB), item("c", now - DAY - HOUR, 300 * MB)];
+        // Folder 10 000 MB, 10 % cap = 1000 MB; 1200 MB archived → the oldest (600 MB) goes.
+        assert_eq!(prune(&items, 10_000 * MB, now, Retention::default()), vec![items[0].stored_at.clone()]);
+    }
+
+    #[test]
+    fn a_small_folder_keeps_its_versions_up_to_the_minimum_cap() {
+        let now = 10 * DAY;
+        // A 30-byte folder: 10 % would be 3 bytes, less than the one version.
+        let items = [item("notes.txt", now - HOUR, 6)];
+        assert!(prune(&items, 30, now, Retention::default()).is_empty());
+        let big = [item("a", now - 2 * HOUR, MIN_CAP), item("b", now - HOUR, 1)];
+        assert_eq!(prune(&big, 30, now, Retention::default()), vec![big[0].stored_at.clone()]);
     }
 
     #[test]

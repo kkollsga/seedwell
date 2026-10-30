@@ -148,6 +148,30 @@ struct RowFiles {
     at: Instant,
 }
 
+impl RowFiles {
+    /// The row's figures from the engine's file list. An empty list is not known yet (a torrent that is
+    /// still starting has no layout): `None`, so the next refresh asks again instead of keeping "0 files".
+    fn of(files: &[eng::FileInfo], key: (u64, bool)) -> Option<Self> {
+        let is_vid = |f: &&eng::FileInfo| !f.padding && crate::play::is_video(f.path.rsplit('/').next().unwrap_or(&f.path));
+        let count = files.iter().filter(|f| !f.padding).count() as u32;
+        if count == 0 {
+            return None;
+        }
+        // The row's icon is the video's only when the biggest file is a video (a photo archive
+        // with a reel stays a folder); the largest video names it (a pack of mkv shows mkv).
+        let biggest = files.iter().filter(|f| !f.padding).max_by_key(|f| f.length);
+        let main = biggest.filter(|f| is_vid(f));
+        let video_ext = main.and_then(|f| f.path.rsplit_once('.')).map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
+        Some(RowFiles { has_video: files.iter().any(|f| is_vid(&f)), count, video_ext, done: files_done(files, key.1), key, at: Instant::now() })
+    }
+
+    /// Still good for a row of this wanted size and finished-ness: every file done is final, a download
+    /// is asked again after 30 s.
+    fn fits(&self, key: (u64, bool)) -> bool {
+        self.key == key && (self.done == self.count || self.at.elapsed() < Duration::from_secs(30))
+    }
+}
+
 pub struct RealBackend {
     rt: tokio::runtime::Runtime,
     host: Mutex<Option<Host>>,
@@ -166,6 +190,8 @@ pub struct RealBackend {
     videos: Mutex<std::collections::HashMap<String, RowFiles>>,
     /// Folder sync (SPEC 7G), started next to the engine.
     sync: Arc<crate::sync::RealSync>,
+    /// An isolated run's own Trash (`Trash` in its state folder): whatever would go to the Trash goes there.
+    trash: Option<PathBuf>,
 }
 
 pub struct StartOptions {
@@ -177,6 +203,12 @@ pub struct StartOptions {
     pub forbidden_root: Option<PathBuf>,
     /// The Keychain for folder sync's keys (`None`: a 0600 file in the state folder).
     pub secret_vault: Option<Arc<dyn crate::sync::SecretVault>>,
+}
+
+/// A folder an isolated run must not use: inside `forbidden` (the real home) and not in a temporary folder (Windows
+/// keeps those in the user's profile, under the home it forbids).
+fn inside_forbidden(p: &Path, forbidden: &Path) -> bool {
+    !p.as_os_str().is_empty() && p.starts_with(forbidden) && !trs_platform::dirs::in_temp_folder(p)
 }
 
 /// Every folder `trackers.toml` makes the engine touch, `~` expanded.
@@ -208,7 +240,7 @@ impl RealBackend {
         if let Some(forbidden) = &o.forbidden_root {
             let store = SettingsStore::new(&o.dir);
             let cfg = store.config();
-            let inside = |p: &Path| !p.as_os_str().is_empty() && p.starts_with(forbidden);
+            let inside = |p: &Path| inside_forbidden(p, forbidden);
             if inside(&o.dir) || config_folders(&cfg).iter().any(|p| inside(p)) || profile_folders(&store.load_profiles_set()).iter().any(|p| inside(p)) {
                 return Err(failed(format!(
                     "Refusing to start: a folder of this isolated run lies inside {}",
@@ -217,14 +249,31 @@ impl RealBackend {
             }
         }
         let rt = trs_engine::build_runtime().map_err(|e| failed(e.to_string()))?;
+        // An isolated run (QA: `--state-dir` with `--home-root`) never puts anything in the user's Trash: a `.torrent`
+        // file a watch folder or an add finishes with "trash", a held torrent's Cancel and a removed synced folder go to
+        // `Trash` in its state folder.
+        let trash = o.forbidden_root.as_ref().map(|_| o.dir.join("Trash"));
+        if let Some(t) = &trash {
+            std::fs::create_dir_all(t).map_err(|e| failed(format!("The Trash folder of this isolated run: {e}")))?;
+        }
+        let isolated_trash = trash.clone();
+        let isolated = trash.is_some();
         let allow_loopback = o.allow_loopback_trackers;
         let allow_lan = SettingsStore::new(&o.dir).config().network.allow_lan_trackers;
         let opts = HostOptions {
             tweak: Some(Box::new(move |ec| {
+                if ec.trash_dir.is_none() {
+                    ec.trash_dir = isolated_trash;
+                }
                 ec.tracker_destinations.allow_lan_trackers = allow_lan;
                 if allow_loopback {
                     ec.tracker_destinations = trs_tracker_policy_local();
                     ec.dht_allow_local = true;
+                }
+                // An isolated (test) run never reaches a real tracker, whatever torrent it is given: only loopback or
+                // LAN trackers answer it.
+                if isolated {
+                    ec.tracker_destinations.allow_public = false;
                 }
             })),
             time_zone: Some(Arc::new(trs_engine::util::local_utc_offset)),
@@ -302,6 +351,7 @@ impl RealBackend {
             cleared_at: Mutex::new(cleared),
             videos: Mutex::new(std::collections::HashMap::new()),
             sync,
+            trash,
             sd: Arc::new(Shutdown {
                 started: AtomicBool::new(false),
                 result: Mutex::new(None),
@@ -574,7 +624,8 @@ impl RealBackend {
                 continue;
             }
             // Known for this wanted size and finished-ness (ticking files, or finishing, asks the engine again).
-            if let Some(v) = lock(&self.videos).get(&row.id).filter(|v| v.key == (row.size_bytes, row.done_bytes >= row.size_bytes) && (v.done == v.count || v.at.elapsed() < Duration::from_secs(30))) {
+            let key = (row.size_bytes, row.done_bytes >= row.size_bytes);
+            if let Some(v) = lock(&self.videos).get(&row.id).filter(|v| v.fits(key)) {
                 (row.has_video, row.file_count, row.video_ext, row.files_done) = (v.has_video, v.count, v.video_ext.clone(), v.done);
                 continue;
             }
@@ -584,20 +635,7 @@ impl RealBackend {
             budget -= 1;
             let found = parse_id(&row.id)
                 .and_then(|tid| self.rt.block_on(self.engine.torrent_detail(tid)).ok())
-                .map(|d| {
-                    let is_vid = |f: &&eng::FileInfo| {
-                        !f.padding && crate::play::is_video(f.path.rsplit('/').next().unwrap_or(&f.path))
-                    };
-                    let has = d.files.iter().any(|f| is_vid(&f));
-                    // The row's icon is the video's only when the biggest file is a video (a photo archive
-                    // with a reel stays a folder); the largest video names it (a pack of mkv shows mkv).
-                    let biggest = d.files.iter().filter(|f| !f.padding).max_by_key(|f| f.length);
-                    let main = biggest.filter(|f| is_vid(f));
-                    let ext = main.and_then(|f| f.path.rsplit_once('.')).map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
-                    let count = d.files.iter().filter(|f| !f.padding).count() as u32;
-                    let done = files_done(&d.files, row.done_bytes >= row.size_bytes);
-                    RowFiles { has_video: has, count, video_ext: ext, done, key: (row.size_bytes, row.done_bytes >= row.size_bytes), at: Instant::now() }
-                });
+                .and_then(|d| RowFiles::of(&d.files, key));
             if let Some(v) = found {
                 lock(&self.videos).insert(row.id.clone(), v.clone());
                 (row.has_video, row.file_count, row.video_ext, row.files_done) = (v.has_video, v.count, v.video_ext, v.done);
@@ -888,6 +926,10 @@ impl Backend for RealBackend {
         self.sync.clone()
     }
 
+    fn trash_dir(&self) -> Option<PathBuf> {
+        self.trash.clone()
+    }
+
     fn snapshot(&self) -> Snapshot {
         let l = self.loaded(CACHE_AGE);
         let pol = lock(&self.policy);
@@ -1110,6 +1152,16 @@ impl Backend for RealBackend {
         *lock(&self.cache) = None;
     }
 
+    fn pause_by_app(&self, ids_: &[String]) {
+        self.engine.pause_by_app(&ids(ids_));
+        *lock(&self.cache) = None;
+    }
+
+    fn resume_by_app(&self, ids_: &[String]) {
+        self.engine.resume_by_app(&ids(ids_));
+        *lock(&self.cache) = None;
+    }
+
     fn move_to_top(&self, id: &str) {
         self.engine.move_to_top(&ids(&[id.to_string()]));
         *lock(&self.cache) = None;
@@ -1210,6 +1262,11 @@ impl Backend for RealBackend {
 
     fn set_alt_speed(&self, on: bool) {
         self.engine.set_alt_speed(on);
+        *lock(&self.cache) = None;
+    }
+
+    fn set_alt_speed_by_app(&self, on: bool) {
+        self.engine.set_alt_speed_by_app(on);
         *lock(&self.cache) = None;
     }
 
@@ -1634,5 +1691,34 @@ mod files_done_tests {
         let files = [f(100, 100, Normal), f(100, 97, Normal), f(100, 40, Skip), f(100, 100, Skip)];
         assert_eq!(files_done(&files, true), 2, "the ticked ones; a skipped file does not count");
         assert_eq!(files_done(&files, false), 1, "while downloading only whole files count");
+    }
+
+    #[test]
+    fn a_starting_download_with_no_file_list_yet_is_asked_again() {
+        use eng::FilePriority::Normal;
+        let key = (300, false);
+        assert!(RowFiles::of(&[], key).is_none(), "an empty list (no layout yet) is not cached as 0 files");
+        let v = RowFiles::of(&[f(100, 0, Normal), f(200, 0, Normal)], key).expect("a known list");
+        assert_eq!((v.count, v.done), (2, 0));
+        assert!(v.fits(key));
+        assert!(!v.fits((300, true)), "finishing asks again");
+    }
+}
+
+#[cfg(test)]
+mod isolation_tests {
+    use super::inside_forbidden;
+    use std::path::Path;
+
+    #[test]
+    fn an_isolated_run_may_use_temporary_folders_inside_the_home_it_forbids_and_nothing_else_there() {
+        let home = Path::new("/Users/someone-else");
+        assert!(inside_forbidden(&home.join("Downloads"), home));
+        assert!(!inside_forbidden(Path::new("/Volumes/Elsewhere/qa"), home));
+        assert!(!inside_forbidden(Path::new(""), home));
+        // Windows keeps the temporary folder in the profile (C:\Users\me\AppData\Local\Temp): a home that holds it.
+        let temp = std::env::temp_dir();
+        let around = temp.parent().unwrap();
+        assert!(!inside_forbidden(&temp.join("seedwell-qa").join("state"), around));
     }
 }

@@ -1,145 +1,100 @@
 #!/usr/bin/env bash
 # The "Starting in 7 s" notifier (SPEC 7A.7, 8.6): the popover with one torrent, three torrents and a paused
-# countdown, dark and light; the menu bar row; a watch-folder add that raises the popover by itself; a
-# frame sequence (and a screen recording when macOS allows it) of the countdown; and the restart that
-# brings the popover back with a fresh countdown. Own QA root (seedwell-qa-start); shots go to
-# app/build/qa/starting-*.png. Nothing outside the QA root is touched; only processes whose command
-# line carries this root's --state-dir are ever signalled.
+# countdown, dark and light; the menu bar row; a watch-folder add that raises the popover by itself; the countdown
+# as a sequence of shots, from the watch-folder add until it started by itself; and the restart that brings the
+# popover back with a fresh countdown. Own QA root (seedwell-qa-start); shots app/build/qa/starting-*.png (the
+# popover's content on a stand-in of its background: a quiet QA run shows no popover at the menu bar).
 set -uo pipefail
 export QA_ROOT="/private/tmp/claude-501/seedwell-qa-start"
 source "$(dirname "$0")/env.sh"
-qa_guard
-mkdir -p "$OUT"
 WATCH="$HOMEROOT/Watch"
 TORR="$QA_ROOT/torrents"
-REPORT="$CTL.bench"
-
-# A display that stays awake for the run, without touching anybody else's caffeinate.
-qa_wake() { detach caffeinate -d -u -t 3600 >/dev/null 2>&1 & echo $! > "$QA_ROOT/caffeinate.pid"; sleep 0.5; }
-qa_pid() { pgrep -f "SeedwellApp --state-dir $STATE" | head -1; }
-stop_app() {
-  qa_cmd "quit" >/dev/null 2>&1
-  for i in $(seq 1 40); do [ -z "$(qa_pid)" ] && break; sleep 0.5; done
-  local p; p=$(qa_pid); [ -n "$p" ] && kill "$p" 2>/dev/null
-  return 0
-}
-set_delay() { python3 - "$STATE/config.toml" "$1" <<'PY'
-import re, sys
-p, v = sys.argv[1], sys.argv[2]
-s = open(p).read()
-s = re.sub(r'(?m)^start_delay_secs = \d+$', f'start_delay_secs = {v}', s)
-open(p, 'w').write(s)
-PY
-}
 add() { "$CLI" --socket "$SOCK" add "$@" >/dev/null 2>&1 || echo "add failed: $*"; }
-state() { rm -f "$REPORT"; qa_cmd "starting state" >/dev/null; tail -1 "$REPORT" 2>/dev/null; }
-# The popover is the one window above the menu level that is about 320 wide.
-popover_line() { for i in 1 2 3 4 5 6 7 8; do l=$("$OUT/winid" Seedwell | awk '$2>0 && $4 ~ /^3[0-9][0-9]x/ {print; exit}'); [ -n "$l" ] && break; sleep 0.3; done; echo "$l"; }
-shot_popover() { # name
-  local l id; l=$(popover_line); id=${l%% *}
-  [ -n "$id" ] && screencapture -x -o -l "$id" "$OUT/starting-$1.png" && echo "  starting-$1 (popover window $id)" || echo "  MISSING starting-$1"
-  # ... and the menu bar around it, to see the anchor
-  local xy wh x y w h
-  xy=$(echo "$l" | awk '{print $3}'); wh=$(echo "$l" | awk '{print $4}')
-  x=${xy%,*}; y=${xy#*,}; w=${wh%x*}; h=${wh#*x}
-  [ -n "$id" ] && screencapture -x -R"$((x > 80 ? x - 80 : 0)),0,$((w + 160)),$((y + h + 24))" "$OUT/starting-$1-bar.png"
-}
+state() { qa_ask "starting state" | tail -1; }
+shot_popover() { qa_shot "starting-$1" popover; }
 
-if [ "${1:-}" != "reuse" ]; then
-  stop_app; sleep 1
-  rm -rf "$QA_ROOT"; mkdir -p "$QA_ROOT" "$WATCH"
-  QA_START_DELAY=60 qa_write_config
-  cat >> "$STATE/config.toml" <<TOML
-[[folders.watch]]
-path = "~/Watch"
-mode = "auto"
-after_add = "leave"
-TOML
-  python3 -I "$REPO/app/qa/make_torrents.py" --out "$QA_ROOT/swarm" --count 5 >/dev/null
-  mkdir -p "$TORR"; cp "$QA_ROOT/swarm/torrents"/*.torrent "$TORR/"
-  qa_app_start --window-size 1180x820
-  sleep 2
-fi
+qa_fresh
+mkdir -p "$WATCH"
+QA_WATCH="~/Watch" QA_START_DELAY=60 qa_write_config
+python3 -I "$REPO/app/qa/make_torrents.py" --out "$QA_ROOT/swarm" --count 5 >/dev/null
+mkdir -p "$TORR"; cp "$QA_ROOT/swarm/torrents"/*.torrent "$TORR/"
+qa_app_start --window-size 1180x820 || qa_end starting
 TS=($(ls "$TORR"/*.torrent))
 echo "torrents: ${#TS[@]}"
 
 # ---- the real path: a watch-folder add raises the popover by itself (no QA command) -------------------
+# The watch folder takes only files newer than its stamp (`since`, whole seconds, written at the first launch).
+qa_until 10 grep -q '^since = ' "$STATE/config.toml"
+since=$(sed -n 's/^since = //p' "$STATE/config.toml" | head -1)
+qa_until 3 eval '[ "$(date +%s)" -gt "${since:-0}" ]'
 cp "${TS[0]}" "$WATCH/"
-for i in $(seq 1 30); do s=$(state); case "$s" in *"shown true"*) break;; esac; sleep 0.5; done
-echo "watch-folder add: $s"
-case "$s" in *"shown true, items 1"*) echo "  OK: the popover appeared for a watch-folder add";; *) echo "  FAIL: no popover for the watch-folder add";; esac
+s=$(qa_wait "starting state ~ shown true" 15); echo "watch-folder add: $s"
+check "the popover appeared for a watch-folder add" "$s" "shown true, items 1"
 
 for mode in dark light; do
   echo "== $mode"
-  qa_cmd "appearance $mode" >/dev/null
-  qa_cmd "starting show" >/dev/null; sleep 1.2
+  qa_cmd "appearance $mode" "starting show"
   shot_popover "one-$mode"
 done
 
 # ---- three torrents -------------------------------------------------------------------------------
 add "${TS[1]}"; add "${TS[2]}"
-sleep 1.5
+check "three torrents wait" "$(qa_wait "starting state ~ items 3" 10)" "items 3"
 for mode in dark light; do
-  qa_cmd "appearance $mode" >/dev/null
-  qa_cmd "starting show" >/dev/null; sleep 1.2
+  qa_cmd "appearance $mode" "starting show"
   shot_popover "three-$mode"
 done
 
 # ---- paused ----------------------------------------------------------------------------------------
-qa_cmd "starting pause" >/dev/null; sleep 1
+qa_cmd "starting pause"
 for mode in dark light; do
-  qa_cmd "appearance $mode" >/dev/null
-  qa_cmd "starting show" >/dev/null; sleep 1.2
+  qa_cmd "appearance $mode" "starting show"
   shot_popover "paused-$mode"
 done
 state
-qa_cmd "starting resume" >/dev/null
+qa_cmd "starting resume"
 
 # ---- the menu bar menu lists them; the popover steps aside ---------------------------------------
-qa_cmd "appearance dark" "starting close" >/dev/null
-qa_cmd "menu open" >/dev/null; sleep 1.2
-id=$("$OUT/winid" Seedwell | awk '$2>0 {print $1}' | head -1)
-[ -n "$id" ] && screencapture -x -o -l "$id" "$OUT/starting-menu-dark.png" && echo "  starting-menu-dark"
-qa_cmd "menu close" >/dev/null
+qa_cmd "appearance dark" "starting close" "menu open"
+qa_shot "starting-menu-dark" menu
+qa_cmd "menu close"
 
-# ---- the countdown as a frame sequence: a watch-folder add, the popover rises by itself and closes by itself ----
-for i in 1 2 3; do qa_cmd "starting now" >/dev/null; done   # clear the board: start what is still waiting
-set_delay 9; sleep 3
-qa_cmd "starting close" "appearance dark" >/dev/null
-rm -f "$OUT"/starting-seq-*.png "$OUT"/starting-countdown.mov
+# ---- the countdown as a sequence of shots: a watch-folder add, the popover rises by itself and closes by itself ----
+qa_cmd "starting now" "starting now" "starting now"   # clear the board: start what is still waiting
+qa_set_config start_delay_secs 9
+qa_cmd "starting close" "appearance dark"
+rm -f "$OUT"/starting-seq-*.png
 cp "${TS[3]}" "$WATCH/"
-id=""
-for i in $(seq 1 40); do l=$(popover_line); id=${l%% *}; [ -n "$id" ] && break; sleep 0.2; done
-if [ -n "$id" ]; then
-  xy=$(echo "$l" | awk '{print $3}'); wh=$(echo "$l" | awk '{print $4}')
-  x=${xy%,*}; y=${xy#*,}; w=${wh%x*}; h=${wh#*x}
-  # a short screen recording of the same spot (needs the Screen Recording permission the captures already use)
-  screencapture -x -v -V 11 -R"$((x > 40 ? x - 40 : 0)),0,$((w + 80)),$((y + h + 20))" "$OUT/starting-countdown.mov" >/dev/null 2>&1 &
-  REC=$!
-  n=0
-  while [ $n -lt 12 ]; do
-    n=$((n + 1)); screencapture -x -o -l "$id" "$OUT/starting-seq-$(printf %02d $n).png" 2>/dev/null || break
-    sleep 0.6
+if qa_wait "starting state ~ shown true" 15 >/dev/null; then
+  n=0; keep=$FAIL
+  # One shot a second until the countdown has run out and the torrent started (the popover closes by itself).
+  while [ $n -lt 14 ]; do
+    n=$((n + 1))
+    qa_shot "starting-seq-$(printf %02d $n)" popover >/dev/null || break
+    sleep 0.6   # the countdown runs: the next frame shows it one step on
   done
-  echo "  $n frames starting-seq-NN.png"
-  wait $REC 2>/dev/null
-  sleep 1; echo "after the countdown: $(state)"
+  FAIL=$keep   # the shot after the popover closed by itself is missing, as it should be
+  echo "  $((n - 1)) frames starting-seq-NN.png"
+  [ $n -gt 3 ] || { echo "  FAIL: too few frames of the countdown"; FAIL=1; }
+  s=$(qa_wait "starting state ~ shown false" 15); echo "after the countdown: $s"
+  check "the popover closed by itself" "$s" "shown false"
 else
-  echo "  FAIL: no popover for the sequence"
+  echo "  FAIL: no popover for the sequence"; FAIL=1
 fi
+# a frame that went missing because the popover had closed is not a failure
+[ -n "${QA_SHOT_LOG:-}" ] && sed -i '' '/^MISSING starting-seq-/d' "$QA_SHOT_LOG"
 
 # ---- a restart during the wait: held again, a fresh countdown, the popover is back ----------------------
-set_delay 40; sleep 3
+qa_set_config start_delay_secs 40
 cp "${TS[4]}" "$WATCH/"
-for i in $(seq 1 30); do s=$(state); case "$s" in *"shown true"*) break;; esac; sleep 0.5; done
-echo "before the restart: $s"
-sleep 8
+s=$(qa_wait "starting state ~ shown true" 15); echo "before the restart: $s"
+sleep 8   # part of the countdown runs out before the restart
 echo "  after 8 s: $(state)"
-stop_app; sleep 3
+qa_app_quit
 echo "app quit"
-qa_app_start --window-size 1180x820
-sleep 2.5
-s=$(state); echo "after the restart: $s"
-case "$s" in *"shown true, items 1"*"Starting in 3"*|*"shown true, items 1"*"Starting in 40"*) echo "  OK: back with a fresh countdown";; *) echo "  CHECK the line above";; esac
-qa_cmd "appearance dark" >/dev/null
+qa_app_start --window-size 1180x820 || qa_end starting
+s=$(qa_wait "starting state ~ shown true" 10); echo "after the restart: $s"
+case "$s" in *"shown true, items 1"*"Starting in 3"*|*"shown true, items 1"*"Starting in 40"*) echo "  ok: back with a fresh countdown";; *) echo "  FAIL: not back with a fresh countdown"; FAIL=1;; esac
+qa_cmd "appearance dark"
 shot_popover "restart-dark"
+qa_end starting

@@ -59,8 +59,8 @@ struct ShareTarget: Equatable {
     @ObservationIgnored private var copiedTask: Task<Void, Never>?
 
     static let newChat = ""
-    static let useChoices: [(UInt32, String)] = [(5, "5 times"), (10, "10 times"), (0, "Unlimited")]
-    static let dayChoices: [(UInt32, String)] = [(1, "1 day"), (7, "7 days"), (30, "30 days")]
+    static let useChoices = syncShareUseChoices()
+    static let dayChoices = syncShareDayChoices()
 
     /// `copied`: show the "Link copied" state (snapshots).
     init(core: Core, id: String, copied: Bool = false) {
@@ -91,13 +91,12 @@ struct ShareTarget: Equatable {
         guard newPath == nil else { invites = []; return }
         Task {
             let list = await Task.detached(priority: .userInitiated) { core.syncInvites(id: id) }.value
-            invites = list.sorted { $0.createdS > $1.createdS }
+            invites = list
         }
     }
 
-    /// Roles this device may hand out: an owner any of them but Owner (co-owners are made on the folder page),
-    /// an admin Read & write and Read only.
-    var roles: [SyncRole] { target?.role == .owner ? [.readWrite, .readOnly, .admin] : [.readWrite, .readOnly] }
+    /// Roles this device may hand out (the core's choice by this device's role).
+    var roles: [SyncRole] { syncShareRoles(role: target?.role ?? .readOnly) }
 
     var canShare: Bool { target.map { SyncText.canShare($0.role) } ?? false }
 
@@ -107,21 +106,20 @@ struct ShareTarget: Equatable {
         return chat == Self.newChat ? target?.name : chatChoices.first { $0.id == chat }?.name
     }
 
-    /// What the next link is: (uses, days valid), 0 = no limit.
-    var settings: (uses: UInt32, linkDays: UInt32) { (singleUse ? 1 : uses, linkExpires ? linkDays : 0) }
+    /// What the next link is: uses and days valid, 0 = no limit.
+    var settings: SyncLinkLimits { syncLinkLimits(singleUse: singleUse, uses: uses, expires: linkExpires, linkDays: linkDays) }
 
     /// The folder is shared for a limited time (an owner set an end).
     var sharingEnds: Bool { target?.shareUntilS != nil }
 
     /// Starts a sharing period of `days` from now, or ends the period (`0`: shared with no end). Owners only.
     func setSharing(days: UInt32) {
-        setSharing(until: days == 0 ? 0 : UInt64(Date().timeIntervalSince1970) + UInt64(days) * 86_400)
+        setSharing(until: syncSharingEnd(days: days, nowUnixS: UInt64(Date().timeIntervalSince1970)))
     }
 
     /// Adds `days` to the running period's end.
     func extendSharing(days: UInt32) {
-        guard let until = target?.shareUntilS else { return setSharing(days: days) }
-        setSharing(until: max(until, UInt64(Date().timeIntervalSince1970)) + UInt64(days) * 86_400)
+        setSharing(until: syncSharingExtended(untilS: target?.shareUntilS, days: days, nowUnixS: UInt64(Date().timeIntervalSince1970)))
     }
 
     /// Sets the end of the folder's sharing (Unix seconds; `0` = no end). Applies at once, for every device.
@@ -136,8 +134,8 @@ struct ShareTarget: Equatable {
         }
     }
 
-    /// The links that still admit someone, newest first.
-    func active(now: UInt64) -> [SyncInvite] { invites.filter { SyncText.inviteState($0, now: now) == .open } }
+    /// The links that still admit someone, newest first (as many as the dialog lists, and how many more there are).
+    func active(now: UInt64) -> SyncActiveLinks { syncActiveLinks(invites: invites, nowUnixS: now) }
 
     /// Makes a link with the settings and copies it (a secret: shown nowhere, never logged).
     func copyLink(actions: SyncActions) {
@@ -220,13 +218,13 @@ struct SyncShareView: View {
                     .foregroundStyle(.secondary).padding(.top, 16).fixedSize(horizontal: false, vertical: true)
             } else {
                 if let path = model.newPath {
-                    Text(SyncText.shareNewNote(Notifier.abbreviate(path))).font(.system(size: 12)).foregroundStyle(.secondary)
+                    Text(syncShareNewNote(pathShown: Notifier.abbreviate(path))).font(.system(size: 12)).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true).padding(.top, 6)
                         .accessibilityIdentifier("sync-share-new")
                 }
                 settings.padding(.top, 18)
                 let s = model.settings
-                Text(SyncText.shareSummary(role: model.role, uses: s.uses, linkDays: s.linkDays, chat: model.chatName))
+                Text(syncShareSummary(role: model.role, uses: s.uses, linkDays: s.linkDays, chat: model.chatName))
                     .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     .padding(.top, 14)
                     .accessibilityIdentifier("sync-share-summary")
@@ -237,7 +235,7 @@ struct SyncShareView: View {
                 }
                 let now = UInt64(Date().timeIntervalSince1970)
                 let active = model.active(now: now)
-                if !active.isEmpty { links(active).padding(.top, 20) }
+                if !active.links.isEmpty { links(active).padding(.top, 20) }
             }
             if let e = model.error { ModalError(text: e).padding(.top, 14) }
             HStack(spacing: 8) {
@@ -275,7 +273,7 @@ struct SyncShareView: View {
             }
             .pickerStyle(.segmented).labelsHidden()
             .frame(maxWidth: .infinity)
-            .help(SyncText.roleNote(model.role))
+            .help(syncRoleNote(role: model.role))
             .accessibilityIdentifier("sync-share-role")
             row("Single use", on: $model.singleUse, help: "The link stops working once one Mac has joined with it") {
                 if !model.singleUse { menu($model.uses, SyncShareModel.useChoices) }
@@ -310,14 +308,14 @@ struct SyncShareView: View {
             TimelineView(.periodic(from: .now, by: 60)) { context in
                 HStack(spacing: 10) {
                     Image(systemName: "timer").foregroundStyle(.secondary)
-                    Text(SyncText.countdown(until: until, now: UInt64(context.date.timeIntervalSince1970)))
+                    Text(syncSharingCountdown(untilS: until, nowUnixS: UInt64(context.date.timeIntervalSince1970)))
                         .monospacedDigit()
                         .accessibilityIdentifier("sync-share-countdown")
                     Spacer()
                     if owner {
                         Menu("Extend") {
-                            ForEach(SyncShareModel.dayChoices, id: \.0) { d in
-                                Button("+ \(d.1)") { model.extendSharing(days: d.0) }
+                            ForEach(syncSharingExtendChoices(), id: \.value) { d in
+                                Button(d.label) { model.extendSharing(days: d.value) }
                             }
                             Divider()
                             Button("No End Date") { model.setSharing(days: 0) }
@@ -336,7 +334,7 @@ struct SyncShareView: View {
             }
             .accessibilityIdentifier("sync-share-until")
         }
-        Text(SyncText.sharingLine(until: until, owner: owner))
+        Text(syncSharingLine(untilDay: until.map { Fmt.day($0) }, owner: owner))
             .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
     }
 
@@ -352,22 +350,22 @@ struct SyncShareView: View {
         .help(help)
     }
 
-    private func menu(_ value: Binding<UInt32>, _ choices: [(UInt32, String)]) -> some View {
+    private func menu(_ value: Binding<UInt32>, _ choices: [SyncChoice]) -> some View {
         Picker("", selection: value) {
-            ForEach(choices, id: \.0) { Text($0.1).tag($0.0) }
+            ForEach(choices, id: \.value) { Text($0.label).tag($0.value) }
         }
         .labelsHidden().fixedSize().controlSize(.small)
     }
 
-    private func links(_ active: [SyncInvite]) -> some View {
+    private func links(_ active: SyncActiveLinks) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             ModalCaption(text: "Active links")
-            ForEach(Array(active.prefix(6).enumerated()), id: \.element.id) { n, i in
+            ForEach(Array(active.links.enumerated()), id: \.element.id) { n, i in
                 if n > 0 { Divider().opacity(0.6) }
                 HStack(spacing: 8) {
                     VStack(alignment: .leading, spacing: 1) {
-                        Text(SyncText.inviteLine(i, now: UInt64(Date().timeIntervalSince1970)))
-                        let detail = SyncText.inviteDetail(i)
+                        Text(syncInviteLine(invite: i, nowUnixS: UInt64(Date().timeIntervalSince1970)))
+                        let detail = syncInviteDetail(invite: i, expiresDay: i.expiresS.map { Fmt.day($0) })
                         if !detail.isEmpty { Text(detail).font(.system(size: 11.5)).foregroundStyle(.secondary) }
                     }
                     Spacer()
@@ -376,8 +374,8 @@ struct SyncShareView: View {
                 .font(.system(size: 12.5))
                 .padding(.vertical, 3)
             }
-            if active.count > 6 {
-                Text("and \(active.count - 6) more").font(.system(size: 11.5)).foregroundStyle(.secondary)
+            if let more = active.more {
+                Text(more).font(.system(size: 11.5)).foregroundStyle(.secondary)
             }
         }
     }

@@ -1,25 +1,23 @@
 import Foundation
 import IOKit.ps
 
-/// "On battery" setting (SPEC §8.4): keep going, apply the Limit Speed limits, or pause downloads.
-/// Follows the power source with a run-loop source, so nothing polls.
+/// Tells the core the power source (SPEC §8.4): at start and at every change, with a run-loop source, so
+/// nothing polls. The core's "On battery" rule decides what that means (keep going, Limit Speed, pause
+/// downloads, and what to undo on AC power).
 @MainActor final class PowerWatcher {
     private let core: Core
-    var mode: OnBatteryMode = .limit { didSet { if mode != oldValue { apply() } } }
     private var source: CFRunLoopSource?
-    private(set) var onBattery = false
-    /// We switched Limit Speed on ourselves, so we switch it off again (and only then).
-    private var limitedByUs = false
-    private var pausedByUs: [String] = []
+    private var onBattery: Bool
 
     init(core: Core) {
         self.core = core
         onBattery = Self.readOnBattery()
+        core.powerChanged(onBattery: onBattery)
         let ctx = Unmanaged.passUnretained(self).toOpaque()
         source = IOPSNotificationCreateRunLoopSource({ ctx in
             guard let ctx else { return }
             let me = Unmanaged<PowerWatcher>.fromOpaque(ctx).takeUnretainedValue()
-            DispatchQueue.main.async { MainActor.assumeIsolated { me.changed() } }
+            DispatchQueue.main.async { MainActor.assumeIsolated { me.report(PowerWatcher.readOnBattery()) } }
         }, ctx).takeRetainedValue()
         CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
     }
@@ -33,30 +31,10 @@ import IOKit.ps
         return kind == kIOPSBatteryPowerValue
     }
 
-    private func changed() {
-        let now = Self.readOnBattery()
+    /// A power source as macOS says it (QA: `power battery|ac` says it instead).
+    func report(_ now: Bool) {
         guard now != onBattery else { return }
         onBattery = now
-        apply()
-    }
-
-    func apply() {
-        if onBattery {
-            switch mode {
-            case .keepGoing: undo()
-            case .limit:
-                if !core.snapshot().altSpeed { core.setAltSpeed(on: true); limitedByUs = true }
-            case .pause:
-                let ids = core.snapshot().allDownloading.filter { $0.state == .downloading && !$0.awaitingChoice }.map(\.id)
-                if !ids.isEmpty { core.pause(ids: ids); pausedByUs += ids }
-            }
-        } else {
-            undo()
-        }
-    }
-
-    private func undo() {
-        if limitedByUs { core.setAltSpeed(on: false); limitedByUs = false }
-        if !pausedByUs.isEmpty { core.resume(ids: pausedByUs); pausedByUs = [] }
+        core.powerChanged(onBattery: now)
     }
 }

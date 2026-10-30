@@ -23,13 +23,15 @@ struct HeldRowActions: View {
     let commands: Commands
     /// Waiting for a choice (else counting down).
     var awaiting = true
+    /// The Start button's tooltip (the core's words).
+    let startHelp: String
     @State private var hasSource = false
     private let store = ChoiceStore.shared
 
     var body: some View {
         HeldButtons(hasSourceFile: hasSource, active: false,
                     canStart: awaiting ? (store.models[id]?.canConfirm ?? false) : true,
-                    startHelp: awaiting ? "Start downloading the ticked files. Nothing downloads before this" : "Skip the wait and start downloading now",
+                    startHelp: startHelp,
                     cancel: { commands.cancelHeld(id, keepFile: $0) },
                     start: { commands.startHeld(id, awaiting: awaiting) })
             .controlSize(.small)

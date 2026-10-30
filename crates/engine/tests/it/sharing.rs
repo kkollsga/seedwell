@@ -55,6 +55,7 @@ fn put_stored(s: &MemStore, t: &TestTorrent, dir: &std::path::Path, last_activit
         pinned: false,
         awaiting_choice: false,
         pending_start: false,
+        pending_stopped: false,
         title: None,
         idle: None,
     };

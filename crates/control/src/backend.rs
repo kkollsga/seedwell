@@ -165,7 +165,7 @@ pub trait Backend: Send + Sync + 'static {
     fn stop_stream(&self, _token: &str) -> impl Future<Output = Result<bool, ApiError>> + Send {
         async { Err(ApiError::new(crate::proto::ErrorCode::Unsupported, "this backend cannot stream")) }
     }
-    /// The Trash folder (`None` = `~/.Trash`): where `sync.remove` with `delete_files` puts a folder.
+    /// A folder that stands in for the Trash (`None` = the system's): where `sync.remove` with `delete_files` puts a folder.
     fn trash_dir(&self) -> impl Future<Output = Option<PathBuf>> + Send {
         async { None }
     }

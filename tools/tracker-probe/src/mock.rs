@@ -307,11 +307,20 @@ mod tests {
 
     #[tokio::test]
     async fn an_aborted_request_is_no_longer_in_flight() {
+        let dir = std::env::temp_dir().join(format!("tp-mock-guard-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        struct Gone(std::path::PathBuf);
+        impl Drop for Gone {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _gone = Gone(dir.clone());
         let st = Arc::new(State {
             peers: vec![],
             interval: 60,
             min_interval: 30,
-            log: log::start(&std::env::temp_dir().join(format!("tp-mock-guard-{}.jsonl", std::process::id()))).unwrap().0,
+            log: log::start(&dir.join("mock.jsonl")).unwrap().0,
             label: None,
             delay_ms: 0,
             fail_status: 0,

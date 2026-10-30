@@ -268,9 +268,16 @@ impl Torrent {
             // The startup slot is not held while waiting for a hashing slot (a Cold torrent that
             // wakes for a peer must not queue behind rechecks).
             slot = None;
-            self.live.verify_wait.store(true, Ordering::Relaxed);
-            let permit = self.interruptible(self.sh.verify_slot()).await;
-            self.live.verify_wait.store(false, Ordering::Relaxed);
+            // "Waiting to verify" only while it really waits: a free slot is taken at once.
+            let permit = match self.sh.verify_slots.clone().try_acquire_owned() {
+                Ok(p) => Some(Some(p)),
+                Err(_) => {
+                    self.live.verify_wait.store(true, Ordering::Relaxed);
+                    let p = self.interruptible(self.sh.verify_slot()).await;
+                    self.live.verify_wait.store(false, Ordering::Relaxed);
+                    p
+                }
+            };
             let Some(Some(permit)) = permit else { return Ok(Flow::Exit) };
             let in_use = self.cfg.verify_slots.max(1).saturating_sub(self.sh.verify_slots.available_permits()) as u64;
             self.sh.diag.verify_peak.fetch_max(in_use, Ordering::Relaxed);

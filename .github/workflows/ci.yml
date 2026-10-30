@@ -1,5 +1,7 @@
-# One build, every test. The Rust test build (debug) is reused by the app build and the Swift tests;
-# clippy runs beside it as a check-only pass. Documentation-only changes do not run CI.
+# One build, every test, on the Mac and on Windows. On the Mac the Rust test build (debug) is reused by the app
+# build and the Swift tests; on Windows the app is built and its QA run (app-windows/qa/run.ps1: the renders and the
+# behaviour checks, quiet). Clippy runs beside them on both, so the cfg(windows) code is linted too. A release starts
+# only when this passed on the tagged commit (release.yml). Documentation-only changes do not run CI.
 name: CI
 
 on:
@@ -66,5 +68,54 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: clippy
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  windows:
+    name: Windows build and test
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+      - name: Rust (version pinned in rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - name: Rust tests
+        run: cargo nextest run --workspace --locked --profile ci
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: "10.0.x"
+      - name: uniffi-bindgen-cs (the C# bindings' generator)
+        run: cargo install uniffi-bindgen-cs --git https://github.com/NordSecurity/uniffi-bindgen-cs --tag v0.11.1+v0.31.0
+      - name: PowerShell scripts parse
+        shell: powershell
+        run: |
+          $bad = 0
+          foreach ($f in @('install.ps1') + (Get-ChildItem app-windows -Recurse -Filter *.ps1 | ForEach-Object FullName)) {
+            $errors = $null
+            [void][Management.Automation.Language.Parser]::ParseFile((Resolve-Path $f), [ref]$null, [ref]$errors)
+            if ($errors) { Write-Host "::error file=$f::$($errors[0].Message)"; $bad++ }
+          }
+          if ($bad) { exit 1 }
+      - name: App and QA (renders and behaviour checks, quiet)
+        shell: powershell
+        run: app-windows\qa\run.ps1 all -Build
+
+  clippy-windows:
+    name: Clippy (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: clippy-windows
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings

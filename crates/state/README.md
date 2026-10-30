@@ -221,9 +221,23 @@ directory. Only a file that itself validates is copied into the backups, so a ha
 never push a good backup out (it is parked as `config.toml.rejected`). Saving identical content is a no-op.
 Comments are not preserved when the app rewrites the file (the header says so).
 
-**Loading never fails**: valid file; else (missing) defaults, written to disk; else (invalid) the newest
-valid of `.bak`, `backups/*`, with the original error in `Loaded::error` and the broken file left in
-place for the user to fix; else defaults.
+**Loading never fails**: valid file; else (missing) defaults, written to disk; else, for a file that is
+valid TOML with bad values (`Document::salvage`, `config.toml` only), every usable value of it and,
+for each bad one, the value the last-known-good backup (the first valid of `.bak`, `backups/*`) holds for
+that key, else for a setting that moves, trashes or deletes the user's files the choice that leaves them
+alone (`config::leaves_files_alone`: `folders.torrent_after_add` → `"leave"`, `folders.by_status` →
+`false`), else the default; a replacement is used only when it reads and passes the checks
+(`LoadSource::Repaired`). A wrong type or an unknown enum word fails the value alone, a validation error
+the key it names, a bad entry of a list of tables (`[[folders.watch]]`) only that entry; each is a
+warning naming the key, the bad value and the value used and why (`folders.torrent_after_add: "keep" is
+not a valid value (…); "leave", which leaves your files alone, is used until it is fixed`; `… the last
+good value 40000 from the backup …`; `… the default 0 …`), and nothing is written (the host does not stamp watch baselines into it; a later save by the
+user parks the original as `config.toml.rejected`); else (broken syntax, a newer `version`, a problem
+no single key is blamed for) the newest valid of `.bak`, `backups/*`, with the original error in
+`Loaded::error` and the broken file left in place for the user to fix; else defaults.
+`Loaded::notes` gives the lines the hosts show (`Core::settings_problems`). `read_lenient` is the
+same salvage without fallback or writes (the agents' permission follows it); hot reload stays strict
+(`read_strict`): a bad edit is rejected and the running values stay in force.
 
 **Hot reload**: `Poller::poll` is a single `stat` (mtime + size); `spawn_watcher` runs it every 2 s on
 one thread. A changed file is parsed and validated; `Reloaded` is only emitted when the content
@@ -319,6 +333,9 @@ Profile keys are the profile id, `@public` or `@other-private`. Removing a torre
 `None` = below the save root's `.incomplete`, the v1 meaning) and two flag bits: `TorrentFlags::AWAITING_CHOICE`
 (bit 6, SPEC 7A.6: held until the user chooses) and `LOCATION_PINNED` (bit 7: the user chose where it lives,
 so setting changes leave it alone). v2 costs one byte (`opts2`) plus the root id when set.
+`opts2` bit 1 marks the display title, bit 2 `pause_kept` (no payload): the user's pause (`PAUSED`) outlives a
+restart (SPEC §10). Builds before 2026-10-28 ended every pause at quit and never set it, so their `PAUSED` alone
+loads as running; they ignore the bit when they read a newer record.
 
 ### Sizes (measured, Apple M-series, release)
 

@@ -51,9 +51,10 @@ impl FileSecrets {
     }
 
     fn write(&self, all: &BTreeMap<String, Vec<u8>>) -> io::Result<()> {
-        use std::os::unix::fs::OpenOptionsExt;
         let tmp = self.path.with_extension("tmp");
-        let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp)?;
+        let mut o = std::fs::OpenOptions::new();
+        o.write(true).create(true).truncate(true);
+        let mut f = trs_platform::fs::set_create_mode(&mut o, 0o600).open(&tmp)?;
         for (k, v) in all {
             let hex: String = v.iter().map(|b| format!("{b:02x}")).collect();
             writeln!(f, "{k} = {hex}")?;
@@ -92,7 +93,6 @@ mod tests {
 
     #[test]
     fn stores_and_forgets_with_owner_only_permissions() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let s = FileSecrets::new(dir.path().join("secrets"));
         assert_eq!(s.get("a").unwrap(), None);
@@ -102,7 +102,8 @@ mod tests {
         s.delete("a").unwrap();
         assert_eq!(s.get("a").unwrap(), None);
         assert_eq!(s.get("b").unwrap(), Some(b"xyz".to_vec()));
-        let mode = std::fs::metadata(dir.path().join("secrets")).unwrap().permissions().mode();
-        assert_eq!(mode & 0o777, 0o600);
+        if let Some(mode) = trs_platform::fs::unix_mode(&std::fs::metadata(dir.path().join("secrets")).unwrap()) {
+            assert_eq!(mode & 0o777, 0o600);
+        }
     }
 }

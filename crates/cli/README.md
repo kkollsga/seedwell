@@ -58,6 +58,9 @@ seedwell daemon --state-dir D --download-dir X [--listen-port P] [--bind 127.0.0
   `seedwell daemon ready socket=... port=<tcp> pid=...` on stdout and runs until SIGINT/SIGTERM.
 * **The flags win over `config.toml` and are written into it** at start (download and incomplete
   folders, listen port, DHT, port mapping, queue size; watch folders cleared; `.torrent` never trashed).
+  A `config.toml` with values that cannot be used, or a broken one, is never rewritten: the flags then apply
+  in memory only (at start and at every hot reload, `HostOptions::adjust_config`), each warning is logged
+  once on stderr at start, and the file stays as the user left it.
 * `--dev-mode` switches developer mode on for the run: every tracker exchange is written, secrets masked, to
   `D/logs/trackers.log`; read it with `seedwell log trackers --socket D/control.sock`.
 * **Tracker destinations** are strict by default (public addresses only, as in the app). `--allow-lan-trackers`

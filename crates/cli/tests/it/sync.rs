@@ -40,9 +40,9 @@ fn folder_sync_runs_in_the_daemon() {
     assert_eq!(text.code, 0, "{}", text.stderr);
     assert!(text.stdout.contains("Docs") && text.stdout.contains(&group), "{}", text.stdout);
     // The owner's key and the links are in a file only the user can read, never in sync.toml.
-    use std::os::unix::fs::PermissionsExt;
-    let mode = std::fs::metadata(d.state.join("sync").join("secrets")).unwrap().permissions().mode();
-    assert_eq!(mode & 0o777, 0o600);
+    if let Some(mode) = trs_platform::fs::unix_mode(&std::fs::metadata(d.state.join("sync").join("secrets")).unwrap()) {
+        assert_eq!(mode & 0o777, 0o600);
+    }
     let toml = std::fs::read_to_string(d.state.join("sync.toml")).unwrap();
     assert!(!toml.contains(&link[16..]), "{toml}");
     // A script gets the plan and the token; -y removes (the files stay).
@@ -98,7 +98,7 @@ fn the_sync_port_moves_at_once_and_a_port_in_use_is_refused() {
 
 /// Starts `seedwell relay` and returns it with its ready line.
 fn relay(key: &std::path::Path) -> (std::process::Child, String) {
-    let mut child = Command::new(BIN)
+    let mut child = trs_platform::proc::stoppable_command(BIN)
         .args(["relay", "--port", "0", "--bind", "127.0.0.1", "--key-file"])
         .arg(key)
         .stdout(Stdio::piped())
@@ -123,11 +123,12 @@ fn the_relay_starts_and_keeps_its_id() {
     let (mut a, line) = relay(&key);
     assert!(line.starts_with("seedwell relay ready address=relay://127.0.0.1:"), "{line:?}");
     let id = line.split('#').nth(1).unwrap().split_whitespace().next().unwrap().to_owned();
-    let _ = Command::new("kill").arg("-TERM").arg(a.id().to_string()).status();
+    trs_platform::proc::request_stop(&a).unwrap();
     let status = a.wait().unwrap();
-    assert!(status.success(), "a signal stops it cleanly: {status:?}");
-    use std::os::unix::fs::PermissionsExt;
-    assert_eq!(std::fs::metadata(&key).unwrap().permissions().mode() & 0o777, 0o600);
+    assert!(status.success(), "asked to stop, it stops cleanly: {status:?}");
+    if let Some(mode) = trs_platform::fs::unix_mode(&std::fs::metadata(&key).unwrap()) {
+        assert_eq!(mode & 0o777, 0o600);
+    }
     let (mut b, line) = relay(&key);
     assert!(line.contains(&format!("#{id}")), "the same key, the same address: {line:?}");
     let _ = b.kill();

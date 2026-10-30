@@ -7,25 +7,59 @@
 //! rules and tracker profiles are read and written straight through `trs-state`, in both modes.
 
 mod backend;
+mod battery;
+mod chat_text;
 mod display;
 mod favorites;
 mod files;
+mod held;
+mod info_card;
+mod library;
+mod library_rows;
+mod library_window;
 mod mail;
+mod menu;
 mod mock;
 mod play;
 mod power;
 mod real;
+mod removal;
+mod row_commands;
+mod row_text;
 mod rows;
 mod settings;
+mod settings_text;
+mod sidebar;
+mod sources;
 mod sync;
+mod sync_menu;
+mod sync_removal;
+mod sync_text;
 mod types;
+mod updates;
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
 pub use backend::{AttrRow, Backend, ShutdownInfo};
+pub use chat_text::*;
+pub use display::RateDirection;
+pub use held::{CancelNote, CancelQuestion};
+pub use info_card::*;
+pub use library::*;
+pub use library_rows::*;
+pub use library_window::*;
+pub use menu::*;
+pub use removal::*;
+pub use updates::{EnvVar, InstallCommand, UpdateButton, Updates, UpdatesModel};
+pub use row_commands::*;
+pub use row_text::*;
 pub use settings::*;
+pub use settings_text::*;
+pub use sidebar::*;
 pub use sync::*;
+pub use sync_menu::*;
+pub use sync_text::*;
 pub use types::*;
 
 use trs_state::rules::TorrentAttrs;
@@ -47,8 +81,10 @@ pub struct CoreOptions {
     pub mock: bool,
     /// QA only: allow trackers on loopback (a local mock tracker). Never set by the app itself.
     pub allow_loopback_trackers: bool,
-    /// Isolated runs: refuse to start when the state folder or any folder in `config.toml`
-    /// (download, incomplete, watch, archive, categories) lies inside this path (the real home).
+    /// Isolated runs (QA): refuse to start when the state folder or any folder in `config.toml`
+    /// (download, incomplete, watch, archive, categories) lies inside this path (the real home: `~` on the Mac, the
+    /// user profile on Windows), a temporary folder excepted. Set, it also makes the run's Trash `Trash` in its state
+    /// folder, never the user's.
     pub forbidden_root: Option<String>,
 }
 
@@ -67,6 +103,10 @@ pub struct Core {
     backend: Arc<dyn Backend>,
     settings: SettingsStore,
     dir: PathBuf,
+    /// An isolated (test) run (`forbidden_root` set): it reaches no real tracker and no real update server.
+    isolated: bool,
+    /// "On battery" (SPEC §8.4), fed by `power_changed` and by changes of `config.toml`.
+    battery: Arc<battery::Battery>,
 }
 
 impl Core {
@@ -86,7 +126,9 @@ impl Core {
                 secret_vault: vault,
             })?
         };
-        Ok(Arc::new(Self { backend, settings: SettingsStore::new(&dir), dir }))
+        let battery = Arc::new(battery::Battery::new(backend.clone(), dir.clone()));
+        let isolated = options.forbidden_root.is_some();
+        Ok(Arc::new(Self { backend, settings: SettingsStore::new(&dir), dir, isolated, battery }))
     }
 
 }
@@ -106,7 +148,15 @@ impl Core {
 
     /// Registers the event listener, replacing any previous one.
     pub fn set_listener(&self, listener: Arc<dyn CoreListener>) {
-        self.backend.set_listener(listener);
+        self.backend.set_listener(Arc::new(battery::Listener { inner: listener, battery: self.battery.clone() }));
+    }
+
+    /// The power source: `true` on battery. The host reports it at start and whenever it changes (macOS:
+    /// IOPS; Windows: `GetSystemPowerStatus` and `WM_POWERBROADCAST`); repeating the same report does
+    /// nothing. The "On battery" setting decides what follows: nothing, the app's own Limit Speed, or
+    /// pausing the downloads until AC power is back (SPEC §8.4).
+    pub fn power_changed(&self, on_battery: bool) {
+        self.battery.power_changed(on_battery);
     }
 
     /// Finished torrents (the Sharing view), filtered and paged.
@@ -151,6 +201,11 @@ impl Core {
 
     /// Adds a magnet link, `.torrent` file path or http(s) URL.
     pub fn add_source(&self, source: String) -> Result<String, CoreError> {
+        // A path to a file that is not there (or cannot be read) is said as such, before the backend
+        // would call it "not a .torrent file".
+        if let Some(e) = sources::file_problem(&source) {
+            return Err(e);
+        }
         self.backend.add_source(&source)
     }
 
@@ -226,8 +281,11 @@ impl Core {
         self.backend.set_limits(down, up);
     }
 
+    /// The user's Limit Speed toggle (⌥⌘L). Kept in `config.toml` like the CLI's, so a later change of
+    /// any setting (the engine applies the whole file again) and the next start keep it.
     pub fn set_alt_speed(&self, on: bool) {
         self.backend.set_alt_speed(on);
+        let _ = self.settings.save_alt_speed(on);
     }
 
     // ---------------------------------------------------------------- settings
@@ -237,10 +295,21 @@ impl Core {
         self.settings.load_settings()
     }
 
+    /// Problems in the settings files, one sentence each, for the host to show (Settings, a
+    /// notice at start). A bad value in `config.toml` costs only itself: the line names the key,
+    /// the bad value and what is used instead and why ("config.toml: folders.torrent_after_add:
+    /// \"keep\" is not a valid value (…); \"leave\", which leaves your files alone, is used until
+    /// it is fixed"; or the last good value from the backup, or the default).
+    /// Empty when the files are fine.
+    pub fn settings_problems(&self) -> Vec<String> {
+        self.settings.load_notes()
+    }
+
     /// Validates and saves; the engine applies the file within seconds.
     pub fn settings_save(&self, settings: AppSettings) -> Result<(), CoreError> {
         self.settings.save_settings(&settings)?;
         self.backend.settings_saved();
+        self.battery.settings_changed();
         Ok(())
     }
 
@@ -370,6 +439,13 @@ impl Core {
         self.backend.confirm_choice(&id, &files)
     }
 
+    /// Start on a torrent that waits for a choice, with nothing ticked by the user (a row's Start, the menu's): it
+    /// downloads what [`held::choice_default_files`] says, everything but the Extras.
+    pub fn confirm_choice_default(&self, id: String) -> Result<(), CoreError> {
+        let info = self.backend.choice(&id, false)?;
+        self.backend.confirm_choice(&id, &held::choice_default_files(&info))
+    }
+
     /// Stops the countdown of a torrent that waits to start (SPEC §7A.7). It stays held and silent.
     pub fn pending_pause(&self, id: String) -> Result<(), CoreError> {
         self.backend.pending_act(&id, backend::PendingAct::Pause).map(|_| ())
@@ -397,9 +473,17 @@ impl Core {
         self.backend.cancel_choice(&id)
     }
 
+    /// Cancel on a held torrent (SPEC 7A.6), the whole of it: the torrent is removed (one in its countdown, which the
+    /// engine does not cancel, is removed without its files) and, unless `keep_file` (⇧-Cancel), the `.torrent` file it
+    /// came from goes to the Trash. A file that cannot be moved never stops the removal: the note says so, for a quiet
+    /// notification. `None`: nothing to say. Blocks briefly (the removal and a file move).
+    pub fn cancel_held(&self, id: String, keep_file: bool) -> Option<CancelNote> {
+        held::cancel_held(&*self.backend, &id, keep_file)
+    }
+
     /// The `.torrent` file a torrent that waits for a decision came from, if it still lies where Seedwell
     /// left it: read now, and only returned when it is a regular `.torrent` file (not a link) with this
-    /// torrent's info-hash. Call it right before moving the file to the Trash. `None` for magnet links,
+    /// torrent's info-hash (`cancel_held` reads it itself, before the cancel). `None` for magnet links,
     /// web addresses, and files that are gone or changed.
     pub fn held_source_file(&self, id: String) -> Option<String> {
         self.backend.held_source(&id)
@@ -639,6 +723,20 @@ mod tests {
     }
 
     #[test]
+    fn a_bad_settings_value_is_named_and_the_rest_is_kept() {
+        let (core, d) = mock_core();
+        assert_eq!(core.settings_problems(), Vec::<String>::new());
+        std::fs::write(d.path().join("config.toml"), "[agents]\npermission = \"full\"\n[folders]\ntorrent_after_add = \"keep\"\n").unwrap();
+        let p = core.settings_problems();
+        assert_eq!(p.len(), 1, "{p:?}");
+        assert!(p[0].starts_with("config.toml: folders.torrent_after_add: \"keep\" is not a valid value ("), "{}", p[0]);
+        assert!(p[0].ends_with("\"leave\", which leaves your files alone, is used until it is fixed"), "{}", p[0]);
+        let s = core.settings_load();
+        assert_eq!(s.agents.permission, AgentPermission::Full, "the rest of the file is in force");
+        assert_eq!(s.folders.torrent_after_add, TorrentFileAction::Leave, "not the default (Trash): no backup has a value");
+    }
+
+    #[test]
     fn pause_resume_and_remove() {
         let (core, _d) = mock_core();
         let id = core.snapshot().downloading[0].id.clone();
@@ -653,15 +751,22 @@ mod tests {
     fn mock_files_and_stream_url() {
         let (core, _d) = mock_core();
         let s = core.snapshot();
-        let row = s.downloading.iter().find(|r| !r.file_ext.is_empty()).expect("a single-file download");
-        let files = core.files(row.id.clone()).unwrap();
-        assert_eq!(files.len(), 1);
-        assert_eq!(files[0].index, 0);
-        assert_eq!(files[0].is_video, matches!(row.file_ext.as_str(), "mkv" | "mp4" | "avi" | "mov" | "m4v" | "webm" | "wmv" | "ts"));
-        if files[0].is_video {
-            let s = core.stream_url(row.id.clone(), 0).unwrap();
-            assert!(s.url.starts_with("http://127.0.0.1:"));
+        // Every single-file row lists one file named with its extension, so a video is a video (Play offers it).
+        let singles: Vec<&TransferRow> =
+            s.downloading.iter().chain(&s.sharing_busiest).filter(|r| !r.file_ext.is_empty()).collect();
+        assert!(singles.iter().any(|r| row_text::is_video_ext(&r.file_ext)), "a single-file video");
+        for r in &singles {
+            let files = core.files(r.id.clone()).unwrap();
+            assert_eq!(files.len(), 1);
+            assert_eq!(files[0].index, 0);
+            assert!(files[0].name.ends_with(&format!(".{}", r.file_ext)), "{}", files[0].name);
+            assert_eq!(files[0].is_video, row_text::is_video_ext(&r.file_ext), "{}", files[0].name);
+            if files[0].is_video {
+                let s = core.stream_url(r.id.clone(), 0).unwrap();
+                assert!(s.url.starts_with("http://127.0.0.1:"));
+            }
         }
+        let row = singles[0];
         assert!(matches!(core.stream_url(row.id.clone(), 99), Err(CoreError::Failed { .. })));
         assert!(matches!(core.files("nope".into()), Err(CoreError::NotFound { .. })));
         core.set_file_priorities(row.id.clone(), vec![FilePriorityChange { index: 0, priority: FilePriority::Low }]).unwrap();
@@ -680,6 +785,15 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    #[test]
+    fn adding_a_missing_torrent_file_says_it_is_missing() {
+        let (core, d) = mock_core();
+        let gone = d.path().join("debian.torrent").display().to_string();
+        let e = core.add_source(gone.clone()).unwrap_err();
+        assert!(matches!(&e, CoreError::InvalidSource { message } if *message == format!("File not found: {gone}")), "{e:?}");
+        assert!(matches!(core.add_source("garbage".into()), Err(CoreError::InvalidSource { .. })));
     }
 
     #[test]
@@ -704,7 +818,7 @@ mod tests {
             tracker_ids: vec!["public".into()],
             private_match: PrivateMatch::Any,
             categories: vec![],
-            goal: Some(GoalKind::Ratio { ratio: 3.0 }),
+            goal: Some(GoalKind::RatioOnly { ratio: 3.0 }),
             min_seed_secs: None,
             priority: Some(Priority::High),
             on_goal: None,
@@ -716,6 +830,234 @@ mod tests {
         let p = core.rule_preview(doc, String::new());
         assert!(p.affected > 10, "{p:?}");
         assert!(p.changed > 0);
+    }
+
+    fn set_on_battery(core: &Core, mode: OnBatteryMode) {
+        let mut s = core.settings_load();
+        s.general.on_battery = mode;
+        core.settings_save(s).unwrap();
+    }
+
+    fn state_of(core: &Core, id: &str) -> Option<TransferState> {
+        let s = core.snapshot();
+        s.downloading.iter().chain(&s.queued).find(|r| r.id == id).map(|r| r.state)
+    }
+
+    #[test]
+    fn on_battery_the_downloads_pause_and_on_ac_what_the_app_paused_resumes() {
+        let (core, _d) = mock_core();
+        set_on_battery(&core, OnBatteryMode::Pause);
+        let running: Vec<String> = core.snapshot().downloading.iter().filter(|r| r.state == TransferState::Downloading).map(|r| r.id.clone()).collect();
+        assert!(running.len() >= 2, "{running:?}");
+        core.power_changed(false);
+        assert!(running.iter().all(|id| state_of(&core, id) == Some(TransferState::Downloading)), "a start on AC power changes nothing");
+        core.power_changed(true);
+        assert!(running.iter().all(|id| state_of(&core, id) == Some(TransferState::Paused)));
+        // The user resumes one on battery (it keeps running) and pauses another (it stays paused on AC).
+        core.resume(vec![running[0].clone()]);
+        core.pause(vec![running[1].clone()]);
+        core.power_changed(true);
+        assert_ne!(state_of(&core, &running[0]), Some(TransferState::Paused), "a repeated report does not pause again");
+        core.power_changed(false);
+        assert_eq!(state_of(&core, &running[1]), Some(TransferState::Paused), "the user's pause is the user's");
+        assert!(running[2..].iter().all(|id| state_of(&core, id) != Some(TransferState::Paused)), "the rest resumed");
+    }
+
+    #[test]
+    fn on_battery_limit_speed_is_the_apps_own_and_the_setting_can_change_on_battery() {
+        let (core, d) = mock_core();
+        core.power_changed(true);
+        assert!(core.snapshot().alt_speed, "Limit (the default) switches Limit Speed on at once");
+        assert!(!SettingsStore::new(d.path()).config().transfers.alt.enabled, "the app's limit is not the user's toggle");
+        // The setting changes on battery: the limit goes and the downloads pause.
+        set_on_battery(&core, OnBatteryMode::Pause);
+        let s = core.snapshot();
+        assert!(!s.alt_speed);
+        assert!(s.downloading.iter().all(|r| r.state != TransferState::Downloading));
+        set_on_battery(&core, OnBatteryMode::KeepGoing);
+        assert!(core.snapshot().downloading.iter().any(|r| r.state == TransferState::Downloading), "they run again");
+        // The user's toggle ends the app's limit; back on AC it is left as the user set it.
+        set_on_battery(&core, OnBatteryMode::Limit);
+        assert!(core.snapshot().alt_speed);
+        core.set_alt_speed(false);
+        assert!(!core.snapshot().alt_speed);
+        core.set_alt_speed(true);
+        core.power_changed(false);
+        assert!(core.snapshot().alt_speed, "the user's Limit Speed stays on AC");
+    }
+
+    /// A real core in temporary folders (HOME too: the engine's guard treats it as the real home), with
+    /// no watch folder and no port mapping.
+    fn real_core() -> (Arc<Core>, PathBuf, [tempfile::TempDir; 2]) {
+        let home = tempfile::tempdir().unwrap();
+        let work = tempfile::tempdir().unwrap();
+        // SAFETY: set before the core starts any thread; nextest runs every test in its own process.
+        unsafe { std::env::set_var("HOME", home.path()) };
+        let dir = work.path().join("state");
+        let store = SettingsStore::new(&dir);
+        let mut st = store.load_settings();
+        st.folders.download_dir = work.path().join("done").display().to_string();
+        st.folders.incomplete_dir = work.path().join("incomplete").display().to_string();
+        st.folders.watch.clear();
+        st.network.port_mapping = false;
+        st.transfers.start_delay_secs = 0;
+        store.save_settings(&st).unwrap();
+        let options = CoreOptions { config_dir: dir.display().to_string(), mock: false, allow_loopback_trackers: false, forbidden_root: None };
+        (Core::new(options).unwrap(), dir, [home, work])
+    }
+
+    #[test]
+    fn an_isolated_run_trashes_into_its_own_state_never_the_users_trash() {
+        let home = tempfile::tempdir().unwrap();
+        let work = tempfile::tempdir().unwrap();
+        // SAFETY: set before the core starts any thread; nextest runs every test in its own process.
+        unsafe { std::env::set_var("HOME", home.path()) };
+        let dir = work.path().join("state");
+        let store = SettingsStore::new(&dir);
+        let mut st = store.load_settings();
+        st.folders.download_dir = work.path().join("done").display().to_string();
+        st.folders.incomplete_dir = work.path().join("incomplete").display().to_string();
+        st.folders.watch.clear();
+        st.folders.torrent_after_add = TorrentFileAction::Trash;
+        st.network.port_mapping = false;
+        store.save_settings(&st).unwrap();
+        let options = CoreOptions {
+            config_dir: dir.display().to_string(),
+            mock: false,
+            allow_loopback_trackers: false,
+            forbidden_root: Some(home.path().display().to_string()),
+        };
+        let core = Core::new(options).unwrap();
+        assert_eq!(core.backend.trash_dir(), Some(dir.join("Trash")));
+        // An added .torrent file that its setting sends to the Trash lands there.
+        let mut t = b"d4:infod6:lengthi40000e4:name5:a.bin12:piece lengthi65536e6:pieces20:".to_vec();
+        t.extend_from_slice(&[7u8; 20]);
+        t.extend_from_slice(b"ee");
+        let tf = work.path().join("one.torrent");
+        std::fs::write(&tf, &t).unwrap();
+        core.add_source(tf.display().to_string()).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while tf.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(!tf.exists(), "the .torrent file was finished");
+        let trashed: Vec<_> = std::fs::read_dir(dir.join("Trash")).unwrap().flatten().map(|e| e.file_name()).collect();
+        assert_eq!(trashed.len(), 1, "{trashed:?}");
+        core.shutdown(5);
+    }
+
+    #[test]
+    fn limit_speed_from_the_app_outlives_a_settings_change_and_a_restart() {
+        let (core, dir, _tmp) = real_core();
+        core.set_alt_speed(true);
+        assert!(core.snapshot().alt_speed);
+        assert!(SettingsStore::new(&dir).config().transfers.alt.enabled, "kept in config.toml, as the CLI keeps it");
+        // Any other change of the settings: the engine applies the file again a moment later.
+        let mut s = core.settings_load();
+        (s.transfers.download_limit, s.transfers.alt_download_limit) = (7_000_000, 3_000_000);
+        core.settings_save(s).unwrap();
+        let applied = (0..100).any(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            matches!(core.snapshot().down_limit, Some(3_000_000 | 7_000_000))
+        });
+        assert!(applied, "the saved file was applied");
+        let s = core.snapshot();
+        assert!(s.alt_speed && s.down_limit == Some(3_000_000), "Limit Speed is still on: {:?}", s.down_limit);
+        assert!(core.shutdown(5).finished);
+        drop(core);
+        let options = CoreOptions { config_dir: dir.display().to_string(), mock: false, allow_loopback_trackers: false, forbidden_root: None };
+        let core = Core::new(options).unwrap();
+        assert!(core.snapshot().alt_speed, "and after a restart");
+        core.set_alt_speed(false);
+        assert!(!SettingsStore::new(&dir).config().transfers.alt.enabled);
+        assert!(core.shutdown(5).finished);
+    }
+
+    /// A download nobody serves (it stays downloading), named so that the classifier is sure of it and it
+    /// starts without asking.
+    fn add_movie(core: &Core, dir: &std::path::Path) -> String {
+        let name = "Sintel.2010.1080p.BluRay.x264-GRP.mkv";
+        let mut t = format!("d4:infod6:lengthi40000e4:name{}:{name}12:piece lengthi65536e6:pieces20:", name.len()).into_bytes();
+        t.extend_from_slice(&[5u8; 20]);
+        t.extend_from_slice(b"ee");
+        let tf = dir.join("movie.torrent");
+        std::fs::write(&tf, &t).unwrap();
+        core.add_source(tf.display().to_string()).unwrap()
+    }
+
+    /// Waits up to 5 s for the state of `id` to satisfy `want`.
+    fn wait_state(core: &Core, id: &str, want: impl Fn(Option<TransferState>) -> bool) -> bool {
+        (0..100).any(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            want(state_of(core, id))
+        })
+    }
+
+    fn running(s: Option<TransferState>) -> bool {
+        matches!(s, Some(TransferState::Downloading | TransferState::Queued | TransferState::Checking))
+    }
+
+    struct Quiet;
+    impl CoreListener for Quiet {
+        fn on_transfer_finished(&self, _: TransferRow) {}
+        fn on_error(&self, _: Option<String>, _: String) {}
+        fn on_goal_reached(&self, _: TransferRow) {}
+        fn on_needs_choice(&self, _: TransferRow) {}
+        fn on_auto_added(&self, _: AutoAdded) {}
+        fn on_duplicate(&self, _: String, _: u32) {}
+        fn on_add_request(&self, _: AddRequestInfo) {}
+        fn on_agent_activity(&self, _: AgentActivity) {}
+        fn on_settings_changed(&self, _: String, _: Vec<String>, _: Vec<String>) {}
+        fn on_settings_rejected(&self, _: String, _: String) {}
+        fn on_locations_changed(&self, _: u32, _: u64) {}
+        fn on_attention_changed(&self) {}
+        fn on_pending_changed(&self) {}
+    }
+
+    /// The setting changed in `config.toml` by something else than Settings (the CLI, an edit) while on
+    /// battery: the engine's reload tells the rule (from inside the engine's runtime).
+    #[test]
+    fn a_setting_changed_in_the_file_on_battery_applies() {
+        let (core, dir, tmp) = real_core();
+        core.set_listener(Arc::new(Quiet));
+        let id = add_movie(&core, tmp[1].path());
+        assert!(wait_state(&core, &id, running));
+        core.power_changed(true);
+        assert!(core.snapshot().alt_speed, "Limit, the default");
+        let store = SettingsStore::new(&dir);
+        let mut s = store.load_settings();
+        s.general.on_battery = OnBatteryMode::Pause;
+        store.save_settings(&s).unwrap();
+        // No snapshot is read meanwhile, so the rule has to read a fresh one when the reload comes.
+        core.resume(Vec::new());
+        std::thread::sleep(std::time::Duration::from_millis(3500));
+        assert_eq!(state_of(&core, &id), Some(TransferState::Paused));
+        assert!(!core.snapshot().alt_speed);
+        assert!(core.shutdown(5).finished);
+    }
+
+    /// The app's pause on battery is stored as running: after a quit on battery the download comes back
+    /// running, and the host's report at start pauses it again.
+    #[test]
+    fn a_quit_on_battery_brings_the_downloads_back_and_the_report_at_start_pauses_them_again() {
+        let (core, dir, tmp) = real_core();
+        set_on_battery(&core, OnBatteryMode::Pause);
+        let id = add_movie(&core, tmp[1].path());
+        let wait = |core: &Core, want: &dyn Fn(Option<TransferState>) -> bool| wait_state(core, &id, want);
+        assert!(wait(&core, &running), "{:?}", state_of(&core, &id));
+        core.power_changed(true);
+        assert!(wait(&core, &|s| s == Some(TransferState::Paused)), "paused on battery: {:?}", state_of(&core, &id));
+        assert!(core.shutdown(5).finished);
+        drop(core);
+
+        let options = CoreOptions { config_dir: dir.display().to_string(), mock: false, allow_loopback_trackers: false, forbidden_root: None };
+        let core = Core::new(options).unwrap();
+        assert!(running(state_of(&core, &id)), "back running after the quit: {:?}", state_of(&core, &id));
+        core.power_changed(true);
+        assert!(wait(&core, &|s| s == Some(TransferState::Paused)), "paused again at start: {:?}", state_of(&core, &id));
+        core.power_changed(false);
+        assert!(wait(&core, &running), "and running on AC: {:?}", state_of(&core, &id));
+        assert!(core.shutdown(5).finished);
     }
 
     #[test]
@@ -798,7 +1140,8 @@ mod tests {
             f.display().to_string()
         };
         let pending_row = |id: &str| core.snapshot().downloading.into_iter().find(|r| r.id == id);
-        let a = core.add_source(pack("Night.of.the.Living.Dead.1968.1080p.BluRay.x264-GRP.mkv")).unwrap();
+        let night = pack("Night.of.the.Living.Dead.1968.1080p.BluRay.x264-GRP.mkv");
+        let a = core.add_source(night.clone()).unwrap();
         let p = pending_row(&a).and_then(|r| r.pending).expect("a pending row");
         assert!(!p.paused && p.remaining_ms > 2500 && p.remaining_ms <= 4000, "{p:?}");
         assert_eq!(pending_row(&a).unwrap().state, TransferState::Queued);
@@ -812,7 +1155,25 @@ mod tests {
         let r = pending_row(&a).unwrap();
         assert!(r.pending.is_none() && r.awaiting_choice, "{r:?}");
         assert!(matches!(core.pending_pause(a.clone()), Err(CoreError::InvalidSource { .. })), "no longer pending");
-        core.cancel_choice(a).unwrap();
+        // Cancel: removed, and its .torrent file in the Trash (the QA one: a test never uses the real Trash).
+        let bin = work.path().join("bin");
+        // SAFETY: as for HOME above; the core reads it only during the cancel.
+        unsafe { std::env::set_var("SEEDWELL_QA_TRASH_DIR", &bin) };
+        assert!(core.has_held_source_file(a.clone()));
+        assert_eq!(core.cancel_held(a.clone(), false), None);
+        let night = std::path::Path::new(&night);
+        assert!(!night.exists() && bin.join(night.file_name().unwrap()).is_file(), "the file is in the Trash");
+        assert!(core.info(a).is_err(), "and the torrent is gone");
+        // Cancel in the countdown, keeping the file: the engine does not cancel it, so it is removed.
+        let c = core.add_source(pack("Big.Buck.Bunny.2008.1080p.BluRay.x264-GRP.mkv")).unwrap();
+        assert!(pending_row(&c).unwrap().pending.is_some());
+        assert_eq!(core.cancel_held(c.clone(), true), None);
+        let gone = (0..100).any(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            core.info(c.clone()).is_err()
+        });
+        assert!(gone, "removed");
+        assert!(work.path().join("Big.Buck.Bunny.2008.1080p.BluRay.x264-GRP.mkv.torrent").is_file(), "the file is kept");
         // Start Now.
         let b = core.add_source(pack("Sintel.2010.1080p.BluRay.x264-GRP.mkv")).unwrap();
         assert!(pending_row(&b).unwrap().pending.is_some());

@@ -171,6 +171,8 @@ struct InstalledPlayer: Equatable, Identifiable, Sendable {
     var needsUpdate: Bool { !runs }
     /// "VLC" or "VLC (needs update)": the Settings popup and the Play With submenu.
     var menuTitle: String { runs ? spec.name : "\(spec.name) (needs update)" }
+    /// What the core's Play entries know of it.
+    var option: PlayerOption { PlayerOption(id: spec.id, name: spec.name, runs: runs, mp4Only: spec.mp4Only) }
 }
 
 /// What "Play" does with the setting and the installed players.
@@ -223,7 +225,8 @@ enum PlayerCatalog {
 
     /// Players that can run here and play this container, in the order of "Automatic".
     static func capable(_ installed: [InstalledPlayer], for c: VideoContainer) -> [InstalledPlayer] {
-        installed.filter { $0.runs && $0.spec.supports(c) }
+        let ids = Set(capablePlayers(players: installed.map(\.option), mp4Family: c == .mp4Family).map(\.id))
+        return installed.filter { ids.contains($0.id) }
     }
 
     /// `preference` is the setting: `"auto"` or a bundle identifier.
@@ -302,13 +305,4 @@ enum PlayerLauncher {
             }
         }
     }
-}
-
-// MARK: Video files
-
-enum VideoFiles {
-    /// Extensions of the video files the rows know about (`TransferRow.fileExt`, the FFI's list).
-    static let rowExtensions: Set<String> = ["mkv", "mp4", "avi", "mov", "m4v", "wmv", "webm", "ts"]
-
-    static func isVideo(ext: String) -> Bool { rowExtensions.contains(ext.lowercased()) }
 }

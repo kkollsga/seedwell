@@ -47,6 +47,16 @@ pub trait Document: Sized + Clone + PartialEq + Send + 'static {
     fn file_is_outdated(_text: &str) -> bool {
         false
     }
+    /// A file that is valid TOML but holds values this build cannot use: the document with every
+    /// usable value of `text` and, in place of each bad one, the value `last_good` (the text of
+    /// the last-known-good backup, when there is one) holds for that key, else the choice that
+    /// leaves the user's files alone for a setting that moves, trashes or deletes them, else the
+    /// default; each is named in a warning (key, bad value, the value used and why). `None` when
+    /// nothing can be saved this way (broken syntax, a newer format, a problem no single key can
+    /// be blamed for).
+    fn salvage(_text: &str, _last_good: Option<&str>) -> Option<Parsed<Self>> {
+        None
+    }
 }
 
 /// Where a loaded document came from.
@@ -56,6 +66,11 @@ pub enum LoadSource {
     File,
     /// The file did not exist; defaults were written to it.
     Created,
+    /// The file holds values that cannot be used: every other value of it is in force and each bad
+    /// one is replaced (by the last good value from the backup, the choice that leaves the user's
+    /// files alone, or the default; [`Document::salvage`]), named in [`Loaded::warnings`]. The file
+    /// is left as it is.
+    Repaired,
     /// The file was invalid; this last-known-good backup was used instead.
     Backup(PathBuf),
     /// The file was invalid and no backup could be used; built-in defaults.
@@ -73,6 +88,16 @@ pub struct Loaded<T> {
     pub warnings: Vec<Warning>,
     /// Why the primary file could not be used, if it could not.
     pub error: Option<DocError>,
+}
+
+impl<T: Document> Loaded<T> {
+    /// What loading found, one line each and naming the file: why the file could not be used,
+    /// then every warning (a bad value with the default used instead, an unknown key). The hosts
+    /// show these; empty when the file was fine.
+    pub fn notes(&self) -> Vec<String> {
+        let file = T::FILE;
+        self.error.iter().map(|e| format!("{file}: {e}")).chain(self.warnings.iter().map(|w| format!("{file}: {w}"))).collect()
+    }
 }
 
 enum ReadFail {
@@ -162,6 +187,20 @@ impl<T: Document> DocStore<T> {
         })
     }
 
+    /// [`DocStore::read_strict`], but a file with bad values gives what [`Document::salvage`]
+    /// keeps of it (its warnings name each bad value) instead of an error. Never writes.
+    pub fn read_lenient(&self) -> Result<Parsed<T>, DocError> {
+        self.read_strict().or_else(|e| self.salvage().ok_or(e))
+    }
+
+    fn salvage(&self) -> Option<Parsed<T>> {
+        let text = read_text(&self.path).ok()?;
+        // The last-known-good copy: the same candidates, in the same order, as a broken file falls
+        // back to.
+        let last_good = self.candidates().into_iter().find_map(|c| read_text(&c).ok().filter(|t| T::parse_str(t).is_ok()));
+        T::salvage(&text, last_good.as_deref())
+    }
+
     fn candidates(&self) -> Vec<PathBuf> {
         let mut v = vec![self.bak_path()];
         let prefix = format!("{}.", T::FILE);
@@ -181,6 +220,9 @@ impl<T: Document> DocStore<T> {
     ///
     /// * valid file: used as is;
     /// * missing file: defaults are written and used;
+    /// * a file with bad values ([`Document::salvage`]): every other value of it and, for each bad
+    ///   one, the last good value from the backup, else the choice that leaves the user's files
+    ///   alone, else the default, named in [`Loaded::warnings`]; nothing is written;
     /// * invalid file: the last-known-good `.bak`, then the newest valid file in `backups/`,
     ///   then defaults; the reason is reported in [`Loaded::error`] and the broken file is left
     ///   alone for the user to fix.
@@ -203,6 +245,11 @@ impl<T: Document> DocStore<T> {
                 Loaded { value, source: LoadSource::Created, warnings: Vec::new(), error }
             }
             Err(ReadFail::Other(primary)) => {
+                // One bad value must not cost the user every other setting (an older backup or the
+                // defaults would change what happens to their files): keep what is usable.
+                if let Some(p) = self.salvage() {
+                    return Loaded { value: p.value, source: LoadSource::Repaired, warnings: p.warnings, error: None };
+                }
                 for cand in self.candidates() {
                     let Ok(text) = read_text(&cand) else { continue };
                     if let Ok(p) = T::parse_str(&text) {
@@ -381,6 +428,190 @@ fn split_unknown(
             Some(_) => {}
         }
     }
+}
+
+/// What [`Document::salvage`] keeps of `input`: each value is taken over in turn and dropped when
+/// `T` cannot be read with it or `validate` blames its key; an entry of an array of tables is
+/// taken or dropped on its own. In place of a dropped value goes, in this order, the value
+/// `last_good` (the last-known-good backup's table) holds for that key, `safe(key)` (the choice
+/// that leaves the user's files alone, for the settings that move, trash or delete them), or
+/// nothing, which is the default (`defaults` is `T::default()` serialised, to name it); a
+/// replacement is used only when it reads and passes `validate` itself. Returns the usable table
+/// and one warning per dropped value. `None` when a problem remains that no single key can be
+/// blamed for.
+pub(crate) fn salvage_table<T>(
+    input: &toml::Table,
+    defaults: &toml::Table,
+    last_good: Option<&toml::Table>,
+    safe: impl Fn(&str) -> Option<toml::Value>,
+    validate: impl Fn(&T) -> Vec<crate::error::FieldError>,
+) -> Option<(toml::Table, Vec<Warning>)>
+where
+    T: DeserializeOwned,
+{
+    fn leaves(t: &toml::Table, at: &mut Vec<String>, out: &mut Vec<(Vec<String>, toml::Value)>) {
+        for (k, v) in t {
+            at.push(k.clone());
+            match v {
+                toml::Value::Table(sub) => leaves(sub, at, out),
+                _ => out.push((at.clone(), v.clone())),
+            }
+            at.pop();
+        }
+    }
+    fn slot<'a>(t: &'a mut toml::Table, path: &[String]) -> Option<&'a mut toml::Table> {
+        let mut t = t;
+        for k in path {
+            t = t.entry(k.clone()).or_insert_with(|| toml::Value::Table(toml::Table::new())).as_table_mut()?;
+        }
+        Some(t)
+    }
+    fn lookup<'a>(t: &'a toml::Table, path: &[String]) -> Option<&'a toml::Value> {
+        let (last, parents) = path.split_last()?;
+        let mut t = t;
+        for k in parents {
+            t = t.get(k)?.as_table()?;
+        }
+        t.get(last)
+    }
+    fn remove(t: &mut toml::Table, path: &[String]) -> Option<toml::Value> {
+        let (last, parents) = path.split_last()?;
+        let mut t = t;
+        for k in parents {
+            t = t.get_mut(k)?.as_table_mut()?;
+        }
+        t.remove(last)
+    }
+    /// What replaced a bad value: nothing (the default), the backup's value or the safe one.
+    const DEFAULT: u8 = 0;
+    const BACKUP: u8 = 1;
+    const SAFE: u8 = 2;
+    /// A replaced value: its warning, the kinds used so far (`BACKUP | SAFE`) and what was wrong with
+    /// the user's value.
+    struct Fixed {
+        warning: usize,
+        tried: u8,
+        bad: toml::Value,
+        why: String,
+    }
+    let reads = |t: &toml::Table| t.clone().try_into::<T>().err().map(|e| e.message().trim().to_owned());
+    let dotted = |p: &[String]| p.join(".");
+    let instead = |p: &[String]| match lookup(defaults, p) {
+        Some(d) => format!("the default {d} is used until it is fixed"),
+        None => "the default is used until it is fixed".to_owned(),
+    };
+    // A replacement must read, and (once every value is in, `checked`) pass the checks for its key.
+    let fits = |good: &toml::Table, path: &[String], checked: bool| {
+        reads(good).is_none()
+            && (!checked || good.clone().try_into::<T>().is_ok_and(|v| !validate(&v).iter().any(|e| e.path == dotted(path))))
+    };
+    // Put the best usable value at `path`, skipping the kinds in `tried`: the backup's, the one that
+    // leaves files alone, else none (the default). Returns the kind used and the words for it.
+    let fallback = |good: &mut toml::Table, path: &[String], tried: u8, checked: bool| -> Option<(u8, String)> {
+        let (last, parents) = path.split_last()?;
+        let from_backup = last_good.and_then(|t| lookup(t, path)).filter(|v| !v.is_table()).cloned();
+        for (kind, v) in [(BACKUP, from_backup), (SAFE, safe(&dotted(path)))] {
+            let Some(v) = v.filter(|_| tried & kind == 0) else { continue };
+            slot(good, parents)?.insert(last.clone(), v.clone());
+            if fits(good, path, checked) {
+                let words = match kind {
+                    BACKUP => format!("the last good value {v} from the backup is used until it is fixed"),
+                    _ => format!("{v}, which leaves your files alone, is used until it is fixed"),
+                };
+                return Some((kind, words));
+            }
+            remove(good, path);
+        }
+        Some((DEFAULT, instead(path)))
+    };
+    let mut good = toml::Table::new();
+    let mut warnings = Vec::new();
+    let mut fixed: std::collections::HashMap<String, Fixed> = std::collections::HashMap::new();
+    let mut all = Vec::new();
+    leaves(input, &mut Vec::new(), &mut all);
+    for (path, value) in all {
+        let (last, parents) = path.split_last()?;
+        slot(&mut good, parents)?.insert(last.clone(), value.clone());
+        let Some(why) = reads(&good) else { continue };
+        remove(&mut good, &path);
+        match value {
+            // A list of tables (watch folders, rules): one bad entry costs only itself.
+            toml::Value::Array(items) if !items.is_empty() && items.iter().all(toml::Value::is_table) => {
+                let mut kept = Vec::new();
+                for (i, item) in items.into_iter().enumerate() {
+                    kept.push(item);
+                    slot(&mut good, parents)?.insert(last.clone(), toml::Value::Array(kept.clone()));
+                    if let Some(why) = reads(&good) {
+                        kept.pop();
+                        warnings.push(Warning {
+                            path: format!("{}[{i}]", dotted(&path)),
+                            message: format!("this entry is not valid ({why}) and is ignored until it is fixed"),
+                        });
+                    }
+                }
+                slot(&mut good, parents)?.insert(last.clone(), toml::Value::Array(kept));
+            }
+            _ => {
+                let (kind, words) = fallback(&mut good, &path, 0, false)?;
+                fixed.insert(dotted(&path), Fixed { warning: warnings.len(), tried: kind, bad: value.clone(), why: why.clone() });
+                warnings.push(Warning { path: dotted(&path), message: format!("{value} is not a valid value ({why}); {words}") });
+            }
+        }
+    }
+    // Every value reads; now the checks across the document. A problem is blamed on its key (or
+    // its entry of a list) and that value is replaced as above; one no key can be blamed for gives up.
+    for _ in 0..8 {
+        let errors = validate(&good.clone().try_into::<T>().ok()?);
+        if errors.is_empty() {
+            return Some((good, warnings));
+        }
+        let mut entries: Vec<(Vec<String>, usize, &crate::error::FieldError)> = Vec::new();
+        let mut progress = false;
+        for e in &errors {
+            if let Some((list, rest)) = e.path.split_once('[') {
+                let i = rest.split_once(']').and_then(|(n, _)| n.parse::<usize>().ok())?;
+                entries.push((list.split('.').map(str::to_owned).collect(), i, e));
+                continue;
+            }
+            let path: Vec<String> = e.path.split('.').map(str::to_owned).collect();
+            let Some(v) = remove(&mut good, &path) else { continue };
+            progress = true;
+            match fixed.get_mut(&e.path) {
+                // A replacement that the checks refuse after all: the next kind, else the default.
+                Some(f) => {
+                    let (kind, words) = fallback(&mut good, &path, f.tried, true)?;
+                    f.tried |= kind;
+                    warnings[f.warning].message = format!("{} is not a valid value ({}); {words}", f.bad, f.why);
+                }
+                None => {
+                    let (kind, words) = fallback(&mut good, &path, 0, true)?;
+                    fixed.insert(e.path.clone(), Fixed { warning: warnings.len(), tried: kind, bad: v.clone(), why: e.reason.clone() });
+                    warnings.push(Warning { path: e.path.clone(), message: format!("{v} is not a valid value ({}); {words}", e.reason) });
+                }
+            }
+        }
+        // Highest index first, so the lower ones still point at their entry.
+        entries.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        entries.dedup_by(|a, b| a.0 == b.0 && a.1 == b.1);
+        for (list, i, e) in entries {
+            let Some(toml::Value::Array(items)) = remove(&mut good, &list) else { continue };
+            let mut items = items;
+            if i < items.len() {
+                items.remove(i);
+                progress = true;
+                warnings.push(Warning {
+                    path: format!("{}[{i}]", dotted(&list)),
+                    message: format!("this entry is not valid ({}) and is ignored until it is fixed", e.reason),
+                });
+            }
+            let (last, parents) = list.split_last()?;
+            slot(&mut good, parents)?.insert(last.clone(), toml::Value::Array(items));
+        }
+        if !progress {
+            return None;
+        }
+    }
+    None
 }
 
 /// Merge preserved unknown entries into a freshly serialised table.

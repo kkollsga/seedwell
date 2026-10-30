@@ -4,12 +4,6 @@ import AppKit
 // a checklist right under the row, and ticking a file keeps the menu open. The list is fetched when it opens
 // and dropped when the menu closes.
 
-extension TransferRow {
-    /// The row gets the chevron for its inline file list: a multi-file torrent that is not held for the user's choice
-    /// (that has the chooser).
-    var offersMenuFiles: Bool { kind == .torrent && fileCount > 1 && pending == nil && !awaitingChoice }
-}
-
 // MARK: Hover
 
 /// A custom menu row that draws its own hover highlight. The controller keeps at most one of them lit
@@ -337,11 +331,9 @@ extension NSView {
         }
         if let image {
             let r = NSRect(x: x, y: (bounds.height - image.size.height) / 2, width: image.size.width, height: image.size.height)
-            if image.isTemplate {
-                image.draw(in: r, from: .zero, operation: .sourceOver, fraction: 1)
-            } else {
-                image.draw(in: r)
-            }
+            // A template (the progress ring) in the row's ink, as NSMenu draws an item's image: drawn as it is, a
+            // template is black, which a dark menu and the hover highlight swallow.
+            (image.isTemplate ? image.tinted(ink) : image).draw(in: r)
             x += image.size.width + 8
         }
         var right = bounds.maxX - Self.edge - 10
@@ -543,19 +535,17 @@ private final class FlippedView: NSView { override var isFlipped: Bool { true } 
     /// A list is open: the menu is not rebuilt under it (the 1 s refresh only updates texts).
     var isOpen: Bool { expanded != nil }
 
-    /// Gives the torrent's menu item its row view (ring, texts, and as the row needs them the chevron, the
-    /// check and the Play icon). A Recent row without a file list keeps the plain item.
-    func decorate(_ item: NSMenuItem, row r: TransferRow, revealOnClick: Bool, interactive: Bool = false,
-                  onActivate: (@MainActor () -> Void)? = nil, running: Bool? = nil, onCheck: (@MainActor () -> Void)? = nil) {
-        let expands = r.offersMenuFiles
+    /// Gives the torrent's menu item its row view (ring, texts, and as the core's `MenuRow` says the chevron, the
+    /// check and the Play icon). Without a file list a row that is not `interactive` keeps the plain item.
+    func decorate(_ item: NSMenuItem, row r: TransferRow, expands: Bool, playable: Bool, interactive: Bool,
+                  onActivate: (@MainActor () -> Void)?, running: Bool?, onCheck: (@MainActor () -> Void)?) {
         guard expands || interactive else { return }
         let view = MenuTorrentRow()
         view.canExpand = expands
-        if revealOnClick { view.onActivate = { [commands] in commands.reveal([r]) } }
-        if let onActivate { view.onActivate = onActivate }
+        view.onActivate = onActivate
         view.running = running
         view.onCheck = onCheck
-        view.playable = r.showsPlayButton
+        view.playable = playable
         view.onPlay = { [commands] in commands.playButtonPressed(r) }
         view.onToggle = { [weak self, weak item] in if let item { self?.toggle(r, item: item) } }
         item.view = view

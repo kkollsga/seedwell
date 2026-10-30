@@ -30,11 +30,11 @@ import SwiftUI
 
     func share(_ id: String) { sync.showShare(id) }
 
-    func showChannel(_ id: String) { show(.chat(id, topic: nil)) }
+    func showChannel(_ id: String) { show(.chat(channelId: id, topicId: nil)) }
 
     /// Opens the private conversation with a device (from the members of a channel).
     func showDirect(_ device: String, name: String) {
-        show(.direct(device))
+        show(.direct(deviceId: device))
         noteDirectName(device, name)
     }
 
@@ -78,7 +78,7 @@ import SwiftUI
         a.addButton(withTitle: "Cancel")
         NSApp.activate()
         guard a.runModal() == .alertFirstButtonReturn, let title = ChatText.topicTitle(field.stringValue) else { return }
-        do { let t = try core.chatNewTopic(channelId: c.id, title: title); show(.chat(c.id, topic: t.id)) } catch {
+        do { let t = try core.chatNewTopic(channelId: c.id, title: title); show(.chat(channelId: c.id, topicId: t.id)) } catch {
             sync.alert("Couldn't start the topic", SyncText.message(error))
         }
     }
@@ -173,16 +173,16 @@ import SwiftUI
             let topics = core.chatTopics(channelId: c.id)
             let general = ChatText.generalUnread(c, topics)
             if !c.muted {
-                note(.chat(c.id, topic: nil), general, ChatText.place(c, nil)) { self.core.chatMessages(id: c.id, topic: nil, before: nil, limit: 1).last }
+                note(.chat(channelId: c.id, topicId: nil), general, ChatText.place(c, nil)) { self.core.chatMessages(id: c.id, topic: nil, before: nil, limit: 1).last }
                 for t in topics {
-                    note(.chat(c.id, topic: t.id), t.unread, ChatText.place(c, t)) {
+                    note(.chat(channelId: c.id, topicId: t.id), t.unread, ChatText.place(c, t)) {
                         self.core.chatMessages(id: c.id, topic: t.id, before: nil, limit: 1).last
                     }
                 }
             }
         }
         for d in core.chatDirects() {
-            note(.direct(d.deviceId), d.unread, d.name) { self.core.chatDirectMessages(deviceId: d.deviceId, before: nil, limit: 1).last }
+            note(.direct(deviceId: d.deviceId), d.unread, d.name) { self.core.chatDirectMessages(deviceId: d.deviceId, before: nil, limit: 1).last }
         }
         seen = now
         for (place, title, last) in fresh where !isShowing(place) {

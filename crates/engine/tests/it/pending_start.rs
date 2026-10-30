@@ -207,6 +207,48 @@ async fn a_restart_keeps_the_torrent_held_with_a_fresh_countdown() {
     wait_for("announce", 10, || async { (!tracker.log_for(&t.id).is_empty()).then_some(()) }).await;
 }
 
+/// The user's pause of a torrent in its countdown (`pause`, as the CLI and agents do, or Pause All)
+/// stops the countdown, and a stopped countdown stays stopped across a restart (SPEC §10): the
+/// torrent is held, silent, until the user resumes it (Resume or Resume All), and then counts down.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_paused_countdown_stays_paused_across_a_restart() {
+    let tracker = MockTracker::start(60).await;
+    let (t, u) = (movie(Some(tracker.url()), 45), movie(Some(tracker.url()), 47));
+    let state = tempfile::tempdir().unwrap();
+    let dl = tempfile::tempdir().unwrap();
+    let mut n = snode(state.path(), dl.path(), None, grace(3)).await;
+    n.h.add_torrent_file(t.bytes.clone(), AddOptions::default()).await.unwrap();
+    n.h.add_torrent_file(u.bytes.clone(), AddOptions::default()).await.unwrap();
+    n.h.pause(&[t.id]);
+    n.h.pause_all();
+    for id in [&t.id, &u.id] {
+        wait_for("countdown stopped", 5, || async { n.row(id).await?.pending?.paused.then_some(()) }).await;
+    }
+    n.h.flush().await.unwrap();
+    n.shutdown(Duration::from_secs(3)).await;
+    drop(n);
+    let n = snode(state.path(), dl.path(), None, grace(3)).await;
+    // Well past a fresh countdown: both still held with their countdown stopped, nothing sent.
+    tokio::time::sleep(Duration::from_millis(3500)).await;
+    for id in [&t.id, &u.id] {
+        let row = n.row(id).await.unwrap();
+        assert_eq!(row.state, TorrentState::Pending);
+        assert!(row.pending.unwrap().paused, "{:?}", row.pending);
+    }
+    assert!(tracker.log_for(&t.id).is_empty() && tracker.log_for(&u.id).is_empty());
+    // A single Resume runs that countdown; Resume All the rest.
+    n.h.resume(&[t.id]);
+    let p = n.row(&t.id).await.unwrap().pending.unwrap();
+    assert!(!p.paused && p.remaining_ms >= 2500, "{p:?}");
+    assert!(n.row(&u.id).await.unwrap().pending.unwrap().paused, "the other one stays stopped");
+    n.h.resume_all();
+    for id in [&t.id, &u.id] {
+        wait_for("started", 10, || async { (n.row(id).await?.state != TorrentState::Pending).then_some(()) }).await;
+    }
+    assert_ne!(n.row(&t.id).await.unwrap().state, TorrentState::Paused);
+    wait_for("announce", 10, || async { (!tracker.log_for(&u.id).is_empty()).then_some(()) }).await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn choosing_files_cancels_the_countdown_and_keeps_the_torrent_held() {
     let tracker = MockTracker::start(60).await;

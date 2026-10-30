@@ -13,6 +13,9 @@ Read `AGENTS.md` and `docs/RELEASING.md` first. Their rules win over anything he
 - Never touch the installed `/Applications/Seedwell.app` or its data. Do not run `tools/install-local.sh` unless the
   user asks.
 
+The gate is CI (Mac and Windows) and the release workflow. Never wait for a Windows PC or a manual acceptance run
+(docs/RELEASING.md).
+
 Invoking `/release` is the user's go-ahead for the whole release, publishing included: merging Dependabot pull
 requests, pushing `main`, pushing the tag and publishing the draft. Anything the steps below say to ask about
 (a PR or branch we did not make, removals), ask about. Stop and report if a step fails, rather than working around
@@ -115,6 +118,7 @@ gh pr list --state open --json number,title,author,headRefName,statusCheckRollup
   gh run watch <id> --exit-status
   ```
   If it fails, read the log (`gh run view <id> --log-failed`), fix on master, and go back to step 4.
+- The release workflow also checks this itself and refuses a commit whose CI did not pass (Mac and Windows).
 - **Re-cutting an unpublished draft of the same version** (step 1):
   ```sh
   gh release delete vX.Y.Z --yes
@@ -126,7 +130,9 @@ gh pr list --state open --json number,title,author,headRefName,statusCheckRollup
   git tag -a vX.Y.Z "$c" -m "Seedwell X.Y.Z"
   git push origin vX.Y.Z
   ```
-  This starts `.github/workflows/release.yml`.
+  This starts `.github/workflows/release.yml`: CI gate, the Mac and Windows builds side by side, then one draft.
+  It is all or nothing: if either build fails, the run is cancelled and the tag (and any draft) is deleted again.
+  Then stop and report: fix the failure on master, go back to step 4, and tag the same version again.
 
 ## 6. The draft
 
@@ -140,9 +146,10 @@ gh pr list --state open --json number,title,author,headRefName,statusCheckRollup
   gh release view vX.Y.Z --json isDraft,assets,body
   ```
   - It is a draft.
-  - Its assets are `Seedwell-X.Y.Z.zip`, `install.sh`, `SHA256SUMS` and `latest.json`.
-  - `latest.json` names X.Y.Z and the zip's SHA-256 matches `SHA256SUMS`. Download them into a scratch folder to
-    compare.
+  - Its assets are `Seedwell-X.Y.Z.zip`, `install.sh`, `Seedwell-X.Y.Z-windows-x64.zip`, `install.ps1`,
+    `SHA256SUMS` and `latest.json`.
+  - `latest.json` names X.Y.Z, both zips' SHA-256 match `SHA256SUMS` (the Mac's at the top level, the Windows one
+    under `"windows"`). Download them into a scratch folder to compare.
   - The notes read sensibly.
 
 ## 7. Publish

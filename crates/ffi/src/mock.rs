@@ -71,6 +71,13 @@ struct State {
     lifetime: [(u64, u64); 3],
     /// Priorities set through `set_file_priorities`, by torrent id and file index.
     file_prios: std::collections::HashMap<(String, u32), crate::types::FilePriority>,
+    /// The `.torrent` file each torrent added from one came from (for Cancel's Trash).
+    sources: std::collections::HashMap<String, std::path::PathBuf>,
+    /// Paused by the app itself (on battery), as the engine's `pause_by_app`: the user's pause or
+    /// resume makes the pause theirs.
+    app_paused: std::collections::HashSet<String>,
+    /// Limit Speed switched on by the app itself (on battery); the user's toggle ends it.
+    alt_by_app: bool,
 }
 
 /// The mock; clones of the `Arc` are shared with the ticker thread via `Weak`.
@@ -80,6 +87,8 @@ pub struct MockBackend {
     offline: std::sync::atomic::AtomicBool,
     /// Fake synced folders (SPEC 7G), for design work.
     sync: Arc<crate::sync::MockSync>,
+    /// Where Cancel puts a `.torrent` file: `Trash` in the state folder, never the real Trash.
+    trash: std::path::PathBuf,
 }
 
 fn now() -> u64 {
@@ -732,8 +741,24 @@ fn initial_items() -> Vec<Item> {
 }
 
 impl MockBackend {
+    /// Pauses what runs of `ids` (the app's pause hands over only downloads, checking and fetching ones included).
+    fn pause_inner(&self, ids: &[String]) {
+        use TransferState::{Checking, Downloading, LowPower, Metadata, Paused, Queued, Seeding};
+        let mut s = self.lock();
+        let by_app = s.app_paused.clone();
+        for it in s
+            .lock_items(ids)
+            .filter(|i| matches!(i.state, Downloading | Queued | Seeding | LowPower) || (by_app.contains(&i.id) && matches!(i.state, Checking | Metadata)))
+        {
+            it.state = Paused;
+            it.down_rate = 0;
+            it.up_rate = 0;
+        }
+        s.schedule();
+    }
+
     /// Builds the mock and starts its ticker thread (stops when the backend is dropped).
-    pub fn start(_config_dir: String) -> Arc<dyn Backend> {
+    pub fn start(config_dir: String) -> Arc<dyn Backend> {
         let items = initial_items();
         let next_order = items.len() as u64 + 1;
         let backend = Arc::new(Self {
@@ -745,6 +770,9 @@ impl MockBackend {
                 rng: 0x9e37_79b9_7f4a_7c15,
                 next_order,
                 file_prios: std::collections::HashMap::new(),
+                sources: std::collections::HashMap::new(),
+                app_paused: std::collections::HashSet::new(),
+                alt_by_app: false,
                 lifetime: [
                     (1_820 * GB, 2_410 * GB),
                     (940 * GB, 1_100 * GB),
@@ -753,6 +781,7 @@ impl MockBackend {
             }),
             offline: std::sync::atomic::AtomicBool::new(false),
             sync: crate::sync::MockSync::new(),
+            trash: std::path::Path::new(&config_dir).join("Trash"),
         });
         {
             // Prime rates so the first snapshot already shows speeds and ETAs.
@@ -850,7 +879,7 @@ impl Backend for MockBackend {
             Totals {
                 down_rate: s.items.iter().map(|i| i.down_rate).sum(),
                 up_rate: s.items.iter().map(|i| i.up_rate).sum(),
-                alt_speed: s.alt,
+                alt_speed: s.alt || s.alt_by_app,
                 down_limit: None,
                 up_limit: None,
                 listen_port: 51413,
@@ -958,7 +987,12 @@ impl Backend for MockBackend {
             tracker_halted: it.err.as_ref().is_some_and(|e| e.0),
             goal_is_custom: !it.goal_is_default,
             state: it.state,
-            added_at: it.finished_at.unwrap_or(0).saturating_sub(3600),
+            // Without a finish time (downloading, or seeding since long ago): before its seeding and its downloaded part
+            // (not at 0, which reads 1 January 1970).
+            added_at: it.finished_at.map_or_else(
+                || now().saturating_sub(it.seed_secs + (it.done / it.base_down.max(KB)).min(86_400) + 600),
+                |f| f.saturating_sub(3600),
+            ),
             finished_at: it.finished_at,
             seeded_secs: it.seed_secs,
             ratio: it.ratio,
@@ -1067,27 +1101,43 @@ impl Backend for MockBackend {
         it.id = id.clone();
         it.kind = kind;
         it.host = src.split('/').nth(2).unwrap_or("").to_string();
+        if kind == TransferKind::Torrent && std::path::Path::new(src).is_file() {
+            s.sources.insert(id.clone(), src.into());
+        }
         s.items.push(it);
         s.schedule();
         Ok(id)
     }
 
     fn pause(&self, ids: &[String]) {
-        use TransferState::{Downloading, LowPower, Paused, Queued, Seeding};
+        self.lock().app_paused.retain(|id| !ids.contains(id));
+        self.pause_inner(ids);
+    }
+
+    fn pause_by_app(&self, ids: &[String]) {
+        use TransferState::{Checking, Downloading, Metadata, Queued};
         let mut s = self.lock();
-        for it in s
-            .lock_items(ids)
-            .filter(|i| matches!(i.state, Downloading | Queued | Seeding | LowPower))
-        {
-            it.state = Paused;
-            it.down_rate = 0;
-            it.up_rate = 0;
-        }
-        s.schedule();
+        let running: Vec<String> = s
+            .items
+            .iter()
+            .filter(|i| ids.contains(&i.id) && i.done < i.size && matches!(i.state, Downloading | Queued | Checking | Metadata))
+            .map(|i| i.id.clone())
+            .collect();
+        s.app_paused.extend(running.iter().cloned());
+        drop(s);
+        self.pause_inner(&running);
+    }
+
+    fn resume_by_app(&self, ids: &[String]) {
+        let mut s = self.lock();
+        let mine: Vec<String> = ids.iter().filter(|id| s.app_paused.remove(*id)).cloned().collect();
+        drop(s);
+        self.resume(&mine);
     }
 
     fn resume(&self, ids: &[String]) {
         let mut s = self.lock();
+        s.app_paused.retain(|id| !ids.contains(id));
         for it in s
             .lock_items(ids)
             .filter(|i| i.state == TransferState::Paused)
@@ -1099,6 +1149,10 @@ impl Backend for MockBackend {
             };
         }
         s.schedule();
+    }
+
+    fn set_alt_speed_by_app(&self, on: bool) {
+        self.lock().alt_by_app = on;
     }
 
     fn move_to_top(&self, id: &str) {
@@ -1134,6 +1188,7 @@ impl Backend for MockBackend {
     fn remove(&self, ids: &[String], _delete_files: bool) {
         let mut s = self.lock();
         s.items.retain(|i| !ids.contains(&i.id));
+        s.sources.retain(|id, _| !ids.contains(id));
         s.schedule();
     }
 
@@ -1170,6 +1225,8 @@ impl Backend for MockBackend {
             .filter(|i| i.done < i.size)
             .map(|i| i.id.clone())
             .collect();
+        // What the app paused by itself becomes the user's pause, as in the engine.
+        self.lock().app_paused.clear();
         self.pause(&ids);
     }
 
@@ -1189,7 +1246,8 @@ impl Backend for MockBackend {
     }
 
     fn set_alt_speed(&self, on: bool) {
-        self.lock().alt = on;
+        let mut s = self.lock();
+        (s.alt, s.alt_by_app) = (on, false);
     }
 
     fn set_rule(&self, _ids: &[String], _rule: Option<String>) {}
@@ -1278,6 +1336,24 @@ impl Backend for MockBackend {
         Err(CoreError::NotFound { id: id.into() })
     }
 
+    /// The file a torrent was added from, while it is still a regular `*.torrent` file (the mock has no info-hash
+    /// to check).
+    fn held_source(&self, id: &str) -> Option<String> {
+        let s = self.lock();
+        let p = s.sources.get(id).filter(|_| s.items.iter().any(|i| i.id == id))?;
+        let ok = std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_file())
+            && p.extension().is_some_and(|e| e.eq_ignore_ascii_case("torrent"));
+        ok.then(|| p.display().to_string())
+    }
+
+    fn has_held_source(&self, id: &str) -> bool {
+        self.held_source(id).is_some()
+    }
+
+    fn trash_dir(&self) -> Option<std::path::PathBuf> {
+        Some(self.trash.clone())
+    }
+
     fn watch_backlog(&self, _folder: &std::path::Path) -> Vec<String> {
         Vec::new()
     }
@@ -1292,7 +1368,9 @@ impl Backend for MockBackend {
         // A single file when the row has an extension; otherwise an episode or track list that
         // matches the category, so the Play entries have something to show.
         let paths: Vec<String> = if !it.ext.is_empty() {
-            vec![it.name.clone()]
+            // The file has its extension, as on disk (the row's name may leave it out): it is what says "video".
+            let dotted = format!(".{}", it.ext);
+            vec![if it.name.ends_with(&dotted) { it.name.clone() } else { format!("{}{dotted}", it.name) }]
         } else if it.category == Category::Tv {
             (1..=it.files_total.clamp(1, 12)).map(|e| format!("{}/{}.E{e:02}.mkv", it.name, it.name)).collect()
         } else {

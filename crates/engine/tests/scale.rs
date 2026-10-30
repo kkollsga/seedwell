@@ -84,6 +84,7 @@ fn record(t: &TestTorrent, dir: &std::path::Path, announce: Option<String>) -> T
         pinned: false,
         awaiting_choice: false,
         pending_start: false,
+        pending_stopped: false,
         title: None,
         idle: None,
     }

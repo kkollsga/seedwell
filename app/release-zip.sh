@@ -3,19 +3,20 @@
 # SHA256SUMS, install.sh, release notes. Everything lands in app/build/release/ ; nothing is published.
 #
 #   app/release-zip.sh [--allow-dirty]          build the assets
-#   app/release-zip.sh --draft [--allow-dirty]  …and create a DRAFT GitHub release with them (gh CLI);
-#                                               publishing the draft is a manual click.
+#
+# It never creates a release: a release is the Mac's and the Windows build together, made only by the release
+# workflow (.github/workflows/release.yml) when both succeeded. A Mac-only release would leave every Windows copy
+# without an update (docs/RELEASING.md).
 #
 # Wrap it in tools/sysguard/heavy.sh: the build is a full LTO build. The signed .dmg route is app/release.sh.
 set -euo pipefail
 
 APP_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$APP_DIR/.." && pwd)"
-ALLOW_DIRTY=0; DRAFT=0
+ALLOW_DIRTY=0
 for a in "$@"; do
     case "$a" in
         --allow-dirty) ALLOW_DIRTY=1 ;;
-        --draft) DRAFT=1 ;;
         -h|--help) sed -n '2,10p' "$0"; exit 0 ;;
         *) echo "unknown argument: $a" >&2; exit 2 ;;
     esac
@@ -24,7 +25,6 @@ done
 if [ -n "$(git -C "$REPO" status --porcelain)" ]; then
     if [ "$ALLOW_DIRTY" = 1 ]; then echo "WARNING: dirty git tree (--allow-dirty): a test build, not a release."
     else echo "Refusing to release a dirty git tree. Commit first, or pass --allow-dirty for a test build." >&2; exit 1; fi
-    [ "$DRAFT" = 0 ] || { echo "--draft needs a clean tree." >&2; exit 1; }
 fi
 
 VERSION="$(sed -n '/^\[workspace.package\]/,/^\[/{s/^version *= *"\(.*\)"/\1/p;}' "$REPO/Cargo.toml" | head -1)"
@@ -119,12 +119,4 @@ PREV="$(git -C "$REPO" describe --tags --abbrev=0 "HEAD^" 2>/dev/null || true)"
 echo "==> Assets in $OUT"
 ls -l "$OUT" | tail -n +2 | awk '{printf "    %-28s %s\n", $NF, $5}'
 
-if [ "$DRAFT" = 1 ]; then
-    command -v gh >/dev/null || { echo "gh (GitHub CLI) is not installed." >&2; exit 1; }
-    echo "==> Draft release $TAG (not published)"
-    gh release create "$TAG" --draft --title "Seedwell $VERSION" --notes-file "$OUT/NOTES.md" \
-        "$OUT/$ZIP" "$OUT/install.sh" "$OUT/SHA256SUMS" "$OUT/latest.json"
-    echo "    Review it on GitHub and press Publish. The install URL works once it is published."
-else
-    echo "    Next: app/release-zip.sh --draft (creates a draft GitHub release), then publish it on GitHub."
-fi
+echo "    A release is made only by the release workflow (tag vX.Y.Z), with the Windows build: docs/RELEASING.md."

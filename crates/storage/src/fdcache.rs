@@ -261,7 +261,7 @@ mod tests {
     use super::*;
 
     fn open_dev_null() -> std::io::Result<File> {
-        File::open("/dev/null")
+        File::open(if cfg!(windows) { "NUL" } else { "/dev/null" })
     }
 
     #[test]

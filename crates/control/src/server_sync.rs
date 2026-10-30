@@ -9,7 +9,7 @@
 //! activity log: [`crate::activity::describe`] leaves them out and every entry is scrubbed again.
 
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -249,8 +249,8 @@ async fn pause(h: &SyncHandle, folder: &str, paused: bool) -> Result<Reply, ApiE
     folder_reply(&status_of(h, &f.id)?, if paused { "paused" } else { "resumed" })
 }
 
-/// Step 1: what will happen, and a token. With `delete_files` the Trash is checked now (same volume), so the
-/// caller learns before confirming that it cannot be done.
+/// Step 1: what will happen, and a token. With `delete_files` the Trash is checked now (same volume, or a Recycle
+/// Bin that keeps it), so the caller learns before confirming that it cannot be done.
 async fn remove_plan<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &Conn, h: &SyncHandle, p: SyncRemoveParams) -> Result<Reply, ApiError> {
     let level = ctx.perm.get();
     if p.delete_files {
@@ -258,8 +258,9 @@ async fn remove_plan<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &Conn, h: &SyncHandle,
     }
     let f = pick(h, &p.folder)?;
     let trash_to = if p.delete_files {
-        let trash = ctx.backend.trash_dir().await;
-        Some(s::trash_target(Path::new(&f.path), trash.as_deref())?)
+        let (trash, folder) = (ctx.backend.trash_dir().await, PathBuf::from(&f.path));
+        // Off the async threads: the Recycle Bin's check adds up a folder's size.
+        Some(blocking(move || s::trash_target(&folder, trash.as_deref())).await??)
     } else {
         None
     };
@@ -272,12 +273,14 @@ async fn remove_plan<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &Conn, h: &SyncHandle,
     let d = folder_dto(&f);
     let summary = match &trash_to {
         Some(t) => format!(
-            "Will stop syncing `{}` on this Mac AND MOVE THE FOLDER {} TO THE TRASH ({}). Other devices keep their copies. Confirmation is valid for {ttl} s.",
+            concat!("Will stop syncing `{}` on this ", trs_platform::computer!(), " AND MOVE THE FOLDER {} TO THE {}{}. Other devices keep their copies. Confirmation is valid for {ttl} s."),
             d.name,
             d.path,
-            t.display()
+            trs_platform::TRASH.to_uppercase(),
+            s::trash_shown(t),
+            ttl = ttl
         ),
-        None => format!("Will stop syncing `{}` on this Mac; its files stay in {}. Other devices keep their copies. Confirmation is valid for {ttl} s.", d.name, d.path),
+        None => format!(concat!("Will stop syncing `{}` on this ", trs_platform::computer!(), "; its files stay in {}. Other devices keep their copies. Confirmation is valid for {ttl} s."), d.name, d.path, ttl = ttl),
     };
     let mut r = reply(&SyncRemovePlanDto { token, expires_in_secs: ttl, delete_files: p.delete_files, folder: d.clone(), summary })?;
     r.note = Some(format!("plan for {} ({}), delete_files={}", clip(&d.name, 80), short(&d.id), p.delete_files));
@@ -308,32 +311,38 @@ async fn remove_confirm<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &Conn, h: &SyncHand
     let f = status_of(h, &plan.folder)?;
     let id = folder_id(&f)?;
     // Checked again (a disk may have gone) before anything is removed.
-    let target = if plan.delete_files {
-        let trash = ctx.backend.trash_dir().await;
-        Some(s::trash_target(Path::new(&f.path), trash.as_deref())?)
+    let trash = if plan.delete_files {
+        let (trash, folder) = (ctx.backend.trash_dir().await, PathBuf::from(&f.path));
+        let dir = trash.clone();
+        blocking(move || s::trash_target(&folder, dir.as_deref())).await??;
+        Some(trash)
     } else {
         None
     };
     let path = h.remove_folder(&id).await.map_err(s::err)?;
     let d = folder_dto(&f);
     let mut out = SyncRemovedDto { id: d.id.clone(), name: d.name.clone(), path: path.display().to_string(), files: "kept".into(), trashed_to: None };
-    if let Some(t) = target {
-        let (from, to) = (path.clone(), t.clone());
-        blocking(move || s::move_to_trash(&from, &to)).await?.map_err(|e| {
+    if let Some(trash) = trash {
+        let from = path.clone();
+        let t = blocking(move || s::move_to_trash(&from, trash.as_deref())).await?.map_err(|e| {
             ApiError::new(
                 ErrorCode::Engine,
-                format!("the folder no longer syncs, but moving it to the Trash failed ({e}); its files are still in {}", path.display()),
+                format!(
+                    concat!("the folder no longer syncs, but moving it to the ", trs_platform::trash!(), " failed ({}); its files are still in {}"),
+                    e,
+                    path.display()
+                ),
             )
         })?;
         out.files = "trashed".into();
-        out.trashed_to = Some(t.display().to_string());
+        out.trashed_to = t.path().map(|p| p.display().to_string());
     }
     let mut r = reply(&out)?;
     r.note = Some(format!(
         "removed {} ({}){}",
         clip(&d.name, 80),
         short(&d.id),
-        if out.files == "trashed" { " and moved it to the Trash" } else { " (files kept)" }
+        if out.files == "trashed" { concat!(" and moved it to the ", trs_platform::trash!()) } else { " (files kept)" }
     ));
     Ok(r)
 }

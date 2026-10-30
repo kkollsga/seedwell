@@ -16,8 +16,6 @@ import os
     var showChat: (_ channel: String) -> Void = { _ in }
     /// The Share dialog of a folder not synced yet (add and share in one).
     var showShareNew: (_ path: String) -> Void = { _ in }
-    /// Where removed folders go: the user's Trash, or the QA one (`SEEDWELL_QA_TRASH_DIR`).
-    var trash = SourceTrash.standard()
     /// The last folder that was removed (the window drops its page).
     var onRemoved: (String) -> Void = { _ in }
 
@@ -39,22 +37,18 @@ import os
         await Task.detached(priority: .userInitiated) { Result { try work() } }.value
     }
 
-    /// Stops syncing on this Mac; with `trash`, the folder then goes to the Trash. Errors are told in an alert
-    /// (the menu, which asked, is closed by then).
+    /// Stops syncing on this Mac; with `trash`, the core then moves the folder to the Trash (it refuses one that cannot
+    /// go there, which stays synced). Errors are told in an alert (the menu, which asked, is closed by then).
     func remove(_ f: SyncFolder, trash: Bool) {
         Task {
             let core = self.core
             let id = f.id
             switch await run({ try core.syncRemove(id: id, trashFiles: trash) }) {
             case .failure(let e):
-                alert("Couldn't stop syncing “\(f.name)”", SyncText.message(e))
-            case .success(let path):
+                alert(syncRemoveFailed(name: f.name, error: SyncText.message(e)))
+            case .success(let trashFailed):
                 onRemoved(f.id)
-                guard trash, FileManager.default.fileExists(atPath: path) else { return }
-                do { try self.trash.move(URL(fileURLWithPath: path)) } catch {
-                    alert("Couldn't move “\(f.name)” to the Trash",
-                          "It is no longer synced on this Mac. Its files are still in \(Notifier.abbreviate(path)).")
-                }
+                if let trashFailed { alert(trashFailed) }
             }
         }
     }
@@ -66,7 +60,7 @@ import os
             let core = self.core
             let (id, copy) = (folder.id, c.copy)
             if case .failure(let e) = await run({ try core.syncResolveConflict(id: id, copy: copy, keep: keep) }) {
-                alert("Couldn't resolve the conflict in “\(c.original)”", SyncText.message(e))
+                alert(syncResolveFailed(original: c.original, error: SyncText.message(e)))
             }
             done()
         }
@@ -76,17 +70,13 @@ import os
     /// share it), else the Share dialog of that folder (or the file's folder) as a new one: Copy Link adds it and makes the link.
     func share(path: String) {
         let real = FinderStatusWriter.realPath(path)
-        let inside = snapshot().folders.filter { f in
-            let root = FinderStatusWriter.realPath(f.path)
-            return real == root || real.hasPrefix(root + "/")
-        }
-        let f = inside.max(by: { $0.path.count < $1.path.count })
+        let f = syncFolderContaining(folders: snapshot().folders, path: real)
+        let refusal = f.flatMap { syncShareRefusal(folder: $0) }
         // Like the Finder extension's "menu" lines: what the Share menu was used on, and what it opened.
         Logger(subsystem: "io.github.kkollsga.Seedwell", category: "share-menu")
-            .info("share: \(f == nil ? "not synced" : SyncText.canShare(f!.role) ? "share dialog" : "may not share", privacy: .public) for \(real)")
+            .info("share: \(f == nil ? "not synced" : refusal == nil ? "share dialog" : "may not share", privacy: .public) for \(real)")
         if let f {
-            if SyncText.canShare(f.role) { showShare(f.id) }
-            else { alert("Only the owner and admins can share “\(f.name)”", "This Mac is \(SyncText.role(f.role)) in it. Ask the owner or an admin for a link.") }
+            if let refusal { alert(refusal) } else { showShare(f.id) }
             return
         }
         var dir: ObjCBool = false
@@ -101,7 +91,7 @@ import os
             let core = self.core
             let device = m.deviceId
             if case .failure(let e) = await run({ try core.syncSetRole(id: id, deviceId: device, role: role) }) {
-                alert("Couldn't change \(m.name)’s role", SyncText.message(e))
+                alert(syncSetRoleFailed(device: m.name, error: SyncText.message(e)))
             }
             done()
         }
@@ -114,11 +104,13 @@ import os
             let core = self.core
             let device = m.deviceId
             if case .failure(let e) = await run({ try core.syncRemoveDevice(id: id, deviceId: device) }) {
-                alert("Couldn't remove \(m.name) from “\(name)”", SyncText.message(e))
+                alert(syncRemoveDeviceFailed(device: m.name, name: name, error: SyncText.message(e)))
             }
             done()
         }
     }
+
+    func alert(_ a: SyncAlert) { alert(a.title, a.text) }
 
     func alert(_ title: String, _ text: String) {
         let a = NSAlert()
@@ -137,7 +129,7 @@ import os
 
     /// The pasteboard's text when it holds a folder link (the add modal starts with it).
     func pastedKey() -> String? {
-        guard let s = NSPasteboard.general.string(forType: .string), SyncText.looksLikeLink(s) else { return nil }
+        guard let s = NSPasteboard.general.string(forType: .string), syncLooksLikeLink(text: s) else { return nil }
         return s.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }

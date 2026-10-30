@@ -1,30 +1,54 @@
 import AppKit
 
-/// QA only (`--qa-control <file>`): runs scene commands appended to a text file, so a script can
-/// put the real windows into each state and capture them from outside with `screencapture -l`.
-/// One command per line; after each batch `<file>.ack` holds the number of lines executed.
+/// QA only (`--qa-control <file>`): runs scene commands appended to a text file, one per line. A run with this flag is
+/// quiet (QuietRun): the app never becomes active or frontmost, never takes the focus or a key, and none of its windows
+/// is on a screen; `shot` draws them in-process, so no screen capture, awake display or Screen Recording permission is
+/// needed. `<file>.ack` holds the number of lines done, written once their effects are applied and laid out (a `shot`
+/// or `where` right after sees them); reports go to `<file>.bench`. Every click or key is the QA command that makes the
+/// call it makes: no event is ever posted (AGENTS.md).
 ///
+///     shot <name> [main|settings|info|chooser|popover|menu|alert|window <id>]   <name>.png (a bare name: in the folder of
+///                                     <file>; a path ending in .png: there) drawn at 2x, see QAShots
+///     wait <command> ~ <text> [timeout <s>] | wait <command> !~ <text> [timeout <s>]   answered once the command's report
+///                                     holds (or no longer holds) the text, or after the timeout (default 15 s): its last
+///                                     report line, or "wait: timeout after <s> s: <last line>"
+///     windows                         the open windows: main (sheet, info), chooser, popover, menu, alert, chat-new, sync-…
+///     config                          "config: reloads <n>.": how often the engine applied an edited settings file
 ///     window open | window close | window size 1180x820
 ///     section downloads | section sharing | tab downloads|sharing|tracker <name or id> | tracker <id> | tracker none | search <text> | select <id>
 ///     info <id> | info none | info-scroll top|bottom|<0...1> | getinfo <name>   (Get Info as the context menu asks for it)
-///     policy | policy-real | dock-quit [logout] | quit-menu | where   (Dock icon and Quit paths)
+///     getinfo-window                  the open Get Info popover: whose row it shows, a child of the main window, has the keys
+///     getinfo-card                    the open Get Info card's lines, trackers and buttons, as the core drew them up
+///     policy | dock-quit [logout] | quit-menu | where   (Dock icon and Quit paths; policy: the Dock icon the app would have)
 ///     settings <tab> | settings close | tracker-edit <id>
 ///     appearance dark | light | system
-///     chooser <n> | chooser-category <name> | chooser-close | scroll top|bottom|<0...1> | settings-scroll top|bottom|<0...1> | activate
-///     menu open | menu close
+///     chooser <n> | chooser-category <name> | chooser-close | scroll top|bottom|<0...1> | settings-scroll top|bottom|<0...1>
+///     menu open | menu close          the menu bar menu (a quiet run opens and refreshes it without showing it)
+///     menu-sync | menu-sync edit|remove <name>   the Folder Sync submenu as drawn (`menu open` first); a row's Edit / Remove button
+///     menu-hover open|quit|none | menu-press open|quit | menu-titles | menu-subtitles | menu-files …   the open menu's
+///                                     footer, titles, the rows' subtitles, file lists
+///     contextmenu <name> [menubar] [playwith] | contextmenu close   a row's context menu, "open" for `shot … menu`
 ///     starting show | close | state | pause|resume|now|choose|ok|cancel|all|none|toggle|open|fold [name]   the "Starting in …" notifier popover
 ///     starting cancel [name] keep     ⇧-Cancel (keeps the .torrent file);  starting shift on|off   force the Shift state of the Cancel buttons
 ///     starting title [name]           a click on the title (opens the torrent in the main window); starting choose = the chevron
 ///     starting category <label>       the pill's menu: change the first held torrent's category (Movie, TV, Music, Audiobook, Book, App, Game, Other)
+///     starting pill [name] | starting pill close   the pill's menu as a native menu (shown only; `starting category` picks)
+///     choice tick <title> | fold <title> | all | pick <All|Latest season|What I don't have> | state
+///                                     a checklist click on the shared chooser model (chooser window, popover, main window): a box
+///                                     or a row's title, a group's chevron, the "Select all / none" box, a quick pick
 ///     open-file <path>                a .torrent opened as from Finder (QA roots only)
 ///     devlog open | close | filter <text> | errors on|off | event <name> | expand all|none|first|last | state
 ///                                     the tracker log viewer of Settings > Advanced > Developer (state: counts into <file>.bench)
 ///     play-players                    detection result (installed players, slices, can run) into <file>.bench
-///     contextmenu <name> playwith     the row's "Play With" submenu as a menu of its own (add `menubar` for the menu bar's version)
-///     settings-popup                  the "Play videos with" choices as a menu over the Settings window
+///     rowcommands <name> [menubar]    the row's context menu as drawn (submenus in brackets) into <file>.bench
+///     settings-popup                  the "Play videos with" choices as a menu (`shot … menu`)
 ///     files expand|folders|collapse <torrent>   open its file list (folders = every folder too), close it
 ///     files filter <torrent> <text> | files select <torrent> <file> | files menu <torrent> <file> [priority]   (the file's context menu)
 ///     files skip|high <torrent> <file>   the checkbox / the Priority menu on one file; files collapse-all
+///     files toggle <torrent>          the row's disclosure triangle; files select <torrent> <file> [command] [shift] is a click on a file row
+///     rowclick <name> [command|shift] a click on a row of the main window's list (anchor and ranges included)
+///     key <key> [shift] [cmd] [list]  what that key does in the main window (the core's answer; no key event is posted)
+///     add-sheet open | close | text <text>   File › Add Magnet Link or URL…'s sheet, and typing in its field
 ///     play-row <row>                  the row's Play button (largest video); reports it and the blocked launch
 ///     play <id>                       Play on a row that is not finished (never launches a player: QA blocks launching)
 ///     favorite <tracker> | unfavorite <tracker>   "Save as Favorite" / "Remove from Favorites" (confirmed) on a tracker by name or id
@@ -32,25 +56,33 @@ import AppKit
 ///     tracker-info <tracker> | tracker-info close   the tracker's Info page (the sidebar item stays selected) / back to its torrents
 ///     fav rename <tracker> | fav addurl | fav editurl <i> | fav removeurl <i> | fav type <text> | fav commit | fav cancel | fav remove-ask [tracker]
 ///                                     the inline edits (the field is focused; `fav type` fills it)
-///     click <label> [command|shift|double] [win=main|chooser|popover] | click at=<x>,<y> | ui dump | ui state | ui ping   real mouse events into the window (see QAClicks)
+///     ui dump | ui state | ui ping [win=main|chooser|popover|info]   read the window (info: Get Info's popover): its accessibility tree, the selection and
+///                                     chooser state, how fast the main run loop answers (see QAInspect)
+///     alert <n>                       presses the n-th button of the open alert
 ///     net offline | net online        the OS path monitor said so (engine holds everything / probes once); no debounce
+///     power battery | power ac        the power source as PowerWatcher tells the core (the "On battery" setting acts);
+///                                     a real change of the power source still reports as well
 ///     play-app <App.app> <file>       the one real launch: opens <file> in that app (a finished local test video)
 @MainActor final class QAControl {
     private let path: String
     private unowned let app: AppDelegate
-    private var executed = 0
-    private var lastMod: Date?
+    /// Lines read from the file (empty ones included), and lines done.
+    private var read = 0
+    private var done = 0
+    private var pending: [String] = []
+    private var draining = false
     private var watcher: DispatchSourceFileSystemObject?
     private var fd: Int32 = -1
+    /// The context menu QA has open: drawn by `shot … menu` (a quiet run pops none up on a screen).
     private var openMenu: NSMenu?
+    /// The menu bar menu's footer side drawn hovered (`menu-hover`), applied again before each drawing of the menu.
+    private var menuHover: String?
+    /// Set while `wait` runs its command: the reports go here instead of `<file>.bench`.
+    private var captured: [String]?
 
     init(path: String, app: AppDelegate) {
         self.path = path
         self.app = app
-        // Captures must show the windows in their active state: a regular app that is frontmost
-        // (an accessory app is often refused activation when another app has the focus).
-        NSApp.setActivationPolicy(.regular)
-        Self.activate()
         FileManager.default.createFile(atPath: path, contents: nil)
         try? "0".write(toFile: path + ".ack", atomically: true, encoding: .utf8)
         // Play never reaches a player here, but the URL it would have handed over lands in `<file>.bench`.
@@ -58,8 +90,7 @@ import AppKit
         // A file-system watch instead of a timer: the harness must not add wake-ups of its own
         // while idle numbers are measured.
         fd = open(path, O_EVTONLY)
-        // The handler runs on a background queue and hops to the main run loop in every mode: a
-        // context menu that is open runs the loop in tracking mode, where the main queue is not served.
+        // The handler runs on a background queue and hops to the main run loop in every mode (an alert's modal loop too).
         watcher = Self.watch(fd: fd) { [weak self] in
             RunLoop.main.perform(inModes: [.common, .default, .eventTracking, .modalPanel]) {
                 MainActor.assumeIsolated { self?.poll() }
@@ -75,50 +106,158 @@ import AppKit
         return src
     }
 
+    /// New complete lines join the queue; one drain at a time runs them in order.
     private func poll() {
         guard let text = try? String(contentsOfFile: path, encoding: .utf8) else { return }
-        let lines = text.split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
-        guard lines.count > executed else { return }
-        // Counted before running: a command may block in a nested menu loop that polls again.
-        let batch = Array(lines[executed...])
-        executed = lines.count
-        for line in batch { run(line) }
-        Self.activate()
-        try? String(executed).write(toFile: path + ".ack", atomically: true, encoding: .utf8)
+        let lines = Self.completeLines(text)
+        guard lines.count > read else { return }
+        let new = Array(lines[read...])  // lines is an array: indices from 0
+        read = lines.count
+        if draining, NSApp.modalWindow != nil {
+            // A command is waiting in an alert's modal loop (backlog offer, Move?): these run inside it (`alert 1`).
+            Task { for line in new { await run(line); done += 1 } }
+            return
+        }
+        pending += new
+        if !draining { drain() }
     }
 
-    /// Frontmost and key: the main window if open, else any of ours. macOS declines an activation
-    /// while the display sleeps or is locked (the windows then draw grey): the harness keeps the
-    /// display awake (`caffeinate -d -u`, see env.sh) and sends `activate` before every capture.
-    static func activate() {
-        NSApp.activate(ignoringOtherApps: true)
-        if let front = NSWorkspace.shared.frontmostApplication, front != NSRunningApplication.current {
-            // macOS 14+: the frontmost app has to yield; claiming its activation on its behalf is
-            // accepted for a QA harness that was started from that app (the terminal).
-            _ = NSRunningApplication.current.activate(from: front, options: [.activateAllWindows])
-        }
-        NSRunningApplication.current.activate(options: [.activateAllWindows])
-        if NSApp.keyWindow == nil, let w = NSApp.windows.first(where: { $0.isVisible && $0.canBecomeKey }) {
-            w.makeKeyAndOrderFront(nil)
+    /// Runs the queue, then lays every window out and writes the ack.
+    private func drain() {
+        draining = true
+        Task {
+            while !pending.isEmpty {
+                let line = pending.removeFirst()
+                if !line.trimmingCharacters(in: .whitespaces).isEmpty { await run(line) }
+                done += 1
+                if pending.isEmpty { await settle() }
+            }
+            try? String(done).write(toFile: path + ".ack", atomically: true, encoding: .utf8)
+            draining = false
         }
     }
 
-    private func run(_ line: String) {
+    /// The commands' effects applied and laid out: SwiftUI applies a change on the next turns of the run loop.
+    private func settle() async {
+        for _ in 0..<2 {
+            try? await Task.sleep(for: .milliseconds(20))
+            for w in NSApp.windows where w.isVisible {
+                w.contentView?.superview?.layoutSubtreeIfNeeded()
+                w.displayIfNeeded()
+            }
+        }
+    }
+
+    /// A context menu QA asked for: drawn by `shot … menu`; shown at its place only outside a quiet run.
+    private func pop(_ menu: NSMenu, show: @escaping @MainActor () -> Void) {
+        openMenu = menu
+        guard !QuietRun.on else { return }
+        DispatchQueue.main.async { MainActor.assumeIsolated { show() } }
+    }
+
+    private func closeMenu() {
+        openMenu?.cancelTracking()
+        openMenu = nil
+    }
+
+    private var scene: QAShots.Scene { QAShots.Scene(app: app, menu: openMenu, menuHover: menuHover) }
+
+    /// `shot <name> [what]`: the picture as `<name>.png`.
+    private func shot(_ arg: String) async {
+        let words = arg.split(separator: " ", maxSplits: 1).map(String.init)
+        guard let name = words.first else { return report("shot: name?") }
+        let file = name.hasSuffix(".png") ? name : name + ".png"
+        let url = file.hasPrefix("/") ? URL(fileURLWithPath: file)
+            : URL(fileURLWithPath: path).deletingLastPathComponent().appendingPathComponent(file)
+        let what = words.count > 1 ? words[1] : "main"
+        switch await QAShots.image(what, in: scene) {
+        case let .success(rep):
+            guard let png = rep.representation(using: .png, properties: [:]) else { return report("shot: \(name) FAILED: no PNG") }
+            try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            do { try png.write(to: url) } catch { return report("shot: \(name) FAILED: \(error.localizedDescription)") }
+            report("shot: \(url.path) \(rep.pixelsWide)x\(rep.pixelsHigh) \(what)")
+        case let .failure(why):
+            report("shot: \(name) FAILED: \(why)")
+        }
+    }
+
+    /// The complete lines of the control file, empty ones included (they count in the ack as in `wc -l`); the text after
+    /// the last newline may still be being written.
+    nonisolated static func completeLines(_ text: String) -> [String] {
+        Array(text.components(separatedBy: "\n").dropLast())
+    }
+
+    /// `wait`'s argument: the command, the text, whether it must be absent (`!~`), the limit in seconds (default 15).
+    struct WaitSpec: Equatable {
+        let command: String
+        let text: String
+        let absent: Bool
+        let limit: Double
+
+        init(command: String, text: String, absent: Bool, limit: Double) {
+            self.command = command; self.text = text; self.absent = absent; self.limit = limit
+        }
+
+        /// `<command> ~ <text> [timeout <s>]` or `<command> !~ <text> [timeout <s>]`; nil when it is neither (or waits
+        /// for a wait).
+        init?(_ arg: String) {
+            var rest = arg
+            var limit = 15.0
+            if let r = rest.range(of: " timeout ", options: .backwards),
+               let t = Double(rest[r.upperBound...].trimmingCharacters(in: .whitespaces)) {
+                limit = t
+                rest = String(rest[..<r.lowerBound])
+            }
+            let absent = rest.contains(" !~ ")
+            let parts = rest.components(separatedBy: absent ? " !~ " : " ~ ")
+            guard parts.count == 2, !parts[0].isEmpty, !parts[1].isEmpty, parts[0].split(separator: " ").first != "wait" else { return nil }
+            self.init(command: parts[0], text: parts[1], absent: absent, limit: limit)
+        }
+    }
+
+    /// `wait <command> ~|!~ <text> [timeout <s>]`: runs the command every 100 ms until its report holds (`~`) or no
+    /// longer holds (`!~`) the text.
+    private func wait(_ arg: String) async {
+        guard let spec = WaitSpec(arg) else { return report("wait: <command> ~ <text> [timeout <s>]") }
+        let (command, text, negate, limit) = (spec.command, spec.text, spec.absent, spec.limit)
+        let clock = ContinuousClock()
+        let end = clock.now + .milliseconds(Int(limit * 1000))
+        var last = ""
+        while true {
+            captured = []
+            await run(command)
+            let lines = captured ?? []
+            captured = nil
+            last = lines.last ?? ""
+            if lines.contains(where: { $0.contains(text) }) != negate { return report(last) }
+            if clock.now >= end { return report("wait: timeout after \(Int(limit)) s: \(last)") }
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+    }
+
+    private func run(_ line: String) async {
         let parts = line.split(separator: " ", maxSplits: 1).map(String.init)
         let cmd = parts[0]
         let arg = parts.count > 1 ? parts[1] : ""
         let commands = app.commands!
         switch cmd {
-        case "click":
-            let (rest, win) = qaTarget(arg)
-            QAClicks.command(rest, window: win) { [weak self] in self?.report($0) }
+        case "shot":
+            await shot(arg)
+        case "wait":
+            await wait(arg)
+        case "windows":
+            report(QAShots.listing(scene))
         case "ui":
             let (rest, win) = qaTarget(arg)
-            if rest == "dump" { QAClicks.dump(window: win) { report($0) } }
-            else if rest == "ping" { QAClicks.ping { [weak self] in self?.report($0) } }
+            if rest == "dump" { QAInspect.dump(window: win) { report($0) } }
+            else if rest == "views" { QAInspect.views(window: win) { report($0) } }
+            else if rest == "ping" { report(await withCheckedContinuation { done in QAInspect.ping { done.resume(returning: $0) } }) }
             else { report(qaUIState()) }
         case "net":
             app.networkWatcher?.inject(satisfied: arg == "online")
+        case "power":
+            guard arg == "battery" || arg == "ac" else { return report("power: battery or ac") }
+            app.power?.report(arg == "battery")
         case "favorite", "unfavorite":
             guard let t = qaTracker(arg) else { return report("\(cmd): no tracker \(arg)") }
             if cmd == "favorite" { commands.favorites.saveAsFavorite(t.id) }
@@ -145,7 +284,7 @@ import AppKit
             commands.showMain(arg == "sharing" ? .sharing : .downloads, nil)
         case "tracker":
             commands.showMain(nil, nil)
-            app.mainWindowController?.libraryModel?.select(arg == "none" ? .sharing : .tracker(arg))
+            app.mainWindowController?.libraryModel?.select(arg == "none" ? .sharing : .tracker(trackerId: arg))
         case "tab":
             // `tab downloads | sharing | tracker <name or id>`: the sidebar item, selected like a click.
             commands.showMain(nil, nil)
@@ -157,38 +296,38 @@ import AppKit
             case "tracker":
                 let name = words.count > 1 ? words[1] : ""
                 if let t = m.snapshot.trackers.first(where: { $0.id == name || $0.name.localizedCaseInsensitiveCompare(name) == .orderedSame })
-                    ?? m.snapshot.trackers.first(where: { $0.name.localizedCaseInsensitiveContains(name) }) { m.select(.tracker(t.id)) }
+                    ?? m.snapshot.trackers.first(where: { $0.name.localizedCaseInsensitiveContains(name) }) { m.select(.tracker(trackerId: t.id)) }
                 else { report("tab: no tracker \(name)") }
             default: report("tab: \(arg)?")
             }
         case "search":
-            app.mainWindowController?.libraryModel?.search = arg
+            app.mainWindowController?.libraryModel?.setSearch(arg)
+        case "add-sheet":
+            // `add-sheet open | close | text <text>`: File › Add Magnet Link or URL…'s sheet; `text` is what its field's
+            // binding calls as the user types.
+            let m = app.mainWindowController?.libraryModel
+            if arg == "close" { m?.closeAddSheet() }
+            else if arg.hasPrefix("text ") { m?.setAddSheetText(String(arg.dropFirst(5))) }
+            else { m?.showAddSheet() }
         case "select":
             // `select <id>` or `select name1, name2`: rows shown in the window, by id prefix or name.
             guard let m = app.mainWindowController?.libraryModel else { return }
             let wanted = arg.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
             let hits = m.visibleRows.filter { r in wanted.contains { r.id.hasPrefix($0) || r.displayName.localizedCaseInsensitiveContains($0) } }
-            m.selection = hits.isEmpty ? [arg] : Set(hits.map(\.id))
+            m.setSelection(hits.isEmpty ? [arg] : hits.map(\.id))
         case "rowclick":
             // `rowclick <name> [command|shift]`: a click on that row as the list handles it (anchor and ranges included).
             guard let m = app.mainWindowController?.libraryModel else { return }
             let words = arg.split(separator: " ").map(String.init)
             let flags = Set(words.filter { $0 == "command" || $0 == "shift" })
             let name = words.filter { $0 != "command" && $0 != "shift" }.joined(separator: " ")
-            let groups: [RowGroup]
-            switch m.section {
-            case .tracker: groups = Lists.tracker(m, commands: commands)
-            case .sharing: groups = Lists.sharing(m, commands: commands)
-            default: groups = Lists.downloads(m, commands: commands)
-            }
-            let hidden = { (g: RowGroup) in g.parent.map { m.isCollapsed($0) } ?? false }
-            let shown = groups.filter { !hidden($0) && ($0.title == nil || !m.isCollapsed($0.id)) }
-            let order = shown.flatMap { g in g.rows.map { (group: g.id, id: $0.id) } }
-            guard let hit = shown.lazy.flatMap({ g in g.rows.map { (g.id, $0) } }).first(where: { $0.1.displayName.localizedCaseInsensitiveContains(name) || $0.1.id.hasPrefix(name) })
+            // The rows on screen, in list order (folded groups and the groups of a folded block have none).
+            let shown = m.view.list?.groups ?? []
+            guard let hit = shown.lazy.flatMap({ g in g.rows.map { (g.key, $0.transfer) } }).first(where: { $0.1.displayName.localizedCaseInsensitiveContains(name) || $0.1.id.hasPrefix(name) })
             else { return report("rowclick: no row \(name)") }
-            m.click(group: hit.0, id: hit.1.id, command: flags.contains("command"), shift: flags.contains("shift"), order: order)
+            m.click(group: hit.0, id: hit.1.id, command: flags.contains("command"), shift: flags.contains("shift"))
         case "info":
-            app.mainWindowController?.libraryModel?.infoID = arg == "none" ? nil : arg
+            app.mainWindowController?.libraryModel?.openInfo(arg == "none" ? nil : arg)
         case "settings":
             if arg == "close" { app.mainWindowController?.libraryModel?.select(.downloads) }
             else { commands.showSettings(SettingsTab(rawValue: arg)) }
@@ -215,26 +354,26 @@ import AppKit
             scroll(arg)
         case "chooser-close":
             app.closeChoosers()
+        case "rowcommands":
+            // `rowcommands <id> [menubar]`: the row's context menu as drawn, submenus in brackets, into `<file>.bench`.
+            let ids = arg.split(separator: " ").map(String.init)
+            guard let row = ids.first.flatMap(contextRow) else { report("rowcommands: no row"); return }
+            report("rowcommands: \(Self.describe(commands.entries(for: [row], inMenuBar: ids.contains("menubar"))))")
         case "contextmenu":
             // `contextmenu <id> [menubar]`: the row's context menu, open until `contextmenu close`.
             let ids = arg.split(separator: " ").map(String.init)
-            if ids.first == "close" { openMenu?.cancelTracking(); return }
-            let all = commands.core.snapshot()
-            let rows = (all.allDownloading + all.allQueued + all.allRecent + all.sharingBusiest)
-                + commands.core.sharingRows(query: RowQuery(group: nil, trackerId: nil, text: "", offset: 0, limit: 400))
-            let wanted = ids.first.flatMap { id in id == "first" ? rows.first : rows.first { $0.id.hasPrefix(id) || $0.name.localizedCaseInsensitiveContains(id) || $0.displayName.localizedCaseInsensitiveContains(id) } }
-            guard let row = wanted, let win = app.mainWindowController?.nsWindow else { return }
+            if ids.first == "close" { return closeMenu() }
+            guard let row = ids.first.flatMap(contextRow), let win = app.mainWindowController?.nsWindow else { return report("contextmenu: no row \(arg)") }
             var entries = commands.entries(for: [row], inMenuBar: ids.contains("menubar"))
             if ids.contains("playwith") {
                 // The submenu on its own (a hover-opened submenu is a separate window we cannot summon).
                 entries = entries.compactMap { if case let .submenu("Play With", children) = $0 { return children } else { return nil } }.first ?? []
             }
             let menu = MenuBuilder.menu(entries)
-            openMenu = menu
             let p = NSPoint(x: win.frame.minX + 520, y: win.frame.maxY - 190)
-            DispatchQueue.main.async { menu.popUp(positioning: nil, at: win.contentView?.convert(win.convertFromScreen(NSRect(origin: p, size: .zero)).origin, from: nil) ?? .zero, in: win.contentView) }
+            pop(menu) { menu.popUp(positioning: nil, at: win.contentView?.convert(win.convertFromScreen(NSRect(origin: p, size: .zero)).origin, from: nil) ?? .zero, in: win.contentView) }
         case "devlog":
-            devlogCommand(arg)
+            await devlogCommand(arg)
         case "files":
             filesCommand(arg)
         case "play-players":
@@ -287,19 +426,6 @@ import AppKit
         case "alert":
             // `alert 1` presses the first button of the alert that is open (1000 = first button).
             NSApp.stopModal(withCode: NSApplication.ModalResponse(rawValue: 999 + (Int(arg) ?? 1)))
-        case "activate":
-            // `activate [main|settings|chooser]`: also make that window the key one (a window that
-            // is not key draws grey even in the active app).
-            let main = app.mainWindowController?.nsWindow, settings = main
-            let other = NSApp.windows.first { $0 != main && $0 != settings && $0.isVisible && $0.canBecomeKey && $0.styleMask.contains(.titled) }
-            Self.activate()
-            switch arg {
-            case "main": main?.makeKeyAndOrderFront(nil)
-            case "settings": settings?.makeKeyAndOrderFront(nil)
-            case "chooser": other?.makeKeyAndOrderFront(nil)
-            default: break
-            }
-            report("active: \(NSApp.isActive), key: \(NSApp.keyWindow != nil), front: \(NSWorkspace.shared.frontmostApplication?.localizedName ?? "-")")
         case "open-file":
             // A .torrent opened from Finder (SPEC 7A.6): the same path as double-clicking one. QA roots only.
             guard ["/private/tmp/", "/tmp/"].contains(where: arg.hasPrefix) else { return report("open-file: only under /private/tmp") }
@@ -307,39 +433,39 @@ import AppKit
         case "quit":
             app.quitForReal()
         case "quit-menu":
-            // The menu bar menu's Quit row pressed as a click would (accessibility press): ends the process.
+            // The menu bar menu's Quit row pressed: the call its click makes; ends the process.
             app.statusMenuController?.perform(open: true)
             app.statusMenuController?.qaPressFooter("quit")
         case "policy":
             report(app.qaPolicyLine())
-        case "policy-real":
-            app.qaPinnedRegular = false
-            app.refreshActivationPolicy()
-            report(app.qaPolicyLine())
+        case "config":
+            // How often the engine re-read and applied its settings files (a hand edit or `seedwell settings set` of
+            // config.toml shows here once it is in force).
+            report("config: reloads \(app.qaConfigReloads).")
         case "dock-quit":
             // The quit Apple event the Dock menu's Quit sends (no reason), or with a reason: `dock-quit logout`.
             app.qaSendQuitEvent(reason: arg.isEmpty ? nil : arg)
         case "key":
-            // `key delete|return|escape [shift]`: a key press posted to the main window (only this app's window).
+            // `key delete|return|escape|space|left|right|up|down|a|i [shift] [cmd] [list]`: what that key does in the main
+            // window, through the same core call a key press reaches (no key event is posted). The list's own keys
+            // (space, arrows) and `list` use the list's scope, the others the window's.
             let parts = arg.split(separator: " ").map(String.init)
-            let codes: [String: (UInt16, String)] = ["delete": (51, "\u{7F}"), "return": (36, "\r"), "escape": (53, "\u{1B}")]
-            guard let (code, chars) = parts.first.flatMap({ codes[$0] }), let win = app.mainWindowController?.nsWindow else { return report("key: \(arg)?") }
-            let flags: NSEvent.ModifierFlags = parts.contains("shift") ? [.shift] : []
-            for type in [NSEvent.EventType.keyDown, .keyUp] {
-                if let e = NSEvent.keyEvent(with: type, location: .zero, modifierFlags: flags, timestamp: ProcessInfo.processInfo.systemUptime,
-                                            windowNumber: win.windowNumber, context: nil, characters: chars,
-                                            charactersIgnoringModifiers: chars, isARepeat: false, keyCode: code) {
-                    NSApp.postEvent(e, atStart: false)
-                }
-            }
+            let keys: [String: LibraryKey] = [
+                "delete": .delete, "return": .return, "escape": .escape, "space": .space, "left": .left, "right": .right,
+                "up": .up, "down": .down, "a": .a, "i": .i,
+            ]
+            guard let name = parts.first, let k = keys[name], let m = app.mainWindowController?.libraryModel else { return report("key: \(arg)?") }
+            let listKey = ["space", "left", "right", "up", "down"].contains(name) || parts.contains("list")
+            let mods = KeyModifiers(shift: parts.contains("shift"), command: parts.contains("cmd"), option: false, control: false)
+            report("key: \(arg) \(m.key(k, mods, scope: listKey ? .list : .window) ? "handled" : "ignored")")
         case "fold":
             // `fold <group id>` (active, dormant, error, next, recent…): toggles that group header. On a tracker tab
             // the ids are downloads, sharing (the blocks), downloading, queued, recent, popular, active, dormant, error, dead.
             app.mainWindowController?.libraryModel?.toggleCollapsed(arg)
         case "remove-ask":
             // `remove-ask <name> [delete|menubar]`: the inline Remove… strip under that row; `remove-ask cancel` drops it, `remove-ask confirm` presses Remove.
-            if arg == "cancel" { commands.removal.cancel(); return }
-            if arg == "confirm" { commands.confirmedRemove(); return }
+            if arg == "cancel" { app.mainWindowController?.libraryModel?.cancelRemoval(); return }
+            if arg == "confirm" { app.mainWindowController?.libraryModel?.confirmRemoval(); return }
             let parts = arg.split(separator: " ").map(String.init)
             let snap = commands.core.snapshot()
             let rows = snap.allDownloading + snap.allQueued + snap.allRecent
@@ -355,26 +481,62 @@ import AppKit
             guard let row = rows.first(where: { $0.id.hasPrefix(arg) || $0.displayName.localizedCaseInsensitiveContains(arg) || $0.name.localizedCaseInsensitiveContains(arg) })
             else { return report("getinfo: no row \(arg)") }
             commands.showMain(nil, row.id)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
-                let m = self?.app.mainWindowController?.libraryModel
-                self?.report("getinfo: section \(m?.section == .sharing ? "sharing" : "downloads"), info \(m?.infoID == row.id ? "open" : "closed")")
+            // The popover opens once the row is laid out (MainWindowController.show): answered when it is up.
+            for _ in 0..<60 where app.mainWindowController?.infoWindow == nil || app.mainWindowController?.libraryModel?.infoRow != row.id {
+                try? await Task.sleep(for: .milliseconds(50))
             }
+            let m = app.mainWindowController?.libraryModel
+            report("getinfo: section \(m?.section == .sharing ? "sharing" : "downloads"), info \(m?.infoRow == row.id ? "open" : "closed")")
+        case "getinfo-card":
+            // The open Get Info card as the core drew it up and the popover draws it: its lines, trackers and buttons.
+            guard let m = InfoCardHolder.shown?.model else { return report("getinfo-card: none") }
+            report("getinfo-card: \(m.title) | \(m.subtitle)")
+            for s in m.sections {
+                report("  section \(s.title)")
+                for r in s.rows {
+                    let value = r.value.map(\.text).joined()
+                    report("    \(r.label): \(r.menu.map { "menu \($0.title)" } ?? value)\(r.button.map { " [\($0.title)]" } ?? "")\(r.playControls.isEmpty ? "" : " play")")
+                }
+                if let a = s.askAgain { report("    [\(a.title)] \(s.askAgainNote ?? "")") }
+                for t in s.trackers {
+                    report("    tracker \(t.url)")
+                    report("      \(t.live)\(t.allowed.map { " · \($0)" } ?? "")")
+                    report("      \(t.detail)")
+                }
+            }
+            report("  buttons \(m.buttons.map(\.title).joined(separator: ", ")) · next read in \(m.reloadDueMs) ms")
+        case "getinfo-window":
+            // Get Info's popover as drawn: open on whose row (by the name it shows), a child of the main window (its
+            // ↑/↓ reach the list), and whether it has the keys.
+            guard let m = app.mainWindowController?.libraryModel, let id = m.infoRow, let w = app.mainWindowController?.infoWindow else {
+                return report("getinfo-window: none")
+            }
+            let name = m.visibleRows.first { $0.id == id }?.displayName ?? id
+            let shows = QAInspect.items(in: w).contains { $0.label.contains(name) }
+            report("getinfo-window: open, row '\(name)' \(shows ? "shown" : "not shown"), child \(w.parent === app.mainWindowController?.nsWindow), key \(w.isKeyWindow)")
         case "where":
             let m = app.mainWindowController?.libraryModel
-            report("where: section \(m.map { String(describing: $0.section) } ?? "none"), tracker \(m?.trackerID ?? "none"), info \(m?.infoID ?? "none"), selection \(m?.selection.count ?? 0), badge \(m?.downloadsFlag == true ? 1 : 0), window \(m == nil ? "closed" : "open")")
+            report("where: section \(m.map { String(describing: $0.section) } ?? "none"), tracker \(m?.trackerID ?? "none"), info \(m?.infoRow ?? "none"), selection \(m?.selection.count ?? 0), badge \(m?.downloadsFlag == true ? 1 : 0), window \(m == nil ? "closed" : "open"), sheet \(m?.view.addSheet.map { "open '\($0.text)'" } ?? "closed"), rows \(m?.visibleRows.count ?? 0), arrived \(commands.arrivals.arrivals.arrived().count)")
         case "menu":
             app.statusMenuController?.perform(open: arg != "close")
         case "menu-files":
             menuFilesCommand(arg)
         case "menu-titles":
             report("menu: \(app.statusMenuController?.qaTitles ?? "")")
+        case "menu-subtitles":
+            report("menu-subtitles: \(app.statusMenuController?.qaSubtitles ?? "")")
+        case "menu-sync":
+            menuSyncCommand(arg)
         case "menu-hover":
             // `menu-hover open | quit | none`: the Open / Quit row as a pointer over one side draws it.
-            app.statusMenuController?.footerRow?.qaHighlight(arg)
+            menuHover = arg == "none" ? nil : arg
+            app.statusMenuController?.footerRow?.qaHighlight(menuHover)
         case "menu-press":
             app.statusMenuController?.footerRow?.qaPress(arg)
         case "starting":
             starting(arg)
+        case "choice":
+            choiceCommand(arg)
         default:
             break
         }
@@ -409,21 +571,20 @@ import AppKit
 
     /// The context menus of the trackers, open until `tracker-menu close`.
     private func qaTrackerMenu(_ arg: String) {
-        if arg == "close" { openMenu?.cancelTracking(); return }
+        if arg == "close" { return closeMenu() }
         guard let win = app.mainWindowController?.nsWindow else { return }
         var entries: [MenuEntry] = []
         var at = NSPoint(x: 110, y: 330)
-        if let t = qaTracker(arg) {
-            entries = TrackerMenus.entries(for: t, commands: commands)
-            let sorted = TrackerOrder.sorted(commands.core.snapshot().trackers)
-            let n = sorted.firstIndex { $0.id == t.id } ?? 0
+        if let t = qaTracker(arg), let m = app.mainWindowController?.libraryModel {
+            let place = LibraryPlace.tracker(trackerId: t.id)
+            entries = SidebarMenus.entries(for: place, model: m, commands: commands)
+            let n = m.view.sidebar.trackers?.items.firstIndex { $0.place == place } ?? 0
             let screen = NSPoint(x: win.frame.minX + 90, y: win.frame.maxY - 195 - CGFloat(n) * 40)
             at = win.contentView?.convert(win.convertFromScreen(NSRect(origin: screen, size: .zero)).origin, from: nil) ?? .zero
         }
         guard !entries.isEmpty else { return report("tracker-menu: none for \(arg)") }
         let menu = MenuBuilder.menu(entries)
-        openMenu = menu
-        DispatchQueue.main.async { menu.popUp(positioning: nil, at: at, in: win.contentView) }
+        pop(menu) { menu.popUp(positioning: nil, at: at, in: win.contentView) }
     }
 
     private func playPlayers() {
@@ -464,10 +625,9 @@ import AppKit
             item.state = pref == p.id ? .on : .off
             menu.addItem(item)
         }
-        openMenu = menu
         // Over the Playback row's pop-up (QA captures the General tab at 860 x 700).
         let p = NSPoint(x: 209, y: 570)
-        DispatchQueue.main.async { menu.popUp(positioning: auto, at: p, in: content) }
+        pop(menu) { menu.popUp(positioning: auto, at: p, in: content) }
     }
 
     /// `scroll top | bottom | <0...1>`: the main window's list, to show the groups further down.
@@ -486,6 +646,8 @@ import AppKit
         switch verb {
         case "expand": store.expand(row.id)
         case "collapse": store.collapse(row.id)
+        // The row's disclosure triangle.
+        case "toggle": store.toggle(row.id)
         case "folders":
             store.expand(row.id)
             if let st = store.states[row.id], let t = st.tree { for f in t.folderIds() { st.setFolder(f, open: true) } }
@@ -497,7 +659,12 @@ import AppKit
                   let file = tree.rows(expanded: tree.folderIds(), filter: "").first(where: { $0.name.localizedCaseInsensitiveContains(pat) }) else { return report("files: no file \(rest)") }
             let node = file.id
             switch verb {
-            case "select": store.select(torrent: row.id, node: node, command: false, shift: false)
+            case "select":
+                // A click on the row, with ⌘ or ⇧ held when named: the torrent rows lose the selection, as for a click.
+                let held = Set(fileWords.dropFirst().flatMap { $0.split(separator: " ").map(String.init) })
+                FileRowView.click(torrent: row.id, node: node, store: store, command: held.contains("command"), shift: held.contains("shift")) { [weak self] in
+                    self?.app.mainWindowController?.libraryModel?.setSelection([])
+                }
             case "skip": st.toggle([node])
             case "high": st.setPriority([node], .high)
             case "menu":
@@ -509,25 +676,29 @@ import AppKit
                 }
                 guard let win = app.mainWindowController?.nsWindow else { return }
                 let menu = MenuBuilder.menu(entries)
-                openMenu = menu
                 let p = NSPoint(x: win.frame.minX + 520, y: win.frame.maxY - 330)
-                DispatchQueue.main.async { menu.popUp(positioning: nil, at: win.contentView?.convert(win.convertFromScreen(NSRect(origin: p, size: .zero)).origin, from: nil) ?? .zero, in: win.contentView) }
+                pop(menu) { menu.popUp(positioning: nil, at: win.contentView?.convert(win.convertFromScreen(NSRect(origin: p, size: .zero)).origin, from: nil) ?? .zero, in: win.contentView) }
             default: report("files: unknown \(verb)")
             }
         }
     }
 
     private func scroll(_ arg: String, in window: NSWindow? = nil) {
-        guard let root = (window ?? app.mainWindowController?.nsWindow)?.contentView else { return }
-        func views(_ v: NSView) -> [NSScrollView] { ((v as? NSScrollView).map { [$0] } ?? []) + v.subviews.flatMap(views) }
-        guard let sv = views(root).filter({ ($0.documentView?.frame.height ?? 0) > $0.bounds.height }).max(by: { $0.bounds.width < $1.bounds.width }),
-              let doc = sv.documentView else { return }
+        guard let root = (window ?? app.mainWindowController?.nsWindow)?.contentView,
+              let sv = Self.scrollTarget(in: root), let doc = sv.documentView else { return }
         let maxY = max(0, doc.frame.height - sv.contentView.bounds.height)
         let f = arg == "bottom" ? 1 : arg == "top" ? 0 : (Double(arg) ?? 0)
         // The top of the list is the negative inset: the toolbar covers the first 50-odd points.
         let top = -sv.contentView.contentInsets.top
         sv.contentView.scroll(to: NSPoint(x: 0, y: top + (maxY - top) * f))
         sv.reflectScrolledClipView(sv.contentView)
+    }
+
+    /// The scroll view that `scroll` and `bench-scroll` drive: the widest one whose content is taller than it, nested
+    /// ones included (an open file list scrolls inside the window's list once it is taller than about 13 rows).
+    static func scrollTarget(in root: NSView) -> NSScrollView? {
+        func views(_ v: NSView) -> [NSScrollView] { ((v as? NSScrollView).map { [$0] } ?? []) + v.subviews.flatMap(views) }
+        return views(root).filter { ($0.documentView?.frame.height ?? 0) > $0.bounds.height }.max { $0.bounds.width < $1.bounds.width }
     }
 
     // MARK: Benchmarks (QA only)
@@ -558,6 +729,17 @@ import AppKit
         case "resume": row.map { commands.pendingCountdown($0.id, pause: false) }
         case "now": row.map { commands.pendingStartNow($0.id) }
         case "choose": row.map { notifier.chooseFromPopover($0.id) }
+        case "pill":
+            // The pill's menu, popped up under the pill; Escape or `starting pill close` puts it away.
+            if name == "close" { return closeMenu() }
+            guard let r = row, let menu = notifier.qaPillMenu(r.id), let w = notifier.popoverWindow, let content = w.contentView else { return report("starting: no pill") }
+            let at = QAInspect.items(in: w).first { $0.role == "AXPopUpButton" || $0.role == "AXMenuButton" }?.frame
+                ?? NSRect(x: content.bounds.width - 70, y: 6, width: 52, height: 18)
+            // `at` is in window points from the top, as `ui dump` prints them; the menu opens under the pill like a pull-down.
+            let p = content.convert(NSPoint(x: at.minX, y: content.bounds.height - at.maxY - 4), from: nil)
+            report("starting: pill menu \(menu.items.map { ($0.state == .on ? "*" : "") + $0.title }) at \(Int(at.minX)),\(Int(at.minY))")
+            pop(menu) { menu.popUp(positioning: nil, at: p, in: content) }
+            return
         case "ok", "cancel", "all", "none", "toggle", "open", "fold", "title", "category":
             // `ok|cancel|all|none|open|fold [name]` (fold opens or closes the block), `toggle <title of a file row>` (first held torrent)
             let named = name.isEmpty ? nil : rows.first { $0.displayName.localizedCaseInsensitiveContains(name) }
@@ -570,8 +752,37 @@ import AppKit
         report(notifier.qaSummary + (w.map { " window \($0.windowNumber) \(Int($0.frame.width))x\(Int($0.frame.height)) at \(Int($0.frame.minX)),\(Int($0.frame.minY))" } ?? ""))
     }
 
+    /// `choice tick <title> | fold <title> | all | pick <name> | state`: a click in a checklist, on the shared chooser model
+    /// (the chooser window, the popover's list and the main window's list of a held torrent show one model): a box or a
+    /// row's title (`tick`, both call `toggle`), a group's chevron (`fold`), the "Select all / none" box (`all`), a quick
+    /// pick (`pick`). The model of the torrent that waits for a choice, else the first. Reports the ticks and the folds.
+    private func choiceCommand(_ arg: String) {
+        let words = arg.split(separator: " ", maxSplits: 1).map(String.init)
+        let verb = words.first ?? "state"
+        let rest = words.count > 1 ? words[1] : ""
+        let models = ChoiceStore.shared.models.sorted { $0.key < $1.key }.map(\.value)
+        guard let m = models.first(where: \.awaiting) ?? models.first else { return report("choice: no chooser") }
+        let all = m.items + m.items.flatMap(\.children)
+        let item = all.first { $0.title.localizedCaseInsensitiveCompare(rest) == .orderedSame }
+            ?? all.first { $0.title.localizedCaseInsensitiveContains(rest) }
+        switch verb {
+        case "tick", "fold":
+            guard !rest.isEmpty, let item else { return report("choice: no row \(rest)") }
+            if verb == "tick" { m.toggle(item) } else { m.toggleExpanded(item) }
+        case "all": m.toggleAll()
+        case "pick":
+            guard let p = ChooserModel.QuickPick.allCases.first(where: { $0.rawValue.localizedCaseInsensitiveCompare(rest) == .orderedSame })
+            else { return report("choice: no quick pick \(rest)") }
+            m.apply(p)
+        case "state": break
+        default: return report("choice: \(arg)?")
+        }
+        let open = m.items.filter { m.expanded.contains($0.id) }.map(\.title)
+        report("choice: \(arg) -> checked \(m.checked.count) all \(m.allState) expanded \(open) rows \(m.visibleRows.map(\.item.title))")
+    }
+
     /// `devlog open|close|filter|errors|event|expand|state`: drives the tracker log viewer.
-    private func devlogCommand(_ arg: String) {
+    private func devlogCommand(_ arg: String) async {
         guard let nav = app.mainWindowController?.nav else { return report("devlog: no window") }
         let core = app.commands.core
         let model = nav.logModel(core: core)
@@ -581,7 +792,7 @@ import AppKit
         switch sub {
         case "open":
             nav.showTrackerLog = true
-            Task { await model.refresh() }
+            await model.refresh()
         case "close":
             nav.showTrackerLog = false
         case "filter":
@@ -598,17 +809,16 @@ import AppKit
             default: model.expanded = []
             }
         case "state":
-            Task {
-                await model.refresh()
-                report("devlog: \(model.items.count) entries, \(model.items.filter { $0.row.error }.count) errors, dropped \(model.dropped), open \(nav.showTrackerLog), settings dev mode \(app.commands.core.settingsLoad().advanced.developerMode)")
-            }
+            await model.refresh()
+            report("devlog: \(model.items.count) entries, \(model.items.filter { $0.row.error }.count) errors, dropped \(model.dropped), open \(nav.showTrackerLog), settings dev mode \(app.commands.core.settingsLoad().advanced.developerMode)")
         default:
             report("devlog: unknown command \(arg)")
         }
     }
 
-    /// `win=main|chooser|popover` anywhere in a click / ui argument picks the window the events go to
-    /// (default: the main window). Returns the argument without it.
+    /// `win=main|chooser|popover|info` anywhere in a `ui` argument picks the window it reads (default: the main window;
+    /// `info`: Get Info's popover).
+    /// Returns the argument without it.
     private func qaTarget(_ arg: String) -> (String, NSWindow?) {
         var words = arg.split(separator: " ").map(String.init)
         var win = app.mainWindowController?.nsWindow
@@ -616,6 +826,7 @@ import AppKit
             switch words[i].dropFirst(4) {
             case "chooser": win = app.qaChooserWindow
             case "popover": win = app.startingNotifier?.popoverWindow
+            case "info": win = app.mainWindowController?.infoWindow
             default: break
             }
             words.remove(at: i)
@@ -630,7 +841,7 @@ import AppKit
         }.joined(separator: " ")
     }
 
-    /// `ui state`: what the clicks changed, in one line.
+    /// `ui state`: what the commands changed, in one line.
     private func qaUIState() -> String {
         let m = app.mainWindowController?.libraryModel
         let f = FilesStore.shared
@@ -640,7 +851,7 @@ import AppKit
         let trees = f.states.sorted { $0.key < $1.key }.map { id, st in
             "\(id.prefix(8)):\(st.totals.map { "\($0.wantedCount)/\($0.fileCount)" } ?? "-")\(st.hasPending ? "+pending" : "")"
         }
-        return "state: events d\(QAClicks.downs) u\(QAClicks.ups) m\(QAClicks.moves) trees \(trees) chevrons \(chev) rows \(sel) files \(f.selectedTorrent.map { String($0.prefix(8)) } ?? "-") nodes \(f.selectedNodes.sorted()) expanded \(f.expanded.map { String($0.prefix(8)) }.sorted()) \(qaChoiceState)"
+        return "state: trees \(trees) chevrons \(chev) rows \(sel) files \(f.selectedTorrent.map { String($0.prefix(8)) } ?? "-") nodes \(f.selectedNodes.sorted()) expanded \(f.expanded.map { String($0.prefix(8)) }.sorted()) \(qaChoiceState)"
     }
 
     /// The inline file list of the open menu bar menu (`menu open` first):
@@ -648,6 +859,18 @@ import AppKit
     ///     menu-files press <file|folder|all|none>   a click on a row of the list; `menu-files fold <folder>` its chevron
     ///     menu-files state <torrent>       engine wanted/total, which list is open, rows, footer, menu still tracking
     ///     menu-files context <row>         the titles of the row's right-click menu, its check and Play icon
+    /// `menu-sync`: the Folder Sync submenu as drawn (rows, the open confirmation, the items) and its state;
+    /// `menu-sync edit|remove <name>`: the row's Edit or Remove button pressed (Remove opens the confirmation under it,
+    /// pressed again it closes; nothing is removed).
+    private func menuSyncCommand(_ arg: String) {
+        guard let sync = app.statusMenuController?.menuSync else { return report("menu-sync: none") }
+        let words = arg.split(separator: " ", maxSplits: 1).map(String.init)
+        switch words.first {
+        case "edit", "remove": report("menu-sync: \(words[0]) \(sync.qaPress(words.count > 1 ? words[1] : "", edit: words[0] == "edit"))")
+        default: report("menu-sync: \(sync.qaState) || \(sync.qaItems)")
+        }
+    }
+
     private func menuFilesCommand(_ arg: String) {
         guard let menu = app.statusMenuController else { return }
         let files = menu.menuFiles
@@ -670,7 +893,29 @@ import AppKit
         }
     }
 
+    /// A row of any list by id prefix or name (`first`: the first one).
+    private func contextRow(_ key: String) -> TransferRow? {
+        let all = app.commands.core.snapshot()
+        let rows = (all.allDownloading + all.allQueued + all.allRecent + all.sharingBusiest)
+            + app.commands.core.sharingRows(query: RowQuery(group: nil, trackerId: nil, text: "", offset: 0, limit: 400))
+        if key == "first" { return rows.first }
+        return rows.first { $0.id.hasPrefix(key) || $0.name.localizedCaseInsensitiveContains(key) || $0.displayName.localizedCaseInsensitiveContains(key) }
+    }
+
+    /// "Pause|Move to Top|-|Priority [★ High|Normal ✓|Low]|Remove and Delete Files… (red)".
+    static func describe(_ entries: [MenuEntry]) -> String {
+        entries.map { e in
+            switch e {
+            case .separator: "-"
+            case let .submenu(title, children): "\(title) [\(describe(children))]"
+            case let .item(title, checked, enabled, role, key, _):
+                title + (checked ? " ✓" : "") + (enabled ? "" : " (off)") + (role == .destructive ? " (red)" : "") + (key.map { " " + $0 } ?? "")
+            }
+        }.joined(separator: "|")
+    }
+
     private func report(_ line: String) {
+        if captured != nil { captured?.append(line); return }
         let url = URL(fileURLWithPath: path + ".bench")
         let old = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
         try? (old + line + "\n").write(to: url, atomically: true, encoding: .utf8)
@@ -705,10 +950,7 @@ import AppKit
     /// Scrolls the main window's list down and up for a few seconds and records frame times.
     private func benchScroll() {
         guard let window = app.mainWindowController?.nsWindow, let root = window.contentView else { return }
-        func scrollViews(_ v: NSView) -> [NSScrollView] {
-            (v as? NSScrollView).map { [$0] } ?? [] + v.subviews.flatMap(scrollViews)
-        }
-        guard let sv = scrollViews(root).filter({ ($0.documentView?.frame.height ?? 0) > $0.bounds.height }).max(by: { $0.bounds.width < $1.bounds.width }) else {
+        guard let sv = Self.scrollTarget(in: root) else {
             report("scroll: nothing to scroll"); return
         }
         let doc = sv.documentView!
@@ -740,7 +982,9 @@ import AppKit
     }
 
     func start() {
-        link = window.displayLink(target: self, selector: #selector(frame(_:)))
+        // A quiet run's window is on no screen, so it has no display of its own to follow: the main display's.
+        link = QuietRun.on ? (NSScreen.main ?? NSScreen.screens.first)?.displayLink(target: self, selector: #selector(frame(_:)))
+            : window.displayLink(target: self, selector: #selector(frame(_:)))
         link?.add(to: .main, forMode: .common)
     }
 

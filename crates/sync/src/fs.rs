@@ -113,6 +113,12 @@ pub trait Fs: Send + Sync {
     /// created, renamed into or out of it and removed from it since. Without it a crash can undo a rename even
     /// after the file's own data was synced.
     fn sync_dir(&self, rel: &str) -> io::Result<()>;
+    /// Why this filesystem cannot hold an item named `name` (one path component), or `None`: the
+    /// puller does not try such a path (see [`crate::pull::Unsupported`]).
+    fn name_problem(&self, name: &str) -> Option<&'static str> {
+        let _ = name;
+        None
+    }
 }
 
 /// Reads a whole file (small files: tests, the ignore file, the simulator).

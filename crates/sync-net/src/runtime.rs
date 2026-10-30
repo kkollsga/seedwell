@@ -49,10 +49,17 @@ fn jitter(base: Duration, seed: u64) -> Duration {
     Duration::from_secs(base.as_secs() - quarter + off)
 }
 
-/// Turns a watcher path (relative, as on disk) into the wire path the index uses.
+/// Turns a watcher path (relative, as on disk, with this system's separators) into the wire path the
+/// index uses: its parts joined with "/". A path with anything but plain names in it (a drive or
+/// root, "." or ".."), or one that is not UTF-8, has no wire path.
 fn wire(rel: &Path) -> Option<String> {
-    let s = rel.to_str()?;
-    let parts: Vec<String> = s.split('/').filter(|c| !c.is_empty()).map(trs_sync::path::wire_name).collect();
+    let mut parts = Vec::new();
+    for c in rel.components() {
+        match c {
+            std::path::Component::Normal(n) => parts.push(trs_sync::path::wire_name(n.to_str()?)),
+            _ => return None,
+        }
+    }
     Some(parts.join("/"))
 }
 
@@ -117,6 +124,7 @@ pub async fn run(ctx: Arc<Ctx>, f: Arc<FolderShared>, mut stop: watch::Receiver<
                 pull(&ctx, &f, &mut retry).await;
             }
             _ = f.rescan.notified() => {
+                lock(&f.core).retry_unsupported();
                 scan(&ctx, &f, "").await;
                 pull(&ctx, &f, &mut retry).await;
             }
@@ -259,10 +267,13 @@ async fn pull(ctx: &Arc<Ctx>, f: &Arc<FolderShared>, retry: &mut Option<(Instant
                 }
             }
             let seq = core.index_state().map(|(_, s)| s).unwrap_or(0);
-            Ok::<_, std::io::Error>((total, seq))
+            // Issues of earlier pulls whose paths need nothing any more: they are settled.
+            let earlier: Vec<String> = lock(&f2.live).pull_issues.keys().cloned().collect();
+            let settled: Vec<String> = earlier.into_iter().filter(|p| !core.still_needed(p).unwrap_or(true)).collect();
+            Ok::<_, std::io::Error>((total, seq, settled))
         })
         .await;
-        let (report, seq) = match res {
+        let (report, seq, settled) = match res {
             Ok(Ok(x)) => x,
             Ok(Err(e)) => return set_error(f, format!("pull: {e}")),
             Err(e) => return set_error(f, format!("pull: {e}")),
@@ -278,9 +289,17 @@ async fn pull(ctx: &Arc<Ctx>, f: &Arc<FolderShared>, retry: &mut Option<(Instant
                     live.conflicts.insert(copy.clone(), c.original);
                 }
             }
-            live.issues.retain(|(p, _)| !report.failed.iter().any(|(q, _)| q == p));
-            live.issues.extend(report.failed.iter().cloned());
+            let now: Vec<(String, String)> =
+                report.failed.iter().cloned().chain(report.unsupported.iter().map(|u| (u.path.clone(), u.why.clone()))).collect();
+            let gone: Vec<(String, String)> = settled.iter().filter_map(|p| live.pull_issues.remove_entry(p)).collect();
+            live.issues.retain(|i| !gone.contains(i) && !now.iter().any(|(q, _)| q == &i.0));
+            for (p, why) in &now {
+                live.pull_issues.insert(p.clone(), why.clone());
+            }
+            live.issues.extend(now);
         }
+        // An unsupported path is not retried on a timer: it would fail the same way until its version
+        // changes (a pull follows that) or a rescan is asked for.
         let stuck = report.waiting > 0 || !report.failed.is_empty();
         *retry = if stuck {
             let next = retry.map_or(RETRY_FIRST, |(_, d)| (d * 2).min(RETRY_MAX));
@@ -333,6 +352,7 @@ fn merge(total: &mut PullReport, r: PullReport) {
     total.rescan = r.rescan;
     total.waiting = r.waiting;
     total.failed = r.failed;
+    total.unsupported = r.unsupported;
     total.conflicts.extend(r.conflicts);
 }
 
@@ -387,7 +407,7 @@ fn sample_pending(core: &FolderCore) -> (Vec<String>, bool) {
         let full = page.len() == PENDING_SAMPLE;
         after = page.last().map(|(p, _)| p.clone());
         for (path, n) in page {
-            if n.need == Need::Nothing {
+            if n.need == Need::Nothing || core.is_unsupported(&path, &n) {
                 continue;
             }
             if out.len() == PENDING_SAMPLE {
@@ -468,7 +488,20 @@ mod tests {
     use trs_sync_proto::device::DeviceKey;
     use trs_sync_proto::keys::{Access, FolderSecret};
 
-    use super::{PENDING_SAMPLE, sample_pending};
+    use super::{PENDING_SAMPLE, sample_pending, wire};
+
+    #[test]
+    fn a_watcher_path_becomes_the_wire_path_on_every_system() {
+        use std::path::Path;
+        assert_eq!(wire(Path::new("")).as_deref(), Some(""));
+        assert_eq!(wire(Path::new("a")).as_deref(), Some("a"));
+        assert_eq!(wire(&Path::new("a").join("b c").join("d.txt")).as_deref(), Some("a/b c/d.txt"));
+        #[cfg(windows)]
+        assert_eq!(wire(Path::new(r"Pass\web\x.bin")).as_deref(), Some("Pass/web/x.bin"), "the watcher's own separators");
+        assert_eq!(wire(Path::new("a/../b")), None);
+        assert_eq!(wire(Path::new("./a")), None);
+        assert_eq!(wire(&std::env::temp_dir()), None, "absolute");
+    }
 
     fn core(seed: u8, key: &FolderSecret) -> (MemFs, FolderCore) {
         let fs = MemFs::new();

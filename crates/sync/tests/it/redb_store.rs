@@ -466,6 +466,8 @@ fn garbage_files_are_errors_not_panics() {
 }
 
 /// A copy of the file taken while the store is open is what a crash of the process would leave.
+/// Unix only: Windows will not let another handle read the parts of the file redb has locked.
+#[cfg(unix)]
 #[test]
 fn a_crash_keeps_durable_batches_whole() {
     let dir = tempfile::tempdir().unwrap();

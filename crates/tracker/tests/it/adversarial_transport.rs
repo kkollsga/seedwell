@@ -407,9 +407,8 @@ async fn tracker_url_cannot_target_local_services() {
             .first()
             .map(|r| r.lines().next().unwrap_or("").to_string())
     );
-    assert_eq!(
-        out.result.unwrap_err(),
-        AnnounceError::Transport(TransportError::Forbidden),
+    assert!(
+        matches!(out.result.unwrap_err(), AnnounceError::Transport(TransportError::Forbidden(_))),
         "a policy refusal is its own error and provably sent nothing"
     );
     assert_eq!(
@@ -447,7 +446,7 @@ async fn every_spelling_of_a_local_address_is_refused_before_any_connect() {
         assert!(
             matches!(
                 e,
-                AnnounceError::Transport(TransportError::Forbidden | TransportError::Dns)
+                AnnounceError::Transport(TransportError::Forbidden(_) | TransportError::Dns)
             ),
             "{host}: {e:?}"
         );
@@ -468,6 +467,7 @@ async fn lan_opt_in_still_refuses_loopback_and_link_local() {
             policy: DestinationPolicy {
                 allow_lan_trackers: true,
                 allow_loopback: false,
+                allow_public: true,
             },
             ..HttpConfig::default()
         },
@@ -476,9 +476,8 @@ async fn lan_opt_in_still_refuses_loopback_and_link_local() {
         let out = t
             .announce(&gated(&format!("http://{host}:{}/announce", s.addr.port())))
             .await;
-        assert_eq!(
-            out.result.unwrap_err(),
-            AnnounceError::Transport(TransportError::Forbidden),
+        assert!(
+            matches!(out.result.unwrap_err(), AnnounceError::Transport(TransportError::Forbidden(_))),
             "{host}"
         );
     }
@@ -524,9 +523,8 @@ async fn udp_tracker_url_cannot_target_local_services() {
             .announce(&gated(&format!("udp://{host}:{}/announce", addr.port())))
             .await
             .unwrap_err();
-        assert_eq!(
-            e,
-            AnnounceError::Transport(TransportError::Forbidden),
+        assert!(
+            matches!(e, AnnounceError::Transport(TransportError::Forbidden(_))),
             "{host}"
         );
     }
@@ -546,6 +544,7 @@ fn fast_udp() -> UdpConfig {
         max_exponent: 3,
         connection_id_ttl: Duration::from_secs(60),
         total_timeout: Duration::from_secs(5),
+        bind: None,
     }
 }
 

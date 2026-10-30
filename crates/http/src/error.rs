@@ -103,12 +103,10 @@ impl std::error::Error for Error {}
 
 impl From<io::Error> for Error {
     fn from(e: io::Error) -> Self {
-        // ENOSPC = 28, EDQUOT = 69 (macOS/Linux differ, 122 on Linux), EROFS = 30.
-        match (e.kind(), e.raw_os_error()) {
-            (io::ErrorKind::StorageFull, _) | (_, Some(28 | 69 | 122)) => Error::DiskFull,
-            (io::ErrorKind::PermissionDenied, _) | (_, Some(30)) => {
-                Error::PermissionDenied(e.to_string())
-            }
+        // By kind, never by number: error numbers mean different things on each system.
+        match e.kind() {
+            io::ErrorKind::StorageFull | io::ErrorKind::QuotaExceeded => Error::DiskFull,
+            io::ErrorKind::PermissionDenied | io::ErrorKind::ReadOnlyFilesystem => Error::PermissionDenied(e.to_string()),
             _ => Error::Io(e.to_string()),
         }
     }

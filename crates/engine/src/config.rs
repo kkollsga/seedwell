@@ -108,7 +108,9 @@ pub enum EncryptionPolicy {
 /// What to do with a `.torrent` after it was added.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AfterAdd {
-    /// Move to the Trash (`~/.Trash`, with a non-colliding name).
+    /// Move to the Trash (`trs_platform::fs::move_to_trash`: the system's own Trash call on macOS, which keeps the
+    /// file in its own volume's Trash with Put Back, the Recycle Bin on Windows, the freedesktop.org home trash
+    /// elsewhere).
     Trash,
     /// Move to this folder.
     Archive(PathBuf),
@@ -247,6 +249,9 @@ pub struct EngineConfig {
     pub alt_schedule: Option<AltSchedule>,
     /// Runtime state kept by the session: the schedule's window is open right now.
     pub alt_scheduled_on: bool,
+    /// Runtime only, never in `config.toml`: the app switched the alternative limits on by itself (on
+    /// battery, SPEC §8.4). A reload of the settings keeps it; the user's toggle clears it.
+    pub alt_by_app: bool,
     /// Upload slots shared by all torrents when the upload rate is unlimited.
     pub upload_slots_unlimited: usize,
     /// Run the DHT for public torrents.
@@ -356,7 +361,7 @@ pub struct EngineConfig {
     pub portmap: PortmapConfig,
     /// Direct downloads.
     pub direct: DirectConfig,
-    /// Where "Trash" is; `None` = `~/.Trash`.
+    /// A folder that stands in for the Trash (tests); `None` = the system's Trash.
     pub trash_dir: Option<PathBuf>,
     /// Test hook for the schedule's notion of "now".
     pub clock: Option<ClockFn>,
@@ -398,6 +403,7 @@ impl Default for EngineConfig {
             alt_speed: false,
             alt_schedule: None,
             alt_scheduled_on: false,
+            alt_by_app: false,
             upload_slots_unlimited: 40,
             dht_enabled: true,
             dht_bind: SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0),
@@ -458,9 +464,9 @@ impl Default for EngineConfig {
 }
 
 impl EngineConfig {
-    /// Alternative limits in force: the manual toggle or the schedule's window.
+    /// Alternative limits in force: the manual toggle, the schedule's window or the app's own (on battery).
     pub fn alt_active(&self) -> bool {
-        self.alt_speed || self.alt_scheduled_on
+        self.alt_speed || self.alt_scheduled_on || self.alt_by_app
     }
 
     /// Effective global download limit, alt-speed applied.

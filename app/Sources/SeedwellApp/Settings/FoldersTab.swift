@@ -53,9 +53,9 @@ struct FoldersTab: View {
             SettingsGroup(title: "After adding a .torrent") {
                 SettingsRow(label: "The .torrent file") {
                     Picker("", selection: f.torrentAfterAdd) {
-                        Text("Move to Trash").tag(TorrentFileAction.trash)
-                        Text("Move to an archive folder").tag(TorrentFileAction.archive)
-                        Text("Leave it").tag(TorrentFileAction.leave)
+                        ForEach([TorrentFileAction.trash, .archive, .leave], id: \.self) { a in
+                            Text(torrentFileActionLabel(action: a)).tag(a)
+                        }
                     }
                     .labelsHidden().fixedSize()
                     .help("What happens to the .torrent file once Seedwell has added it")
@@ -99,7 +99,7 @@ struct FoldersTab: View {
                 .font(.system(size: 20)).foregroundStyle(Color.accentColor).frame(width: 30)
             VStack(alignment: .leading, spacing: 1) {
                 Text(w.path).font(.system(size: 14, weight: .semibold)).lineLimit(1).truncationMode(.middle)
-                Text(Self.detail(w)).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
+                Text(watchFolderDetail(folder: w)).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
             }
             Spacer()
             Picker("", selection: wb.mode) {
@@ -124,22 +124,11 @@ struct FoldersTab: View {
                 }
             }
             Menu("Then") {
-                Button("Move .torrent to Trash") { f.wrappedValue.watch[i].afterAdd = .trash }
-                Button("Leave .torrent") { f.wrappedValue.watch[i].afterAdd = .leave }
+                ForEach([TorrentFileAction.trash, .leave], id: \.self) { a in
+                    Button(watchThenLabel(action: a)) { f.wrappedValue.watch[i].afterAdd = a }
+                }
             }
         }
-    }
-
-    private static func detail(_ w: WatchFolderSetting) -> String {
-        var parts = [w.mode == .auto ? "Add automatically" : "Ask first"]
-        switch w.afterAdd {
-        case .trash: parts.append("then move .torrent to Trash")
-        case .archive: parts.append("then archive .torrent")
-        case .leave: parts.append("keep .torrent")
-        }
-        var s = parts.joined(separator: " · ")
-        if let c = w.category { s = "Always treat as \(c.label) · " + s }
-        return s
     }
 
     private func addWatch() {

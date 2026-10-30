@@ -48,9 +48,9 @@ import AppKit
         quit.hovered = side == "quit"
     }
 
-    /// QA: presses one side as a click would (through the accessibility press, the same path).
+    /// QA: presses one side: the call a click (and an accessibility press) on it makes.
     func qaPress(_ side: String) {
-        _ = (side == "quit" ? quit : open).accessibilityPerformPress()
+        (side == "quit" ? quit : open).fire()
     }
 }
 
@@ -99,7 +99,8 @@ import AppKit
 
     override func accessibilityPerformPress() -> Bool { fire(); return true }
 
-    private func fire() {
+    /// What a click on this side does (also QA's `menu-press`).
+    func fire() {
         hovered = false
         enclosingMenuItem?.menu?.cancelTracking()
         // After the menu has closed, as a plain item's action would run.

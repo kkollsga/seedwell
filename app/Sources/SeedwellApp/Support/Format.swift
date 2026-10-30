@@ -12,25 +12,52 @@ enum Fmt {
     static func ago(_ unix: UInt64, short: Bool = false, now: Date = .now) -> String {
         fmtAgo(unix: unix, now: UInt64(max(0, now.timeIntervalSince1970)), compact: short)
     }
-    static func duration(_ secs: UInt64) -> String { fmtDuration(secs: secs) }
     static func until(_ secs: UInt64) -> String { fmtUntil(secs: secs) }
 
-    /// "22:29": the time of day that is `secs` from now (in the user's own clock style).
-    static func clock(in secs: UInt64, now: Date = .now) -> String {
-        now.addingTimeInterval(TimeInterval(secs)).formatted(date: .omitted, time: .shortened)
-    }
-
-    /// "22:29" or "Mon 22:29" for a unix time (seconds): when something began or will happen.
-    static func clockAt(_ unix: UInt64, now: Date = .now) -> String {
+    /// "1 Nov" (with the year when it is not this year), in the user's own date style: the day the core's sync and chat
+    /// lines name ("Link until 1 Nov").
+    static func day(_ unix: UInt64, now: Date = .now) -> String {
         let d = Date(timeIntervalSince1970: TimeInterval(unix))
-        if Calendar.current.isDate(d, inSameDayAs: now) { return d.formatted(date: .omitted, time: .shortened) }
-        return d.formatted(.dateTime.weekday(.abbreviated).hour().minute())
+        let sameYear = Calendar.current.isDate(d, equalTo: now, toGranularity: .year)
+        return d.formatted(sameYear ? .dateTime.day().month(.abbreviated) : .dateTime.day().month(.abbreviated).year())
     }
 
-    static func inFuture(_ unix: UInt64, now: Date = .now) -> String { fmtInFuture(unix: unix, now: UInt64(max(0, now.timeIntervalSince1970))) }
-    static func peers(connected: UInt32, known: UInt32) -> String { fmtPeers(connected: connected, known: known) }
-    static let peersHelp = fmtPeersHelp()
     static func count(_ n: some BinaryInteger, _ noun: String) -> String { fmtCount(n: UInt64(max(0, Int64(n))), noun: noun) }
     static func ratio(_ r: Double) -> String { fmtRatio(r: r) }
     static func goal(_ r: Double) -> String { fmtGoal(r: r) }
+}
+
+extension Date {
+    /// Unix milliseconds: the clock the core's models take.
+    var unixMs: UInt64 { UInt64(max(0, timeIntervalSince1970 * 1000)) }
+}
+
+/// The core's `LocalClock`: the time of day and the day in the user's own style (the core decides which form a text
+/// uses: the time of day on the same day, else the weekday and the time). The day is `Fmt.day`'s format.
+final class MacClock: LocalClock, @unchecked Sendable {
+    func timeOfDay(unixS: UInt64) -> String {
+        Date(timeIntervalSince1970: TimeInterval(unixS)).formatted(date: .omitted, time: .shortened)
+    }
+
+    func weekdayTime(unixS: UInt64) -> String {
+        Date(timeIntervalSince1970: TimeInterval(unixS)).formatted(.dateTime.weekday(.abbreviated).hour().minute())
+    }
+
+    func day(unixS: UInt64, withYear: Bool) -> String {
+        let d = Date(timeIntervalSince1970: TimeInterval(unixS))
+        return d.formatted(withYear ? .dateTime.day().month(.abbreviated).year() : .dateTime.day().month(.abbreviated))
+    }
+
+    /// "Nov 1, 2026 at 10:29 PM": Get Info's Added and Finished.
+    func dateTime(unixS: UInt64) -> String {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US")
+        f.dateStyle = .medium
+        f.timeStyle = .short
+        return f.string(from: Date(timeIntervalSince1970: TimeInterval(unixS)))
+    }
+
+    func utcOffsetS(unixS: UInt64) -> Int32 {
+        Int32(TimeZone.current.secondsFromGMT(for: Date(timeIntervalSince1970: TimeInterval(unixS))))
+    }
 }

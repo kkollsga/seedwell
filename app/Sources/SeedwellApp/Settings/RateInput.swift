@@ -10,12 +10,6 @@ enum RateUnit: String, CaseIterable, Identifiable {
 
 /// Parsing and writing speed limits. Limits are stored in bytes per second, 0 = unlimited.
 enum RateText {
-    /// The sidebar rate's tooltip: "Download limit: 18 MB/s (Limit Speed)", or "No download limit".
-    static func limitHelp(_ kind: String, limit: UInt64?, altSpeed: Bool) -> String {
-        guard let limit, limit > 0 else { return "No \(kind.lowercased()) limit" + (altSpeed ? " (Limit Speed is on)" : "") }
-        return "\(kind) limit: \(label(limit))" + (altSpeed ? " (Limit Speed)" : "")
-    }
-
     /// Highest limit the core accepts (1 TiB/s).
     static let maxBytes: UInt64 = 1 << 40
 
@@ -41,24 +35,6 @@ enum RateText {
 
     /// The unit a stored value is shown in first: MB/s from 1 MB/s up, KB/s below.
     static func unit(for bytes: UInt64) -> RateUnit { bytes >= 1_000_000 || bytes == 0 ? .mb : .kb }
-
-    /// "5 MB/s", "2.5 MB/s", "500 KB/s"; "Unlimited" for 0.
-    static func label(_ bytes: UInt64) -> String {
-        guard bytes != 0 else { return "Unlimited" }
-        let u = unit(for: bytes)
-        return number(bytes, unit: u) + " " + u.rawValue
-    }
-
-    /// The bottom line of the window: the rate, and with a limit "2.0 / 5 MB/s" (the unit once when both share it).
-    static func line(rate: UInt64, limit: UInt64?) -> String {
-        let r = Fmt.rate(rate)
-        guard let limit, limit != 0 else { return r }
-        let l = label(limit)
-        let (ru, lu) = (r.split(separator: " ").last.map(String.init) ?? "", l.split(separator: " ").last.map(String.init) ?? "")
-        let rn = r.split(separator: " ").dropLast().joined(separator: " ")
-        let ln = l.split(separator: " ").dropLast().joined(separator: " ")
-        return ru == lu ? "\(rn) / \(ln) \(lu)" : "\(r) / \(l)"
-    }
 }
 
 /// A speed limit: a number, a unit menu (MB/s or KB/s) and, left empty, "Unlimited". Applies while

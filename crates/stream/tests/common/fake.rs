@@ -7,7 +7,6 @@
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::ops::Range;
-use std::os::unix::fs::FileExt;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -156,7 +155,7 @@ impl FakeSource {
     pub fn expected(&self, offset: u64, len: usize) -> Vec<u8> {
         let mut v = vec![0u8; len];
         match &self.content {
-            Content::File(f) => f.read_exact_at(&mut v, offset).unwrap(),
+            Content::File(f) => trs_platform::fs::read_exact_at(f, &mut v, offset).unwrap(),
             Content::Synthetic => {
                 for (i, b) in v.iter_mut().enumerate() {
                     *b = synth_byte(offset + i as u64);
@@ -305,7 +304,7 @@ impl PieceSource for FakeSource {
             buf.clear();
             buf.resize(len, 0);
             match &self.content {
-                Content::File(f) => f.read_exact_at(&mut buf, offset).map(|()| buf),
+                Content::File(f) => trs_platform::fs::read_exact_at(f, &mut buf, offset).map(|()| buf),
                 Content::Synthetic => {
                     for (i, b) in buf.iter_mut().enumerate() {
                         *b = synth_byte(offset + i as u64);

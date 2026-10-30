@@ -73,3 +73,8 @@ release procedure.
   CLI commands are fine. `seedwell debug announce` is not read-only.
 - Never contact private trackers from tests or tools. Tests use only legal torrents and loopback trackers.
 - Seedwell always identifies as itself (peer id, User-Agent). Never spoof another client.
+- **Agents drive the app only through tool calls**: the `seedwell` CLI and the QA control commands
+  (`app/qa/`, `QAControl.swift`), which call the same model and core methods the UI calls. No synthetic key presses,
+  mouse movements or clicks (no posted NSEvent or CGEvent, no AppleScript or accessibility input), in QA, tests or
+  tools. When a check needs a key or a click, add a QA command that calls what that key or click calls; the host's
+  mapping from the event to that call is covered by unit tests.

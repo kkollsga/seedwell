@@ -6,7 +6,7 @@ use std::fs;
 use std::sync::mpsc;
 use std::time::Duration;
 
-use common::TempDir;
+use common::{TempDir, abs, win};
 use trs_state::doc::{BACKUPS_KEEP, DocStore, Document, LoadSource, PollEvent, Poller, spawn_watcher};
 use trs_state::rules::{Priority, Rule, RuleSet};
 use trs_state::trackers::{Profile, TrackerProfiles};
@@ -73,20 +73,20 @@ fn invalid_edit_falls_back_to_last_known_good_and_reports() {
     c.network.listen_port = 41_000;
     store.save(&c).unwrap(); // .bak now holds 40_000
 
-    // The user breaks the file by hand.
-    fs::write(store.path(), "[network]\nlisten_port = \"oops\"\n").unwrap();
+    // The user breaks the file by hand, so that it is not TOML any more.
+    fs::write(store.path(), "[network]\nlisten_port = 41000\nupnp = \n").unwrap();
     let l = store.load();
     assert!(matches!(l.source, LoadSource::Backup(_)), "{:?}", l.source);
     assert_eq!(l.value.network.listen_port, 40_000, "last known good");
     let err = l.error.expect("the reason is reported");
-    assert!(matches!(err, DocError::Parse { line: Some(2), .. }), "{err}");
-    assert!(fs::read_to_string(store.path()).unwrap().contains("oops"), "the broken file is left for the user to fix");
+    assert!(matches!(err, DocError::Parse { line: Some(3), .. }), "{err}");
+    assert!(fs::read_to_string(store.path()).unwrap().contains("upnp = \n"), "the broken file is left for the user to fix");
 
-    // A semantic error is reported with its path.
-    fs::write(store.path(), "[network]\nlisten_port = 80\n").unwrap();
+    // A newer format is never half-read either.
+    fs::write(store.path(), "version = 99\n[network]\nlisten_port = 41000\n").unwrap();
     let l = store.load();
-    let err = l.error.unwrap();
-    assert!(err.to_string().contains("network.listen_port"), "{err}");
+    assert!(matches!(l.source, LoadSource::Backup(_)), "{:?}", l.source);
+    assert!(matches!(l.error, Some(DocError::Unsupported { .. })), "{:?}", l.error);
 
     // Saving over a broken file keeps it as .rejected and does not poison .bak.
     fs::write(store.path(), "garbage = [").unwrap();
@@ -95,6 +95,144 @@ fn invalid_edit_falls_back_to_last_known_good_and_reports() {
     assert_eq!(fs::read_to_string(dir.path().join("config.toml.rejected")).unwrap(), "garbage = [");
     let bak = Config::parse_str(&fs::read_to_string(dir.path().join("config.toml.bak")).unwrap()).unwrap().value;
     assert_eq!(bak.network.listen_port, 40_000, ".bak still the last good one");
+}
+
+/// One bad value costs that value only: every other setting of the file stays in force (the
+/// defaults would move the user's .torrent files to the Trash and switch agents off), the bad one
+/// takes the last good value, from the backup the loader would fall back to, and is named with it;
+/// the file is not written.
+#[test]
+fn a_bad_value_takes_the_last_good_value_from_the_backup_and_everything_else_is_kept() {
+    use trs_state::config::{AfterAdd, Encryption};
+    let dir = TempDir::new("salvage");
+    let store = DocStore::<Config>::new(dir.path());
+    let mut c = Config::default();
+    c.network.listen_port = 40_000;
+    c.network.encryption = Encryption::Require;
+    c.folders.torrent_after_add = AfterAdd::Leave;
+    store.save(&c).unwrap();
+    c.network.listen_port = 40_001;
+    store.save(&c).unwrap(); // .bak holds the first: the last good file before the hand edit
+    let text = "[agents]\npermission = \"full\"\n[folders]\ntorrent_after_add = \"keep\"\n[network]\nlisten_port = 80\nencryption = \"always\"\nupnp = false\n";
+    fs::write(store.path(), text).unwrap();
+    let before = names(dir.path());
+
+    let l = store.load();
+    assert_eq!(l.source, LoadSource::Repaired);
+    assert!(l.error.is_none(), "{:?}", l.error);
+    assert_eq!(l.value.agents.permission, trs_state::config::Permission::Full);
+    assert!(!l.value.network.upnp);
+    assert_eq!(l.value.folders.torrent_after_add, AfterAdd::Leave);
+    assert_eq!(l.value.network.listen_port, 40_000, "the last good file's, not the default");
+    assert_eq!(l.value.network.encryption, Encryption::Require);
+    let w: Vec<String> = l.warnings.iter().map(ToString::to_string).collect();
+    assert_eq!(w.len(), 3, "{w:?}");
+    let named = |key: &str, bad: &str, used: &str| {
+        w.iter().any(|m| {
+            m.starts_with(&format!("{key}: {bad} is not a valid value (")) && m.ends_with(&format!("; the last good value {used} from the backup is used until it is fixed"))
+        })
+    };
+    assert!(named("folders.torrent_after_add", "\"keep\"", "\"leave\""), "{w:?}");
+    assert!(named("network.listen_port", "80", "40000"), "{w:?}");
+    assert!(named("network.encryption", "\"always\"", "\"require\""), "{w:?}");
+    assert_eq!(fs::read_to_string(store.path()).unwrap(), text, "the user's file is not rewritten");
+    assert_eq!(names(dir.path()), before, "nothing is written next to it either");
+
+    // The strict read still refuses it (hot reload keeps the running value); the lenient one does not.
+    assert!(store.read_strict().is_err());
+    assert_eq!(store.read_lenient().unwrap().value, l.value);
+}
+
+/// With no backup, a bad value of a setting that moves, trashes or deletes the user's files takes
+/// the choice that leaves them alone, not its default; any other takes its default.
+#[test]
+fn without_a_backup_a_file_setting_takes_the_choice_that_leaves_files_alone() {
+    use trs_state::config::AfterAdd;
+    let dir = TempDir::new("salvage-safe");
+    let store = DocStore::<Config>::new(dir.path());
+    fs::write(store.path(), "[folders]\ntorrent_after_add = \"keep\"\nby_status = \"yes\"\n[network]\nlisten_port = 80\n").unwrap();
+    let l = store.load();
+    assert_eq!(l.source, LoadSource::Repaired);
+    assert_eq!(l.value.folders.torrent_after_add, AfterAdd::Leave, "not the default (Trash)");
+    assert!(!l.value.folders.by_status, "nothing is filed into status folders");
+    assert_eq!(l.value.network.listen_port, 0);
+    let w: Vec<String> = l.warnings.iter().map(ToString::to_string).collect();
+    assert_eq!(w.len(), 3, "{w:?}");
+    assert!(w.iter().any(|m| m.starts_with("folders.torrent_after_add: \"keep\" is not a valid value (") && m.ends_with("; \"leave\", which leaves your files alone, is used until it is fixed")), "{w:?}");
+    assert!(w.iter().any(|m| m.starts_with("folders.by_status: \"yes\" is not a valid value (") && m.ends_with("; false, which leaves your files alone, is used until it is fixed")), "{w:?}");
+    assert!(w.iter().any(|m| m.starts_with("network.listen_port: 80 is not a valid value (") && m.ends_with("; the default 0 is used until it is fixed")), "{w:?}");
+}
+
+/// "archive" without a usable archive folder: the choice that cannot work is the one replaced, so
+/// the file keeps every other value (it used to fall back as a whole, to the defaults with none:
+/// the Trash for .torrent files and agents off).
+#[test]
+fn archive_without_a_folder_leaves_the_torrent_files_alone_and_keeps_the_rest() {
+    use trs_state::config::{AfterAdd, Permission};
+    for folder in ["", "archive_dir = \"relative/path\"\n"] {
+        let dir = TempDir::new("salvage-archive");
+        let store = DocStore::<Config>::new(dir.path());
+        fs::write(store.path(), format!("[agents]\npermission = \"full\"\n[folders]\ntorrent_after_add = \"archive\"\n{folder}")).unwrap();
+        let l = store.load();
+        assert_eq!(l.source, LoadSource::Repaired, "{folder:?}: {:?}", l.error);
+        assert_eq!(l.value.folders.torrent_after_add, AfterAdd::Leave, "{folder:?}");
+        assert_eq!(l.value.folders.archive_dir, None);
+        assert_eq!(l.value.agents.permission, Permission::Full, "the rest is kept");
+        let w: Vec<String> = l.warnings.iter().map(ToString::to_string).collect();
+        assert!(
+            w.iter().any(|m| m.starts_with("folders.torrent_after_add: \"archive\" is not a valid value (\"archive\" needs folders.archive_dir")
+                && m.ends_with("; \"leave\", which leaves your files alone, is used until it is fixed")),
+            "{w:?}"
+        );
+        assert_eq!(w.len(), 1 + folder.len().min(1), "{w:?}");
+    }
+}
+
+/// A backup without a value for the key (or none that passes the checks in the repaired file)
+/// gives way to the next choice: the one that leaves files alone, then the default.
+#[test]
+fn a_backup_value_is_used_only_when_it_is_there_and_passes_the_checks() {
+    use trs_state::config::AfterAdd;
+    let dir = TempDir::new("salvage-partial");
+    let store = DocStore::<Config>::new(dir.path());
+    // A hand-written good file as the last good one: it has no torrent_after_add.
+    fs::write(dir.path().join("config.toml.bak"), "[network]\nmax_connections = 100\nmax_connections_per_torrent = 80\n").unwrap();
+    // 80 per torrent does not fit under this file's 60 in all: the default 50 does.
+    fs::write(store.path(), "[folders]\ntorrent_after_add = \"keep\"\n[network]\nmax_connections = 60\nmax_connections_per_torrent = \"many\"\n").unwrap();
+    let l = store.load();
+    assert_eq!(l.source, LoadSource::Repaired);
+    assert_eq!(l.value.folders.torrent_after_add, AfterAdd::Leave);
+    assert_eq!((l.value.network.max_connections, l.value.network.max_connections_per_torrent), (60, 50));
+    let w: Vec<String> = l.warnings.iter().map(ToString::to_string).collect();
+    assert_eq!(w.len(), 2, "{w:?}");
+    assert!(w.iter().any(|m| m.starts_with("folders.torrent_after_add: \"keep\"") && m.ends_with("which leaves your files alone, is used until it is fixed")), "{w:?}");
+    assert!(
+        w.iter().any(|m| m.starts_with("network.max_connections_per_torrent: \"many\" is not a valid value (") && m.ends_with("; the default 50 is used until it is fixed")),
+        "{w:?}"
+    );
+}
+
+#[test]
+fn an_out_of_range_value_and_a_bad_list_entry_cost_only_themselves() {
+    let dir = TempDir::new("salvage-checks");
+    let store = DocStore::<Config>::new(dir.path());
+    let (a, b) = (abs("/w/a"), abs("/w/b"));
+    let text = format!(
+        "[network]\nlisten_port = 80\ndht = false\n\n[[folders.watch]]\npath = \"{a}\"\nafter_add = \"keep\"\n\n[[folders.watch]]\npath = \"{b}\"\nafter_add = \"leave\"\n\n[[folders.watch]]\npath = \"{b}\"\n"
+    );
+    fs::write(store.path(), win(&text)).unwrap();
+    let l = store.load();
+    assert_eq!(l.source, LoadSource::Repaired);
+    assert_eq!(l.value.network.listen_port, 0, "the default (automatic)");
+    assert!(!l.value.network.dht);
+    // The entry with a bad value goes, and so does the duplicate; the good one stays.
+    assert_eq!(l.value.folders.watch.len(), 1, "{:?}", l.value.folders.watch);
+    assert_eq!(l.value.folders.watch[0].path, b);
+    let w: Vec<String> = l.warnings.iter().map(ToString::to_string).collect();
+    assert_eq!(w.len(), 3, "{w:?}");
+    assert!(w.iter().any(|m| m.starts_with("folders.watch[0]: this entry is not valid (")), "{w:?}");
+    assert!(w.iter().any(|m| m.starts_with("network.listen_port: 80 is not a valid value (must be") && m.ends_with("the default 0 is used until it is fixed")), "{w:?}");
+    assert!(w.iter().any(|m| m.starts_with("folders.watch[1]: this entry is not valid (duplicate")), "{w:?}");
 }
 
 #[test]
@@ -326,15 +464,15 @@ fn watchers_share_one_thread_stop_independently_and_the_thread_restarts() {
 fn a_version_1_config_is_migrated_on_load_with_a_backup() {
     let dir = TempDir::new("migrate-v1");
     let path = dir.path().join("config.toml");
-    let v1 = "version = 1\n[network]\nlisten_port = 51413\n[folders]\ndownload_dir = \"/Volumes/Media/Done\"\nincomplete_dir = \"/Volumes/Media/Inc\"\n";
-    fs::write(&path, v1).unwrap();
+    let v1 = win("version = 1\n[network]\nlisten_port = 51413\n[folders]\ndownload_dir = \"/Volumes/Media/Done\"\nincomplete_dir = \"/Volumes/Media/Inc\"\n");
+    fs::write(&path, &v1).unwrap();
     let store = DocStore::<Config>::new(dir.path());
     let l = store.load();
     assert_eq!(l.source, LoadSource::File);
     assert!(l.error.is_none(), "{:?}", l.error);
     assert_eq!(l.value.version, trs_state::config::CONFIG_VERSION);
     assert_eq!(l.value.network.listen_port, 51413);
-    assert_eq!(l.value.folders.download_dir, "/Volumes/Media/Done");
+    assert_eq!(l.value.folders.download_dir, abs("/Volumes/Media/Done"));
     assert_eq!(l.value.transfers.large_torrent_gb, 50);
     assert!(l.value.folders.categories.is_empty());
     // The file on disk is now version 3 and the old text is in the backups.
@@ -355,16 +493,16 @@ fn a_version_1_config_is_migrated_on_load_with_a_backup() {
 fn a_config_with_the_retired_seeding_folder_loads_and_is_rewritten_without_it() {
     let dir = TempDir::new("migrate-seeding");
     let path = dir.path().join("config.toml");
-    let old = "version = 2\n[folders]\ndownload_dir = \"~/Downloads\"\nplacement = \"hardlink\"\n[folders.templates]\nmovie = \"~/Media/{title}\"\n[folders.seeding]\nmode = \"fixed\"\ndir = \"/Volumes/Media/Seed\"\n";
-    fs::write(&path, old).unwrap();
+    let old = win("version = 2\n[folders]\ndownload_dir = \"~/Downloads\"\nplacement = \"hardlink\"\n[folders.templates]\nmovie = \"~/Media/{title}\"\n[folders.seeding]\nmode = \"fixed\"\ndir = \"/Volumes/Media/Seed\"\n");
+    fs::write(&path, &old).unwrap();
     let store = DocStore::<Config>::new(dir.path());
     let l = store.load();
     assert!(l.error.is_none(), "{:?}", l.error);
     assert!(l.warnings.is_empty(), "{:?}", l.warnings);
     // The seeding folder became the finished location; the key is gone from the file, the old text is kept.
-    assert_eq!(l.value.folders.download_dir, "/Volumes/Media/Seed");
+    assert_eq!(l.value.folders.download_dir, abs("/Volumes/Media/Seed"));
     let text = fs::read_to_string(&path).unwrap();
-    assert!(!text.contains("seeding") && !text.contains("template") && !text.contains("placement") && text.contains("/Volumes/Media/Seed"), "{text}");
+    assert!(!text.contains("seeding") && !text.contains("template") && !text.contains("placement") && text.contains(&abs("/Volumes/Media/Seed")), "{text}");
     assert_eq!(fs::read_to_string(dir.path().join("config.toml.bak")).unwrap(), old);
     assert_eq!(store.load().value, l.value);
     assert_eq!(store.backups().len(), 1);
@@ -425,12 +563,12 @@ fn watch_baselines_are_stamped_once_and_restamped_when_re_enabled() {
 
 #[test]
 fn category_locations_round_trip_and_validate() {
-    let text = "[folders.categories.tv]\nincomplete_dir = \"/Volumes/Fast/inc\"\nfinished_dir = \"/Volumes/Media/TV\"\n\
-                [folders.categories.movie]\nfinished_dir = \"/Volumes/Media/Movies\"\n";
+    let text = &win("[folders.categories.tv]\nincomplete_dir = \"/Volumes/Fast/inc\"\nfinished_dir = \"/Volumes/Media/TV\"\n\
+                [folders.categories.movie]\nfinished_dir = \"/Volumes/Media/Movies\"\n");
     let p = Config::parse_str(text).unwrap();
     let c = &p.value.folders.categories;
-    assert_eq!(c.tv.incomplete_dir.as_deref(), Some("/Volumes/Fast/inc"));
-    assert_eq!(c.movie.finished_dir.as_deref(), Some("/Volumes/Media/Movies"));
+    assert_eq!(c.tv.incomplete_dir.as_deref(), Some(abs("/Volumes/Fast/inc").as_str()));
+    assert_eq!(c.movie.finished_dir.as_deref(), Some(abs("/Volumes/Media/Movies").as_str()));
     assert!(c.music.is_empty());
     let out = p.value.render().unwrap();
     assert!(out.contains("[folders.categories.tv]") && !out.contains("[folders.categories.music]"), "{out}");

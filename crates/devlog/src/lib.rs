@@ -10,7 +10,7 @@
 //! * `trackers.log` rotates at 10 MB and keeps 3 files (`trackers.log`, `.1`, `.2`).
 //! * [`read`] tails the files for the CLI and the app viewer; [`view::Row`] renders a
 //!   line for people.
-#![deny(unsafe_code)] // one allowed exception: `localtime_r` in view.rs (local time for the human rendering)
+#![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
 mod entry;

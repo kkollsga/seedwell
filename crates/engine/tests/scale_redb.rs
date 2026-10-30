@@ -90,6 +90,7 @@ fn populate(state: &std::path::Path, n: usize) {
                 pinned: false,
                 awaiting_choice: false,
                 pending_start: false,
+                pending_stopped: false,
                 title: None,
                 idle: None,
             });

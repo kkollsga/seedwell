@@ -573,12 +573,13 @@ async fn a_held_torrent_remembers_its_torrent_file_and_only_a_matching_one_count
     assert_eq!(n.h.held_source(t.id), None);
     std::fs::write(&file, &t.bytes).unwrap();
     assert_eq!(n.h.held_source(t.id), Some(file.clone()));
-    // A link in its place is not a regular file.
+    // A link in its place is not a regular file (where this system lets us make one).
     let real = l.state.join("real.dat");
     std::fs::rename(&file, &real).unwrap();
-    std::os::unix::fs::symlink(&real, &file).unwrap();
-    assert_eq!(n.h.held_source(t.id), None, "a symlink is never offered");
-    std::fs::remove_file(&file).unwrap();
+    if trs_platform::fs::symlink(&real.to_string_lossy(), &file).is_ok() {
+        assert_eq!(n.h.held_source(t.id), None, "a symlink is never offered");
+        std::fs::remove_file(&file).unwrap();
+    }
     assert!(!n.h.has_held_source(t.id), "a file that is gone is not offered");
 
     // Cancelling forgets it; the file (here: gone) is not the engine's business.

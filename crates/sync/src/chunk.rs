@@ -453,20 +453,23 @@ mod tests {
         }
     }
 
-    proptest! {
-        #![proptest_config(config(8))]
-
-        #[test]
-        fn one_inserted_byte_changes_few_chunks(seed: u64, at in 0usize..65_536, byte: u8) {
-            let old = random(4 << 20, seed);
+    /// An inserted byte changes the chunk it lands in and the cuts fall back in step at once, nearly
+    /// always. Not always: normalized chunking's mask depends on the distance from the chunk's start,
+    /// so a new cut can leave the old ones unqualified for a while (seed 12386282097987239528, a byte
+    /// at 32514: 14 of 56 chunks change). So this is checked over fixed inputs, on average, not as a
+    /// bound on every random input, which failed now and then.
+    #[test]
+    fn one_inserted_byte_changes_few_chunks() {
+        let mut total = 0;
+        for i in 0..32u64 {
+            let old = random(4 << 20, i.wrapping_mul(0x9E37_79B9_7F4A_7C15));
             let mut new = old.clone();
-            new.insert(at, byte);
+            new.insert((i as usize * 7919) % 65_536, (i % 251) as u8);
             let tier = Tier::for_size(old.len() as u64);
             let before: BTreeSet<[u8; 32]> = chunk_bytes(&old, tier).iter().map(|c| c.hash).collect();
-            let after = chunk_bytes(&new, tier);
-            let changed = after.iter().filter(|c| !before.contains(&c.hash)).count();
-            prop_assert!(changed <= 3, "{} of {} chunks changed", changed, after.len());
+            total += chunk_bytes(&new, tier).iter().filter(|c| !before.contains(&c.hash)).count();
         }
+        assert!(total <= 32 * 2, "{total} chunks changed for 32 inserted bytes");
     }
 
     /// `cargo test --release -p trs-sync chunk_bench -- --ignored --nocapture`

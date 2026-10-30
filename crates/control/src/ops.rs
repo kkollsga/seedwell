@@ -256,8 +256,8 @@ pub fn clean_path(raw: &str, what: &str) -> Result<PathBuf, ApiError> {
         return Err(ApiError::params(format!("`{what}` is empty, too long or has control characters")));
     }
     let p = if raw == "~" || raw.starts_with("~/") {
-        let home = std::env::var_os("HOME").ok_or_else(|| ApiError::invalid("cannot expand `~`: HOME is not set"))?;
-        PathBuf::from(home).join(raw.trim_start_matches('~').trim_start_matches('/'))
+        let home = trs_platform::dirs::home().ok_or_else(|| ApiError::invalid("cannot expand `~`: HOME is not set"))?;
+        home.join(raw.trim_start_matches('~').trim_start_matches('/'))
     } else {
         PathBuf::from(raw)
     };
@@ -270,19 +270,23 @@ pub fn clean_path(raw: &str, what: &str) -> Result<PathBuf, ApiError> {
     Ok(p)
 }
 
-/// True for folders where a downloaded file could act as code or configuration: system roots,
-/// the home folder itself, `~/Library`, and hidden folders in the home folder (`~/.ssh`,
-/// `~/.config`). Temporary folders stay allowed.
+/// True for folders where a downloaded file could act as code or configuration: a disk's root, the
+/// system's folders and the user's settings folder (`trs_platform::dirs::sensitive_dirs`), the
+/// home folder itself, and hidden folders in it (`~/.ssh`, `~/.config`). The temporary folder
+/// stays allowed (on Windows it is inside `AppData`).
 pub fn is_sensitive_dir(p: &Path) -> bool {
-    const SYSTEM: [&str; 8] = ["/System", "/Library", "/usr", "/bin", "/sbin", "/etc", "/private/etc", "/Applications"];
-    if p == Path::new("/") || SYSTEM.iter().any(|r| p.starts_with(r)) {
+    if p.parent().is_none() {
         return true;
     }
-    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else { return false };
+    if p.starts_with(std::env::temp_dir()) {
+        return false;
+    }
+    if trs_platform::dirs::sensitive_dirs().iter().any(|d| p.starts_with(d)) {
+        return true;
+    }
+    let Some(home) = trs_platform::dirs::home() else { return false };
     let Ok(rel) = p.strip_prefix(&home) else { return false };
-    rel.as_os_str().is_empty()
-        || rel.starts_with("Library")
-        || rel.components().any(|c| matches!(c, std::path::Component::Normal(n) if n.to_string_lossy().starts_with('.')))
+    rel.as_os_str().is_empty() || rel.components().any(|c| matches!(c, std::path::Component::Normal(n) if n.to_string_lossy().starts_with('.')))
 }
 
 /// Decide which of the five source fields was used and validate its shape.
@@ -407,6 +411,28 @@ pub fn reachability(mut r: ReachabilityDto) -> ReachabilityDto {
 mod tests {
     use super::*;
 
+    /// A Unix-style absolute test path made absolute on this system: unchanged on Unix, a drive letter in front on Windows.
+    fn abs(p: &str) -> String {
+        if cfg!(windows) { format!("C:{p}") } else { p.to_string() }
+    }
+
+    #[test]
+    fn roots_system_and_settings_folders_are_sensitive_but_the_temporary_folder_is_not() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(!is_sensitive_dir(tmp.path()));
+        assert!(!is_sensitive_dir(&tmp.path().join(".hidden")), "the temporary folder is allowed, even inside the home folder");
+        let root = tmp.path().ancestors().last().unwrap();
+        assert!(is_sensitive_dir(root), "{}", root.display());
+        for d in trs_platform::dirs::sensitive_dirs() {
+            assert!(is_sensitive_dir(&d.join("x")), "{}", d.display());
+        }
+        if let Some(home) = trs_platform::dirs::home() {
+            assert!(is_sensitive_dir(&home));
+            assert!(is_sensitive_dir(&home.join(".ssh")));
+            assert!(!is_sensitive_dir(&home.join("Downloads")));
+        }
+    }
+
     fn row(id_byte: u8, name: &str, state: &str) -> TransferDto {
         TransferDto { id: id_hex(&[id_byte; 20]), kind: "torrent".into(), name: name.into(), state: state.into(), ..Default::default() }
     }
@@ -517,10 +543,10 @@ mod tests {
         .is_err());
         assert!(matches!(mk(&|p| p.source = Some("magnet:?xt=urn:btih:ab".into())).unwrap(), SourceKind::Magnet(_)));
         assert!(matches!(mk(&|p| p.source = Some("https://dl.example.com/f.iso".into())).unwrap(), SourceKind::Url(_)));
-        assert!(matches!(mk(&|p| p.source = Some("/tmp/a.torrent".into())).unwrap(), SourceKind::Path(_)));
+        assert!(matches!(mk(&|p| p.source = Some(abs("/tmp/a.torrent"))).unwrap(), SourceKind::Path(_)));
         assert!(mk(&|p| p.source = Some("ftp://x/y".into())).is_err());
         assert!(mk(&|p| p.source = Some("relative/a.torrent".into())).is_err());
-        assert!(mk(&|p| p.source = Some("/tmp/../etc/passwd".into())).is_err());
+        assert!(mk(&|p| p.source = Some(abs("/tmp/../etc/passwd"))).is_err());
         assert!(mk(&|p| p.url = Some("https://a b/".into())).is_err());
         assert!(mk(&|p| p.url = Some("file:///etc/passwd".into())).is_err());
         assert!(mk(&|p| p.magnet = Some("http://x".into())).is_err());
@@ -530,10 +556,10 @@ mod tests {
 
     #[test]
     fn paths_and_values() {
-        assert!(clean_path("/a/b", "x").is_ok());
+        assert!(clean_path(&abs("/a/b"), "x").is_ok());
         assert!(clean_path("a/b", "x").is_err());
-        assert!(clean_path("/a/../b", "x").is_err());
-        assert!(clean_path("/a\nb", "x").is_err());
+        assert!(clean_path(&abs("/a/../b"), "x").is_err());
+        assert!(clean_path(&abs("/a\nb"), "x").is_err());
         assert!(clean_path("", "x").is_err());
         assert_eq!(parse_category("TV").unwrap(), "tv");
         assert!(parse_category("games").is_err());

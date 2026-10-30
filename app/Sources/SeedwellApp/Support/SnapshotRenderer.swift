@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 
 /// Debug-only visual QA: renders the real windows (real AppKit controls, toolbar and sidebar)
-/// to PNG at 2x. Launch with `--render-snapshots <dir>`. Not used in normal operation.
+/// to PNG at 2x. Launch with `--render-snapshots <dir>`. Not used in normal operation. The menus: MenuSnapshots.
 @MainActor struct SnapshotRenderer {
     let core: Core
     let commands: Commands
@@ -10,7 +10,6 @@ import SwiftUI
     let dir: String
 
     func renderAll() async {
-        NSApp.setActivationPolicy(.regular)  // so the offscreen windows are key and drawn as active
         try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
         let mainSize = NSSize(width: 1180, height: 820)
 
@@ -22,8 +21,8 @@ import SwiftUI
         await render("downloads-light", size: mainSize, dark: false) { MainWindowView(model: model(.downloads, select: nil), commands: commands, settings: settings, nav: SettingsNavigation()) }
         await render("sharing-dark", size: NSSize(width: 1180, height: 1100)) { MainWindowView(model: model(.sharing, select: nil), commands: commands, settings: settings, nav: SettingsNavigation()) }
         await render("sharing-light", size: NSSize(width: 1180, height: 1100), dark: false) { MainWindowView(model: model(.sharing, select: nil), commands: commands, settings: settings, nav: SettingsNavigation()) }
-        await render("tracker-filter-dark", size: NSSize(width: 1180, height: 1100)) { MainWindowView(model: model(.tracker("tracker-z.cc"), select: nil), commands: commands, settings: settings, nav: SettingsNavigation()) }
-        await render("downloads-filter-dark", size: mainSize) { MainWindowView(model: model(.tracker("tracker-y.net"), select: nil), commands: commands, settings: settings, nav: SettingsNavigation()) }
+        await render("tracker-filter-dark", size: NSSize(width: 1180, height: 1100)) { MainWindowView(model: model(.tracker(trackerId: "tracker-z.cc"), select: nil), commands: commands, settings: settings, nav: SettingsNavigation()) }
+        await render("downloads-filter-dark", size: mainSize) { MainWindowView(model: model(.tracker(trackerId: "tracker-y.net"), select: nil), commands: commands, settings: settings, nav: SettingsNavigation()) }
 
         for tab in SettingsTab.allCases {
             let h: CGFloat = tab == .folders ? 1180 : tab == .transfers ? 860 : tab == .rules ? 860 : tab == .folderSync ? 760 : 700
@@ -36,6 +35,7 @@ import SwiftUI
         }
         await render("chooser-dark", size: NSSize(width: 640, height: 640), settings: true) { ChooserView(model: ChooserModel.sample()) }
         await renderSync()
+        await renderMenus()
         await render("chooser-light", size: NSSize(width: 640, height: 640), dark: false, settings: true) { ChooserView(model: ChooserModel.sample()) }
     }
 
@@ -53,7 +53,7 @@ import SwiftUI
                 return MainWindowView(model: m, commands: commands, settings: settings, nav: SettingsNavigation())
             }
             await render("sync-menu-\(suffix)", size: NSSize(width: 330, height: 420), dark: dark, settings: true) {
-                SyncMenuPreview(folders: folders, hovered: 1, confirm: 2)
+                SyncMenuPreview(snapshot: core.syncSnapshot(), hovered: 1, confirm: 2)
             }
             await render("sync-add-local-\(suffix)", size: NSSize(width: 480, height: 250), dark: dark, settings: true) {
                 let m = SyncAddModel(core: core)
@@ -64,7 +64,7 @@ import SwiftUI
                 let link = (try? core.syncCreateInvite(id: folders[0].id, role: .readOnly, maxUses: 1, validDays: 7, channelId: core.syncSnapshot().folders[0].channelId))?.link ?? ""
                 return SyncAddView(model: SyncAddModel(core: core, prefill: link))
             }
-            await render("sync-add-bad-\(suffix)", size: NSSize(width: 480, height: 290), dark: dark, settings: true) {
+            await render("sync-add-bad-\(suffix)", size: NSSize(width: 480, height: 340), dark: dark, settings: true) {
                 let m = SyncAddModel(core: core, prefill: "SWW-NOTAKEY")
                 m.error = "Folders in iCloud Drive or other cloud storage cannot be synced."
                 return SyncAddView(model: m)
@@ -97,21 +97,21 @@ import SwiftUI
         for dark in [true, false] {
             let suffix = dark ? "dark" : "light"
             await render("chats-window-\(suffix)", size: NSSize(width: 1180, height: 760), dark: dark) {
-                let m = model(.chat(core.chatChannels().first?.id ?? "", topic: nil), select: nil)
+                let m = model(.chat(channelId: core.chatChannels().first?.id ?? "", topicId: nil), select: nil)
                 return MainWindowView(model: m, commands: commands, settings: settings, nav: SettingsNavigation())
             }
             await render("chats-topic-\(suffix)", size: NSSize(width: 1180, height: 760), dark: dark) {
                 let c = core.chatChannels().first?.id ?? ""
-                let m = model(.chat(c, topic: core.chatTopics(channelId: c).first?.id), select: nil)
+                let m = model(.chat(channelId: c, topicId: core.chatTopics(channelId: c).first?.id), select: nil)
                 return MainWindowView(model: m, commands: commands, settings: settings, nav: SettingsNavigation())
             }
             await render("chats-agents-\(suffix)", size: NSSize(width: 1180, height: 760), dark: dark) {
                 // Agents writing Markdown, each with its name and computer.
                 let c = core.chatChannels().first { $0.name == "Release notes" }?.id ?? ""
-                return MainWindowView(model: model(.chat(c, topic: nil), select: nil), commands: commands, settings: settings, nav: SettingsNavigation())
+                return MainWindowView(model: model(.chat(channelId: c, topicId: nil), select: nil), commands: commands, settings: settings, nav: SettingsNavigation())
             }
             await render("chats-direct-\(suffix)", size: NSSize(width: 1180, height: 760), dark: dark) {
-                let m = model(.direct(core.chatDirects().first?.deviceId ?? ""), select: nil)
+                let m = model(.direct(deviceId: core.chatDirects().first?.deviceId ?? ""), select: nil)
                 return MainWindowView(model: m, commands: commands, settings: settings, nav: SettingsNavigation())
             }
             await render("chat-markdown-\(suffix)", size: NSSize(width: 820, height: 1700), dark: dark, settings: true) {
@@ -149,7 +149,7 @@ import SwiftUI
 
     private func model(_ s: LibraryModel.Section, select: String?) -> LibraryModel {
         let m = LibraryModel(core: core, section: s)
-        if select == "sprite" { m.selection = m.snapshot.downloading.dropFirst().first.map { [$0.id] } ?? [] }
+        if select == "sprite" { m.setSelection(m.snapshot.downloading.dropFirst().first.map { [$0.id] } ?? []) }
         return m
     }
 
@@ -166,59 +166,118 @@ import SwiftUI
 
     private func render<V: View>(_ name: String, size: NSSize, dark: Bool = true, settings: Bool = false,
                                  @ViewBuilder _ content: () -> V) async {
-        let w = FreeWindow(contentViewController: NSHostingController(rootView: content()))
+        let w = SnapshotWindow(contentViewController: NSHostingController(rootView: content()))
         w.styleMask = settings ? [.titled, .closable, .fullSizeContentView] : [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView]
         w.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
         w.titlebarAppearsTransparent = true
         if settings { w.titleVisibility = .hidden }
         if !settings { w.titleVisibility = .hidden; w.toolbarStyle = .unified }
         w.setContentSize(size)
-        w.setFrameOrigin(NSPoint(x: 0, y: 0))
-        w.alphaValue = 0
-        w.makeKeyAndOrderFront(nil)
-        NSApp.activate()
-        try? await Task.sleep(for: .seconds(1.0))
+        w.setFrameOrigin(SnapshotWindow.offscreen)
+        w.orderFront(nil)
         w.makeFirstResponder(nil)
-        try? await Task.sleep(for: .seconds(0.3))
         defer { w.contentViewController = nil; w.close() }
-        guard let frame = w.contentView?.superview else { return }
-        // 2x regardless of the display: a retina-sized rep whose point size is the view's.
-        let b = frame.bounds
-        guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(b.width * 2), pixelsHigh: Int(b.height * 2),
-                                         bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
-                                         colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0) else { return }
-        rep.size = b.size
-        frame.cacheDisplay(in: b, to: rep)
-        guard let png = rep.representation(using: .png, properties: [:]) else { return }
+        guard let frame = w.contentView?.superview, let rep = await SnapshotWindow.settledImage(of: frame),
+              let png = rep.representation(using: .png, properties: [:]) else { return }
         try? png.write(to: URL(fileURLWithPath: dir).appendingPathComponent("\(name).png"))
         print("wrote \(name).png (\(rep.pixelsWide)x\(rep.pixelsHigh))")
     }
 }
 
-/// A window that may be larger than the screen, so snapshots are not clipped on small displays.
-private final class FreeWindow: NSWindow {
+/// A snapshot's window: off every screen and never really key, so the renderer never becomes the active app and never
+/// takes the user's keys or focus (a Space typed for another app once replaced the selected link of the add modal's
+/// focused field). It draws as the key and main window all the same (accent colours, not the grey inactive look),
+/// may be larger than the screen (snapshots are not clipped on small displays) and takes no input.
+class SnapshotWindow: NSWindow {
+    /// Far from every screen: nothing shows, and the pointer never lights a row.
+    static let offscreen = NSPoint(x: -30_000, y: -30_000)
+
+    override var isKeyWindow: Bool { true }
+    override var isMainWindow: Bool { true }
+    override var canBecomeKey: Bool { false }
+    override var canBecomeMain: Bool { false }
+
     override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect { frameRect }
+
+    /// `view` drawn at 2x (whatever the display) once it has settled: SwiftUI lays out and loads over several run loop
+    /// turns, so it is drawn every 50 ms until two drawings in a row are the same, or for `limit` at most (something
+    /// that keeps moving). `before` runs before each drawing (a state the window may undo, such as a row's hover).
+    static func settledImage(of view: NSView, limit: Duration = .seconds(1.3), before: () -> Void = {}) async -> NSBitmapImageRep? {
+        await settled(limit: limit) {
+            before()
+            view.layoutSubtreeIfNeeded()
+            return image(of: view)
+        }
+    }
+
+    /// What `draw` draws, drawn every 50 ms until two drawings in a row are the same, or for `limit` at most.
+    static func settled(limit: Duration = .seconds(1.3), _ draw: () -> NSBitmapImageRep?) async -> NSBitmapImageRep? {
+        let clock = ContinuousClock()
+        let end = clock.now + limit
+        var last: Data?
+        while true {
+            try? await Task.sleep(for: .milliseconds(50))
+            guard let rep = draw() else { return nil }
+            let data = rep.bitmapData.map { Data(bytes: $0, count: rep.bytesPerRow * rep.pixelsHigh) }
+            if data == last || clock.now >= end { return rep }
+            last = data
+        }
+    }
+
+    /// `view` drawn now at 2x: a retina-sized rep whose point size is the view's.
+    static func image(of view: NSView) -> NSBitmapImageRep? {
+        let b = view.bounds
+        guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(b.width * 2), pixelsHigh: Int(b.height * 2),
+                                         bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                                         colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0) else { return nil }
+        rep.size = b.size
+        view.cacheDisplay(in: b, to: rep)
+        return rep
+    }
+
+    override func sendEvent(_ event: NSEvent) {
+        if !Self.isInput(event.type) { super.sendEvent(event) }
+    }
+
+    /// Key equivalents (Return, Escape, ⌘-keys) are handled here and go no further, not to the menu either.
+    override func performKeyEquivalent(with event: NSEvent) -> Bool { true }
+
+    /// Typing, clicks, scrolling and the pointer (hover would light rows): what the user does, not the renderer.
+    static func isInput(_ type: NSEvent.EventType) -> Bool {
+        switch type {
+        case .keyDown, .keyUp, .flagsChanged,
+             .leftMouseDown, .leftMouseUp, .leftMouseDragged, .rightMouseDown, .rightMouseUp, .rightMouseDragged,
+             .otherMouseDown, .otherMouseUp, .otherMouseDragged, .mouseMoved, .mouseEntered, .mouseExited, .cursorUpdate,
+             .scrollWheel, .magnify, .rotate, .swipe, .smartMagnify, .gesture, .beginGesture, .endGesture, .pressure,
+             .tabletPoint, .tabletProximity:
+            true
+        default:
+            false
+        }
+    }
 }
 
 /// The Folder Sync submenu drawn from its real row views on the menu's material (QA: a real NSMenu cannot be
 /// captured offscreen). Row `hovered` shows the hover buttons; a confirmation is open under row `confirm`.
 private struct SyncMenuPreview: NSViewRepresentable {
-    let folders: [SyncFolder]
+    let snapshot: SyncSnapshot
     var hovered: Int?
     var confirm: Int?
 
     func makeNSView(context: Context) -> NSView {
         let width: CGFloat = 330
+        let removal = SyncRemoval()
+        if let c = confirm, snapshot.folders.indices.contains(c) { removal.toggle(id: snapshot.folders[c].id) }
+        let m = syncMenuModel(snapshot: snapshot, removal: removal)
         var views: [NSView] = []
         let top = NSView(frame: NSRect(x: 0, y: 0, width: width, height: 5))
         views.append(top)
-        for (i, f) in folders.enumerated() {
-            let row = MenuSyncRow(folder: f)
+        for (i, r) in m.rows.enumerated() {
+            let row = MenuSyncRow(row: r)
             // A row drops its hover when it joins a window: light it once it is there.
             if i == hovered { DispatchQueue.main.async { row.hovered = true } }
-            row.confirming = i == confirm
             views.append(row)
-            if i == confirm { views.append(SyncConfirmPanel(name: f.name, trashOn: false, width: width)) }
+            if let c = m.confirm, c.folderId == r.id { views.append(SyncConfirmPanel(confirm: c, width: width)) }
         }
         let sep = NSBox(frame: NSRect(x: 14, y: 0, width: width - 28, height: 11))
         sep.boxType = .separator
@@ -226,7 +285,7 @@ private struct SyncMenuPreview: NSViewRepresentable {
         sep.frame = NSRect(x: 14, y: 5, width: width - 28, height: 1)
         sepWrap.addSubview(sep)
         views.append(sepWrap)
-        views.append(MenuCheckRow(content: .init(title: "Add Folder…"), width: width) {})
+        views.append(MenuCheckRow(content: .init(title: m.add.title), width: width) {})
         let total = views.reduce(0) { $0 + $1.frame.height } + 5
         let root = NSVisualEffectView(frame: NSRect(x: 0, y: 0, width: width, height: total))
         root.material = .menu

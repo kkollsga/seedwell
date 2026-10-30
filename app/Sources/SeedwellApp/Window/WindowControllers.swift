@@ -4,7 +4,8 @@ import Darwin
 import os
 
 /// Owns the main window. The window and its view model exist only while it is open; closing
-/// tears down the hosting controller, the model and its timer (SPEC §2, §8.3).
+/// tears down the hosting controller, the model and its timer (SPEC §2, §8.3). The core's `Library` (the window's
+/// state) lives with the app: it remembers a new download that arrives while the window is closed.
 @MainActor final class MainWindowController: NSObject, NSWindowDelegate {
     private let commands: Commands
     private let settings: SettingsModel
@@ -15,8 +16,7 @@ import os
     private var keyMonitor: Any?
 
     private let defaultSize: CGSize?
-    /// A new download that arrived while the window was closed: the next opening selects it (SPEC 8.3).
-    private var arrivalWhileClosed = ClosedWindowArrival()
+    private let library: Library
     /// Called after the window opened or closed (the Dock icon follows it).
     var onOpenChange: () -> Void = {}
     /// Called when the window closes (Settings are saved then).
@@ -26,16 +26,18 @@ import os
         self.commands = commands
         self.settings = settings
         self.defaultSize = defaultSize
+        library = LibraryModel.makeLibrary(core: commands.core)
         super.init()
-        nav.openTracker = { [weak self] id in self?.commands.showMain(.tracker(id), nil) }
+        nav.openTracker = { [weak self] id in self?.commands.showMain(.tracker(trackerId: id), nil) }
     }
 
     var isOpen: Bool { window != nil }
     var libraryModel: LibraryModel? { model }
     var nsWindow: NSWindow? { window }
 
-    /// Opens the window, on `settings` (a tab of Settings) when given: Settings is a section of this window.
-    func show(section: LibraryModel.Section? = nil, info id: String? = nil,
+    /// Opens the window, on `settings` (a tab of Settings) when given: Settings is a section of this window. `torrent`:
+    /// a click on its title in the notifier (the core decides where the window goes).
+    func show(section: LibraryModel.Section? = nil, info id: String? = nil, torrent: String? = nil,
               settings tab: SettingsTab? = nil, editTracker: String? = nil, newTrackerHost: String? = nil, openSettings: Bool = false) {
         let opening = self.model == nil
         let model = self.model ?? makeWindow()
@@ -46,19 +48,19 @@ import os
             if let newTrackerHost { nav.newTrackerHost = newTrackerHost }
             self.settings.reload()
             model.select(.settings)
+        } else if let torrent {
+            // Downloads on the row, its files open; an open add sheet keeps the window and its place (SPEC 8.3).
+            if model.showTorrent(torrent) == .shown { FilesStore.shared.expand(torrent) }
         } else if let id {
             model.reveal(id: id)
             // The popover anchors to the row, which exists one layout pass later.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { model.infoID = id }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { model.openInfo(id) }
         } else if let section, section != model.section {
             model.select(section)
         }
         // Opened plainly (Open Seedwell…, the Dock): on the download that arrived meanwhile, if it still downloads.
-        let snap = commands.core.snapshot()
-        let active = Set((snap.downloading + snap.queued).map(\.id))
-        let waiting = arrivalWhileClosed.take { active.contains($0) }
-        if opening, section == nil, id == nil, tab == nil, !openSettings, editTracker == nil, newTrackerHost == nil, let waiting {
-            model.showNewDownload(waiting)
+        if opening {
+            model.takeArrival(plain: section == nil && id == nil && torrent == nil && tab == nil && !openSettings && editTracker == nil && newTrackerHost == nil)
         }
         onOpenChange()
         NSApp.activate()
@@ -69,27 +71,24 @@ import os
 
     func closeForQuit() { window?.close() }
 
-    /// A click on a title in the notifier: Downloads, this torrent selected and scrolled into view, its files open (selection mode
-    /// for a torrent that waits for a choice). The torrent stays held as it is.
+    /// A click on a title in the notifier: the window comes forward on Downloads, this torrent selected and scrolled into
+    /// view, its files open (selection mode for a torrent that waits for a choice). The torrent stays held as it is. With
+    /// the "Add a Download" sheet open the window only comes forward: the sheet keeps its text, Downloads gets its dot.
     func showTorrent(_ id: String) {
-        show(section: .downloads)
-        guard let model else { return }
-        if model.section == .settings { model.select(.downloads) }
-        model.showNewDownload(id)
-        FilesStore.shared.expand(id)
+        show(torrent: id)
     }
 
     /// A torrent became a download (the watcher's `onArrival`, SPEC 8.3): the open window switches to
-    /// Downloads and selects it; a closed one remembers it for its next opening.
+    /// Downloads and selects it (the core decides); a closed one remembers it for its next opening.
     func newDownload(_ id: String) {
-        if let model { model.showNewDownload(id) } else { arrivalWhileClosed.remember(id) }
+        if let model { model.newDownload(id) } else {
+            _ = library.newDownload(rowId: id, context: WindowContext(editing: false, openLists: [], fileTorrent: nil, fileRows: 0))
+        }
     }
 
     private func makeWindow() -> LibraryModel {
-        let model = LibraryModel(core: commands.core)
-        model.isBusy = { [commands] in
-            commands.favorites.target != nil || commands.favorites.removal != nil || commands.removal.pending != nil
-        }
+        let model = LibraryModel(core: commands.core, library: library)
+        model.editing = { [commands] in commands.favorites.target != nil || commands.favorites.removal != nil }
         model.onSnapshot = { [commands] in commands.arrivals.note($0) }
         let host = NSHostingController(rootView: MainWindowView(model: model, commands: commands, settings: settings, nav: nav))
         let w = NSWindow(contentViewController: host)
@@ -101,7 +100,8 @@ import os
         w.titlebarAppearsTransparent = true
         w.toolbarStyle = .unified
         w.setContentSize(defaultSize ?? NSSize(width: 1100, height: 720))
-        if defaultSize == nil {
+        // A quiet QA run never saves its frame (off every screen) where the installed app would read it.
+        if defaultSize == nil, !QuietRun.on {
             w.setFrameAutosaveName("MainWindow")
             if !w.setFrameUsingName("MainWindow") { w.center() }
         } else {
@@ -126,48 +126,62 @@ import os
         return model
     }
 
-    /// Polls only while the window can actually be seen.
+    /// Polls only while the window can actually be seen; in a quiet QA run, off every screen, always (QuietRun).
     private func updatePolling() {
-        if window?.occlusionState.contains(.visible) == true { model?.start() } else { model?.stop() }
+        if QuietRun.on || window?.occlusionState.contains(.visible) == true { model?.start() } else { model?.stop() }
     }
 
-    /// Delete asks to remove the selected torrents, ⇧Delete to remove them and trash their files; while
-    /// that question is open, Return answers it and Escape drops it. Window-wide, so it works without the
-    /// list holding focus, but never while typing in a field, in Settings or on selected files.
+    /// The window's keys (Delete, Return, Escape: the Remove… question; ⌘I: Get Info; ⌘A: Select All), as the core
+    /// decides them. Window-wide, so they work without the list holding focus, but never while typing in a field.
     private func handleKey(_ event: NSEvent) -> Bool {
-        guard let w = window, event.window === w, w.isKeyWindow, let model, model.section != .settings,
-              !(w.firstResponder is NSText) else { return false }
-        let mods = event.modifierFlags.intersection([.command, .option, .control, .shift])
-        let removal = commands.removal
+        guard let w = window, let model else { return false }
+        if event.window !== w { return handleInfoKey(event) }
+        guard w.isKeyWindow, !(w.firstResponder is NSText) else { return false }
+        let key: LibraryKey
         switch event.keyCode {
-        case 51, 117:  // delete, forward delete
-            guard removal.pending == nil, mods.subtracting(.shift).isEmpty, FilesStore.shared.selectedNodes.isEmpty else { return false }
-            let rows = model.rows(for: model.selection)
-            guard !rows.isEmpty else { return false }
-            commands.confirmRemove(rows, deleteFiles: mods.contains(.shift))
-            return true
-        case 36, 76:  // return, enter
-            guard removal.pending != nil, mods.isEmpty else { return false }
-            // Only while its rows are on screen: never remove what the user cannot see.
-            guard removal.isAnswerable(visible: Set(model.visibleRows.map(\.id))) else { removal.cancel(); return false }
-            commands.confirmedRemove()
-            model.selection = []
-            return true
-        case 53:  // escape
-            guard removal.pending != nil else { return false }
-            removal.cancel()
-            return true
+        case 51, 117: key = .delete  // delete, forward delete
+        case 36, 76: key = .return  // return, enter
+        case 53: key = .escape
         default:
-            return false
+            // A letter by what it types, as menu key equivalents are (the keyboard layout decides).
+            switch event.charactersIgnoringModifiers?.lowercased() {
+            case "i": key = .i
+            case "a": key = .a
+            default: return false
+            }
         }
+        let m = event.modifierFlags
+        let mods = KeyModifiers(shift: m.contains(.shift), command: m.contains(.command), option: m.contains(.option), control: m.contains(.control))
+        return model.key(key, mods, scope: .window)
+    }
+
+    /// ↑/↓ while Get Info's popover (a child window of this one) has the keys, as it does once it opens: the list's
+    /// arrows, so the selection moves and Get Info follows it to the row (or closes for several, SPEC 8.3).
+    private func handleInfoKey(_ event: NSEvent) -> Bool {
+        guard let w = window, let model, model.infoRow != nil, let popover = event.window, popover.parent === w, popover.isKeyWindow,
+              !(popover.firstResponder is NSText), event.keyCode == 125 || event.keyCode == 126 else { return false }
+        let m = event.modifierFlags
+        let mods = KeyModifiers(shift: m.contains(.shift), command: m.contains(.command), option: m.contains(.option), control: m.contains(.control))
+        return model.key(event.keyCode == 125 ? .down : .up, mods, scope: .list)
+    }
+
+    /// Get Info's popover while it is open (QA).
+    var infoWindow: NSWindow? {
+        guard model?.infoRow != nil else { return nil }
+        return window?.childWindows?.first { $0.isVisible && String(describing: type(of: $0)).contains("Popover") }
+    }
+
+    /// Edit › Select All when no text field takes it (the window's delegate is the last stop of its responder chain):
+    /// the rows, as ⌘A.
+    @objc func selectAll(_ sender: Any?) {
+        _ = model?.key(.a, KeyModifiers(shift: false, command: true, option: false, control: false), scope: .window)
     }
 
     func windowWillClose(_ notification: Notification) {
         if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
         keyMonitor = nil
-        commands.removal.cancel()
         onClose()
-        model?.stop()
+        model?.close()
         observers.forEach(NotificationCenter.default.removeObserver)
         observers = []
         window?.delegate = nil

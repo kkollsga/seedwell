@@ -490,8 +490,8 @@ impl HttpTransport {
             // hop. (Names, including odd spellings such as `127.1`, go through
             // the vetting resolver at connect time.)
             if let Some(ip) = literal_ip(&uri)
-                && self.cfg.policy.check(ip).is_err() {
-                    return Err(AnnounceError::Transport(TransportError::Forbidden));
+                && let Err(r) = self.cfg.policy.check(ip) {
+                    return Err(AnnounceError::Transport(TransportError::Forbidden(r)));
                 }
             let response = self.send(&uri, may_retry, quit, trace).await?;
             let status = response.status();
@@ -619,7 +619,7 @@ impl HttpTransport {
                 // second time through the connector would only double the wait.
                 let addrs = self.resolver.resolve(&host).await.map_err(|e| {
                     AnnounceError::Transport(match e {
-                        ResolveError::Forbidden(_) => TransportError::Forbidden,
+                        ResolveError::Forbidden(r) => TransportError::Forbidden(r),
                         ResolveError::Dns(_) | ResolveError::Timeout => TransportError::Dns,
                     })
                 })?;
@@ -926,7 +926,7 @@ fn classify(e: &hyper_util::client::legacy::Error) -> TransportError {
     }
     if let Some(r) = resolve {
         return match r {
-            ResolveError::Forbidden(_) => TransportError::Forbidden,
+            ResolveError::Forbidden(r) => TransportError::Forbidden(*r),
             ResolveError::Dns(_) | ResolveError::Timeout => TransportError::Dns,
         };
     }

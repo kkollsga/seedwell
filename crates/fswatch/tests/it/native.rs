@@ -1,4 +1,4 @@
-//! The native backend (FSEvents on macOS, inotify on Linux).
+//! The native backend (FSEvents on macOS, inotify on Linux, ReadDirectoryChangesW on Windows).
 
 use trs_fswatch::{ActiveBackend, Backend, watch};
 
@@ -8,7 +8,13 @@ use crate::common::*;
 fn uses_the_native_backend() {
     let (_t, r) = root();
     let w = watch(&r, opts(Backend::Auto)).expect("watch");
-    let want = if cfg!(target_os = "macos") { ActiveBackend::FsEvents } else { ActiveBackend::Inotify };
+    let want = if cfg!(target_os = "macos") {
+        ActiveBackend::FsEvents
+    } else if cfg!(windows) {
+        ActiveBackend::ReadDirectoryChanges
+    } else {
+        ActiveBackend::Inotify
+    };
     assert_eq!(w.backend(), want);
     assert_eq!(w.root(), std::fs::canonicalize(&r).expect("canonicalize"));
 }

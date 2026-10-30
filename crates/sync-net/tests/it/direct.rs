@@ -48,7 +48,7 @@ async fn a_private_message_goes_only_to_its_recipient_and_no_other_member_gets_i
     b.h.test_refuse_direct(ad);
     until(20, "A and B apart", || !a.h.chat_directs()[0].online).await;
     let e = a.h.chat_send_direct(&bd, MessageKind::Text, "later", None, None).await.unwrap_err().to_string();
-    assert!(e.contains("not connected to this Mac directly"), "{e}");
+    assert!(e.contains(concat!("not connected to this ", trs_platform::computer!(), " directly")), "{e}");
     assert_eq!(a.h.chat_direct_messages(&bd, None, 10).unwrap().len(), 2);
 
     // A device that shares no channel and no conversation with this one is refused, with a reason.
@@ -142,7 +142,7 @@ async fn a_conversation_outlives_its_channel_until_it_is_deleted() {
     assert!(!std::fs::read_to_string(dirs[1].path().join("secrets")).unwrap().contains(&format!("store-dm-{ad}")));
     until(20, "apart", || !a.chat_directs()[0].online).await;
     let e = a.chat_send_direct(&bd, MessageKind::Text, "hello?", None, None).await.unwrap_err().to_string();
-    assert!(e.contains("not connected to this Mac directly"), "{e}");
+    assert!(e.contains(concat!("not connected to this ", trs_platform::computer!(), " directly")), "{e}");
     assert_eq!(a.chat_direct_messages(&bd, None, 10).unwrap().len(), 2, "A keeps its copy");
     a.shutdown().await;
     b.shutdown().await;

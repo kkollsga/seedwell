@@ -7,6 +7,16 @@ use std::time::Duration;
 
 use trs_state::{OpenOptions, Opened, Store};
 
+/// A Unix-style absolute test path made absolute on this system: unchanged on Unix, a drive letter in front on Windows.
+pub fn abs(p: &str) -> String {
+    if cfg!(windows) { format!("C:{p}") } else { p.to_string() }
+}
+
+/// A TOML test document whose quoted Unix-style absolute paths (`"/x"`) are made absolute on this system.
+pub fn win(doc: &str) -> String {
+    if cfg!(windows) { doc.replace("\"/", "\"C:/") } else { doc.to_string() }
+}
+
 static N: AtomicU64 = AtomicU64::new(0);
 
 /// A unique scratch directory removed on drop.

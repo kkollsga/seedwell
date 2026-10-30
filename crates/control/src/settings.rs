@@ -187,8 +187,10 @@ mod tests {
 
     #[test]
     fn optional_leaf_can_be_created() {
-        let (c, _) = apply(&Config::default(), &changes(json!({"folders.torrent_after_add": "archive", "folders.archive_dir": "/tmp/arch"}))).unwrap();
-        assert_eq!(c.folders.archive_dir.as_deref(), Some("/tmp/arch"));
+        // absolute on this system: a drive letter in front on Windows, as is elsewhere
+        let arch = if cfg!(windows) { "C:/tmp/arch" } else { "/tmp/arch" };
+        let (c, _) = apply(&Config::default(), &changes(json!({"folders.torrent_after_add": "archive", "folders.archive_dir": arch}))).unwrap();
+        assert_eq!(c.folders.archive_dir.as_deref(), Some(arch));
     }
 
     #[test]

@@ -5,14 +5,11 @@ import Observation
 struct ChoiceEngine {
     var load: (_ id: String, _ reopen: Bool) throws -> ChoiceInfo
     var confirm: (_ id: String, _ files: [Bool]) throws -> Void
-    var cancel: (_ id: String) throws -> Void
-    /// The `.torrent` file a held torrent came from, checked by the core right now (a regular file with the torrent's own
-    /// info-hash); nil when there is none (magnet link, web address, gone, changed).
-    var sourceFile: (_ id: String) -> String? = { _ in nil }
-    /// Whether `sourceFile` has something to offer (cheap, for the button's Shift variant).
+    /// Cancel, all of it in the core (`cancel_held`): the torrent is removed and its `.torrent` file goes to the Trash
+    /// unless `keepFile`. A note to show when the file could not be moved.
+    var cancel: (_ id: String, _ keepFile: Bool) -> CancelNote?
+    /// Whether Cancel would move a `.torrent` file to the Trash (cheap, for the button's Shift variant).
     var hasSource: (_ id: String) -> Bool = { _ in false }
-    /// Removes a torrent that is not waiting for a choice (an auto-start torrent in its countdown): Cancel on it.
-    var remove: ((_ id: String) -> Void)?
     /// Changes the category of a torrent: the engine re-plans destination, rule, title and structure.
     var setCategory: ((_ id: String, _ category: Category) -> Void)?
 }
@@ -27,15 +24,11 @@ struct ChoiceEngine {
     /// Told when OK or Cancel resolved a torrent here, so a chooser window open for it can close.
     @ObservationIgnored var didResolve: (String) -> Void = { _ in }
     private(set) var models: [String: ChooserModel] = [:]
-    /// Moves a cancelled torrent's `.torrent` file to the Trash; injected so that tests never touch the real one.
-    @ObservationIgnored var trash: SourceTrash
     /// A quiet note (a notification, never an alert).
-    @ObservationIgnored var note: (String) -> Void
+    @ObservationIgnored var note: (CancelNote) -> Void
 
-    init(engine: ChoiceEngine? = nil, trash: SourceTrash = .standard(),
-         note: @escaping (String) -> Void = { Notifier.post(title: $0, body: "The torrent was removed.") }) {
+    init(engine: ChoiceEngine? = nil, note: @escaping (CancelNote) -> Void = { Notifier.post(title: $0.title, body: $0.body) }) {
         self.engine = engine
-        self.trash = trash
         self.note = note
     }
 
@@ -50,7 +43,7 @@ struct ChoiceEngine {
         let m = ChooserModel(info: info, origin: info.awaiting ? "Choose what to download" : "Choose files")
         // Start on a torrent that waits takes everything except the Extras unless the user ticks otherwise (SPEC 7A.6):
         // the list shows exactly what Start does.
-        if info.awaiting { m.applyHeldDefault() }
+        if info.awaiting { m.applyHeldDefault(choiceDefaultFiles(info: info)) }
         models[id] = m
         return m
     }
@@ -63,22 +56,15 @@ struct ChoiceEngine {
         didResolve(id)
     }
 
-    /// Cancel: remove the held torrent. Nothing was downloaded; the engine never deletes files here. The `.torrent`
-    /// file it came from goes to the Trash (SPEC 7A.6) unless `keepFile` (⇧-Cancel). A file that cannot be moved
-    /// never stops the removal: a quiet note says so.
-    func cancel(_ id: String, keepFile: Bool = false) throws {
+    /// Cancel: remove the held torrent (SPEC 7A.6), and its `.torrent` file goes to the Trash unless `keepFile`
+    /// (⇧-Cancel). The core does all of it; a file that could not be moved never stops the removal, and its note is
+    /// shown quietly.
+    func cancel(_ id: String, keepFile: Bool = false) {
         guard let engine else { return }
-        // Asked before the removal, while the engine still knows the file; the core re-reads it and checks its hash.
-        let source = keepFile ? nil : engine.sourceFile(id)
-        do { try engine.cancel(id) } catch {
-            guard let remove = engine.remove else { throw error }
-            remove(id)
-        }
+        let failed = engine.cancel(id, keepFile)
         models[id] = nil
         didResolve(id)
-        if let source, case .failed(let name) = trash.trash(source) {
-            note("Couldn't move \(name) to the Trash")
-        }
+        if let failed { note(failed) }
     }
 
     /// The pill's menu, and the chooser's Change: the engine re-plans the torrent and the shared model is rebuilt from
@@ -101,7 +87,7 @@ struct ChoiceEngine {
                 }.map(\.id))
                 fresh.edited = true
             } else {
-                fresh.applyHeldDefault()
+                fresh.applyHeldDefault(choiceDefaultFiles(info: info))
             }
         }
         m.adopt(fresh)

@@ -5,7 +5,6 @@
 //! do not exist are *never* created: their pieces simply count as invalid and the file is listed
 //! in the report.
 
-use std::os::unix::fs::MetadataExt;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -380,11 +379,8 @@ impl ResumeReport {
 }
 
 fn fingerprint_of(m: &std::fs::Metadata) -> FileFingerprint {
-    FileFingerprint {
-        size: m.len(),
-        mtime_secs: m.mtime(),
-        mtime_nanos: m.mtime_nsec() as u32,
-    }
+    let (mtime_secs, mtime_nanos) = m.modified().map(trs_platform::fs::unix_time).unwrap_or((0, 0));
+    FileFingerprint { size: m.len(), mtime_secs, mtime_nanos }
 }
 
 impl TorrentHandle {

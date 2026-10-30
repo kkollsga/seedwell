@@ -38,7 +38,6 @@ fn mp4_atoms(data: &[u8]) -> Vec<(String, u64, u64)> {
 
 /// Drive a probe over a real file, returning the result and the (offset, len) fetches it asked for.
 fn drive(path: &Path, p: fn(u64, &Fetched) -> Probe) -> (trs_stream::container::ContainerInfo, Vec<(u64, usize)>) {
-    use std::os::unix::fs::FileExt;
     let f = std::fs::File::open(path).unwrap();
     let len = f.metadata().unwrap().len();
     let mut fetched = Fetched::new();
@@ -52,7 +51,7 @@ fn drive(path: &Path, p: fn(u64, &Fetched) -> Probe) -> (trs_stream::container::
             Probe::Need { offset, len } => {
                 needs.push((offset, len));
                 let mut b = vec![0u8; len];
-                f.read_exact_at(&mut b, offset).unwrap();
+                trs_platform::fs::read_exact_at(&f, &mut b, offset).unwrap();
                 fetched.add(offset, b);
             }
         }

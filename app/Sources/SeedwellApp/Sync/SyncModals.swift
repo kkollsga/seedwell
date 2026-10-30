@@ -27,10 +27,17 @@ import SwiftUI
         let info = t.isEmpty ? nil : core.syncParseLink(text: t)
         defaultLocation = info == nil ? nil : core.syncJoinPath(keyOrLink: t)
         existingFolder = info.flatMap { i in
-            defaultLocation.flatMap { SyncAddForm.existing(name: SyncText.suggestedName(i), next: $0, synced: core.syncSnapshot().folders.map(\.path)) }
+            defaultLocation.flatMap { syncExistingFolder(name: syncSuggestedName(info: i), next: $0, synced: core.syncSnapshot().folders.map(\.path)) }
         }
         form.setKey(text, info: info, defaultLocation: defaultLocation, problem: info == nil && !t.isEmpty ? core.syncLinkProblem(text: t) : nil)
         error = nil
+    }
+
+    /// The link field's text. SwiftUI hands the field's text back while it is being edited (in layout passes, and when
+    /// editing ends) also when it did not change: only a change is a new link. Taken as one, it cleared the error of
+    /// a failed Start as soon as the field lost focus.
+    func editKey(_ text: String) {
+        if text != form.key { setKey(text) }
     }
 
     func chooseFolder() {
@@ -60,7 +67,7 @@ import SwiftUI
     }
 
     /// Start: shares the folder, or joins the pasted one. `done` gets the new folder.
-    func start(done: @escaping (SyncFolder, SyncAddForm.Mode) -> Void) {
+    func start(done: @escaping (SyncFolder, SyncAddMode) -> Void) {
         guard form.canStart, !busy else { return }
         busy = true
         error = nil
@@ -124,7 +131,7 @@ struct ModalButtons: View {
 struct SyncAddView: View {
     @Bindable var model: SyncAddModel
     var cancel: () -> Void = {}
-    var done: (SyncFolder, SyncAddForm.Mode) -> Void = { _, _ in }
+    var done: (SyncFolder, SyncAddMode) -> Void = { _, _ in }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -133,7 +140,7 @@ struct SyncAddView: View {
                 Text("Add Folder").font(.system(size: 17, weight: .semibold))
             }
             Picker("", selection: Binding(get: { model.form.mode }, set: { model.form.mode = $0; model.error = nil })) {
-                ForEach(SyncAddForm.Mode.allCases) { Text($0.rawValue).tag($0) }
+                ForEach(syncAddModes(), id: \.self) { Text(syncAddModeLabel(mode: $0)).tag($0) }
             }
             .pickerStyle(.segmented).labelsHidden()
             .padding(.top, 16)
@@ -178,7 +185,7 @@ struct SyncAddView: View {
             HStack(alignment: .firstTextBaseline, spacing: 10) {
                 Text("Link").frame(width: 82, alignment: .leading)
                 VStack(alignment: .leading, spacing: 5) {
-                    TextField("seedwell://sync/…", text: Binding(get: { model.form.key }, set: { model.setKey($0) }))
+                    TextField("seedwell://sync/…", text: Binding(get: { model.form.key }, set: { model.editKey($0) }))
                         .textFieldStyle(.roundedBorder)
                         .accessibilityIdentifier("sync-key-field")
                     if !model.form.keyLine.isEmpty {
@@ -203,7 +210,8 @@ struct SyncAddView: View {
                 .disabled(!model.form.keyUsable)
                 .help("Where the shared folder goes on this Mac")
             }
-            if model.form.keyUsable, let note = SyncText.locationNote(model.form.location, existing: model.existingFolder, abbreviate: Notifier.abbreviate) {
+            if model.form.keyUsable, let note = syncLocationNote(location: model.form.location, existing: model.existingFolder,
+                                                                 existingShown: model.existingFolder.map(Notifier.abbreviate) ?? "") {
                 Text(note).font(.system(size: 12)).foregroundStyle(.secondary)
                     .padding(.leading, 92)
                     .fixedSize(horizontal: false, vertical: true)
@@ -258,14 +266,6 @@ struct SyncAddView: View {
     var target: String { (parent as NSString).appendingPathComponent(name.trimmingCharacters(in: .whitespaces)) }
     var changed: Bool { folder.map { target != $0.path || paused != ($0.state == .paused) || lanOnly != $0.lanOnly } ?? false }
 
-    nonisolated static func nameProblem(_ name: String) -> String? {
-        let n = name.trimmingCharacters(in: .whitespaces)
-        if n.isEmpty { return "Give the folder a name." }
-        if n.contains("/") || n.contains(":") { return "A folder name cannot contain “/” or “:”." }
-        if n.hasPrefix(".") { return "A folder name cannot start with a dot." }
-        return nil
-    }
-
     func move() {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
@@ -285,7 +285,7 @@ struct SyncAddView: View {
 
     func save(done: @escaping () -> Void) {
         guard let f = folder, !busy else { return }
-        if let p = Self.nameProblem(name) { error = p; return }
+        if let p = syncFolderNameProblem(name: name) { error = p; return }
         let (core, id, target, newName, moved) = (core, id, target, name.trimmingCharacters(in: .whitespaces), newParent != nil)
         let pause = paused != (f.state == .paused) ? Optional(paused) : nil
         let lan = lanOnly != f.lanOnly ? Optional(lanOnly) : nil
@@ -390,14 +390,7 @@ struct SyncEditView: View {
         .font(.system(size: 13))
     }
 
-    private var shareNote: String {
-        guard let f = model.folder else { return "" }
-        switch f.role {
-        case .owner: return "You own this folder. Links you make admit devices at the role you pick; roles are changed on the folder page."
-        case .admin: return "You are an admin: you can make links for others to join."
-        case .readWrite, .readOnly: return "Only the folder’s owner and admins can share it."
-        }
-    }
+    private var shareNote: String { model.folder.map { syncEditShareNote(role: $0.role) } ?? "" }
 }
 
 /// The add and edit windows: one add window, one edit window per folder. The menu closes before they open.

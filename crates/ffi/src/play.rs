@@ -76,13 +76,17 @@ pub(crate) fn tree_paths(paths: &[String], save_path: &std::path::Path) -> Vec<(
             let p = Path::new(raw);
             if p.is_absolute() {
                 let rel = common.as_deref().and_then(|c| p.strip_prefix(c).ok()).unwrap_or(p);
-                (rel.to_string_lossy().into_owned(), raw.clone())
+                // A tree label: `/` between folders on every system, like the torrent's own paths.
+                let label: Vec<String> = rel.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
+                (label.join("/"), raw.clone())
             } else {
                 let rel = match raw.split_once('/') {
                     Some((_, rest)) => rest.to_owned(),
                     None => raw.clone(),
                 };
-                (rel, parent.join(raw).to_string_lossy().into_owned())
+                // The location on disk, with this system's separators: a torrent path is `/`-separated.
+                let full = raw.split('/').fold(parent.to_path_buf(), |p, c| p.join(c));
+                (rel, full.to_string_lossy().into_owned())
             }
         })
         .collect()
@@ -139,20 +143,23 @@ mod tests {
 
     #[test]
     fn tree_paths_strip_the_root_and_the_shared_library_folder() {
-        let save = std::path::Path::new("/dl/Pack.S01");
-        let r = tree_paths(&["Pack.S01/Season 1/e1.mkv".into(), "Pack.S01/Extras/s.mkv".into()], save);
-        assert_eq!(r[0], ("Season 1/e1.mkv".into(), "/dl/Pack.S01/Season 1/e1.mkv".into()));
+        // Absolute on this system (a drive in front on Windows).
+        let abs = |p: &str| if cfg!(windows) { format!("C:{p}") } else { p.to_string() };
+        let save = std::path::PathBuf::from(abs("/dl/Pack.S01"));
+        let r = tree_paths(&["Pack.S01/Season 1/e1.mkv".into(), "Pack.S01/Extras/s.mkv".into()], &save);
+        let full = std::path::Path::new(&abs("/dl")).join("Pack.S01").join("Season 1").join("e1.mkv");
+        assert_eq!(r[0], ("Season 1/e1.mkv".into(), full.display().to_string()));
         assert_eq!(r[1].0, "Extras/s.mkv");
         let placed = tree_paths(
-            &["/lib/Show/Season 01/Show - E1.mkv".into(), "/lib/Show/Season 01/Sub/E1.srt".into(), "Pack.S01/Extras/s.mkv".into()],
-            save,
+            &[abs("/lib/Show/Season 01/Show - E1.mkv"), abs("/lib/Show/Season 01/Sub/E1.srt"), "Pack.S01/Extras/s.mkv".into()],
+            &save,
         );
-        assert_eq!(placed[0], ("Show - E1.mkv".into(), "/lib/Show/Season 01/Show - E1.mkv".into()));
-        assert_eq!(placed[1].0, "Sub/E1.srt");
+        assert_eq!(placed[0], ("Show - E1.mkv".into(), abs("/lib/Show/Season 01/Show - E1.mkv")));
+        assert_eq!(placed[1].0, "Sub/E1.srt", "a tree label has / on every system");
         assert_eq!(placed[2].0, "Extras/s.mkv");
         // One file: just its name; a flat single-file torrent keeps its name.
-        assert_eq!(tree_paths(&["/lib/m/Movie.mkv".into()], save)[0].0, "Movie.mkv");
-        assert_eq!(tree_paths(&["Movie.mkv".into()], save)[0].0, "Movie.mkv");
+        assert_eq!(tree_paths(&[abs("/lib/m/Movie.mkv")], &save)[0].0, "Movie.mkv");
+        assert_eq!(tree_paths(&["Movie.mkv".into()], &save)[0].0, "Movie.mkv");
     }
 
     #[test]

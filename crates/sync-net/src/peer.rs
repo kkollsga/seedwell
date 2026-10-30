@@ -258,7 +258,7 @@ fn version_reason(e: Incompatible, peer_name: &str) -> String {
     let who = if peer_name.is_empty() { "The other device" } else { peer_name };
     match e {
         Incompatible::PeerTooOld => format!("{who} runs an older Seedwell that cannot sync with this one: update it"),
-        Incompatible::PeerTooNew => format!("{who} runs a newer Seedwell that this one cannot sync with: update this Mac"),
+        Incompatible::PeerTooNew => format!(concat!("{who} runs a newer Seedwell that this one cannot sync with: update this ", trs_platform::computer!()), who = who),
     }
 }
 

@@ -5,38 +5,6 @@ import Observation
 // stored profile the user made with "Save as Favorite". All editing starts from a right-click and
 // happens inline: a sidebar label or a line in the favorite's tab turns into a text field.
 
-/// The order of the sidebar's Trackers section: favorites (alphabetical), then the automatic trackers
-/// by torrent count and name, then Other private (only when it has something), then Public.
-enum TrackerOrder {
-    static func sorted(_ trackers: [TrackerSummary]) -> [TrackerSummary] {
-        func rank(_ t: TrackerSummary) -> Int {
-            if t.favorite { return 0 }
-            switch t.id {
-            case "public": return 3
-            case "other-private": return 2
-            default: return 1
-            }
-        }
-        return trackers.sorted { a, b in
-            let (ra, rb) = (rank(a), rank(b))
-            if ra != rb { return ra < rb }
-            if ra == 1, a.count != b.count { return a.count > b.count }
-            let c = a.name.localizedCaseInsensitiveCompare(b.name)
-            return c == .orderedSame ? a.id < b.id : c == .orderedAscending
-        }
-    }
-
-    /// The sidebar's trackers: only those with torrents, in `sorted` order, and not those in hidden mode
-    /// (SPEC 7E.5). The open tracker stays while its tab is shown, so the place the user is looking at
-    /// does not vanish under them.
-    static func visible(_ trackers: [TrackerSummary], selected: String?) -> [TrackerSummary] {
-        sorted(trackers).filter { $0.id == selected || ($0.count > 0 && !$0.hidden) }
-    }
-
-    /// More automatic trackers than this and the list scrolls (it always can; this is only the note).
-    static let comfortable = 8
-}
-
 /// The list of addresses of one favorite, edited a line at a time. Pure: the checking of a line is
 /// the core's (`UrlCheck`), passed in.
 enum FavoriteURLs {

@@ -8,6 +8,7 @@ publish = false
 description = "Folder sync driver: TLS sessions between devices, discovery, relays and the folder runtime over trs-sync (SPEC 7G)"
 
 [dependencies]
+trs-platform = { path = "../platform" }
 # Each dependency is justified in README.md.
 trs-sync = { path = "../sync" }
 trs-sync-proto = { path = "../sync-proto" }
@@ -24,5 +25,5 @@ toml = { version = "1", default-features = false, features = ["std", "parse", "d
 socket2 = { version = "0.6", default-features = false, features = ["all"] }
 
 [dev-dependencies]
-tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-thread", "net", "time", "sync", "io-util", "macros"] }
+tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-thread", "net", "time", "sync", "io-util", "macros", "test-util"] }
 tempfile = "3"

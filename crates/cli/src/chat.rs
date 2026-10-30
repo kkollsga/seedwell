@@ -372,7 +372,7 @@ pub(crate) fn label(g: &Global, agent: &Option<String>, project: &Option<String>
     }
     let env = std::env::var("SEEDWELL_AGENT").ok();
     let cwd = std::env::current_dir().unwrap_or_default();
-    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let home = trs_platform::dirs::home();
     default_agent(env.as_deref(), g.client_given.then_some(g.client.as_str()), &cwd, home.as_deref(), |p| p.join(".git").exists())
 }
 
@@ -400,7 +400,7 @@ pub async fn run(cmd: Cmd, g: &Global) -> R {
         }
         Cmd::New { name } => {
             let (raw, d): (_, ChatChannelDto) = ask(&mut c, Request::ChatNew(ChatNewParams { name })).await?;
-            show(g, &raw, || format!("Made the channel {} (this Mac is its owner).\nInvite another device: seedwell chat share {}", d.name, first_group(&d.id)));
+            show(g, &raw, || format!(concat!("Made the channel {} (this ", trs_platform::computer!(), " is its owner).\nInvite another device: seedwell chat share {}"), d.name, first_group(&d.id)));
         }
         Cmd::Join { link } => {
             let link = if link == "-" { stdin_text("Channel link")?.trim().to_owned() } else { link };
@@ -510,11 +510,11 @@ pub async fn run(cmd: Cmd, g: &Global) -> R {
         }
         Cmd::DmDelete { device } => {
             let (raw, _): (_, serde_json::Value) = ask(&mut c, Request::ChatDmDelete(ChatDmDeleteParams { device: device.clone() })).await?;
-            show(g, &raw, || format!("Deleted the private conversation with {device} on this Mac (the other device keeps its copy)."));
+            show(g, &raw, || format!(concat!("Deleted the private conversation with {device} on this ", trs_platform::computer!(), " (the other device keeps its copy)."), device = device));
         }
         Cmd::DmAgents { access } => {
             let (raw, _): (_, serde_json::Value) = ask(&mut c, Request::ChatDmSetAgents(ChatDmAgentsParams { agents: access.clone() })).await?;
-            show(g, &raw, || format!("Agents on this Mac may {} with private messages.", agents(raw["agents"].as_str().unwrap_or(&access))));
+            show(g, &raw, || format!(concat!("Agents on this ", trs_platform::computer!(), " may {} with private messages."), agents(raw["agents"].as_str().unwrap_or(&access))));
         }
         Cmd::DmWatch { devices, count } => {
             // Names resolve to device ids first, so the stream can be filtered.
@@ -608,7 +608,7 @@ pub async fn run(cmd: Cmd, g: &Global) -> R {
         }
         Cmd::Rename { channel, name } => {
             let (raw, d): (_, ChatChannelDto) = ask(&mut c, Request::ChatRename(ChatRenameParams { channel, name })).await?;
-            show(g, &raw, || format!("The channel is called {} on this Mac.", d.name));
+            show(g, &raw, || format!(concat!("The channel is called {} on this ", trs_platform::computer!(), "."), d.name));
         }
         Cmd::Mute { channel, on } => {
             let (raw, d): (_, ChatChannelDto) = ask(&mut c, Request::ChatMute(ChatMuteParams { channel, muted: on })).await?;
@@ -616,7 +616,7 @@ pub async fn run(cmd: Cmd, g: &Global) -> R {
         }
         Cmd::Agents { channel, access } => {
             let (raw, d): (_, ChatChannelDto) = ask(&mut c, Request::ChatSetAgents(ChatAgentsParams { channel, agents: access })).await?;
-            show(g, &raw, || format!("Agents on this Mac may {} in {}.", agents(&d.agents), d.name));
+            show(g, &raw, || format!(concat!("Agents on this ", trs_platform::computer!(), " may {} in {}."), agents(&d.agents), d.name));
         }
         Cmd::Wake { channel, command } => {
             let (raw, d): (_, ChatChannelDto) = ask(&mut c, Request::ChatSetWake(ChatWakeParams { channel, command })).await?;
@@ -627,7 +627,7 @@ pub async fn run(cmd: Cmd, g: &Global) -> R {
         }
         Cmd::Leave { channel } => {
             let raw = c.call(&Request::ChatLeave(ch(channel))).await?;
-            show(g, &raw, || format!("Left {}; its messages on this Mac are gone (other members keep theirs).", raw["name"].as_str().unwrap_or("the channel")));
+            show(g, &raw, || format!(concat!("Left {}; its messages on this ", trs_platform::computer!(), " are gone (other members keep theirs)."), raw["name"].as_str().unwrap_or("the channel")));
         }
     }
     let _ = std::io::stdout().flush();
@@ -1051,7 +1051,7 @@ pub fn topics(l: &ChatTopicsDto) -> String {
 
 /// `chat dm list`.
 pub fn directs(l: &ChatDirectsDto) -> String {
-    let mut o = format!("Agents on this Mac may {} with private messages.\n", agents(&l.agents));
+    let mut o = format!(concat!("Agents on this ", trs_platform::computer!(), " may {} with private messages.\n"), agents(&l.agents));
     if l.conversations.is_empty() {
         o.push_str("No private messages. Write to a member of a channel with `seedwell chat dm send <device> -`.");
         return o;

@@ -3,6 +3,7 @@
 //! `EngineConfig::retry_minute`; the arithmetic of the schedules is unit-tested in
 //! `session/recover.rs` and `queue.rs`.
 use crate::common;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -18,13 +19,27 @@ async fn seeded(t: &TestTorrent, cfg: impl FnOnce(&mut EngineConfig)) -> Node {
     seeder
 }
 
+/// Root writes to read-only files anyway (a Windows administrator does not: the read-only
+/// attribute holds for everyone).
 fn running_as_root() -> bool {
+    #[cfg(unix)]
     // SAFETY: geteuid has no preconditions.
-    unsafe { libc::geteuid() == 0 }
+    return unsafe { libc::geteuid() == 0 };
+    #[cfg(windows)]
+    false
 }
 
+/// Unix permission bits; on Windows only "read-only" (no write bit for the owner) counts.
 fn chmod(p: &Path, mode: u32) {
-    std::fs::set_permissions(p, std::fs::Permissions::from_mode(mode)).unwrap();
+    #[cfg(unix)]
+    let perm = std::fs::Permissions::from_mode(mode);
+    #[cfg(windows)]
+    let perm = {
+        let mut perm = std::fs::metadata(p).unwrap().permissions();
+        perm.set_readonly(mode & 0o200 == 0);
+        perm
+    };
+    std::fs::set_permissions(p, perm).unwrap();
 }
 
 /// Create the folders and empty files of `t` below `dir`, read-only: every write is refused.
@@ -72,7 +87,8 @@ async fn a_refused_write_waits_and_retries_by_itself() {
 
     let row = wait_for("the refusal shows on the row", 20, || async {
         let r = leech.row(&t.id).await?;
-        r.hold_note.is_some().then_some(r)
+        // Other notes come first (a moment of "Waiting to verify" when both slots are busy).
+        r.hold_note.as_deref().is_some_and(|n| n.starts_with("Not allowed to write")).then_some(r)
     })
     .await;
     let note = row.hold_note.clone().unwrap();
@@ -179,7 +195,9 @@ async fn an_unplugged_drive_is_noticed_in_bulk_and_comes_back_without_rechecks()
 }
 
 /// Missing data is retried on the 1, 5, 15, 60 minute schedule (here one minute is 100 ms) and
-/// the retry keeps failing quietly while the drive is away.
+/// the retry keeps failing quietly while the drive is away. Unix only: the drive's going away is
+/// a rename of its folder while files in it are open, which Windows refuses.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn missing_data_backs_off_instead_of_a_flat_minute() {
     let vol = tempfile::tempdir().unwrap();

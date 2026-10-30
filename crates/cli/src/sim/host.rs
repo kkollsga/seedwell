@@ -13,7 +13,6 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::watch;
 
 use super::content::{Kind, LayoutSpec, build, fill, hex, layout};
@@ -235,8 +234,8 @@ pub async fn run_host(dir: &Path, app_socket: &Path) -> i32 {
             return 1;
         }
     };
-    let listener = match UnixListener::bind(&sock_path) {
-        Ok(l) => l,
+    let mut listener = match trs_control::transport::bind_in_private_dir(&sock_path).await {
+        Ok(b) => b.listener,
         Err(e) => {
             eprintln!("sim host: cannot bind {}: {e}", sock_path.display());
             return 1;
@@ -251,7 +250,7 @@ pub async fn run_host(dir: &Path, app_socket: &Path) -> i32 {
         let mut misses = 0;
         loop {
             tokio::time::sleep(Duration::from_secs(2)).await;
-            if UnixStream::connect(&app).await.is_ok() {
+            if trs_control::transport::connect(&app).await.is_ok() {
                 misses = 0;
             } else {
                 misses += 1;
@@ -265,10 +264,10 @@ pub async fn run_host(dir: &Path, app_socket: &Path) -> i32 {
     loop {
         tokio::select! {
             _ = quit_rx.changed() => break,
-            Ok((sock, _)) = listener.accept() => {
+            Ok(sock) = listener.accept() => {
                 let h = host.clone();
                 tokio::spawn(async move {
-                    let (rd, mut wr) = sock.into_split();
+                    let (rd, mut wr) = tokio::io::split(sock);
                     let mut lines = BufReader::new(rd).lines();
                     while let Ok(Some(l)) = lines.next_line().await {
                         let out = match serde_json::from_str::<Value>(&l) {

@@ -358,7 +358,7 @@ impl RelayUrl {
 
 /// Connects to the relay and runs the hello: the stream, after the relay's key was checked, and its nonce.
 async fn hello(url: &RelayUrl) -> io::Result<(TcpStream, [u8; 32], [u8; 32])> {
-    let mut tcp = TcpStream::connect(url.host_port.as_str()).await?;
+    let mut tcp = trs_platform::net::connect_tcp(url.host_port.as_str()).await?;
     let _ = tcp.set_nodelay(true);
     tcp.write_all(&Magic::Relay.bytes()).await?;
     let mut b = [0u8; 64];

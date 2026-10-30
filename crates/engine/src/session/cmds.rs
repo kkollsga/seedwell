@@ -10,6 +10,7 @@ use trs_metainfo::Metainfo;
 use trs_wire::Handshake;
 
 use super::cold::*;
+use super::pending::PendingAct;
 use super::{After, Cmd, Live, RemoveWait, Session, SessionMsg};
 use crate::api::*;
 use crate::budget::ConnPermit;
@@ -42,9 +43,15 @@ impl Session {
             Cmd::SetPolicy(p) => self.set_policy(p),
             Cmd::Pause(ids) => {
                 for id in ids {
-                    self.set_want(id, Want::Paused);
+                    self.user_pause(id);
                 }
             }
+            Cmd::PauseByApp(ids) => {
+                for id in ids {
+                    self.app_pause(id);
+                }
+            }
+            Cmd::ResumeByApp(ids) => self.resume_by_app(&ids),
             Cmd::Resume(ids) => {
                 for id in ids {
                     self.user_resume(id);
@@ -211,7 +218,23 @@ impl Session {
     /// Pause everything that runs, in one pass: the wants change first and the queue is planned
     /// once, so n torrents cost O(n), not n plans of n.
     fn pause_all(&mut self) {
-        let ids: Vec<_> = self.table.iter().filter(|(_, e)| e.cold.want == Want::Active).map(|(i, _)| *i).collect();
+        // A grace countdown stops (the torrent would start by itself); what the app paused by
+        // itself becomes the user's pause.
+        let held: Vec<_> = self.table.iter().filter(|(_, e)| e.cold.pending() && e.cold.want == Want::Active).map(|(i, _)| *i).collect();
+        for id in held {
+            let _ = self.pending_act(id, PendingAct::Pause);
+        }
+        let apps: Vec<_> = self
+            .table
+            .iter()
+            .filter(|(_, e)| e.cold.want == Want::Paused && e.cold.flags3 & H3_APP_PAUSED != 0)
+            .map(|(i, _)| *i)
+            .chain(self.directs.iter().filter(|(_, e)| e.app_paused).map(|(i, _)| *i))
+            .collect();
+        for id in apps {
+            self.claim_pause(id);
+        }
+        let ids: Vec<_> = self.table.iter().filter(|(_, e)| e.cold.want == Want::Active && !e.cold.pending()).map(|(i, _)| *i).collect();
         for id in ids {
             self.set_want_inner(id, Want::Paused, false, false);
         }
@@ -226,6 +249,10 @@ impl Session {
     /// rechecking, fetching metadata) come up through the start queue, a couple per tick, in queue
     /// order, exactly as at launch; finished ones stay Cold and cost nothing.
     fn resume_all(&mut self) {
+        let stopped: Vec<_> = self.table.keys().copied().filter(|id| self.countdown_stopped(id) == Some(true)).collect();
+        for id in stopped {
+            let _ = self.pending_act(id, PendingAct::Resume);
+        }
         let mut ids: Vec<_> = self.table.iter().filter(|(_, e)| e.cold.want == Want::Paused).map(|(i, e)| (e.cold.queue_pos, e.cold.added_at, *i)).collect();
         ids.sort_unstable();
         for (_, _, id) in ids {
@@ -261,14 +288,89 @@ impl Session {
         // A resume by hand restarts the inactive condition's window (SPEC §7.5): the user's choice
         // is not undone an hour later.
         e.cold.idle = None;
+        e.cold.flags3 &= !H3_APP_PAUSED;
         e.cold.error = None;
         e.cold.set2(G_MISSING, false);
         true
     }
 
+    /// The user's pause: it outlives a restart (SPEC §10). A torrent in its grace countdown has
+    /// the countdown stopped instead (SPEC 7A.7), the way the menu's check does.
+    pub(crate) fn user_pause(&mut self, id: TorrentId) {
+        if self.countdown_stopped(&id).is_some() && self.table.get(&id).is_some_and(|e| e.cold.want == Want::Active) {
+            let _ = self.pending_act(id, PendingAct::Pause);
+            return;
+        }
+        self.claim_pause(id);
+        self.set_want(id, Want::Paused);
+    }
+
+    /// A pause the app makes by itself (on battery): only a running torrent that is not held (or a
+    /// running direct download), and stored as running, so it ends with the run.
+    fn app_pause(&mut self, id: TorrentId) {
+        if let Some(d) = self.directs.get_mut(&id) {
+            if d.rec.state == crate::persist::DirectState::Active {
+                d.app_paused = true;
+                self.direct_set_want(id, false);
+            }
+            return;
+        }
+        let Some(e) = self.table.get_mut(&id) else { return };
+        if e.cold.want != Want::Active || e.cold.awaiting() {
+            return;
+        }
+        e.cold.flags3 |= H3_APP_PAUSED;
+        self.set_want(id, Want::Paused);
+    }
+
+    /// Ends the app's own pause of those it still holds (`H3_APP_PAUSED`, a direct download's
+    /// `app_paused`), in one pass through the start queue like Resume All. A torrent the user has
+    /// paused, resumed or paused again since is not the app's any more and is left as it is.
+    fn resume_by_app(&mut self, ids: &[TorrentId]) {
+        let mut mine: Vec<_> = ids
+            .iter()
+            .filter_map(|id| self.table.get(id).map(|e| (e, id)))
+            .filter(|(e, _)| e.cold.want == Want::Paused && e.cold.flags3 & H3_APP_PAUSED != 0)
+            .map(|(e, id)| (e.cold.queue_pos, e.cold.added_at, *id))
+            .collect();
+        mine.sort_unstable();
+        for (_, _, id) in mine {
+            self.set_want_inner(id, Want::Active, false, true);
+        }
+        let directs: Vec<_> = ids.iter().copied().filter(|id| self.directs.get(id).is_some_and(|e| e.app_paused)).collect();
+        for id in directs {
+            self.direct_set_want_with(id, true, false);
+        }
+        self.replan();
+        self.boot_begin();
+    }
+
+    /// The pause becomes the user's (it was the app's): it is kept across a restart from now on.
+    fn claim_pause(&mut self, id: TorrentId) {
+        if let Some(d) = self.directs.get_mut(&id)
+            && d.app_paused
+        {
+            d.app_paused = false;
+            let rec = d.rec.clone();
+            self.dirty_direct(rec);
+            return;
+        }
+        if let Some(e) = self.table.get_mut(&id)
+            && e.cold.flags3 & H3_APP_PAUSED != 0
+        {
+            e.cold.flags3 &= !H3_APP_PAUSED;
+            self.mark_record(id);
+        }
+    }
+
     pub(crate) fn user_resume(&mut self, id: TorrentId) {
         if self.directs.contains_key(&id) {
             return self.direct_set_want(id, true);
+        }
+        // A countdown the user stopped runs on (at least a few seconds, `pending.rs`).
+        if self.countdown_stopped(&id) == Some(true) && self.table.get(&id).is_some_and(|e| e.cold.want == Want::Active) {
+            let _ = self.pending_act(id, PendingAct::Resume);
+            return;
         }
         if self.prepare_resume(id) {
             self.set_want(id, Want::Active);
@@ -288,6 +390,10 @@ impl Session {
     /// torrent that needs an actor to come back waits in the start queue instead of starting now.
     pub(crate) fn set_want_inner(&mut self, id: TorrentId, want: Want, replan: bool, hold: bool) {
         let Some(e) = self.table.get_mut(&id) else { return };
+        // The app's own pause only ever marks a paused torrent: whatever else it becomes, the mark goes.
+        if want != Want::Paused {
+            e.cold.flags3 &= !H3_APP_PAUSED;
+        }
         if e.cold.want == want {
             return;
         }

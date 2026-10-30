@@ -103,7 +103,8 @@ pub(crate) struct ColdTorrent {
     pub flags: u8,
     pub flags2: u16,
     /// `H3_*` bits. `H3_NO_HOLD` and `H3_FORCE_HOLD` only matter between an add and the arrival of
-    /// metadata and are not persisted; `H3_PENDING` is (as `TorrentRecord::pending_start`).
+    /// metadata and are not persisted; `H3_PENDING` and `H3_COUNTDOWN_STOPPED` are (as
+    /// `TorrentRecord::pending_start` / `pending_stopped`); `H3_APP_PAUSED` is deliberately not.
     pub flags3: u8,
 }
 
@@ -113,6 +114,11 @@ pub(crate) const H3_NO_HOLD: u8 = 1;
 pub(crate) const H3_FORCE_HOLD: u8 = 2;
 /// Held for the grace period before an auto-add starts (SPEC 7A.7). Always together with `G_AWAITING`.
 pub(crate) const H3_PENDING: u8 = 4;
+/// The user stopped the grace countdown (`H3_PENDING` only); it stays stopped across a restart.
+pub(crate) const H3_COUNTDOWN_STOPPED: u8 = 8;
+/// `Want::Paused` by the app itself (on battery), not by the user: stored as running, so the pause
+/// ends with the run (SPEC §10). A user's pause or resume clears it.
+pub(crate) const H3_APP_PAUSED: u8 = 16;
 
 pub(crate) const NONE_U32: u32 = u32::MAX;
 pub(crate) const NONE_CAT: u8 = u8::MAX;
@@ -308,6 +314,8 @@ impl ColdTorrent {
             save_path,
             state: match self.want {
                 Want::Active => StoredState::Active,
+                // What the app paused by itself resumes at the next start; the user's pause stays.
+                Want::Paused if self.flags3 & H3_APP_PAUSED != 0 => StoredState::Active,
                 Want::Paused => StoredState::Paused,
                 Want::GoalReached => StoredState::GoalReached,
                 Want::Error => StoredState::Error(self.error.as_deref().unwrap_or("error").to_owned()),
@@ -335,6 +343,7 @@ impl ColdTorrent {
             pinned: self.has2(G_PINNED),
             awaiting_choice: self.has2(G_AWAITING),
             pending_start: self.pending(),
+            pending_stopped: self.pending() && self.flags3 & H3_COUNTDOWN_STOPPED != 0,
             title: self.title.as_deref().map(str::to_owned),
             idle: self.idle.as_deref().cloned(),
         }

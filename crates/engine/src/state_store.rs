@@ -10,12 +10,13 @@
 //! |---|---|
 //! | has metadata, added complete, staged, complete, placed | spare bits 8..15 of `TorrentFlags` (unknown bits survive round trips) |
 //! | waiting for a choice, location pinned by the user | `TorrentFlags::AWAITING_CHOICE` / `LOCATION_PINNED` (bits 6, 7) |
+//! | paused by the user (kept across a restart) | `TorrentFlags::PAUSED` plus `pause_kept`; `PAUSED` alone is an older build's pause, which ended at quit |
 //! | staging root of unfinished data | `TorrentRecord::stage_root` (record version 2, an interned root like `save_root`) |
 //! | magnet URI (only while the metadata is missing) | `rel_path` |
 //! | announce tiers, piece length, wanted bytes | read back from `torrents/<hash>.torrent` at load |
 //! | priority / seed goal | `priority` / `goal`, only when the user chose them (`Some`); otherwise the rules decide |
 //! | skipped files | `skipped_files` bitset (Low/High per-file priorities are not persisted) |
-//! | queue position, last activity, error start | `torrent-extra.bin` next to the database (losing it falls back to the order of adding) |
+//! | queue position, last activity, error start, grace countdown (held, stopped) | `torrent-extra.bin` next to the database (losing it falls back to the order of adding) |
 //! | per-file paths of placed torrents | `placement/<hash>.bin` |
 //! | direct downloads | `downloads/<id>.rec` (the resumable bytes are trs-http's own `.part` + sidecar) |
 //! | launch history for the crash-loop guard | `launches.log` |
@@ -67,6 +68,8 @@ struct Extra {
     error_tracker: bool,
     /// Held for the grace period before an auto-add starts (byte 33, bit 0).
     pending_start: bool,
+    /// The user stopped that countdown (byte 33, bit 1).
+    pending_stopped: bool,
 }
 
 const EXTRA_LEN: usize = 36;
@@ -160,6 +163,12 @@ impl StateStore {
     }
 
     fn write_side(&self, path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
+        // Folders inside the state folder are made as needed, the state folder itself never: when it
+        // is gone (removed under a running engine) nothing more is written, instead of a new folder
+        // holding one side file.
+        if !self.dir.is_dir() {
+            return Err(StoreError("the state folder is gone".into()));
+        }
         if let Some(d) = path.parent() {
             std::fs::create_dir_all(d).map_err(se)?;
         }
@@ -192,7 +201,7 @@ impl StateStore {
                 let mut id = [0u8; 20];
                 id.copy_from_slice(&c[..20]);
                 let u = |i: usize| u32::from_le_bytes([c[i], c[i + 1], c[i + 2], c[i + 3]]);
-                m.insert(id, Extra { queue_pos: u(20), last_activity: u(24), error_since: u(28), error_tracker: c[32] & 1 != 0, pending_start: c[33] & 1 != 0 });
+                m.insert(id, Extra { queue_pos: u(20), last_activity: u(24), error_since: u(28), error_tracker: c[32] & 1 != 0, pending_start: c[33] & 1 != 0, pending_stopped: c[33] & 2 != 0 });
             }
         }
         m
@@ -222,7 +231,7 @@ impl StateStore {
                 out.extend_from_slice(&x.last_activity.to_le_bytes());
                 out.extend_from_slice(&x.error_since.to_le_bytes());
                 out.push(u8::from(x.error_tracker));
-                out.push(u8::from(x.pending_start));
+                out.push(u8::from(x.pending_start) | u8::from(x.pending_stopped) << 1);
                 out.extend_from_slice(&[0, 0]);
             }
             // Losing this file only loses the order of the queue and the activity history.
@@ -251,6 +260,7 @@ fn to_state_record(r: &TorrentRecord, root: u32) -> SRecord {
     let f = &mut rec.flags;
     f.set(TorrentFlags::PRIVATE, r.private);
     f.set(TorrentFlags::PAUSED, r.state == StoredState::Paused);
+    rec.pause_kept = r.state == StoredState::Paused;
     f.set(TorrentFlags::GOAL_REACHED, r.state == StoredState::GoalReached);
     f.set(TorrentFlags::FINISHED, r.finished_at.is_some());
     f.set(TorrentFlags::CATEGORY_USER_SET, r.category_user);
@@ -433,7 +443,8 @@ impl StateStore {
             piece_length,
             private: f.has(TorrentFlags::PRIVATE),
             save_path: self.inner.root_path(rec.save_root).map(PathBuf::from).unwrap_or_default(),
-            state: if f.has(TorrentFlags::PAUSED) {
+            // `PAUSED` without `pause_kept` is the pause of an older build, which ended at quit.
+            state: if f.has(TorrentFlags::PAUSED) && rec.pause_kept {
                 StoredState::Paused
             } else if f.has(TorrentFlags::GOAL_REACHED) {
                 StoredState::GoalReached
@@ -463,6 +474,7 @@ impl StateStore {
             pinned: f.has(TorrentFlags::LOCATION_PINNED),
             awaiting_choice: f.has(TorrentFlags::AWAITING_CHOICE),
             pending_start: f.has(TorrentFlags::AWAITING_CHOICE) && extra.get(&id).is_some_and(|x| x.pending_start),
+            pending_stopped: f.has(TorrentFlags::AWAITING_CHOICE) && extra.get(&id).is_some_and(|x| x.pending_start && x.pending_stopped),
             title: rec.title.clone(),
             idle: Self::read_side(&self.idle_path(&id)).ok().flatten().and_then(|b| crate::idle::IdleRing::from_bytes(&b)),
         };
@@ -905,6 +917,7 @@ impl Store for StateStore {
                     error_since: r.error_since.min(u64::from(u32::MAX)) as u32,
                     error_tracker: r.error_tracker,
                     pending_start: r.pending_start && r.awaiting_choice,
+                    pending_stopped: r.pending_stopped && r.pending_start && r.awaiting_choice,
                 };
                 (r.id, x)
             })
@@ -1007,5 +1020,25 @@ impl StateStore {
             return Ok(());
         }
         self.inner.record_stats(&scope, self.day_of(d.at), &b).map_err(se)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_side_file_never_makes_the_state_folder_again() {
+        let t = tempfile::tempdir().unwrap();
+        let dir = t.path().join("state");
+        let (store, _) = StateStore::open(&dir).unwrap();
+        store.write_side(&dir.join("idle/x.bin"), b"1").unwrap();
+        assert!(dir.join("idle/x.bin").exists(), "folders inside it are made");
+        drop(store);
+        std::fs::remove_dir_all(&dir).unwrap();
+        let (store, _) = StateStore::open(t.path().join("other")).unwrap();
+        let gone = StateStore { dir: dir.clone(), ..Arc::try_unwrap(store).ok().unwrap() };
+        assert!(gone.write_side(&gone.extra_path(), b"1").is_err());
+        assert!(!dir.exists(), "the removed state folder stays removed");
     }
 }

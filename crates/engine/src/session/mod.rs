@@ -133,6 +133,10 @@ pub(crate) enum Cmd {
     AddMagnet { uri: String, opts: Box<AddOptions>, reply: oneshot::Sender<Result<Added, EngineError>> },
     Exists(TorrentId, oneshot::Sender<Option<String>>),
     Pause(Vec<TorrentId>),
+    /// A pause the app makes by itself (on battery): it does not outlive the run.
+    PauseByApp(Vec<TorrentId>),
+    /// Ends the app's own pause of those it still holds.
+    ResumeByApp(Vec<TorrentId>),
     Resume(Vec<TorrentId>),
     Remove { ids: Vec<TorrentId>, delete_files: bool, reply: oneshot::Sender<()> },
     Recheck(Vec<TorrentId>),
@@ -958,7 +962,11 @@ impl Session {
         self.schedule_persist();
     }
 
-    pub(crate) fn dirty_direct(&mut self, d: DirectRecord) {
+    pub(crate) fn dirty_direct(&mut self, mut d: DirectRecord) {
+        // What the app paused by itself (on battery) is stored as running: the pause ends with the run.
+        if d.state == crate::persist::DirectState::Paused && self.directs.get(&d.id).is_some_and(|e| e.app_paused) {
+            d.state = crate::persist::DirectState::Active;
+        }
         self.dirty.removed_directs.retain(|x| *x != d.id);
         self.dirty.directs.insert(d.id, d);
         self.schedule_persist();

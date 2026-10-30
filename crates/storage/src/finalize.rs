@@ -187,7 +187,7 @@ impl JournalFile {
 
 fn sync_parent(path: &Path) -> io::Result<()> {
     match path.parent() {
-        Some(p) if !p.as_os_str().is_empty() => File::open(p)?.sync_all(),
+        Some(p) if !p.as_os_str().is_empty() => trs_platform::fs::sync_dir(p),
         _ => Ok(()),
     }
 }
@@ -323,7 +323,7 @@ fn move_one(
         ctx.step()?;
         match fs::rename(&src, &dst) {
             Ok(()) => return Ok(Moved::Renamed),
-            Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {}
+            Err(e) if e.kind() == io::ErrorKind::CrossesDevices => {}
             Err(e) => return Err(io(e)),
         }
     }

@@ -15,10 +15,21 @@ against the release's `SHA256SUMS`, verifies the code signature, quits a running
 
 ### Release with GitHub Actions (the usual way)
 
-`.github/workflows/ci.yml` runs clippy, the Rust tests, the app build and the Swift tests on every push to `main`
-and on pull requests. `.github/workflows/release.yml` runs when a `vX.Y.Z` tag is pushed: it checks that the tag
-matches `Cargo.toml`, builds the release (`app/release-zip.sh --draft`, build number 100 + the run number) and
-creates a **draft** release with the zip, `install.sh`, `SHA256SUMS` and `latest.json`. Publishing stays manual.
+`.github/workflows/ci.yml` runs on every push to `main` and on pull requests, on the Mac (clippy, the Rust tests,
+the app build, the Swift tests) and on Windows (clippy, the Rust tests, the app build and `app-windows\qa\run.ps1 all`,
+the PowerShell scripts parsed). `.github/workflows/release.yml` runs when a `vX.Y.Z` tag is pushed, **all or nothing**:
+
+1. *Tag and CI*: the tag matches `Cargo.toml`, and CI passed on the tagged commit (it waits up to an hour for CI to
+   finish).
+2. *Mac build* (`app/release-zip.sh`, build number 100 + the run number) and *Windows build*
+   (`app-windows\release-zip.ps1`) side by side, each checking its own zip; a failure in one cancels the other.
+3. *Draft release*, only when both succeeded: `tools/release-merge.py` makes one `SHA256SUMS`, one `latest.json` (the
+   Mac's fields unchanged, plus `"windows"`) and one set of notes (both installers, all checksums), and the draft gets
+   `Seedwell-X.Y.Z.zip`, `install.sh`, `Seedwell-X.Y.Z-windows-x64.zip`, `install.ps1`, `SHA256SUMS` and `latest.json`.
+4. *Withdraw the tag*, when anything failed or was cancelled: the tag (and a draft, if one was made) is deleted. Fix
+   the failure on `master`, publish the tree again and tag the same version again.
+
+Publishing the draft stays manual.
 
 ```sh
 # on master: bump [workspace.package] version in Cargo.toml, commit, then publish the tree (see below) and tag it
@@ -36,21 +47,62 @@ listed by their titles.
 
 Dependabot (`.github/dependabot.yml`) opens weekly pull requests for Cargo and Actions updates; CI tests each one.
 
-### Release from this Mac (fallback)
+### Build the Mac's assets on this Mac (a check, not a release)
 
 ```sh
 git status                                              # must be clean
 tools/sysguard/heavy.sh app/release-zip.sh              # full LTO build → app/build/release/
 #   Seedwell-<version>.zip  install.sh  SHA256SUMS  latest.json  NOTES.md   (checked locally: checksum, signature, script syntax)
-app/release-zip.sh --draft                              # optional: creates a DRAFT GitHub release with the assets (gh CLI)
 ```
 
-Then open the draft on GitHub, read it, and press **Publish**. The install URL
-(`https://github.com/kkollsga/seedwell/releases/latest/download/install.sh`) works from the moment it is published.
+This builds and checks the Mac's assets only; it never creates a release. A release is always the Mac's and the
+Windows build together, made by the release workflow when both succeeded: a Mac-only release would leave every
+Windows copy without an update.
 Updates: users run the same command again, or let the app do it (see "Updates" below).
 
 Test the installer without touching your own install: `SEEDWELL_REPO_URL=http://127.0.0.1:8765 SEEDWELL_INSTALL_DIR=/tmp/x`
 against a local `python3 -m http.server` that serves `releases/latest/download/` with the three assets.
+
+### Windows: the PowerShell installer (no code-signing certificate)
+
+Without a certificate an MSIX does not install and an MSI or .exe from a browser gets a SmartScreen warning on every
+download, so Windows takes the Mac's route: a script installer, per user, no administrator rights.
+
+```powershell
+irm https://github.com/kkollsga/seedwell/releases/latest/download/install.ps1 | iex
+& ([scriptblock]::Create((irm https://github.com/kkollsga/seedwell/releases/latest/download/install.ps1))) -Version 0.2.0 -Cli
+```
+
+`install.ps1` (repo root, Windows PowerShell 5.1) downloads `SHA256SUMS` and `Seedwell-X.Y.Z-windows-x64.zip` from
+the release, checks the zip's SHA-256, unpacks it next to the target and swaps it in (a failure leaves the old
+version), quits a running Seedwell cleanly first (`Seedwell.exe --quit`), installs to `%LOCALAPPDATA%\Programs\Seedwell`
+and starts it. Per user it adds a Start menu shortcut, the `.torrent` and `magnet:` handlers (`Seedwell.exe --register`,
+the app's own rule) and an Apps & features entry whose Uninstall runs the kept `install.ps1 -Uninstall`. `-Cli` puts
+`cli\seedwell.exe` on the user's PATH (the CLI lives in `cli\`: Windows file names ignore case, so `seedwell.exe` and
+`Seedwell.exe` cannot share a folder), `-Version X` picks a release, `-NoLaunch` skips the start, `-Uninstall` removes
+everything and asks before deleting `%LOCALAPPDATA%\Seedwell`. Running it again updates in place.
+
+The release: the *Windows build* job of `.github/workflows/release.yml` builds with `app-windows\release-zip.ps1` (release Rust with `SEEDWELL_RELEASE=1` and full LTO, the app published
+self-contained for win-x64 with the Windows App SDK inside, so nothing else needs installing), which also checks the
+zip (hash, unzipped, the CLI's version, the unzipped app starts and draws a quiet render, `install.ps1` parses). The
+*Draft release* job merges its `SHA256SUMS-windows` and `latest-windows.json` into the Mac's (`tools/release-merge.py`:
+`latest.json` gains `"windows": {zip, sha256, minimum_windows}`, the Mac's fields unchanged; `install.sh` takes the Mac
+zip by its exact name). Review the draft as usual: both platforms are in it.
+
+**The gate is CI, never a person or a machine.** A release needs CI passing on the Mac and Windows (Rust tests,
+clippy, the app's QA checks on both) and the release workflow passing (both builds, and on Windows the installer test
+`app-windows\qa\install-test.ps1` against the built zip). A Windows PC with an agent on it speeds up Windows work and
+may test more by hand, but a release never waits for it: what it finds is fixed like any other bug, in the next
+release if this one is out. So the Windows app stays a thin shell over the core (Rust decides, the host draws), and
+a rule that matters is tested in Rust, where both CIs run it.
+
+Build it on a Windows PC (a check; it never creates a release): `app-windows\release-zip.ps1` (refuses a dirty tree; `-AllowDirty` for a test
+build) writes `app-windows\bin\release\` with the zip, `install.ps1`, `SHA256SUMS-windows` and `latest-windows.json`.
+
+Test the installer without touching your own install: `app-windows\qa\install-test.ps1` serves those assets from a
+local web server laid out like GitHub's, and installs, updates, installs a pinned version and uninstalls with the
+test seam on (`SEEDWELL_INSTALL_TEST=1`: every registry key under `HKCU\Software\SeedwellInstallTest`, the shortcut in
+a temporary folder, the app never started), then checks that nothing is left and that the real places did not change.
 
 ### First publication: a fresh public history
 
@@ -132,7 +184,7 @@ configured; Sparkle, used only by a build that carries `SUPublicEDKey` and `SUFe
 ### GitHub release updater (now)
 
 - `release-zip.sh` writes `latest.json` next to the zip (`version`, `tag`, `notes_url`, `minimum_macos`, `zip`, `sha256`, all from
-  the script's own values) and `--draft` uploads it with the other assets. It is not in `SHA256SUMS`; `install.sh` checks the zip itself.
+  the script's own values); the release workflow adds the Windows entry and uploads it with the other assets. It is not in `SHA256SUMS`; `install.sh` checks the zip itself.
 - Installed copies read `<repo>/releases/latest/download/latest.json` once a day, which GitHub resolves to the release marked
   **Latest**. So **Publish is the moment users are notified** (within a day). For a minute or two after publishing, GitHub still
   resolves `latest` to the previous release on some requests, so an immediate Check Now can report "up to date". A draft, or a release marked as pre-release,
@@ -142,7 +194,7 @@ configured; Sparkle, used only by a build that carries `SUPublicEDKey` and `SUFe
 - `build.sh` writes `SeedwellRepoURL` into Info.plist (default `https://github.com/kkollsga/seedwell`; `SEEDWELL_REPO_URL` overrides).
   For tests, launch the app with `SEEDWELL_UPDATE_REPO=http://127.0.0.1:PORT` and serve `/releases/latest/download/latest.json`
   and `/releases/download/v<version>/install.sh` (plus the installer's own files) from there.
-- The install log is `~/Library/Logs/Seedwell/update.log`.
+- The install log is `logs/update.log` in the state folder (`~/Library/Application Support/Seedwell` on the Mac, `%LOCALAPPDATA%\Seedwell` on Windows); the updater's own record is `updates.json` next to it.
 
 ### Sparkle (when a Developer ID exists)
 

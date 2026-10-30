@@ -21,6 +21,7 @@ default = ["daemon"]
 daemon = ["dep:trs-engine", "dep:trs-storage", "dep:trs-state", "dep:trs-sync-net", "dep:trs-sync-proto", "trs-control/engine", "trs-control/sync", "tokio/signal", "tokio/rt-multi-thread"]
 
 [dependencies]
+trs-platform = { path = "../platform" }
 trs-control = { path = "../control", default-features = false }
 # `seedwell log trackers`: the same renderer as the app's viewer, and the local-file fallback.
 trs-devlog = { path = "../devlog" }

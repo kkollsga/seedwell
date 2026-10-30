@@ -7,7 +7,7 @@
 //! ```
 //!
 //! Runs in the foreground, prints one JSON object per second on stdout (everything else goes to
-//! stderr) and shuts down gracefully (stopped announces, state flushed) on SIGTERM or SIGINT.
+//! stderr) and shuts down gracefully (stopped announces, state flushed) when asked to stop (SIGTERM, SIGINT, Ctrl+C).
 #![deny(unsafe_code)]
 
 use std::fmt::Write as _;
@@ -15,7 +15,6 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use std::io::Write as _;
-use tokio::signal::unix::{SignalKind, signal};
 use trs_engine::{AddOptions, EngineConfig, EngineHandle, Host, HostOptions, Totals};
 
 /// Live heap bytes, counted only when `TRS_BENCH_DIAG=1` (measurement aid; with it, a diagnostics line
@@ -262,8 +261,7 @@ async fn run(a: Args) -> Result<(), String> {
     eprintln!("bench_client: {} torrents added, listening on {}", a.torrents.len(), h.listen_port());
 
     let heap_log = std::env::var_os("TRS_BENCH_DIAG").is_some();
-    let mut term = signal(SignalKind::terminate()).map_err(|e| e.to_string())?;
-    let mut int = signal(SignalKind::interrupt()).map_err(|e| e.to_string())?;
+    let mut stop = trs_platform::signal::Shutdown::new().map_err(|e| e.to_string())?;
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut stdout = std::io::stdout();
@@ -304,8 +302,7 @@ async fn run(a: Args) -> Result<(), String> {
                 let cum: Vec<String> = heap::CUM.iter().enumerate().map(|(i, c)| format!("{i}:{}", c.load(std::sync::atomic::Ordering::Relaxed) >> 10)).collect();
                 eprintln!("bench_client: heap_peak={} cum_kib_by_class {}", heap::PEAK.load(std::sync::atomic::Ordering::Relaxed), cum.join(" "));
             }
-            _ = term.recv() => break,
-            _ = int.recv() => break,
+            _ = stop.recv() => break,
         }
     }
     eprintln!("bench_client: shutting down");

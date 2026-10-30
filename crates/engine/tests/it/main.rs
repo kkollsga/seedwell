@@ -19,6 +19,7 @@ mod live_port;
 mod locations;
 mod merge_trackers;
 mod moves;
+#[cfg(unix)] // peak memory from getrusage
 mod network;
 mod organize;
 mod outage;

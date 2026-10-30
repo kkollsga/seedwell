@@ -78,7 +78,7 @@ pub fn words(d: &AwakeDto, mine: Option<(&str, bool)>) -> String {
     let until = |ms: u64| crate::chat::time(ms / 1000);
     let mut t = match mine {
         Some((key, true)) => match d.leases.iter().find(|l| l.key == key) {
-            Some(l) => format!("Keeping the Mac awake for {} until {}.", l.who, until(l.until_ms)),
+            Some(l) => format!(concat!("Keeping the ", trs_platform::computer!(), " awake for {} until {}."), l.who, until(l.until_ms)),
             None => "The lease is already over.".into(),
         },
         Some((_, false)) => "Gave the lease back.".into(),
@@ -94,17 +94,17 @@ pub fn words(d: &AwakeDto, mine: Option<(&str, bool)>) -> String {
     if mine.is_none() || !others.is_empty() {
         sep(&mut t);
         t.push_str(&match (mine.is_some(), others.is_empty()) {
-            (_, true) => "No agent asked to keep the Mac awake.".to_string(),
-            (false, false) => format!("Agents keeping the Mac awake: {}.", others.join(", ")),
+            (_, true) => concat!("No agent asked to keep the ", trs_platform::computer!(), " awake.").to_string(),
+            (false, false) => format!(concat!("Agents keeping the ", trs_platform::computer!(), " awake: {}."), others.join(", ")),
             (true, false) => format!("Also: {}.", others.join(", ")),
         });
     }
     if !d.leases.is_empty() {
         sep(&mut t);
         t.push_str(if !d.setting {
-            "But Seedwell's setting \"Keep awake while agents work\" is off, so the Mac may sleep."
+            concat!("But Seedwell's setting \"Keep awake while agents work\" is off, so the ", trs_platform::computer!(), " may sleep.")
         } else if !d.host_keeps {
-            "But this Seedwell runs without the app, so nothing holds the Mac awake."
+            concat!("But this Seedwell runs without the app, so nothing holds the ", trs_platform::computer!(), " awake.")
         } else {
             "The display still sleeps and the screen still locks."
         });
@@ -140,13 +140,13 @@ mod tests {
         let lease = |key: &str, who: &str| AwakeLeaseDto { key: key.into(), who: who.into(), client: "c".into(), since_ms: 0, until_ms: 3_600_000 };
         let d = AwakeDto { leases: vec![lease("agent:kglite", "kglite"), lease("agent:web", "web")], setting: true, host_keeps: true, kept: true };
         let t = words(&d, Some(("agent:kglite", true)));
-        assert!(t.starts_with("Keeping the Mac awake for kglite until ") && t.contains("Also: web until") && t.ends_with("the screen still locks."), "{t}");
-        assert!(words(&d, None).starts_with("Agents keeping the Mac awake: kglite until"));
+        assert!(t.starts_with(concat!("Keeping the ", trs_platform::computer!(), " awake for kglite until ")) && t.contains("Also: web until") && t.ends_with("the screen still locks."), "{t}");
+        assert!(words(&d, None).starts_with(concat!("Agents keeping the ", trs_platform::computer!(), " awake: kglite until")));
         let off = AwakeDto { setting: false, kept: false, ..d.clone() };
         assert!(words(&off, None).contains("setting \"Keep awake while agents work\" is off"));
         let daemon = AwakeDto { host_keeps: false, kept: false, ..d };
         assert!(words(&daemon, None).contains("runs without the app"));
-        assert_eq!(words(&AwakeDto::default(), None), "No agent asked to keep the Mac awake.");
+        assert_eq!(words(&AwakeDto::default(), None), concat!("No agent asked to keep the ", trs_platform::computer!(), " awake."));
         assert_eq!(words(&AwakeDto::default(), Some(("agent:x", false))), "Gave the lease back.");
     }
 }

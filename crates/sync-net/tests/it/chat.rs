@@ -182,7 +182,11 @@ async fn the_wake_up_command_gets_each_message_from_others_on_stdin() {
     join(&b.h, &a.h, &id, Role::ReadWrite, addr(&a)).await;
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("woken");
+    // (cmd.exe on Windows: findstr copies standard input; a command there gets no arguments either.)
+    #[cfg(unix)]
     let cmd = format!("cat >> '{}'; echo \"args=$#\" >> '{}'", out.display(), out.display());
+    #[cfg(windows)]
+    let cmd = format!("findstr \"^\" >> \"{}\" & >> \"{}\" echo args=0", out.display(), out.display());
     b.h.chat_set_wake_command(&id, Some(&cmd)).unwrap();
     // Agents off: nothing runs.
     a.h.chat_send(&id, None, MessageKind::Text, "first", None, None).await.unwrap();

@@ -117,7 +117,8 @@ if [ -n "$local_zip" ]; then
 else
   say "Downloading $APP_NAME${version:+ $version}"
   curl -fsSL --retry 3 -o "$tmp/SHA256SUMS" "$base/SHA256SUMS" || die "could not download $base/SHA256SUMS"
-  zip=$(awk '$2 ~ /^Seedwell-.*\.zip$/ {print $2; exit}' "$tmp/SHA256SUMS")
+  # The Mac's zip (Seedwell-X.Y.Z.zip); the release also lists the Windows one (Seedwell-X.Y.Z-windows-x64.zip).
+  zip=$(awk '$2 ~ /^Seedwell-[0-9]+\.[0-9]+\.[0-9]+\.zip$/ {print $2; exit}' "$tmp/SHA256SUMS")
   [ -n "$zip" ] || die "SHA256SUMS lists no Seedwell zip"
   curl -fSL --retry 3 --progress-bar -o "$tmp/$zip" "$base/$zip" || die "could not download $base/$zip"
 

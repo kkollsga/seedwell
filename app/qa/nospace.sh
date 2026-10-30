@@ -20,5 +20,5 @@ python3 -I "$REPO/app/qa/make_torrents.py" --out "$QA_ROOT/nospace" --count 1 --
 ID=$("$CLI" --socket "$SOCK" list --json --limit 500 | python3 -c "
 import json,sys
 print(next((t['id'] for t in json.load(sys.stdin)['transfers'] if '/vol3/' in t['save_path']), ''))")
-[ -n "$ID" ] && "$CLI" --socket "$SOCK" choose "$ID" --default >/dev/null 2>&1 || true
+[ -n "$ID" ] && "$CLI" --socket "$SOCK" start "$ID" --suggested >/dev/null 2>&1 || true
 echo "added a torrent that does not fit on $VOL"

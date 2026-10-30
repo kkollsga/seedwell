@@ -11,18 +11,17 @@
 //! parent, `/Volumes`, is the boot volume) and is reported as an error, never as "same volume".
 
 use std::io;
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use trs_classify::Category;
 
 use crate::config::Config;
 
-/// `~` and `~/x` expanded with `$HOME`; other strings are used as they are.
+/// `~` and `~/x` expanded with the home folder; other strings are used as they are.
 pub fn expand_tilde(s: &str) -> PathBuf {
     if (s == "~" || s.starts_with("~/"))
-        && let Some(home) = std::env::var_os("HOME") {
-            let mut p = PathBuf::from(home);
+        && let Some(home) = trs_platform::dirs::home() {
+            let mut p = home;
             if let Some(rest) = s.strip_prefix("~/") {
                 p.push(rest);
             }
@@ -36,16 +35,19 @@ pub fn expand_tilde(s: &str) -> PathBuf {
 /// Errors: `NotFound` when the path is below `/Volumes/<name>` and that volume is not mounted,
 /// or when no ancestor can be read at all.
 pub fn volume_id(path: &Path) -> io::Result<u64> {
-    if let Ok(rest) = path.strip_prefix("/Volumes")
-        && let Some(first) = rest.components().next()
-            && !Path::new("/Volumes").join(first).exists() {
-                return Err(io::Error::new(io::ErrorKind::NotFound, "volume is not mounted"));
-            }
+    for root in trs_platform::dirs::mount_roots() {
+        if let Ok(rest) = path.strip_prefix(root)
+            && let Some(first) = rest.components().next()
+            && !Path::new(root).join(first).exists()
+        {
+            return Err(io::Error::new(io::ErrorKind::NotFound, "volume is not mounted"));
+        }
+    }
     let mut last = io::Error::new(io::ErrorKind::NotFound, "no existing folder");
     for dir in path.ancestors() {
         let probe = if dir.as_os_str().is_empty() { Path::new(".") } else { dir };
-        match std::fs::metadata(probe) {
-            Ok(m) => return Ok(m.dev()),
+        match trs_platform::fs::volume_id(probe) {
+            Ok(id) => return Ok(id),
             Err(e) => last = e,
         }
     }
@@ -140,10 +142,35 @@ pub fn tracker_cross_volume_pairs(cfg: &Config, own: &crate::config::LocationOve
 mod tests {
     use super::*;
 
-    fn tmp(tag: &str) -> PathBuf {
+    /// A scratch folder, removed when dropped (also when the test fails).
+    struct Tmp(PathBuf);
+
+    impl std::ops::Deref for Tmp {
+        type Target = Path;
+        fn deref(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for Tmp {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn tmp(tag: &str) -> Tmp {
         let d = std::env::temp_dir().join(format!("trs-vol-{tag}-{}", std::process::id()));
         std::fs::create_dir_all(&d).unwrap();
-        d
+        Tmp(d)
+    }
+
+    /// A place on a disk that is not there: below `/Volumes` on Unix, a drive letter nothing uses on Windows.
+    fn unmounted(rest: &str) -> String {
+        #[cfg(windows)]
+        let root = ('D'..='Z').rev().map(|l| format!("{l}:\\")).find(|r| !Path::new(r).exists()).expect("a free drive letter");
+        #[cfg(not(windows))]
+        let root = "/Volumes/definitely-not-mounted-xyz/".to_string();
+        format!("{root}{rest}")
     }
 
     #[test]
@@ -151,14 +178,13 @@ mod tests {
         let d = tmp("same");
         assert!(same_volume(&d, &d.join("not/yet/created")).unwrap());
         assert!(same_volume(&d.join("a/b"), &d.join("c")).unwrap());
-        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
     fn an_unmounted_volume_is_an_error_not_a_match() {
-        let e = volume_id(Path::new("/Volumes/definitely-not-mounted-xyz/Media")).unwrap_err();
+        let e = volume_id(Path::new(&unmounted("Media"))).unwrap_err();
         assert_eq!(e.kind(), io::ErrorKind::NotFound);
-        assert!(same_volume(Path::new("/tmp"), Path::new("/Volumes/definitely-not-mounted-xyz/x")).is_err());
+        assert!(same_volume(&std::env::temp_dir(), Path::new(&unmounted("x"))).is_err());
     }
 
     #[test]
@@ -169,9 +195,8 @@ mod tests {
         cfg.folders.incomplete_dir = d.join("inc").display().to_string();
         assert!(cross_volume_pairs(&cfg).is_empty());
         // A category pointing at a volume that is not mounted is unknown, not "different".
-        cfg.folders.categories.movie.finished_dir = Some("/Volumes/definitely-not-mounted-xyz/Movies".into());
+        cfg.folders.categories.movie.finished_dir = Some(unmounted("Movies"));
         assert!(cross_volume_pairs(&cfg).is_empty());
-        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
@@ -199,7 +224,7 @@ mod tests {
         let mut own = crate::config::LocationOverride::default();
         let cats = crate::config::CategoryLocations::default();
         assert!(tracker_cross_volume_pairs(&cfg, &own, &cats).is_empty(), "nothing set: nothing to warn about");
-        own.finished_dir = Some("/Volumes/definitely-not-mounted-xyz/T".into());
+        own.finished_dir = Some(unmounted("T"));
         // An unmounted disk is an error elsewhere, never a "different disks" warning.
         assert!(tracker_cross_volume_pairs(&cfg, &own, &cats).is_empty());
     }

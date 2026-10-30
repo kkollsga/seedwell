@@ -22,6 +22,28 @@ async fn move_to(n: &Node, wanted: u16) -> u16 {
     .await
 }
 
+/// Moves `n` to a manual port that is free: [`free_port`] checks TCP only and another test may take the port
+/// meanwhile, and a taken port (TCP or UDP) leaves the engine where it was with a warning, so then the next one.
+async fn move_to_free(n: &Node) -> u16 {
+    for _ in 0..5 {
+        let p = free_port();
+        let before = n.h.listen_port();
+        n.h.update_config(move |c| c.listen_port = p);
+        let moved = wait_for("the port changed or was refused", 15, || async {
+            if n.h.listen_port() == p && p != before {
+                Some(true)
+            } else {
+                n.h.port_fallback().filter(|f| f.wanted == p).map(|_| false)
+            }
+        })
+        .await;
+        if moved {
+            return p;
+        }
+    }
+    panic!("no free port after five tries");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_live_port_change_moves_tcp_and_utp_closes_the_old_port_and_waits_for_the_next_announce() {
     let tracker = MockTracker::start(60).await;
@@ -44,8 +66,7 @@ async fn a_live_port_change_moves_tcp_and_utp_closes_the_old_port_and_waits_for_
     wait_for("some data", 30, || async { (stay.row(&t.id).await?.done_bytes > 100_000).then_some(()) }).await;
 
     let announces_before = tracker.log_for(&t.id).len();
-    let new = free_port();
-    assert_eq!(move_to(&seeder, new).await, new);
+    let new = move_to_free(&seeder).await;
     assert!(seeder.h.port_fallback().is_none());
 
     // Right after the change no announce was made because of it.
@@ -110,8 +131,7 @@ async fn a_taken_port_keeps_the_old_one_and_says_so() {
 
     // Free again: the port moves and the warning goes away.
     drop(squatter);
-    let ok = free_port();
-    assert_eq!(move_to(&n, ok).await, ok);
+    move_to_free(&n).await;
     assert!(n.h.port_fallback().is_none());
 }
 
@@ -123,8 +143,7 @@ async fn automatic_is_a_random_port_at_every_start_and_at_every_live_change() {
     assert_ne!(a.h.listen_port(), b.h.listen_port());
     assert_eq!(a.h.config().await.unwrap().listen_port, 0, "automatic stays automatic in the configuration");
     assert!(a.h.port_fallback().is_none());
-    let manual = free_port();
-    assert_eq!(move_to(&a, manual).await, manual);
+    let manual = move_to_free(&a).await;
     let random = move_to(&a, 0).await;
     assert_ne!(random, manual);
     assert!(a.h.port_fallback().is_none());
@@ -145,8 +164,7 @@ async fn the_dht_follows_the_port() {
     let router_addr = format!("127.0.0.1:{}", router.h.listen_port());
     let t = standard_torrent(1_000_000, None, false, 8802);
     let seeder = node(dht(router_addr.clone())).await;
-    let new = free_port();
-    move_to(&seeder, new).await;
+    move_to_free(&seeder).await;
     t.write_to(seeder.dir.path());
     seeder.h.add_torrent_file(t.bytes.clone(), AddOptions::default()).await.unwrap();
     wait_done(&seeder, &t.id, 30).await;
@@ -178,7 +196,7 @@ async fn the_dht_is_lent_for_public_topics() {
     let router_addr = format!("127.0.0.1:{}", router.h.listen_port());
     let a = node(dht(router_addr.clone())).await;
     let b = node(dht(router_addr)).await;
-    move_to(&a, free_port()).await;
+    move_to_free(&a).await;
     let topic = [0x5a; 20];
     let topic = trs_dht::PublicInfoHash::new(topic, false).unwrap();
     let found = wait_for("the announced port is found", 60, || async {

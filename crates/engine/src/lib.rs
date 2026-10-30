@@ -52,7 +52,7 @@ pub use persist::{MemStore, Store};
 pub use probe::EngineProbe;
 pub use session::moves::{MOVE_STEP_BEFORE_COMMIT, MOVE_STEP_BEFORE_MARK};
 pub use policy::PolicyData;
-pub use host::{ConfigTweak, Host, HostOptions};
+pub use host::{ConfigAdjust, ConfigTweak, Host, HostOptions};
 pub use state_store::StateStore;
 
 pub use api::*;

@@ -158,7 +158,7 @@ pub fn describe(r: &Request) -> String {
         Request::SyncRemove(p) => format!(
             "remove folder {}{} (step 1, asks for confirmation)",
             folder(&p.folder),
-            if p.delete_files { " and move it to the Trash" } else { "" }
+            if p.delete_files { concat!(" and move it to the ", trs_platform::trash!()) } else { "" }
         ),
         Request::SyncRemoveConfirm(_) => "confirm folder removal".into(),
         Request::SyncSetSettings(p) => {

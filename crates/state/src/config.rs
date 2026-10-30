@@ -10,7 +10,7 @@ use serde::de::{self, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use trs_classify::Category;
 
-use crate::doc::{Document, Parsed, parse_toml, render_table};
+use crate::doc::{Document, Parsed, parse_toml, render_table, salvage_table};
 use crate::duration::Secs;
 use crate::error::{DocError, FieldError};
 use crate::ids::valid_id;
@@ -785,7 +785,7 @@ pub(crate) fn check_path(errs: &mut Vec<FieldError>, path: &str, v: &str) {
         errs.push(FieldError::new(path, "longer than 4096 bytes"));
     } else if v.chars().any(char::is_control) {
         errs.push(FieldError::new(path, "contains a control character"));
-    } else if !(v.starts_with('/') || v == "~" || v.starts_with("~/")) {
+    } else if !(std::path::Path::new(v).is_absolute() || v == "~" || v.starts_with("~/")) {
         errs.push(FieldError::new(path, "must be absolute or start with `~/`"));
     }
 }
@@ -849,8 +849,10 @@ impl Config {
         check_path(&mut e, "folders.download_dir", &f.download_dir);
         check_path(&mut e, "folders.incomplete_dir", &f.incomplete_dir);
         match (&f.archive_dir, f.torrent_after_add) {
+            // Blamed on the choice that cannot work: a file with bad values then keeps every other
+            // value and this one leaves the .torrent alone (a missing key cannot be replaced).
             (None, AfterAdd::Archive) => {
-                e.push(FieldError::new("folders.archive_dir", "required when torrent_after_add = \"archive\""));
+                e.push(FieldError::new("folders.torrent_after_add", "\"archive\" needs folders.archive_dir, the folder to move the .torrent files to"));
             }
             (Some(d), _) => check_path(&mut e, "folders.archive_dir", d),
             _ => {}
@@ -1028,6 +1030,26 @@ fn migrate_retired_keys(text: &str) -> Option<String> {
     toml::to_string(&t).ok()
 }
 
+/// The settings that move, trash or delete the user's files, with the value of each that leaves
+/// them alone: what a bad value of one becomes when the backup has no usable value for it (SPEC §10).
+///
+/// * `folders.torrent_after_add` moves the added `.torrent` to the Trash or the archive folder:
+///   `"leave"` leaves it where it is.
+/// * `folders.by_status` files finished torrents into `Active/`, `Dormant/`, `Stopped/` and `Dead/`
+///   as their state changes (SPEC 7A.3): `false` moves nothing.
+///
+/// The others are not single values: a bad `[[folders.watch]]` entry (its `after_add` trashes or
+/// archives what it picks up) is ignored as a whole, so that folder is not watched and nothing in
+/// it is touched; a bad `folders.archive_dir` takes the backup's folder or none, and then
+/// `torrent_after_add = "archive"` without a folder is refused on `torrent_after_add` itself.
+pub fn leaves_files_alone(key: &str) -> Option<toml::Value> {
+    match key {
+        "folders.torrent_after_add" => Some(toml::Value::String(AfterAdd::Leave.as_str().to_owned())),
+        "folders.by_status" => Some(toml::Value::Boolean(false)),
+        _ => None,
+    }
+}
+
 impl Document for Config {
     const FILE: &'static str = "config.toml";
 
@@ -1064,6 +1086,22 @@ impl Document for Config {
         Ok(Parsed { value: cfg, warnings })
     }
 
+    fn salvage(text: &str, last_good: Option<&str>) -> Option<Parsed<Self>> {
+        let table = |text: &str| -> Option<toml::Table> { migrate_retired_keys(text).as_deref().unwrap_or(text).parse().ok() };
+        let input = table(text)?;
+        // A file of a newer format (or no number at all) is never half-read.
+        if let Some(v) = input.get("version") {
+            v.as_integer().filter(|n| (1..=i64::from(CONFIG_VERSION)).contains(n))?;
+        }
+        let defaults = toml::Table::try_from(Config::default()).ok()?;
+        let backup = last_good.filter(|t| Self::parse_str(t).is_ok()).and_then(table);
+        let (good, mut warnings) = salvage_table::<Config>(&input, &defaults, backup.as_ref(), leaves_files_alone, Config::validate)?;
+        // The kept values go through the normal path (migrations, unknown keys).
+        let parsed = Self::parse_str(&toml::to_string(&good).ok()?).ok()?;
+        warnings.extend(parsed.warnings);
+        Some(Parsed { value: parsed.value, warnings })
+    }
+
     fn file_is_outdated(text: &str) -> bool {
         let table = text.parse::<toml::Table>().ok();
         table
@@ -1091,6 +1129,16 @@ impl Document for Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A Unix-style absolute test path made absolute on this system: unchanged on Unix, a drive letter in front on Windows.
+    fn abs(p: &str) -> String {
+        if cfg!(windows) { format!("C:{p}") } else { p.to_string() }
+    }
+
+    /// A TOML test document whose quoted Unix-style absolute paths (`"/x"`) are made absolute on this system.
+    fn win(doc: &str) -> String {
+        if cfg!(windows) { doc.replace("\"/", "\"C:/") } else { doc.to_string() }
+    }
 
     #[test]
     fn defaults_validate_and_roundtrip() {
@@ -1264,6 +1312,21 @@ mod tests {
     }
 
     #[test]
+    fn a_folder_is_an_absolute_path_of_this_system_or_starts_with_a_tilde() {
+        let check = |v: &str| {
+            let mut e = Vec::new();
+            check_path(&mut e, "folders.download_dir", v);
+            e.is_empty()
+        };
+        assert!(check("~") && check("~/Downloads"));
+        assert!(!check("relative/dir") && !check("~user/x"));
+        let abs = std::env::temp_dir().join("Downloads");
+        assert!(check(abs.to_str().unwrap()), "{}", abs.display());
+        // A path from the root of no drive is not absolute on Windows.
+        assert_eq!(check("/data/seed"), cfg!(unix));
+    }
+
+    #[test]
     fn organize_by_status_is_off_by_default_and_round_trips() {
         assert!(!Config::default().folders.by_status);
         let mut c = Config::default();
@@ -1276,20 +1339,20 @@ mod tests {
 
     #[test]
     fn templates_placement_and_template_locations_of_older_files_are_dropped() {
-        let old = "version = 2\n[folders]\ndownload_dir = \"~/Downloads\"\nplacement = \"hardlink\"\n\
+        let old = &win("version = 2\n[folders]\ndownload_dir = \"~/Downloads\"\nplacement = \"hardlink\"\n\
             [folders.templates]\nmovie = \"~/Media/Movies/{title} ({year})/{title}.{ext}\"\n\
             [folders.categories.movie]\nfinished_dir = \"/Volumes/M/Movies/{title} ({year})/\"\n\
             [folders.categories.tv]\nfinished_dir = \"{show}/Season {season}\"\nincomplete_dir = \"/Volumes/M/inc\"\n\
-            [folders.categories.music]\nfinished_dir = \"/Volumes/M/Music\"\n";
+            [folders.categories.music]\nfinished_dir = \"/Volumes/M/Music\"\n");
         assert!(Config::file_is_outdated(old));
         let p = Config::parse_str(old).unwrap();
         assert!(p.warnings.is_empty(), "{:?}", p.warnings);
         assert_eq!(p.value.version, CONFIG_VERSION);
         let cats = &p.value.folders.categories;
-        assert_eq!(cats.movie.finished_dir.as_deref(), Some("/Volumes/M/Movies"), "the fixed prefix");
+        assert_eq!(cats.movie.finished_dir.as_deref(), Some(abs("/Volumes/M/Movies").as_str()), "the fixed prefix");
         assert_eq!(cats.tv.finished_dir, None, "nothing fixed in front: the app default");
-        assert_eq!(cats.tv.incomplete_dir.as_deref(), Some("/Volumes/M/inc"));
-        assert_eq!(cats.music.finished_dir.as_deref(), Some("/Volumes/M/Music"), "a plain folder is kept");
+        assert_eq!(cats.tv.incomplete_dir.as_deref(), Some(abs("/Volumes/M/inc").as_str()));
+        assert_eq!(cats.music.finished_dir.as_deref(), Some(abs("/Volumes/M/Music").as_str()), "a plain folder is kept");
         assert_eq!(p.value.folders.download_dir, "~/Downloads");
         let out = p.value.render().unwrap();
         assert!(!out.contains("template") && !out.contains("placement") && !out.contains('{'), "{out}");
@@ -1309,10 +1372,10 @@ mod tests {
     #[test]
     fn retired_seeding_folder_migrates_to_the_finished_location() {
         // Organize off: the fixed seeding folder was where the files lived, i.e. the finished location.
-        let old = "version = 2\n[folders]\ndownload_dir = \"~/Downloads\"\nplacement = \"off\"\n[folders.seeding]\nmode = \"fixed\"\ndir = \"/data/seed\"\n";
+        let old = &win("version = 2\n[folders]\ndownload_dir = \"~/Downloads\"\nplacement = \"off\"\n[folders.seeding]\nmode = \"fixed\"\ndir = \"/data/seed\"\n");
         assert!(Config::file_is_outdated(old), "the store rewrites the file once");
         let p = Config::parse_str(old).unwrap();
-        assert_eq!(p.value.folders.download_dir, "/data/seed");
+        assert_eq!(p.value.folders.download_dir, abs("/data/seed"));
         assert!(p.value.unknown.get("folders").is_none_or(|f| f.get("seeding").is_none()), "not kept as an unknown key");
         let out = p.value.render().unwrap();
         assert!(!out.contains("seeding"), "{out}");
@@ -1320,8 +1383,8 @@ mod tests {
         assert_eq!(Config::parse_str(&out).unwrap().value, p.value);
 
         // Organize on: the fixed folder was never used, so it is dropped and nothing moves.
-        let organized = "[folders]\ndownload_dir = \"~/Downloads\"\n[folders.seeding]\nmode = \"fixed\"\ndir = \"/data/seed\"\n";
-        assert_eq!(Config::parse_str(organized).unwrap().value.folders.download_dir, "~/Downloads");
+        let organized = win("[folders]\ndownload_dir = \"~/Downloads\"\n[folders.seeding]\nmode = \"fixed\"\ndir = \"/data/seed\"\n");
+        assert_eq!(Config::parse_str(&organized).unwrap().value.folders.download_dir, "~/Downloads");
 
         // "organized" mode, a fixed mode without a folder (formerly an error), a plain old file: all load.
         for t in [

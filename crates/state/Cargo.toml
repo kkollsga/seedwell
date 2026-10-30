@@ -8,6 +8,7 @@ publish = false
 description = "Persistent state for Seedwell: config, rules, tracker profiles, redb database, statistics"
 
 [dependencies]
+trs-platform = { path = "../platform" }
 redb = "4"
 # Reads databases written by Seedwell 0.1 (redb 2 file format) once, to convert them (src/legacy.rs).
 redb2 = { package = "redb", version = "2.6" }

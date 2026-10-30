@@ -8,6 +8,7 @@ publish = false
 description = "Direct HTTP(S) downloads: resumable, segmented, throttled, staged in .part files (SPEC 7D)"
 
 [dependencies]
+trs-platform = { path = "../platform" }
 # Same HTTP stack as trs-tracker (hyper 1 + rustls via hyper-rustls) so the binary carries one.
 tokio = { version = "1", default-features = false, features = ["rt", "net", "time", "sync", "macros"] }
 hyper = { version = "1", default-features = false, features = ["http1", "client"] }

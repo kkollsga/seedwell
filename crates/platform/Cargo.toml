@@ -1,0 +1,31 @@
+[package]
+name = "trs-platform"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "The one place in Seedwell's core that names an operating system (docs/CROSS-PLATFORM.md §2)"
+
+[dependencies]
+socket2 = { version = "0.6", default-features = false, features = ["all"] }
+# `signal::Shutdown`.
+tokio = { version = "1", default-features = false, features = ["signal", "macros", "net"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# The Mac's own Trash (`fs::move_to_trash`): -[NSFileManager trashItemAtURL:resultingItemURL:error:], which keeps an
+# item in the Trash of its own volume, with Finder's Put Back.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { version = "0.6.5", default-features = false, features = ["std"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSError", "NSFileManager", "NSString", "NSURL"] }
+
+[target.'cfg(windows)'.dependencies]
+# Named pipes for the control connection (`ipc::create_pipe`).
+tokio = { version = "1", default-features = false, features = ["net", "signal"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Networking_WinSock", "Win32_Storage_FileSystem", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_CloudFilters", "Win32_System_Console", "Win32_System_Com", "Win32_System_Diagnostics_ToolHelp", "Win32_System_JobObjects", "Win32_System_Pipes", "Win32_System_ProcessStatus", "Win32_System_Registry", "Win32_System_Threading", "Win32_System_Time", "Win32_UI_Shell"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", default-features = false, features = ["rt", "macros", "net", "io-util"] }

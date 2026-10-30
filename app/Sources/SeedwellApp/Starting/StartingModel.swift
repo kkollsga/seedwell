@@ -12,20 +12,15 @@ extension PendingStart {
 extension TransferRow {
     /// Held by the engine: waiting for a choice, or counting down to its start. Neither announces,
     /// connects or has anything to play or list.
-    var isHeld: Bool { awaitingChoice || pending != nil }
+    var isHeld: Bool { rowIsHeld(row: self) }
     /// A magnet link that has not fetched its metadata: the engine does not know its files yet.
     var isUnresolvedMagnet: Bool { sizeBytes == 0 }
 }
 
-/// "Starting in 7 s", the one phrase of the countdown, in the notifier, the rows and the menu.
+/// "Starting in 7 s", the one phrase of the countdown, in the notifier, the rows and the menu (the core's words).
 enum StartingText {
-    /// Whole seconds shown for `remaining`: the number only reaches 0 when the torrent starts.
-    static func seconds(_ remaining: TimeInterval) -> Int { max(0, Int(remaining.rounded(.up))) }
-
     static func line(remaining: TimeInterval, paused: Bool) -> String {
-        if paused { return "Paused" }
-        let s = seconds(remaining)
-        return s <= 0 ? "Starting…" : "Starting in \(s) s"
+        startingLine(remainingMs: UInt64(max(0, (remaining * 1000).rounded(.up))), paused: paused)
     }
 
     /// "Movie · ~/Media/Movies/…": what it is and where it goes.

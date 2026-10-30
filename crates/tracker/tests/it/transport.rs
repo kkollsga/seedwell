@@ -564,6 +564,7 @@ fn fast_udp() -> UdpConfig {
         max_exponent: 3,
         connection_id_ttl: Duration::from_millis(400),
         total_timeout: Duration::from_secs(5),
+        bind: None,
     }
 }
 
@@ -579,7 +580,9 @@ fn actions(t: &UdpTracker) -> Vec<u32> {
 #[tokio::test]
 async fn udp_announce_reuses_the_connection_id_and_sends_bep41_data() {
     let tr = udp_tracker(0, false).await;
-    let t = UdpTransport::bind(fast_udp()).await.unwrap();
+    // It counts packets, so no retransmit may happen: fast_udp()'s 40 ms timer fires on a loaded machine before the
+    // tracker's reply is read, and a second announce would be sent.
+    let t = UdpTransport::bind(UdpConfig { base_timeout: Duration::from_secs(2), ..fast_udp() }).await.unwrap();
     let url = format!("udp://127.0.0.1:{}/announce?passkey=XYZ", tr.addr.port());
     let r1 = t.announce(&gated(&url)).await.unwrap();
     assert_eq!(r1.interval, Duration::from_secs(1800));
@@ -711,8 +714,11 @@ async fn udp_times_out_and_maps_errors() {
 #[tokio::test]
 async fn udp_stale_connection_id_error_reconnects_once() {
     let tr = udp_tracker(0, false).await;
+    // It counts packets, so no retransmit may happen (a 2 s timer, not fast_udp()'s 40 ms, which fires on a loaded
+    // machine).
     let t = UdpTransport::bind(UdpConfig {
         connection_id_ttl: Duration::from_secs(60),
+        base_timeout: Duration::from_secs(2),
         ..fast_udp()
     })
     .await
@@ -720,7 +726,7 @@ async fn udp_stale_connection_id_error_reconnects_once() {
     let url = format!("udp://127.0.0.1:{}/announce", tr.addr.port());
     assert!(t.announce(&gated(&url)).await.is_ok());
     // A second client session makes the tracker forget our id (it keeps only the latest).
-    let other = UdpTransport::bind(fast_udp()).await.unwrap();
+    let other = UdpTransport::bind(UdpConfig { base_timeout: Duration::from_secs(2), ..fast_udp() }).await.unwrap();
     assert!(other.announce(&gated(&url)).await.is_ok());
     assert!(
         t.announce(&gated(&url)).await.is_ok(),
@@ -792,4 +798,14 @@ async fn quit_stop_to_a_refusing_host_is_never_reached() {
     let limits = QuitLimits { connect: Duration::from_secs(3), answer: Duration::from_secs(2) };
     let out = local_http("1").announce_quit(&gated_stopped(&format!("http://127.0.0.1:{port}/announce")), limits).await;
     assert!(out.result.unwrap_err().never_reached_tracker());
+}
+
+/// A transport given one address listens there only (an engine bound to loopback stays off the network), and
+/// one without listens on every address.
+#[tokio::test]
+async fn a_bound_transport_listens_on_its_address_only() {
+    let t = UdpTransport::bind(UdpConfig { bind: Some(std::net::Ipv4Addr::LOCALHOST), ..fast_udp() }).await.unwrap();
+    assert_eq!(t.local_addr_v4().unwrap().ip(), std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+    let any = UdpTransport::bind(fast_udp()).await.unwrap();
+    assert!(any.local_addr_v4().unwrap().ip().is_unspecified());
 }

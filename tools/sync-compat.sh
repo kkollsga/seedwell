@@ -42,9 +42,17 @@ failed=0
 pass() { echo "PASS  $*"; }
 fail() { echo "FAIL  $*"; failed=1; }
 
+# A Python that runs: python3; on Windows "python3" may be only the Store's placeholder, so also
+# python and the py launcher.
+PY=""
+for c in python3 python py; do
+  if "$c" -c 'import sys' >/dev/null 2>&1; then PY="$c"; break; fi
+done
+[ -n "$PY" ] || { echo "sync-compat: no Python found (python3, python or py)"; exit 2; }
+
 # A field of the JSON on stdin: `field a.0.b`.
 field() {
-  python3 -I -c '
+  "$PY" -I -c '
 import json, sys
 v = json.load(sys.stdin)
 for k in sys.argv[1].split("."):

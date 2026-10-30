@@ -263,16 +263,30 @@ async fn a_declined_move_is_not_made_behind_the_users_back() {
 
 // ---- files that cannot be moved --------------------------------------------------------------
 
-/// `chflags uchg` (Finder "Locked") on a file, undone on drop so a failing test leaves nothing behind.
-struct Locked(PathBuf);
+/// A file that cannot be moved, freed on drop so a failing test leaves nothing behind: `chflags uchg`
+/// (Finder "Locked"); on Windows the file held open without letting others delete it, as a program
+/// that has it open does.
+struct Locked(PathBuf, std::sync::Mutex<Option<std::fs::File>>);
 
 impl Locked {
     fn new(p: PathBuf) -> Self {
-        assert!(std::process::Command::new("chflags").arg("uchg").arg(&p).status().unwrap().success());
-        Locked(p)
+        #[cfg(windows)]
+        let held = {
+            use std::os::windows::fs::OpenOptionsExt as _;
+            // FILE_SHARE_READ | FILE_SHARE_WRITE, no FILE_SHARE_DELETE.
+            Some(std::fs::OpenOptions::new().read(true).share_mode(3).open(&p).unwrap())
+        };
+        #[cfg(not(windows))]
+        let held = {
+            assert!(std::process::Command::new("chflags").arg("uchg").arg(&p).status().unwrap().success());
+            None
+        };
+        Locked(p, std::sync::Mutex::new(held))
     }
     fn unlock(&self) {
-        let _ = std::process::Command::new("chflags").arg("nouchg").arg(&self.0).stderr(std::process::Stdio::null()).status();
+        if self.1.lock().unwrap().take().is_none() {
+            let _ = std::process::Command::new("chflags").arg("nouchg").arg(&self.0).stderr(std::process::Stdio::null()).status();
+        }
     }
 }
 
@@ -282,9 +296,11 @@ impl Drop for Locked {
     }
 }
 
-/// A folder made read-only, put back on drop.
+/// A folder made read-only, put back on drop (Unix permissions: a Windows folder has no such bit).
+#[cfg(unix)]
 struct ReadOnly(PathBuf);
 
+#[cfg(unix)]
 impl ReadOnly {
     fn new(p: PathBuf) -> Self {
         use std::os::unix::fs::PermissionsExt;
@@ -297,6 +313,7 @@ impl ReadOnly {
     }
 }
 
+#[cfg(unix)]
 impl Drop for ReadOnly {
     fn drop(&mut self) {
         self.restore();
@@ -330,10 +347,7 @@ async fn a_locked_file_is_reported_once_and_the_move_follows_the_unlock() {
     let lock = Locked::new(l.dl.join("Active/lockedbundle/sub/two.bin"));
     n.h.pause(&[t.id]); // belongs in Stopped/ at the next check
     let (failed, started) = failures(&mut ev, t.id, 2500).await; // about ten checks
-    assert_eq!(
-        failed,
-        ["\u{201c}two.bin\u{201d} is locked (Finder \u{203a} Get Info \u{203a} Locked), so the torrent stays where it is"]
-    );
+    assert_eq!(failed, [format!("\u{201c}two.bin\u{201d} {}, so the torrent stays where it is", trs_platform::fs::LOCKED_WORDS)]);
     assert_eq!(started, 0, "the preflight runs before the move is announced");
     assert!(!failed[0].contains("file #"));
     let r = row_h(&n.h, &t.id).await.unwrap();
@@ -366,7 +380,7 @@ async fn a_move_the_user_asked_for_reports_a_locked_file_every_time() {
         n.h.move_to(&[t.id], dest.path()).await.unwrap();
         let (failed, _) = failures(&mut ev, t.id, 800).await;
         assert_eq!(failed.len(), 1, "{failed:?}");
-        assert!(failed[0].starts_with("\u{201c}one.bin\u{201d} is locked"), "{failed:?}");
+        assert!(failed[0].starts_with(&format!("\u{201c}one.bin\u{201d} {}", trs_platform::fs::LOCKED_WORDS)), "{failed:?}");
     }
     t.verify(&l.dl, &[]);
     assert!(top(dest.path()).is_empty());
@@ -375,6 +389,7 @@ async fn a_move_the_user_asked_for_reports_a_locked_file_every_time() {
 
 /// A folder that cannot be written is named, and nothing is touched.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[cfg(unix)]
 async fn a_folder_without_permission_is_named() {
     let t = bundle("nopermbundle", 1310);
     let l = lab();

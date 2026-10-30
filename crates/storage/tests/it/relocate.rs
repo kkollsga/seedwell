@@ -1182,11 +1182,13 @@ fn switch_layout_renaming_refuses_a_target_that_appeared_and_undoes_partial_rena
 // ---------------------------------------------------------------------------------------------
 
 /// A binary plist holding the Finder tags ["Green\n2", "Seedwell"] (`com.apple.metadata:_kMDItemUserTags`).
+#[cfg(unix)]
 const FINDER_TAGS: [u8; 63] = [
     98, 112, 108, 105, 115, 116, 48, 48, 162, 1, 2, 87, 71, 114, 101, 101, 110, 10, 50, 88, 83, 101, 101, 100, 119, 101, 108,
     108, 8, 11, 19, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 28,
 ];
 
+#[cfg(unix)]
 fn set_xattr(p: &Path, name: &str, value: &[u8]) {
     use std::os::unix::ffi::OsStrExt;
     let path = std::ffi::CString::new(p.as_os_str().as_bytes()).unwrap();
@@ -1200,6 +1202,7 @@ fn set_xattr(p: &Path, name: &str, value: &[u8]) {
     assert_eq!(rc, 0, "setxattr {name:?}: {}", std::io::Error::last_os_error());
 }
 
+#[cfg(unix)]
 fn get_xattr(p: &Path, name: &str) -> Option<Vec<u8>> {
     use std::os::unix::ffi::OsStrExt;
     let path = std::ffi::CString::new(p.as_os_str().as_bytes()).unwrap();
@@ -1226,6 +1229,7 @@ fn acl_listing(p: &Path) -> String {
 /// A cross-volume move (the copy path) keeps extended attributes, Finder tags, ACLs and the mode of
 /// every file; an empty file and a file without any attribute are fine too.
 #[test]
+#[cfg(unix)] // extended attributes and modes; Windows keeps neither on copy yet
 fn copy_keeps_xattrs_finder_tags_acls_and_mode() {
     use std::os::unix::fs::PermissionsExt;
     let f = fx();
@@ -1297,4 +1301,40 @@ fn finder_litter_does_not_keep_an_emptied_folder() {
     assert!(!f.src.exists(), "left behind: {:?}", walk(&f.src));
     assert!(keep.join(".DS_Store").exists() && keep.join("notes.txt").exists());
     assert!(f.base.exists(), "stop_at itself stays");
+}
+
+/// Windows: a file another program opens (without letting it be deleted) after the preflight is
+/// found by the move itself: Locked, not an I/O error, and the files already moved go back.
+#[cfg(windows)]
+#[test]
+fn a_file_held_open_by_another_program_ends_the_move_as_locked() {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    let f = fx();
+    let io = disk();
+    let h = f.handle(&io);
+    let plan = f.plan(&h);
+    let held_path = f.src.join(&f.s.names[2]);
+    let first_src = f.src.join(&f.s.names[0]);
+    // A program opens file 2 after the preflight, once the first file has moved: FILE_SHARE_READ |
+    // FILE_SHARE_WRITE, no FILE_SHARE_DELETE, as a program that has it open does.
+    let holder: Arc<std::sync::Mutex<Option<std::fs::File>>> = Arc::default();
+    let mut o = opts(&f.s);
+    let (h2, p2) = (holder.clone(), held_path.clone());
+    o.fault = Some(Arc::new(move |_| {
+        let mut g = h2.lock().unwrap();
+        if !first_src.exists() && g.is_none() {
+            *g = Some(std::fs::OpenOptions::new().read(true).share_mode(3).open(&p2).unwrap());
+        }
+        true
+    }));
+    let r = h.relocate_prepare(f.journal(), plan, o).unwrap().wait_fast();
+    assert!(holder.lock().unwrap().is_some(), "the file was taken during the move");
+    assert!(matches!(&r, Err(StorageError::Locked { file: 2, path }) if *path == held_path), "{r:?}");
+    assert_eq!(r.unwrap_err().to_string(), format!("\u{201c}{}\u{201d} is open in another program", held_path.file_name().unwrap().to_string_lossy()));
+    holder.lock().unwrap().take();
+    for i in [0, 2] {
+        let p = f.src.join(&f.s.names[i]);
+        assert_eq!(std::fs::read(&p).unwrap(), f.s.file_bytes(i), "{p:?} must be back");
+    }
+    assert!(!f.journal().exists());
 }

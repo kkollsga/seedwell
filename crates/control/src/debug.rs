@@ -2,40 +2,13 @@
 //! the words for "why is the next announce then", and the health findings. Everything is derived from
 //! what the protocol already returns, so the same rules serve the app, the daemon and the tests.
 
-use std::process::Command;
-
 use crate::types::*;
 
-/// Measure this process with `ps` and the file-descriptor table. Run it on a blocking thread; it
-/// spawns one short child process.
+/// Measure this process (trs_platform::proc::self_stats). Run it on a blocking thread: on Unix it
+/// spawns `ps`.
 pub fn process_stats() -> ProcessDto {
-    let pid = std::process::id();
-    let mut out = ProcessDto { pid, ..Default::default() };
-    let ps = |args: &[&str]| -> Option<String> {
-        // The C locale: in a Norwegian one `ps` writes "0,0".
-        let o = Command::new("ps").env("LC_ALL", "C").args(args).arg("-p").arg(pid.to_string()).output().ok()?;
-        o.status.success().then(|| String::from_utf8_lossy(&o.stdout).into_owned())
-    };
-    if let Some(t) = ps(&["-o", "rss=", "-o", "%cpu="]) {
-        let mut it = t.split_whitespace();
-        out.rss_bytes = it.next().and_then(|v| v.parse::<u64>().ok()).map(|kb| kb * 1024);
-        out.cpu_percent = it.next().and_then(decimal);
-    }
-    out.threads = if cfg!(target_os = "macos") {
-        // One line per thread plus a header.
-        ps(&["-M"]).map(|t| t.lines().count().saturating_sub(1) as u32)
-    } else {
-        ps(&["-o", "nlwp="]).and_then(|t| t.trim().parse().ok())
-    };
-    let fd_dir = if cfg!(target_os = "macos") { "/dev/fd" } else { "/proc/self/fd" };
-    // The directory handle used for the listing is itself one descriptor.
-    out.open_fds = std::fs::read_dir(fd_dir).ok().map(|d| d.count().saturating_sub(1) as u32);
-    out
-}
-
-/// "12.5", or "12,5" from a `ps` that kept a locale's decimal comma.
-fn decimal(v: &str) -> Option<f64> {
-    v.replace(',', ".").parse().ok()
+    let s = trs_platform::proc::self_stats();
+    ProcessDto { pid: std::process::id(), rss_bytes: s.rss_bytes, cpu_percent: s.cpu_percent, threads: s.threads, open_fds: s.open_files }
 }
 
 /// Why the next announce is when it is.
@@ -153,7 +126,6 @@ mod tests {
 
     #[test]
     fn the_process_is_measured_whatever_the_locale() {
-        assert_eq!((decimal("12.5"), decimal("0,0"), decimal("x")), (Some(12.5), Some(0.0), None));
         let p = process_stats();
         assert!(p.cpu_percent.is_some() && p.rss_bytes.is_some_and(|b| b > 0), "{p:?}");
     }

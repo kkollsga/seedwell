@@ -119,10 +119,12 @@ enum TriState { case on, off, mixed }
         }
     }
 
-    /// The start of a torrent that waits (SPEC 7A.6): everything ticked except the Extras group (samples, featurettes,
-    /// `.nfo`). It is not an edit: a category change may replace it.
-    func applyHeldDefault() {
-        checked = Set(items.filter { !$0.isExtras }.flatMap(\.leafIDs))
+    /// The start of a torrent that waits (SPEC 7A.6), as the core decides it (`choiceDefaultFiles`: everything but the
+    /// Extras group): each leaf whose files it all wants is ticked. It is not an edit: a category change may replace it.
+    func applyHeldDefault(_ files: [Bool]) {
+        checked = Set(leafItems.filter { leaf in
+            !leaf.files.isEmpty && leaf.files.allSatisfy { files.indices.contains($0) && files[$0] }
+        }.map(\.id))
         pick = nil
     }
 

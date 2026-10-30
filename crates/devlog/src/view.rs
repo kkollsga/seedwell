@@ -50,16 +50,10 @@ fn dur(secs: i64) -> String {
 }
 
 /// Local wall-clock `HH:MM:SS`, matching the times the app's list shows (the file itself keeps UTC).
-#[allow(unsafe_code)]
 fn hms(ms: u64) -> String {
-    let secs = (ms / 1000) as libc::time_t;
-    // SAFETY: `localtime_r` writes only into the `tm` we own; a zeroed `tm` is a valid value.
-    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-    if unsafe { libc::localtime_r(&secs, &mut tm) }.is_null() {
-        let iso = crate::iso_time(ms);
-        return iso.get(11..19).unwrap_or("").to_string();
-    }
-    format!("{:02}:{:02}:{:02}", tm.tm_hour, tm.tm_min, tm.tm_sec)
+    let secs = (ms / 1000) as i64;
+    let local = (secs + i64::from(trs_platform::proc::utc_offset(secs))).rem_euclid(86_400);
+    format!("{:02}:{:02}:{:02}", local / 3600, local / 60 % 60, local % 60)
 }
 
 fn fields(v: &Value) -> Vec<(String, String)> {

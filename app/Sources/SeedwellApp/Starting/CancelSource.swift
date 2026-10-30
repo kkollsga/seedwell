@@ -14,12 +14,6 @@ enum CancelText {
         keepsFile(shift: shift, hasSourceFile: hasSourceFile) ? keepCaption : nil
     }
 
-    static func help(hasSourceFile: Bool) -> String {
-        hasSourceFile
-            ? "Remove this torrent and move its .torrent file to the Trash. Hold ⇧ to keep the file."
-            : "Remove this torrent. Nothing has been downloaded"
-    }
-
     /// ⇧ keeps the file, but only where there is a file to keep.
     static func keepsFile(shift: Bool, hasSourceFile: Bool) -> Bool { shift && hasSourceFile }
 }
@@ -28,51 +22,6 @@ enum CancelText {
 enum ShiftKey {
     @MainActor static var qaOverride: Bool?
     @MainActor static var down: Bool { qaOverride ?? NSEvent.modifierFlags.contains(.shift) }
-}
-
-/// Moves the `.torrent` file of a cancelled torrent to the Trash, and nothing else. The core already checked that
-/// the file is the torrent's own (same info-hash); here it must also still be a regular file, not a link, named
-/// `*.torrent`. The move itself is a closure so that tests never touch the real Trash.
-struct SourceTrash: Sendable {
-    enum Result: Equatable { case trashed, skipped, failed(name: String) }
-
-    var move: @Sendable (URL) throws -> Void
-
-    static let live = SourceTrash { url in try FileManager.default.trashItem(at: url, resultingItemURL: nil) }
-
-    /// The real Trash, or, when `SEEDWELL_QA_TRASH_DIR` names a folder under a temp root, that folder (QA only: the
-    /// real Trash must not receive QA files).
-    static func standard(environment: [String: String] = ProcessInfo.processInfo.environment) -> SourceTrash {
-        guard let dir = environment["SEEDWELL_QA_TRASH_DIR"], !dir.isEmpty,
-              ["/private/tmp/", "/tmp/", "/var/folders/", "/private/var/folders/"].contains(where: dir.hasPrefix)
-        else { return .live }
-        return SourceTrash { url in
-            let fm = FileManager.default
-            let folder = URL(fileURLWithPath: dir, isDirectory: true)
-            try fm.createDirectory(at: folder, withIntermediateDirectories: true)
-            var target = folder.appendingPathComponent(url.lastPathComponent)
-            var n = 2
-            while fm.fileExists(atPath: target.path) {
-                target = folder.appendingPathComponent("\(url.deletingPathExtension().lastPathComponent) (\(n)).\(url.pathExtension)")
-                n += 1
-            }
-            try fm.moveItem(at: url, to: target)
-        }
-    }
-
-    func trash(_ path: String) -> Result {
-        let url = URL(fileURLWithPath: path)
-        // `attributesOfItem` does not follow links: a link reports `.typeSymbolicLink`.
-        guard url.pathExtension.lowercased() == "torrent",
-              (try? FileManager.default.attributesOfItem(atPath: path))?[.type] as? FileAttributeType == .typeRegular
-        else { return .skipped }
-        do {
-            try move(url)
-            return .trashed
-        } catch {
-            return .failed(name: url.lastPathComponent)
-        }
-    }
 }
 
 /// A normal Cancel button. While Shift is held a caption slides out just below it ("Keep .torrent file") and the
@@ -88,7 +37,7 @@ struct CancelControl: View {
     @State private var shift = false
 
     var body: some View {
-        let help = CancelText.help(hasSourceFile: hasSourceFile)
+        let help = cancelHelp(hasSourceFile: hasSourceFile)
         // The state of Shift is read again at the click: a click that arrives before the next poll still counts.
         let go = { action(CancelText.keepsFile(shift: ShiftKey.down, hasSourceFile: hasSourceFile)) }
         Group {

@@ -45,13 +45,12 @@ footprint -p "$PID" 2>/dev/null | grep -E "phys_footprint|Footprint:" | head -3 
 top -l 3 -s 10 -pid "$PID" -stats pid,cpu,mem,idlew,power 2>/dev/null | tail -3
 echo "== window open =="
 qa_cmd "window size 1180x820" "section sharing"
-sleep 3
+sleep 3   # the window settles before its memory is read
 ps -o rss= -p "$PID" | awk '{printf "RSS with window %.1f MB\n", $1/1024}'
 : > "$CTL.bench"
 qa_cmd "bench-snapshot"
-sleep 12
 qa_cmd "bench-scroll"
-sleep 15
+qa_until 30 grep -q '^scroll:' "$CTL.bench" || echo "scroll bench: no frames in 30 s (display asleep?)"
 cat "$CTL.bench"
 echo "== window closed again =="
 qa_cmd "window close"

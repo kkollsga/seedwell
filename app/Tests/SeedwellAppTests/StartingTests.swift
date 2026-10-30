@@ -139,9 +139,8 @@ struct StartingModelTests {
     }
 
     @Test func aPendingRowSaysWhenItStartsAndStaysOutOfPlayAndFileLists() {
+        // Its line ("Starting in 7 s") is the core's (library_rows.rs).
         let r = row(pending: wait(startsIn: 7))
-        #expect(r.statusLine(.download, now: t0) == "Starting in 7 s")
-        #expect(row(pending: wait(startsIn: 9, paused: true, left: 5)).statusLine(.download, now: t0).hasPrefix("Paused"))
         #expect(r.isHeld && !r.showsPlayButton && !r.mayHoldVideo)
     }
 }

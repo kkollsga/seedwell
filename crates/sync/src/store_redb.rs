@@ -396,10 +396,10 @@ fn create_atomically(dir: &Path, path: &Path, index_id: u64, opts: &OpenOptions)
     {
         prepare(open_database(&tmp, &OpenOptions { verify: false, ..*opts })?, &tmp, index_id, opts)?;
     }
-    fs::File::open(&tmp)?.sync_all()?;
+    trs_platform::fs::sync_file(&tmp)?;
     fs::rename(&tmp, path)?;
     // Make the rename durable.
-    fs::File::open(dir)?.sync_all()
+    trs_platform::fs::sync_dir(dir)
 }
 
 fn stored_version(rtx: &ReadTransaction) -> io::Result<Option<u32>> {
@@ -553,7 +553,7 @@ fn back_up(path: &Path, version: u32) -> io::Result<PathBuf> {
         .find(|p| !p.exists())
         .unwrap_or_else(|| PathBuf::from(format!("{base}.v{version}.bak")));
     fs::copy(path, &backup)?;
-    fs::File::open(&backup)?.sync_all()?;
+    trs_platform::fs::sync_file(&backup)?;
     Ok(backup)
 }
 

@@ -8,6 +8,7 @@ publish = false
 description = "BitTorrent session engine: torrents, peers, picker, choker, limits, queue, tiers, persistence boundary and control API"
 
 [dependencies]
+trs-platform = { path = "../platform" }
 trs-bencode = { path = "../bencode" }
 trs-metainfo = { path = "../metainfo" }
 trs-wire = { path = "../wire" }
@@ -34,10 +35,11 @@ tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-t
 bytes = { version = "1", default-features = false }
 # OS entropy for the per-process tracker `key` and the engine's shuffle RNG seed.
 getrandom = { version = "0.4", default-features = false }
-libc = "0.2"
 
 [dev-dependencies]
-# `signal` only for the bench_client example (SIGTERM = graceful shutdown).
-tokio = { version = "1", default-features = false, features = ["signal", "process"] }
+tokio = { version = "1", default-features = false, features = ["process"] }
 tempfile = "3"
 serde_json = { version = "1", default-features = false, features = ["std"] }
+
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"

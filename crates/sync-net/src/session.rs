@@ -154,7 +154,7 @@ pub async fn accept_over(tls: &Tls, io: BoxIo, remote: SocketAddr, local: Socket
 /// Connects to `addr` over TCP and runs the session handshake.
 pub async fn dial_tcp(tls: &Tls, addr: SocketAddr) -> io::Result<Connected> {
     let run = async {
-        let tcp = TcpStream::connect(addr).await?;
+        let tcp = trs_platform::net::connect_tcp(addr).await?;
         tune(&tcp);
         let local = tcp.local_addr()?;
         client_over(tls, Box::new(tcp), addr, local, Via::Tcp).await

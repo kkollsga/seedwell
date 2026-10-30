@@ -753,12 +753,15 @@ impl FileTreeModel {
             return Some(n.disk.clone()).filter(|d| !d.is_empty());
         }
         let f = &t.nodes[*t.file_nodes(&[id as usize]).first()?];
-        let below = f.path.strip_prefix(&n.path).filter(|r| r.starts_with('/'));
+        // The file's path below the folder ("/" in the torrent) against its disk path (this system's
+        // separators), part by part.
+        let below = f.path.strip_prefix(&n.path).and_then(|r| r.strip_prefix('/'));
+        let disk = std::path::Path::new(&f.disk);
         let at = match below {
-            Some(rest) if f.disk.ends_with(rest) => &f.disk[..f.disk.len() - rest.len()],
-            _ => f.disk.rsplit_once('/').map_or(f.disk.as_str(), |(d, _)| d),
+            Some(rest) if disk.ends_with(rest) => disk.ancestors().nth(rest.split('/').count()),
+            _ => disk.parent(),
         };
-        Some(at.to_string()).filter(|d| !d.is_empty())
+        Some(at?.to_string_lossy().into_owned()).filter(|d| !d.is_empty())
     }
 }
 
@@ -1025,5 +1028,17 @@ mod tests {
         assert_eq!(m.disk_location(top).as_deref(), Some("/d/Show"), "the folder itself");
         let file = m.rows(vec![top], String::new()).into_iter().find(|r| !r.is_folder).unwrap();
         assert_eq!(m.disk_location(file.id).as_deref(), Some("/d/Show/readme.txt"));
+        // Disk paths with this system's separators (on Windows "\\"), as the engine gives them.
+        let root = std::env::temp_dir().join("d");
+        let native: Vec<TorrentFile> = pack()
+            .into_iter()
+            .map(|mut f| {
+                f.disk_path = f.path.split('/').fold(root.clone(), |p, c| p.join(c)).to_string_lossy().into_owned();
+                f
+            })
+            .collect();
+        let m = FileTreeModel::new(native);
+        let top = m.top()[0];
+        assert_eq!(m.disk_location(top), Some(root.join("Show").to_string_lossy().into_owned()), "the folder itself");
     }
 }

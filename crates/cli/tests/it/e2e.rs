@@ -66,6 +66,36 @@ fn allow_lan_trackers_flag_writes_the_setting_and_the_default_is_strict() {
     lan.terminate();
 }
 
+/// A `config.toml` with a bad value is never rewritten by the daemon: its options (here the
+/// download folder) apply in memory, each warning is logged once at start, and the file is the
+/// user's to fix. (Rewriting it would turn the salvaged value into its replacement for good.)
+#[test]
+fn a_config_with_a_bad_value_is_not_rewritten_and_the_options_still_apply() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("bad").join("state");
+    std::fs::create_dir_all(&state).unwrap();
+    let text = "[folders]\ntorrent_after_add = \"keep\"\n[transfers]\nmax_active_downloads = 0\n[network]\nupnp = true\n";
+    std::fs::write(state.join("config.toml"), text).unwrap();
+    let log = dir.path().join("daemon.err");
+    let mut d = Daemon::start_logging(dir.path(), "bad", "control", &log);
+    // The flags' download folder is in force: a payload put there is found complete.
+    let t = make_torrent("Kept.Settings", &[("a.bin", 300_000)], 7);
+    t.write_payload(&d.dl);
+    let file = t.write_torrent(dir.path());
+    let added = d.json(&["add", file.to_str().unwrap(), "--now"]);
+    let id = added["id"].as_str().unwrap().to_owned();
+    wait_until(30, "found complete in the flags' folder", || row(&d, &id).filter(is_done));
+    d.terminate();
+    assert_eq!(std::fs::read_to_string(state.join("config.toml")).unwrap(), text, "the user's file is left as it is");
+    for f in ["config.toml.bak", "config.toml.rejected", "backups"] {
+        assert!(!state.join(f).exists(), "{f} written next to it");
+    }
+    let err = std::fs::read_to_string(&log).unwrap();
+    for w in ["config.toml: folders.torrent_after_add: \"keep\" is not a valid value (", "config.toml: transfers.max_active_downloads: 0 is not a valid value (", "the options apply to this run only and the file is left as it is"] {
+        assert_eq!(err.matches(w).count(), 1, "{w:?} once in:\n{err}");
+    }
+}
+
 #[test]
 fn download_pause_resume_info_stats_and_two_step_remove() {
     let root = tempfile::tempdir().unwrap();
@@ -462,7 +492,8 @@ fn smart_add_and_move_through_the_cli() {
     // ---- move the finished torrent
     let dest = root.path().join("moved");
     std::fs::create_dir_all(&dest).unwrap();
-    assert_eq!(leech.cli(&["move", &pack.id, "/etc"]).code, 1, "system folders are refused");
+    let system = trs_platform::dirs::sensitive_dirs().into_iter().next().unwrap();
+    assert_eq!(leech.cli(&["move", &pack.id, system.to_str().unwrap()]).code, 1, "system folders are refused");
     assert_eq!(leech.cli(&["move", &pack.id]).code, 2, "usage");
     let m = leech.json(&["move", &pack.id, dest.to_str().unwrap()]);
     assert_eq!(m["queued"].as_array().unwrap().len(), 1, "{m}");

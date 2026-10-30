@@ -67,33 +67,16 @@ struct PlayNoticeView: View {
 
 extension TorrentFile {
     var isFinished: Bool { length > 0 && done >= length }
-
-    /// "S01E02" when the name has it, else the name without its extension.
-    var episodeLabel: String {
-        let base = (name as NSString).deletingPathExtension
-        if let r = base.range(of: #"[Ss]\d{1,2}[Ee]\d{1,3}(-?[Ee]\d{1,3})?"#, options: .regularExpression) {
-            return base[r].uppercased()
-        }
-        return base
-    }
 }
 
 extension TransferRow {
-    /// A torrent or download whose name says it is one video file (cheap: no engine call).
-    var isSingleVideo: Bool { VideoFiles.isVideo(ext: fileExt) }
     /// Worth asking the engine for the file list (a single video, or a folder that may hold episodes).
-    var mayHoldVideo: Bool {
-        guard kind == .torrent, !isHeld else { return false }
-        return isSingleVideo || hasVideo || (fileExt.isEmpty && (category == .movie || category == .tv || category == .other))
-    }
+    var mayHoldVideo: Bool { rowMayHoldVideo(row: self) }
     /// A finished direct download of a video: opens its file.
-    var isFinishedDirectVideo: Bool { kind == .direct && state == .completed && isSingleVideo }
+    var isFinishedDirectVideo: Bool { rowIsFinishedDirectVideo(row: self) }
     /// The Play button of a row: any torrent that holds a video (a single file or a folder; the engine
     /// worked that out once, `hasVideo`), playing one fetches its start first; or a finished direct video.
-    var showsPlayButton: Bool {
-        if isFinishedDirectVideo { return true }
-        return (isSingleVideo || hasVideo) && !isHeld && kind == .torrent
-    }
+    var showsPlayButton: Bool { rowShowsPlay(row: self) }
 }
 
 extension Commands {
@@ -106,7 +89,7 @@ extension Commands {
     /// The video files of a torrent that can be played: selected for download, not padding.
     func playableFiles(_ row: TransferRow) -> [TorrentFile] {
         guard row.mayHoldVideo, let files = try? core.files(id: row.id) else { return [] }
-        return files.filter { $0.isVideo && $0.wanted }
+        return playableVideos(files: files)
     }
 
     /// The largest playable video: what the row's Play button and the default entry play (episodes are
@@ -204,45 +187,23 @@ extension Commands {
 
     // MARK: Menu entries
 
-    /// "Play" and "Play With ▸" for the context menu and the menu bar submenu; empty when the torrent
-    /// has no selected video. A pack lists its episodes.
-    func playEntries(for row: TransferRow) -> [MenuEntry] {
-        if row.isFinishedDirectVideo {
-            let capable = PlayerCatalog.capable(PlayerDirectory.shared.installed(), for: VideoContainer(fileName: row.url.lastPathComponent))
-            return [
-                .item("Play") { self.playLocal(row, with: nil) },
-                .submenu("Play With", capable.isEmpty
-                    ? [.item("No Player Installed", enabled: false) {}]
-                    : capable.map { p in .item(p.name) { self.playLocal(row, with: p) } }),
-            ]
-        }
+    /// What the Play entries of a row are made of (`rowCommands`, `playCommands`): its playable videos and the players
+    /// on this Mac (only looked up when there is something to play).
+    func playOffer(_ row: TransferRow) -> PlayOffer {
         let videos = playableFiles(row)
-        guard !videos.isEmpty else { return [] }
-        return playEntries(row: row, videos: videos)
+        let wanted = row.isFinishedDirectVideo || !videos.isEmpty
+        return PlayOffer(videos: videos, players: wanted ? PlayerDirectory.shared.installed().map(\.option) : [])
     }
 
+    /// "Play" and "Play With ▸" for Get Info; empty when the torrent has no selected video. A pack lists its episodes.
+    func playEntries(for row: TransferRow) -> [MenuEntry] {
+        let offer = playOffer(row)
+        return draw(playCommands(row: row, offer: offer), rows: [row], videos: offer.videos, inMenuBar: false)
+    }
+
+    /// The Play entries of these videos of a torrent (a video's menu in the file list).
     func playEntries(row: TransferRow, videos: [TorrentFile]) -> [MenuEntry] {
-        let installed = PlayerDirectory.shared.installed()
-        let shown = Array(videos.prefix(Self.episodesShown))
-        let more: [MenuEntry] = videos.count > shown.count ? [.item("+ \(videos.count - shown.count) more in Get Info", enabled: false) {}] : []
-        func episodes(_ with: InstalledPlayer?) -> [MenuEntry] {
-            shown.map { f in .item(f.episodeLabel) { self.play(row, file: f, with: with) } } + more
-        }
-        // Play With lists the players that can run here and play the first video's container.
-        let capable = PlayerCatalog.capable(installed, for: VideoContainer(isMp4Family: videos[0].isMp4Family))
-        let playWith: MenuEntry
-        if capable.isEmpty {
-            playWith = .submenu("Play With", [.item("No Player Installed", enabled: false) {}])
-        } else if videos.count == 1 {
-            playWith = .submenu("Play With", capable.map { p in .item(p.name) { self.play(row, file: videos[0], with: p) } })
-        } else {
-            playWith = .submenu("Play With", capable.map { p in .submenu(p.name, episodes(p)) })
-        }
-        let play: MenuEntry = videos.count == 1
-            ? .item("Play") { self.play(row, file: videos[0]) }
-            : .submenu("Play", episodes(nil))
-        return [play, playWith]
+        let offer = PlayOffer(videos: videos, players: PlayerDirectory.shared.installed().map(\.option))
+        return draw(playCommands(row: row, offer: offer), rows: [row], videos: videos, inMenuBar: false)
     }
-
-    static let episodesShown = 40
 }

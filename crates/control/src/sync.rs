@@ -13,6 +13,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
+use trs_platform::fs::{OtherVolume, TrashError, TrashPlace, Trashed};
+
 use serde_json::json;
 use trs_engine::EngineHandle;
 use trs_sync_net::secrets::SecretStore;
@@ -476,15 +478,20 @@ fn is_test_binary() -> bool {
     std::env::current_exe().ok().and_then(|p| p.parent().and_then(|d| d.file_name()).map(|n| n == "deps")).unwrap_or(false)
 }
 
+/// Whether the real-home guard is on: under `cargo test`, or with `TRS_FORBID_REAL_HOME`.
+fn guard_active() -> bool {
+    (cfg!(test) || is_test_binary() || std::env::var_os("TRS_FORBID_REAL_HOME").is_some()) && std::env::var_os("TRS_ALLOW_REAL_HOME").is_none()
+}
+
 /// The engine's real-home guard (`trs_engine::guard`), for sync's paths: under `cargo test`, or with
 /// `TRS_FORBID_REAL_HOME`, nothing inside the real home folder is synced, moved or trashed.
 fn guard(what: &str, p: &Path) -> Result<(), ApiError> {
-    let active = (cfg!(test) || is_test_binary() || std::env::var_os("TRS_FORBID_REAL_HOME").is_some()) && std::env::var_os("TRS_ALLOW_REAL_HOME").is_none();
-    if !active {
+    if !guard_active() {
         return Ok(());
     }
-    let Some(home) = std::env::var_os("HOME").map(PathBuf::from).filter(|h| h.is_absolute() && h.parent().is_some()) else { return Ok(()) };
-    if p.starts_with(&home) {
+    let Some(home) = trs_platform::dirs::home().filter(|h| h.is_absolute() && h.parent().is_some()) else { return Ok(()) };
+    // The temporary folder is inside the home folder on Windows.
+    if p.starts_with(&home) && !p.starts_with(std::env::temp_dir()) {
         return Err(ApiError::invalid(format!(
             "refusing to use {what} {} inside the real home directory while running under test (set HOME to a temporary folder)",
             p.display()
@@ -506,7 +513,7 @@ pub fn folder_path(raw: &str, what: &str) -> Result<PathBuf, ApiError> {
 
 /// One path component from a folder name or a link's name hint; `None` when nothing usable is left.
 fn component(name: &str) -> Option<String> {
-    let n: String = name.chars().filter(|c| !c.is_control() && *c != '/' && *c != ':').take(100).collect();
+    let n: String = trs_platform::fs::clean_name(name).chars().take(100).collect();
     let n = n.trim().trim_start_matches('.').trim().to_owned();
     (!n.is_empty()).then_some(n)
 }
@@ -537,36 +544,50 @@ pub fn default_join_path(default_location: &str, key_or_link: &str) -> Result<Pa
     Ok(unique_in(&base, &name))
 }
 
-/// Where a removed folder would go in the Trash (`trash_dir`, else `~/.Trash`), checked before anything is
-/// removed: the folder must be on the same volume as the Trash (the home folder's), so the move is a rename;
-/// a folder on another disk is refused (Finder would copy it).
-pub fn trash_target(folder: &Path, trash_dir: Option<&Path>) -> Result<PathBuf, ApiError> {
-    let home = std::env::var_os("HOME").map(PathBuf::from).filter(|h| h.is_absolute());
-    let (trash, reference) = match (trash_dir, &home) {
-        (Some(t), _) => (t.to_path_buf(), t.to_path_buf()),
-        (None, Some(h)) => (h.join(".Trash"), h.clone()),
-        (None, None) => return Err(ApiError::invalid("HOME is not set, so there is no Trash to move the folder to; remove it without deleting files")),
-    };
-    guard("the Trash", &trash)?;
-    guard("the folder", folder)?;
-    let same = trs_state::volume::same_volume(folder, &reference).unwrap_or(false);
-    if !same {
-        return Err(ApiError::invalid(format!(
-            "{} is on another volume than the Trash ({}); remove it without deleting files, then delete the folder in Finder",
-            folder.display(),
-            trash.display()
-        )));
+/// Where a removed folder would go in the Trash (`trash_dir`, else the system's), checked before anything is
+/// removed: a Trash folder (the setting, Linux's home trash) must be on the folder's volume, so the move is a rename,
+/// and a folder on another disk is refused (it would have to be copied); the Mac's own Trash keeps a folder in the
+/// Trash of its own volume; the Recycle Bin refuses a folder it would delete outright instead of keeping.
+pub fn trash_target(folder: &Path, trash_dir: Option<&Path>) -> Result<Trashed, ApiError> {
+    match trash_dir.map(|t| TrashPlace::Folder(t.to_path_buf())).or_else(trs_platform::fs::system_trash) {
+        Some(TrashPlace::Folder(t)) => guard(concat!("the ", trs_platform::trash!()), &t)?,
+        Some(TrashPlace::RecycleBin | TrashPlace::VolumeTrash) if guard_active() => {
+            return Err(ApiError::invalid(concat!("refusing to use the ", trs_platform::trash!(), " while running under test (set a Trash folder)")));
+        }
+        Some(TrashPlace::RecycleBin | TrashPlace::VolumeTrash) => {}
+        None => return Err(trash_error(folder, TrashError::NoTrash)),
     }
-    let name = folder.file_name().map(|n| n.to_string_lossy().into_owned()).and_then(|n| component(&n)).unwrap_or_else(|| "Folder".into());
-    Ok(unique_in(&trash, &name))
+    guard("the folder", folder)?;
+    trs_platform::fs::trash_check(folder, trash_dir, OtherVolume::Refuse).map_err(|e| trash_error(folder, e))
 }
 
-/// Move `folder` to `target` (from [`trash_target`]).
-pub fn move_to_trash(folder: &Path, target: &Path) -> io::Result<()> {
-    if let Some(dir) = target.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    std::fs::rename(folder, target)
+/// Move `folder` to the Trash, after [`trash_target`] said it can go.
+pub fn move_to_trash(folder: &Path, trash_dir: Option<&Path>) -> Result<Trashed, TrashError> {
+    trs_platform::fs::move_to_trash(folder, trash_dir, OtherVolume::Refuse)
+}
+
+/// " (where)" for a folder moved to a Trash folder; nothing for the Recycle Bin, which has no path.
+pub fn trash_shown(t: &Trashed) -> String {
+    t.path().map(|p| format!(" ({})", p.display())).unwrap_or_default()
+}
+
+/// Why `folder` cannot go to the Trash, and what to do instead.
+fn trash_error(folder: &Path, e: TrashError) -> ApiError {
+    use trs_platform::{file_manager, trash};
+    ApiError::invalid(match e {
+        TrashError::NoTrash => concat!("HOME is not set, so there is no ", trash!(), " to move the folder to; remove it without deleting files").into(),
+        TrashError::OtherVolume { trash } => format!(
+            concat!("{} is on another volume than the ", trash!(), " ({}); remove it without deleting files, then delete the folder in ", file_manager!()),
+            folder.display(),
+            trash.display()
+        ),
+        TrashError::WouldDelete { reason } => format!(
+            concat!("the ", trash!(), " would delete {} at once instead of keeping it ({}); remove it without deleting files, then delete the folder in ", file_manager!()),
+            folder.display(),
+            reason
+        ),
+        TrashError::Io(e) => format!(concat!("{} cannot go to the ", trash!(), " ({}); remove it without deleting files"), folder.display(), e),
+    })
 }
 
 // ----------------------------------------------------------------------------- channels
@@ -730,12 +751,13 @@ mod tests {
         let f = dir.path().join("Docs");
         std::fs::create_dir_all(&f).unwrap();
         let t = trash_target(&f, Some(&trash)).unwrap();
-        assert_eq!(t, trash.join("Docs"));
+        assert_eq!(t, Trashed::At(trash.join("Docs")));
         std::fs::create_dir_all(trash.join("Docs")).unwrap();
         let t = trash_target(&f, Some(&trash)).unwrap();
-        assert_eq!(t, trash.join("Docs 2"));
-        move_to_trash(&f, &t).unwrap();
-        assert!(!f.exists() && t.is_dir());
+        assert_eq!(t, Trashed::At(trash.join("Docs 2")));
+        assert_eq!(trash_shown(&t), format!(" ({})", trash.join("Docs 2").display()));
+        assert_eq!(move_to_trash(&f, Some(&trash)).unwrap(), t);
+        assert!(!f.exists() && trash.join("Docs 2").is_dir());
         // A folder on an unmounted (or other) volume is refused before anything happens.
         let e = trash_target(Path::new("/Volumes/no-such-volume-for-seedwell/Docs"), Some(&trash)).unwrap_err();
         assert!(e.message.contains("another volume"), "{}", e.message);

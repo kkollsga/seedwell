@@ -85,13 +85,21 @@ impl Hidden {
     }
 }
 
-/// `tracker` is the tab being listed; without one, hidden trackers' rows are left out.
+/// The search of every list (Downloads, Sharing, a tracker's tab): the text, whatever its case, in the raw name or
+/// the shown name. `text_lower` is lower-cased already; empty matches everything.
+pub(crate) fn matches_text(r: &TransferRow, text_lower: &str) -> bool {
+    text_lower.is_empty() || r.name.to_lowercase().contains(text_lower) || r.display_name.to_lowercase().contains(text_lower)
+}
+
+/// The search of every list: `text`, whatever its case, in the row's raw or shown name; empty matches every row.
+#[uniffi::export]
+pub fn row_matches_search(row: TransferRow, text: String) -> bool {
+    matches_text(&row, &text.to_lowercase())
+}
+
+/// `tracker` is the tab being listed; without one, hidden trackers' rows are left out. `text` is lower-cased.
 fn matches(r: &TransferRow, tracker: Option<&str>, category: Option<Category>, text: &str, hidden: &Hidden) -> bool {
-    tracker.map_or_else(|| !hidden.sharing(r), |t| r.tracker_id == t)
-        && category.is_none_or(|c| r.category == c)
-        && (text.is_empty()
-            || r.name.to_lowercase().contains(&text.to_lowercase())
-            || r.display_name.to_lowercase().contains(&text.to_lowercase()))
+    tracker.map_or_else(|| !hidden.sharing(r), |t| r.tracker_id == t) && category.is_none_or(|c| r.category == c) && matches_text(r, text)
 }
 
 /// Sharing rows of `q`, sorted and paged.
@@ -373,6 +381,24 @@ mod tests {
         assert_eq!(ids(&s.downloading), ["pub-dl", "h-dl"]);
         assert_eq!(s.sharing_total, 2);
         assert!(s.hidden_downloading.is_empty() && !s.trackers.iter().any(|t| t.hidden));
+    }
+
+    #[test]
+    fn every_list_searches_the_raw_and_the_shown_name_whatever_the_case() {
+        let mut r = row("x", "public", TransferState::Downloading, None);
+        r.name = "Sintel.2010.1080p.BluRay".into();
+        r.display_name = "Sintel (2010)".into();
+        for text in ["", "sintel", "SINTEL (2", "bluray", "1080P"] {
+            assert!(row_matches_search(r.clone(), text.into()), "{text}");
+        }
+        assert!(!row_matches_search(r.clone(), "big buck".into()));
+        // Not only ASCII: the same rule as the Sharing queries (Rust's lower case), for Downloads too.
+        r.display_name = "Ærlig talt — ÉTÉ".into();
+        assert!(row_matches_search(r.clone(), "ærlig".into()) && row_matches_search(r.clone(), "été".into()));
+        let shared = row("s", "public", TransferState::Seeding, Some(SeedGroup::Active));
+        let q = |text: &str| RowQuery { group: None, tracker_id: None, text: text.into(), category: None, offset: 0, limit: 9 };
+        assert_eq!(query(std::slice::from_ref(&shared), &q("S"), &Hidden::default()).len(), 1);
+        assert!(row_matches_search(shared, "S".into()), "the Downloads rule and the Sharing queries agree");
     }
 
     #[test]

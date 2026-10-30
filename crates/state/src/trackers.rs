@@ -795,6 +795,16 @@ impl Document for TrackerProfiles {
 mod tests {
     use super::*;
 
+    /// A Unix-style absolute test path made absolute on this system: unchanged on Unix, a drive letter in front on Windows.
+    fn abs(p: &str) -> String {
+        if cfg!(windows) { format!("C:{p}") } else { p.to_string() }
+    }
+
+    /// A TOML test document whose quoted Unix-style absolute paths (`"/x"`) are made absolute on this system.
+    fn win(doc: &str) -> String {
+        if cfg!(windows) { doc.replace("\"/", "\"C:/") } else { doc.to_string() }
+    }
+
     fn profile(id: &str, urls: &[&str]) -> Profile {
         Profile {
             id: id.into(),
@@ -1052,15 +1062,16 @@ nickname = "tl!"
         for k in ["hidden", "hide_only_seeding", "location", "categories"] {
             assert!(!out.contains(k), "{k} is skipped when unset: {out}");
         }
-        let text = "[[tracker]]\nid=\"a\"\nname=\"A\"\nurls=[\"x.org\"]\nhidden=true\nhide_only_seeding=true\n\
+        let text = &win("[[tracker]]\nid=\"a\"\nname=\"A\"\nurls=[\"x.org\"]\nhidden=true\nhide_only_seeding=true\n\
             [tracker.location]\nfinished_dir=\"/Volumes/M/A\"\nincomplete_dir=\"~/inc\"\n\
-            [tracker.categories.movie]\nfinished_dir=\"/Volumes/M/A/Movies\"\n";
+            [tracker.categories.movie]\nfinished_dir=\"/Volumes/M/A/Movies\"\n");
         let p = TrackerProfiles::parse_str(text).unwrap().value;
         let a = p.get("a").unwrap();
         assert!(a.hidden && a.hide_only_seeding);
-        assert_eq!(a.location_for(Some(Category::Movie)), (Some("~/inc"), Some("/Volumes/M/A/Movies")));
-        assert_eq!(a.location_for(Some(Category::Tv)), (Some("~/inc"), Some("/Volumes/M/A")));
-        assert_eq!(a.location_for(None), (Some("~/inc"), Some("/Volumes/M/A")));
+        let (movies, all) = (abs("/Volumes/M/A/Movies"), abs("/Volumes/M/A"));
+        assert_eq!(a.location_for(Some(Category::Movie)), (Some("~/inc"), Some(movies.as_str())));
+        assert_eq!(a.location_for(Some(Category::Tv)), (Some("~/inc"), Some(all.as_str())));
+        assert_eq!(a.location_for(None), (Some("~/inc"), Some(all.as_str())));
         assert_eq!(a.folders().len(), 3);
         let out = p.render().unwrap();
         assert_eq!(TrackerProfiles::parse_str(&out).unwrap().value, p, "{out}");

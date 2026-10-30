@@ -17,6 +17,7 @@ engine = ["dep:trs-engine"]
 sync = ["engine", "dep:trs-sync-net", "dep:trs-sync", "dep:trs-sync-proto", "dep:trs-dht"]
 
 [dependencies]
+trs-platform = { path = "../platform" }
 trs-state = { path = "../state" }
 trs-classify = { path = "../classify" }
 # `tracker_log`: reads the developer-mode log (masked JSON lines).
@@ -30,7 +31,7 @@ trs-sync-proto = { path = "../sync-proto", optional = true }
 trs-dht = { path = "../dht", optional = true }
 serde = { version = "1", default-features = false, features = ["derive", "std"] }
 serde_json = { version = "1", default-features = false, features = ["std"] }
-# `net` for the Unix socket (and `peer_cred`), `fs` for reading .torrent paths and socket files.
+# `net` for the Unix socket (and `peer_cred`) or the named pipe, `fs` for reading .torrent paths and socket files.
 tokio = { version = "1", default-features = false, features = ["rt", "net", "time", "sync", "macros", "io-util", "fs"] }
 # Confirmation tokens come from the OS RNG.
 getrandom = { version = "0.4", default-features = false }

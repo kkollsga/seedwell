@@ -18,7 +18,8 @@ use trs_sync_proto::model::{FileInfo, FileKind, STATE_DIR, SignedFile, Version};
 use crate::chunk::{self, Tier};
 use crate::fs::{Fs, Meta};
 use crate::ignore::Ignore;
-use crate::index::{Batch, IndexStore, LocalRecord, Stamp, TierMemo};
+use crate::global::Need;
+use crate::index::{Batch, IndexStore, LocalRecord, NeedRecord, Stamp, TierMemo};
 use crate::path;
 
 /// Makes and signs this device's new versions. A read-only device has none: its local changes are
@@ -150,6 +151,41 @@ fn is_ours(name: &str) -> bool {
     name == STATE_DIR || (name.starts_with(".seedwell.") && name.ends_with(".tmp"))
 }
 
+/// Is the temp file `name` in `dir` the one a pull would resume (a path it would be the temp of still
+/// needs something)? A wanted temp is kept for that; any other is left over.
+fn temp_is_wanted(store: &dyn IndexStore, dir: &str, name: &str) -> io::Result<bool> {
+    let tmp = join(dir, name);
+    let wanted = |p: &str, n: &NeedRecord| n.need != Need::Nothing && crate::pull::temp_path(p) == tmp;
+    // The usual name: `.seedwell.<name>.tmp` next to the path. (`.seedwell.tmp` itself has no name inside.)
+    let Some(inner) = name.get(".seedwell.".len()..name.len().saturating_sub(".tmp".len())).filter(|n| !n.is_empty()) else {
+        return Ok(false);
+    };
+    let path = join(dir, inner);
+    if store.need(&path)?.is_some_and(|n| wanted(&path, &n)) {
+        return Ok(true);
+    }
+    // A long name has a hashed temp name: look through the needs in `dir` (rare).
+    if !(inner.len() == 32 && inner.bytes().all(|b| b.is_ascii_hexdigit())) {
+        return Ok(false);
+    }
+    let prefix = if dir.is_empty() { String::new() } else { format!("{dir}/") };
+    let mut after = (!dir.is_empty()).then(|| dir.to_string());
+    loop {
+        let page = store.needs(after.as_deref(), 1000)?;
+        let Some((last, _)) = page.last() else { return Ok(false) };
+        for (p, n) in &page {
+            if p.starts_with(&prefix) && wanted(p, n) {
+                return Ok(true);
+            }
+        }
+        // Paths below `dir` sort before `<dir>0` ('0' follows '/').
+        if !prefix.is_empty() && last.as_str() > format!("{dir}0").as_str() {
+            return Ok(false);
+        }
+        after = Some(last.clone());
+    }
+}
+
 fn stamp_of(m: &Meta) -> Stamp {
     Stamp { size: m.size, mtime_ns: m.mtime_ns, ctime_ns: m.ctime_ns, inode: m.inode }
 }
@@ -215,6 +251,11 @@ impl Scanner<'_> {
                 names.sort_unstable_by(|a, b| b.cmp(a));
                 for name in names {
                     if is_ours(&name) {
+                        if name != STATE_DIR && !temp_is_wanted(&*store, &rel, &name)? {
+                            // A pull's temp file whose path needs nothing any more (deleted or renamed
+                            // on the other side meanwhile): no pull will finish it.
+                            let _ = self.fs.remove_file(&join(&rel, &name));
+                        }
                         continue;
                     }
                     if self.byte_exact_names && !path::is_nfc(&name) {

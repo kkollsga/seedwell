@@ -1,0 +1,46 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Seedwell for Windows: a WinUI 3 app over the Rust core (trs-ffi as a DLL, C# bindings by uniffi-bindgen-cs).
+       Unpackaged and self-contained (Windows App SDK included): simpler on a test PC and for a zip release like the
+       Mac's. Build with build.ps1, which makes Generated/ (the DLL, the bindings, the .ico) first. -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
+    <RootNamespace>Seedwell</RootNamespace>
+    <AssemblyName>Seedwell</AssemblyName>
+    <Product>Seedwell</Product>
+    <Company>Seedwell (publisher placeholder)</Company>
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <UseWinUI>true</UseWinUI>
+    <WindowsPackageType>None</WindowsPackageType>
+    <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+    <SelfContained>true</SelfContained>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <!-- The generated bindings use unsafe code and have no doc comments of their own. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <NoWarn>$(NoWarn);CS1591;CS8981</NoWarn>
+    <ApplicationIcon>Generated\Seedwell.ico</ApplicationIcon>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <!-- Program.cs has the entry point (one instance only). -->
+    <DefineConstants>$(DefineConstants);DISABLE_XAML_GENERATED_MAIN</DefineConstants>
+    <!-- release-zip.ps1 builds with -p:SeedwellRelease=true: a published build, whose updater checks by itself. -->
+    <DefineConstants Condition="'$(SeedwellRelease)' == 'true'">$(DefineConstants);SEEDWELL_RELEASE</DefineConstants>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.6.4" />
+    <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.28000.2705" />
+    <PackageReference Include="H.NotifyIcon.WinUI" Version="2.4.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Build output of build.ps1, never committed. -->
+    <Content Include="Generated\trs_ffi.dll" CopyToOutputDirectory="PreserveNewest" Link="trs_ffi.dll" />
+    <Content Include="Generated\Seedwell.ico" CopyToOutputDirectory="PreserveNewest" Link="Seedwell.ico" />
+  </ItemGroup>
+
+</Project>

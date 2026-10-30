@@ -34,6 +34,7 @@ pub mod server;
 pub mod settings;
 pub mod socket;
 pub mod state;
+pub mod transport;
 pub mod types;
 
 #[cfg(feature = "engine")]

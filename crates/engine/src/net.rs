@@ -61,6 +61,23 @@ impl Rc4Io {
         }
         Ok(true)
     }
+
+    /// [`Self::flush_out`] for `poll_write` and `poll_flush`: `Pending` only with the socket's waker
+    /// registered. A socket that is writable again by the time it is asked gives no wake-up later,
+    /// so then the held-back bytes are pushed again at once.
+    fn poll_flush_out(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        loop {
+            match self.flush_out() {
+                Ok(true) => return Poll::Ready(Ok(())),
+                Ok(false) => match self.inner.poll_write_ready(cx) {
+                    Poll::Ready(Ok(())) => continue,
+                    Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                    Poll::Pending => return Poll::Pending,
+                },
+                Err(e) => return Poll::Ready(Err(e)),
+            }
+        }
+    }
 }
 
 /// How an outgoing connection is attempted (decided by the torrent, executed by the peer task).
@@ -206,16 +223,9 @@ impl AsyncWrite for PeerIo {
             PeerIo::Utp(s) => Pin::new(s).poll_write(cx, data),
             PeerIo::Rc4(r) => {
                 // (Used for the handshake only: the peer loop writes through `try_write`.)
-                match r.flush_out() {
-                    Ok(true) => {}
-                    Ok(false) => {
-                        // Park on the socket until it can take the held-back bytes.
-                        return match r.inner.poll_write_ready(cx) {
-                            Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
-                            _ => Poll::Pending,
-                        };
-                    }
-                    Err(e) => return Poll::Ready(Err(e)),
+                match r.poll_flush_out(cx) {
+                    Poll::Ready(Ok(())) => {}
+                    other => return other.map_ok(|()| 0),
                 }
                 let n = data.len().min(64 * 1024);
                 r.out.extend_from_slice(&data[..n]);
@@ -231,14 +241,7 @@ impl AsyncWrite for PeerIo {
         match self.get_mut() {
             PeerIo::Tcp(s) => Pin::new(s).poll_flush(cx),
             PeerIo::Utp(s) => Pin::new(s).poll_flush(cx),
-            PeerIo::Rc4(r) => match r.flush_out() {
-                Ok(true) => Poll::Ready(Ok(())),
-                Ok(false) => match r.inner.poll_write_ready(cx) {
-                    Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
-                    _ => Poll::Pending,
-                },
-                Err(e) => Poll::Ready(Err(e)),
-            },
+            PeerIo::Rc4(r) => r.poll_flush_out(cx),
         }
     }
 

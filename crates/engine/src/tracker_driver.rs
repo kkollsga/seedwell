@@ -360,7 +360,9 @@ async fn run(
 ) {
     let policy = d.sh.cfg().tracker_destinations;
     let http = HttpTransport::with_config(&version, trs_tracker::http::HttpConfig { policy, ..Default::default() });
-    let udp = UdpTransport::bind(UdpConfig { policy, ..UdpConfig::default() }).await.ok();
+    // An engine bound to one address (a test on loopback, `daemon --bind`) keeps its tracker sockets there too.
+    let listen = d.sh.cfg().listen_addr;
+    let udp = UdpTransport::bind(UdpConfig { policy, bind: (!listen.is_unspecified()).then_some(listen), ..UdpConfig::default() }).await.ok();
     // Torrents added by `seedwell sim` (marked by the control layer) announce to the mock tracker on 127.0.0.1;
     // every other torrent keeps the configured policy.
     let http_sim = HttpTransport::with_config(&version, trs_tracker::http::HttpConfig { policy: trs_tracker::policy::DestinationPolicy { allow_loopback: true, ..policy }, ..Default::default() });
@@ -519,6 +521,9 @@ async fn run(
                 }
             },
             Some((ticket, result, fin)) = done_rx.recv() => {
+                // The latest sign of life first: a failure is weighed against it, and the reading of
+                // the last pass can be a pass old (a busy seed then read two dead trackers as an outage).
+                d.hub.note_alive(Millis(d.sh.net.alive_ms()));
                 d.hub.complete(ticket, result, clock());
                 d.flight_ended(ticket);
                 if let Some(f) = fin {
@@ -774,9 +779,9 @@ impl Driver {
                 self.log_net("path", format!("the OS reports the network path is {}", if ok { "satisfied" } else { "unsatisfied" }));
                 self.hub.path_changed(ok, now);
             }
-            TrackerCmd::WillSleep => self.log_net("will_sleep", "the Mac is going to sleep: nothing to do".into()),
+            TrackerCmd::WillSleep => self.log_net("will_sleep", concat!("the ", trs_platform::computer!(), " is going to sleep: nothing to do").into()),
             TrackerCmd::DidWake => {
-                self.log_net("did_wake", "the Mac woke: announces wait for the network (or 5 s), then one probe decides".into());
+                self.log_net("did_wake", concat!("the ", trs_platform::computer!(), " woke: announces wait for the network (or 5 s), then one probe decides").into());
                 self.hub.did_wake(now);
             }
             TrackerCmd::Alive => self.hub.net_hint(now),
@@ -1327,7 +1332,7 @@ pub(crate) fn short_failure(e: &trs_tracker::AnnounceError) -> String {
             T::Tls => "Secure connection failed".into(),
             T::Io => "Connection dropped".into(),
             T::TooLarge => "Answer too big".into(),
-            T::Connect | T::Forbidden | T::NotSent | T::Redirect => "Can't connect".into(),
+            T::Connect | T::Forbidden(_) | T::NotSent | T::Redirect => "Can't connect".into(),
         },
     }
 }
@@ -1389,7 +1394,7 @@ pub(crate) fn describe_failure(e: &trs_tracker::AnnounceError) -> String {
             T::Dns => "The tracker can't be reached (its address couldn't be looked up).".into(),
             T::Connect => "The tracker can't be reached (the connection was refused or failed).".into(),
             T::Tls => "The tracker can't be reached (a secure connection couldn't be set up).".into(),
-            T::Forbidden => "The tracker can't be reached (Seedwell isn't allowed to contact that address).".into(),
+            T::Forbidden(_) => "The tracker can't be reached (Seedwell isn't allowed to contact that address).".into(),
             T::NotSent => "The tracker can't be reached (Seedwell couldn't send the request).".into(),
             T::Io => "The tracker can't be reached (the connection broke).".into(),
             T::Redirect => "The tracker can't be reached (it sent Seedwell somewhere it won't follow).".into(),

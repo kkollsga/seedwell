@@ -199,7 +199,7 @@ fn completed_that_provably_never_reached_the_tracker_is_sent_again() {
         }),
         ("tls", || Err(AnnounceError::Transport(TransportError::Tls))),
         ("policy", || {
-            Err(AnnounceError::Transport(TransportError::Forbidden))
+            Err(AnnounceError::Transport(TransportError::Forbidden(trs_tracker::policy::Refusal::Loopback)))
         }),
     ];
     for (name, f) in kinds {

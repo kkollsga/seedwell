@@ -27,6 +27,8 @@ enum PopoverPlacement {
     @MainActor static func edge(rowInWindow row: CGRect, height: CGFloat) -> Edge {
         guard let w = NSApp.keyWindow ?? NSApp.mainWindow ?? NSApp.windows.first(where: \.isVisible),
               let screen = w.screen ?? NSScreen.main else { return .bottom }
-        return edge(row: row, window: w.frame, visible: screen.visibleFrame, height: height)
+        // A quiet QA run keeps its windows off the screens: the room is measured where the window would be.
+        let frame = QuietRun.onscreen(w.frame, screens: NSScreen.screens.map(\.frame))
+        return edge(row: row, window: frame, visible: screen.visibleFrame, height: height)
     }
 }

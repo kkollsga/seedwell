@@ -17,3 +17,8 @@ __pycache__/
 
 # Local working notes and ideas (never published)
 dev-docs/
+
+# The Windows app: build output of app-windows/build.ps1
+/app-windows/Generated
+/app-windows/bin
+/app-windows/obj

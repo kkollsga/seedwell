@@ -226,12 +226,11 @@ pub async fn run(h: SyncHandle) {
     );
 }
 
-/// A UDP socket on the discovery port, shared with other processes on this machine (SO_REUSEADDR and
-/// SO_REUSEPORT: the app and a daemon, or tests, can all listen; broadcast and multicast reach each).
+/// A UDP socket on the discovery port, shared with other processes on this machine (the app and a daemon, or
+/// tests, can all listen; broadcast and multicast reach each).
 fn open(addr: SocketAddr, groups: bool) -> io::Result<UdpSocket> {
     let s = Socket::new(Domain::for_address(addr), Type::DGRAM, Some(Protocol::UDP))?;
-    s.set_reuse_address(true)?;
-    s.set_reuse_port(true)?;
+    trs_platform::net::share_udp_port(&s)?;
     if addr.is_ipv6() {
         s.set_only_v6(true)?;
     }
@@ -288,14 +287,14 @@ async fn send_loop(h: &SyncHandle, v4: Option<&UdpSocket>, v6: Option<&UdpSocket
     loop {
         if groups {
             // Joined again every round: after a network change the default interface is another one. An
-            // existing membership answers EADDRINUSE, which is fine.
+            // existing membership answers with an error that says so (trs_platform::net::already_member).
             if let Some(s) = v4 {
                 let r = s.join_multicast_v4(GROUP_V4, Ipv4Addr::UNSPECIFIED);
-                quiet.note("joining", g4, r.or_else(|e| if e.kind() == io::ErrorKind::AddrInUse { Ok(()) } else { Err(e) }));
+                quiet.note("joining", g4, r.or_else(|e| if trs_platform::net::already_member(&e) { Ok(()) } else { Err(e) }));
             }
             if let Some(s) = v6 {
                 let r = s.join_multicast_v6(&GROUP_V6, 0);
-                quiet.note("joining", g6, r.or_else(|e| if e.kind() == io::ErrorKind::AddrInUse { Ok(()) } else { Err(e) }));
+                quiet.note("joining", g6, r.or_else(|e| if trs_platform::net::already_member(&e) { Ok(()) } else { Err(e) }));
             }
         }
         if let Some(pkt) = build(h, instance, round) {

@@ -794,6 +794,7 @@ fn fast_udp() -> UdpConfig {
         max_exponent: 3,
         connection_id_ttl: Duration::from_secs(30),
         total_timeout: Duration::from_secs(8),
+        bind: None,
     }
 }
 

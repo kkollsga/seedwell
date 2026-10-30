@@ -553,7 +553,9 @@ pub(crate) fn apply_to_config(s: &AppSettings, c: &mut Config) {
 #[derive(Clone, Copy, Debug, PartialEq, uniffi::Enum)]
 pub enum GoalKind {
     StopWhenFinished,
-    Ratio { ratio: f64 },
+    /// (Not `Ratio`: in C# a variant becomes a nested type, and `Ratio` would clash with the `ratio` field of the
+    /// combined variants below.)
+    RatioOnly { ratio: f64 },
     Time { secs: u64 },
     RatioOrTime { ratio: f64, secs: u64 },
     RatioAndTime { ratio: f64, secs: u64 },
@@ -635,7 +637,7 @@ fn goal_to(g: rules::SeedingGoal) -> GoalKind {
     use rules::SeedingGoal as G;
     match g {
         G::StopWhenFinished => GoalKind::StopWhenFinished,
-        G::Ratio { ratio } => GoalKind::Ratio { ratio },
+        G::Ratio { ratio } => GoalKind::RatioOnly { ratio },
         G::Time { time } => GoalKind::Time { secs: time.0 },
         G::RatioOrTime { ratio, time } => GoalKind::RatioOrTime { ratio, secs: time.0 },
         G::RatioAndTime { ratio, time } => GoalKind::RatioAndTime { ratio, secs: time.0 },
@@ -647,7 +649,7 @@ fn goal_from(g: GoalKind) -> rules::SeedingGoal {
     use rules::SeedingGoal as G;
     match g {
         GoalKind::StopWhenFinished => G::StopWhenFinished,
-        GoalKind::Ratio { ratio } => G::Ratio { ratio },
+        GoalKind::RatioOnly { ratio } => G::Ratio { ratio },
         GoalKind::Time { secs } => G::Time { time: Secs(secs) },
         GoalKind::RatioOrTime { ratio, secs } => G::RatioOrTime { ratio, time: Secs(secs) },
         GoalKind::RatioAndTime { ratio, secs } => G::RatioAndTime { ratio, time: Secs(secs) },
@@ -875,6 +877,15 @@ impl SettingsStore {
         self.cfg.load().value
     }
 
+    /// What loading `config.toml`, `rules.toml` and `trackers.toml` finds, one sentence each and
+    /// naming the file (the same lines the engine host logs at start).
+    pub fn load_notes(&self) -> Vec<String> {
+        let mut v = self.cfg.load().notes();
+        v.extend(self.rules.load().notes());
+        v.extend(self.profiles.load().notes());
+        v
+    }
+
     pub fn load_settings(&self) -> AppSettings {
         from_config(&self.config())
     }
@@ -886,6 +897,17 @@ impl SettingsStore {
         if !errs.is_empty() {
             return Err(problems(&errs));
         }
+        self.cfg.save(&c).map_err(|e| doc_err(&e))
+    }
+
+    /// The Limit Speed toggle (`transfers.alt.enabled`), kept in `config.toml` as the CLI keeps it: the
+    /// engine applies the file again after every change of it, and the next start reads it.
+    pub fn save_alt_speed(&self, on: bool) -> Result<(), CoreError> {
+        let mut c = self.config();
+        if c.transfers.alt.enabled == on {
+            return Ok(());
+        }
+        c.transfers.alt.enabled = on;
         self.cfg.save(&c).map_err(|e| doc_err(&e))
     }
 
@@ -1021,8 +1043,8 @@ impl SettingsStore {
 /// Expands `~` against `$HOME` (which `--home-root` redirects).
 pub fn expand_home(p: &str) -> PathBuf {
     if (p == "~" || p.starts_with("~/"))
-        && let Some(home) = std::env::var_os("HOME") {
-            let mut b = PathBuf::from(home);
+        && let Some(home) = trs_platform::dirs::home() {
+            let mut b = home;
             if let Some(rest) = p.strip_prefix("~/") {
                 b.push(rest);
             }
@@ -1190,7 +1212,7 @@ mod tests {
             tracker_ids: vec![],
             private_match: PrivateMatch::PrivateOnly,
             categories: vec![Category::Tv],
-            goal: Some(GoalKind::Ratio { ratio: 2.0 }),
+            goal: Some(GoalKind::RatioOnly { ratio: 2.0 }),
             min_seed_secs: Some(72 * 3600),
             priority: Some(Priority::High),
             on_goal: None,
@@ -1202,7 +1224,7 @@ mod tests {
         let saved = store.save_rules(&doc).unwrap();
         assert_eq!(saved.rules[0].id, "z-priority-h-r-safe");
         assert_eq!(store.load_rules(), saved);
-        doc.rules[0].goal = Some(GoalKind::Ratio { ratio: -1.0 });
+        doc.rules[0].goal = Some(GoalKind::RatioOnly { ratio: -1.0 });
         assert!(matches!(store.save_rules(&doc), Err(CoreError::Invalid { .. })));
     }
 
@@ -1261,6 +1283,8 @@ mod tests {
     fn a_favorites_folders_and_hidden_mode_survive_a_save_and_a_reload() {
         let dir = tempfile::tempdir().unwrap();
         let store = SettingsStore::new(dir.path());
+        // absolute on this system: a drive letter in front on Windows
+        let media = if cfg!(windows) { "C:/Volumes/Media/TZ" } else { "/Volumes/Media/TZ" }.to_string();
         let rec = ProfileRecord {
             id: "tz".into(),
             name: "TZ".into(),
@@ -1271,9 +1295,9 @@ mod tests {
             down_limit: None,
             up_limit: None,
             incomplete_dir: Some(" ".into()),
-            finished_dir: Some("/Volumes/Media/TZ".into()),
+            finished_dir: Some(media.clone()),
             categories: vec![
-                CategoryLocationSetting { category: Category::Movie, incomplete_dir: None, finished_dir: Some("/Volumes/Media/TZ/Movies".into()) },
+                CategoryLocationSetting { category: Category::Movie, incomplete_dir: None, finished_dir: Some(format!("{media}/Movies")) },
                 CategoryLocationSetting { category: Category::Tv, incomplete_dir: None, finished_dir: None },
             ],
             hidden: true,
@@ -1282,7 +1306,7 @@ mod tests {
         };
         let saved = store.save_profiles(&[rec]).unwrap();
         assert_eq!(saved[0].incomplete_dir, None, "a blank folder is \"same as Settings\"");
-        assert_eq!(saved[0].finished_dir.as_deref(), Some("/Volumes/Media/TZ"));
+        assert_eq!(saved[0].finished_dir.as_deref(), Some(media.as_str()));
         assert_eq!(saved[0].categories.len(), 1, "an empty category entry is dropped");
         assert!(saved[0].hidden && saved[0].hide_only_seeding);
         assert_eq!(store.load_profiles(), saved);

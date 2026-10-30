@@ -22,13 +22,16 @@ path = "src/bin/uniffi-bindgen.rs"
 required-features = ["bindgen"]
 
 [dependencies]
-uniffi = { version = "0.32", default-features = false }
+# Held at 0.31 while uniffi-bindgen-cs (the Windows app's C# bindings) supports nothing newer; the Rust side
+# and every generator must be on the same UniFFI version. Move on when it does (docs/CROSS-PLATFORM.md).
+uniffi = { version = "0.31", default-features = false }
 trs-engine = { path = "../engine" }
 # `MappedAlloc`, the app's global allocator (big blocks leave the footprint when freed).
 trs-storage = { path = "../storage" }
 trs-state = { path = "../state" }
 trs-classify = { path = "../classify" }
 trs-control = { path = "../control" }
+trs-platform = { path = "../platform" }
 # Folder sync (SPEC 7G): the service's handle, its secret store and status, keys and links.
 trs-sync-net = { path = "../sync-net" }
 trs-sync-proto = { path = "../sync-proto" }
@@ -39,8 +42,13 @@ trs-tracker = { path = "../tracker" }
 trs-devlog = { path = "../devlog" }
 # Content types and container families of file names (the Play entries); the server itself is the engine's.
 trs-stream = { path = "../stream" }
-# Runtime handle, broadcast receiver for engine events, timers.
-tokio = { version = "1", default-features = false, features = ["rt", "sync", "time"] }
+# Runtime handle, broadcast receiver for engine events, timers; `net` for the update check's request.
+tokio = { version = "1", default-features = false, features = ["rt", "sync", "time", "net"] }
+# The update check: one small GET of `latest.json` (the downloads' client and redirect rules), the document read
+# and what is kept between launches (`updates.json`).
+trs-http = { path = "../http" }
+serde = { version = "1", default-features = false, features = ["derive", "std"] }
+serde_json = { version = "1", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 tempfile = "3"

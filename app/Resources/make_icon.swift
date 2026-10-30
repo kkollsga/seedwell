@@ -10,7 +10,10 @@ import AppKit
 import CoreGraphics
 import ImageIO
 
-let out = CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : "AppIcon.iconset"
+// `make_icon --windows <dir>`: the sizes a Windows .ico holds instead (icon_<px>.png, each drawn from scratch), for
+// the Windows app, which cannot run this script.
+let windows = CommandLine.arguments.count > 2 && CommandLine.arguments[1] == "--windows"
+let out = windows ? CommandLine.arguments[2] : CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : "AppIcon.iconset"
 try? FileManager.default.createDirectory(atPath: out, withIntermediateDirectories: true)
 
 let space = CGColorSpace(name: CGColorSpace.sRGB)!
@@ -124,6 +127,13 @@ func render(_ px: Int) -> Data? {
     }
     guard let image = ctx.makeImage() else { return nil }
     return NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:])
+}
+
+if windows {
+    for px in [16, 20, 24, 32, 40, 48, 64, 96, 128, 256] {
+        try? render(px)?.write(to: URL(fileURLWithPath: "\(out)/icon_\(px).png"))
+    }
+    exit(0)
 }
 
 for (name, px) in [("16", 16), ("16@2x", 32), ("32", 32), ("32@2x", 64), ("128", 128), ("128@2x", 256),

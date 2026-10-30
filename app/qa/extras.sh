@@ -12,6 +12,6 @@ B="$QA_ROOT/extras-bunny"; P="$QA_ROOT/extras-private"
 rm -rf "$B" "$P"
 python3 -I "$REPO/app/qa/make_torrents.py" --out "$B" --special bunny --start 3000 >/dev/null
 python3 -I "$REPO/app/qa/make_torrents.py" --out "$P" --special private --start 3001 >/dev/null
-"$REPO/target/release/seedwell" --socket "$QA_ROOT/seeder/control.sock" add "$B"/torrents/*.torrent --save-path "$B/data" >/dev/null
+"$TRS" --socket "$QA_ROOT/seeder/control.sock" add "$B"/torrents/*.torrent --save-path "$B/data" >/dev/null
 "$CLI" --socket "$SOCK" add "$B"/torrents/*.torrent --peer 127.0.0.1:7201 >/dev/null || echo "bunny add failed"
 "$CLI" --socket "$SOCK" add "$P"/torrents/*.torrent --save-path "$P/data" >/dev/null || echo "private add failed"

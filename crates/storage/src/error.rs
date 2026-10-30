@@ -75,8 +75,9 @@ pub enum StorageError {
     },
     /// The relocation journal is in a state that does not allow this call.
     InvalidState,
-    /// A file is locked (macOS `uchg`/`schg`/append-only flag, Finder "Locked"): it cannot be
-    /// renamed or removed. Found before anything was touched.
+    /// A file is locked (macOS `uchg`/`schg`/append-only flag, Finder "Locked"; on Windows open in
+    /// another program that does not let it be deleted): it cannot be renamed or removed. Found
+    /// before anything was touched, or by the move itself (Windows), which then rolled back.
     Locked {
         /// Index of the file in the layout.
         file: u32,
@@ -118,10 +119,10 @@ impl StorageError {
 }
 
 /// An OS error code that means "this place cannot be written right now, but may be later":
-/// disk full (`ENOSPC`), quota (`EDQUOT`), read-only file system (`EROFS`), permission denied
-/// (`EACCES`, `EPERM`).
+/// disk full, quota, read-only file system, permission denied.
 pub fn os_error_is_write_blocked(code: i32) -> bool {
-    matches!(code, libc::ENOSPC | libc::EDQUOT | libc::EROFS | libc::EACCES | libc::EPERM)
+    use io::ErrorKind::*;
+    matches!(io::Error::from_raw_os_error(code).kind(), StorageFull | QuotaExceeded | ReadOnlyFilesystem | PermissionDenied)
 }
 
 impl StorageError {
@@ -140,7 +141,7 @@ pub fn leaf(p: &std::path::Path) -> String {
 
 /// ENOENT and ENOTDIR both mean the path (or a parent) is not there.
 pub(crate) fn is_not_found(e: &io::Error) -> bool {
-    e.kind() == io::ErrorKind::NotFound || e.raw_os_error() == Some(libc::ENOTDIR)
+    trs_platform::fs::is_not_found(e)
 }
 
 impl fmt::Display for StorageError {
@@ -175,7 +176,7 @@ impl fmt::Display for StorageError {
             }
             Self::InvalidState => write!(f, "relocation journal is not in a state that allows this"),
             Self::Locked { path, .. } => {
-                write!(f, "\u{201c}{}\u{201d} is locked (Finder \u{203a} Get Info \u{203a} Locked)", leaf(path))
+                write!(f, "\u{201c}{}\u{201d} {}", leaf(path), trs_platform::fs::LOCKED_WORDS)
             }
             Self::NoPermission { path } => write!(f, "No permission to change \u{201c}{}\u{201d}", leaf(path)),
             Self::Layout(e) => write!(f, "invalid layout: {e}"),
@@ -208,11 +209,16 @@ mod blocked_tests {
 
     #[test]
     fn full_readonly_and_denied_writes_are_blocked_not_fatal() {
-        for code in [libc::ENOSPC, libc::EROFS, libc::EACCES, libc::EDQUOT] {
+        #[cfg(unix)]
+        let (blocked, other) = ([libc::ENOSPC, libc::EROFS, libc::EACCES, libc::EDQUOT], libc::EIO);
+        // ERROR_DISK_FULL, ERROR_HANDLE_DISK_FULL, ERROR_ACCESS_DENIED; ERROR_CRC.
+        #[cfg(windows)]
+        let (blocked, other) = ([112, 39, 5], 23);
+        for code in blocked {
             let e = StorageError::from_io(0, io::Error::from_raw_os_error(code));
             assert!(e.is_write_blocked(), "os error {code}");
         }
-        assert!(!StorageError::from_io(0, io::Error::from_raw_os_error(libc::EIO)).is_write_blocked());
+        assert!(!StorageError::from_io(0, io::Error::from_raw_os_error(other)).is_write_blocked());
         assert!(!StorageError::MissingData { file: 0 }.is_write_blocked());
         assert!(!StorageError::MissingRoot.is_write_blocked());
     }

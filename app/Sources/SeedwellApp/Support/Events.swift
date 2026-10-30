@@ -43,8 +43,8 @@ final class CoreEvents: CoreListener, Sendable {
 
 /// System notifications (SPEC §9). Clicking one opens the main window on the transfer.
 @MainActor enum Notifier {
-    /// Notification centre needs a real bundle; skipped under `swift run`.
-    static var available: Bool { Bundle.main.bundleIdentifier != nil && Bundle.main.bundlePath.hasSuffix(".app") }
+    /// Notification centre needs a real bundle; skipped under `swift run`. A quiet QA run posts none (QuietRun).
+    static var available: Bool { Bundle.main.bundleIdentifier != nil && Bundle.main.bundlePath.hasSuffix(".app") && !QuietRun.on }
     private static let log = Logger(subsystem: "io.github.kkollsga.Seedwell", category: "notify")
 
     static func requestAuthorization() {

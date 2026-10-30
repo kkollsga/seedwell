@@ -35,7 +35,7 @@ pub(super) fn pick(h: &SyncHandle, q: &str) -> Result<(ChannelStatus, FolderId),
 }
 
 fn channel_reply(h: &SyncHandle, id: &FolderId, what: &str) -> Result<Reply, ApiError> {
-    let c = h.channel_status(id).ok_or_else(|| ApiError::not_found("the channel is no longer on this Mac"))?;
+    let c = h.channel_status(id).ok_or_else(|| ApiError::not_found(concat!("the channel is no longer on this ", trs_platform::computer!())))?;
     let d = channel_dto(&c);
     let mut r = reply(&d)?;
     r.note = Some(format!("{what} {} ({})", clip(&d.name, 80), short(&d.id)));
@@ -52,7 +52,10 @@ fn agents_allow(c: &ChannelStatus, need: AgentAccess, what: &str) -> Result<(), 
     Err(ApiError::new(
         ErrorCode::PermissionDenied,
         format!(
-            "agents on this Mac may not {how} in the channel `{name}` yet; the user can allow it in Seedwell: Chats ▸ {name} ▸ ⋯ ▸ Agents on This Mac ▸ {choice}. Settings › Agents does not open up chats: each channel has its own switch"
+            concat!("agents on this ", trs_platform::computer!(), " may not {how} in the channel `{name}` yet; the user can allow it in Seedwell: Chats ▸ {name} ▸ ⋯ ▸ Agents on This ", trs_platform::computer!(), " ▸ {choice}. Settings › Agents does not open up chats: each channel has its own switch"),
+            how = how,
+            name = name,
+            choice = choice
         ),
     )
     .with_data(json!({ "channel": c.id, "agents": c.agents.name(), "method": what })))
@@ -85,7 +88,9 @@ fn direct_allow(h: &SyncHandle, need: AgentAccess, what: &str) -> Result<(), Api
     Err(ApiError::new(
         ErrorCode::PermissionDenied,
         format!(
-            "agents on this Mac may not {how} private messages yet; the user can allow it in Seedwell: Chats ▸ a private conversation ▸ ⋯ ▸ Agents on This Mac ▸ {choice} (one switch for every private conversation). Settings › Agents does not open up chats"
+            concat!("agents on this ", trs_platform::computer!(), " may not {how} private messages yet; the user can allow it in Seedwell: Chats ▸ a private conversation ▸ ⋯ ▸ Agents on This ", trs_platform::computer!(), " ▸ {choice} (one switch for every private conversation). Settings › Agents does not open up chats"),
+            how = how,
+            choice = choice
         ),
     )
     .with_data(json!({ "agents": h.chat_direct_agents().name(), "method": what })))

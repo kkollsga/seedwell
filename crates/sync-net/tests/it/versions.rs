@@ -88,7 +88,7 @@ async fn a_member_that_cannot_talk_any_more_is_listed_with_the_folders_issues_un
     let b = restart(b, dirs[1].path(), "Beta", (PROTOCOL + 1, PROTOCOL + 1), 1).await;
     b.add_address(&id, std::net::SocketAddr::new(std::net::Ipv4Addr::LOCALHOST.into(), a.port())).unwrap();
     until(30, "B's folder lists the owner", || issues(&b, &id).iter().any(|i| i == "Owner runs an older Seedwell that cannot sync with this one: update it")).await;
-    until(30, "the owner's folder lists B", || issues(&a, &id).iter().any(|i| i == "Beta runs a newer Seedwell that this one cannot sync with: update this Mac")).await;
+    until(30, "the owner's folder lists B", || issues(&a, &id).iter().any(|i| i == concat!("Beta runs a newer Seedwell that this one cannot sync with: update this ", trs_platform::computer!()))).await;
 
     // Back to a version both speak: the issues go.
     let b = restart(b, dirs[1].path(), "Beta", now, 1).await;

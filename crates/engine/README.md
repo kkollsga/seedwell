@@ -381,7 +381,8 @@ Vec<PathBuf>` lists it (sorted, at most 1,000) so the app can offer "Add 5 exist
 `add_torrent_path` for the accepted ones. Without a persisted value (an engine used without `Host`) the baseline is the moment the folder
 first appears in the process. Per folder: mode `auto` (add; ask when the confidence is below the threshold and `ask_when_unsure`) or `ask`
 (`EngineEvent::AddRequest` with an `AddPreview`; the app answers with `add_torrent_path`), a forced category and rule,
-and the after-add action (Trash = `~/.Trash` with a non-colliding name, Archive, Leave, Delete). Invalid files are
+and the after-add action (Trash = the system's Trash through `trs_platform::fs::move_to_trash`: on macOS the system's own
+Trash call, which keeps a file in its own volume's Trash with Put Back, the Recycle Bin on Windows; Archive, Leave, Delete). Invalid files are
 reported once (`WatchError`) and left alone; duplicates give a `Duplicate` event.
 
 ## Direct downloads (SPEC 7D)

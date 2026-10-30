@@ -213,6 +213,9 @@ pub struct Live {
     pub state: crate::status::FolderState,
     /// Paths that cannot be synced, with the reason (from the last scan and pull).
     pub issues: Vec<(String, String)>,
+    /// The entries of `issues` a pull put there, by path: taken out again once the path no longer
+    /// needs pulling (it arrived, or the other device changed or deleted it).
+    pub pull_issues: BTreeMap<String, String>,
     /// The error that keeps the folder from syncing, if any.
     pub error: Option<String>,
     /// When it last had nothing left to do, Unix seconds.
@@ -237,6 +240,7 @@ impl Default for Live {
         Live {
             state: crate::status::FolderState::Starting,
             issues: Vec::new(),
+            pull_issues: BTreeMap::new(),
             error: None,
             last_synced_s: None,
             conflicts: BTreeMap::new(),

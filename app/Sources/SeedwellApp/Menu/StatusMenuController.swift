@@ -3,13 +3,20 @@ import os
 
 /// The menu bar item and its plain native NSMenu (SPEC §8.2). The menu is rebuilt when it opens
 /// and refreshed once a second only while it is open; when closed nothing polls the core.
+///
+/// What the menu and the icon show is the core's (`menuModel`, `IconState`: sections, rows, texts, signatures,
+/// cadence); this draws it and runs the commands.
 @MainActor final class StatusMenuController: NSObject, NSMenuDelegate {
     private let core: Core
     private let commands: Commands
     private let settings: SettingsModel?
-    private var statusItem: NSStatusItem? = NSStatusItem.make()
+    private var statusItem: NSStatusItem?
+    /// The menu of the running app (also in a quiet QA run, which has no menu bar item), not a picture of it.
+    private var live: Bool
     /// What the icon shows now; it is redrawn only when this changes.
     private var iconLook: IconLook?
+    /// The icon's model (it remembers when a move started).
+    private let icon = IconState()
     /// Called with every snapshot the icon refresh reads (the sleep assertion follows it).
     var onRefresh: ((Snapshot) -> Void)?
     /// The menu is about to open: the notifier steps aside for it.
@@ -18,14 +25,15 @@ import os
     var statusButton: NSStatusBarButton? { statusItem?.button }
     private let menu = NSMenu(title: AppInfo.name)
     private var timer: Timer?
+    /// The icon's next look, when the core says (`IconModel.nextRefreshMs`); events ask sooner.
     private var iconTimer: Timer?
-    private var moveTimer: Timer?
-    private var moveBar = MoveBar()
-    private var attentionTimer: Timer?
     private var rightClickMonitor: Any?
     private var signature = ""
     private var rowItems: [String: NSMenuItem] = [:]
+    /// The snapshot's rows, for the commands (right-click, reveal, Play, the file list).
     private var rows: [String: TransferRow] = [:]
+    /// The menu's rows as the core last gave them (the check flips here at once; the next refresh confirms it).
+    private var models: [String: MenuRow] = [:]
     /// The Sharing line: a row of its own, so the rate sits at the right edge as plain text.
     private var sharingRow: MenuCheckRow?
     /// The Folder Sync line and its submenu (SPEC 8.2 item 5).
@@ -36,90 +44,63 @@ import os
     /// The Open / Quit row (QA draws its hover state).
     private(set) var footerRow: FooterRow?
     private let log = Logger(subsystem: "io.github.kkollsga.Seedwell", category: "menu")
-    private static let queuedShown = 3
-    private static let recentShown = 3
-    /// Longest name a downloading row shows before the middle is cut.
-    static let titleLimit = 44
 
-    init(core: Core, commands: Commands, settings: SettingsModel? = nil) {
+    /// `inMenuBar: false` (the visual QA run only): no menu bar item, so the menu can be built and drawn offscreen. A
+    /// quiet QA run (QuietRun) has no menu bar item either, but its menu and icon state run as usual.
+    init(core: Core, commands: Commands, settings: SettingsModel? = nil, inMenuBar: Bool = true) {
         self.core = core
         self.commands = commands
         self.settings = settings
+        live = inMenuBar
+        statusItem = inMenuBar && !QuietRun.on ? NSStatusItem.make() : nil
         super.init()
         menu.delegate = self
         menu.autoenablesItems = false
         statusItem?.menu = menu
         menuFiles.onMoved = { [weak self] in self?.refreshHover() }
         refreshIcon()
-        // Errors, dead torrents and uploads start without an event: look again every 30 s (cheap, coalesced).
-        let slow = Timer(timeInterval: 30, repeats: true) { [weak self] _ in MainActor.assumeIsolated { self?.refreshIcon() } }
-        slow.tolerance = 15
-        RunLoop.main.add(slow, forMode: .common)
-        attentionTimer = slow
     }
 
-    /// QA: opens or closes the menu as a click on the icon would.
     /// QA: presses one side of the footer row as a click would.
     func qaPressFooter(_ side: String) { footerRow?.qaPress(side) }
 
+    /// QA: opens or closes the menu as a click on the icon would. A quiet QA run shows no menu: it opens and closes
+    /// it as the menu itself would (built, refreshed once a second, the icon's open cadence) without tracking it on a
+    /// screen; QA draws its items (`shot … menu`).
     func perform(open: Bool) {
+        if QuietRun.on {
+            if open, !qaMenuOpen { menuWillOpen(menu) } else if !open, qaMenuOpen { menuDidClose(menu) }
+            return
+        }
         if open { statusItem?.button?.performClick(nil) } else { menu.cancelTracking() }
     }
 
     /// Quit hides everything at once (SPEC §12 #16): the icon goes while the engine finishes its announces.
     func hide() {
-        timer?.invalidate(); iconTimer?.invalidate(); attentionTimer?.invalidate(); moveTimer?.invalidate()
-        timer = nil; iconTimer = nil; attentionTimer = nil; moveTimer = nil
+        timer?.invalidate(); iconTimer?.invalidate()
+        timer = nil; iconTimer = nil
         if let item = statusItem { NSStatusBar.system.removeStatusItem(item) }
         statusItem = nil
+        live = false
     }
 
-    // MARK: Icon (event-driven; a slow timer runs only while something is downloading)
+    // MARK: Icon (event-driven, plus a timer at the cadence the core gives)
 
     func refreshIcon() {
-        guard let statusItem else { return }
+        guard live, statusItem != nil || QuietRun.on else { return }  // the visual QA run's copy draws, nothing more
         let s = core.snapshot()
         onRefresh?(s)
-        let active = s.downloading.filter { !$0.isHeld }
-        let total = active.reduce(0) { $0 + $1.progressSize }
-        let done = active.reduce(0) { $0 + $1.progressDone }
-        let downloading = !active.isEmpty
-        let look = IconLook(down: Drawing.intensity(s.downRate), up: Drawing.intensity(s.upRate),
-                            progress: downloading ? (Double(done) / Double(max(total, 1)) * 50).rounded() / 50 : nil,
-                            moving: moveBar.fraction(percent: s.movingPercent, now: Date()),
-                            attention: s.attention)
-        if look != iconLook {
-            iconLook = look
-            statusItem.button?.image = Drawing.statusIcon(down: look.down, up: look.up, progress: look.progress, moving: look.moving, attention: look.attention)
+        let m = icon.icon(snapshot: s, nowUnixMs: Date().unixMs, menuOpen: qaMenuOpen)
+        if m.look != iconLook {
+            iconLook = m.look
+            statusItem?.button?.image = Drawing.statusIcon(down: m.look.down, up: m.look.up, progress: m.look.progress, moving: m.look.moving, attention: m.look.attention)
         }
-        // Move progress is not an event: look twice a second while a move runs (and for the grace
-        // period after it starts), then stop.
-        if moveBar.isWatching, moveTimer == nil {
-            let t = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in MainActor.assumeIsolated { self?.refreshIcon() } }
-            t.tolerance = 0.1
-            RunLoop.main.add(t, forMode: .common)
-            moveTimer = t
-        } else if !moveBar.isWatching {
-            moveTimer?.invalidate()
-            moveTimer = nil
-        }
-        var label = AppInfo.name
-        if s.downRate > 0 { label += ", downloading \(Fmt.rate(s.downRate))" } else if downloading { label += ", downloading" }
-        if s.upRate > 0 { label += ", uploading \(Fmt.rate(s.upRate))" }
-        if s.attention { label += ", needs attention" }
-        statusItem.button?.setAccessibilityLabel(label)
-        // Colours follow the rates: a 5 s refresh while something moves or an arrow is still
-        // coloured (a finished download's rate fades over a few seconds after its last block).
-        let moving = downloading || s.upRate > 0 || s.downRate > 0 || look.down > 0 || look.up > 0
-        if moving, iconTimer == nil {
-            let t = Timer(timeInterval: 5, repeats: true) { [weak self] _ in MainActor.assumeIsolated { self?.refreshIcon() } }
-            t.tolerance = 2
-            RunLoop.main.add(t, forMode: .common)
-            iconTimer = t
-        } else if !moving {
-            iconTimer?.invalidate()
-            iconTimer = nil
-        }
+        statusItem?.button?.setAccessibilityLabel(m.accessibilityLabel)
+        iconTimer?.invalidate()
+        let t = Timer(timeInterval: Double(m.nextRefreshMs) / 1000, repeats: false) { [weak self] _ in MainActor.assumeIsolated { self?.refreshIcon() } }
+        t.tolerance = Double(m.refreshLeewayMs) / 1000
+        RunLoop.main.add(t, forMode: .common)
+        iconTimer = t
     }
 
     // MARK: NSMenuDelegate
@@ -129,13 +110,17 @@ import os
         onWillOpen?()
         qaMenuOpen = true
         pinToSRGB()
-        menuSync.menuOpened(core.syncSnapshot())
-        rebuild(core.snapshot())
-        let t = Timer(timeInterval: 1, repeats: true) { [weak self] _ in MainActor.assumeIsolated { self?.tick() } }
+        let sync = core.syncSnapshot()
+        menuSync.menuOpened(sync)
+        let s = core.snapshot()
+        let m = model(s, sync)
+        rebuild(s, m)
+        let t = Timer(timeInterval: Double(m.refreshMs) / 1000, repeats: true) { [weak self] _ in MainActor.assumeIsolated { self?.tick() } }
         t.tolerance = 0.1
         // eventTracking mode: timers in the default mode do not fire while a menu is tracking.
         RunLoop.main.add(t, forMode: .common)
         timer = t
+        refreshIcon()  // the open menu's cadence
         installRightClickMonitor()
     }
 
@@ -154,6 +139,7 @@ import os
         rightClickMonitor = nil
         clearHover()
         rowItems = [:]
+        models = [:]
         qaMenuOpen = false
         menuFiles.menuClosed()
         refreshIcon()
@@ -205,39 +191,18 @@ import os
 
     private func tick() {
         let s = core.snapshot()
-        commands.arrivals.note(s)
+        let sync = core.syncSnapshot()
+        let m = model(s, sync)
         // An open file list is not rebuilt under the pointer (ticking a file can move the row).
-        if signatureOf(s) != signature, !menuFiles.isOpen { rebuild(s) } else { update(s) }
-        menuSync.update(core.syncSnapshot())
+        if m.signature != signature, !menuFiles.isOpen { rebuild(s, m) } else { update(s, m) }
+        menuSync.update(sync)
     }
 
-    /// The Downloading section and the Queued section as the menu shows them (SPEC 8.2). A torrent that
-    /// just arrived is listed first in Downloading, newest first, even while it waits for a free slot: the
-    /// user must see what they just added without looking under Queued. Held torrents (waiting for the
-    /// user's choice, then counting down) stay ahead of it, as the engine orders them.
-    struct Layout {
-        var downloading: [TransferRow]
-        var queued: [TransferRow]
-    }
-
-    /// At most this many queued arrivals are lifted into Downloading.
-    static let arrivedQueuedShown = 3
-
-    static func layout(_ s: Snapshot, arrivals: DownloadArrivals) -> Layout {
-        let lifted = Array(s.queued.filter { arrivals.arrived.contains($0.id) && $0.state == .queued }
-            .sorted { arrivals.rank(of: $0.id) > arrivals.rank(of: $1.id) }.prefix(arrivedQueuedShown))
-        let liftedIDs = Set(lifted.map(\.id))
-        let all = s.downloading + lifted
-        func tier(_ r: TransferRow) -> Int { r.awaitingChoice ? 0 : r.pending != nil ? 1 : 2 }
-        // Stable: the engine's order inside a tier, newest arrival first.
-        let sorted = all.enumerated().sorted { a, b in
-            let (ta, tb) = (tier(a.element), tier(b.element))
-            if ta != tb { return ta < tb }
-            let (ra, rb) = (arrivals.rank(of: a.element.id), arrivals.rank(of: b.element.id))
-            if ta == 2, ra != rb { return ra > rb }
-            return a.offset < b.offset
-        }.map(\.element)
-        return Layout(downloading: sorted, queued: s.queued.filter { !liftedIDs.contains($0.id) })
+    /// The menu as the core lays it out, with the torrents that just arrived first (they are noted here too).
+    private func model(_ s: Snapshot, _ sync: SyncSnapshot) -> MenuModel {
+        commands.arrivals.note(s)
+        return menuModel(snapshot: s, sync: sync, arrivals: commands.arrivals.arrivals, nowUnixMs: Date().unixMs,
+                         updateVersion: UpdateCenter.shared.availableVersion)
     }
 
     /// QA: the titles of the open menu, headers first ("Downloading|name|name||Recent|…").
@@ -247,8 +212,24 @@ import os
             .joined(separator: "|")
     }
 
+    /// QA: the subtitles of the open menu's rows ("42% · 3.1 MB/s · 4 min left|…").
+    var qaSubtitles: String {
+        menu.items.filter { !$0.isHidden }.compactMap(\.subtitle).joined(separator: "|")
+    }
+
     /// QA: the menu items (top level).
     var qaItems: [NSMenuItem] { menu.items }
+
+    /// QA (the visual QA run): builds the menu's items from the core as opening the menu does, without opening it
+    /// (no refresh timer, no right-click monitor, no hover tracking). The items keep the views the menu shows.
+    func qaBuildItems() -> [NSMenuItem] {
+        let sync = core.syncSnapshot()
+        menuSync.menuOpened(sync)
+        let s = core.snapshot()
+        rebuild(s, model(s, sync))
+        return menu.items
+    }
+
     /// QA: the menu is tracking.
     private(set) var qaMenuOpen = false
 
@@ -269,89 +250,60 @@ import os
         return "\(titles) [check \(check), play \(view?.playable == true ? "yes" : "no")]"
     }
 
-    private func signatureOf(_ s: Snapshot) -> String {
-        let l = Self.layout(s, arrivals: commands.arrivals.arrivals)
-        let d = l.downloading.map { "\($0.id)\($0.state)\($0.pending != nil)\($0.pending?.paused ?? false)" }
-        let q = l.queued.prefix(Self.queuedShown).map(\.id) + ["\(l.queued.count)"]
-        let r = s.recent.prefix(Self.recentShown).map(\.id)
-        let a = ["\(s.sharingTotal > 0)", "\(s.errorCount)", "\(s.online)"]
-        let c = s.downloading.filter(\.awaitingChoice).map(\.id)
-        return [d, q, r, a, c].map { $0.joined(separator: ",") }.joined(separator: "|") + "|" + Self.syncSignature(core.syncSnapshot())
-    }
-
-    /// The Folder Sync line is in the menu only while there are synced folders (the user, 2026-10-26: with none it
-    /// is not shown; folders are added in the window). Its folders are the submenu's own business (`MenuSync`
-    /// rebuilds them in place), so only the line's presence is part of the menu's structure.
-    nonisolated static func showsSync(_ s: SyncSnapshot) -> Bool { !s.folders.isEmpty }
-    nonisolated static func syncSignature(_ s: SyncSnapshot) -> String { showsSync(s) ? "sync" : "" }
-
-    private func rebuild(_ s: Snapshot) {
-        commands.arrivals.note(s)
-        signature = signatureOf(s)
-        let layout = Self.layout(s, arrivals: commands.arrivals.arrivals)
+    private func rebuild(_ s: Snapshot, _ m: MenuModel) {
+        signature = m.signature
         syncItem?.submenu = nil  // the submenu is reused: it may hang under one item only
         syncItem = nil
         sharingRow = nil
         menu.removeAllItems()
         rowItems = [:]
         rows = [:]
+        models = [:]
         clearHover()
         for r in s.downloading + s.queued + s.recent { rows[r.id] = r }
 
-        if !s.online, s.sharingTotal == 0 {
-            // The Sharing line carries it when there is one; otherwise a single quiet line.
+        if let line = m.offline {
             let item = NSMenuItem(title: "", action: nil, keyEquivalent: "")
-            item.attributedTitle = NSAttributedString(string: "Offline", attributes: [.foregroundColor: NSColor.secondaryLabelColor, .font: NSFont.menuFont(ofSize: 0)])
+            item.attributedTitle = NSAttributedString(string: line, attributes: [.foregroundColor: NSColor.secondaryLabelColor, .font: NSFont.menuFont(ofSize: 0)])
             item.isEnabled = false
             menu.addItem(item)
         }
-
-        if !layout.downloading.isEmpty {
-            menu.addItem(.sectionHeader(title: "Downloading"))
-            for r in layout.downloading { menu.addItem(rowItem(r, .active)) }
-        }
-        if !layout.queued.isEmpty {
-            menu.addItem(.sectionHeader(title: "Queued"))
-            for r in layout.queued.prefix(Self.queuedShown) { menu.addItem(rowItem(r, .queued)) }
-            let more = layout.queued.count - Self.queuedShown
-            if more > 0 {
+        for section in m.sections {
+            if section.separatorBefore { menu.addItem(.separator()) }
+            menu.addItem(.sectionHeader(title: section.title))
+            for r in section.rows { menu.addItem(rowItem(r, section.kind)) }
+            if let more = section.more {
                 let item = ActionItem(title: "") { [commands] in commands.showMain(.downloads, nil) }
-                item.attributedTitle = NSAttributedString(string: "+ \(more) more", attributes: [.foregroundColor: NSColor.secondaryLabelColor])
+                item.attributedTitle = NSAttributedString(string: more, attributes: [.foregroundColor: NSColor.secondaryLabelColor])
                 menu.addItem(item)
             }
         }
-        if !s.recent.isEmpty {
-            if !menu.items.isEmpty { menu.addItem(.separator()) }
-            menu.addItem(.sectionHeader(title: "Recent"))
-            for r in s.recent.prefix(Self.recentShown) { menu.addItem(rowItem(r, .recent)) }
-        }
-        if s.sharingTotal > 0 {
-            if !menu.items.isEmpty { menu.addItem(.separator()) }
+        if let line = m.sharing {
+            if line.separatorBefore { menu.addItem(.separator()) }
             // A click opens Sharing in the window. No submenu (user, 2026-10-14): the line is the summary, with the
             // combined upload rate at its right edge (user, 2026-10-26).
             let item = NSMenuItem()
-            let row = MenuCheckRow(content: Self.sharingContent(s), width: 220) { [commands, weak item] in
+            let row = MenuCheckRow(content: Self.sharingContent(line), width: 220) { [commands, weak item] in
                 MenuSync.closeThen(item?.menu) { commands.showMain(.sharing, nil) }
             }
             item.view = row
             sharingRow = row
             menu.addItem(item)
         }
-        let sync = core.syncSnapshot()
-        if Self.showsSync(sync) {
-            if s.sharingTotal == 0, !menu.items.isEmpty { menu.addItem(.separator()) }
+        if let line = m.folderSync {
+            if line.separatorBefore { menu.addItem(.separator()) }
             // The one submenu of this menu (approved 2026-10-25): the folders, then Add Folder….
-            let item = NSMenuItem(title: "Folder Sync", action: nil, keyEquivalent: "")
+            let item = NSMenuItem(title: line.title, action: nil, keyEquivalent: "")
             item.image = NSImage(systemSymbolName: "arrow.triangle.2.circlepath", accessibilityDescription: nil)
-            item.subtitle = SyncText.summary(sync)
+            item.subtitle = line.subtitle
             item.submenu = menuSync.menu
             syncItem = item
             menu.addItem(item)
         }
         menu.addItem(.separator())
         // Only while an update is waiting (read when the menu is rebuilt; no timer of its own).
-        if let v = UpdateCenter.shared.availableVersion {
-            let item = ActionItem(title: "Update to \(AppInfo.name) \(v)") { UpdateCenter.shared.install() }
+        if let title = m.update {
+            let item = ActionItem(title: title) { UpdateCenter.shared.install() }
             item.image = NSImage(systemSymbolName: "arrow.down.circle", accessibilityDescription: nil)
             menu.addItem(item)
         }
@@ -360,128 +312,99 @@ import os
         // The only Quit that ends the process; ⌘Q elsewhere (and the Dock's Quit) just close the windows.
         let quit: @MainActor () -> Void = { (NSApp.delegate as? AppDelegate)?.quitForReal() ?? NSApp.terminate(nil) }
         let footer = NSMenuItem()
-        let row = FooterRow(openTitle: "Open \(AppInfo.name)…", onOpen: showMain, onQuit: quit)
+        let row = FooterRow(openTitle: m.openTitle, onOpen: showMain, onQuit: quit)
         footer.view = row
         footerRow = row
         menu.addItem(footer)
-        for (title, key, run) in [("Open \(AppInfo.name)…", "l", showMain), ("Quit", "q", quit)] {
+        for (title, key, run) in [(m.openTitle, "l", showMain), (m.quitTitle, "q", quit)] {
             let item = ActionItem(title: title, key: key, run: run)
             item.isHidden = true
             item.allowsKeyEquivalentWhenHidden = true
             menu.addItem(item)
         }
-        update(s)
+        update(s, m)
         // New rows under a pointer that has not moved: NSMenu says nothing until it does.
         DispatchQueue.main.async { [weak self] in self?.refreshHover() }
     }
 
-    /// Updates titles, subtitles and rings in place; no structural change, so the highlight stays put.
-    private func update(_ s: Snapshot) {
+    /// Updates subtitles, marks and checks in place; no structural change, so the highlight stays put.
+    private func update(_ s: Snapshot, _ m: MenuModel) {
         for r in s.downloading + s.queued + s.recent { rows[r.id] = r }
-        for r in s.queued { (rowItems[r.id]?.view as? MenuTorrentRow)?.running = Self.isRunning(r) }
-        for r in Self.layout(s, arrivals: commands.arrivals.arrivals).downloading where !r.awaitingChoice {
-            guard let item = rowItems[r.id] else { continue }
-            (item.view as? MenuTorrentRow)?.running = Self.isRunning(r)
-            if let p = r.pending {
-                item.subtitle = StartingText.line(remaining: p.remaining(at: Date()), paused: p.paused)
-                continue
+        for section in m.sections {
+            for r in section.rows {
+                let old = models[r.id]
+                models[r.id] = r
+                guard let item = rowItems[r.id] else { continue }
+                (item.view as? MenuTorrentRow)?.running = r.running
+                let subtitle = r.subtitle.isEmpty ? nil : r.subtitle
+                if item.subtitle != subtitle { item.subtitle = subtitle }
+                if old?.mark != r.mark { item.image = Self.image(r.mark) }
             }
-            item.subtitle = r.menuSubtitle
-            item.image = r.state == .queued ? Drawing.ring(0) : Drawing.ring(r.fraction)
         }
-        for r in s.recent {
-            rowItems[r.id]?.subtitle = Self.recentSubtitle(r)
-        }
-        sharingRow?.content = Self.sharingContent(s)
-        if let item = syncItem {
-            let line = SyncText.summary(core.syncSnapshot())
-            if item.subtitle != line { item.subtitle = line }
-        }
+        if let line = m.sharing { sharingRow?.content = Self.sharingContent(line) }
+        if let item = syncItem, let line = m.folderSync, item.subtitle != line.subtitle { item.subtitle = line.subtitle }
         for item in rowItems.values { (item.view as? MenuTorrentRow)?.sync(from: item) }
         refreshHover()
     }
 
-    /// "Sharing 2 torrents", plus "· Offline" and "· 1 error" (only problems that need the user count), and the
-    /// combined upload rate at the right edge.
-    static func sharingContent(_ s: Snapshot) -> MenuCheckRow.Content {
-        var title = "Sharing \(Fmt.count(s.sharingTotal, "torrent"))"
-        if !s.online { title += " · Offline" }
-        if s.errorCount > 0 { title += " · \(s.errorCount) error\(s.errorCount == 1 ? "" : "s")" }
-        return MenuCheckRow.Content(title: title, trailing: sharingRate(s), rateActive: s.online && s.upRate > 0)
+    static func sharingContent(_ line: MenuSharingLine) -> MenuCheckRow.Content {
+        MenuCheckRow.Content(title: line.title, trailing: line.rate, rateActive: line.rateActive)
     }
 
-    /// The combined upload rate at the right edge of the Sharing line (the user, 2026-10-26): "↑ 14 KB/s", or a
-    /// bare "–" while nothing uploads.
-    static func sharingRate(_ s: Snapshot) -> String { Fmt.liveRate(s.online ? s.upRate : 0, "↑") }
-
-    private static func recentSubtitle(_ r: TransferRow) -> String {
-        [r.category.label, r.finishedAt.map { Fmt.ago($0, short: true) }].compactMap { $0 }.joined(separator: " · ")
+    static func image(_ mark: MenuMark?) -> NSImage? {
+        switch mark {
+        case let .ring(fraction): Drawing.ring(fraction)
+        case .attention: Drawing.dot(.systemOrange)
+        case .done: Drawing.check()
+        case nil: nil
+        }
     }
 
-    private enum Kind { case active, queued, recent }
-
-    private func rowItem(_ r: TransferRow, _ kind: Kind) -> NSMenuItem {
-        let item: NSMenuItem
-        if r.awaitingChoice {
-            // Waits for the user: orange dot, and a click opens the chooser (SPEC §7A.6).
-            item = ActionItem(title: r.displayName) { [commands] in commands.showChooser(r.id) }
-            item.image = Drawing.dot(.systemOrange)
-            item.subtitle = "Choose what to download…"
-            menuFiles.decorate(item, row: r, revealOnClick: false, interactive: true, onActivate: { [commands] in commands.showChooser(r.id) })
-        } else if kind == .recent {
-            // Recent: a plain row; a click reveals it in Finder.
-            item = ActionItem(title: r.displayName) { [commands] in commands.reveal([r]) }
-            item.image = Drawing.check()
-            item.subtitle = Self.recentSubtitle(r)
-        } else {
-            // The name gives way, never the numbers under it (SPEC 8.2).
-            item = NSMenuItem(title: kind == .active ? Fmt.middleTruncated(r.displayName, to: Self.titleLimit) : r.displayName, action: nil, keyEquivalent: "")
-            // No submenu: the commands are on the right-click menu (`handleRightClick`).
-            if r.pending != nil {
-                item.image = Drawing.ring(0)
-            } else if r.state == .queued {
-                item.image = Drawing.ring(0)
-            } else if r.state == .downloading || r.state == .paused && r.progressDone > 0 {
-                item.image = Drawing.ring(r.fraction)
-            }
+    private func rowItem(_ m: MenuRow, _ kind: MenuSectionKind) -> NSMenuItem {
+        let id = m.id
+        var activate: (@MainActor () -> Void)?
+        switch m.click {
+        case .openChooser: activate = { [commands] in commands.showChooser(id) }
+        case .reveal: activate = { [weak self] in self?.reveal(id) }
+        case nil: break
         }
-        if kind == .queued {
-            item.attributedTitle = NSAttributedString(string: r.displayName, attributes: [.foregroundColor: NSColor.secondaryLabelColor])
+        var onCheck: (@MainActor () -> Void)?
+        if m.running != nil { onCheck = { [weak self] in self?.toggleRunning(id) } }
+        // No submenu: the commands are on the right-click menu (`handleRightClick`).
+        let item = activate.map { ActionItem(title: m.title, run: $0) } ?? NSMenuItem(title: m.title, action: nil, keyEquivalent: "")
+        item.image = Self.image(m.mark)
+        item.subtitle = m.subtitle.isEmpty ? nil : m.subtitle
+        if m.dimmed {
+            item.attributedTitle = NSAttributedString(string: m.title, attributes: [.foregroundColor: NSColor.secondaryLabelColor])
         }
-        item.representedObject = r.id
-        // A multi-file torrent gets a chevron that opens its file list under the row, a download a check
-        // (running / paused) and a video a Play icon (SPEC 8.2).
-        if !r.awaitingChoice {
-            let live = kind != .recent
-            menuFiles.decorate(item, row: r, revealOnClick: kind == .recent, interactive: live,
-                               running: live ? Self.isRunning(r) : nil, onCheck: { [weak self] in self?.toggleRunning(r.id) })
+        item.representedObject = id
+        models[id] = m
+        // The row's own view: the file list's chevron, the check (running / paused) and Play, as the model says. A
+        // Recent row without a file list keeps the plain item.
+        if let r = rows[id] {
+            menuFiles.decorate(item, row: r, expands: m.expands, playable: m.playable, interactive: kind != .recent,
+                               onActivate: activate, running: m.running, onCheck: onCheck)
         }
         (item.view as? MenuTorrentRow)?.onContext = { [weak self] in
-            guard let self, let row = self.rows[r.id] else { return }
+            guard let self, let row = self.rows[id] else { return }
             self.popContext(row)
         }
-        rowItems[r.id] = item
+        rowItems[id] = item
         return item
     }
 
-    /// The check of a row: running = downloading or queued, off = paused. A held row's countdown pauses too.
-    static func isRunning(_ r: TransferRow) -> Bool {
-        if let p = r.pending { return !p.paused }
-        return r.state != .paused
+    private func reveal(_ id: String) {
+        if let r = rows[id] { commands.reveal([r]) }
     }
 
     private func toggleRunning(_ id: String) {
-        guard let r = rows[id] else { return }
-        let running = Self.isRunning(r)
-        if r.pending != nil { commands.pendingCountdown(id, pause: running) }
+        guard let m = models[id], let running = m.running else { return }
+        if m.countdown { commands.pendingCountdown(id, pause: running) }
         else if running { core.pause(ids: [id]) }
         else { core.resume(ids: [id]) }
         // The row follows at once; the next refresh confirms it from the engine.
         (rowItems[id]?.view as? MenuTorrentRow)?.running = !running
-        if var next = rows[id] {
-            if next.pending != nil { next.pending?.paused = running } else { next.state = running ? .paused : .queued }
-            rows[id] = next
-        }
+        models[id]?.running = !running
     }
 
     // MARK: Right-click (SPEC §8.2)
@@ -528,51 +451,5 @@ private extension NSStatusItem {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         item.button?.window?.colorSpace = Windows.space
         return item
-    }
-}
-
-/// The inputs of the menu bar icon, quantised so that equal looks compare equal.
-struct IconLook: Equatable {
-    let down: Double
-    let up: Double
-    let progress: Double?
-    /// Aggregate move progress once a move has run long enough to show (`MoveBar`), else nil.
-    let moving: Double?
-    let attention: Bool
-}
-
-/// When the menu bar icon shows the green move bar. A same-volume move is a rename that takes about
-/// 30 ms; showing the bar for it would only flicker, so the bar appears for a move that is still
-/// running after `grace` seconds and goes as soon as no move is left.
-struct MoveBar {
-    static let grace: TimeInterval = 0.4
-    private var since: Date?
-
-    /// `percent`: the snapshot's aggregate move progress (nil = nothing moves). Returns the fraction
-    /// (0...1, in steps of 2 % so equal looks compare equal) to draw, or nil while nothing is shown.
-    mutating func fraction(percent: UInt8?, now: Date) -> Double? {
-        guard let percent else { since = nil; return nil }
-        let start = since ?? now
-        since = start
-        guard now.timeIntervalSince(start) >= Self.grace else { return nil }
-        return (Double(min(percent, 100)) / 100 * 50).rounded() / 50
-    }
-
-    /// A move is under way (shown or still within the grace period): the icon is checked again soon.
-    var isWatching: Bool { since != nil }
-}
-
-extension TransferRow {
-    /// The grey line of a downloading row in the menu: "42% · 3.1 MB/s · 4 min left". With no speed (or
-    /// no estimate yet) the engine's reason replaces the time ("42% · Waiting for peers"), never a stale one.
-    var menuSubtitle: String {
-        if state == .paused { return "Paused · \(percent)%" }
-        if state == .queued { return "Up next · waiting for a free slot" }
-        if state == .downloading {
-            if downRate > 0, let eta = etaSecs { return "\(percent)% · \(Fmt.rate(downRate)) · \(Fmt.remaining(eta, short: true))" }
-            if downRate == 0, let w = downloadWaiting { return "\(percent)% · \(w.note)\(w.tail)" }
-            return "\(percent)% · " + (downRate > 0 ? "\(Fmt.rate(downRate)) · " : "") + Fmt.remaining(nil, short: true)
-        }
-        return "\(percent)% · \(Fmt.remaining(etaSecs, short: true))"
     }
 }

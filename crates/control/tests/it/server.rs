@@ -734,7 +734,7 @@ async fn tracker_log_is_read_only_and_serves_the_masked_lines() {
     let v = call(&mut c, "tracker_log", json!({})).await.unwrap();
     assert_eq!(v["entries"].as_array().unwrap().len(), 3);
     assert_eq!(v["enabled"], false, "the setting, not the file");
-    assert!(v["path"].as_str().unwrap().ends_with("logs/trackers.log"));
+    assert!(std::path::Path::new(v["path"].as_str().unwrap()).ends_with(std::path::Path::new("logs").join("trackers.log")));
     let e = call(&mut c, "tracker_log", json!({"errors_only": true})).await.unwrap();
     assert_eq!(e["entries"].as_array().unwrap().len(), 1);
     let f = call(&mut c, "tracker_log", json!({"since_ms": 2000, "tracker": "t.example", "torrent": "aabb", "limit": 5})).await.unwrap();
@@ -763,7 +763,8 @@ async fn rules_are_listed() {
 async fn socket_file_goes_away_with_the_server() {
     let rig = Rig::new(Permission::ReadOnly).await;
     let path = rig.path();
-    assert!(path.exists());
+    // A socket file on Unix; on Windows the address names a pipe, which has no file.
+    assert_eq!(path.exists(), cfg!(unix));
     let Rig { server, dir, .. } = rig;
     server.shutdown().await;
     assert!(!path.exists());
@@ -771,15 +772,23 @@ async fn socket_file_goes_away_with_the_server() {
     drop(dir);
 }
 
+/// A Unix-style absolute test path made absolute on this system: unchanged on Unix, a drive letter in front on Windows.
+fn abs(p: &str) -> String {
+    if cfg!(windows) { format!("C:{p}") } else { p.to_string() }
+}
+
 #[tokio::test]
 async fn save_path_needs_full_and_never_targets_sensitive_folders() {
     let rig = Rig::new(Permission::Full).await;
     let mut c = rig.client("claude").await;
-    let ok = call(&mut c, "add", json!({"source": "magnet:?xt=urn:btih:abcdef", "save_path": "/tmp/x"})).await;
+    let ok = call(&mut c, "add", json!({"source": "magnet:?xt=urn:btih:abcdef", "save_path": abs("/tmp/x")})).await;
     assert!(ok.is_ok(), "{ok:?}");
     let e = call(&mut c, "add", json!({"source": "magnet:?xt=urn:btih:abcdef", "save_path": "relative/dir"})).await.unwrap_err();
     assert_eq!(e.code, ErrorCode::InvalidParams, "{e}");
-    for bad in ["~/.ssh", "~/Library/LaunchAgents", "~", "/Library/LaunchDaemons", "/usr/local/bin", "/etc"] {
+    // The system's own sensitive folders (a folder below each) and the settings folder of the user.
+    let mut bad: Vec<String> = ["~/.ssh", "~"].map(String::from).into();
+    bad.extend(trs_platform::dirs::sensitive_dirs().iter().map(|d| d.join("sub").display().to_string()));
+    for bad in bad {
         let e = call(&mut c, "add", json!({"source": "magnet:?xt=urn:btih:abcdef", "save_path": bad})).await.unwrap_err();
         assert_eq!(e.code, ErrorCode::Invalid, "{bad}: {e}");
     }
@@ -853,7 +862,7 @@ async fn choose_files_validates_and_maps_to_priorities() {
 async fn move_needs_full_and_refuses_sensitive_folders() {
     let rig = Rig::new(Permission::Control).await;
     let mut c = rig.client("claude").await;
-    let e = call(&mut c, "move", json!({"ids": ["aaaaaa"], "path": "/Volumes/Media/Done"})).await.unwrap_err();
+    let e = call(&mut c, "move", json!({"ids": ["aaaaaa"], "path": abs("/Volumes/Media/Done")})).await.unwrap_err();
     assert_eq!(e.code, ErrorCode::PermissionDenied);
     assert_eq!(e.data.unwrap()["required"], "full");
     // Reading what is out of place and cancelling moves are not that sensitive.
@@ -863,7 +872,10 @@ async fn move_needs_full_and_refuses_sensitive_folders() {
 
     let rig = Rig::new(Permission::Full).await;
     let mut c = rig.client("claude").await;
-    for bad in ["/System/x", "/Library/y", "/etc", "relative/dir", "/a/../b"] {
+    let mut bad: Vec<String> = ["relative/dir"].map(String::from).into();
+    bad.push(abs("/a/../b"));
+    bad.extend(trs_platform::dirs::sensitive_dirs().iter().map(|d| d.join("x").display().to_string()));
+    for bad in bad {
         let e = call(&mut c, "move", json!({"ids": ["aaaaaa"], "path": bad})).await.unwrap_err();
         assert!(matches!(e.code, ErrorCode::Invalid | ErrorCode::InvalidParams), "{bad}: {e}");
     }
@@ -873,9 +885,9 @@ async fn move_needs_full_and_refuses_sensitive_folders() {
         assert_eq!(e.code, ErrorCode::Invalid);
     }
     assert!(rig.mock.calls().is_empty(), "nothing reached the backend");
-    let r: MoveReportDto = serde_json::from_value(call(&mut c, "move", json!({"ids": ["aaaaaa"], "path": "/Volumes/Media/Done"})).await.unwrap()).unwrap();
+    let r: MoveReportDto = serde_json::from_value(call(&mut c, "move", json!({"ids": ["aaaaaa"], "path": abs("/Volumes/Media/Done")})).await.unwrap()).unwrap();
     assert_eq!(r.queued.len(), 1);
-    assert_eq!(rig.mock.calls(), ["move 1 to Some(\"/Volumes/Media/Done\")"]);
+    assert_eq!(rig.mock.calls(), [format!("move 1 to Some({:?})", abs("/Volumes/Media/Done"))]);
     // Without a path: where the settings say.
     call(&mut c, "move", json!({"ids": ["aaaaaa"]})).await.unwrap();
     assert_eq!(rig.mock.calls()[1], "move 1 to None");

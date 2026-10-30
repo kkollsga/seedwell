@@ -215,10 +215,17 @@ struct CategoryPill: View {
     let category: Category
     let choose: (Category) -> Void
 
+    /// The menu: every category, the current one ticked (also what QA's `starting pill` shows as a native menu).
+    static func entries(category: Category, choose: @escaping (Category) -> Void) -> [MenuEntry] {
+        Category.all.map { c in .item(c.label, checked: c == category) { choose(c) } }
+    }
+
     var body: some View {
         Menu {
-            ForEach(Category.all, id: \.self) { c in
-                Toggle(c.label, isOn: Binding(get: { c == category }, set: { _ in choose(c) }))
+            ForEach(Array(Self.entries(category: category, choose: choose).enumerated()), id: \.offset) { _, entry in
+                if case let .item(title, checked, _, _, _, run) = entry {
+                    Toggle(title, isOn: Binding(get: { checked }, set: { _ in run() }))
+                }
             }
         } label: {
             HStack(spacing: 4) {

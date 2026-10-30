@@ -19,7 +19,6 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
 use trs_control::client::Client;
 use trs_control::human;
 use trs_control::proto::*;
@@ -231,7 +230,7 @@ fn save_manifest(dir: &Path, m: &Manifest) -> R {
 
 async fn host_call(dir: &Path, req: Value) -> Result<Value, CliError> {
     let sock = dir.join("host.sock");
-    let mut s = UnixStream::connect(&sock).await.map_err(|_| CliError { code: 3, message: "no sims are running (start one with `seedwell sim add`)".into(), api_code: Some(ErrorCode::NotFound), data: None })?;
+    let mut s = trs_control::transport::connect(&sock).await.map_err(|_| CliError { code: 3, message: "no sims are running (start one with `seedwell sim add`)".into(), api_code: Some(ErrorCode::NotFound), data: None })?;
     s.write_all(format!("{req}\n").as_bytes()).await.map_err(|e| CliError::plain(1, format!("sim host: {e}")))?;
     let mut lines = BufReader::new(s).lines();
     let line = tokio::time::timeout(Duration::from_secs(900), lines.next_line())
@@ -250,11 +249,8 @@ async fn ensure_host(g: &Global, dir: &Path) -> R {
     std::fs::create_dir_all(dir).map_err(|e| CliError::plain(1, format!("cannot create {}: {e}", dir.display())))?;
     let exe = std::env::current_exe().map_err(|e| CliError::plain(1, format!("cannot find myself: {e}")))?;
     let log = std::fs::File::create(dir.join("host.log")).map_err(|e| CliError::plain(1, e.to_string()))?;
-    // `trap '' HUP`: closing the terminal does not end the host; it ends when the app does.
-    std::process::Command::new("/bin/sh")
-        .arg("-c")
-        .arg("trap '' HUP; exec \"$0\" \"$@\"")
-        .arg(&exe)
+    // Closing the terminal does not end the host; it ends when the app does.
+    trs_platform::proc::detached_command(&exe)
         .args(["sim", "host", "--dir"])
         .arg(dir)
         .arg("--app-socket")

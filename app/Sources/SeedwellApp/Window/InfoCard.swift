@@ -1,14 +1,13 @@
 import SwiftUI
 
-/// Get Info popover (SPEC §8.3), in the style of Finder's: grouped sections with a label column and a
-/// value column, values selectable. General, Peers, Trackers, then the rule and the seeding goal.
+/// Get Info popover (SPEC §8.3), in the style of Finder's: grouped sections with a label column and a value column,
+/// values selectable. The core decides every line, value, button and menu and how often the card asks again
+/// (`InfoCard`, info_card.rs); this draws its model and runs its commands.
 struct InfoCard: View {
     let core: Core
     let row: TransferRow
     let commands: Commands
-    @State private var info: TorrentInfo?
-    /// Play and Play With (a pack lists its episodes); empty when there is no video to play.
-    @State private var playEntries: [MenuEntry] = []
+    @State private var card: InfoCardHolder?
     @State private var contentHeight: CGFloat = 480
     @Environment(\.dismiss) private var dismiss
 
@@ -24,52 +23,54 @@ struct InfoCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 0) {
-                    header
-                    if let info {
-                        general(info)
-                        peers(info)
-                        trackers(info)
-                        goal(info)
+            if let m = card?.model {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 0) {
+                        header(m)
+                        ForEach(m.sections.indices, id: \.self) { n in section(m.sections[n]) }
+                    }
+                    // Nothing inside may be wider than the popover: every line wraps or truncates in this width.
+                    .frame(width: Self.contentWidth, alignment: .leading)
+                    .padding(.horizontal, Self.gutter)
+                    .padding(.top, 18)
+                    .padding(.bottom, 6)
+                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { contentHeight = $0 }
+                }
+                .scrollBounceBehavior(.basedOnSize)
+                .frame(height: min(contentHeight, Self.maxHeight))
+                Divider()
+                HStack(spacing: 8) {
+                    Spacer()
+                    ForEach(m.buttons.indices, id: \.self) { n in
+                        let b = m.buttons[n]
+                        Button { run(b.command, closes: b.closesCard) } label: {
+                            if b.destructive { Text(b.title).foregroundStyle(.red) } else { Text(b.title) }
+                        }
+                        .help(b.help)
                     }
                 }
-                // Nothing inside may be wider than the popover: every line wraps or truncates in this width.
-                .frame(width: Self.contentWidth, alignment: .leading)
-                .padding(.horizontal, Self.gutter)
-                .padding(.top, 18)
-                .padding(.bottom, 6)
-                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { contentHeight = $0 }
+                .padding(.horizontal, 20)
+                .padding(.vertical, 12)
             }
-            .scrollBounceBehavior(.basedOnSize)
-            .frame(height: min(contentHeight, Self.maxHeight))
-            Divider()
-            HStack(spacing: 8) {
-                Spacer()
-                Button("Show in Finder") { commands.reveal([row]) }
-                    .help("Show the downloaded files in Finder")
-                Button { dismiss(); commands.confirmRemove([row], deleteFiles: false) } label: { Text("Remove…").foregroundStyle(.red) }
-                    .help("Remove this torrent from Seedwell; asks under its row first, and keeps the files")
-            }
-            .padding(.horizontal, 20)
-            .padding(.vertical, 12)
         }
         .frame(width: Self.width)
         .clipped()
         .onAppear {
-            info = try? core.info(id: row.id)
-            playEntries = commands.playEntries(for: row)
+            if card == nil { card = InfoCardHolder(core: core, row: row, commands: commands) }
+            card?.start()
         }
+        .onDisappear { card?.stop() }
+        .onChange(of: row) { _, now in card?.update(row: now) }
     }
 
     // MARK: Header
 
-    private var header: some View {
+    private func header(_ m: InfoCardModel) -> some View {
         HStack(spacing: 12) {
-            FileIconView(ext: row.fileExt, linked: row.kind == .direct, size: 40)
+            FileIconView(ext: m.iconExt, linked: m.linked, size: 40)
             VStack(alignment: .leading, spacing: 2) {
-                Text(row.displayName).font(.system(size: 15, weight: .semibold)).lineLimit(2).truncationMode(.middle)
-                Text(subtitle).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
+                Text(m.title).font(.system(size: 15, weight: .semibold)).lineLimit(2).truncationMode(.middle)
+                Text(m.subtitle).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
             }
             Spacer(minLength: 0)
         }
@@ -78,104 +79,24 @@ struct InfoCard: View {
 
     // MARK: Sections
 
-    /// What the trackers said, in plain words: what is wrong, which tracker, since when, when Seedwell tries
-    /// again, and (for a passing outage on a finished torrent) that the files are fine. A passing outage
-    /// is plain text; only a refusal that needs the user is red.
-    @ViewBuilder private func trackerProblem(_ p: TrackerProblem) -> some View {
-        InfoRow("Problem") { Text(p.message).foregroundStyle(p.temporary ? Color.primary : Color.red) }
-        if !p.host.isEmpty { InfoRow("Tracker") { Text(p.host) } }
-        if let since = p.since { InfoRow("Since") { Text(Fmt.clockAt(since)) } }
-        if let next = p.nextTryMs {
-            InfoRow("Next try") { Text(Fmt.clockAt(next / 1000)) }
-        } else if !p.temporary {
-            InfoRow("Next try") { Text("Not until you ask the tracker again").foregroundStyle(.secondary) }
-        }
-        if let note = p.reassurance {
-            InfoRow("") { Text(note).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true) }
-        }
-    }
-
-    private func general(_ i: TorrentInfo) -> some View {
-        InfoSection("General") {
-            InfoRow("Title") { Text(row.displayName) }
-            if row.name != row.displayName { InfoRow("Release") { Text(row.name).lineLimit(3).truncationMode(.middle) } }
-            if let disk = i.error { InfoRow("Problem") { Text(disk).foregroundStyle(Color.red) } }
-            if let p = i.trackerProblem { trackerProblem(p) }
-            InfoRow("Category") { Text(i.category.label) }
-            InfoRow("Size") { Text(Fmt.bytes(i.sizeBytes)) }
-            InfoRow("State") { Text(Self.stateLabel(i.state)) }
-            InfoRow("Added") { Text(Self.date(i.addedAt)) }
-            if let f = i.finishedAt { InfoRow("Finished") { Text(Self.date(f)) } }
-            if i.seededSecs > 0 { InfoRow("Seeding time") { Text(Fmt.duration(i.seededSecs)) } }
-            if let t = row.lastActivity, row.isSharing { InfoRow("Last active") { Text(Fmt.ago(t)) } }
-            InfoRow("Ratio") {
-                Text(Fmt.ratio(i.ratio) + (row.ratioGoal.map { " of \(Fmt.goal($0))" } ?? ""))
-            }
-            InfoRow("Uploaded") { Text(Fmt.bytes(i.uploadedTotal)) }
-            InfoRow("Downloaded") { Text(Fmt.bytes(i.downloadedTotal)) }
-            InfoRow("Location") {
-                HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    Text(Self.tidy(i.savePath)).lineLimit(3).truncationMode(.middle)
-                    Button { commands.reveal([row]) } label: {
-                        Image(systemName: "arrow.right.circle.fill").foregroundStyle(.secondary)
-                    }
-                    .buttonStyle(.plain)
-                    .help("Show in Finder")
-                    .accessibilityLabel("Show in Finder")
-                }
-            }
-            InfoRow("Files") {
-                HStack(spacing: 10) {
-                    (Text("\(i.filesWanted) of \(i.filesTotal)")
-                        + Text(i.skippedNote.isEmpty ? "" : " · \(i.skippedNote)").foregroundStyle(.secondary))
-                    if commands.chooserAvailable && i.filesTotal > 1 {
-                        Button("Choose…") { commands.showChooser(row.id) }.controlSize(.small)
-                            .help("Choose which files to download")
+    private func section(_ s: InfoCardSection) -> some View {
+        InfoSectionView(s.title) {
+            ForEach(s.rows.indices, id: \.self) { n in line(s.rows[n]) }
+            if let ask = s.askAgain {
+                HStack(spacing: 8) {
+                    Button(ask.title) { run(ask.command) }
+                        .controlSize(.small)
+                        .help(ask.help)
+                    if let note = s.askAgainNote {
+                        Text(note).font(.system(size: 11.5)).foregroundStyle(.secondary)
                     }
                 }
             }
-            if i.pieceCount > 0 { InfoRow("Pieces") { Text("\(i.pieceCount) × \(Self.pieceSize(i.pieceLength))") } }
-            InfoRow("Info-hash") { Text(i.infoHash).font(.system(size: 11, design: .monospaced)) }
-            InfoRow("Type") { Text(i.isPrivate ? "Private" : "Public") }
-            if !playEntries.isEmpty { InfoRow("Play", selectable: false) { PlayControls(entries: playEntries) } }
-        }
-    }
-
-    private func peers(_ i: TorrentInfo) -> some View {
-        InfoSection("Peers") {
-            InfoRow("Connected") {
-                let leechers = i.peers > i.seedsConnected ? i.peers - i.seedsConnected : 0
-                (Text(Fmt.peers(connected: i.peers, known: row.knownPeers)) + Text(i.peers > 0 ? " · \(i.seedsConnected) seeds, \(leechers) leechers" : "").foregroundStyle(.secondary))
-                    .help(Fmt.peersHelp)
-            }
-            InfoRow("Swarm (tracker)") {
-                if i.swarmSeeders != nil || i.swarmLeechers != nil {
-                    Text("\(i.swarmSeeders.map(String.init) ?? "?") seeders · \(i.swarmLeechers.map(String.init) ?? "?") leechers")
-                } else {
-                    Text("Not reported by the tracker").foregroundStyle(.secondary)
-                }
-            }
-            if i.state == .downloading { InfoRow("Speed") { Text("\(Fmt.rate(i.downRate)) down") } }
-        }
-    }
-
-    @ViewBuilder private func trackers(_ i: TorrentInfo) -> some View {
-        if !i.trackers.isEmpty {
-            InfoSection("Trackers") {
-                if row.canAskAgain || i.trackerHalted {
-                    HStack(spacing: 8) {
-                        Button("Ask Tracker Again") { commands.askTrackerAgain([row]); reload() }
-                            .controlSize(.small)
-                            .help("Ask the tracker again now. Seedwell never does this by itself after a tracker said no, and asks at most once a minute.")
-                        if i.trackerHalted {
-                            Text("Announcing stopped until you ask.").font(.system(size: 11.5)).foregroundStyle(.secondary)
-                        }
-                    }
-                }
+            if !s.trackers.isEmpty {
                 VStack(alignment: .leading, spacing: 12) {
-                    ForEach(Array(i.trackers.enumerated()), id: \.offset) { n, t in
-                        TrackerLineView(line: t, copy: { commands.copyTrackerURL(id: row.id, index: UInt32(n)) },
-                                        announceAnyway: { commands.announceAnyway([row]); reload() })
+                    ForEach(s.trackers, id: \.index) { t in
+                        TrackerLineView(line: t, copy: { run(t.copy.command, tracker: t.index) },
+                                        announceAnyway: { if let b = t.announceAnyway { run(b.command) } })
                     }
                 }
                 .padding(.top, 2)
@@ -183,81 +104,159 @@ struct InfoCard: View {
         }
     }
 
-    private func goal(_ i: TorrentInfo) -> some View {
-        InfoSection("Rule and goal") {
-            InfoRow("Rule") { Text(i.ruleName) }
-            InfoRow("Then", selectable: false) {
-                Menu(i.seedingGoal) {
-                    Button("Rule default") { set(.ruleDefault) }
-                    Button("Ratio 1.0") { set(.ratio(ratio: 1)) }
-                    Button("Ratio 3.0") { set(.ratio(ratio: 3)) }
-                    Button("Seed Forever") { set(.forever) }
-                    Divider()
-                    Button("Custom…") { commands.customGoal([row]); reload() }
+    @ViewBuilder private func line(_ r: InfoCardLine) -> some View {
+        InfoRowView(r.label, selectable: r.selectable) {
+            if let menu = r.menu {
+                Menu(menu.title) {
+                    MenuEntriesView(entries: commands.draw(menu.entries, rows: [row], videos: [], inMenuBar: false) { card?.reload() })
                 }
                 .menuStyle(.button)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: Self.contentWidth - 108, alignment: .leading)
-                .help("Choose what happens when this torrent is done downloading")
+                .help(menu.help)
+            } else if !r.playControls.isEmpty {
+                PlayControls(controls: r.playControls) { entries in
+                    commands.draw(entries, rows: [row], videos: card?.videos ?? [], inMenuBar: false)
+                }
+            } else if let b = r.button {
+                HStack(alignment: .firstTextBaseline, spacing: b.symbolOnly ? 6 : 10) {
+                    value(r)
+                    if b.symbolOnly {
+                        Button { run(b.command) } label: {
+                            Image(systemName: "arrow.right.circle.fill").foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .help(b.help)
+                        .accessibilityLabel(b.title)
+                    } else {
+                        Button(b.title) { run(b.command) }.controlSize(.small)
+                            .help(b.help)
+                    }
+                }
+            } else {
+                value(r)
             }
-            if let idle = i.idleText { InfoRow("Inactive") { Text(idle) } }
         }
     }
 
-    // MARK: Helpers
-
-    private func reload() { info = try? core.info(id: row.id) }
-
-    private func set(_ goal: SeedingGoal) {
-        core.setSeedingGoal(ids: [row.id], goal: goal)
-        info = try? core.info(id: row.id)
-    }
-
-    private var subtitle: String {
-        var parts = [row.category.label, Fmt.bytes(row.sizeBytes)]
-        if row.state == .downloading, let i = info { parts.append("\(Fmt.rate(i.downRate)) from \(i.peers) peers") }
-        else if let i = info, row.isSharing { parts.append(i.trackerName) }
-        return parts.joined(separator: " · ")
-    }
-
-    static func stateLabel(_ s: TransferState) -> String {
-        switch s {
-        case .checking: "Checking files"
-        case .metadata: "Fetching metadata"
-        case .downloading: "Downloading"
-        case .queued: "Waiting"
-        case .paused: "Paused"
-        case .seeding: "Seeding"
-        case .lowPower: "Seeding (resting)"
-        case .error: "Error"
-        case .missingData: "Files missing"
-        case .completed: "Finished"
+    /// The value's runs in their colours, set as its style says.
+    @ViewBuilder private func value(_ r: InfoCardLine) -> some View {
+        let text = r.value.reduce(Text("")) { line, run in
+            switch run.tone {
+            case .primary: line + Text(run.text)
+            case .secondary: line + Text(run.text).foregroundStyle(.secondary)
+            case .problem: line + Text(run.text).foregroundStyle(Color.red)
+            }
+        }
+        switch r.style {
+        case .text: text.hoverHelp(r.help)
+        case .long: text.lineLimit(3).truncationMode(.middle).hoverHelp(r.help)
+        case .code: text.font(.system(size: 11, design: .monospaced)).hoverHelp(r.help)
         }
     }
 
-    static func date(_ unix: UInt64) -> String {
-        let f = DateFormatter()
-        f.locale = Locale(identifier: "en_US")
-        f.dateStyle = .medium
-        f.timeStyle = .short
-        return f.string(from: Date(timeIntervalSince1970: TimeInterval(unix)))
+    // MARK: Commands
+
+    /// Runs a button's command for the card's row, then reads the torrent again.
+    private func run(_ command: InfoCommand, closes: Bool = false, tracker: UInt32 = 0) {
+        if closes { dismiss() }
+        switch command {
+        case .reveal: commands.reveal([row])
+        case .remove: commands.confirmRemove([row], deleteFiles: false)
+        case .chooseFiles: commands.showChooser(row.id)
+        case .askTrackerAgain: commands.askTrackerAgain([row])
+        case .announceAnyway: commands.announceAnyway([row])
+        case .copyTrackerUrl: commands.copyTrackerURL(id: row.id, index: tracker)
+        }
+        if !closes { card?.reload() }
+    }
+}
+
+/// The core's card of one row while its popover is open: a new model after `refreshMs` (the trackers' live status
+/// ticks), when the list's row changes and after each command; the torrent read again off the main thread when the
+/// model says (`reloadDueMs`).
+@MainActor @Observable final class InfoCardHolder {
+    @ObservationIgnored private let card: GetInfoCard
+    @ObservationIgnored private var row: TransferRow
+    /// The videos the Play entries name.
+    @ObservationIgnored let videos: [TorrentFile]
+    private(set) var model: InfoCardModel
+    @ObservationIgnored private var timer: Timer?
+    @ObservationIgnored private var running = false
+    @ObservationIgnored private var reading = false
+    /// The card on screen (QA reads it: `getinfo-card`).
+    static weak var shown: InfoCardHolder?
+
+    init(core: Core, row: TransferRow, commands: Commands) {
+        let offer = commands.playOffer(row)
+        self.row = row
+        videos = offer.videos
+        card = GetInfoCard(core: core, row: row, clock: MacClock(), chooserAvailable: commands.chooserAvailable, play: offer)
+        model = card.model(row: row, nowUnixMs: Date().unixMs)
     }
 
-    static func pieceSize(_ bytes: UInt32) -> String {
-        ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .binary)
+    func start() {
+        running = true
+        Self.shown = self
+        refresh()
     }
 
-    /// "~/Movies/Sprite Fright" for a path in the user's home.
-    static func tidy(_ path: String) -> String { (path as NSString).abbreviatingWithTildeInPath }
+    func stop() {
+        running = false
+        if Self.shown === self { Self.shown = nil }
+        timer?.invalidate()
+        timer = nil
+    }
 
-    /// "Movies › Sprite Fright (2021)": the last two path components.
-    static func breadcrumb(_ path: String) -> String {
-        path.split(separator: "/").suffix(2).joined(separator: " › ")
+    func update(row: TransferRow) {
+        self.row = row
+        refresh()
+    }
+
+    /// Reads the torrent again (after a command), then draws it.
+    func reload() {
+        card.reload()
+        refresh()
+    }
+
+    private func refresh() {
+        let next = card.model(row: row, nowUnixMs: Date().unixMs)
+        if next != model { model = next }
+        timer?.invalidate()
+        timer = nil
+        guard running else { return }
+        if model.reloadDueMs == 0 { readAgain() }
+        let wait = model.reloadDueMs == 0 ? model.refreshMs : min(model.refreshMs, model.reloadDueMs)
+        let t = Timer(timeInterval: Double(wait) / 1000, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated { self?.refresh() }
+        }
+        t.tolerance = Double(model.refreshLeewayMs) / 1000
+        RunLoop.main.add(t, forMode: .common)
+        timer = t
+    }
+
+    /// The torrent's read is a slow call (the engine's detail of it): off the main thread, then drawn.
+    private func readAgain() {
+        guard !reading else { return }
+        reading = true
+        let card = self.card
+        Task {
+            await Task.detached(priority: .utility) { card.reload() }.value
+            reading = false
+            refresh()
+        }
+    }
+}
+
+private extension View {
+    /// The hover text, when there is one.
+    @ViewBuilder func hoverHelp(_ help: String?) -> some View {
+        if let help { self.help(help) } else { self }
     }
 }
 
 /// A titled group of rows with a hairline above it.
-private struct InfoSection<Content: View>: View {
+private struct InfoSectionView<Content: View>: View {
     let title: String
     @ViewBuilder let content: Content
 
@@ -280,7 +279,7 @@ private struct InfoSection<Content: View>: View {
 }
 
 /// Label column (right-aligned, grey) and value column, like Finder's Get Info.
-private struct InfoRow<Value: View>: View {
+private struct InfoRowView<Value: View>: View {
     let label: String
     var selectable = true
     @ViewBuilder let value: Value
@@ -305,9 +304,9 @@ private struct InfoRow<Value: View>: View {
     }
 }
 
-/// One tracker: the URL (secret parts masked), then its status and what it reported.
+/// One tracker: the URL (secret parts masked), then its live status and what it reported.
 private struct TrackerLineView: View {
-    let line: TrackerLine
+    let line: InfoTracker
     let copy: () -> Void
     let announceAnyway: () -> Void
     @State private var hovering = false
@@ -326,58 +325,51 @@ private struct TrackerLineView: View {
                     .buttonStyle(.plain)
                     .foregroundStyle(.secondary)
                     .opacity(hovering ? 1 : 0)
-                    .help("Copy URL")
-                    .accessibilityLabel("Copy URL")
+                    .help(line.copy.help)
+                    .accessibilityLabel(line.copy.title)
             }
-            TimelineView(.periodic(from: .now, by: 1)) { ctx in
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(TrackerLive.text(line, now: ctx.date))
-                    if let ok = TrackerLive.allowedAt(line, now: ctx.date) {
-                        HStack(spacing: 6) {
-                            Text("Tracker allows the next announce at \(Fmt.clockAt(ok, now: ctx.date))")
-                            Button("Announce anyway", action: announceAnyway).buttonStyle(.link).controlSize(.small)
-                                .help("Ask now, ignoring the wait the tracker set. Allowed once per tracker per 5 minutes.")
+            VStack(alignment: .leading, spacing: 3) {
+                Text(line.live)
+                if let allowed = line.allowed {
+                    HStack(spacing: 6) {
+                        Text(allowed)
+                        if let b = line.announceAnyway {
+                            Button(b.title, action: announceAnyway).buttonStyle(.link).controlSize(.small)
+                                .help(b.help)
                         }
                     }
                 }
-                .font(.system(size: 11.5)).foregroundStyle(.secondary).monospacedDigit()
-                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            Text(detail).font(.system(size: 11.5)).foregroundStyle(.secondary).monospacedDigit()
+            .font(.system(size: 11.5)).foregroundStyle(.secondary).monospacedDigit()
+            .frame(maxWidth: .infinity, alignment: .leading)
+            Text(line.detail).font(.system(size: 11.5)).foregroundStyle(.secondary).monospacedDigit()
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
-        .contextMenu { Button("Copy URL", action: copy) }
-    }
-
-    private var detail: String {
-        var parts = [line.status.prefix(1).uppercased() + line.status.dropFirst()]
-        if let t = line.lastAnnounce { parts.append("last " + Fmt.ago(t)) }
-        if let t = line.nextAnnounce { parts.append("next " + Fmt.inFuture(t)) }
-        if line.seeders != nil || line.leechers != nil {
-            parts.append("\(line.seeders.map(String.init) ?? "?") seeders · \(line.leechers.map(String.init) ?? "?") leechers")
-        }
-        return parts.joined(separator: " · ")
+        .contextMenu { Button(line.copy.title, action: copy) }
     }
 }
 
 /// The Play entries as controls: a button for "Play", pop-up buttons for the submenus.
 struct PlayControls: View {
-    let entries: [MenuEntry]
+    let controls: [InfoPlayControl]
+    /// The entries as menu entries that run their commands.
+    let draw: ([CommandEntry]) -> [MenuEntry]
 
     var body: some View {
         HStack(spacing: 8) {
-            ForEach(entries.indices, id: \.self) { i in
-                switch entries[i] {
+            ForEach(controls.indices, id: \.self) { i in
+                let c = controls[i]
+                switch draw([c.entry]).first {
                 case let .item(title, _, _, _, _, run):
                     Button(title) { run() }
-                        .help("Play with \(title)")
+                        .help(c.help)
                 case let .submenu(title, children):
                     Menu(title) { MenuEntriesView(entries: children) }.menuStyle(.button).fixedSize()
-                        .help("Choose what to play")
-                case .separator:
+                        .help(c.help)
+                case .separator, nil:
                     EmptyView()
                 }
             }

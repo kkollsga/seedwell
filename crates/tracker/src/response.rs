@@ -129,9 +129,10 @@ pub enum TransportError {
     /// was never written.
     Tls,
     /// The destination address is not allowed (loopback, link-local, cloud
-    /// metadata, or a private network without `allow_lan_trackers`). Nothing
-    /// was sent (SSRF protection, see [`crate::policy`]).
-    Forbidden,
+    /// metadata, a private network without `allow_lan_trackers`, a public one in
+    /// an isolated test run), and why. Nothing was sent (SSRF protection, see
+    /// [`crate::policy`]).
+    Forbidden(crate::policy::Refusal),
     /// The request was never put on the wire for a local reason (the durable
     /// write it depends on failed). Nothing was sent.
     NotSent,
@@ -288,7 +289,7 @@ impl AnnounceError {
                     | TransportError::Connect
                     | TransportError::ConnectTimeout
                     | TransportError::Tls
-                    | TransportError::Forbidden
+                    | TransportError::Forbidden(_)
                     | TransportError::NotSent
             )
         )
@@ -300,7 +301,7 @@ impl AnnounceError {
         !matches!(
             self,
             AnnounceError::Rejected { .. }
-                | AnnounceError::Transport(TransportError::Forbidden | TransportError::NotSent)
+                | AnnounceError::Transport(TransportError::Forbidden(_) | TransportError::NotSent)
         )
     }
 }
@@ -358,6 +359,7 @@ impl fmt::Display for AnnounceError {
             AnnounceError::Rejected { reason, .. } => {
                 write!(f, "tracker rejected the announce: {reason}")
             }
+            AnnounceError::Transport(TransportError::Forbidden(r)) => write!(f, "tracker address not allowed: {r}"),
             AnnounceError::Transport(e) => write!(f, "tracker request failed: {e:?}"),
             AnnounceError::Http { status, .. } => write!(f, "tracker returned HTTP {status}"),
             AnnounceError::Garbage(e) => write!(f, "tracker sent an unusable response: {e:?}"),
@@ -543,6 +545,15 @@ pub fn parse_announce_response(body: &[u8]) -> Result<AnnounceResponse, Announce
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_refused_address_says_why_not_forbidden() {
+        use crate::policy::Refusal;
+        let e = AnnounceError::Transport(TransportError::Forbidden(Refusal::Public));
+        assert_eq!(e.to_string(), "tracker address not allowed: public address (an isolated test run reaches only local trackers)");
+        assert!(e.never_reached_tracker() && !e.is_host_failure());
+    }
+
     use super::*;
 
     fn s(secs: u64) -> Duration {

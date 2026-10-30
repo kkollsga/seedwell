@@ -38,15 +38,15 @@ import os
     private var userLaunch = false
     /// The Dock icon was clicked while the previous run was still quitting: start again once it is gone.
     private var reopenAfterQuit = false
-    /// QA keeps the app a regular, frontmost app so that captures show the windows active; the
-    /// `policy-real` command lets the Dock logic run unpinned.
-    var qaPinnedRegular = false
+    /// QA (`config`): how often the engine has read its settings files again and applied them.
+    private(set) var qaConfigReloads = 0
     private var askingToMove = false
     private var powerOff = false
     private var sleepAssertion = SleepAssertion()
     private var agentsAssertion = SleepAssertion()
     private var napGuard = NapGuard()
-    private var power: PowerWatcher?
+    /// The power source, told to the core ("On battery", SPEC §8.4).
+    private(set) var power: PowerWatcher?
     /// The OS network path and sleep/wake, told to the engine (SPEC 7C.4c).
     private(set) var networkWatcher: NetworkWatcher?
 
@@ -126,6 +126,11 @@ import os
     }
 
     private func fatal(_ title: String, _ text: String) {
+        // A QA-control run shows no window the user could answer: it says why on stderr and ends.
+        if QuietRun.on {
+            FileHandle.standardError.write(Data("\(title): \(text)\n".utf8))
+            exit(1)
+        }
         NSApp.setActivationPolicy(.regular)
         let a = NSAlert()
         a.messageText = title
@@ -136,15 +141,15 @@ import os
     }
 
     private func start() {
-        UpdateCenter.shared.apply(settings.app.updates)
-        UpdateCenter.shared.start()
+        UpdateCenter.shared.start(core: core)
         let main = MainWindowController(commands: commands, settings: settings, defaultSize: options.showWindowSize)
         mainWindow = main
         main.onOpenChange = { [weak self] in self?.refreshActivationPolicy() }
         commands.showMain = { section, info in main.show(section: section, info: info) }
-        commands.showTrackerInfo = { id in main.show(section: .tracker(id)); main.libraryModel?.trackerInfo = true }
-        commands.showTracker = { id in main.show(section: .tracker(id)) }
-        commands.showAddLink = { main.show(); main.libraryModel?.adding = true }
+        commands.showTrackerInfo = { id in main.show(section: .tracker(trackerId: id)); main.libraryModel?.trackerInfo = true }
+        commands.showTracker = { id in main.show(section: .tracker(trackerId: id)) }
+        commands.showAddLink = { main.show(); main.libraryModel?.showAddSheet() }
+        commands.askRemoval = { rows, deleteFiles in main.libraryModel?.askRemoval(rows, deleteFiles: deleteFiles) }
         // Settings is a section of the main window: every way in opens it on the right tab.
         commands.showSettings = { tab in main.show(settings: tab, openSettings: true) }
         commands.editTracker = { id in main.show(settings: .rules, editTracker: id) }
@@ -158,8 +163,9 @@ import os
         sync.showShareNew = { [weak self, sync] path in self?.syncWindows.showShare(newFolder: path, actions: sync) }
         let chat = commands.chat
         chat.show = { place in main.show(section: place) }
-        chat.isShowing = { place in NSApp.isActive && main.isOpen && main.libraryModel?.section == place }
-        chat.noteDirectName = { device, name in main.libraryModel?.directNames[device] = name }
+        // A quiet QA run is never the active app; its window counts as seen.
+        chat.isShowing = { place in (NSApp.isActive || QuietRun.on) && main.isOpen && main.libraryModel?.section == place }
+        chat.noteDirectName = { device, name in main.libraryModel?.noteDirectName(device, name) }
         chat.start()
         sync.showChat = { [chat] id in chat.showChannel(id) }
         sync.showFolder = { id, ask in main.show(section: .folderSync); main.libraryModel?.showSyncFolder(id, askRemove: ask) }
@@ -171,10 +177,8 @@ import os
         ChoiceStore.shared.engine = ChoiceEngine(
             load: { [core = self.core] id, reopen in try core.choice(id: id, reopen: reopen) },
             confirm: { [core = self.core] id, files in try core.confirmChoice(id: id, files: files) },
-            cancel: { [core = self.core] id in try core.cancelChoice(id: id) },
-            sourceFile: { [core = self.core] id in core.heldSourceFile(id: id) },
+            cancel: { [core = self.core] id, keepFile in core.cancelHeld(id: id, keepFile: keepFile) },
             hasSource: { [core = self.core] id in core.hasHeldSourceFile(id: id) },
-            remove: { [core = self.core] id in core.remove(ids: [id], deleteFiles: false) },
             setCategory: { [core = self.core] id, c in core.setCategory(ids: [id], category: c) })
         ChoiceStore.shared.didResolve = { [weak self] id in
             self?.commands.arrivals.userReselected(id)  // a running torrent's files chosen again
@@ -189,7 +193,7 @@ import os
         commands.arrivals.note(core.snapshot())  // the baseline: what is downloading now is not new
         statusMenu?.onRefresh = { [weak self] s in
             self?.commands.arrivals.note(s)
-            UpdateCenter.shared.noteActivity(busy: s.allDownloading.contains { !$0.isHeld } || s.movingPercent != nil)
+            UpdateCenter.shared.noteActivity()
             let needs = powerNeeds(s: s)
             self?.sleepAssertion.update(downloading: needs.downloading)
             self?.napGuard.update(serving: needs.serving)
@@ -208,6 +212,7 @@ import os
             Task { @MainActor in self?.handle(event) }
         })
         networkWatcher = NetworkWatcher(core: core)
+        if !options.mock { power = PowerWatcher(core: core) }
         let ws = NSWorkspace.shared.notificationCenter
         ws.addObserver(forName: NSWorkspace.willPowerOffNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.powerOff = true; self?.core.shortenShutdown(secs: 3) }
@@ -223,7 +228,6 @@ import os
 
         UpdateCenter.shared.willRelaunch = { [weak self] in self?.terminationAllowed = true }
         if let path = options.qaControl {
-            qaPinnedRegular = true
             PlayerLauncher.blocked = true  // QA never starts the user's players on its own
             qa = QAControl(path: path, app: self)
         }
@@ -257,18 +261,12 @@ import os
         }
         try? "offered".write(to: marker, atomically: true, encoding: .utf8)
         guard let offer = offers.first else { return }
-        let n = offer.files.count
+        let o = backlogOffer(count: UInt32(offer.files.count), folderPath: offer.folder.path, afterAdd: offer.folder.afterAdd)
         let a = NSAlert()
-        a.messageText = "Add \(n) existing torrent\(n == 1 ? "" : "s") from \((offer.folder.path as NSString).lastPathComponent)?"
-        var then = "\(AppInfo.name) only picks up new files from a watched folder. These were already there."
-        switch offer.folder.afterAdd {
-        case .trash: then += " Added ones are moved to the Trash."
-        case .archive: then += " Added ones are moved to the archive folder."
-        case .leave: then += " The .torrent files stay where they are."
-        }
-        a.informativeText = then
-        a.addButton(withTitle: "Add \(n)")
-        a.addButton(withTitle: "Not Now")
+        a.messageText = o.title
+        a.informativeText = o.text
+        a.addButton(withTitle: o.addTitle)
+        a.addButton(withTitle: o.laterTitle)
         NSApp.activate()
         if a.runModal() == .alertFirstButtonReturn { for f in offer.files { commands.add(f) } }
     }
@@ -283,9 +281,7 @@ import os
         }
         sleepAssertion.enabled = s.general.preventSleepWhileDownloading
         agentsAssertion.enabled = s.general.keepAwakeForAgents
-        UpdateCenter.shared.apply(s.updates)
-        if power == nil, !options.mock { power = PowerWatcher(core: core) }
-        power?.mode = s.general.onBattery
+        UpdateCenter.shared.settingsChanged()
         statusMenu?.refreshIcon()
     }
 
@@ -332,6 +328,7 @@ import os
             settings.reloadActivity()
             if settings.app.agents.notifyChanges { Notifier.agent(a) }
         case .settingsChanged(_, let warnings, let restart):
+            qaConfigReloads += 1
             settings.noteReloaded(warnings: warnings, restart: restart)
             settings.reload()
         case .settingsRejected(_, let error):
@@ -401,9 +398,9 @@ import os
         let isChoice = response.notification.request.identifier.hasPrefix("choice-")
         await MainActor.run {
             if let channel {
-                commands.chat.show(.chat(channel, topic: topic))
+                commands.chat.show(.chat(channelId: channel, topicId: topic))
             } else if let direct {
-                commands.chat.show(.direct(direct))
+                commands.chat.show(.direct(deviceId: direct))
             } else if let id, isChoice {
                 commands.showChooser(id)
             } else {
@@ -425,7 +422,9 @@ import os
     func refreshActivationPolicy() {
         guard !quitting else { return }
         let open = mainWindow?.isOpen ?? false
-        let want: NSApplication.ActivationPolicy = open || qaPinnedRegular ? .regular : .accessory
+        let want: NSApplication.ActivationPolicy = open ? .regular : .accessory
+        // A quiet QA run never has a Dock icon or a place in the app switcher: `policy` reports the one it would have.
+        if QuietRun.on { QuietRun.policy = want; return }
         guard NSApp.activationPolicy() != want else { return }
         NSApp.setActivationPolicy(want)
         if want == .regular { NSApp.activate() }
@@ -442,7 +441,7 @@ import os
 
     /// QA: policy and windows, as one line for `<file>.bench`.
     func qaPolicyLine() -> String {
-        let p = NSApp.activationPolicy()
+        let p = QuietRun.on ? QuietRun.policy : NSApp.activationPolicy()
         let name = p == .regular ? "regular" : p == .accessory ? "accessory" : "prohibited"
         let visible = NSApp.windows.filter { $0.isVisible && $0.styleMask.contains(.titled) }.count
         return "policy: \(name), main \(mainWindow?.isOpen == true ? "open" : "closed"), settings \(mainWindow?.libraryModel?.section == .settings ? "open" : "closed"), titled windows \(visible), pid \(getpid())"

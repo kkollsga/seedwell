@@ -17,7 +17,7 @@ use trs_state::{Config, Day, Document, ResumeData, TorrentRecord};
 fn path_s() -> impl Strategy<Value = String> {
     prop_oneof![
         "~/[A-Za-z0-9 _.-]{1,20}(/[A-Za-z0-9 _.-]{1,12}){0,3}",
-        "/[A-Za-z0-9 _.-]{1,20}(/[A-Za-z0-9 _.\u{e9}\u{4e2d}-]{1,12}){0,3}",
+        "/[A-Za-z0-9 _.-]{1,20}(/[A-Za-z0-9 _.\u{e9}\u{4e2d}-]{1,12}){0,3}".prop_map(|p| if cfg!(windows) { format!("C:{p}") } else { p }),
     ]
 }
 
@@ -483,6 +483,7 @@ fn record_strategy() -> impl Strategy<Value = TorrentRecord> {
             skipped_files: skipped.map(Vec::into_boxed_slice),
             stage_root: if save_root % 3 == 0 { Some(save_root / 3) } else { None },
             title: if save_root % 2 == 0 { Some(format!("Title {save_root}")) } else { None },
+            pause_kept: flags & TorrentFlags::PAUSED != 0 && save_root % 5 != 0,
         })
 }
 

@@ -4,7 +4,8 @@ Watches one sync folder recursively and tells the sync scanner which paths to lo
 Two parts:
 
 * **`watch(root, opts) -> Watcher`**: a backend on its own std thread, sending `RawEvent`s on a bounded std
-  `mpsc` channel. FSEvents on macOS, inotify on Linux, a metadata walk anywhere (or on request). No async
+  `mpsc` channel. FSEvents on macOS, inotify on Linux, ReadDirectoryChangesW on Windows, a metadata walk anywhere
+  (or on request, or where the native one cannot start). No async
   runtime, so the daemon, the app and tests use it the same way.
 * **`aggregate::Aggregator`**: a pure state machine on a virtual clock (`Millis`) that turns raw events into
   `Batch`es (`Paths`, `Dir`, `All`) for the scanner.
@@ -33,12 +34,13 @@ of losing events becomes a `RawEvent::Rescan`:
 
 | Loss | Reported as |
 |---|---|
-| FSEvents `KernelDropped` / `UserDropped`, inotify `IN_Q_OVERFLOW` | `Rescan { rel: None, reason: Dropped }` |
+| FSEvents `KernelDropped` / `UserDropped`, inotify `IN_Q_OVERFLOW`, ReadDirectoryChangesW overflow (a completion with no records, `ERROR_NOTIFY_ENUM_DIR`, a failed read) | `Rescan { rel: None, reason: Dropped }` |
 | FSEvents `MustScanSubDirs`, a directory-level event without file detail, a mount/unmount inside the root | `Rescan { rel: Some(dir) or None, reason: MustScanSubDirs }` |
 | FSEvents `EventIdsWrapped` | `Rescan { rel: None, reason: EventIdsWrapped }` |
 | The consumer fell behind and the channel (8192 events) filled up | `Rescan { rel: None, reason: ChannelFull }`, sent before anything else once there is room (a backend timer retries even if no new event comes) |
 | A resume token whose history cannot be replayed (other volume, reset store, ID from the future, no history on that volume, inotify, polling) | `Rescan { rel: None, reason: NoHistory }`, then `HistoryDone` |
-| inotify: a new directory, watched only after it appeared | `Rescan { rel: Some(dir), reason: NewDirectory }` |
+| inotify: a new directory, watched only after it appeared; ReadDirectoryChangesW: a directory created or moved in (its contents are not reported) | `Rescan { rel: Some(dir), reason: NewDirectory }` |
+| ReadDirectoryChangesW: a name in its 8.3 short form that is not there under that name | `Rescan { rel: Some(parent) or None, reason: MustScanSubDirs }` |
 | inotify: a directory that could not be watched (watch limit, permissions) | `Rescan { rel: Some(dir), reason: WatchFailed }` |
 | An FSEvents path that cannot be placed under the root | `Rescan { rel: None, reason: UnknownPath }` |
 | The root moved, deleted or replaced | `RootChanged` (the aggregator treats it as `All`) |
@@ -90,6 +92,19 @@ stop closes. Records are parsed from bytes in safe code. When the root goes away
 reported with `RootChanged` again once it is back. Built and linted for Linux from this Mac with
 `cargo +nightly clippy -Zbuild-std --target x86_64-unknown-linux-gnu`; its tests run only on Linux.
 
+**ReadDirectoryChangesW** (Windows, `windows-sys`). One directory handle on the root (`FILE_LIST_DIRECTORY`,
+every share mode, so the user can still rename or delete the root), recursive, 64 KiB reads (the network-share
+maximum), overlapped with two buffers: the next read is posted before the completed one is parsed. Records map
+to hints directly (renames come as old/new name pairs, so no inode pairing); a directory's own "modified"
+record is left out (its entries' records say what changed). A directory created or moved in gets a
+`NewDirectory` rescan. Overflow is a full rescan. Junctions and symlinks inside the root are reported as entries
+and never followed (the system does not report changes inside their targets). Once a second the thread checks
+that the root path still names the watched directory (volume serial and file index): `RootChanged` when it is
+renamed, deleted or replaced, and again when it is back. No history: a resume is a full rescan. If the handle
+or the first read cannot be had (a share that refuses change notifications), `watch` falls back to polling.
+Stop sets an event, cancels the pending read and waits for it, then joins the thread. `debug::hold_reads` (tests
+only) stops re-posting reads so the system's buffer overflows on purpose.
+
 **Polling** (`Backend::Poll { interval }`, default 10 s; the native backend elsewhere). `read_dir` + `lstat`
 of the whole tree each interval, compared with the previous walk (size, mtime, ctime, mode, inode; a
 directory's own size and times are ignored, its entries are reported themselves). A path that disappeared and
@@ -98,7 +113,8 @@ follows symlinks. Costs one `lstat` per entry per interval, which is why it is t
 
 ## Unsafe code
 
-`#![deny(unsafe_code)]`; `#[allow(unsafe_code)]` only on `fsevents` (18 `unsafe` blocks) and `inotify` (8),
+`#![deny(unsafe_code)]`; `#[allow(unsafe_code)]` only on `fsevents` (18 `unsafe` blocks), `inotify` (8) and
+`windows` (Win32 calls and one `Send` for its read slots),
 each with a `// SAFETY:` comment. The aggregator, polling, the channel and everything else are safe code.
 
 ## Dependencies (each justified)
@@ -106,6 +122,7 @@ each with a `// SAFETY:` comment. The aggregator, polling, the channel and every
 | Crate | Why |
 |---|---|
 | `libc` | inotify, `poll`, `pipe2`, `read` on Linux, and `dev_t` for `FSEventsCopyUUIDForDevice`. Already in the workspace. |
+| `windows-sys` *(Windows)* | `ReadDirectoryChangesW`, `CreateFileW`, overlapped I/O and events. Already in the workspace (trs-platform). |
 | `proptest` *(dev)* | Properties of the aggregator over random event streams. |
 | `tempfile` *(dev)* | Temporary folders for the integration tests; never the home folder. |
 

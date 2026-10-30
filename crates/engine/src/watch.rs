@@ -82,11 +82,12 @@ fn stamp_of(m: &std::fs::Metadata) -> Stamp {
 }
 
 /// When a file arrived in its folder: the latest of birth, modification and status change time.
-fn arrived_at(m: &std::fs::Metadata) -> SystemTime {
-    use std::os::unix::fs::MetadataExt;
-    let ctime = SystemTime::UNIX_EPOCH
-        + Duration::new(m.ctime().max(0) as u64, m.ctime_nsec().clamp(0, 999_999_999) as u32);
-    [m.modified().ok(), m.created().ok(), Some(ctime)].into_iter().flatten().max().unwrap_or(ctime)
+fn arrived_at(path: &Path, m: &std::fs::Metadata) -> SystemTime {
+    [m.modified().ok(), m.created().ok(), trs_platform::fs::change_time(path, m)]
+        .into_iter()
+        .flatten()
+        .max()
+        .unwrap_or(SystemTime::UNIX_EPOCH)
 }
 
 /// The watch list with every baseline filled in. A folder handed over without one gets the moment
@@ -119,7 +120,7 @@ pub(crate) fn backlog(dir: &Path, since: SystemTime) -> Vec<PathBuf> {
             continue;
         }
         let Ok(md) = entry.metadata() else { continue };
-        if md.is_file() && arrived_at(&md) + BASELINE_SLACK <= since {
+        if md.is_file() && arrived_at(&entry.path(), &md) + BASELINE_SLACK <= since {
             out.push(entry.path());
             if out.len() >= 1000 {
                 break;
@@ -187,7 +188,7 @@ fn scan(dir: &Path, st: &mut FolderState, now: Instant) -> Vec<Ready> {
                 let stamp = stamp_of(&md);
                 present.push(path.clone());
                 // Older than the folder's place on the watch list: backlog, never news.
-                if st.since.is_some_and(|s| arrived_at(&md) + BASELINE_SLACK <= s) {
+                if st.since.is_some_and(|s| arrived_at(&path, &md) + BASELINE_SLACK <= s) {
                     continue;
                 }
                 if st.seen.get(&path) == Some(&stamp) {
@@ -406,7 +407,7 @@ mod tests {
         scan(d.path(), &mut st, t0);
         let before = std::fs::metadata(d.path()).unwrap().modified().unwrap();
         std::fs::write(d.path().join("late.torrent"), b"d4:infod4:name1:aee").unwrap();
-        std::fs::File::open(d.path()).unwrap().set_modified(before).unwrap();
+        trs_platform::fs::set_modified(d.path(), before).unwrap();
         assert_eq!(std::fs::metadata(d.path()).unwrap().modified().unwrap(), before, "the coarse tick");
         assert!(!is_idle(d.path(), &mut st), "an mtime this fresh is not trusted");
         scan(d.path(), &mut st, t0 + Duration::from_secs(2));

@@ -42,6 +42,11 @@ impl DeviceKey {
         Ok(Self::from_seed(&seed))
     }
 
+    /// A new key from the operating system's random source.
+    pub fn generate_system() -> Result<Self, RandomFailed> {
+        Self::generate(&mut ring::rand::SystemRandom::new())
+    }
+
     /// The key with this Ed25519 seed (deterministic: tests and simulations).
     pub fn from_seed(seed: &[u8; 32]) -> Self {
         let pair = match Ed25519KeyPair::from_seed_unchecked(seed) {

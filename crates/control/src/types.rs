@@ -1149,16 +1149,16 @@ pub struct ProbeDto {
 pub struct ProcessDto {
     /// Process id.
     pub pid: u32,
-    /// Resident memory in bytes (`ps`), when it could be read.
+    /// Resident memory in bytes (the working set on Windows), when it could be read.
     #[serde(default)]
     pub rss_bytes: Option<u64>,
-    /// CPU percent over the process lifetime window `ps` reports.
+    /// CPU percent of one core (trs_platform::proc::SelfStats says over which window on each system).
     #[serde(default)]
     pub cpu_percent: Option<f64>,
     /// Threads.
     #[serde(default)]
     pub threads: Option<u32>,
-    /// Open file descriptors (sockets included).
+    /// Open file descriptors (sockets included); open handles on Windows.
     #[serde(default)]
     pub open_fds: Option<u32>,
 }

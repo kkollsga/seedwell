@@ -2,7 +2,8 @@ import Foundation
 import Testing
 @testable import SeedwellApp
 
-// Peer exchange per private tracker (SPEC 7B.4): what the app says, and that nothing is on by default.
+// Peer exchange per private tracker (SPEC 7B.4): nothing is on by default. What Get Info's hover text says of the known
+// peers is the core's (info_card_tests.rs).
 
 @Suite("Peer exchange")
 struct PeerExchangeTests {
@@ -18,9 +19,5 @@ struct PeerExchangeTests {
                               downLimit: nil, upLimit: nil, incompleteDir: nil, finishedDir: nil, categories: [],
                               hidden: false, hideOnlySeeding: false)
         #expect(r.allowPex == false)
-    }
-
-    @Test func theKnownPeersHoverTextSaysWhereTheyComeFrom() {
-        #expect(Fmt.peersHelp.contains("tracker and incoming connections (private torrents; plus PEX when the tracker allows it); plus DHT and PEX for public ones"))
     }
 }

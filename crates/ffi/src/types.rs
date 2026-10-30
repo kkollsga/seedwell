@@ -8,7 +8,7 @@ pub enum TransferKind {
 }
 
 /// Detected content type (SPEC §7A.2).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, uniffi::Enum)]
 pub enum Category {
     Movie,
     Tv,
@@ -63,7 +63,7 @@ pub enum Priority {
 }
 
 /// One row in a list; the same record is used for every list in the UI.
-#[derive(Clone, Debug, uniffi::Record)]
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
 pub struct TransferRow {
     /// 40 hex characters (torrent id) or the direct download's id.
     pub id: String,

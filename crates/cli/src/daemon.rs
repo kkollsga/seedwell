@@ -23,6 +23,10 @@
 //! `~/Downloads` or a media library: the download and incomplete folders are the flags', watch
 //! folders are cleared, and the
 //! `.torrent` is never trashed. Everything else in `config.toml` (limits, queue, rules) is honoured.
+//! A `config.toml` with values that cannot be used (`LoadSource::Repaired`), or one that is broken,
+//! is never rewritten: writing it would turn each salvaged value into its replacement for good and
+//! lose what the user wrote. The flags then apply in memory only, at start and at every hot reload
+//! (`HostOptions::adjust_config`), the warnings are logged once at start, and the file stays as it is.
 //!
 //! **Tracker destinations** follow the app: public addresses only, unless
 //! `network.allow_lan_trackers` is on in `config.toml` (the Settings toggle) or `--allow-lan-trackers`
@@ -36,7 +40,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::signal::unix::{SignalKind, signal};
 use trs_control::sync::{SyncSlot, start_sync_with};
 use trs_control::{EngineBackend, Permission, PermissionSource, StateAccess, serve_backend};
 use trs_engine::{Host, HostOptions};
@@ -96,7 +99,10 @@ pub async fn run(mut o: Opts, g: &Global) -> Result<(), CliError> {
     let socket = if g.socket_given { g.socket.clone() } else { state_dir.join("control.sock") };
 
     let flags = Flags { listen_port, no_dht, portmap, ask, grace, max_active, allow_lan_trackers };
-    let cfg = apply_flags_to_config(&state_dir, &download_dir, &flags)?;
+    let (cfg, adjust, written) = apply_flags_to_config(&state_dir, &download_dir, &flags)?;
+    if !written {
+        eprintln!("seedwell daemon: config.toml has values that cannot be used: the options apply to this run only and the file is left as it is");
+    }
     // The same setting the app honours, read from the file the flags were just written into.
     let allow_lan = cfg.network.allow_lan_trackers;
     let opts = HostOptions {
@@ -111,6 +117,7 @@ pub async fn run(mut o: Opts, g: &Global) -> Result<(), CliError> {
             }
         })),
         developer_mode: dev_mode,
+        adjust_config: Some(adjust),
         ..HostOptions::default()
     };
     let host = Host::start(&state_dir, opts).await.map_err(|e| fail(format!("cannot start: {e}")))?;
@@ -142,12 +149,7 @@ pub async fn run(mut o: Opts, g: &Global) -> Result<(), CliError> {
         let _ = std::io::stdout().flush();
     }
 
-    let mut term = signal(SignalKind::terminate()).map_err(|e| fail(e.to_string()))?;
-    let mut int = signal(SignalKind::interrupt()).map_err(|e| fail(e.to_string()))?;
-    tokio::select! {
-        _ = term.recv() => {}
-        _ = int.recv() => {}
-    }
+    trs_platform::signal::Shutdown::new().map_err(|e| fail(e.to_string()))?.recv().await;
     eprintln!("seedwell daemon: shutting down");
     server.shutdown().await;
     // The slot's service: a port change may have started another one.
@@ -190,6 +192,7 @@ async fn start_folder_sync(state_dir: &std::path::Path, engine: &trs_engine::Eng
 }
 
 /// The daemon's flags that end up in `config.toml`.
+#[derive(Clone)]
 struct Flags {
     listen_port: u16,
     no_dht: bool,
@@ -203,21 +206,11 @@ struct Flags {
     allow_lan_trackers: bool,
 }
 
-/// Write the flags into `<state_dir>/config.toml` (see the module docs for why) and return the
-/// config that was saved.
-fn apply_flags_to_config(
-    state_dir: &std::path::Path,
-    download_dir: &std::path::Path,
-    f: &Flags,
-) -> Result<trs_state::config::Config, CliError> {
+/// The flags, put over a loaded `config.toml`.
+fn apply_flags(cfg: &mut trs_state::config::Config, download_dir: &str, incomplete_dir: &str, f: &Flags) {
     use trs_state::config::AfterAdd;
-    let state = StateAccess::new(state_dir, None);
-    let mut cfg = state.config();
-    let abs = |p: &std::path::Path| -> Result<String, CliError> {
-        std::path::absolute(p).map(|p| p.display().to_string()).map_err(|e| fail(format!("{}: {e}", p.display())))
-    };
-    cfg.folders.download_dir = abs(download_dir)?;
-    cfg.folders.incomplete_dir = abs(&download_dir.join(".incomplete"))?;
+    cfg.folders.download_dir = download_dir.to_owned();
+    cfg.folders.incomplete_dir = incomplete_dir.to_owned();
     if !f.ask {
         cfg.transfers.ask_before_adding = trs_state::config::AskBeforeAdding::Never;
     }
@@ -234,8 +227,35 @@ fn apply_flags_to_config(
     if f.allow_lan_trackers {
         cfg.network.allow_lan_trackers = true;
     }
-    state.save_config(&cfg).map_err(|e| fail(format!("config.toml in {}: {e}", state_dir.display())))?;
-    Ok(cfg)
+}
+
+/// Put the flags over `<state_dir>/config.toml` and write them into it (see the module docs for
+/// why), unless the file has values that cannot be used or is broken: then nothing is written.
+/// Returns the config with the flags, the same change for the host to make at start and at every
+/// hot reload, and whether the file was written.
+fn apply_flags_to_config(
+    state_dir: &std::path::Path,
+    download_dir: &std::path::Path,
+    f: &Flags,
+) -> Result<(trs_state::config::Config, trs_engine::ConfigAdjust, bool), CliError> {
+    use trs_state::{DocStore, LoadSource};
+    let abs = |p: &std::path::Path| -> Result<String, CliError> {
+        std::path::absolute(p).map(|p| p.display().to_string()).map_err(|e| fail(format!("{}: {e}", p.display())))
+    };
+    let (dl, incomplete) = (abs(download_dir)?, abs(&download_dir.join(".incomplete"))?);
+    let docs = DocStore::<trs_state::config::Config>::new(state_dir);
+    let loaded = docs.load();
+    let mut cfg = loaded.value;
+    apply_flags(&mut cfg, &dl, &incomplete, f);
+    // A clean file takes the flags (a hot reload of it keeps them); one with bad values is left
+    // for the user to fix, so that its salvaged values never become its replacements for good.
+    let clean = matches!(loaded.source, LoadSource::File | LoadSource::Created) && loaded.error.is_none();
+    if clean {
+        docs.save(&cfg).map_err(|e| fail(format!("config.toml in {}: {e}", state_dir.display())))?;
+    }
+    let f = f.clone();
+    let adjust: trs_engine::ConfigAdjust = std::sync::Arc::new(move |c| apply_flags(c, &dl, &incomplete, &f));
+    Ok((cfg, adjust, clean))
 }
 
 #[cfg(test)]
@@ -247,7 +267,7 @@ mod tests {
     }
 
     fn apply(dir: &std::path::Path, f: &Flags) -> trs_state::config::Config {
-        apply_flags_to_config(dir, &dir.join("dl"), f).unwrap()
+        apply_flags_to_config(dir, &dir.join("dl"), f).unwrap().0
     }
 
     #[test]
@@ -267,6 +287,33 @@ mod tests {
         assert!(text.contains("allow_lan_trackers = true"), "{text}");
         // ... and it sticks for the next start without the flag.
         assert!(apply(dir.path(), &flags(false)).network.allow_lan_trackers);
+    }
+
+    /// A file with a bad value (or a broken one) is not written: the flags come back in memory,
+    /// and the host gets the same change for every reload. A clean file is written as before.
+    #[test]
+    fn a_file_with_bad_values_is_left_as_it_is_and_the_flags_apply_in_memory() {
+        use trs_state::config::{AfterAdd, Config};
+        for text in ["[folders]\ntorrent_after_add = \"keep\"\n[network]\nupnp = true\n", "[network\nupnp = true\n"] {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join("config.toml"), text).unwrap();
+            let f = Flags { max_active: Some(5), ..flags(false) };
+            let (cfg, adjust, written) = apply_flags_to_config(dir.path(), &dir.path().join("dl"), &f).unwrap();
+            assert!(!written);
+            assert_eq!(std::fs::read_to_string(dir.path().join("config.toml")).unwrap(), text, "the user's file is left as it is");
+            assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1, "nothing is written next to it");
+            assert!(cfg.folders.download_dir.ends_with("dl") && cfg.folders.watch.is_empty() && !cfg.network.upnp);
+            assert_eq!((cfg.folders.torrent_after_add, cfg.transfers.max_active_downloads), (AfterAdd::Leave, 5));
+            let mut reloaded = Config::default();
+            adjust(&mut reloaded);
+            assert_eq!((reloaded.folders.download_dir.as_str(), reloaded.transfers.max_active_downloads), (cfg.folders.download_dir.as_str(), 5));
+            assert!(reloaded.folders.watch.is_empty());
+        }
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("config.toml"), "[network]\nupnp = true\n").unwrap();
+        let (_, _, written) = apply_flags_to_config(dir.path(), &dir.path().join("dl"), &flags(false)).unwrap();
+        assert!(written, "a clean file takes the flags");
+        assert!(std::fs::read_to_string(dir.path().join("config.toml")).unwrap().contains("upnp = false"));
     }
 
     #[test]

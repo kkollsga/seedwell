@@ -38,9 +38,10 @@ impl std::error::Error for StoreError {}
 /// What the user asked the torrent to be doing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StoredState {
-    /// Running (downloading, seeding or queued).
+    /// Running (downloading, seeding or queued). Also what a pause the app made by itself (on
+    /// battery) is stored as: it does not outlive the run.
     Active,
-    /// Paused by the user.
+    /// Paused by the user: it stays paused after a restart (SPEC §10).
     Paused,
     /// Stopped because the seeding goal was reached.
     GoalReached,
@@ -130,6 +131,9 @@ pub struct TorrentRecord {
     /// Held for the grace period before an auto-add starts (SPEC 7A.7); implies `awaiting_choice`.
     /// After a restart the countdown begins again.
     pub pending_start: bool,
+    /// The user stopped that countdown (`pending_start` only): after a restart it is held with its
+    /// countdown stopped, until the user resumes it.
+    pub pending_stopped: bool,
     /// Cleaned display title, computed once by the engine (`None` = not yet: records of older versions).
     pub title: Option<String>,
 }
@@ -694,6 +698,7 @@ mod tests {
             pinned: false,
             awaiting_choice: false,
             pending_start: false,
+            pending_stopped: false,
             title: None,
             idle: None,
         }

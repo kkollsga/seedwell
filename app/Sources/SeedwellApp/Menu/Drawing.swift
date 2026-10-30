@@ -2,17 +2,9 @@ import AppKit
 
 /// Small vector images for the menu bar: the status icon and the progress ring.
 enum Drawing {
-    /// How strongly an arrow is coloured for a transfer rate: 0 below 5 KB/s, then logarithmic up to
-    /// 1 at 10 MB/s, in 8 steps (the icon is only redrawn when a step changes).
-    static func intensity(_ bytesPerSec: UInt64) -> Double {
-        guard bytesPerSec >= 5_000 else { return 0 }
-        let t = log10(Double(bytesPerSec) / 5_000) / log10(10_000_000 / 5_000)
-        return (min(1, max(0, t)) * 8).rounded(.up) / 8
-    }
-
     /// Menu bar icon: a down and an up arrow, no text. Each arrow goes from the menu bar's dimmed
     /// grey to green (download) or red (upload) with its transfer rate (`down`/`up` from
-    /// [`intensity`]); a faint hairline shows total download progress (`progress`, nil = none); a
+    /// the core's `IconLook`); a faint hairline shows total download progress (`progress`, nil = none); a
     /// small, soft dot (3 pt, a muted orange) in the lower right corner says something waits for the user. While files are being moved
     /// (`moving`, 0...1, aggregate over all moves) the hairline is a green bar instead and shows that. Drawn with dynamic
     /// colours at draw time, so it follows the light/dark menu bar.

@@ -1,6 +1,6 @@
 //! Bringing torrents up after start-up, a few at a time.
 //!
-//! Everything resumes when the app starts (SPEC 10), but a torrent that needs an actor (it is
+//! Everything resumes when the app starts (SPEC 10; what the user paused stays paused), but a torrent that needs an actor (it is
 //! downloading, rechecking or still fetching its metadata) costs memory the moment it starts: file
 //! tables, piece hashes, a bitfield, hashing buffers. Finished torrents need none (they stay Cold
 //! until a peer asks), so the cost is in the others. Starting them all at once made the footprint

@@ -36,8 +36,8 @@ indirect enum MenuEntry {
     var createTracker: (_ host: String) -> Void = { _ in }
     /// The calm note under the list when Play cannot start (SPEC §7F.3).
     let playNotice = PlayNotice()
-    /// The Remove… waiting for its answer under the row.
-    let removal = RemovalPrompt()
+    /// Asks the main window's Remove… question (wired by the app delegate; the window's core keeps it).
+    var askRemoval: (_ rows: [TransferRow], _ deleteFiles: Bool) -> Void = { _, _ in }
     /// Favorite trackers: the inline renaming and address editing, and the question of removing one.
     let favorites: FavoriteEditing
     /// Which torrents just became downloads: the window switches to them, the menu lists them first.
@@ -53,14 +53,17 @@ indirect enum MenuEntry {
         sync = SyncActions(core: core)
         chat = ChatActions(core: core, sync: sync)
         favorites = FavoriteEditing(store: core)
-        favorites.openTab = { [weak self] id in self?.showMain(.tracker(id), nil) }
+        favorites.openTab = { [weak self] id in self?.showMain(.tracker(trackerId: id), nil) }
         favorites.openInfo = { [weak self] id in self?.showTrackerInfo(id) }
     }
 
     // MARK: Adding
 
     func add(_ source: String) {
-        do { _ = try core.addSource(source: source) } catch { alert("Couldn't add", "\(error)") }
+        do { _ = try core.addSource(source: source) } catch {
+            let a = addFailed(error: SyncText.message(error))
+            alert(a.title, a.text)
+        }
     }
 
     func add(urls: [URL]) {
@@ -96,7 +99,7 @@ indirect enum MenuEntry {
     func cancelHeld(_ id: String, keepFile: Bool? = nil) {
         let store = ChoiceStore.shared
         let keep = keepFile ?? (ShiftKey.down && store.hasSource(id))
-        do { try store.cancel(id, keepFile: keep) } catch { core.remove(ids: [id], deleteFiles: false) }
+        store.cancel(id, keepFile: keep)
     }
 
     func pendingStartNow(_ id: String) {
@@ -162,13 +165,7 @@ indirect enum MenuEntry {
     func confirmRemove(_ rows: [TransferRow], deleteFiles: Bool, openWindow: Bool = false) {
         guard let first = rows.first else { return }
         if openWindow { showMain(first.isSharing ? .sharing : .downloads, nil) }
-        removal.ask(rows, deleteFiles: deleteFiles)
-    }
-
-    func confirmedRemove() {
-        guard let p = removal.pending else { return }
-        removal.cancel()
-        core.remove(ids: p.ids, deleteFiles: p.deleteFiles)
+        askRemoval(rows, deleteFiles)
     }
 
     func customGoal(_ rows: [TransferRow]) {
@@ -202,108 +199,75 @@ indirect enum MenuEntry {
         } catch { alert("Not moved", "\(error)") }
     }
 
-    // MARK: Menu model (SPEC §8.5)
+    // MARK: Menu model (SPEC §8.5): the list is the core's (`rowCommands`); the app draws it and runs its commands.
 
-    /// `inMenuBar`: the menu bar's version also offers "Files…".
+    /// The commands of one row or a selection. `inMenuBar`: the menu bar's version ("Move to Top of Queue", "Files…").
     func entries(for rows: [TransferRow], inMenuBar: Bool = false) -> [MenuEntry] {
         guard let first = rows.first else { return [] }
-        let ids = rows.map(\.id)
         let single = rows.count == 1
-        let sharing = first.isSharing
         let info = single ? try? core.info(id: first.id) : nil
-        var out: [MenuEntry] = []
-
-        // Play first (SPEC §7F.3): only for a single torrent that holds a video selected for download.
-        if single {
-            let play = playEntries(for: first)
-            if !play.isEmpty { out += play + [.separator] }
-        }
-
-        // Actions
-        if rows.contains(where: \.canAskAgain) {
-            out.append(.item("Ask Tracker Again") { self.askTrackerAgain(rows.filter(\.canAskAgain)) })
-        }
-        if first.awaitingChoice {
-            if single {
-                out.append(.item("Start") { self.startHeld(first.id, awaiting: true) })
-                out.append(.item("Cancel") { self.cancelHeld(first.id) })
-            }
-            out.append(.item("Choose Files…") { self.showChooser(first.id) })
-        } else if first.pending != nil, single {
-            out.append(.item("Start") { self.startHeld(first.id, awaiting: false) })
-            out.append(.item("Cancel") { self.cancelHeld(first.id) })
-            out.append(.item("Choose Files…") { self.pendingChoose(first.id) })
-        } else if sharing {
-            if first.state == .paused {
-                out.append(.item("Resume Sharing") { self.core.resume(ids: ids) })
-            } else {
-                out.append(.item("Stop Sharing") { self.core.stopSharing(ids: ids) })
-            }
-        } else {
-            let paused = first.state == .paused
-            out.append(.item(paused ? "Resume" : "Pause") { paused ? self.core.resume(ids: ids) : self.core.pause(ids: ids) })
-            if single { out.append(.item(inMenuBar ? "Move to Top of Queue" : "Move to Top") { self.core.moveToTop(id: first.id) }) }
-        }
-        out.append(.separator)
-
-        // Reveal / info
-        out.append(.item("Show in Finder") { self.reveal(rows) })
-        if single { out.append(.item("Get Info", key: "⌘I") { self.showMain(nil, first.id) }) }
-        if !inMenuBar, !first.isHeld { out.append(.item("Move to…") { self.moveTo(rows) }) }
-        out.append(.separator)
-
-        // Settings submenus
-        if sharing {
-            let custom = info?.goalIsCustom ?? false
-            let goal = first.ratioGoal
-            out.append(.submenu("Seeding Goal", [
-                .item("Rule default", checked: single && !custom) { self.core.setSeedingGoal(ids: ids, goal: .ruleDefault) },
-                .separator,
-                .item("Ratio 1.0", checked: single && custom && goal == 1.0) { self.core.setSeedingGoal(ids: ids, goal: .ratio(ratio: 1)) },
-                .item("Ratio 3.0", checked: single && custom && goal == 3.0) { self.core.setSeedingGoal(ids: ids, goal: .ratio(ratio: 3)) },
-                .item("Seed Forever", checked: single && custom && goal == nil) { self.core.setSeedingGoal(ids: ids, goal: .forever) },
-                .separator,
-                .item("Custom…") { self.customGoal(rows) },
-            ]))
-        }
-        out.append(.submenu("Priority", Priority.all.map { p in
-            .item(p == .high ? "★ High" : p.label, checked: info?.priority == p) { self.core.setPriority(ids: ids, priority: p) }
-        }))
-        do {
-            let title = single ? "Category: \(first.category.label)" : "Category"
-            var cats: [MenuEntry] = Category.all.map { c in
-                .item(c.label, checked: single && c == first.category) { self.core.setCategory(ids: ids, category: c) }
-            }
-            if single { cats += [.separator, .item("Detected: \(first.category.label)", enabled: false) {}] }
-            out.append(.submenu(title, cats))
-        }
-        out.append(ruleMenu(ids: ids, current: info?.ruleName))
-        if inMenuBar && chooserAvailable && !sharing && single && first.pending == nil {
-            out.append(.item("Files…") { self.showChooser(first.id) })
-        }
-        out.append(.separator)
-
-        // Utilities, then destructive last
-        if sharing { out.append(.item("Verify Files") { self.core.verify(ids: ids) }) }
-        if single && first.kind == .torrent {
-            out.append(.item("Copy Magnet Link") { self.copyMagnet(first) })
-        }
-        out.append(.separator)
-        out.append(.item("Remove…") { self.confirmRemove(rows, deleteFiles: false, openWindow: inMenuBar) })
-        out.append(.item("Remove and Delete Files…", role: .destructive) { self.confirmRemove(rows, deleteFiles: true, openWindow: inMenuBar) })
-        return out
+        let play = single ? playOffer(first) : nil
+        let list = rowCommands(rows: rows, info: info, rules: core.rulesLoad().rules, play: play,
+                               inMenuBar: inMenuBar, chooserAvailable: chooserAvailable)
+        return draw(list, rows: rows, videos: play?.videos ?? [], inMenuBar: inMenuBar)
     }
 
-    private func ruleMenu(ids: [String], current: String?) -> MenuEntry {
-        let rules = core.rulesLoad().rules.filter(\.enabled)
-        var items: [MenuEntry] = [
-            .item("Automatic, by tracker", checked: current == "Default") { self.core.setRule(ids: ids, rule: nil) },
-            .separator,
-        ]
-        for r in rules {
-            items.append(.item(r.name, checked: current == r.name) { self.core.setRule(ids: ids, rule: r.id) })
+    /// A command list as menu entries. `videos` are the files its Play commands name; `then` runs after each command
+    /// (Get Info reads the torrent again).
+    func draw(_ list: [CommandEntry], rows: [TransferRow], videos: [TorrentFile], inMenuBar: Bool,
+              then: @escaping @MainActor () -> Void = {}) -> [MenuEntry] {
+        list.map { entry in
+            switch entry {
+            case .separator:
+                return .separator
+            case let .note(title):
+                return .item(title, enabled: false) {}
+            case let .submenu(title, entries):
+                return .submenu(title, draw(entries, rows: rows, videos: videos, inMenuBar: inMenuBar, then: then))
+            case let .item(command, title, checked, enabled, destructive, shortcut):
+                return .item(title, checked: checked, enabled: enabled, role: destructive ? .destructive : .normal,
+                             key: shortcut.map { "⌘" + $0 }) {
+                    self.run(command, rows: rows, videos: videos, inMenuBar: inMenuBar)
+                    then()
+                }
+            }
         }
-        items += [.separator, .item("Edit Rules…") { self.showSettings(.rules) }]
-        return .submenu("Rule: \(current ?? "Default")", items)
+    }
+
+    /// What each command does here: a core call, Finder, the pasteboard, a window or a dialog.
+    func run(_ command: RowCommand, rows: [TransferRow], videos: [TorrentFile], inMenuBar: Bool) {
+        guard let first = rows.first else { return }
+        let ids = rows.map(\.id)
+        switch command {
+        case let .askTrackerAgain(asked): askTrackerAgain(rows.filter { asked.contains($0.id) })
+        case .confirmChoice: startHeld(first.id, awaiting: true)
+        case .startNow: startHeld(first.id, awaiting: false)
+        case .cancelHeld: cancelHeld(first.id)
+        case .openChooser: showChooser(first.id)
+        case .chooseFiles: pendingChoose(first.id)
+        case .resume: core.resume(ids: ids)
+        case .pause: core.pause(ids: ids)
+        case .stopSharing: core.stopSharing(ids: ids)
+        case .moveToTop: core.moveToTop(id: first.id)
+        case .reveal: reveal(rows)
+        case .getInfo: showMain(nil, first.id)
+        case .moveTo: moveTo(rows)
+        case let .setSeedingGoal(goal): core.setSeedingGoal(ids: ids, goal: goal)
+        case .customGoal: customGoal(rows)
+        case let .setPriority(priority): core.setPriority(ids: ids, priority: priority)
+        case let .setCategory(category): core.setCategory(ids: ids, category: category)
+        case let .setRule(ruleId): core.setRule(ids: ids, rule: ruleId)
+        case .editRules: showSettings(.rules)
+        case .verify: core.verify(ids: ids)
+        case .copyMagnet: copyMagnet(first)
+        case .remove: confirmRemove(rows, deleteFiles: false, openWindow: inMenuBar)
+        case .removeAndDeleteFiles: confirmRemove(rows, deleteFiles: true, openWindow: inMenuBar)
+        case .playRow: playButtonPressed(first)
+        case let .play(fileIndex, playerId):
+            let player = playerId.flatMap { id in PlayerDirectory.shared.installed().first { $0.id == id } }
+            guard let fileIndex else { return playLocal(first, with: player) }
+            guard let file = videos.first(where: { $0.index == fileIndex }) else { return }
+            play(first, file: file, with: player)
+        }
     }
 }

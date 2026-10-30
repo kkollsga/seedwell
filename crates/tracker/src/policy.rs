@@ -32,6 +32,9 @@ pub struct DestinationPolicy {
     /// Allow loopback trackers. Meant for tests and local development; there
     /// is no reason for a production UI to offer it.
     pub allow_loopback: bool,
+    /// Allow public addresses: every real tracker. Off only in an isolated (test) run, which must never reach a real
+    /// tracker whatever torrent it is given.
+    pub allow_public: bool,
 }
 
 /// Why an address was refused.
@@ -51,6 +54,8 @@ pub enum Refusal {
     Loopback,
     /// RFC 1918 / CGNAT / ULA while `allow_lan_trackers` is off.
     PrivateNetwork,
+    /// A public address while `allow_public` is off (an isolated test run).
+    Public,
 }
 
 impl std::fmt::Display for Refusal {
@@ -63,22 +68,30 @@ impl std::fmt::Display for Refusal {
             Refusal::Metadata => "cloud metadata address",
             Refusal::Loopback => "loopback address",
             Refusal::PrivateNetwork => "private network address (enable allow_lan_trackers)",
+            Refusal::Public => "public address (an isolated test run reaches only local trackers)",
         })
     }
 }
 impl std::error::Error for Refusal {}
 
 impl DestinationPolicy {
+    /// A public address: allowed unless `allow_public` is off.
+    fn public(&self) -> Result<(), Refusal> {
+        if self.allow_public { Ok(()) } else { Err(Refusal::Public) }
+    }
+
     /// The production policy: public addresses only.
     pub const STRICT: DestinationPolicy = DestinationPolicy {
         allow_lan_trackers: false,
         allow_loopback: false,
+        allow_public: true,
     };
 
     /// Tests and local development: loopback and private networks allowed.
     pub const LOCAL: DestinationPolicy = DestinationPolicy {
         allow_lan_trackers: true,
         allow_loopback: true,
+        allow_public: true,
     };
 
     /// May we connect to `ip`?
@@ -150,7 +163,7 @@ impl DestinationPolicy {
                 Err(Refusal::PrivateNetwork)
             };
         }
-        Ok(())
+        self.public()
     }
 
     fn check_v6(&self, a: Ipv6Addr) -> Result<(), Refusal> {
@@ -217,7 +230,7 @@ impl DestinationPolicy {
                 Err(Refusal::PrivateNetwork)
             };
         }
-        Ok(())
+        self.public()
     }
 }
 
@@ -298,6 +311,7 @@ mod tests {
         let p = DestinationPolicy {
             allow_lan_trackers: true,
             allow_loopback: false,
+            allow_public: true,
         };
         for a in [
             "10.1.2.3",
@@ -328,12 +342,24 @@ mod tests {
         let p = DestinationPolicy {
             allow_lan_trackers: false,
             allow_loopback: true,
+            allow_public: true,
         };
         assert!(p.check(ip("127.0.0.1")).is_ok());
         assert!(p.check(ip("::1")).is_ok());
         assert!(p.check(ip("::ffff:127.0.0.1")).is_ok());
         assert!(p.check(ip("192.168.1.1")).is_err());
         assert!(p.check(ip("169.254.169.254")).is_err());
+    }
+
+    #[test]
+    fn an_isolated_run_reaches_local_trackers_and_no_public_one() {
+        let p = DestinationPolicy { allow_public: false, ..DestinationPolicy::LOCAL };
+        for a in ["127.0.0.1", "::1", "192.168.1.10", "fd12::1"] {
+            assert!(p.check(ip(a)).is_ok(), "{a}");
+        }
+        for a in ["38.145.60.21", "2606:4700::6810:84e5", "::ffff:8.8.8.8", "2002:0808:0808::1"] {
+            assert_eq!(p.check(ip(a)), Err(Refusal::Public), "{a}");
+        }
     }
 
     #[test]

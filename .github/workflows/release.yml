@@ -1,5 +1,10 @@
-# Pushing a tag vX.Y.Z builds the release on GitHub and creates a DRAFT release with Seedwell-X.Y.Z.zip,
-# install.sh, SHA256SUMS and latest.json. Publishing the draft is a manual click: that is the moment every
+# Pushing a tag vX.Y.Z builds the release for the Mac and for Windows and creates ONE draft release with every asset:
+# Seedwell-X.Y.Z.zip, install.sh, Seedwell-X.Y.Z-windows-x64.zip, install.ps1, SHA256SUMS and latest.json.
+#
+# All or nothing: the release starts only when the tag matches Cargo.toml and CI passed on the tagged commit; the Mac
+# and Windows builds run side by side and a failure in one cancels the other; the draft is made only when both
+# succeeded. When anything fails or is cancelled, the tag (and a draft, if one was made) is deleted again, so a fix
+# is followed by a fresh tag of the same version. Publishing the draft stays a manual click: that is the moment every
 # installed copy is offered the update (SPEC 12A).
 name: Release
 
@@ -9,12 +14,42 @@ on:
 
 permissions:
   contents: write
+  actions: write   # a failing build cancels the run
 
 concurrency:
   group: release-${{ github.ref }}
 
 jobs:
-  release:
+  gate:
+    name: Tag and CI
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v7
+      - name: The tag matches the version in Cargo.toml
+        run: |
+          v=$(sed -n '/^\[workspace.package\]/,/^\[/{s/^version *= *"\(.*\)"/\1/p;}' Cargo.toml | head -1)
+          [ "v$v" = "$GITHUB_REF_NAME" ] || { echo "::error::tag $GITHUB_REF_NAME but Cargo.toml says $v"; exit 1; }
+      - name: CI passed on this commit (Mac and Windows)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # The tag is pushed after main; CI may still be running. Wait for its run on this commit, at most an hour.
+          for _ in $(seq 1 120); do
+            read -r status conclusion url < <(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml --commit "$GITHUB_SHA" \
+                --event push --limit 1 --json status,conclusion,url --jq '.[0] | "\(.status) \(.conclusion) \(.url)"') || true
+            if [ "${status:-}" = completed ]; then
+              [ "$conclusion" = success ] && { echo "CI passed: $url"; exit 0; }
+              echo "::error::CI on $GITHUB_SHA ended with $conclusion: $url"; exit 1
+            fi
+            echo "CI on $GITHUB_SHA: ${status:-not started yet}; waiting"
+            sleep 30
+          done
+          echo "::error::no finished CI run on $GITHUB_SHA within an hour"; exit 1
+
+  mac:
+    name: Mac build
+    needs: gate
     runs-on: macos-26
     timeout-minutes: 60
     steps:
@@ -23,14 +58,101 @@ jobs:
           fetch-depth: 0   # the release notes list the commits since the previous tag
       - name: Rust (version pinned in rust-toolchain.toml)
         run: rustup show active-toolchain || rustup toolchain install
-      - name: The tag matches the version in Cargo.toml
-        run: |
-          v=$(sed -n '/^\[workspace.package\]/,/^\[/{s/^version *= *"\(.*\)"/\1/p;}' Cargo.toml | head -1)
-          [ "v$v" = "$GITHUB_REF_NAME" ] || { echo "::error::tag $GITHUB_REF_NAME but Cargo.toml says $v"; exit 1; }
-      - name: Build and create the draft release
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Build and check the Mac release
         run: |
           # Build numbers keep rising past the ones built locally before CI existed (0.1.0 was build 88).
           export SEEDWELL_BUILD=$((100 + GITHUB_RUN_NUMBER))
-          app/release-zip.sh --draft
+          app/release-zip.sh
+      - uses: actions/upload-artifact@v5
+        with:
+          name: mac
+          path: |
+            app/build/release/Seedwell-*.zip
+            app/build/release/install.sh
+            app/build/release/SHA256SUMS
+            app/build/release/latest.json
+            app/build/release/NOTES.md
+          if-no-files-found: error
+      - name: A failed build cancels the release
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run cancel "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY"
+
+  windows:
+    name: Windows build
+    needs: gate
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+      - name: Rust (version pinned in rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: "10.0.x"
+      - name: uniffi-bindgen-cs (the C# bindings' generator)
+        run: cargo install uniffi-bindgen-cs --git https://github.com/NordSecurity/uniffi-bindgen-cs --tag v0.11.1+v0.31.0
+      - name: Build and check the Windows release
+        shell: powershell
+        run: app-windows\release-zip.ps1
+      - name: The installer installs, updates, pins a version and uninstalls (local server, test registry keys)
+        shell: powershell
+        run: |
+          app-windows\qa\install-test.ps1
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+      - uses: actions/upload-artifact@v5
+        with:
+          name: windows
+          path: |
+            app-windows/bin/release/Seedwell-*-windows-x64.zip
+            app-windows/bin/release/install.ps1
+            app-windows/bin/release/SHA256SUMS-windows
+            app-windows/bin/release/latest-windows.json
+          if-no-files-found: error
+      - name: A failed build cancels the release
+        if: failure()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run cancel "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY"
+
+  draft:
+    name: Draft release
+    needs: [mac, windows]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v5
+        with:
+          path: assets
+      - name: One SHA256SUMS, one latest.json, one set of notes
+        run: python3 -I tools/release-merge.py assets/mac assets/windows
+      - name: Create the draft (not published)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          v=${GITHUB_REF_NAME#v}
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft --verify-tag --title "Seedwell $v" \
+            --notes-file assets/mac/NOTES.md \
+            assets/mac/Seedwell-"$v".zip assets/mac/install.sh \
+            assets/windows/Seedwell-"$v"-windows-x64.zip assets/windows/install.ps1 \
+            assets/mac/SHA256SUMS assets/mac/latest.json
+
+  withdraw:
+    name: Withdraw the tag
+    needs: [gate, mac, windows, draft]
+    if: failure() || cancelled()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Delete the draft, if one was made, and the tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag 2>/dev/null \
+            || gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/tags/$GITHUB_REF_NAME" \
+            || true
+          echo "::error::The release of $GITHUB_REF_NAME was withdrawn: fix the failure, then tag the version again."
+          exit 1

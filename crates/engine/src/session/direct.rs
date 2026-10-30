@@ -57,6 +57,8 @@ pub(crate) struct DirectEntry {
     pub error: Option<String>,
     forwarder: Option<JoinHandle<()>>,
     last_saved_done: u64,
+    /// Paused by the app itself (on battery), not by the user: stored as running (`dirty_direct`).
+    pub app_paused: bool,
 }
 
 impl Drop for DirectEntry {
@@ -243,7 +245,7 @@ impl Session {
             queue_pos: pos,
         };
         self.commit_now(crate::persist::Batch { directs: vec![rec.clone()], ..Default::default() })?;
-        self.directs.insert(id, DirectEntry { rec, task: None, queued: false, error: None, forwarder: None, last_saved_done: 0 });
+        self.directs.insert(id, DirectEntry { rec, task: None, queued: false, error: None, forwarder: None, last_saved_done: 0, app_paused: false });
         self.sh.emit(EngineEvent::Added { id, name: name.clone() });
         self.replan();
         self.schedule_after(Duration::from_secs(5), Job::DirectTick);
@@ -257,7 +259,7 @@ impl Session {
         for rec in recs.into_iter().take(MAX_DIRECTS) {
             self.next_pos = self.next_pos.max(rec.queue_pos + 1);
             let done = rec.done;
-            self.directs.insert(rec.id, DirectEntry { rec, task: None, queued: false, error: None, forwarder: None, last_saved_done: done });
+            self.directs.insert(rec.id, DirectEntry { rec, task: None, queued: false, error: None, forwarder: None, last_saved_done: done, app_paused: false });
         }
         if self.directs.values().any(DirectEntry::wants_slot) {
             self.schedule_after(Duration::from_secs(5), Job::DirectTick);
@@ -373,6 +375,7 @@ impl Session {
             (DirectState::Active, true) | (DirectState::Paused, false) => return,
             (_, true) => {
                 e.rec.state = DirectState::Active;
+                e.app_paused = false;
                 e.error = None;
             }
             (_, false) => e.rec.state = DirectState::Paused,

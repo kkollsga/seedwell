@@ -10,6 +10,9 @@ import SwiftUI
     /// The menu bar item's button, or nil when there is no item (QA without a menu bar).
     private let anchor: () -> NSStatusBarButton?
     private var popover: NSPopover?
+    /// A quiet QA run (QuietRun) shows no popover at the menu bar: the same content lives in a window off every screen
+    /// for as long as the popover would be up, and QA draws it (`shot … popover`).
+    private var quietWindow: NSWindow?
     private var timer: Timer?
     /// Torrents whose "Choose Files…" is waiting for their metadata (magnet links): the chooser opens
     /// by itself when it arrives, without the "Choose what to download" notification.
@@ -23,8 +26,8 @@ import SwiftUI
         self.anchor = anchor
     }
 
-    var isShown: Bool { popover?.isShown == true }
-    var popoverWindow: NSWindow? { popover?.contentViewController?.view.window }
+    var isShown: Bool { popover?.isShown == true || quietWindow != nil }
+    var popoverWindow: NSWindow? { quietWindow ?? popover?.contentViewController?.view.window }
 
     /// Looks at the core and shows, updates or closes the popover. Cheap; called on every pending event
     /// and once a second while the popover is up.
@@ -48,6 +51,7 @@ import SwiftUI
         } else if !pinned {
             close()
         }
+        qaFit()
     }
 
     /// The menu bar menu opens on the same spot: the popover steps aside for it and stays put for these torrents.
@@ -59,6 +63,11 @@ import SwiftUI
 
     func close() {
         stopTicking()
+        if let w = quietWindow {
+            quietWindow = nil
+            w.contentViewController = nil
+            w.close()
+        }
         guard let p = popover else { return }
         p.delegate = nil
         if p.isShown { p.performClose(nil) }
@@ -97,7 +106,7 @@ import SwiftUI
             // Fetching a magnet link's list: not waiting for a choice yet, so the engine has nothing to cancel.
             chooserRequests.remove(id)
             model.collapse(id)
-            do { try store.cancel(id, keepFile: keepFile) } catch { commands.core.remove(ids: [id], deleteFiles: false) }
+            store.cancel(id, keepFile: keepFile)
             refresh()
         },
         open: { [weak self] id in
@@ -131,6 +140,7 @@ import SwiftUI
 
     private func show() {
         startTicking()
+        if QuietRun.on { return showQuiet() }
         guard popover == nil || popover?.isShown == false else { return }
         guard let button = anchor(), button.window != nil else { return }
         let p = NSPopover()
@@ -147,6 +157,29 @@ import SwiftUI
         p.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         // Memory: pinned to sRGB like every other window (see `Windows`).
         host.view.window?.colorSpace = Windows.space
+    }
+
+    /// The popover's content in a borderless window off every screen (a quiet QA run).
+    private func showQuiet() {
+        guard quietWindow == nil else { return }
+        let host = NSHostingController(rootView: StartingView(model: model, store: store, actions: actions))
+        host.sizingOptions = [.preferredContentSize]
+        let w = NSWindow(contentViewController: host)
+        w.styleMask = [.borderless]
+        w.isReleasedWhenClosed = false
+        w.backgroundColor = .windowBackgroundColor
+        w.colorSpace = Windows.space
+        w.identifier = NSUserInterfaceItemIdentifier("starting-popover")
+        w.orderFront(nil)
+        quietWindow = w
+        qaFit()
+    }
+
+    /// The quiet window takes the size the popover would (the content's preferred size).
+    func qaFit() {
+        guard let w = quietWindow, let size = w.contentViewController?.preferredContentSize, size.width > 0, size.height > 0,
+              w.contentLayoutRect.size != size else { return }
+        w.setContentSize(size)
     }
 
     func popoverDidClose(_ notification: Notification) {
@@ -201,6 +234,12 @@ import SwiftUI
         default: break
         }
         refresh()
+    }
+
+    /// QA: the category pill's menu of a block, as a native menu (a SwiftUI menu cannot be opened from code).
+    func qaPillMenu(_ id: String) -> NSMenu? {
+        guard let item = model.items.first(where: { $0.id == id }), item.showsCategory else { return nil }
+        return MenuBuilder.menu(CategoryPill.entries(category: item.category) { [weak self] in self?.actions.changeCategory(id, $0) })
     }
 
     func qaClose() {

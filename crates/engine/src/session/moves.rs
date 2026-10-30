@@ -135,7 +135,7 @@ fn fail_text(e: &StorageError, dest: &Path, layout: Option<&trs_storage::Layout>
     match e {
         StorageError::Locked { .. } => format!("{e}, so the torrent stays where it is"),
         StorageError::NoPermission { .. } => e.to_string(),
-        StorageError::Io { file, source } if source.raw_os_error().is_some_and(|c| c == libc::EPERM || c == libc::EACCES) => {
+        StorageError::Io { file, source } if source.kind() == std::io::ErrorKind::PermissionDenied => {
             denied_text(*file, layout, dest)
         }
         StorageError::InsufficientSpace { needed, available } => format!(

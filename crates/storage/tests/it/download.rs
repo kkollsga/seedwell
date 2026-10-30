@@ -343,13 +343,13 @@ fn preallocate_option_reserves_full_files() {
         std::thread::yield_now();
     };
     assert_eq!(len, 200_000);
-    use std::os::unix::fs::MetadataExt;
-    let m = std::fs::metadata(path_of(dir.path(), &s, 0)).unwrap();
-    assert!(
-        m.blocks() * 512 >= 200_000,
-        "not preallocated: {} blocks",
-        m.blocks()
-    );
+    // The space itself, where the system tells (Windows reserves nothing ahead: only the length).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let m = std::fs::metadata(path_of(dir.path(), &s, 0)).unwrap();
+        assert!(m.blocks() * 512 >= 200_000, "not preallocated: {} blocks", m.blocks());
+    }
 }
 
 #[test]

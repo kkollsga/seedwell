@@ -108,11 +108,9 @@ mod tests {
     }
 }
 
-/// Offset of the local time zone from UTC, in seconds, valid at Unix time `unix`.
-///
-/// There is no time-zone database in the tree and the engine forbids `unsafe`, so the offset is
-/// read from `/bin/date` (`+%z`) and cached per half hour. The app can bypass this entirely by
-/// installing a [`crate::config::ClockFn`] (Swift knows the zone exactly). Falls back to UTC.
+/// Offset of the local time zone from UTC, in seconds, valid at Unix time `unix`, cached per half
+/// hour. The app can bypass this entirely by installing a [`crate::config::ClockFn`] (Swift knows
+/// the zone exactly). Falls back to UTC.
 pub fn local_utc_offset(unix: i64) -> i32 {
     use std::sync::Mutex;
     static CACHE: Mutex<Option<(i64, i32)>> = Mutex::new(None);
@@ -124,14 +122,7 @@ pub fn local_utc_offset(unix: i64) -> i32 {
                 return off;
             }
     }
-    let off = std::process::Command::new("/bin/date")
-        .args(["-r", &unix.to_string(), "+%z"])
-        .env_clear()
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .and_then(|s| parse_utc_offset(s.trim()))
-        .unwrap_or(0);
+    let off = trs_platform::proc::utc_offset(unix);
     *CACHE.lock().unwrap_or_else(|p| p.into_inner()) = Some((window, off));
     off
 }

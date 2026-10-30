@@ -29,7 +29,7 @@ Swift that is not drawing or OS integration is a bug in this sense and moves to 
 |---|---|---|---|
 | Secrets (`SecretVault`) | Keychain | Credential Manager / DPAPI | Secret Service (libsecret); file when headless |
 | Keep awake (lease → assertion; `power_needs`) | IOPMAssertion, App Nap activity | `PowerCreateRequest` / `SetThreadExecutionState` | logind `Inhibit` |
-| Power source, network, sleep/wake | IOPS, NWPathMonitor, NSWorkspace | `RegisterPowerSettingNotification`, `NotifyIpInterfaceChange`, `WM_POWERBROADCAST` | UPower, NetworkManager, logind `PrepareForSleep` |
+| Power source (`power_changed`; the On battery rule is Rust's), network, sleep/wake | IOPS, NWPathMonitor, NSWorkspace | `RegisterPowerSettingNotification`, `NotifyIpInterfaceChange`, `WM_POWERBROADCAST` | UPower, NetworkManager, logind `PrepareForSleep` |
 | Notifications | UNUserNotificationCenter | App notifications (toast) | `org.freedesktop.Notifications` |
 | Menu bar / tray | NSStatusItem + NSMenu | Notification-area icon + menu | StatusNotifierItem |
 | File manager badges and Share | Finder Sync + Share extension | Shell overlays / Cloud Files API, Explorer verb | Nautilus/Dolphin extensions, `.desktop` actions |
@@ -44,8 +44,9 @@ Swift that is not drawing or OS integration is a bug in this sense and moves to 
   utc offset), `signal` (shutdown), `net` (default gateway).
 - Existing seams kept: `trs-fswatch` backends (FSEvents, inotify, poll; ReadDirectoryChangesW to add), the
   `trs_sync::fs::Fs` trait (a Windows `StdFs`), `SecretStore`, `Awake`.
-- New: a `Trash` seam (freedesktop Trash, Recycle Bin), and a transport seam in `trs-control` (Unix socket, named
-  pipe with an owner-only DACL).
+- New: a Trash seam, `fs::move_to_trash` (a given Trash folder; else the Mac's own Trash call (NSFileManager, each volume's
+  Trash, Put Back), the Recycle Bin, the freedesktop.org home trash) with `trash!()` for its name in text, and a transport seam in `trs-control` (Unix socket, named pipe
+  with an owner-only DACL).
 - errno numbers are never matched; `io::ErrorKind` is.
 
 **Bindings.** `trs-ffi` stays the one API for every host. It is plain UniFFI (no Swift-specific code); it builds as a
@@ -100,7 +101,8 @@ Each step is its own commit with tests; `tools/check.sh` passes after each.
 - [x] Found on the way: a folder-and-channel link's two invitations could expire a second apart.
 
 **Phase 1: compatibility decisions** (§3)
-- [ ] (Skip, don't drop: done in Phase 0.) A Windows name check as a per-path issue in the puller.
+- [x] A Windows name check as a per-path issue in the puller (`trs_platform::fs::name_problem`; a folder named
+      `dir.` would otherwise come back as `dir`), and the same for symlinks without Developer Mode.
 - [x] Deterministic conflict-copy times: the stamp is UTC with a `z` (`2026-10-25 14.32z`), shown in local time
       by the app; the device name is the loser's own signed profile in the folder's membership (0.1.9), so every
       member uses the same one.
@@ -110,11 +112,28 @@ Each step is its own commit with tests; `tools/check.sh` passes after each.
       system.
 
 **Phase 2: Rust builds and runs on Windows and Linux**
-- [ ] `trs-platform` with the modules of §2; every `std::os::unix`, `libc` call and errno match moves there.
-- [ ] Linux behaviour: XDG state dir, freedesktop Trash, mount roots, local time offset (`/bin/date -r` means a
-      file on GNU: Linux falls back to UTC today).
-- [ ] Windows: named-pipe transport, Windows `StdFs`, ReadDirectoryChangesW watcher, Recycle Bin, Job Objects
-      for wake commands, `ctrl_c`/close for shutdown.
+- [x] `trs-platform` with the modules of §2 (`fs`, `dirs`, `proc`, `signal`, `net`, `ipc`); the `std::os::unix`, `libc`
+      calls and errno matches of storage, state, http, sync, sync-net, engine, devlog, control and cli moved there
+      or became `io::ErrorKind` matches. The workspace builds and passes clippy for `x86_64-pc-windows-gnu`.
+      Still OS-specific in place: the fswatch backends, `trs-storage`'s mapped allocator (macOS), the sync flush
+      barrier (macOS), uTP's socket options; and the app (`trs-ffi` builds for Windows, nothing calls it yet).
+- [ ] Linux behaviour: run it there. Done: XDG state dir (`dirs::state_dir`), mount roots, local time offset
+      (`localtime_r`, no more `/bin/date`), the freedesktop.org home trash (`fs::move_to_trash`: `files/` and
+      `info/*.trashinfo`; only the home trash, so a folder on another volume is refused as on the Mac).
+- [ ] Windows: ReadDirectoryChangesW watcher (the poll backend runs meanwhile), the Recycle Bin run on the PC
+      (`fs::move_to_trash`: `SHFileOperationW` with undo and no UI; refuses what the bin would delete outright:
+      a drive without one, set to delete at once, or an item larger than it holds). Done: named-pipe
+      transport with an owner-only DACL (`trs-control::transport`), Windows `StdFs` (file ids and change times
+      from the handle, no exec bit), Job Objects for wake commands, Ctrl+C/close/logoff/shutdown.
+- [x] The test suite runs on a Windows 11 PC (MSVC), through the OneDrive bridge: from 434 failures at the first
+      run to the few listed there. Found on the way and fixed for every system: a lost wake-up on encrypted
+      connections, stale pull issues, the archive cap, half copies, temp files nobody finishes, a state folder
+      made again, a stale sign of life in the outage check.
+- [x] Windows timers: an async sleep under 16 ms takes about 16 ms (the default 15.6 ms tick). Measured: the rate
+      limiter and uTP pacing stay within 0.3 % of their targets regardless, so no `timeBeginPeriod` (it costs power).
+- [x] UniFFI held at 0.31 (2026-10-28): the Windows app's C# bindings come from uniffi-bindgen-cs, which supports
+      0.31 at most, and the Rust side and every generator must share one UniFFI version. 0.32 brought nothing
+      Seedwell uses. Dependabot ignores uniffi >= 0.32 until a uniffi-bindgen-cs release supports it; then both move.
 - [ ] CI: `cargo check`/clippy for `x86_64-pc-windows-msvc` and `x86_64-unknown-linux-gnu`, and the Linux test
       matrix extended to sync, sync-net, fswatch, stream, devlog and ffi.
 - [ ] `tools/sync-compat.sh` against a daemon on another machine (Mac ↔ Linux ↔ Windows).
@@ -122,13 +141,36 @@ Each step is its own commit with tests; `tools/check.sh` passes after each.
 **Phase 3: the Mac app becomes a thin host** (Swift logic → Rust view models; Swift keeps drawing)
 - [ ] One formatter (`human`): bytes, rates, durations, "ago", counts and plurals, used by the app and the CLI.
 - [ ] File tree (window list, menu list) and chooser models; the starting countdown.
-- [ ] Menu bar model (sections, caps, signatures, Sharing and Folder Sync lines, icon state).
-- [ ] Row model (status lines, rate slot, controls) and list groups; Get Info sections; tracker order and pages.
-- [ ] Library window state (polling cadence, section fallbacks, summaries, new-download takeover).
-- [ ] Sync view model (SyncText, share, add/edit, Finder status file), chat view model (text, mail, tags, markdown).
+- [x] Menu bar model (sections, caps, signatures, Sharing and Folder Sync lines, icon state): `trs-ffi`'s `menu.rs`
+      (`menu_model`, the `Arrivals` and `IconState` objects, `sync_summary`) and `row_text.rs` (the countdown phrase,
+      the waiting and retry notes, category labels, the Play check); the Mac's menu and icon only draw them.
+- [x] Library window, step 1 (sidebar, title bar, lists): `trs-ffi`'s `library.rs` (the `Library` object: place,
+      search, category, folds and pages; its `LibraryViewModel` with the title and summary, the page, the refresh
+      cadence and the fallbacks of a place that disappeared; `LocalClock`, the host's time and day styles),
+      `library_rows.rs` (the Downloads, Sharing and tracker-tab groups, every row's lines in colour, rate slot,
+      controls, category pill and filter chip, the empty notes), `sidebar.rs` (places, chats, private conversations,
+      the trackers' order, the footer, the items' context menus) and `chat_text.rs`; the Mac draws them.
+- [ ] Get Info sections; a tracker's header and Info page; the Folder Sync and conversation pages.
+- [x] Row commands (a row's right-click menu in the window and the menu bar, the selection's menu): `trs-ffi`'s
+      `row_commands.rs` (`row_commands`, `play_commands`: titles, order, checks, the red Remove, the shortcut, the
+      Seeding Goal, Priority, Category and Rule submenus, Play and Play With with the episode labels and the capable
+      players) and `row_text.rs` (held, Ask Tracker Again, may hold video). Each `RowCommand` is run by the host
+      (core call, file manager, pasteboard, window, dialog); "Show in Finder" names `trs_platform::file_manager!()`.
+- [x] Library window state, step 1b: `trs-ffi`'s `library_window.rs` (the selection with its anchor, ⇧-click ranges, ⌘A,
+      ↑/↓ and ⇧↑/⇧↓, and the rows that leave the screen; the Remove… question, where it is drawn and when it goes; the window's keys as
+      `LibraryKey` → `KeyOutcome`, with the file-list parts left to the host as `LibraryKeyAction`; the place Get Info
+      shows and how it follows the arrows; the new-download takeover, a click in the notifier, and the arrival while the window is closed (`Library`
+      lives with the app); the add sheet's texts, what is typed in it and the link check); the Mac maps its keys and
+      clicks and draws the model.
+- [x] Sync view model: `trs-ffi`'s `sync_text.rs` (folder lines and badges, roles and members, links, invitations and
+      the sharing period, the add form and rename check, the Share dialog's choices, the file-manager badge, error and
+      alert texts) and `sync_menu.rs` (`sync_menu_model`, the `SyncRemoval` confirmation); the Mac only draws them.
+- [ ] Chat view model (text, mail, tags, markdown).
 - [ ] Notices (which events notify, texts, bursts, click routing), `seedwell://` link routing, launch options.
 - [ ] Settings parsing and save policy (ports, rates, times, goals, rules, folders, sync settings).
-- [ ] Update checker; Play (player choice, episode labels); context-menu models; the QA control protocol.
+- [ ] Update checker; Play's player choice (the setting, Automatic, "needs update"; the episode labels and Play With
+      are done with the row commands); the other context-menu models (a file's in the file list); the QA control
+      protocol.
 - [ ] Each step deletes the Swift copy, so no rule exists twice.
 
 ## 5. Status

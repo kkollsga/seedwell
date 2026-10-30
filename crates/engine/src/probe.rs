@@ -63,7 +63,7 @@ impl EngineHandle {
         self.held_source(id)
     }
 
-    /// Put a `.torrent` file in the Trash folder (the setting's `trash_dir`, else `~/.Trash`). Only a
+    /// Put a `.torrent` file in the Trash (the setting's `trash_dir`, else the system's Trash). Only a
     /// regular `*.torrent` file; returns whether it was moved.
     pub fn trash_file(&self, path: &std::path::Path) -> bool {
         let cfg = self.sh.cfg();

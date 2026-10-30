@@ -172,6 +172,43 @@ async fn direct_downloads_survive_a_restart_and_resume_with_a_range() {
     assert!(resumed >= 1, "the second run asked for a range, not the whole file: {hits:?}");
 }
 
+/// The app's own pause (on battery) of a direct download is stored as running and ends with the
+/// run or with `resume_by_app`; the user's pause of it makes it the user's, kept across a restart.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_app_pause_of_a_direct_download_ends_with_the_run() {
+    let mut f = ServedFile::new("/slow.bin", pattern_bytes(2_000_000, 7));
+    f.rate = Some(300_000);
+    let srv = serve_files(vec![f]).await;
+    let (state, dl) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut a = snode(state.path(), dl.path(), None, |_| {}).await;
+    let d = a.h.add_download(&srv.url("/slow.bin"), DownloadOptions::default()).await.unwrap();
+    wait_state(&a.h, &d.id, TorrentState::Downloading, 10).await;
+    let stored = |store: &std::sync::Arc<StateStore>| store.load_directs().unwrap().into_iter().find(|r| r.id == d.id).unwrap().state;
+    a.h.pause_by_app(&[d.id]);
+    wait_state(&a.h, &d.id, TorrentState::Paused, 10).await;
+    a.h.flush().await.unwrap();
+    assert_eq!(stored(&a.store), persist::DirectState::Active, "stored as running");
+    a.h.resume_by_app(&[d.id]);
+    wait_state(&a.h, &d.id, TorrentState::Downloading, 10).await;
+    // Paused by the app, then by the user: the user's.
+    a.h.pause_by_app(&[d.id]);
+    a.h.pause(&[d.id]);
+    wait_state(&a.h, &d.id, TorrentState::Paused, 10).await;
+    a.h.resume_by_app(&[d.id]);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(a.row(&d.id).await.unwrap().state, TorrentState::Paused, "not the app's to resume");
+    a.h.flush().await.unwrap();
+    assert_eq!(stored(&a.store), persist::DirectState::Paused);
+    a.h.resume(&[d.id]);
+    // An app pause at quit: running after the restart.
+    a.h.pause_by_app(&[d.id]);
+    wait_state(&a.h, &d.id, TorrentState::Paused, 10).await;
+    a.shutdown(Duration::from_secs(3)).await;
+    drop(a);
+    let b = snode(state.path(), dl.path(), None, |_| {}).await;
+    wait_state(&b.h, &d.id, TorrentState::Downloading, 10).await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_global_and_per_download_limits_throttle_direct_downloads() {
     let srv = serve_files(vec![ServedFile::new("/a.bin", pattern_bytes(600_000, 4)), ServedFile::new("/b.bin", pattern_bytes(300_000, 5))]).await;

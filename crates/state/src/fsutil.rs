@@ -1,6 +1,6 @@
 //! Filesystem helpers: atomic writes, timestamps, civil-date arithmetic.
 
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -18,7 +18,7 @@ pub fn unix_now() -> i64 {
 
 /// fsync a directory so a rename inside it survives power loss.
 pub(crate) fn sync_dir(dir: &Path) -> io::Result<()> {
-    File::open(dir)?.sync_all()
+    trs_platform::fs::sync_dir(dir)
 }
 
 /// Write `data` to `path` atomically: temp file in the same directory, fsync,

@@ -33,11 +33,13 @@ fn fit(stem: &str, suffix: &str, ext: &str) -> String {
     format!("{}{suffix}{ext}", &stem[..end])
 }
 
-/// Device names go into file names: no `/`, no control characters, no leading dot, at most 40 chars.
+/// Device names go into file names: no `/`, no control characters, no leading dot, at most 40 chars, and
+/// none of the characters Windows refuses in a name (`\ : * ? " < > |`). The same on every system, since
+/// every member names a copy the same.
 fn clean_device(name: &str) -> String {
     let cleaned: String = name
         .chars()
-        .map(|c| if c == '/' || c == ':' || c.is_control() { '-' } else { c })
+        .map(|c| if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') || c.is_control() { '-' } else { c })
         .take(40)
         .collect();
     let trimmed = cleaned.trim().trim_start_matches('.');
@@ -125,6 +127,18 @@ pub fn archived_of(below_archive: &str) -> Option<(String, i64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_device_name_in_a_copy_holds_only_what_every_system_allows() {
+        let p = conflict_path("a.txt", r#"Kris: "work" <PC>? \ */|"#, "2026-10-25 14.32", 1);
+        assert_eq!(p, "a (conflict, Kris- -work- -PC-- - ---, 2026-10-25 14.32).txt");
+        assert!(portable(&p));
+    }
+
+    /// No character any system refuses in a name.
+    fn portable(p: &str) -> bool {
+        !p.chars().any(|c| matches!(c, '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|'))
+    }
 
     #[test]
     fn conflict_names_read_well() {

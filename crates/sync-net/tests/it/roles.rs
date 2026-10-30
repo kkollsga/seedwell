@@ -215,7 +215,7 @@ async fn a_folder_still_in_use_is_not_moved_and_starts_again_where_it_is() {
     a.h.test_stop_wait(Duration::from_secs(60));
     until(10, "the folder runs again", || a.h.snapshot().folders.iter().any(|f| f.id == id.to_string())).await;
     let moved = a.h.rename_folder(&id, "Papers").await.unwrap();
-    assert!(moved.path.ends_with("/Papers"), "{}", moved.path);
+    assert!(Path::new(&moved.path).ends_with("Papers"), "{}", moved.path);
     assert_eq!(read(&root.path().join("Papers/a.txt")).as_deref(), Some(&b"hello"[..]));
 }
 

@@ -6,7 +6,6 @@
 //! default = `<repo>/bench/downloads/storage-bench` and `$TMPDIR`). Bench files are deleted after use.
 
 use std::collections::VecDeque;
-use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -270,7 +269,7 @@ fn bench_reads(dir: &Path) {
             for c in chunk.chunks_mut(8) {
                 c.copy_from_slice(&rng.next().to_le_bytes());
             }
-            f.write_all_at(&chunk, i << 20).unwrap();
+            trs_platform::fs::write_all_at(&f, &chunk, i << 20).unwrap();
         }
     }
     let blocks = file_len / u64::from(BLOCK_SIZE);
@@ -286,11 +285,11 @@ fn bench_reads(dir: &Path) {
     let f = std::fs::File::open(&path).unwrap();
     let mut buf = vec![0u8; BLOCK_SIZE as usize];
     for &o in offsets.iter().take(20_000) {
-        f.read_exact_at(&mut buf, o).unwrap(); // warm
+        trs_platform::fs::read_exact_at(&f, &mut buf, o).unwrap(); // warm
     }
     let t = Instant::now();
     for &o in &offsets {
-        f.read_exact_at(&mut buf, o).unwrap();
+        trs_platform::fs::read_exact_at(&f, &mut buf, o).unwrap();
     }
     let e = t.elapsed().as_secs_f64();
     println!(

@@ -1,4 +1,4 @@
-//! The control server: accepts same-user connections on the Unix socket and serves the protocol
+//! The control server: accepts same-user connections on the control socket and serves the protocol
 //! on top of a [`Backend`].
 //!
 //! Per connection: `hello` first, then one request at a time (responses are in request order),
@@ -14,8 +14,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use serde_json::{Value, json};
-use tokio::io::{AsyncWriteExt, BufReader};
-use tokio::net::{UnixListener, UnixStream, unix::OwnedWriteHalf};
+use tokio::io::{AsyncWriteExt, BufReader, WriteHalf};
 use tokio::sync::{Semaphore, broadcast, watch};
 use tokio::task::JoinSet;
 
@@ -28,7 +27,7 @@ use crate::ops::{self, Picked, SourceKind};
 use crate::perm::{Permission, PermissionSource};
 use crate::proto::*;
 use crate::redact::scrub_urls;
-use crate::socket::{bind_secure, peer_allowed, remove_if_ours};
+use crate::transport::{self, Listener, Owner};
 use crate::state::StateAccess;
 use crate::types::*;
 
@@ -182,7 +181,7 @@ struct Ctx<B> {
 /// A running server. Dropping it stops accepting, closes connections and removes the socket.
 pub struct ServerHandle {
     path: PathBuf,
-    ino: u64,
+    owner: Owner,
     warnings: Vec<String>,
     activity: ActivityLog,
     awake: Awake,
@@ -229,7 +228,7 @@ impl ServerHandle {
         if let Some(t) = self.task.take() {
             let _ = tokio::time::timeout(Duration::from_secs(3), t).await;
         }
-        remove_if_ours(&self.path, self.ino);
+        transport::remove_if_ours(&self.path, &self.owner);
     }
 }
 
@@ -239,7 +238,7 @@ impl Drop for ServerHandle {
         if let Some(t) = &self.task {
             t.abort();
         }
-        remove_if_ours(&self.path, self.ino);
+        transport::remove_if_ours(&self.path, &self.owner);
     }
 }
 
@@ -253,7 +252,7 @@ pub async fn serve_backend<B: Backend>(
     opts: ServerOptions,
 ) -> io::Result<ServerHandle> {
     let path = path.as_ref().to_path_buf();
-    let bound = bind_secure(&path).await?;
+    let bound = transport::bind(&path).await?;
     let (stop_tx, stop_rx) = watch::channel(false);
     let activity = ActivityLog::new();
     let awake = Awake::new();
@@ -296,10 +295,10 @@ pub async fn serve_backend<B: Backend>(
     tokio::spawn(chat_methods::pump(ctx.clone(), stop_rx.clone()));
     let c1 = ctx.clone();
     let c2 = ctx.clone();
-    let task = tokio::spawn(accept_loop(ctx, bound.listener, bound.uid));
+    let task = tokio::spawn(accept_loop(ctx, bound.listener));
     Ok(ServerHandle {
         path,
-        ino: bound.ino,
+        owner: bound.owner,
         warnings: bound.warnings,
         activity,
         awake,
@@ -310,7 +309,7 @@ pub async fn serve_backend<B: Backend>(
     })
 }
 
-async fn accept_loop<B: Backend>(ctx: Arc<Ctx<B>>, listener: UnixListener, server_uid: u32) {
+async fn accept_loop<B: Backend>(ctx: Arc<Ctx<B>>, mut listener: Listener) {
     let slots = Arc::new(Semaphore::new(ctx.opts.max_connections));
     let mut conns = JoinSet::new();
     let mut stop = ctx.stop.clone();
@@ -321,18 +320,14 @@ async fn accept_loop<B: Backend>(ctx: Arc<Ctx<B>>, listener: UnixListener, serve
             // Reap finished connection tasks so the set does not grow.
             Some(_) = conns.join_next(), if !conns.is_empty() => continue,
         };
+        // Only our own user gets this far (the transport checks).
         let stream = match accepted {
-            Ok((s, _)) => s,
+            Ok(s) => s,
             Err(_) => {
                 tokio::time::sleep(Duration::from_millis(50)).await;
                 continue;
             }
         };
-        // Who is it? Only our own uid gets any answer at all.
-        match stream.peer_cred() {
-            Ok(c) if peer_allowed(c.uid(), server_uid) => {}
-            _ => continue,
-        }
         match slots.clone().try_acquire_owned() {
             Ok(permit) => {
                 let ctx = ctx.clone();
@@ -387,12 +382,12 @@ async fn next_event(sub: &mut Option<Sub>) -> Result<Arc<EventDto>, broadcast::e
     }
 }
 
-async fn send(wr: &mut OwnedWriteHalf, bytes: &[u8], timeout: Duration) -> bool {
+async fn send(wr: &mut WriteHalf<transport::Conn>, bytes: &[u8], timeout: Duration) -> bool {
     matches!(tokio::time::timeout(timeout, wr.write_all(bytes)).await, Ok(Ok(())))
 }
 
-async fn serve_conn<B: Backend>(ctx: &Arc<Ctx<B>>, stream: UnixStream) {
-    let (rd, mut wr) = stream.into_split();
+async fn serve_conn<B: Backend>(ctx: &Arc<Ctx<B>>, stream: transport::Conn) {
+    let (rd, mut wr) = tokio::io::split(stream);
     let mut rd = BufReader::with_capacity(32 * 1024, rd);
     let wt = ctx.opts.write_timeout;
     if ctx.perm.get() == Permission::Off {

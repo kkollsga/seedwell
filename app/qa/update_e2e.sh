@@ -45,8 +45,8 @@ copy_app "$APP" "$QA_ROOT/new/Seedwell.app" "$NEW"
 
 ZIP="Seedwell-$NEW.zip"
 ditto -c -k --sequesterRsrc --keepParent "$QA_ROOT/new/Seedwell.app" "$REL/download/v$NEW/$ZIP"
-sed 's/^version=""; cli=0; launch=1; uninstall=0$/version=""; cli=0; launch=0; uninstall=0/' "$REPO/install.sh" > "$REL/download/v$NEW/install.sh"
-grep -q 'launch=0; uninstall=0' "$REL/download/v$NEW/install.sh" || { echo "could not turn off relaunch in install.sh"; exit 1; }
+sed 's/^\(version=""; cli=0; \)launch=1; /\1launch=0; /' "$REPO/install.sh" > "$REL/download/v$NEW/install.sh"
+grep -q '^version=""; cli=0; launch=0; ' "$REL/download/v$NEW/install.sh" || { echo "could not turn off relaunch in install.sh"; exit 1; }
 (cd "$REL/download/v$NEW" && shasum -a 256 "$ZIP" install.sh > SHA256SUMS)
 SHA=$(shasum -a 256 "$REL/download/v$NEW/$ZIP" | cut -d' ' -f1)
 printf '{"version":"%s","tag":"v%s","notes_url":"%s/releases/tag/v%s","minimum_macos":"15.0","zip":"%s","sha256":"%s"}\n' \
@@ -56,7 +56,7 @@ detach python3 -I -m http.server "$PORT" --bind 127.0.0.1 --directory "$QA_ROOT/
 sleep 1
 curl -fsS "$BASE/releases/latest/download/latest.json" >/dev/null
 
-LOG="$HOMEROOT/Library/Logs/Seedwell/update.log"
+LOG="$STATE/logs/update.log"
 # run_case <label>: launch the installed copy and wait until it has been replaced by $NEW and has quit.
 run_case() {
   echo "==> $1"
@@ -83,12 +83,12 @@ run_case "Fresh launch of $OLD: the daily check is due (about 60 s), finds $NEW 
 
 # An update found earlier, the daily check not due: the launch must still install it.
 rm -rf "$INST_APP" "$LOG"; copy_app "$APP" "$INST_APP" "$OLD"
-defaults write "$E2E_ID" update.lastCheck -date "$(date -u '+%Y-%m-%d %H:%M:%S +0000')"
-defaults write "$E2E_ID" update.lastVersion "$NEW"
-defaults delete "$E2E_ID" update.pending 2>/dev/null || true
+# The core's own record (updates.json in the state folder): checked a minute ago, $NEW on offer.
+printf '{"last_check_ms":%s,"offered":"%s","notes":null,"pending":null}\n' "$(( $(date +%s) * 1000 - 60000 ))" "$NEW" > "$STATE/updates.json"
 run_case "Launch of $OLD with $NEW already known and the daily check not due"
 
-[ ! -e "$HOME/Library/Logs/Seedwell/update.log" ] || [ "$HOME/Library/Logs/Seedwell/update.log" -ot "$QA_ROOT/http.log.mark" ] \
-  || { echo "FAIL: wrote to the real ~/Library/Logs"; exit 1; }
+[ ! -e "$HOME/Library/Application Support/Seedwell/logs/update.log" ] \
+  || [ "$HOME/Library/Application Support/Seedwell/logs/update.log" -ot "$QA_ROOT/http.log.mark" ] \
+  || { echo "FAIL: wrote to the real app's update log"; exit 1; }
 defaults delete "$E2E_ID" 2>/dev/null || true
 echo "PASS: both cases"

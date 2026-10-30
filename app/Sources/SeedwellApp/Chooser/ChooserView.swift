@@ -263,15 +263,14 @@ struct TriCheck: View {
             },
             cancel: { [weak self] keepFile in
                 if model.awaiting {
+                    let q = cancelQuestion(name: model.name, hasSourceFile: ChoiceStore.shared.hasSource(id), keepFile: keepFile)
                     let a = NSAlert()
-                    a.messageText = "Remove “\(model.name)”?"
-                    let source = ChoiceStore.shared.hasSource(id)
-                    a.informativeText = "Nothing has been downloaded. It is removed from \(AppInfo.name)."
-                        + (source ? (keepFile ? " Its .torrent file stays where it is." : " Its .torrent file moves to the Trash.") : "")
-                    a.addButton(withTitle: "Remove")
-                    a.addButton(withTitle: "Keep Waiting")
+                    a.messageText = q.title
+                    a.informativeText = q.text
+                    a.addButton(withTitle: q.removeTitle)
+                    a.addButton(withTitle: q.keepTitle)
                     if a.runModal() == .alertFirstButtonReturn {
-                        try? ChoiceStore.shared.cancel(id, keepFile: keepFile)
+                        ChoiceStore.shared.cancel(id, keepFile: keepFile)
                         self?.close(id)
                     }
                 } else {

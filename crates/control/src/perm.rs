@@ -32,7 +32,8 @@ impl PermissionSource {
     }
 
     /// Follow `agents.permission` in `<dir>/config.toml`. The file is re-read at most once per
-    /// second; an unreadable or invalid file keeps the last good value (`off` before the first).
+    /// second; a bad value elsewhere in it does not matter (the rest of the file is read, as at
+    /// start-up); an unreadable or broken file keeps the last good value (`off` before the first).
     pub fn from_config_dir(dir: impl Into<PathBuf>) -> Self {
         let store = DocStore::<Config>::new(dir.into());
         let cache: Mutex<(Option<Instant>, Permission)> = Mutex::new((None, Permission::Off));
@@ -40,7 +41,7 @@ impl PermissionSource {
             let mut g = cache.lock().unwrap_or_else(|p| p.into_inner());
             let stale = g.0.is_none_or(|t| t.elapsed() >= Duration::from_secs(1));
             if stale {
-                if let Ok(c) = store.read_strict() {
+                if let Ok(c) = store.read_lenient() {
                     g.1 = c.value.agents.permission;
                 }
                 g.0 = Some(Instant::now());
@@ -124,6 +125,13 @@ mod tests {
         std::fs::write(dir.path().join("config.toml"), "this is = not [valid").unwrap();
         std::thread::sleep(Duration::from_millis(1100));
         assert_eq!(src.get(), Permission::Control);
+    }
+
+    #[test]
+    fn a_bad_value_elsewhere_in_the_file_does_not_switch_agents_off() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("config.toml"), "[agents]\npermission = \"full\"\n[folders]\ntorrent_after_add = \"keep\"\n").unwrap();
+        assert_eq!(PermissionSource::from_config_dir(dir.path()).get(), Permission::Full);
     }
 
     #[test]

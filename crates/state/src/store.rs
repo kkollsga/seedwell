@@ -476,9 +476,7 @@ fn open_and_prepare(dir: &Path, path: &Path, opts: &OpenOptions) -> Result<Prepa
             fs::create_dir_all(&backups).map_err(io_err("create backups directory"))?;
             let backup = unique_stamped(&backups, &format!("state.redb.v{v}."), "");
             fs::copy(path, &backup).map_err(io_err("back up the database before migrating"))?;
-            if let Ok(f) = fs::File::open(&backup) {
-                let _ = f.sync_all();
-            }
+            let _ = trs_platform::fs::sync_file(&backup);
             db = open_database(path, opts)?;
             let backup2 = backup.clone();
             guarded(|| {
@@ -532,7 +530,7 @@ fn init_atomically(dir: &Path, path: &Path, opts: &OpenOptions) -> Result<(), St
         Err(OpenFail::Corrupt(m)) => return Err(StateError::Corrupt(m)),
         Err(OpenFail::OldFormat(v)) => return Err(StateError::Legacy(format!("a new database has file format {v}"))),
     }
-    fs::File::open(&tmp).and_then(|f| f.sync_all()).map_err(io_err("sync the new database"))?;
+    trs_platform::fs::sync_file(&tmp).map_err(io_err("sync the new database"))?;
     fs::rename(&tmp, path).map_err(io_err("move the new database into place"))?;
     crate::fsutil::sync_dir(dir).map_err(io_err("sync the data directory"))
 }

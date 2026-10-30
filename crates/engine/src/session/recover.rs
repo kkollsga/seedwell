@@ -73,9 +73,10 @@ pub(crate) fn blocked_label(message: &str) -> (&'static str, bool) {
         .rsplit_once("(os error ")
         .and_then(|(_, rest)| rest.split_once(')'))
         .and_then(|(n, _)| n.parse::<i32>().ok());
-    match code {
-        Some(c) if c == libc::ENOSPC || c == libc::EDQUOT => ("Disk full", true),
-        Some(c) if c == libc::EROFS => ("Disk is read-only", false),
+    use std::io::ErrorKind::*;
+    match code.map(|c| std::io::Error::from_raw_os_error(c).kind()) {
+        Some(StorageFull | QuotaExceeded) => ("Disk full", true),
+        Some(ReadOnlyFilesystem) => ("Disk is read-only", false),
         Some(_) => ("Not allowed to write", false),
         None if message.starts_with("Not enough space") => ("Disk full", true),
         None => ("Disk not writable", false),
@@ -401,7 +402,7 @@ fn stall_interval(after: Duration) -> Duration {
 fn path_present(p: &Path) -> bool {
     match std::fs::metadata(p) {
         Ok(_) => true,
-        Err(e) => !(e.kind() == std::io::ErrorKind::NotFound || e.raw_os_error() == Some(libc::ENOTDIR)),
+        Err(e) => !trs_platform::fs::is_not_found(&e),
     }
 }
 
@@ -427,9 +428,15 @@ mod tests {
 
     #[test]
     fn words_for_blocked_writes() {
-        assert_eq!(blocked_label("i/o error: No space left on device (os error 28)"), ("Disk full", true));
-        assert_eq!(blocked_label("i/o error: Read-only file system (os error 30)"), ("Disk is read-only", false));
-        assert_eq!(blocked_label("i/o error: Permission denied (os error 13)"), ("Not allowed to write", false));
+        // The message as the storage layer words it, with this system's numbers.
+        let words = |code: i32| format!("i/o error: {}", std::io::Error::from_raw_os_error(code));
+        #[cfg(unix)]
+        let (full, read_only, denied) = (28, 30, 13); // ENOSPC, EROFS, EACCES
+        #[cfg(windows)]
+        let (full, read_only, denied) = (112, 19, 5); // ERROR_DISK_FULL, ERROR_WRITE_PROTECT, ERROR_ACCESS_DENIED
+        assert_eq!(blocked_label(&words(full)), ("Disk full", true));
+        assert_eq!(blocked_label(&words(read_only)), ("Disk is read-only", false));
+        assert_eq!(blocked_label(&words(denied)), ("Not allowed to write", false));
         assert_eq!(blocked_label("Not enough space: 3.0 GB still to download, 1.0 GB free"), ("Disk full", true));
         assert_eq!(wait_words(540), "9 min");
         assert_eq!(wait_words(1), "1 min");

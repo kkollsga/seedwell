@@ -832,9 +832,26 @@ impl EngineHandle {
         self.send(Cmd::SetPolicy(None));
     }
 
-    /// Pause (tracker `stopped`, peers dropped).
+    /// The user's pause (tracker `stopped`, peers dropped). It outlives a restart: the torrent comes
+    /// back paused until the user resumes it (SPEC §10). A torrent in its grace countdown (SPEC
+    /// 7A.7) has the countdown stopped instead, which also outlives a restart.
     pub fn pause(&self, ids: &[TorrentId]) {
         self.send(Cmd::Pause(ids.to_vec()));
+    }
+
+    /// A pause the app makes by itself (on battery power, SPEC §8.4): as [`EngineHandle::pause`]
+    /// for this run, but stored as running, so the next start resumes the torrent. Only running
+    /// torrents and direct downloads are touched (a held, paused or finished one stays as it is).
+    /// The user's pause or resume of the torrent makes it theirs.
+    pub fn pause_by_app(&self, ids: &[TorrentId]) {
+        self.send(Cmd::PauseByApp(ids.to_vec()));
+    }
+
+    /// Ends the app's own pause ([`EngineHandle::pause_by_app`]) of these: only those still paused
+    /// by the app resume (one the user paused, resumed or paused again since is left alone), through
+    /// the start queue like Resume All.
+    pub fn resume_by_app(&self, ids: &[TorrentId]) {
+        self.send(Cmd::ResumeByApp(ids.to_vec()));
     }
 
     /// Resume (tracker `started`; session counters restart).
@@ -890,12 +907,12 @@ impl EngineHandle {
         self.send(Cmd::SetRule(ids.to_vec(), rule));
     }
 
-    /// Pause everything.
+    /// Pause everything (the user's pause: it outlives a restart; grace countdowns stop).
     pub fn pause_all(&self) {
         self.send(Cmd::PauseAll);
     }
 
-    /// Resume everything that is paused.
+    /// Resume everything that is paused (stopped grace countdowns run on).
     pub fn resume_all(&self) {
         self.send(Cmd::ResumeAll);
     }
@@ -908,9 +925,19 @@ impl EngineHandle {
         });
     }
 
-    /// Switch the alternative ("Limit Speed") limits.
+    /// Switch the alternative ("Limit Speed") limits: the user's toggle. It also ends the app's own
+    /// ([`EngineHandle::set_alt_speed_by_app`]): the user decided.
     pub fn set_alt_speed(&self, on: bool) {
-        self.update_config(move |c| c.alt_speed = on);
+        self.update_config(move |c| {
+            c.alt_speed = on;
+            c.alt_by_app = false;
+        });
+    }
+
+    /// The alternative limits switched on or off by the app itself (on battery power, SPEC §8.4). For
+    /// this run only: never written to `config.toml`, kept when the settings are applied again.
+    pub fn set_alt_speed_by_app(&self, on: bool) {
+        self.update_config(move |c| c.alt_by_app = on);
     }
 
     /// Change any setting at runtime; limits, caps and the queue are re-applied at once.

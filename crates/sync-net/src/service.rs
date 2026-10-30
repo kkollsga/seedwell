@@ -297,7 +297,7 @@ impl SyncHandle {
         let key = match opts.secrets.get(DEVICE_KEY)? {
             Some(pkcs8) => DeviceKey::from_pkcs8(&pkcs8).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("device key: {e:?}")))?,
             None => {
-                let k = DeviceKey::generate(&mut ring::rand::SystemRandom::new()).map_err(io::Error::other)?;
+                let k = DeviceKey::generate_system().map_err(io::Error::other)?;
                 opts.secrets.put(DEVICE_KEY, &k.to_pkcs8())?;
                 k
             }
@@ -384,7 +384,7 @@ impl SyncHandle {
             if let Ok(id) = e.id.parse::<FolderId>() {
                 let _ = h.chat_leave(&id);
             }
-            eprintln!("seedwell sync: channel {} was made by a test build; it is no longer on this Mac", e.name);
+            eprintln!(concat!("seedwell sync: channel {} was made by a test build; it is no longer on this ", trs_platform::computer!()), e.name);
         }
         let entries = lock(&h.inner.cfg).folders.clone();
         for e in entries {
@@ -700,7 +700,7 @@ impl SyncHandle {
         self.refuse_overlap(&path)?;
         let id = link.invite.folder_id();
         if self.inner.ctx.registry.folder(&id).is_some() {
-            return Err(invalid("this folder is already synced on this Mac"));
+            return Err(invalid(concat!("this folder is already synced on this ", trs_platform::computer!())));
         }
         let channel = chat.as_ref().map(|c| c.invite.folder_id());
         if let Some(c) = chat
@@ -1006,10 +1006,10 @@ impl SyncHandle {
     /// linked to the channel here when it has no channel yet.
     pub fn create_bundle_invite(&self, id: &FolderId, role: Role, max_uses: u32, valid_days: u32, channel: &FolderId) -> Result<InviteInfo, SyncError> {
         let f = self.inner.ctx.registry.folder(id).ok_or(SyncError::NotFound)?;
-        let c = self.inner.ctx.registry.channel(channel).ok_or_else(|| invalid("no such channel on this Mac"))?;
+        let c = self.inner.ctx.registry.channel(channel).ok_or_else(|| invalid(concat!("no such channel on this ", trs_platform::computer!())))?;
         self.may_invite(&f, role, max_uses)?;
         let name = lock(&c.name).clone();
-        self.may_invite(&c, role, max_uses).map_err(|e| invalid(format!("this Mac may not share the channel {name} at that role ({e})")))?;
+        self.may_invite(&c, role, max_uses).map_err(|e| invalid(format!(concat!("this ", trs_platform::computer!(), " may not share the channel {name} at that role ({e})"), name = name, e = e)))?;
         // One clock reading for both halves: read twice, they could expire a second apart.
         let now = crate::roles::now_s();
         let ci = self.make_invite(channel, role, max_uses, valid_days, now, None)?;
@@ -1033,7 +1033,7 @@ impl SyncHandle {
         if let Some(c) = channel
             && self.inner.ctx.registry.channel(c).is_none()
         {
-            return Err(invalid("no such channel on this Mac"));
+            return Err(invalid(concat!("no such channel on this ", trs_platform::computer!())));
         }
         {
             let mut cfg = lock(&self.inner.cfg);
@@ -1058,7 +1058,7 @@ impl SyncHandle {
             return Err(invalid(format!("a link can have at most {} uses (or unlimited)", trs_sync_proto::members::MAX_INVITE_USES)));
         }
         if mine == Some(Role::Owner) && f.secret.read().unwrap_or_else(|e| e.into_inner()).is_none() {
-            return Err(invalid(format!("this Mac is an owner but has not received the {noun}'s owner key yet")));
+            return Err(invalid(format!(concat!("this ", trs_platform::computer!(), " is an owner but has not received the {noun}'s owner key yet"), noun = noun)));
         }
         Ok(())
     }
@@ -1189,7 +1189,7 @@ impl SyncHandle {
             Some(Role::Admin) => Some(Statement::by_device(&self.inner.ctx.key, id, body)),
             _ => return Err(invalid(format!("only the {}'s owner or an admin can revoke a link", crate::roles::noun(&f)))),
         };
-        let st = st.ok_or_else(|| invalid(format!("this Mac has not received the {}'s owner key yet", crate::roles::noun(&f))))?;
+        let st = st.ok_or_else(|| invalid(format!(concat!("this ", trs_platform::computer!(), " has not received the {}'s owner key yet"), crate::roles::noun(&f))))?;
         if crate::roles::add(&f, [st]) {
             self.spawn_changed(&f);
         }
@@ -1214,8 +1214,8 @@ impl SyncHandle {
         let f = self.inner.ctx.registry.space(id).ok_or(SyncError::NotFound)?;
         if *device == self.inner.ctx.me {
             return Err(invalid(match f.kind {
-                SpaceKind::Folder => "to stop syncing on this Mac, remove the folder instead",
-                SpaceKind::Channel => "to leave the channel on this Mac, leave it instead",
+                SpaceKind::Folder => concat!("to stop syncing on this ", trs_platform::computer!(), ", remove the folder instead"),
+                SpaceKind::Channel => concat!("to leave the channel on this ", trs_platform::computer!(), ", leave it instead"),
             }));
         }
         let pk = self.owner_change(&f, device, true)?;
@@ -1379,7 +1379,7 @@ impl SyncHandle {
             FolderState::WaitingForAdmin
         } else {
             let ended = f.membership.read().unwrap_or_else(|e| e.into_inner()).expired(self.inner.ctx.key.public_key());
-            live.error = Some(if ended { "this folder is no longer shared" } else { "this Mac was removed from the folder" }.into());
+            live.error = Some(if ended { "this folder is no longer shared" } else { concat!("this ", trs_platform::computer!(), " was removed from the folder") }.into());
             FolderState::Error
         };
         let share_until = f.membership.read().unwrap_or_else(|e| e.into_inner()).share_until();
@@ -1804,8 +1804,7 @@ fn absolute(p: &Path) -> io::Result<PathBuf> {
 /// iCloud Drive and File Provider folders are refused: their files may be placeholders, and two sync
 /// engines on one folder fight (SPEC §7G.2).
 fn refuse_cloud_root(p: &Path) -> Result<(), SyncError> {
-    let s = p.to_string_lossy();
-    if s.contains("/Library/Mobile Documents") || s.contains("/Library/CloudStorage") {
+    if trs_platform::dirs::in_cloud_storage(p) {
         return Err(invalid("folders in iCloud Drive or other cloud storage cannot be synced"));
     }
     Ok(())
@@ -1824,25 +1823,36 @@ fn move_tree(from: &Path, to: &Path) -> io::Result<()> {
     }
     match std::fs::rename(from, to) {
         Ok(()) => Ok(()),
-        Err(e) if e.raw_os_error() == Some(18) => {
+        Err(e) if e.kind() == io::ErrorKind::CrossesDevices => {
             // EXDEV: another volume.
-            copy_tree(from, to)?;
+            copy_new_tree(from, to)?;
             std::fs::remove_dir_all(from)
         }
         Err(e) => Err(e),
     }
 }
 
-fn copy_tree(from: &Path, to: &Path) -> io::Result<()> {
+/// Copies `from` to `to`, which must not exist yet. A copy that fails halfway (a full disk, a link
+/// this system cannot make) removes what it made, so only the original is left.
+fn copy_new_tree(from: &Path, to: &Path) -> io::Result<()> {
     std::fs::create_dir(to)?;
+    copy_tree(from, to).inspect_err(|_| {
+        // Everything below `to` is the copy's: it did not exist before.
+        let _ = std::fs::remove_dir_all(to);
+    })
+}
+
+/// Copies the contents of `from` into the folder `to`.
+fn copy_tree(from: &Path, to: &Path) -> io::Result<()> {
     for e in std::fs::read_dir(from)? {
         let e = e?;
         let (src, dst) = (e.path(), to.join(e.file_name()));
         let t = e.file_type()?;
         if t.is_dir() {
+            std::fs::create_dir(&dst)?;
             copy_tree(&src, &dst)?;
         } else if t.is_symlink() {
-            std::os::unix::fs::symlink(std::fs::read_link(&src)?, &dst)?;
+            trs_platform::fs::symlink(&trs_platform::fs::read_link(&src)?, &dst)?;
         } else {
             std::fs::copy(&src, &dst)?;
             let m = std::fs::metadata(&src)?;
@@ -2112,5 +2122,39 @@ async fn dht_loop(h: SyncHandle) {
             }
         }
         tokio::time::sleep(Duration::from_secs(15 * 60)).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_copy_to_another_volume_that_fails_halfway_leaves_nothing_behind() {
+        let t = tempfile::tempdir().unwrap();
+        let (from, to) = (t.path().join("from"), t.path().join("to"));
+        std::fs::create_dir_all(from.join("a/b")).unwrap();
+        std::fs::write(from.join("a/b/f"), b"x").unwrap();
+        copy_new_tree(&from, &to).unwrap();
+        assert_eq!(std::fs::read(to.join("a/b/f")).unwrap(), b"x");
+        // A second copy onto an existing folder is refused and leaves it alone.
+        assert_eq!(copy_new_tree(&from, &to).unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+        assert!(to.join("a/b/f").exists());
+
+        // A source entry that cannot be copied: a folder that cannot be read, after a file that was copied.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let (to2, bad) = (t.path().join("to2"), from.join("a/b"));
+            std::fs::write(from.join("a/g"), b"y").unwrap();
+            std::fs::set_permissions(&bad, std::fs::Permissions::from_mode(0o000)).unwrap();
+            let failed = copy_new_tree(&from, &to2);
+            std::fs::set_permissions(&bad, std::fs::Permissions::from_mode(0o755)).unwrap();
+            if failed.is_ok() {
+                return; // running as root: every folder can be read
+            }
+            assert!(!to2.exists(), "the half copy is removed");
+            assert!(from.join("a/b/f").exists(), "the original stays");
+        }
     }
 }

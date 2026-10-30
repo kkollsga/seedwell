@@ -91,7 +91,7 @@ pub fn sub_help(sub: &str) -> Option<String> {
         ),
         "tag" => ("tag <id> [TAG...] [--remove TAG]... [--clear]", "Your tags on a mail or any message of the channel: seen, actioned, backlog, needs-triage, or a word of your own. They are yours: everyone sees who tagged what (`mail inbox`, the app), and nobody else's change. Showing a mail in your inbox tags it seen for you, so its sender sees that. `mail inbox --tag backlog` lists what you tagged so. With no tags given: the tags on it, by owner.\n\nExample:\n  seedwell mail tag 0392ba7c backlog\n  seedwell mail tag 0392ba7c actioned --remove backlog"),
         "receive" => ("receive <id> --to DIR [--wait S] [--force]", "Takes the files a mail passed to you (send --pass): checks each sha256, copies them into DIR (any folder, made if missing; a different file of the same name is kept unless --force) and deletes them from the pass-through folder, which removes them on both computers (and keeps no archive copy). Not all there yet (still syncing): it says which, exit 6; --wait waits for them. The mail is tagged received for you, so its sender sees that."),
-        "passes" => ("passes [--clean [--older D]]", "The passes still waiting in the Seedwell Pass-Through folders of this Mac's synced folders (to whom, from whom, how big, how old). --clean removes those older than a week (--older 1d: sooner, --older 0: all); a pass is a copy, its original stays with its sender."),
+        "passes" => ("passes [--clean [--older D]]", concat!("The passes still waiting in the Seedwell Pass-Through folders of this ", trs_platform::computer!(), "'s synced folders (to whom, from whom, how big, how old). --clean removes those older than a week (--older 1d: sooner, --older 0: all); a pass is a copy, its original stays with its sender.")),
         "read" => ("read <id> [--full] [--save DIR]", "One mail in full, with its statuses and replies; attached files are listed (--full shows them). --save DIR writes the files and checks each sha256, and prints only that. Reading an answer or an update counts it as seen: it leaves your inbox and stays under `mail sent <your mail>`."),
         "reply" => (
             "reply <id> [--final | --done <status> | --type request|question] [--attach FILE]... [--pass FILE]... -|<text>",
@@ -736,7 +736,7 @@ pub fn pick_channel(channels: &[ChatChannelDto], given: Option<&str>) -> Result<
         [c] => Ok((*c).clone()),
         [] => Err(CliError::plain(
             4,
-            "no channel where agents on this Mac may post: the user can allow it in Seedwell (Chats ▸ <channel> ▸ ⋯ ▸ Agents on This Mac ▸ Read and post), or give --channel",
+            concat!("no channel where agents on this ", trs_platform::computer!(), " may post: the user can allow it in Seedwell (Chats ▸ <channel> ▸ ⋯ ▸ Agents on This ", trs_platform::computer!(), " ▸ Read and post), or give --channel"),
         )),
         many => Err(CliError::plain(
             3,
@@ -892,7 +892,7 @@ fn pass_state(header: &str, m: &ChatMessageDto, folders: &[SyncFolderDto], all: 
     if crate::tags::of_agent(&m.id, &to, all).iter().any(|t| t == "received") {
         return format!("pass: received by {to}, and removed");
     }
-    let Some(f) = folders.iter().find(|f| f.id == p.folder) else { return "pass: in a synced folder this Mac no longer has".into() };
+    let Some(f) = folders.iter().find(|f| f.id == p.folder) else { return concat!("pass: in a synced folder this ", trs_platform::computer!(), " no longer has").into() };
     let dir = PathBuf::from(&f.path).join(&p.rel);
     if !dir.exists() {
         return format!("pass: removed from {} (taken, or cleaned up)", f.name);
@@ -1192,7 +1192,7 @@ pub async fn run(m: Mail, g: &Global) -> R {
             }
             let (all, ..) = crate::pass::folders(&mut c).await?;
             let Some(f) = all.iter().find(|f| f.id == pass.folder) else {
-                return Err(CliError::plain(3, format!("the files are in a synced folder this Mac does not have ({}); the user can join it here, then run this again", first_group(&pass.folder))));
+                return Err(CliError::plain(3, format!(concat!("the files are in a synced folder this ", trs_platform::computer!(), " does not have ({}); the user can join it here, then run this again"), first_group(&pass.folder))));
             };
             let end = wait.map(|s| std::time::Instant::now() + Duration::from_secs(s));
             let got = loop {

@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use common::*;
 use sha2::{Digest, Sha256};
 use trs_http::{
-    DownloadTask, Downloader, DownloaderConfig, Error, Event, RestartReason, State, TokenBucket, list_staged,
+    DownloadTask, Downloader, DownloaderConfig, Error, Event, RestartReason, State, TokenBucket, get_small, list_staged,
 };
 
 const MIB: u64 = 1024 * 1024;
@@ -718,6 +718,7 @@ async fn urls_with_credentials_or_odd_schemes_are_refused_up_front() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[cfg(unix)] // a read-only folder is made with Unix permissions
 async fn unwritable_incomplete_dir_surfaces_permission_denied() {
     use std::os::unix::fs::PermissionsExt;
     let file = FileSrv::new(10_000);
@@ -737,14 +738,38 @@ async fn unwritable_incomplete_dir_surfaces_permission_denied() {
     std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
 
+/// The same numbers on macOS and Linux.
+#[cfg(unix)]
+mod libc_codes {
+    pub const EIO: i32 = 5;
+    pub const EACCES: i32 = 13;
+    pub const ENOSPC: i32 = 28;
+    pub const EROFS: i32 = 30;
+}
+
 #[test]
 fn disk_full_and_permission_errors_are_typed() {
-    use std::io::Error as IoError;
-    assert_eq!(Error::from(IoError::from_raw_os_error(28)), Error::DiskFull); // ENOSPC
-    assert_eq!(Error::from(IoError::from(std::io::ErrorKind::StorageFull)), Error::DiskFull);
-    assert!(matches!(Error::from(IoError::from_raw_os_error(13)), Error::PermissionDenied(_))); // EACCES
-    assert!(matches!(Error::from(IoError::from_raw_os_error(30)), Error::PermissionDenied(_))); // EROFS
-    assert!(matches!(Error::from(IoError::from_raw_os_error(5)), Error::Io(_)));
+    use std::io::{Error as IoError, ErrorKind};
+    assert_eq!(Error::from(IoError::from(ErrorKind::StorageFull)), Error::DiskFull);
+    assert_eq!(Error::from(IoError::from(ErrorKind::QuotaExceeded)), Error::DiskFull);
+    assert!(matches!(Error::from(IoError::from(ErrorKind::PermissionDenied)), Error::PermissionDenied(_)));
+    assert!(matches!(Error::from(IoError::from(ErrorKind::ReadOnlyFilesystem)), Error::PermissionDenied(_)));
+    assert!(matches!(Error::from(IoError::from(ErrorKind::BrokenPipe)), Error::Io(_)));
+    // The system's own numbers reach the same kinds.
+    #[cfg(unix)]
+    {
+        assert_eq!(Error::from(IoError::from_raw_os_error(libc_codes::ENOSPC)), Error::DiskFull);
+        assert!(matches!(Error::from(IoError::from_raw_os_error(libc_codes::EACCES)), Error::PermissionDenied(_)));
+        assert!(matches!(Error::from(IoError::from_raw_os_error(libc_codes::EROFS)), Error::PermissionDenied(_)));
+        assert!(matches!(Error::from(IoError::from_raw_os_error(libc_codes::EIO)), Error::Io(_)));
+    }
+    #[cfg(windows)]
+    {
+        assert_eq!(Error::from(IoError::from_raw_os_error(112)), Error::DiskFull); // ERROR_DISK_FULL
+        assert!(matches!(Error::from(IoError::from_raw_os_error(5)), Error::PermissionDenied(_))); // ERROR_ACCESS_DENIED
+        assert!(matches!(Error::from(IoError::from_raw_os_error(30)), Error::Io(_)), "ERROR_READ_FAULT is not EROFS");
+        assert!(matches!(Error::from(IoError::from_raw_os_error(122)), Error::Io(_)), "ERROR_INSUFFICIENT_BUFFER is not EDQUOT");
+    }
     assert!(!Error::DiskFull.is_retryable());
 }
 
@@ -763,4 +788,47 @@ async fn concurrent_downloads_of_the_same_name_do_not_clobber_each_other() {
     assert_file_matches(&pa, len, 0);
     assert_file_matches(&pb, len, 0);
     assert_eq!(d.dest_files(), vec!["same (2).bin".to_owned(), "same.bin".to_owned()]);
+}
+
+// ---------------------------------------------------------------- get_small (the app's update check)
+
+#[tokio::test]
+async fn get_small_follows_a_redirect_and_reads_the_body() {
+    let srv = Server::start(|r, _| match r.path.as_str() {
+        "/latest.json" => Reply::redirect(302, "/real.json"),
+        _ => Reply::text(200, "{\"version\":\"1.2.3\"}"),
+    })
+    .await;
+    let r = get_small(&srv.url("/latest.json"), "0.1.9", 1024, Duration::from_secs(5)).await.unwrap();
+    assert_eq!((r.status, r.body.as_slice()), (200, b"{\"version\":\"1.2.3\"}".as_slice()));
+    assert_eq!(srv.requests()[0].header("user-agent").as_deref(), Some("Seedwell/0.1.9"));
+}
+
+#[tokio::test]
+async fn get_small_answers_a_404_as_a_status() {
+    let srv = Server::start(|_, _| Reply::status(404)).await;
+    let r = get_small(&srv.url("/x"), "0.1.9", 1024, Duration::from_secs(5)).await.unwrap();
+    assert_eq!((r.status, r.body.len()), (404, 0));
+}
+
+#[tokio::test]
+async fn get_small_refuses_a_body_over_its_cap() {
+    let big = "x".repeat(2000);
+    let srv = Server::start(move |_, _| Reply::text(200, &big)).await;
+    let e = get_small(&srv.url("/x"), "0.1.9", 1000, Duration::from_secs(5)).await.unwrap_err();
+    assert!(matches!(e, Error::BadResponse(_)), "{e:?}");
+}
+
+#[tokio::test]
+async fn get_small_gives_up_on_a_server_that_never_answers() {
+    let srv = Server::start(|_, _| {
+        let mut r = Reply::status(200);
+        r.body = Some(BodySpec { len: 10, stall: Some(Duration::from_secs(5)), ..Default::default() });
+        r
+    })
+    .await;
+    let t = Instant::now();
+    let e = get_small(&srv.url("/x"), "0.1.9", 1000, Duration::from_millis(300)).await.unwrap_err();
+    assert_eq!(e, Error::Timeout);
+    assert!(t.elapsed() < Duration::from_secs(2), "{:?}", t.elapsed());
 }

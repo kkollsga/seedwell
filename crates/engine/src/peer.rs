@@ -19,7 +19,6 @@ use std::time::{Duration, Instant};
 
 use bytes::{Buf, Bytes, BytesMut};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
 use trs_utp::UtpSocket;
 use trs_storage::{Pending, StorageError, TorrentHandle, WriteAck};
 use trs_wire::{
@@ -415,7 +414,7 @@ pub(crate) async fn run(p: Box<PeerSpawn>) {
 /// (a peer that speaks uTP answers the SYN in a round trip, one that does not never will).
 async fn connect_transport(ctx: &PeerCtx, addr: SocketAddr, dial: Dial) -> Result<PeerIo, Close> {
     async fn tcp(ctx: &PeerCtx, addr: SocketAddr) -> Result<PeerIo, Close> {
-        let s = tokio::time::timeout(ctx.connect_timeout, TcpStream::connect(addr))
+        let s = tokio::time::timeout(ctx.connect_timeout, trs_platform::net::connect_tcp(addr))
             .await
             .map_err(|_| Close::Timeout)?
             .map_err(|e| Close::Io(e.to_string()))?;
@@ -676,6 +675,8 @@ impl Peer {
         let remote = tokio::time::timeout(hs_deadline, async {
             if !sent {
                 stream.write_all(&ours.to_bytes()).await.map_err(|e| Close::Io(e.to_string()))?;
+                // Through RC4 the tail may still be held back: it must go out before the reply is awaited.
+                stream.flush().await.map_err(|e| Close::Io(e.to_string()))?;
             }
             if is_incoming {
                 return Ok(remote);

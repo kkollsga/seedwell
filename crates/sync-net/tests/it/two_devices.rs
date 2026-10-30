@@ -350,3 +350,163 @@ async fn joining_into_a_folder_with_files_keeps_them_and_both_versions_of_a_diff
     a.h.shutdown().await;
     b.h.shutdown().await;
 }
+
+/// A link at `link` to the folder `target`: a symlink, or on Windows a directory junction, which needs
+/// no privilege and is read as a link like a symlink.
+fn make_dir_link(target: &Path, link: &Path) {
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(target, link).unwrap();
+    #[cfg(windows)]
+    {
+        let ok = std::process::Command::new("cmd").arg("/C").arg("mklink").arg("/J").arg(link).arg(target).output().unwrap();
+        assert!(ok.status.success(), "mklink /J: {ok:?}");
+    }
+}
+
+/// A link from another device that this system may not make (Windows without Developer Mode) is an
+/// issue on its path; the rest of the folder syncs and the folder settles up to date instead of trying
+/// it again. Where links can be made, it simply arrives.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_link_this_system_cannot_make_is_an_issue_and_the_folder_still_settles() {
+    let (a, b) = (device("Alpha").await, device("Beta").await);
+    let (fa, fb) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    std::fs::create_dir(fa.path().join("sub")).unwrap();
+    std::fs::write(fa.path().join("sub/a.txt"), b"next to the link").unwrap();
+    make_dir_link(&fa.path().join("sub"), &fa.path().join("link"));
+
+    let st = a.h.add_folder(fa.path().to_path_buf()).await.unwrap();
+    let id: FolderId = st.id.parse().unwrap();
+    let key = a.h.create_invite(&id, Role::ReadWrite, 1, 1).unwrap().link;
+    let dest = fb.path().join("Shared");
+    b.h.join_folder(&key, dest.clone()).await.unwrap();
+    b.h.add_address(&id, addr(&a)).unwrap();
+    until(20, "B has the file", || read(&dest.join("sub/a.txt")).as_deref() == Some(b"next to the link")).await;
+
+    let probe = fb.path().join("probe");
+    let links = match trs_platform::fs::symlink("Shared", &probe) {
+        Ok(()) => true,
+        Err(e) if e.kind() == std::io::ErrorKind::Unsupported => {
+            assert_eq!(e.to_string(), trs_platform::fs::SYMLINK_UNSUPPORTED);
+            false
+        }
+        Err(e) => panic!("probe link: {e}"),
+    };
+    if links {
+        until(20, "B has the link", || std::fs::symlink_metadata(dest.join("link")).is_ok_and(|m| m.file_type().is_symlink())).await;
+    } else {
+        eprintln!("this system may not make symbolic links: checking that the link is skipped");
+        until(20, "B is up to date with the link as an issue", || {
+            let f = &b.h.snapshot().folders[0];
+            f.state == FolderState::UpToDate
+                && f.issues.iter().any(|(p, why)| p == "link" && why == trs_platform::fs::SYMLINK_UNSUPPORTED)
+        })
+        .await;
+        assert!(std::fs::symlink_metadata(dest.join("link")).is_err(), "nothing is made at the link's path");
+        // Not tried again on the retry timer (its first step is 10 s): the folder never goes back to
+        // waiting for it (a routine scan in between is fine), and settles with the issue kept.
+        let t0 = std::time::Instant::now();
+        while t0.elapsed() < Duration::from_secs(12) {
+            assert_ne!(b.h.snapshot().folders[0].state, FolderState::WaitingForDevices, "the link is waited for again");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        until(10, "settled with the link as an issue", || b.h.snapshot().folders[0].state == FolderState::UpToDate).await;
+        let f = &b.h.snapshot().folders[0];
+        assert_eq!(f.issues.iter().filter(|(p, _)| p == "link").count(), 1, "{:?}", f.issues);
+    }
+    a.h.shutdown().await;
+    b.h.shutdown().await;
+}
+
+/// An issue from a pull goes away once its file arrives, without the folder restarting: here the file's
+/// folder cannot be written at first.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_pull_issue_goes_away_once_its_file_arrives() {
+    use std::os::unix::fs::PermissionsExt;
+    let (a, b) = (device("Alpha").await, device("Beta").await);
+    let (fa, fb) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    std::fs::create_dir(fa.path().join("sub")).unwrap();
+    std::fs::write(fa.path().join("sub/a.txt"), b"late").unwrap();
+    let st = a.h.add_folder(fa.path().to_path_buf()).await.unwrap();
+    let id: FolderId = st.id.parse().unwrap();
+    let key = a.h.create_invite(&id, Role::ReadWrite, 1, 1).unwrap().link;
+    let dest = fb.path().join("Shared");
+    let sub = dest.join("sub");
+    std::fs::create_dir_all(&sub).unwrap();
+    std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o555)).unwrap();
+    b.h.join_folder(&key, dest.clone()).await.unwrap();
+    b.h.add_address(&id, addr(&a)).unwrap();
+    let issue = |b: &Device| b.h.snapshot().folders[0].issues.iter().any(|(p, _)| p == "sub/a.txt");
+    until(20, "an issue on sub/a.txt", || issue(&b)).await;
+    std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o755)).unwrap();
+    until(40, "the file, and its issue gone", || read(&dest.join("sub/a.txt")).as_deref() == Some(b"late") && !issue(&b)).await;
+    a.h.shutdown().await;
+    b.h.shutdown().await;
+}
+
+/// Changes below the top level travel by the watcher, not only by the hourly full scan: a deleted
+/// folder two levels down and a new file in another one reach the other device within seconds (on
+/// Windows the watcher's paths carry "\", which once made them miss the index's "a/b" paths).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn nested_deletes_and_creates_travel_by_the_watcher() {
+    let (a, b) = (device("Alpha").await, device("Beta").await);
+    let (fa, fb) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    for p in ["d/e/f.txt", "d/g/h.txt"] {
+        let p = fa.path().join(p);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, b"nested").unwrap();
+    }
+    let st = a.h.add_folder(fa.path().to_path_buf()).await.unwrap();
+    let id: FolderId = st.id.parse().unwrap();
+    let key = a.h.create_invite(&id, Role::ReadWrite, 1, 1).unwrap().link;
+    let dest = fb.path().join("Shared");
+    b.h.join_folder(&key, dest.clone()).await.unwrap();
+    b.h.add_address(&id, addr(&a)).unwrap();
+    until(30, "B has both nested files", || read(&dest.join("d/e/f.txt")).is_some() && read(&dest.join("d/g/h.txt")).is_some()).await;
+    until(20, "both up to date", || {
+        a.h.snapshot().folders[0].state == FolderState::UpToDate && b.h.snapshot().folders[0].state == FolderState::UpToDate
+    })
+    .await;
+
+    std::fs::remove_dir_all(fa.path().join("d/e")).unwrap();
+    std::fs::write(fa.path().join("d/g/new.txt"), b"new").unwrap();
+    // Well under the full scan (an hour): the watcher (or the poller, every 10 s) brings both.
+    until(40, "B has the new nested file", || read(&dest.join("d/g/new.txt")).as_deref() == Some(b"new")).await;
+    until(40, "the nested folder is gone at B", || !dest.join("d/e").exists()).await;
+    assert_eq!(read(&dest.join("d/g/h.txt")).as_deref(), Some(&b"nested"[..]));
+    a.h.shutdown().await;
+    b.h.shutdown().await;
+}
+
+/// A burst the folder watcher cannot keep up with (on Windows its reads held back until the system's
+/// buffer overflows) becomes a full rescan, and the other device still ends up with every file.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_burst_that_overflows_the_watcher_still_syncs_every_file() {
+    let (a, b) = (device("Alpha").await, device("Beta").await);
+    let (fa, fb) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let st = a.h.add_folder(fa.path().to_path_buf()).await.unwrap();
+    let id: FolderId = st.id.parse().unwrap();
+    let key = a.h.create_invite(&id, Role::ReadWrite, 1, 1).unwrap().link;
+    let dest = fb.path().join("Shared");
+    b.h.join_folder(&key, dest.clone()).await.unwrap();
+    b.h.add_address(&id, addr(&a)).unwrap();
+    until(20, "both up to date", || {
+        a.h.snapshot().folders.first().is_some_and(|f| f.state == FolderState::UpToDate)
+            && b.h.snapshot().folders.first().is_some_and(|f| f.state == FolderState::UpToDate)
+    })
+    .await;
+
+    // The folder first, synced, so nothing but the overflow's rescan can bring what comes next.
+    std::fs::create_dir(fa.path().join("burst")).unwrap();
+    until(30, "B has the folder", || dest.join("burst").is_dir()).await;
+    let n = 3000;
+    trs_fswatch::debug::hold_reads(true);
+    for i in 0..n {
+        std::fs::write(fa.path().join("burst").join(format!("file-{i:05}-with-a-name-long-enough-to-fill-the-buffer.txt")), i.to_string()).unwrap();
+    }
+    trs_fswatch::debug::hold_reads(false);
+    until(180, "B has every file of the burst", || std::fs::read_dir(dest.join("burst")).is_ok_and(|d| d.count() == n)).await;
+    assert_eq!(read(&dest.join("burst").join("file-02999-with-a-name-long-enough-to-fill-the-buffer.txt")).as_deref(), Some(&b"2999"[..]));
+    a.h.shutdown().await;
+    b.h.shutdown().await;
+}

@@ -20,13 +20,8 @@ import Testing
                   lastMessageS: nil, unread: unread, messages: messages)
     }
 
-    @Test func theListAndPageSayWhatIsGoingOn() {
-        #expect(ChatText.header(Self.channel()) == "Owner · 2 of 3 online")
-        var c = Self.channel(muted: true)
-        c.agents = .read
-        #expect(ChatText.header(c) == "Owner · 2 of 3 online · Muted · agents: read")
-        #expect(ChatText.subtitle(Self.channel()) == "2 of 3 online")
-        #expect(ChatText.subtitle(Self.channel(members: 1, online: 0, muted: true)) == "Only this Mac · Muted")
+    @Test func agentsAccessIsSaidInWords() {
+        // The sidebar's and the title bar's lines are the core's (crates/ffi/src/chat_text.rs).
         #expect(ChatText.agents(.readPost) == "Read and post")
     }
 
@@ -72,8 +67,6 @@ import Testing
     }
 
     @Test func topicsAndPrivateConversations() {
-        #expect(ChatText.topicLine(Self.topic()) == "Topic by Kari's iPhone · 12 messages")
-        #expect(ChatText.directLine(online: false) == "Private · not connected · end-to-end encrypted")
         #expect(ChatText.topicTitle("  Dinner on Saturday \n") == "Dinner on Saturday")
         #expect(ChatText.topicTitle(" ") == nil)
         #expect(ChatText.topicTitle(String(repeating: "x", count: 200))?.count == 100)

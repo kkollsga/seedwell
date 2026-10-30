@@ -100,6 +100,7 @@ struct SyncBadgeView: View {
                     Circle().trim(from: 0, to: max(0.04, f)).stroke(Color.accentColor, style: StrokeStyle(lineWidth: 2, lineCap: .round)).rotationEffect(.degrees(-90))
                 }
                 .padding(2)
+            case .waiting: Image(systemName: "clock.fill").foregroundStyle(.secondary)
             case .paused: Image(systemName: "pause.circle.fill").foregroundStyle(.secondary)
             case .attention: Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
             case .missing: Image(systemName: "questionmark.folder.fill").foregroundStyle(.secondary)
@@ -196,7 +197,7 @@ struct SyncFolderPage: View {
 
     private var statusLine: String {
         var parts = [SyncText.subtitle(folder), SyncText.role(folder.role)]
-        if let until = folder.shareUntilS { parts.append("shared until \(SyncText.day(until))") }
+        if let until = folder.shareUntilS { parts.append("shared until \(Fmt.day(until))") }
         if folder.files > 0 { parts.append("\(Fmt.count(folder.files, "item")) · \(Fmt.bytes(folder.bytes))") }
         if folder.state == .upToDate, let t = folder.lastSyncedS { parts.append("synced \(Fmt.ago(t))") }
         return parts.joined(separator: " · ")
@@ -206,8 +207,8 @@ struct SyncFolderPage: View {
         HStack(spacing: 10) {
             Image(systemName: model.syncTrash ? "trash" : "minus.circle").font(.system(size: 11)).foregroundStyle(.secondary)
             VStack(alignment: .leading, spacing: 6) {
-                Text(SyncRemoval.question(folder.name)).font(.system(size: 12)).foregroundStyle(.secondary)
-                Toggle(SyncRemoval.trashLabel, isOn: $model.syncTrash).toggleStyle(.checkbox).font(.system(size: 12))
+                Text(syncRemoveQuestion(name: folder.name)).font(.system(size: 12)).foregroundStyle(.secondary)
+                Toggle(syncRemoveTrashLabel(), isOn: $model.syncTrash).toggleStyle(.checkbox).font(.system(size: 12))
             }
             Spacer(minLength: 8)
             Button("Cancel") { model.syncAskRemove = nil }.controlSize(.small).keyboardShortcut(.cancelAction).help("Keep syncing this folder")
@@ -216,7 +217,7 @@ struct SyncFolderPage: View {
                 model.syncAskRemove = nil
                 actions.remove(folder, trash: trash)
             } label: { Text("Remove").foregroundStyle(.red) }
-                .controlSize(.small).help(model.syncTrash ? "Stop syncing and move the folder to the Trash" : "Stop syncing; the files stay")
+                .controlSize(.small).help(syncRemoveHelp(trash: model.syncTrash))
         }
         .padding(.horizontal, 12).padding(.vertical, 8)
         .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.05)))

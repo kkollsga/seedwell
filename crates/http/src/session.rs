@@ -14,7 +14,6 @@ use std::collections::VecDeque;
 use std::fs::{self, File, OpenOptions};
 use std::future::Future;
 use std::io;
-use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -497,7 +496,7 @@ impl Writer {
         let len = buf.len() as u64;
         let file = self.act.file.clone();
         let (mut buf, res) = blocking(move || {
-            let r = file.write_all_at(&buf, off);
+            let r = trs_platform::fs::write_all_at(&file, &buf, off);
             (buf, r)
         })
         .await?;
@@ -1066,7 +1065,7 @@ async fn hash_file(act: &Arc<Active>, stop: &Stop, total: u64) -> Result<[u8; 32
         let want = BLOCK.min((total - off) as usize);
         let (h, res) = blocking(move || {
             let mut buf = vec![0u8; want];
-            let r = file.read_exact_at(&mut buf, off);
+            let r = trs_platform::fs::read_exact_at(&file, &mut buf, off);
             if r.is_ok() {
                 hasher.update(&buf);
             }
@@ -1113,7 +1112,7 @@ fn move_into_place(part: &Path, dest_dir: &Path, name: &str, sidecar: &Path) -> 
                     Err(e) if e.kind() == io::ErrorKind::CrossesDevices => {
                         let tmp = dest_dir.join(format!(".{cand}.trs-tmp"));
                         fs::copy(part, &tmp)?;
-                        File::open(&tmp)?.sync_all()?;
+                        trs_platform::fs::sync_file(&tmp)?;
                         fs::rename(&tmp, &target)?;
                         fs::remove_file(part)?;
                         break target;
@@ -1123,9 +1122,7 @@ fn move_into_place(part: &Path, dest_dir: &Path, name: &str, sidecar: &Path) -> 
             }
         }
     };
-    if let Ok(d) = File::open(dest_dir) {
-        let _ = d.sync_all();
-    }
+    let _ = trs_platform::fs::sync_dir(dest_dir);
     let _ = fs::remove_file(sidecar);
     Ok(final_path)
 }

@@ -65,6 +65,9 @@ pub struct UdpConfig {
     /// Where we may send. Default: public addresses only; see
     /// [`DestinationPolicy`].
     pub policy: DestinationPolicy,
+    /// The address the sockets are bound to: `None` for every address (an IPv4 and an IPv6
+    /// socket), or one IPv4 address only, such as loopback for an engine bound to it.
+    pub bind: Option<std::net::Ipv4Addr>,
 }
 
 impl Default for UdpConfig {
@@ -75,6 +78,7 @@ impl Default for UdpConfig {
             connection_id_ttl: udp_proto::CONNECTION_ID_TTL,
             total_timeout: Duration::from_secs(540),
             policy: DestinationPolicy::STRICT,
+            bind: None,
         }
     }
 }
@@ -145,8 +149,10 @@ impl UdpTransport {
         cfg: UdpConfig,
         hosts: Option<HashMap<String, Vec<IpAddr>>>,
     ) -> std::io::Result<Self> {
-        let sock4 = UdpSocket::bind("0.0.0.0:0").await?;
-        let sock6 = UdpSocket::bind("[::]:0").await.ok();
+        let (sock4, sock6) = match cfg.bind {
+            None => (UdpSocket::bind("0.0.0.0:0").await?, UdpSocket::bind("[::]:0").await.ok()),
+            Some(ip) => (UdpSocket::bind((ip, 0)).await?, None),
+        };
         let inner = Arc::new(Inner {
             sock4,
             sock6,
@@ -212,7 +218,7 @@ impl UdpTransport {
             .cfg
             .policy
             .vet(addrs)
-            .map_err(|_| AnnounceError::Transport(TransportError::Forbidden))?;
+            .map_err(|r| AnnounceError::Transport(TransportError::Forbidden(r)))?;
         let v4 = addrs
             .iter()
             .find(|a| a.ip().to_canonical().is_ipv4())

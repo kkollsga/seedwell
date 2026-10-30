@@ -121,11 +121,21 @@ impl Daemon {
 
     /// `trackers`: let the daemon talk to trackers (the default of the tests is `--no-trackers`).
     pub fn start_full(root: &Path, name: &str, permission: &str, extra: &[&str], trackers: bool) -> Daemon {
+        Self::start_inner(root, name, permission, extra, trackers, Stdio::inherit())
+    }
+
+    /// As [`Daemon::start`], with the daemon's standard error written to `log`.
+    pub fn start_logging(root: &Path, name: &str, permission: &str, log: &Path) -> Daemon {
+        Self::start_inner(root, name, permission, &[], false, Stdio::from(std::fs::File::create(log).unwrap()))
+    }
+
+    fn start_inner(root: &Path, name: &str, permission: &str, extra: &[&str], trackers: bool, stderr: Stdio) -> Daemon {
         std::fs::create_dir_all(root.join("home")).unwrap();
         let state = root.join(name).join("state");
         let dl = root.join(name).join("dl");
         std::fs::create_dir_all(&state).unwrap();
-        let mut cmd = Command::new(BIN);
+        // Stoppable: terminate() asks it to quit the way a user would (SIGTERM, Ctrl+Break).
+        let mut cmd = trs_platform::proc::stoppable_command(BIN);
         cmd.args(["daemon", "--state-dir"])
             .arg(&state)
             .arg("--download-dir")
@@ -137,7 +147,7 @@ impl Daemon {
             // A stray `~` can only ever expand into the test directory, never the real home.
             .env("HOME", root.join("home"))
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit());
+            .stderr(stderr);
         let mut child = cmd.spawn().expect("spawn seedwell daemon");
         let out = child.stdout.take().unwrap();
         let (tx, rx) = mpsc::channel();
@@ -181,7 +191,7 @@ impl Daemon {
     }
 
     pub fn terminate(&mut self) {
-        let _ = Command::new("kill").arg("-TERM").arg(self.child.id().to_string()).status();
+        let _ = trs_platform::proc::request_stop(&self.child);
         let t = Instant::now();
         while t.elapsed() < Duration::from_secs(20) {
             if self.child.try_wait().ok().flatten().is_some() {
@@ -226,7 +236,10 @@ pub fn cli_in(root: &Path, socket: &Path, args: &[&str]) -> Out {
         .args(args)
         .env_remove("SEEDWELL_SOCKET")
         .env("HOME", root.join("home"))
+        // The temp folder of the child (sim folders): TMPDIR on Unix, TMP and TEMP on Windows.
         .env("TMPDIR", root.join("tmp"))
+        .env("TMP", root.join("tmp"))
+        .env("TEMP", root.join("tmp"))
         .output()
         .expect("run seedwell");
     Out { code: o.status.code().unwrap_or(-1), stdout: String::from_utf8_lossy(&o.stdout).into_owned(), stderr: String::from_utf8_lossy(&o.stderr).into_owned() }

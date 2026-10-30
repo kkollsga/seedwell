@@ -50,7 +50,8 @@ struct FileTreeBlock: View {
     let row: TransferRow
     let commands: Commands
     let store: FilesStore
-    @Binding var selection: Set<String>
+    /// A click on a file row deselects the torrent rows.
+    let clearRows: () -> Void
     @AppStorage(FileLayout.showAllKey) private var showAll = false
 
     var body: some View {
@@ -68,13 +69,13 @@ struct FileTreeBlock: View {
                 if st.rows.count > 0, showAll {
                     // No inner scroll: the rows are children of the outer list (still lazy there).
                     ForEach(st.rows, id: \.id) { f in
-                        FileRowView(row: row, commands: commands, state: st, store: store, file: f, selection: $selection)
+                        FileRowView(row: row, commands: commands, state: st, store: store, file: f, clearRows: clearRows)
                     }
                 } else if st.rows.count > 0 {
                     ScrollView {
                         LazyVStack(spacing: 0) {
                             ForEach(st.rows, id: \.id) { f in
-                                FileRowView(row: row, commands: commands, state: st, store: store, file: f, selection: $selection)
+                                FileRowView(row: row, commands: commands, state: st, store: store, file: f, clearRows: clearRows)
                             }
                         }
                     }
@@ -157,7 +158,7 @@ struct FileRowView: View {
     let store: FilesStore
     /// The row as the core lays it out.
     let file: FileRow
-    @Binding var selection: Set<String>
+    let clearRows: () -> Void
 
     var body: some View {
         let f = file
@@ -201,11 +202,16 @@ struct FileRowView: View {
         .contentShape(Rectangle())
         .onTapGesture {
             let m = NSEvent.clickModifiers
-            selection = []
-            store.select(torrent: row.id, node: f.id, command: m.contains(.command), shift: m.contains(.shift))
+            Self.click(torrent: row.id, node: f.id, store: store, command: m.contains(.command), shift: m.contains(.shift), clearRows: clearRows)
         }
         .contextMenu { MenuEntriesView(entries: Self.menuEntries(row: row, commands: commands, state: state, store: store, file: f)) }
         .accessibilityElement(children: .combine)
+    }
+
+    /// A click on a file or folder row (also QA's `files select`): the torrent rows give up the selection, the file takes it.
+    static func click(torrent: String, node: UInt32, store: FilesStore, command: Bool, shift: Bool, clearRows: () -> Void) {
+        clearRows()
+        store.select(torrent: torrent, node: node, command: command, shift: shift)
     }
 
     private var checkbox: some View {

@@ -28,7 +28,6 @@
 use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
-use std::os::unix::fs::{FileExt, MetadataExt, OpenOptionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -226,8 +225,7 @@ fn header(count: usize, digest: u64) -> [u8; HEADER_LEN] {
 }
 
 fn put_path(out: &mut Vec<u8>, p: &Path) {
-    use std::os::unix::ffi::OsStrExt;
-    let b = p.as_os_str().as_bytes();
+    let b = trs_platform::fs::path_bytes(p);
     out.extend_from_slice(&(b.len() as u32).to_le_bytes());
     out.extend_from_slice(b);
 }
@@ -271,12 +269,11 @@ impl<'a> Rd<'a> {
             .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
     }
     fn path(&mut self) -> Option<PathBuf> {
-        use std::os::unix::ffi::OsStrExt;
         let n = self.u32()? as usize;
         if n > MAX_PATH_BYTES {
             return None;
         }
-        Some(PathBuf::from(std::ffi::OsStr::from_bytes(self.take(n)?)))
+        trs_platform::fs::path_from_bytes(self.take(n)?)
     }
 }
 
@@ -437,9 +434,7 @@ impl Jw {
 }
 
 fn sync_dir(p: &Path) {
-    if let Ok(d) = File::open(p) {
-        let _ = d.sync_all();
-    }
+    let _ = trs_platform::fs::sync_dir(p);
 }
 
 fn sync_parent(p: &Path) {
@@ -696,11 +691,9 @@ fn writer(
                 len,
             } => {
                 ctx.step()?;
-                let f = OpenOptions::new()
-                    .write(true)
-                    .create(true)
-                    .truncate(true)
-                    .mode(mode & 0o7777 | 0o600)
+                let mut o = OpenOptions::new();
+                o.write(true).create(true).truncate(true);
+                let f = trs_platform::fs::set_create_mode(&mut o, mode & 0o7777 | 0o600)
                     .open(&part)
                     .map_err(StorageError::io)?;
                 if nocache {
@@ -712,7 +705,7 @@ fn writer(
                 ctx.step()?;
                 if let Some(c) = &cur
                     && !(sparse && is_zero(&buf[..n])) {
-                        c.f.write_all_at(&buf[..n], off).map_err(StorageError::io)?;
+                        trs_platform::fs::write_all_at(&c.f, &buf[..n], off).map_err(StorageError::io)?;
                     }
                 let _ = free.send(buf);
             }
@@ -864,7 +857,9 @@ fn copy_all(
                         entry,
                     } => (*file, path, *len, *entry),
                 };
-                let src = File::open(path).map_err(|e| StorageError::from_io(file, e))?;
+                let src = File::open(path).map_err(|e| {
+                    if trs_platform::fs::is_in_use(&e) { StorageError::Locked { file, path: path.to_path_buf() } } else { StorageError::from_io(file, e) }
+                })?;
                 if opts.nocache {
                     fsutil::set_nocache(&src);
                 }
@@ -873,7 +868,7 @@ fn copy_all(
                     send!(Item::Open(Msg::Open {
                         src: path.clone(),
                         part: part_path(&entries[ei].dst),
-                        mode: meta.mode(),
+                        mode: trs_platform::fs::unix_mode(&meta).unwrap_or(0o644),
                         mtime: meta.modified().ok(),
                         len,
                     }));
@@ -905,7 +900,7 @@ fn copy_all(
                     if buf.len() < n {
                         buf.resize(n, 0);
                     }
-                    src.read_exact_at(&mut buf[..n], off)
+                    trs_platform::fs::read_exact_at(&src, &mut buf[..n], off)
                         .map_err(|e| StorageError::from_io(file, e))?;
                     if let Some(l) = &limiter {
                         l.acquire(n, &opts.cancel);
@@ -991,37 +986,28 @@ struct Prepared {
     src_stamp: Vec<(PathBuf, u64, Option<SystemTime>)>,
 }
 
-/// Can a folder be changed (entries created in it or removed from it)? `access(W_OK)` also
-/// reports a locked folder (`uchg`) and a read-only volume.
+/// Can a folder be changed (entries created in it or removed from it)? Also false for a locked
+/// folder and a read-only volume where the system says so.
 fn dir_writable(dir: &Path) -> bool {
-    use std::os::unix::ffi::OsStrExt;
-    let Ok(c) = std::ffi::CString::new(dir.as_os_str().as_bytes()) else { return false };
-    // SAFETY: `c` is a valid NUL-terminated path for the duration of the call.
-    unsafe { libc::access(c.as_ptr(), libc::W_OK) == 0 }
+    trs_platform::fs::dir_writable(dir)
 }
 
 /// The lock flags that stop a file from being renamed or removed (Finder "Locked" is `uchg`).
-#[cfg(target_os = "macos")]
 fn locked_flags(m: &fs::Metadata) -> bool {
-    use std::os::macos::fs::MetadataExt as _;
-    const LOCKED: u32 = libc::UF_IMMUTABLE | libc::UF_APPEND | libc::SF_IMMUTABLE | libc::SF_APPEND;
-    m.st_flags() & LOCKED != 0
-}
-#[cfg(not(target_os = "macos"))]
-fn locked_flags(_: &fs::Metadata) -> bool {
-    false
+    trs_platform::fs::is_locked(m)
 }
 
 /// The cheap check before a move touches anything: no source file is locked, the folders the
 /// sources leave can be changed, and so can the nearest existing folder of every destination.
 /// Pairs are `(file index, source, destination)`; a source that is not there is skipped (the
-/// plan decides about missing data). Stats and `access` only; no file is opened or changed.
+/// plan decides about missing data). Stats and `access`; on Windows each source is also opened once,
+/// without reading it, to see whether another program holds it. Nothing is changed.
 pub fn preflight_move<'a>(pairs: impl IntoIterator<Item = (u32, &'a Path, &'a Path)>) -> Result<()> {
     let mut checked: HashSet<PathBuf> = HashSet::new();
     let mut dir_ok = |d: &Path| -> bool { !checked.insert(d.to_path_buf()) || dir_writable(d) };
     for (file, src, dst) in pairs {
         if let Ok(m) = fs::symlink_metadata(src) {
-            if locked_flags(&m) {
+            if locked_flags(&m) || (m.is_file() && trs_platform::fs::held_by_another_program(src)) {
                 return Err(StorageError::Locked { file, path: src.to_path_buf() });
             }
             if let Some(p) = src.parent()
@@ -1331,7 +1317,7 @@ fn run_prepare(
                             .open(&e.dst)
                             .map_err(|er| map_exists(e.file, er))?;
                     } else {
-                        fsutil::rename_excl(&e.src, &e.dst).map_err(|er| map_exists(e.file, er))?;
+                        fsutil::rename_excl(&e.src, &e.dst).map_err(|er| map_move(e.file, &e.src, er))?;
                     }
                     jw.rec(T_DONE, e.file, false)?;
                     if let Some(s) = parsed.state.get_mut(e.file as usize) {
@@ -1425,6 +1411,16 @@ fn map_exists(file: u32, e: io::Error) -> StorageError {
         StorageError::DestinationExists { file }
     } else {
         StorageError::from_io(file, e)
+    }
+}
+
+/// [`map_exists`] for a step that takes the source at `src` away: another program holding it
+/// (Windows) is [`StorageError::Locked`], like a lock flag, not an I/O error.
+fn map_move(file: u32, src: &Path, e: io::Error) -> StorageError {
+    if trs_platform::fs::is_in_use(&e) {
+        StorageError::Locked { file, path: src.to_path_buf() }
+    } else {
+        map_exists(file, e)
     }
 }
 
@@ -1536,7 +1532,7 @@ fn run_commit(
             }
         }
         for e in p.entries.iter().filter(|e| !e.create_empty) {
-            remove_if_exists(&e.src).map_err(|er| StorageError::from_io(e.file, er))?;
+            remove_if_exists(&e.src).map_err(|er| map_move(e.file, &e.src, er))?;
         }
     }
     let mut jw = Jw::append(journal_path)?;

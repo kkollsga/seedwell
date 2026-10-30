@@ -4,63 +4,33 @@ import UniformTypeIdentifiers
 extension TransferRow: Identifiable {}
 
 extension TransferRow {
-    var isDownload: Bool { seedGroup == nil && kind == .torrent || kind == .direct && state != .completed }
-    /// What a download's progress counts. A finished torrent that downloads again starts at 0 for the
-    /// new files (the engine's session); rows without a session figure use the wanted bytes held.
-    var progressDone: UInt64 { sessionSize > 0 ? min(sessionDone, sessionSize) : min(doneBytes, sizeBytes) }
-    var progressSize: UInt64 { sessionSize > 0 ? sessionSize : sizeBytes }
-    var fraction: Double { progressSize == 0 ? 0 : min(1, Double(progressDone) / Double(progressSize)) }
-    var percent: Int { Int((fraction * 100).rounded(.down)) }
     var url: URL { URL(fileURLWithPath: savePath) }
     /// Seeding rows: the Sharing view.
     var isSharing: Bool { seedGroup != nil }
-    var isPaused: Bool { state == .paused }
 }
 
 extension SeedGroup: CaseIterable {
     public static var allCases: [SeedGroup] { [.popular, .active, .dormant, .error, .dead, .stopped] }
-
-    var title: String {
-        switch self {
-        case .popular: "Popular"
-        case .active: "Active"
-        case .dormant: "Dormant"
-        case .error: "Error"
-        case .dead: "Dead"
-        case .stopped: "Stopped"
-        }
-    }
 }
 
 extension SharingCounts {
-    func count(_ g: SeedGroup) -> Int {
-        switch g {
-        case .popular: Int(popular)
-        case .active: Int(active)
-        case .dormant: Int(dormant)
-        case .error: Int(error)
-        case .dead: Int(dead)
-        case .stopped: Int(stopped)
-        }
-    }
-    var total: Int { SeedGroup.allCases.reduce(0) { $0 + count($1) } }
+    var total: Int { Int(popular + active + dormant + error + dead + stopped) }
+}
+
+extension Snapshot {
+    /// Every download, including those of a tracker in hidden mode (SPEC 7E.5). `downloading`, `queued`
+    /// and `recent` are what the Downloads tab and the menu list; a tracker's own tab, the sleep assertion,
+    /// the chooser and the notifications need all of them.
+    var allDownloading: [TransferRow] { downloading + hiddenDownloading }
+    var allQueued: [TransferRow] { queued + hiddenQueued }
+    var allRecent: [TransferRow] { recent + hiddenRecent }
 }
 
 extension Category {
     static let all: [Category] = [.movie, .tv, .music, .audiobook, .book, .software, .game, .other]
 
-    var label: String {
-        switch self {
-        case .movie: "Movie"
-        case .tv: "TV"
-        case .music: "Music"
-        case .audiobook: "Audiobook"
-        case .book: "Book"
-        case .software: "App"
-        case .game: "Game"
-        case .other: "Other"
-        }
-    }
+    /// "Movie", "TV", "App" (the core's words).
+    var label: String { categoryLabel(category: self) }
 
     /// The one symbol of a category, in the pill, the chooser card and Settings.
     var symbol: String {
@@ -73,31 +43,6 @@ extension Category {
         case .software: "opticaldisc"
         case .game: "gamecontroller"
         case .other: "shippingbox"
-        }
-    }
-
-    /// Folder-style name used in the "Recently Finished" line.
-    var plural: String {
-        switch self {
-        case .movie: "Movies"
-        case .tv: "TV"
-        case .music: "Music"
-        case .audiobook: "Audiobooks"
-        case .book: "Books"
-        case .software: "Apps"
-        case .game: "Games"
-        case .other: "Other"
-        }
-    }
-}
-
-extension Priority {
-    static let all: [Priority] = [.high, .normal, .low]
-    var label: String {
-        switch self {
-        case .high: "High"
-        case .normal: "Normal"
-        case .low: "Low"
         }
     }
 }

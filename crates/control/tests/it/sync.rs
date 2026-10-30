@@ -117,7 +117,8 @@ async fn permission_levels() {
     assert_eq!(call(&mut c, "sync.settings", json!({})).await.unwrap()["device_name"], "");
     assert!(call(&mut c, "sync.remove", json!({"folder": "Docs"})).await.is_ok(), "stopping without the files is control");
     // Even at control, no folder in a system, Library or hidden place.
-    let e = call(&mut c, "sync.add", json!({"path": "/System/Library"})).await.unwrap_err();
+    let system = trs_platform::dirs::sensitive_dirs()[0].join("Library");
+    let e = call(&mut c, "sync.add", json!({"path": text(&system)})).await.unwrap_err();
     assert_eq!(e.code, ErrorCode::Invalid);
     let e = call(&mut c, "sync.add", json!({"path": "relative/path"})).await.unwrap_err();
     assert_eq!(e.code, ErrorCode::InvalidParams);
@@ -298,7 +299,7 @@ async fn removal_takes_two_steps_and_the_trash_is_the_configured_one() {
 
     // With delete_files the folder goes to the Trash (the configured one, never the real one in tests).
     let plan: SyncRemovePlanDto = serde_json::from_value(call(&mut c, "sync.remove", json!({"folder": "Gone", "delete_files": true})).await.unwrap()).unwrap();
-    assert!(plan.delete_files && plan.summary.contains("TRASH"), "{}", plan.summary);
+    assert!(plan.delete_files && plan.summary.contains(&trs_platform::TRASH.to_uppercase()), "{}", plan.summary);
     assert!(gone.exists(), "nothing happens at step 1");
     let r: SyncRemovedDto = serde_json::from_value(call(&mut c, "sync.remove_confirm", json!({"token": plan.token})).await.unwrap()).unwrap();
     assert_eq!(r.files, "trashed");
@@ -347,7 +348,7 @@ async fn channels_need_their_agent_switch_mark_others_untrusted_and_stream_as_ev
         let e = call(&mut c, m, p).await.unwrap_err();
         assert_eq!(e.code, ErrorCode::PermissionDenied, "{m}");
         // Where to click, exactly as the app names it.
-        assert!(e.message.contains("Chats ▸ Plans ▸ ⋯ ▸ Agents on This Mac ▸ Read"), "{}", e.message);
+        assert!(e.message.contains(concat!("Chats ▸ Plans ▸ ⋯ ▸ Agents on This ", trs_platform::computer!(), " ▸ Read")), "{}", e.message);
     }
     call(&mut c, "chat.set_agents", json!({"channel": "plans", "agents": "read"})).await.unwrap();
     let read: ChatMessagesDto = serde_json::from_value(call(&mut c, "chat.read", json!({"channel": "Plans"})).await.unwrap()).unwrap();

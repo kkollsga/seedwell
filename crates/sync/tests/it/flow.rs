@@ -518,3 +518,121 @@ fn files_scanned_before_a_device_may_write_are_sent_once_it_may() {
     assert!(!names(&a.fs).iter().any(|n| n.starts_with("same (conflict")), "the same content merges: {:?}", names(&a.fs));
     assert_eq!(names(&a.fs).iter().filter(|n| n.starts_with("plan (conflict")).count(), 1, "one copy of the difference: {:?}", names(&a.fs));
 }
+
+/// A FolderCore over a real folder on this system's disk.
+fn core_on_disk(fs: trs_sync::fs::StdFs, seed: u8, key: &Key) -> FolderCore {
+    fs.create_dir(".seedwell").unwrap();
+    let dk = Arc::new(DeviceKey::from_seed(&[seed; 32]));
+    let cfg = FolderConfig {
+        me: dk.device_id(),
+        folder_pk: *key.public_key(),
+        access: key.access(),
+        case_insensitive: trs_sync::path::probe_case_insensitive(&fs).unwrap(),
+        byte_exact_names: false,
+        exec_bits: trs_sync::path::probe_exec_bits(&fs).unwrap(),
+        archive: true,
+    };
+    let ids = Arc::new(AtomicU64::new(u64::from(seed) << 32));
+    let new_id = Arc::new(move || {
+        let mut id = [0u8; 16];
+        id[..8].copy_from_slice(&ids.fetch_add(1, Ordering::SeqCst).to_be_bytes());
+        id
+    });
+    FolderCore::new(cfg, Box::new(MemStore::new(u64::from(seed))), Arc::new(fs), Some(dk), Arc::new(Utc), new_id, Ignore::defaults()).unwrap()
+}
+
+/// Names another system allows but this disk cannot hold (on Windows `?` and `:`, a reserved device
+/// name, and a folder with a trailing dot, which Windows would make under another name) are issues on
+/// their paths and are not tried again; the good file arrives and the folder settles. Where the disk
+/// can hold them, they arrive like any other.
+#[test]
+fn names_the_disk_cannot_hold_are_issues_and_the_rest_arrives() {
+    let key = rw();
+    let mut a = dev("A", 1, &key);
+    a.fs.create_dir("dir.").unwrap();
+    let files = [("dir./x.txt", "in a folder with a trailing dot"), ("why?.txt", "question"), ("a:b.txt", "colon"), ("con.txt", "device"), ("good.txt", "good")];
+    for (p, body) in files {
+        write_all(&a.fs, p, body.as_bytes()).unwrap();
+    }
+    a.core.scan("").unwrap();
+
+    let t = tempfile::tempdir().unwrap();
+    let disk = trs_sync::fs::StdFs::new(t.path());
+    let mut b = core_on_disk(disk.clone(), 2, &key);
+    learn_writers(&mut b, &a.core.writers()).unwrap();
+    let (index_id, _) = a.core.index_state().unwrap();
+    let entries = a.core.announce_since(0, usize::MAX).unwrap();
+    b.apply_remote(short(&a), RemoteIndex { index_id, full: true, done: true, entries }).unwrap();
+
+    let source = Disks(vec![&a.fs]);
+    let name = |_: ShortId| "A".to_string();
+    let first = b.pull(&source, &name, 64 << 20).unwrap();
+    assert!(first.failed.is_empty(), "{:?}", first.failed);
+    assert_eq!(read_all(&disk, "good.txt").unwrap(), b"good");
+    let bad = ["a:b.txt", "con.txt", "dir.", "dir./x.txt", "why?.txt"];
+    if disk.name_problem("why?.txt").is_some() {
+        let mut got: Vec<&str> = first.unsupported.iter().map(|u| u.path.as_str()).collect();
+        got.sort_unstable();
+        assert_eq!(got, bad);
+        assert!(first.unsupported.iter().all(|u| u.why == trs_platform::fs::NAME_NOT_ALLOWED), "{:?}", first.unsupported);
+        assert_eq!(b.need_totals().unwrap(), (0, 0), "the folder settles: nothing left to wait for");
+        let mut on_disk: Vec<String> = std::fs::read_dir(t.path()).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        on_disk.sort_unstable();
+        assert_eq!(on_disk, [".seedwell", "good.txt"], "nothing made under another name (no \"dir\")");
+        // Not tried again while their versions stay the same: reported, nothing done.
+        let again = b.pull(&source, &name, 64 << 20).unwrap();
+        assert_eq!((again.done, again.failed.len(), again.unsupported.len()), (0, 0, bad.len()));
+    } else {
+        assert!(first.unsupported.is_empty(), "{:?}", first.unsupported);
+        for (p, body) in files {
+            assert_eq!(read_all(&disk, p).unwrap(), body.as_bytes(), "{p}");
+        }
+        assert_eq!(b.need_totals().unwrap(), (0, 0));
+    }
+    // The next scan finds nothing new either way.
+    let r = b.scan("").unwrap();
+    assert_eq!((r.changed, r.deleted), (0, 0));
+}
+
+/// A pull's temp file is kept while its path still needs pulling (the next pull resumes from it) and
+/// removed by the next scan once the path needs nothing (deleted on the other side meanwhile), a
+/// long name's hashed temp too; the one still wanted is finished by the pull.
+#[test]
+fn a_temp_file_nobody_will_finish_is_removed_by_the_next_scan() {
+    let key = rw();
+    let (mut a, mut b) = (dev("A", 1, &key), dev("B", 2, &key));
+    let long = format!("{}.txt", "l".repeat(250));
+    let paths = ["gone.txt", long.as_str(), "kept.txt"];
+    for p in paths {
+        write_all(&a.fs, p, b"data").unwrap();
+    }
+    a.core.scan("").unwrap();
+    send(&a, &mut b);
+    // B's pull stopped half way: a partial temp of each (as a crash or a quit leaves them).
+    let temps: Vec<String> = paths.iter().map(|p| trs_sync::pull::temp_path(p)).collect();
+    assert!(temps[1].len() < 60, "the long name has a hashed temp name: {}", temps[1]);
+    for t in &temps {
+        write_all(&b.fs, t, b"da").unwrap();
+    }
+    b.core.scan("").unwrap();
+    assert!(temps.iter().all(|t| b.fs.lstat(t).unwrap().is_some()), "all still wanted: kept for resuming");
+
+    // A deletes two of them before B fetched them.
+    a.fs.remove_file("gone.txt").unwrap();
+    a.fs.remove_file(&long).unwrap();
+    a.core.scan("").unwrap();
+    send(&a, &mut b);
+    b.core.scan("").unwrap();
+    assert!(b.fs.lstat(&temps[0]).unwrap().is_none(), "gone.txt's temp is removed");
+    assert!(b.fs.lstat(&temps[1]).unwrap().is_none(), "the long name's temp is removed");
+    assert!(b.fs.lstat(&temps[2]).unwrap().is_some(), "kept.txt's temp is still wanted");
+
+    let p = pull(&mut b, &[&a]);
+    assert!(p.failed.is_empty(), "{:?}", p.failed);
+    assert_eq!(read_all(&b.fs, "kept.txt").unwrap(), b"data");
+    assert!(b.fs.lstat(&temps[2]).unwrap().is_none());
+
+    // A file named like the temps' frame alone holds no path: the scan does not trip over it.
+    write_all(&b.fs, ".seedwell.tmp", b"x").unwrap();
+    b.core.scan("").unwrap();
+}

@@ -79,21 +79,17 @@ import SeedwellFinderShared
         return String(cString: p)
     }
 
-    /// A folder's own badge.
+    /// A folder's own badge (the core decides; `SyncFileBadge` is the same set of badges for every file manager).
     nonisolated static func badge(_ f: SyncFolder) -> FinderBadge {
-        let b: FinderBadge
-        switch f.state {
-        case .paused: return .paused
-        case .missing, .error: return .error
-        case .starting, .scanning: b = .syncing
-        case .waitingForDevices, .waitingForAdmin: b = .offline
-        case .syncing:
-            let (down, up) = (f.rateIn > 0 || f.needFiles > 0, f.rateOut > 0)
-            b = down && up ? .syncing : down ? .downloading : up ? .uploading : .syncing
-        case .upToDate:
-            b = f.rateOut > 0 ? .uploading : f.connected == 0 ? .offline : .synced
+        switch syncFileBadge(folder: f) {
+        case .synced: .synced
+        case .syncing: .syncing
+        case .downloading: .downloading
+        case .uploading: .uploading
+        case .paused: .paused
+        case .offline: .offline
+        case .conflict: .conflict
+        case .error: .error
         }
-        // A conflict waits for the user: it shows unless something is moving right now.
-        return f.conflicts > 0 && [.synced, .uploading, .offline].contains(b) ? .conflict : b
     }
 }

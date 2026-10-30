@@ -7,8 +7,9 @@ import Sparkle
 ///
 /// - Sparkle: only when the build carries an EdDSA public key and a feed (`SUPublicEDKey` + `SUFeedURL`,
 ///   a future Developer ID build). Sparkle drives everything, as before.
-/// - GitHub: every other build. Reads the `latest.json` asset of the latest GitHub release once a day and
-///   installs through the curl installer (install.sh).
+/// - GitHub: every other build. The core's `Updates` decides everything (when to check, what is on offer, when to
+///   install by itself, the installer command, the texts); this runs its timer, its checks off the main thread and the
+///   installer it hands over, and keeps its model for the views.
 ///
 /// Never both: the other back end is not started, not even constructed.
 @MainActor @Observable final class UpdateCenter {
@@ -16,45 +17,18 @@ import Sparkle
 
     enum Backend { case sparkle, github }
 
-    enum Status: Equatable {
-        case idle
-        case checking
-        case upToDate(checked: Date?)
-        case available(version: String, notes: URL?)
-        case noReleases
-        case checkFailed(String)
-        case installing(String)
-        case installFailed(String)
-        case updated(String)
-    }
-
     let backend: Backend
     /// Release builds check and install by themselves; development builds only when asked.
     let releaseBuild: Bool
-    private(set) var status: Status = .idle
+    /// What Settings › General › Updates draws (GitHub back end), from the core.
+    private(set) var model: UpdatesModel?
 
-    /// The two settings (`config.toml` `[updates]`), pushed in by the app on load and on every change.
-    private(set) var prefs = UpdatePreferences(check: true, autoInstall: false)
-
-    private let repoURL: String
-    private let current: SemVer
-    private let currentString: String
+    private let repoURL: String?
+    private var updates: Updates?
     private var sparkle: SPUStandardUpdaterController?
     private let relaunch = Relaunch()
-    private var scheduler: NSBackgroundActivityScheduler?
-    private var firstCheck: Task<Void, Never>?
-    private var watchdog: Task<Void, Never>?
-    private var busy = false
-    private var checking = false
-    private var installing = false
-    @ObservationIgnored private let defaults = UserDefaults.standard
-
-    private enum Key {
-        static let lastCheck = "update.lastCheck"
-        static let lastVersion = "update.lastVersion"
-        static let lastNotes = "update.lastNotes"
-        static let pending = "update.pending"
-    }
+    private var schedule: Task<Void, Never>?
+    private var refresher: Task<Void, Never>?
 
     /// Called just before an update quits the app (Sparkle's relaunch): quitting is allowed then.
     var willRelaunch: () -> Void {
@@ -68,76 +42,73 @@ import Sparkle
         let feed = (info.object(forInfoDictionaryKey: "SUFeedURL") as? String) ?? ""
         backend = !key.isEmpty && !feed.isEmpty ? .sparkle : .github
         releaseBuild = (info.object(forInfoDictionaryKey: "SeedwellReleaseBuild") as? Bool) ?? false
-        // SEEDWELL_UPDATE_REPO (read here, once): a base URL serving /releases/latest/download/latest.json and
-        // /releases/download/v<ver>/install.sh, for tests on loopback. Unset in normal use.
-        let envRepo = ProcessInfo.processInfo.environment["SEEDWELL_UPDATE_REPO"]
-        repoURL = (envRepo?.isEmpty == false ? envRepo : nil)
-            ?? (info.object(forInfoDictionaryKey: "SeedwellRepoURL") as? String)
-            ?? "https://github.com/kkollsga/seedwell"
-        currentString = (info.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "0.0.0"
-        current = SemVer(plain: currentString) ?? SemVer(0, 0, 0)
+        // SEEDWELL_UPDATE_REPO (a loopback server in tests) is read by the core.
+        repoURL = info.object(forInfoDictionaryKey: "SeedwellRepoURL") as? String
     }
 
-    var currentVersion: String { currentString }
+    var currentVersion: String {
+        updates?.currentVersion() ?? (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "0.0.0"
+    }
+
+    private static var nowMs: UInt64 { UInt64(Date().timeIntervalSince1970 * 1000) }
 
     // MARK: Launch
 
     /// Called once at launch.
-    func start() {
+    func start(core: Core) {
         switch backend {
         case .sparkle:
             guard sparkle == nil else { return }
-            let c = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: relaunch, userDriverDelegate: nil)
-            sparkle = c
+            sparkle = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: relaunch, userDriverDelegate: nil)
         case .github:
-            restore()
-            applySchedule()
-            // Due, or an update found earlier is still on offer: check again (it may have been withdrawn), which
-            // also starts a waiting automatic install. About a minute after launch, not during it.
-            if automaticChecking,
-               UpdateSchedule.isDue(lastCheck: defaults.object(forKey: Key.lastCheck) as? Date, now: Date()) || availableVersion != nil {
-                firstCheck = Task { [weak self] in
-                    try? await Task.sleep(for: .seconds(60))
-                    guard !Task.isCancelled else { return }
-                    await self?.check(silent: true)
-                }
-            }
+            guard updates == nil else { return }
+            let v = ProcessInfo.processInfo.operatingSystemVersion
+            let u = Updates(core: core, releaseBuild: releaseBuild, repoUrl: repoURL,
+                            systemVersion: "\(v.majorVersion).\(v.minorVersion).\(v.patchVersion)", nowMs: Self.nowMs)
+            updates = u
+            importEarlier(u)
+            refresh()
+            reschedule()
         }
     }
 
-    /// Settings loaded or changed.
-    func apply(_ p: UpdatePreferences) {
-        guard p != prefs else { return }
-        prefs = p
-        if backend == .github { applySchedule(); considerAutoInstall() }
+    /// Before 0.1.10 this app kept its update state in its user defaults: handed to the core once (it takes it only
+    /// while it has no state of its own), so an update installed by that version is reported by this one.
+    private func importEarlier(_ u: Updates) {
+        let d = UserDefaults.standard
+        let keys = ["update.lastCheck", "update.lastVersion", "update.lastNotes", "update.pending"]
+        guard keys.contains(where: { d.object(forKey: $0) != nil }) else { return }
+        let last = (d.object(forKey: keys[0]) as? Date).map { UInt64(max(0, $0.timeIntervalSince1970) * 1000) }
+        u.importEarlier(lastCheckMs: last, offered: d.string(forKey: keys[1]), notes: d.string(forKey: keys[2]), pending: d.string(forKey: keys[3]))
+        keys.forEach(d.removeObject(forKey:))
     }
 
-    private var automaticChecking: Bool { releaseBuild && prefs.check }
+    /// Settings loaded or changed (the core reads the two switches itself): the schedule and a waiting install follow.
+    func settingsChanged() {
+        guard backend == .github else { return }
+        refresh()
+        reschedule()
+        considerAutoInstall()
+    }
 
     // MARK: Shared settings bindings (the Sparkle back end keeps its own copy of the two switches)
 
-    // With the GitHub back end the switches live in `config.toml` (the view binds to SettingsModel); the setters
-    // below only matter for Sparkle.
     var checkAutomatically: Bool {
-        get { access(keyPath: \.prefs); return backend == .sparkle ? (sparkle?.updater.automaticallyChecksForUpdates ?? false) : prefs.check }
-        set { withMutation(keyPath: \.prefs) { sparkle?.updater.automaticallyChecksForUpdates = newValue } }
+        get { sparkle?.updater.automaticallyChecksForUpdates ?? false }
+        set { sparkle?.updater.automaticallyChecksForUpdates = newValue }
     }
+
     var installAutomatically: Bool {
-        get { access(keyPath: \.prefs); return backend == .sparkle ? (sparkle?.updater.automaticallyDownloadsUpdates ?? false) : prefs.autoInstall }
-        set { withMutation(keyPath: \.prefs) { sparkle?.updater.automaticallyDownloadsUpdates = newValue } }
+        get { sparkle?.updater.automaticallyDownloadsUpdates ?? false }
+        set { sparkle?.updater.automaticallyDownloadsUpdates = newValue }
     }
-    /// The switches do something: always with Sparkle, in release builds with the GitHub back end.
-    var switchesActive: Bool { backend == .sparkle ? sparkle != nil : releaseBuild }
 
     // MARK: What the UI shows
 
     /// The version on offer from the GitHub back end (nil with Sparkle, which shows its own window).
-    var availableVersion: String? {
-        if backend == .github, case .available(let v, _) = status { return v }
-        return nil
-    }
+    var availableVersion: String? { model?.availableVersion }
 
-    var canCheck: Bool { backend == .sparkle ? (sparkle?.updater.canCheckForUpdates ?? false) : !checking && !installing }
+    var canCheck: Bool { backend == .sparkle ? (sparkle?.updater.canCheckForUpdates ?? false) : (model?.checkNow.enabled ?? false) }
 
     func checkNow() {
         switch backend {
@@ -146,138 +117,72 @@ import Sparkle
         }
     }
 
-    // MARK: GitHub back end: checking
-
-    private func restore() {
-        let pending = defaults.string(forKey: Key.pending)
-        if let pending {
-            defaults.removeObject(forKey: Key.pending)
-            if pending == currentString {
-                status = .updated(pending)
-                defaults.removeObject(forKey: Key.lastVersion)
-                return
-            }
-            status = .installFailed(pending)
-            return
-        }
-        let last = defaults.object(forKey: Key.lastCheck) as? Date
-        if let v = defaults.string(forKey: Key.lastVersion), let sv = SemVer(plain: v), sv > current {
-            status = .available(version: v, notes: defaults.string(forKey: Key.lastNotes).flatMap(URL.init(string:)))
-        } else if last != nil {
-            status = .upToDate(checked: last)
+    /// The model again now, then as often as it asks (every second while checking or installing, else a minute).
+    private func refresh() {
+        guard let updates else { return }
+        let m = updates.model(nowMs: Self.nowMs)
+        if m != model { model = m }
+        refresher?.cancel()
+        refresher = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(Int(m.refreshMs)))
+            guard !Task.isCancelled else { return }
+            self?.refresh()
         }
     }
 
-    private func applySchedule() {
-        guard automaticChecking else {
-            scheduler?.invalidate(); scheduler = nil
-            firstCheck?.cancel(); firstCheck = nil
-            return
+    /// The timer for the next automatic check, at the time the core names (none: no automatic check).
+    private func reschedule() {
+        schedule?.cancel()
+        guard let ms = updates?.nextDueMs(nowMs: Self.nowMs) else { return }
+        schedule = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(Int(min(ms, UInt64(Int32.max)))))
+            guard !Task.isCancelled, let self else { return }
+            if self.updates?.nextDueMs(nowMs: Self.nowMs) == 0 { await self.check(silent: true) } else { self.reschedule() }
         }
-        guard scheduler == nil else { return }
-        let s = NSBackgroundActivityScheduler(identifier: "io.github.kkollsga.Seedwell.update-check")
-        s.repeats = true
-        s.interval = UpdateSchedule.interval
-        s.tolerance = 6 * 3600
-        s.qualityOfService = .utility
-        s.schedule { [weak self] completion in
-            Task { @MainActor in
-                await self?.check(silent: true)
-                completion(.finished)
-            }
-        }
-        scheduler = s
     }
 
-    /// One request. `silent`: a background check, which keeps the previous status on failure.
+    /// One check, off the main thread (it blocks up to 15 s); the model shows "Checking…" meanwhile.
     private func check(silent: Bool) async {
-        guard backend == .github, !checking, !installing else { return }
-        checking = true
-        let before = status
-        if !silent { status = .checking }
-        let outcome = await UpdateFetcher.fetch(repo: repoURL)
-        checking = false
-        let now = Date()
-        switch outcome {
-        case .release(let r):
-            defaults.set(now, forKey: Key.lastCheck)
-            if r.isOffered(current: current, macOS: Self.macOSVersion) {
-                defaults.set(r.version.description, forKey: Key.lastVersion)
-                defaults.set(r.notesURL?.absoluteString, forKey: Key.lastNotes)
-                status = .available(version: r.version.description, notes: r.notesURL)
-                considerAutoInstall()
-            } else {
-                defaults.removeObject(forKey: Key.lastVersion)
-                defaults.removeObject(forKey: Key.lastNotes)
-                status = .upToDate(checked: now)
-            }
-        case .none:
-            defaults.set(now, forKey: Key.lastCheck)
-            defaults.removeObject(forKey: Key.lastVersion)
-            status = .noReleases
-        case .failed(let why):
-            status = silent && !isFailure(before) ? before : .checkFailed(why)
-        }
-    }
-
-    private func isFailure(_ s: Status) -> Bool { if case .checkFailed = s { true } else { false } }
-
-    private static var macOSVersion: SemVer {
-        let v = ProcessInfo.processInfo.operatingSystemVersion
-        return SemVer(v.majorVersion, v.minorVersion, v.patchVersion)
+        guard let updates else { return }
+        let now = Self.nowMs
+        let run = Task.detached { updates.check(silent: silent, nowMs: now) }
+        try? await Task.sleep(for: .milliseconds(50))
+        refresh()
+        await run.value
+        refresh()
+        reschedule()
+        considerAutoInstall()
     }
 
     // MARK: GitHub back end: installing
 
-    /// The app tells the updater whether anything is downloading or being moved (event-driven: the menu bar
-    /// refreshes on engine events). A drop to idle may start a waiting automatic install.
-    func noteActivity(busy now: Bool) {
-        guard now != busy else { return }
-        busy = now
-        if !now { considerAutoInstall() }
+    /// The menu bar refreshed (on engine events): a waiting automatic install may start now that nothing downloads.
+    func noteActivity() {
+        guard model?.availableVersion != nil else { return }
+        considerAutoInstall()
     }
 
     private func considerAutoInstall() {
-        guard backend == .github, case .available = status else { return }
-        if AutoInstall.shouldInstall(releaseBuild: releaseBuild, checking: prefs.check, autoInstall: prefs.autoInstall,
-                                     available: true, busy: busy, installing: installing) { install() }
+        if let updates, model?.availableVersion != nil, updates.shouldInstall() { install() }
     }
 
-    /// Runs the curl installer in a shell of its own session; it quits this app, replaces the bundle and reopens it.
+    /// Starts the installer the core names, in a shell of its own session; it quits this app, replaces the bundle and
+    /// reopens it. The core reports a failure (it could not start, or the app still runs after 90 s).
     func install() {
-        guard backend == .github, !installing, case .available(let v, _) = status else { return }
-        let log = Self.logURL
+        guard let updates, let c = updates.install(installDir: Bundle.main.bundleURL.deletingLastPathComponent().path, nowMs: Self.nowMs) else { return }
+        let log = URL(fileURLWithPath: c.log)
         do {
             try FileManager.default.createDirectory(at: log.deletingLastPathComponent(), withIntermediateDirectories: true)
-            defaults.set(v, forKey: Key.pending)
-            let argv = UpdateInstall.arguments(repo: repoURL, version: v, bundleURL: Bundle.main.bundleURL)
-            try Spawn.detached(argv: argv, log: log)
+            try Spawn.detached(argv: c.argv, env: c.env.map { ($0.name, $0.value) }, log: log)
         } catch {
-            defaults.removeObject(forKey: Key.pending)
-            status = .installFailed(v)
-            return
+            updates.installFailed()
         }
-        installing = true
-        status = .installing(v)
-        // The installer quits this app within seconds. Still here after 90 s: it did not work.
-        watchdog = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(90))
-            guard !Task.isCancelled, let self else { return }
-            self.installing = false
-            self.defaults.removeObject(forKey: Key.pending)
-            self.status = .installFailed(v)
-        }
-    }
-
-    /// `~/Library/Logs/Seedwell/update.log`; under `--home-root` in an isolated (QA) run.
-    static var logURL: URL {
-        let home = LaunchOptions(CommandLine.arguments).homeRoot.map { URL(fileURLWithPath: $0) }
-            ?? FileManager.default.homeDirectoryForCurrentUser
-        return home.appendingPathComponent("Library/Logs/Seedwell/update.log")
+        refresh()
     }
 
     func revealLog() {
-        NSWorkspace.shared.activateFileViewerSelecting([Self.logURL])
+        guard let path = updates?.logPath() else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
     }
 }
 
@@ -294,60 +199,15 @@ private final class Relaunch: NSObject, SPUUpdaterDelegate, @unchecked Sendable 
     }
 }
 
-// MARK: Network
-
-enum UpdateFetchOutcome: Equatable {
-    case release(LatestRelease)
-    /// 404: no release has been published yet.
-    case none
-    case failed(String)
-}
-
-enum UpdateFetcher {
-    /// One GET of `latest.json` through an ephemeral session (no cookies, no cache, no credentials),
-    /// 15 s, no retries; the session is gone when this returns.
-    static func fetch(repo: String) async -> UpdateFetchOutcome {
-        guard let url = UpdateInstall.latestURL(repo: repo) else { return .failed("bad address") }
-        let cfg = URLSessionConfiguration.ephemeral
-        cfg.timeoutIntervalForRequest = 15
-        cfg.timeoutIntervalForResource = 15
-        cfg.waitsForConnectivity = false
-        cfg.requestCachePolicy = .reloadIgnoringLocalCacheData
-        let session = URLSession(configuration: cfg)
-        defer { session.finishTasksAndInvalidate() }
-        var req = URLRequest(url: url)
-        let v = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "0"
-        req.setValue("Seedwell/\(v)", forHTTPHeaderField: "User-Agent")
-        req.setValue("application/json", forHTTPHeaderField: "Accept")
-        do {
-            let (data, resp) = try await session.data(for: req)
-            guard let http = resp as? HTTPURLResponse else { return .failed("no answer") }
-            switch http.statusCode {
-            case 200: return LatestRelease.parse(data).map { .release($0) } ?? .failed("unreadable release information")
-            case 404: return .none
-            default: return .failed("server answered \(http.statusCode)")
-            }
-        } catch let e as URLError {
-            switch e.code {
-            case .notConnectedToInternet, .networkConnectionLost: return .failed("no internet connection")
-            case .timedOut: return .failed("timed out")
-            case .cannotFindHost, .dnsLookupFailed: return .failed("server not found")
-            default: return .failed("network error")
-            }
-        } catch {
-            return .failed("network error")
-        }
-    }
-}
-
 // MARK: Detached process
 
 enum Spawn {
     struct Failure: Error { let code: Int32 }
 
     /// posix_spawn in a new session (POSIX_SPAWN_SETSID): the child is not in this app's process group and
-    /// is not touched when the app exits. stdin /dev/null, stdout and stderr appended to `log`.
-    static func detached(argv: [String], log: URL) throws {
+    /// is not touched when the app exits. stdin /dev/null, stdout and stderr appended to `log`; `env` is added to
+    /// this app's environment.
+    static func detached(argv: [String], env extra: [(String, String)] = [], log: URL) throws {
         var actions: posix_spawn_file_actions_t?
         posix_spawn_file_actions_init(&actions)
         defer { posix_spawn_file_actions_destroy(&actions) }
@@ -359,7 +219,9 @@ enum Spawn {
         defer { posix_spawnattr_destroy(&attr) }
         posix_spawnattr_setflags(&attr, Int16(POSIX_SPAWN_SETSID))
         var args: [UnsafeMutablePointer<CChar>?] = argv.map { strdup($0) } + [nil]
-        var env: [UnsafeMutablePointer<CChar>?] = ProcessInfo.processInfo.environment.map { strdup("\($0.key)=\($0.value)") } + [nil]
+        var vars = ProcessInfo.processInfo.environment
+        for (k, v) in extra { vars[k] = v }
+        var env: [UnsafeMutablePointer<CChar>?] = vars.map { strdup("\($0.key)=\($0.value)") } + [nil]
         defer { for p in args { free(p) }; for p in env { free(p) } }
         var pid: pid_t = 0
         let rc = posix_spawn(&pid, argv[0], &actions, &attr, &args, &env)

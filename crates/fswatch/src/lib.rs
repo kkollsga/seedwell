@@ -1,8 +1,9 @@
 //! trs-fswatch: a recursive watcher for one folder root, and a pure aggregator that turns its events into
 //! scan batches.
 //!
-//! * [`watch`] starts a watcher on a std thread: FSEvents on macOS, inotify on Linux, a periodic
-//!   metadata walk everywhere else (or when [`Backend::Poll`] is asked for). Its [`RawEvent`]s arrive on a
+//! * [`watch`] starts a watcher on a std thread: FSEvents on macOS, inotify on Linux, ReadDirectoryChangesW
+//!   on Windows, a periodic metadata walk everywhere else (or when [`Backend::Poll`] is asked for, or when
+//!   the native one cannot start). Its [`RawEvent`]s arrive on a
 //!   std `mpsc` channel, so it works the same in the daemon, the app and tests; no async runtime.
 //! * [`aggregate::Aggregator`] is a sans-I/O state machine on a virtual clock ([`Millis`]): it waits for a
 //!   path to go quiet, holds deletes and renames so both halves of a rename go out together, and collapses
@@ -13,7 +14,8 @@
 //! events (kernel or daemon drops, a full channel, no history for a resume token, a watch that could not be
 //! added) is reported as a [`RawEvent::Rescan`].
 //!
-//! `unsafe` code lives only in the OS binding modules (`fsevents`, `inotify`); everything else is safe.
+//! `unsafe` code lives only in the OS binding modules (`fsevents`, `inotify`, `windows`); everything else is
+//! safe.
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
@@ -26,6 +28,9 @@ mod fsevents;
 mod inotify;
 mod poll;
 mod sink;
+#[cfg(windows)]
+#[allow(unsafe_code)]
+mod windows;
 
 use std::io;
 use std::path::{Component, Path, PathBuf};
@@ -160,7 +165,8 @@ pub enum RawEvent {
 /// Which backend to use.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum Backend {
-    /// FSEvents on macOS, inotify on Linux, polling elsewhere.
+    /// FSEvents on macOS, inotify on Linux, ReadDirectoryChangesW on Windows, polling elsewhere (and where
+    /// the native backend cannot start, e.g. a share that refuses change notifications).
     #[default]
     Auto,
     /// A metadata walk of the whole tree every `interval`, compared with the previous walk.
@@ -177,6 +183,8 @@ pub enum ActiveBackend {
     FsEvents,
     /// Linux inotify.
     Inotify,
+    /// Windows ReadDirectoryChangesW.
+    ReadDirectoryChanges,
     /// Periodic metadata walk.
     Poll,
 }
@@ -307,7 +315,15 @@ fn start_native(root: &Path, opts: &WatchOptions) -> io::Result<(ActiveBackend, 
     Ok((ActiveBackend::Inotify, inotify::start(root.to_path_buf(), opts.since)?))
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(windows)]
+fn start_native(root: &Path, opts: &WatchOptions) -> io::Result<(ActiveBackend, Started)> {
+    match windows::start(root.to_path_buf(), opts.since) {
+        Ok(s) => Ok((ActiveBackend::ReadDirectoryChanges, s)),
+        Err(_) => Ok((ActiveBackend::Poll, poll::start(root.to_path_buf(), DEFAULT_POLL_INTERVAL, opts.since)?)),
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 fn start_native(root: &Path, opts: &WatchOptions) -> io::Result<(ActiveBackend, Started)> {
     Ok((ActiveBackend::Poll, poll::start(root.to_path_buf(), DEFAULT_POLL_INTERVAL, opts.since)?))
 }
@@ -341,7 +357,21 @@ pub mod debug {
     pub(crate) static CALLBACKS: AtomicU64 = AtomicU64::new(0);
     pub(crate) static LIVE_STREAMS: AtomicU64 = AtomicU64::new(0);
 
-    /// Backend callbacks entered so far (FSEvents only).
+    pub(crate) static HOLD_READS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+    /// Tests only: while on, the Windows backend posts no new read after the one that completes, so the
+    /// system's buffer fills and overflows as under a burst. Off by default; process-wide.
+    #[doc(hidden)]
+    pub fn hold_reads(on: bool) {
+        HOLD_READS.store(on, Ordering::SeqCst);
+    }
+
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub(crate) fn reads_held() -> bool {
+        HOLD_READS.load(Ordering::SeqCst)
+    }
+
+    /// Backend callbacks entered so far (FSEvents and the Windows backend's completions).
     pub fn callbacks() -> u64 {
         CALLBACKS.load(Ordering::SeqCst)
     }

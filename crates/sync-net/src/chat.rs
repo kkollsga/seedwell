@@ -635,7 +635,7 @@ impl SyncHandle {
         }
         let id = l.invite.folder_id();
         if self.inner.ctx.registry.channel(&id).is_some() {
-            return Err(invalid("this channel is already on this Mac"));
+            return Err(invalid(concat!("this channel is already on this ", trs_platform::computer!())));
         }
         self.inner.secrets.put(&crate::roles::invite_name(&id), l.format_chat().as_bytes())?;
         let name = l.name.clone().and_then(|n| clean_name(&n)).unwrap_or_else(|| "Channel".into());
@@ -688,7 +688,7 @@ impl SyncHandle {
         let error = match (role, joining) {
             (Some(_), _) => None,
             (None, true) => refused,
-            (None, false) => Some(if expired { "this channel is no longer shared" } else { "this Mac was removed from the channel" }.into()),
+            (None, false) => Some(if expired { "this channel is no longer shared" } else { concat!("this ", trs_platform::computer!(), " was removed from the channel") }.into()),
         };
         let online = 1 + self.inner.ctx.registry.peers().iter().filter(|p| p.access(&c.id).is_some()).count() as u32;
         let s = lock(&c.settings).clone();
@@ -876,7 +876,7 @@ impl SyncHandle {
         if !c.may_post(&me) {
             return Err(invalid(match c.role_of(&me) {
                 Some(_) => "Read only members of a channel cannot post",
-                None => "this Mac is not a member of the channel (yet)",
+                None => concat!("this ", trs_platform::computer!(), " is not a member of the channel (yet)"),
             }));
         }
         if kind == MessageKind::Json && serde_json::from_str::<serde_json::Value>(body).is_err() {
@@ -1196,36 +1196,28 @@ fn wake_start(id: FolderId, dir: PathBuf, job: (String, String)) -> Option<std::
 /// command that never reads its input cannot block the writer, and one that exits early cannot raise SIGPIPE in
 /// the app (which, unlike a Rust binary, does not ignore it).
 pub(crate) fn run_wake(command: &str, channel: &FolderId, json: &str, dir: &std::path::Path, timeout: Duration) -> io::Result<()> {
-    use std::os::unix::fs::OpenOptionsExt as _;
-    use std::os::unix::process::CommandExt as _;
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
     let path = dir.join(format!(".wake-{}.json", hex(&random_id())));
     {
-        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path)?;
+        let mut o = std::fs::OpenOptions::new();
+        o.write(true).create_new(true);
+        let mut f = trs_platform::fs::set_create_mode(&mut o, 0o600).open(&path)?;
         f.write_all(json.as_bytes())?;
         f.write_all(b"\n")?;
     }
     let input = std::fs::File::open(&path);
     let _ = std::fs::remove_file(&path);
-    let mut child = Command::new("/bin/sh")
-        .arg("-c")
-        .arg(command)
-        .env("SEEDWELL_CHANNEL", channel.to_string())
-        .stdin(Stdio::from(input?))
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        // Its own process group, so a stop reaches what it started too.
-        .process_group(0)
-        .spawn()?;
+    let input = input?;
+    let mut child = trs_platform::proc::Shell::spawn(command, |c| {
+        c.env("SEEDWELL_CHANNEL", channel.to_string()).stdin(Stdio::from(input)).stdout(Stdio::null()).stderr(Stdio::null());
+    })?;
     let end = std::time::Instant::now() + timeout;
     loop {
         if let Some(status) = child.try_wait()? {
             return if status.success() { Ok(()) } else { Err(io::Error::other(format!("it ended with {status}"))) };
         }
         if std::time::Instant::now() >= end {
-            let _ = Command::new("/bin/kill").args(["-KILL", "--", &format!("-{}", child.id())]).stderr(Stdio::null()).status();
-            let _ = child.kill();
-            let _ = child.wait();
+            child.kill_all();
             return Err(io::Error::other(format!("it ran for more than {} seconds and was stopped", timeout.as_secs())));
         }
         std::thread::sleep(Duration::from_millis(50));
@@ -1441,14 +1433,18 @@ mod tests {
     fn the_wake_up_command_reads_the_message_on_stdin_and_is_stopped_after_its_time() {
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("out");
-        let cmd = format!("cat > '{}'; echo \"$#\" >> '{}'", out.display(), out.display());
+        // (cmd.exe on Windows: findstr copies standard input; a command there gets no arguments either.)
+        #[cfg(unix)]
+        let (cmd, want) = (format!("cat > '{}'; echo \"$#\" >> '{}'", out.display(), out.display()), "{\"body\":\"hi\"}\n0\n");
+        #[cfg(windows)]
+        let (cmd, want) = (format!("findstr \"^\" > \"{}\"", out.display()), "{\"body\":\"hi\"}\n");
         let t = Duration::from_secs(5);
         run_wake(&cmd, &FolderId([1; 32]), "{\"body\":\"hi\"}", dir.path(), t).unwrap();
-        assert_eq!(std::fs::read_to_string(&out).unwrap(), "{\"body\":\"hi\"}\n0\n", "on stdin, no arguments");
+        assert_eq!(std::fs::read_to_string(&out).unwrap().replace("\r\n", "\n"), want, "on stdin, no arguments");
         assert!(run_wake("exit 3", &FolderId([1; 32]), "{}", dir.path(), t).is_err());
         // A big message to a command that exits without reading it: no SIGPIPE, no error from the input.
         let big = format!("{{\"body\":\"{}\"}}", "x".repeat(100_000));
-        run_wake("true", &FolderId([1; 32]), &big, dir.path(), t).unwrap();
+        run_wake(if cfg!(windows) { "rem" } else { "true" }, &FolderId([1; 32]), &big, dir.path(), t).unwrap();
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1, "the input file is gone");
     }
 
@@ -1462,9 +1458,14 @@ mod tests {
         let c = ChannelShared { space: Arc::new(space), store: Mutex::new(store), settings: Mutex::new(Settings::default()), wake: Mutex::new(None), wake_dir: dir.path().to_path_buf() };
         // More than a pipe holds, to a command that never reads: stopped after its time.
         let started = std::time::Instant::now();
-        wake(&c, "sleep 60", format!("{{\"body\":\"{}\"}}", "y".repeat(70 * 1024)));
+        let sleep = if cfg!(windows) { "ping -n 61 127.0.0.1 >NUL" } else { "sleep 60" };
+        wake(&c, sleep, format!("{{\"body\":\"{}\"}}", "y".repeat(70 * 1024)));
         let out = dir.path().join("second");
-        wake(&c, &format!("cat > '{}'", out.display()), "{\"body\":\"next\"}".into());
+        #[cfg(unix)]
+        let copy = format!("cat > '{}'", out.display());
+        #[cfg(windows)]
+        let copy = format!("findstr \"^\" > \"{}\"", out.display());
+        wake(&c, &copy, "{\"body\":\"next\"}".into());
         while !out.exists() || std::fs::read_to_string(&out).unwrap().is_empty() {
             assert!(started.elapsed() < Duration::from_secs(20), "the second message never ran");
             std::thread::sleep(Duration::from_millis(50));

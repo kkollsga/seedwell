@@ -278,10 +278,11 @@ fn missing_staged_file_and_unplugged_destination_volume() {
     );
 
     // Custom target on a volume that is not mounted: refuse, keep the staged data.
+    let unplugged = unplugged_volume();
     let files = vec![
         (FilePath::Relative(vec!["a".into()]), 1000, false),
         (
-            FilePath::Absolute("/Volumes/__trs_unplugged__/Media/x.mkv".into()),
+            FilePath::Absolute(unplugged.join("Media").join("x.mkv")),
             1000,
             false,
         ),
@@ -298,8 +299,19 @@ fn missing_staged_file_and_unplugged_destination_volume() {
         .unwrap()
         .wait();
     assert!(matches!(r, Err(StorageError::MissingRoot)), "{r:?}");
-    assert!(!Path::new("/Volumes/__trs_unplugged__").exists());
+    assert!(!unplugged.exists());
     assert!(h2.file_path(1, Location::Staging).unwrap().exists());
+}
+
+/// The root of a volume that is not mounted: a made-up one under /Volumes on Unix, a free drive
+/// letter on Windows.
+fn unplugged_volume() -> std::path::PathBuf {
+    if cfg!(windows) {
+        let free = ('D'..='Z').rev().map(|d| std::path::PathBuf::from(format!("{d}:\\"))).find(|p| !p.exists());
+        free.expect("a free drive letter")
+    } else {
+        std::path::PathBuf::from("/Volumes/__trs_unplugged__")
+    }
 }
 
 #[test]
@@ -322,6 +334,7 @@ fn foreign_journal_is_rejected() {
 /// Finishing a download across volumes (the copy path of finalize) keeps a staged file's extended
 /// attributes, such as a Finder tag a watch-folder or an app put on it.
 #[test]
+#[cfg(unix)]
 fn finalize_by_copy_keeps_extended_attributes() {
     use std::os::unix::ffi::OsStrExt;
     let dir = tempfile::tempdir().unwrap();

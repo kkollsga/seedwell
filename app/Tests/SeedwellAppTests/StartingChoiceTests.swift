@@ -42,7 +42,7 @@ private func row(_ id: String = "t1", pending: PendingStart? = nil, awaiting: Bo
         ChoiceEngine(
             load: { [self] id, _ in loads += 1; if failLoad { throw CoreError.NotFound(id: id) }; return info(id: id) },
             confirm: { [self] id, files in confirmed.append((id, files)) },
-            cancel: { [self] id in cancelled.append(id) })
+            cancel: { [self] id, _ in cancelled.append(id); return nil })
     }
 }
 
@@ -89,7 +89,7 @@ struct StartingChoiceTests {
         var resolved: [String] = []
         store.didResolve = { resolved.append($0) }
         _ = store.model(for: "t1")
-        try store.cancel("t1")
+        store.cancel("t1")
         #expect(fake.cancelled == ["t1"] && fake.confirmed.isEmpty && store.models["t1"] == nil && resolved == ["t1"])
     }
 
@@ -224,7 +224,7 @@ struct StartingChoiceModelTests {
 }
 
 // "I deselected every episode, then could not tick one": the model side of that path (the click side,
-// an unticked box that ignored clicks, is replayed by qa/capture_chooser.sh).
+// an unticked box that ignored clicks, is HitAreaTests; qa/capture_chooser.sh replays the path in the app).
 @MainActor @Suite("Deselect all, then pick one")
 struct DeselectAllThenPickTests {
     private func model() throws -> ChooserModel {

@@ -27,19 +27,34 @@ fn files_dirs_and_metadata() {
     assert_eq!(fs.lstat("missing").unwrap(), None);
     assert_eq!(fs.lstat("a/f.txt/below").unwrap(), None, "below a file: not there");
 
+    // Where the disk keeps an executable bit it round-trips; elsewhere (Windows) setting it is
+    // accepted and changes nothing.
+    fs.create_dir(".seedwell").unwrap();
+    let exec_bits = trs_sync::path::probe_exec_bits(&fs).unwrap();
     fs.set_exec("a/f.txt", true).unwrap();
-    assert!(fs.lstat("a/f.txt").unwrap().unwrap().exec);
+    assert_eq!(fs.lstat("a/f.txt").unwrap().unwrap().exec, exec_bits);
     fs.set_exec("a/f.txt", false).unwrap();
     assert!(!fs.lstat("a/f.txt").unwrap().unwrap().exec);
     let t = 1_600_000_000_123_456_789;
     fs.set_mtime("a/f.txt", t).unwrap();
-    assert_eq!(fs.lstat("a/f.txt").unwrap().unwrap().mtime_ns, t);
+    // NTFS keeps times in 100 ns steps.
+    let kept = if cfg!(windows) { t / 100 * 100 } else { t };
+    assert_eq!(fs.lstat("a/f.txt").unwrap().unwrap().mtime_ns, kept);
 
-    fs.symlink("f.txt", "a/link").unwrap();
-    assert_eq!(fs.lstat("a/link").unwrap().unwrap().kind, FileKind::Symlink);
-    assert_eq!(fs.read_link("a/link").unwrap(), "f.txt");
+    let link = match fs.symlink("f.txt", "a/link") {
+        Ok(()) => true,
+        Err(e) if e.kind() == io::ErrorKind::Unsupported => {
+            eprintln!("this system may not make symbolic links: {e}");
+            false
+        }
+        Err(e) => panic!("symlink: {e}"),
+    };
+    if link {
+        assert_eq!(fs.lstat("a/link").unwrap().unwrap().kind, FileKind::Symlink);
+        assert_eq!(fs.read_link("a/link").unwrap(), "f.txt");
+    }
     let names: Vec<String> = fs.read_dir("a").unwrap().entries.into_iter().map(|e| e.name).collect();
-    assert_eq!(names, ["f.txt", "link"]);
+    assert_eq!(names, if link { &["f.txt", "link"][..] } else { &["f.txt"][..] });
 
     let h = fs.open_rw("a/f.txt").unwrap();
     h.write_at(10, b"!").unwrap();
@@ -49,7 +64,9 @@ fn files_dirs_and_metadata() {
     assert_eq!(h.read_at(0, &mut buf).unwrap(), 11, "short only at the end");
     drop(h);
     assert_eq!(fs.remove_dir("a").unwrap_err().kind(), io::ErrorKind::DirectoryNotEmpty);
-    fs.remove_file("a/link").unwrap();
+    if link {
+        fs.remove_file("a/link").unwrap();
+    }
     fs.remove_file("a/f.txt").unwrap();
     fs.remove_dir("a").unwrap();
 }
@@ -84,6 +101,7 @@ fn directories_sync() {
     write_all(&fs, "d/f", b"x").unwrap();
     fs.sync_dir("d").unwrap();
     fs.sync_dir("").unwrap();
+    // A missing folder is an error on every system (Windows has nothing to flush, but still says so).
     assert!(fs.sync_dir("missing").is_err());
 }
 
@@ -100,6 +118,7 @@ fn rename_replaces() {
 }
 
 #[test]
+#[cfg(unix)]
 fn names_that_are_not_utf8_are_skipped() {
     let (d, fs) = folder();
     use std::os::unix::ffi::OsStrExt;
@@ -138,7 +157,14 @@ fn escaping_the_root_is_refused() {
     assert_eq!(fs_in.lstat("stolen").unwrap(), None);
 
     // A directory replaced by a symlink to the outside: writes and reads through it are refused.
+    // (On Windows a directory junction: it needs no privilege and is read as a link.)
+    #[cfg(unix)]
     fs_in.symlink("..", "up").unwrap();
+    #[cfg(windows)]
+    {
+        let o = std::process::Command::new("cmd").arg("/C").arg("mklink").arg("/J").arg(inner.join("up")).arg(d.path()).output().unwrap();
+        assert!(o.status.success(), "mklink /J: {o:?}");
+    }
     assert_eq!(fs_in.open_read("up/secret").err().unwrap().kind(), io::ErrorKind::InvalidInput);
     assert_eq!(fs_in.open_rw("up/planted").err().unwrap().kind(), io::ErrorKind::InvalidInput);
     assert!(fs_in.remove_file("up/secret").is_err());

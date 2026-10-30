@@ -13,6 +13,7 @@ trs-http (direct downloads) ─────────────────�
 trs-classify ─▶ trs-state (config, rules, ────┘
                  profiles, stats, redb)
 tools/tracker-probe   (test tool; standalone)
+trs-platform          (the OS seam, below everything: any crate may use it)
 ```
 
 A crate may depend only on crates to its left. Shared primitive types (`InfoHash`, `PeerId`) live in `trs-metainfo`.
@@ -24,7 +25,8 @@ To build in parallel, `trs-tracker`, `trs-wire` and `trs-storage` do **not** dep
 ## 2. Quality bar (every crate, every change)
 
 - `cargo build`, `cargo test`, and `cargo clippy --all-targets -- -D warnings` are clean for the crate you touched.
-- Rust 2024 edition. Each crate has `#![forbid(unsafe_code)]`, except `trs-storage` and `trs-ffi`, where every `unsafe` block carries a `// SAFETY:` comment.
+- Rust 2024 edition. Each crate has `#![forbid(unsafe_code)]`, except `trs-platform`, `trs-storage` and `trs-ffi`, where every `unsafe` block carries a `// SAFETY:` comment.
+- **No operating system outside `trs-platform`** (docs/CROSS-PLATFORM.md): no `std::os::unix`, no `libc`, no error numbers. Ask `trs-platform` (`fs`, `dirs`, `proc`, `signal`, `net`, `ipc`) or match `io::ErrorKind`. The exceptions are the seams the plan names: `trs-fswatch` backends, `trs-control::transport`, and tests of one system's behaviour (`#[cfg(unix)]`).
 - **No panics on untrusted input.** Anything parsed from the network, from `.torrent` files or from disk returns `Result`. Never call `unwrap`/`expect`/indexing on untrusted data. Fuzz every parser (`fuzz/` directory per crate, `cargo fuzz`).
 - **Memory discipline:**
   - No per-item heap allocation in hot paths. Prefer `Box<[u8]>` over `Vec` for fixed data, and use `SmallVec`/arrays where sizes are bounded.

@@ -5,7 +5,8 @@
 //! allocated), marked `H3_PENDING` and given a countdown. The deadline lives here, in the session,
 //! so it holds with no window open; at the deadline the torrent starts exactly as the add would
 //! have. The mark is persisted: after a restart the torrent is held again with a fresh countdown,
-//! and nothing ever starts without the countdown having run.
+//! and nothing ever starts without the countdown having run. A countdown the user stopped stays
+//! stopped across the restart (SPEC §10: the user's pause outlives a quit).
 
 use std::time::{Duration, Instant};
 
@@ -61,11 +62,24 @@ impl Session {
         Duration::from_secs(u64::from(if s == 0 { RESTART_FALLBACK_SECS } else { s }))
     }
 
-    /// Start the countdown of a torrent whose cold record is marked pending.
+    /// Start the countdown of a torrent whose cold record is marked pending; one the user had
+    /// stopped (`H3_COUNTDOWN_STOPPED`, a restart) is set up stopped with `delay` to run.
     pub(super) fn arm_pending(&mut self, id: TorrentId, delay: Duration) {
+        if self.table.get(&id).is_some_and(|e| e.cold.flags3 & H3_COUNTDOWN_STOPPED != 0) {
+            self.pending.insert(id, Countdown { deadline: Instant::now() + delay, stopped_with: Some(delay) });
+            return;
+        }
         let deadline = Instant::now() + delay;
         self.pending.insert(id, Countdown { deadline, stopped_with: None });
         self.schedule(deadline, Job::PendingDue(id));
+    }
+
+    /// Whether this torrent's countdown is stopped (`None`: it has none).
+    pub(super) fn countdown_stopped(&self, id: &TorrentId) -> Option<bool> {
+        if !self.table.get(id).is_some_and(|e| e.cold.pending()) {
+            return None;
+        }
+        self.pending.get(id).map(|c| c.stopped_with.is_some())
     }
 
     /// The row's view of a countdown.
@@ -88,7 +102,7 @@ impl Session {
     fn clear_pending(&mut self, id: TorrentId) {
         self.pending.remove(&id);
         if let Some(e) = self.table.get_mut(&id) {
-            e.cold.flags3 &= !H3_PENDING;
+            e.cold.flags3 &= !(H3_PENDING | H3_COUNTDOWN_STOPPED);
         }
         self.mark_record(id);
     }
@@ -153,6 +167,7 @@ impl Session {
                         c.stopped_with = Some(c.deadline.saturating_duration_since(now));
                         self.sh.emit(EngineEvent::Pending { id, change: PendingChange::Paused });
                     }
+                self.mark_countdown_stopped(id, true);
                 Ok(false)
             }
             PendingAct::Resume => {
@@ -166,6 +181,7 @@ impl Session {
                     self.schedule(at, Job::PendingDue(id));
                     self.sh.emit(EngineEvent::Pending { id, change: PendingChange::Resumed });
                 }
+                self.mark_countdown_stopped(id, false);
                 Ok(false)
             }
             PendingAct::StartNow => {
@@ -191,6 +207,20 @@ impl Session {
                     Ok(false)
                 }
             }
+        }
+    }
+
+    /// Remember on the record whether the user stopped the countdown (it is kept across a restart).
+    fn mark_countdown_stopped(&mut self, id: TorrentId, stopped: bool) {
+        let Some(e) = self.table.get_mut(&id) else { return };
+        let before = e.cold.flags3;
+        if stopped {
+            e.cold.flags3 |= H3_COUNTDOWN_STOPPED;
+        } else {
+            e.cold.flags3 &= !H3_COUNTDOWN_STOPPED;
+        }
+        if e.cold.flags3 != before {
+            self.mark_record(id);
         }
     }
 }

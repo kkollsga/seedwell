@@ -8,6 +8,7 @@ publish = false
 description = "Folder sync core: scanner, chunker, index, planner, puller and conflict rules over an injected filesystem (SPEC 7G)"
 
 [dependencies]
+trs-platform = { path = "../platform" }
 # Each dependency is justified in README.md.
 trs-sync-proto = { path = "../sync-proto" }
 redb = "4"

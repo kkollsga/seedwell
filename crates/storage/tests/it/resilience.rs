@@ -309,7 +309,7 @@ fn resume_fingerprints_detect_changes() {
         .unwrap();
     // Grown file.
     std::fs::OpenOptions::new()
-        .append(true)
+        .write(true) // an append-only handle may not set the length on Windows
         .open(path_of(dir.path(), &s, 0))
         .unwrap()
         .set_len(300_001)

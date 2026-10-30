@@ -28,52 +28,34 @@ struct InlineField: View {
     }
 }
 
-/// The menus of a tracker in the sidebar, as one description (the window and QA both render it).
-enum TrackerMenus {
-    @MainActor static func entries(for t: TrackerSummary, commands: Commands) -> [MenuEntry] {
-        let fav = commands.favorites
-        if t.favorite {
-            return [
-                .item("Info") { fav.openInfo(t.id) },
-                .item("Rename") { fav.beginRename(t.id) },
-                .separator,
-                .item("Remove from Favorites", role: .destructive) { fav.askRemove(t.id) },
-            ]
-        }
-        if t.id != "public" && t.id != "other-private" {
-            return [
-                .item("Info") { fav.openInfo(t.id) },
-                .item("Save as Favorite") { fav.saveAsFavorite(t.id) },
-            ]
-        }
-        return []
-    }
-}
-
 /// A tracker in the sidebar. A favorite has a small star; while it is being renamed the label is a field.
 struct TrackerRow: View {
-    let tracker: TrackerSummary
+    let item: SidebarItem
     let editing: FavoriteEditing
 
     var body: some View {
+        let id = item.trackerID
         HStack(spacing: 8) {
-            Image(systemName: icon)
+            Image(systemName: SidebarSymbols.symbol(item.icon))
                 .frame(width: 20)
-                .foregroundStyle(tracker.favorite ? Color.accentColor.opacity(0.85) : Color.secondary)
-            if editing.target == .sidebarName(tracker.id) {
-                InlineField(editing: editing, target: .sidebarName(tracker.id))
+                .foregroundStyle(item.icon == .favoriteTracker ? Color.accentColor.opacity(0.85) : Color.secondary)
+            if editing.target == .sidebarName(id) {
+                InlineField(editing: editing, target: .sidebarName(id))
             } else {
-                Text(tracker.name).lineLimit(1)
+                Text(item.title).lineLimit(1)
             }
             Spacer(minLength: 4)
-            Text("\(tracker.count)").foregroundStyle(.secondary).monospacedDigit()
+            Text("\(item.count ?? 0)").foregroundStyle(.secondary).monospacedDigit()
         }
         .accessibilityElement(children: .combine)
     }
+}
 
-    private var icon: String {
-        if tracker.favorite { return "star.fill" }
-        return tracker.id == "public" ? "globe" : "dot.radiowaves.left.and.right"
+extension SidebarItem {
+    /// The tracker of a tracker's item ("" for other places).
+    var trackerID: String {
+        if case .tracker(let id) = place { return id }
+        return ""
     }
 }
 

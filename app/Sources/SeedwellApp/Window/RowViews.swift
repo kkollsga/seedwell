@@ -15,163 +15,9 @@ struct PlayGlyph: View {
     }
 }
 
-enum RowStyle {
-    case download, queued, recent, popular, active, dormant, error, dead, stopped
-
-    init(_ g: SeedGroup) {
-        switch g {
-        case .popular: self = .popular
-        case .active: self = .active
-        case .dormant: self = .dormant
-        case .error: self = .error
-        case .dead: self = .dead
-        case .stopped: self = .stopped
-        }
-    }
-}
-
 extension TransferRow {
-    /// The extension whose Finder icon the row shows: the file's own; for a multi-file torrent whose main
-    /// content is video, the largest video's (the same icon a single-file video row gets); else a folder.
-    var iconExt: String { fileExt.isEmpty && hasVideo && !videoExt.isEmpty ? videoExt : fileExt }
-
-    /// The tracker said no or cannot be reached: Ask Tracker Again is offered.
-    var canAskAgain: Bool {
-        kind == .torrent && (trackerHalted || (errorTransient && state == .downloading) || seedGroup == .error || seedGroup == .dead)
-    }
-
-    /// A download that is not moving, in the engine's words ("Tracker: Unregistered torrent",
-    /// "Waiting for peers"): the progress, then why. `nil` while data flows or for anything but a download.
-    var downloadWaiting: (lead: String, note: String, tail: String)? {
-        guard let note = waitingNote, state == .downloading || waitingIsError || errorTransient, error == nil else { return nil }
-        let lead = "\(Fmt.progress(done: progressDone, total: progressSize)) — "
-        let tail = errorTransient && !trackerHalted ? retryNote.map { " · " + $0 } ?? "" : ""
-        return (lead, note, tail)
-    }
-
-    /// What the tracker side is doing after a failure, quietly: "retrying in 9 min", then "retrying now…" (Get Info adds the attempt). Nil when no retry is planned.
-    var retryNote: String? { retryNote(now: Date()) }
-
-    func retryNote(now: Date) -> String? {
-        guard let secs = retryInSecs else { return nil }
-        if secs == 0 || isAnnouncing(now: now) { return "retrying now…" }
-        return "retrying in \(Fmt.until(secs))"
-    }
-
-    /// An announce has been in flight for over half a second (shorter ones never show, so nothing flickers).
-    func isAnnouncing(now: Date) -> Bool {
-        guard let since = announcingSinceMs else { return false }
-        return now.timeIntervalSince1970 * 1000 - Double(since) > 500
-    }
-
-    /// What to do about a download that stopped with an error (not enough space, a disk problem).
-    static let retryHint = " · Resume to try again"
-
-    /// "8 / 57 peers": the connected peers against the peer addresses known (always both numbers, "0 / 0 peers"
-    /// included) while a download runs. Empty otherwise. Downloads only: a Sharing row
-    /// has its own short line (`sharingLine`). The rate is not here: it has its own slot (`rateSlot`).
-    func liveSuffix(_ style: RowStyle) -> String {
-        guard style == .download, state == .downloading else { return "" }
-        return Fmt.peers(connected: peers, known: knownPeers)
-    }
-
-    /// The live rate a row shows at the right of its name, big and in the primary colour: "↓ 2.1 MB/s" while a
-    /// download moves data, "↑ 1.2 MB/s" while a sharing row uploads. Nil when nothing flows.
-    func headlineRate(_ style: RowStyle) -> String? {
-        guard let slot = rateSlot(style), slot.active else { return nil }
-        return slot.text
-    }
-
-    /// The rate slot at the right of a row, always there for a download (↓) and a sharing row (↑): "↑ 1.2 MB/s" in
-    /// the primary colour while data flows, "–" in the secondary colour when idle. Nil for rows without one
-    /// (held, queued, finished, errors).
-    func rateSlot(_ style: RowStyle) -> (text: String, active: Bool)? {
-        switch style {
-        case .download:
-            guard !isHeld, !awaitingChoice, pending == nil else { return nil }
-            let on = state == .downloading && downRate > 0
-            return (Fmt.liveRate(on ? downRate : 0, "↓"), on)
-        case .popular, .active, .dormant, .stopped:
-            let on = movingPercent == nil && upRate > 0
-            return (Fmt.liveRate(on ? upRate : 0, "↑"), on)
-        default: return nil
-        }
-    }
-
-    /// Second line of a Sharing row: "1 peer · Ratio 0.27" (the upload rate stands out at the right of the
-    /// name, `headlineRate`). The tracker, the goal, the seeding time and the swarm are in Get Info.
-    var sharingLine: String {
-        if let p = movingPercent { return "Moving… \(p)%" }
-        let goal = ratioGoal.map { " of \(Fmt.goal($0))" } ?? ""
-        return "\(Fmt.peers(connected: peers, known: knownPeers)) · Ratio \(Fmt.ratio(ratio))\(goal)"
-    }
-
-    /// Third line of a Sharing row: "3 of 24 files · 1.8 GB of 14 GB downloaded · 3 GB uploaded". The
-    /// files are the ones fully downloaded, of all files; a single file leaves them out. The sizes
-    /// are of the whole torrent.
-    var sharingTotalsLine: String {
-        var parts: [String] = []
-        if fileCount > 1 { parts.append("\(filesDone) of \(fileCount) files") }
-        // Against the whole torrent, skipped files included.
-        let total = max(totalBytes, sizeBytes)
-        let held = min(max(heldBytes, doneBytes), total)
-        let down = held >= total ? Fmt.bytes(total) : Fmt.bytes(held) + " of " + Fmt.bytes(total)
-        parts.append(down + " downloaded")
-        parts.append(Fmt.bytes(uploadedBytes) + " uploaded")
-        return parts.joined(separator: " · ")
-    }
-
-    /// Grey second line of a row.
-    func statusLine(_ style: RowStyle, showTracker: Bool = true, now: Date = Date()) -> String {
-        let line = baseLine(style, showTracker: showTracker, now: now)
-        let live = liveSuffix(style)
-        var out = live.isEmpty ? line : line + " · " + live
-        // One rule for every torrent: a quiet "Announcing…" while an announce is in flight, nothing otherwise.
-        // After a failure the retry text says "retrying now…" instead, so it is not doubled.
-        if isAnnouncing(now: now), retryInSecs == nil, style != .recent, style != .queued, style != .error, style != .dead {
-            out += " · Announcing…"
-        }
-        return out
-    }
-
-    private func baseLine(_ style: RowStyle, showTracker: Bool, now: Date) -> String {
-        let size = Fmt.bytes(sizeBytes)
-        let goal = ratioGoal.map { " of \(Fmt.goal($0))" } ?? ""
-        switch style {
-        case .download:
-            if awaitingChoice { return "Choose what to download…" }
-            if let p = pending {
-                // Starting in 7 s (the number follows the snapshot, once a second)
-                return StartingText.line(remaining: p.remaining(at: now), paused: p.paused) + (p.paused ? " — won't start until you resume" : "")
-            }
-            if let p = movingPercent { return "Moving… \(p)%" }
-            if let error { return state == .error ? error + Self.retryHint : error }
-            if let w = downloadWaiting { return w.lead + w.note + w.tail }
-            switch state {
-            case .metadata: return "Fetching metadata…"
-            case .checking: return "Checking files… \(percent)%"
-            case .paused: return "Paused — \(Fmt.progress(done: progressDone, total: progressSize))"
-            default: return "\(Fmt.progress(done: progressDone, total: progressSize)) — \(Fmt.remaining(etaSecs))"
-            }
-        case .queued:
-            let lead = kind == .direct ? "\(trackerName) — " : ""
-            if let p = movingPercent { return "Moving… \(p)%" }
-            return lead + (state == .paused ? "Paused" : "Waiting") + " — \(size)"
-        case .recent:
-            let when = finishedAt.map { Fmt.ago($0) } ?? ""
-            return "\(size) — \(when) · \(category.plural)"
-        case .popular, .active, .dormant:
-            return sharingLine
-        case .error:
-            var parts = (showTracker ? [trackerName] : []) + [error ?? "Problem"]
-            if let note = retryNote(now: now) { parts.append(note) }
-            return parts.joined(separator: " · ")
-        case .dead:
-            return ((showTracker ? [trackerName] : []) + [error ?? "Gone"]).joined(separator: " · ")
-        case .stopped:
-            return "Ratio \(Fmt.ratio(ratio))\(goal) · Stopped" + (idleStopped.map { " — \($0)" } ?? "")
-        }
-    }
+    /// The tracker said no or cannot be reached: Ask Tracker Again is offered (Get Info).
+    var canAskAgain: Bool { rowCanAskAgain(row: self) }
 }
 
 /// Finder's own icon for the file type; direct downloads get a small link badge.
@@ -220,6 +66,7 @@ struct PauseRing: View {
     let paused: Bool
     /// The row stopped on an error: the button retries (same action as resume, distinct glyph).
     var retry = false
+    let help: String
     let action: () -> Void
 
     var body: some View {
@@ -237,24 +84,20 @@ struct PauseRing: View {
             .contentShape(Circle())
         }
         .buttonStyle(.plain)
-        .help(retry ? "Try again" : paused ? "Resume" : "Pause")
+        .help(help)
     }
 }
 
 struct TransferRowView: View {
-    let row: TransferRow
-    let style: RowStyle
-    let selected: Bool
+    let row: ListRow
     let commands: Commands
-    @Binding var infoID: String?
-    /// False inside a tracker's own view, where every row would repeat its name.
-    var showTracker = true
+    /// The info button; and the popover was dismissed (the row's `infoOpen` says whether it is open).
+    let openInfo: () -> Void
+    let infoClosed: () -> Void
     /// A torrent with several files: the triangle that opens its file list. Nil = no triangle (its column stays).
     var disclosure: (expanded: Bool, toggle: () -> Void)?
     /// A click on the category pill (filters the list to it); nil = the pill is not clickable.
     var categoryAction: ((Category) -> Void)?
-    /// The list is filtered to this row's category: the pill shows it.
-    var categoryActive = false
     @State private var hovering = false
     /// Get Info opens below the row, or above it when the screen has no room below (PopoverPlacement).
     @State private var infoEdge: Edge = .bottom
@@ -262,9 +105,6 @@ struct TransferRowView: View {
 
     /// Wide enough for "↑ 999.9 MB/s", so the text beside it never moves as the value changes.
     static let rateWidth: CGFloat = 96
-
-    private var dimmed: Bool { style == .queued || style == .dormant || style == .stopped }
-    private var attention: Bool { row.awaitingChoice || (style == .download && row.error != nil) }
 
     var body: some View {
         HStack(spacing: 14) {
@@ -274,230 +114,199 @@ struct TransferRowView: View {
                 } else {
                     Color.clear.frame(width: FileLayout.triangle, height: 1)
                 }
-                FileIconView(ext: row.iconExt, linked: row.kind == .direct)
-                    .opacity(dimmed ? 0.55 : 1)
+                FileIconView(ext: row.iconExt, linked: row.linked)
+                    .opacity(row.dimmed ? 0.55 : 1)
             }
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
-                    if row.awaitingChoice {
+                    if row.attentionDot {
                         Circle().fill(Color.orange).frame(width: 8, height: 8).accessibilityHidden(true)
                     }
-                    Text(row.displayName)
-                        .font(.system(size: 13.5, weight: dimmed ? .regular : .medium))
-                        .foregroundStyle(dimmed ? .secondary : .primary)
+                    Text(row.title)
+                        .font(.system(size: 13.5, weight: row.dimmed ? .regular : .medium))
+                        .foregroundStyle(row.dimmed ? .secondary : .primary)
                         .lineLimit(1)
                         .truncationMode(.middle)
-                        .help(row.name == row.displayName ? "" : row.name)
-                    RowCategoryPill(category: row.category, active: categoryActive, action: categoryAction)
+                        .help(row.titleHelp ?? "")
+                    RowCategoryPill(pill: row.pill, action: categoryAction)
                         .layoutPriority(1)
                 }
                 statusText
                     .font(.system(size: 12))
                     .monospacedDigit()
-                    .foregroundStyle(attention ? Color.orange : .secondary)
                     .lineLimit(1)
-                if style == .popular || style == .active || style == .dormant || style == .stopped {
-                    Text(row.sharingTotalsLine)
+                if let detail = row.detail {
+                    Text(detail)
                         .font(.system(size: 12))
                         .monospacedDigit()
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
-                if style == .download, !row.isHeld { ThinProgress(value: row.fraction).padding(.top, 5) }
+                if let progress = row.progress { ThinProgress(value: progress).padding(.top, 5) }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            if let slot = row.rateSlot(style) {
+            if let slot = row.rate {
                 Text(slot.text)
                     .font(.system(size: 13, weight: .medium)).monospacedDigit()
                     .foregroundStyle(slot.active ? Color.primary : Color.secondary)
                     .lineLimit(1)
                     .frame(width: Self.rateWidth, alignment: .trailing)
-                    .help(style == .download ? "Download speed" : "Upload speed")
+                    .help(slot.help)
             }
-            trailing
+            ForEach(row.controls.indices, id: \.self) { i in control(row.controls[i]) }
         }
         .padding(.leading, FileLayout.lead)
         .padding(.trailing, 10)
         .padding(.vertical, 9)
-        .background(RoundedRectangle(cornerRadius: 10).fill(selected ? Color.accentColor.opacity(0.22) : .clear))
+        .background(RoundedRectangle(cornerRadius: 10).fill(row.selected ? Color.accentColor.opacity(0.22) : .clear))
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
         .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { frame in
             rowFrame = frame
-            if infoID == row.id { infoEdge = PopoverPlacement.edge(rowInWindow: frame, height: InfoCard.maxHeight + 60) }
+            if row.infoOpen { infoEdge = PopoverPlacement.edge(rowInWindow: frame, height: InfoCard.maxHeight + 60) }
         }
-        .onChange(of: infoID == row.id) { _, open in
+        .onChange(of: row.infoOpen) { _, open in
             guard open else { return }
             infoEdge = PopoverPlacement.edge(rowInWindow: rowFrame, height: InfoCard.maxHeight + 60)
         }
-        .popover(isPresented: Binding(get: { infoID == row.id }, set: { if !$0 { infoID = nil } }), arrowEdge: infoEdge) {
-            InfoCard(core: commands.core, row: row, commands: commands)
+        .popover(isPresented: Binding(get: { row.infoOpen }, set: { if !$0 { infoClosed() } }), arrowEdge: infoEdge) {
+            InfoCard(core: commands.core, row: row.transfer, commands: commands)
         }
     }
 
-    /// Problems that need the user (a dead tracker, a disk error) colour the reason red; a temporary tracker
-    /// outage stays in the secondary colour: "tracker-z.cc · Bad gateway · retrying in 9 min".
+    /// The grey line in the core's colours: problems that need the user red, a row that waits for them orange.
     private var statusText: Text {
-        switch style {
-        case .error, .dead:
-            let calm = style == .error && row.errorTransient
-            let reason = Text(row.error ?? (style == .dead ? "Gone" : "Problem"))
-                .foregroundStyle(calm ? Color.secondary : Color.red)
-            var t = Text(showTracker ? row.trackerName + " · " : "") + reason
-            if style == .error, let note = row.retryNote { t = t + Text(" · " + note) }
-            return t
-        case .download where row.downloadWaiting != nil && row.waitingIsError:
-            // The reason alone takes the error colour: "0.0 of 1.9 GB — **Tracker: Unregistered torrent**"
-            let w = row.downloadWaiting!
-            return Text(w.lead) + Text(w.note).foregroundStyle(Color.red) + Text(w.tail)
-        default:
-            return Text(row.statusLine(style, showTracker: showTracker))
+        row.status.reduce(Text("")) { line, run in
+            switch run.tone {
+            case .secondary: line + Text(run.text).foregroundStyle(.secondary)
+            case .attention: line + Text(run.text).foregroundStyle(Color.orange)
+            case .problem: line + Text(run.text).foregroundStyle(Color.red)
+            }
         }
     }
 
-    @ViewBuilder private var trailing: some View {
-        switch style {
-        case .download:
-            if row.awaitingChoice {
-                HeldRowActions(id: row.id, commands: commands)
-            } else if row.pending != nil {
-                HeldRowActions(id: row.id, commands: commands, awaiting: false)
-            } else {
-                if row.canAskAgain { askAgainButton }
-                if selected || hovering { infoButton }
-                // Only next to a pause glyph: beside a paused row's resume triangle it would read as a
-                // second resume button (Play stays in the context menu).
-                if row.showsPlayButton && row.state != .paused && row.state != .error { playRing }
-                PauseRing(fraction: row.fraction, paused: row.state == .paused || row.state == .error, retry: row.state == .error) {
-                    if row.state == .paused || row.state == .error { commands.core.resume(ids: [row.id]) } else { commands.core.pause(ids: [row.id]) }
+    /// One control at the right of the row, as the core lists them.
+    @ViewBuilder private func control(_ c: RowControl) -> some View {
+        let t = row.transfer
+        switch c.kind {
+        case .askAgain:
+            // The way out of a halted tracker: ask once more now (the tracker's minimum interval still applies).
+            Button(c.title ?? "") { commands.askTrackerAgain([t]) }
+                .controlSize(.small)
+                .help(c.help)
+        case .getInfo:
+            if c.keepsSpace {
+                // A fixed slot so the text never shifts.
+                ZStack {
+                    if row.selected || hovering { infoButton(c) }
                 }
+                .frame(width: 22, height: 22)
+            } else if !c.hoverOnly || row.selected || hovering {
+                infoButton(c)
             }
-        case .queued:
-            if selected || hovering { infoButton }
-        case .recent:
-            // Play sits right before the magnifier, the same plain accent glyph, so the two read as a pair.
-            if row.showsPlayButton { playButton }
-            Button { commands.reveal([row]) } label: {
+        case .playWhileDownloading:
+            // The same plain triangle as on finished rows, next to the pause ring.
+            Button { commands.playButtonPressed(t) } label: {
+                PlayGlyph().frame(width: 22, height: 26).contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(c.help)
+            .accessibilityLabel(c.accessibility ?? c.help)
+        case .play:
+            // Play in the user's own player (SPEC §7F.3): a finished video opens, like Show in Finder next to it.
+            Button { commands.playButtonPressed(t) } label: {
+                PlayGlyph().frame(width: 22, height: 22).contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(c.help)
+            .accessibilityLabel(c.accessibility ?? c.help)
+            .padding(.trailing, t.isSharing ? 0 : 6)
+        case .pauseRing:
+            let ring = c.ring ?? RingLook(fraction: 0, paused: false, retry: false)
+            PauseRing(fraction: ring.fraction, paused: ring.paused, retry: ring.retry, help: c.help) {
+                if ring.paused { commands.core.resume(ids: [t.id]) } else { commands.core.pause(ids: [t.id]) }
+            }
+        case .reveal:
+            Button { commands.reveal([t]) } label: {
                 Image(systemName: "magnifyingglass").font(.system(size: 14, weight: .medium)).foregroundStyle(Color.accentColor)
             }
             .buttonStyle(.plain)
-            .help("Show in Finder")
+            .help(c.help)
             .padding(.trailing, 4)
-        case .popular, .active:
-            // The rate and peers are in the grey line; the right edge keeps only controls.
-            if row.showsPlayButton { playButton }
-            infoSlot
-        case .dormant:
-            // Play first, then the moon in a fixed spot next to the info slot, so the moon lines
-            // up on every resting row whether or not it has a Play button.
-            if row.showsPlayButton { playButton }
+        case .lowPower:
             Image(systemName: "moon.fill").font(.system(size: 11)).foregroundStyle(.secondary)
                 .frame(width: 16)
-                .help("Low power: resting, wakes instantly")
-            infoSlot
-        case .error:
+                .help(c.help)
+        case .errorBadge:
             Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 13)).foregroundStyle(Color.orange).padding(.trailing, 4)
-                .help(row.error ?? "Problem")
-        case .dead:
-            Image(systemName: "xmark.octagon.fill").font(.system(size: 13)).foregroundStyle(Color.red).help(row.error ?? "Gone")
-            if row.canAskAgain { askAgainButton }
-            Button("Remove…") { commands.confirmRemove([row], deleteFiles: false) }.controlSize(.small)
-                .help("Remove this torrent from Seedwell; asks under its row first, and keeps the files")
-        case .stopped:
-            if row.showsPlayButton { playButton }
-            Button { commands.core.resume(ids: [row.id]) } label: {
+                .help(c.help)
+        case .deadBadge:
+            Image(systemName: "xmark.octagon.fill").font(.system(size: 13)).foregroundStyle(Color.red).help(c.help)
+        case .remove:
+            Button(c.title ?? "") { commands.confirmRemove([t], deleteFiles: false) }.controlSize(.small)
+                .help(c.help)
+        case .resumeSharing:
+            Button { commands.core.resume(ids: [t.id]) } label: {
                 Image(systemName: "play.circle").font(.system(size: 18, weight: .light)).foregroundStyle(Color.accentColor)
             }
             .buttonStyle(.plain)
-            .help("Resume sharing")
+            .help(c.help)
             .padding(.trailing, 2)
+        case .choiceActions:
+            HeldRowActions(id: t.id, commands: commands, startHelp: c.help)
+        case .countdownActions:
+            HeldRowActions(id: t.id, commands: commands, awaiting: false, startHelp: c.help)
         }
     }
 
-    /// Play in the user's own player (SPEC §7F.3): a finished video opens, like Show in Finder next to it.
-    private var playButton: some View {
-        Button { commands.playButtonPressed(row) } label: {
-            PlayGlyph().frame(width: 22, height: 22).contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .help("Play")
-        .accessibilityLabel("Play")
-        .padding(.trailing, row.isSharing ? 0 : 6)
-    }
-
-    /// Play while downloading: the same plain triangle as on finished rows, next to the pause ring.
-    private var playRing: some View {
-        Button { commands.playButtonPressed(row) } label: {
-            PlayGlyph().frame(width: 22, height: 26).contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .help("Play while downloading")
-        .accessibilityLabel("Play")
-    }
-
-    /// Get Info on a Sharing row: shown on hover or selection, in a fixed slot so the text never shifts.
-    private var infoSlot: some View {
-        ZStack {
-            if selected || hovering { infoButton }
-        }
-        .frame(width: 22, height: 22)
-    }
-
-    /// The way out of a halted tracker: ask once more now (the tracker's minimum interval still applies).
-    private var askAgainButton: some View {
-        Button("Ask Again") { commands.askTrackerAgain([row]) }
-            .controlSize(.small)
-            .help("Ask the tracker again now. Seedwell never does this by itself after a tracker said no, and asks at most once a minute.")
-    }
-
-    private var infoButton: some View {
-        Button { infoID = row.id } label: {
+    private func infoButton(_ c: RowControl) -> some View {
+        Button(action: openInfo) {
             Image(systemName: "info.circle").font(.system(size: 19, weight: .light)).foregroundStyle(Color.accentColor)
         }
         .buttonStyle(.plain)
-        .help("Get Info")
+        .help(c.help)
     }
 }
 
 /// The row's category as a small capsule after its name. A click filters the list to that category (and
 /// clears the filter when it is on already); the context menu's Category submenu changes it.
 struct RowCategoryPill: View {
-    let category: Category
-    var active = false
+    let pill: RowPill
     var action: ((Category) -> Void)?
     @State private var hovering = false
 
     var body: some View {
-        let pill = HStack(spacing: 3) {
-            Image(systemName: category.symbol).font(.system(size: 8.5, weight: .medium))
-            Text(category.label).font(.system(size: 10.5, weight: .medium))
+        let active = pill.active
+        let capsule = HStack(spacing: 3) {
+            Image(systemName: pill.category.symbol).font(.system(size: 8.5, weight: .medium))
+            Text(pill.label).font(.system(size: 10.5, weight: .medium))
         }
         .foregroundStyle(active ? Color.accentColor : .secondary)
         .padding(.horizontal, 6).padding(.vertical, 1.5)
         .background(Capsule().fill(active ? Color.accentColor.opacity(0.16) : Color.primary.opacity(hovering && action != nil ? 0.12 : 0.07)))
         .lineLimit(1).fixedSize()
         if let action {
-            Button { action(category) } label: { pill.contentShape(Capsule()) }
+            Button { action(pill.category) } label: { capsule.contentShape(Capsule()) }
                 .buttonStyle(.plain)
                 .onHover { hovering = $0 }
-                .help(active ? "Showing only \(category.label). Click to show all" : "Show only \(category.label)")
-                .accessibilityLabel("Category \(category.label)")
+                .help(pill.help)
+                .accessibilityLabel(pill.accessibility)
         } else {
-            pill
+            capsule
         }
     }
 }
 
 /// "TV ×" above a filtered list: the category being shown, and the way back.
 struct CategoryFilterChip: View {
-    let category: Category
+    let chip: FilterChip
     let clear: () -> Void
 
     var body: some View {
         Button(action: clear) {
             HStack(spacing: 5) {
-                Image(systemName: category.symbol).font(.system(size: 10, weight: .medium))
-                Text(category.label).font(.system(size: 11.5, weight: .medium))
+                Image(systemName: chip.category.symbol).font(.system(size: 10, weight: .medium))
+                Text(chip.label).font(.system(size: 11.5, weight: .medium))
                 Image(systemName: "xmark").font(.system(size: 8.5, weight: .bold))
             }
             .foregroundStyle(Color.accentColor)
@@ -506,7 +315,7 @@ struct CategoryFilterChip: View {
             .contentShape(Capsule())
         }
         .buttonStyle(.plain)
-        .help("Showing only \(category.label). Click to show all")
-        .accessibilityLabel("Category filter \(category.label), clear")
+        .help(chip.help)
+        .accessibilityLabel(chip.accessibility)
     }
 }

@@ -257,7 +257,7 @@ pub async fn run(cmd: Cmd, g: &Global) -> R {
         }
         Cmd::Add { path } => {
             let (raw, d): (_, SyncFolderDto) = ask(&mut c, Request::SyncAdd(SyncAddParams { path: abs(&path)? })).await?;
-            show(g, &raw, || format!("Sharing {} from {} (this Mac is its owner).\nInvite another device: seedwell sync share {}", d.name, d.path, first_group(&d.id)));
+            show(g, &raw, || format!(concat!("Sharing {} from {} (this ", trs_platform::computer!(), " is its owner).\nInvite another device: seedwell sync share {}"), d.name, d.path, first_group(&d.id)));
         }
         Cmd::Join { key, to } => {
             let key = if key == "-" { key_from_stdin()? } else { key };
@@ -413,22 +413,16 @@ pub fn parse_relay(args_in: Vec<String>) -> Result<RelayArgs, Usage> {
     Ok(a)
 }
 
-/// Where the relay keeps its key by default: next to Seedwell's state on macOS, `~/.local/state/seedwell`
-/// elsewhere.
+/// Where the relay keeps its key by default: in Seedwell's state folder.
 #[cfg(feature = "daemon")]
 fn default_relay_key_file() -> R<std::path::PathBuf> {
-    let home = std::env::var_os("HOME").map(std::path::PathBuf::from).ok_or_else(|| CliError::plain(1, "HOME is not set; give --key-file"))?;
-    Ok(if cfg!(target_os = "macos") {
-        home.join("Library/Application Support/Seedwell/relay.key")
-    } else {
-        home.join(".local/state/seedwell/relay.key")
-    })
+    let dir = trs_platform::dirs::state_dir().ok_or_else(|| CliError::plain(1, "no home folder is set; give --key-file"))?;
+    Ok(dir.join("relay.key"))
 }
 
 /// The relay's key: read from `path`, or made on first start and written there (0600).
 #[cfg(feature = "daemon")]
 fn relay_key(path: &std::path::Path) -> R<trs_sync_proto::device::DeviceKey> {
-    use std::io::Read as _;
     use trs_sync_net::secrets::{FileSecrets, SecretStore};
     use trs_sync_proto::device::DeviceKey;
     let fail = |e: &dyn std::fmt::Display| CliError::plain(1, format!("relay key {}: {e}", path.display()));
@@ -439,9 +433,8 @@ fn relay_key(path: &std::path::Path) -> R<trs_sync_proto::device::DeviceKey> {
     if let Some(pkcs8) = store.get("relay").map_err(|e| fail(&e))? {
         return DeviceKey::from_pkcs8(&pkcs8).map_err(|e| fail(&format!("{e:?}")));
     }
-    let mut seed = [0u8; 32];
-    std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut seed)).map_err(|e| fail(&e))?;
-    let k = DeviceKey::from_seed(&seed);
+    // The system's random source (there is no /dev/urandom on Windows).
+    let k = DeviceKey::generate_system().map_err(|e| fail(&format!("{e:?}")))?;
     store.put("relay", &k.to_pkcs8()).map_err(|e| fail(&e))?;
     Ok(k)
 }
@@ -450,7 +443,6 @@ fn relay_key(path: &std::path::Path) -> R<trs_sync_proto::device::DeviceKey> {
 /// `seedwell relay ready address=relay://<ip:port>#<relay id> pid=<pid>`.
 #[cfg(feature = "daemon")]
 pub async fn relay(a: RelayArgs) -> R {
-    use tokio::signal::unix::{SignalKind, signal};
     use trs_sync_net::RelayOptions;
     let key_file = match &a.key_file {
         Some(k) => std::path::PathBuf::from(k),
@@ -467,12 +459,10 @@ pub async fn relay(a: RelayArgs) -> R {
     let opts = RelayOptions::new(key);
     println!("seedwell relay ready address={} pid={}", opts.url(&local.to_string()), std::process::id());
     let _ = std::io::stdout().flush();
-    let mut term = signal(SignalKind::terminate()).map_err(|e| CliError::plain(1, e.to_string()))?;
-    let mut int = signal(SignalKind::interrupt()).map_err(|e| CliError::plain(1, e.to_string()))?;
+    let mut stop = trs_platform::signal::Shutdown::new().map_err(|e| CliError::plain(1, e.to_string()))?;
     tokio::select! {
         _ = trs_sync_net::run_relay(listener, opts) => {}
-        _ = term.recv() => {}
-        _ = int.recv() => {}
+        _ = stop.recv() => {}
     }
     eprintln!("seedwell relay: stopped");
     Ok(())
@@ -534,7 +524,7 @@ pub fn list(l: &SyncListDto) -> String {
     let mut o = String::new();
     let _ = writeln!(
         o,
-        "This Mac: {}  (device {})  port {}{}",
+        concat!("This ", trs_platform::computer!(), ": {}  (device {})  port {}{}"),
         l.device_name,
         first_group(&l.device_id),
         l.port,
@@ -668,7 +658,7 @@ pub fn members(m: &SyncMembersDto) -> String {
     let _ = writeln!(o, "Devices of {}:", m.name);
     for d in &m.members {
         let name = crate::chat::with_user(&d.user, if d.name.is_empty() { "(not met yet)" } else { &d.name });
-        let tail = if d.me { "  (this Mac)" } else if d.online { "  (online)" } else { "" };
+        let tail = if d.me { concat!("  (this ", trs_platform::computer!(), ")") } else if d.online { "  (online)" } else { "" };
         let until = d.expires_at.map(|t| format!("  ({})", shared_until(t))).unwrap_or_default();
         let _ = writeln!(o, "  {:<7}  {:<13} {name}{tail}{until}", first_group(&d.device_id), role(&d.role));
     }
@@ -696,8 +686,10 @@ pub fn settings(s: &SyncSettingsDto) -> String {
 
 fn removed(r: &SyncRemovedDto) -> String {
     match &r.trashed_to {
-        Some(t) => format!("{} no longer syncs on this Mac; the folder is in the Trash ({t}).", r.name),
-        None => format!("{} no longer syncs on this Mac; its files stay in {}.", r.name, r.path),
+        Some(t) => format!(concat!("{} no longer syncs on this ", trs_platform::computer!(), "; the folder is in the ", trs_platform::trash!(), " ({t})."), r.name, t = t),
+        // The Recycle Bin has no path to show.
+        None if r.files == "trashed" => format!(concat!("{} no longer syncs on this ", trs_platform::computer!(), "; the folder is in the ", trs_platform::trash!(), "."), r.name),
+        None => format!(concat!("{} no longer syncs on this ", trs_platform::computer!(), "; its files stay in {}."), r.name, r.path),
     }
 }
 

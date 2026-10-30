@@ -7,11 +7,10 @@ use std::time::Duration;
 
 use serde::de::DeserializeOwned;
 use serde_json::Value;
-use tokio::io::{AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
-use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::io::{AsyncWriteExt, BufReader, ReadHalf, WriteHalf};
 
 use crate::limits::{LineRead, read_line};
+use crate::transport::Conn;
 use crate::proto::*;
 use crate::types::{EventDto, HelloDto};
 
@@ -70,8 +69,8 @@ impl From<ApiError> for ClientError {
 
 /// One connection, one request at a time.
 pub struct Client {
-    rd: BufReader<OwnedReadHalf>,
-    wr: OwnedWriteHalf,
+    rd: BufReader<ReadHalf<Conn>>,
+    wr: WriteHalf<Conn>,
     next_id: u64,
     events: VecDeque<EventDto>,
     buf: Vec<u8>,
@@ -85,10 +84,10 @@ impl Client {
     /// refuses.
     pub async fn connect(path: impl AsRef<Path>, client_name: &str) -> Result<Client, ClientError> {
         let path = path.as_ref();
-        let stream = UnixStream::connect(path)
+        let stream = crate::transport::connect(path)
             .await
             .map_err(|source| ClientError::NotRunning { path: path.to_path_buf(), source })?;
-        let (rd, wr) = stream.into_split();
+        let (rd, wr) = tokio::io::split(stream);
         let mut c = Client {
             rd: BufReader::new(rd),
             wr,

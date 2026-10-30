@@ -57,6 +57,11 @@ pub trait Backend: Send + Sync {
     fn add_source(&self, source: &str) -> Result<String, CoreError>;
     fn pause(&self, ids: &[String]);
     fn resume(&self, ids: &[String]);
+    /// A pause the app makes by itself (on battery, SPEC §8.4): for this run only (stored as running),
+    /// and only running downloads are touched. The user's pause or resume of one makes the pause theirs.
+    fn pause_by_app(&self, ids: &[String]);
+    /// Ends the app's own pause of those it still holds; one the user paused or resumed since is left alone.
+    fn resume_by_app(&self, ids: &[String]);
     fn move_to_top(&self, id: &str);
     fn remove(&self, ids: &[String], delete_files: bool);
     fn set_priority(&self, ids: &[String], priority: Priority);
@@ -72,7 +77,10 @@ pub trait Backend: Send + Sync {
     fn resume_all(&self);
     fn clear_recent(&self);
     fn set_limits(&self, down: Option<u64>, up: Option<u64>);
+    /// The user's Limit Speed toggle; it also ends the app's own.
     fn set_alt_speed(&self, on: bool);
+    /// Limit Speed switched by the app itself (on battery): this run only, never in `config.toml`.
+    fn set_alt_speed_by_app(&self, on: bool);
     fn torrent_attrs(&self) -> Vec<AttrRow>;
     fn agent_activity(&self, limit: u32) -> Vec<AgentActivity>;
     /// Agents' live leases on keeping the Mac awake (`None`: no agent asked). Cheap.
@@ -107,6 +115,11 @@ pub trait Backend: Send + Sync {
     /// Whether a held torrent has such a file (cheap, nothing is read; for showing the Shift variant).
     fn has_held_source(&self, _id: &str) -> bool {
         false
+    }
+    /// A folder that stands in for the Trash when Cancel moves that file or a removed synced folder goes there (`None`:
+    /// the system's Trash): the mock's own, so that design work never fills the real one.
+    fn trash_dir(&self) -> Option<std::path::PathBuf> {
+        None
     }
     /// `.torrent` files that were already in a watch folder when it joined the list (SPEC 7A.1).
     fn watch_backlog(&self, folder: &std::path::Path) -> Vec<String>;

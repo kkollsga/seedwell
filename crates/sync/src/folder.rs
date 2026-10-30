@@ -17,8 +17,8 @@ use crate::archive::{self, Archived, Retention};
 use crate::clock::Clock;
 use crate::fs::Fs;
 use crate::ignore::Ignore;
-use crate::index::{Batch, IndexStore, PeerState};
-use crate::pull::{ChunkSource, PullReport, Puller};
+use crate::index::{Batch, IndexStore, NeedRecord, PeerState};
+use crate::pull::{ChunkSource, PullReport, Puller, Unsupported};
 use crate::scan::{ScanError, ScanReport, Scanner, Signer};
 
 /// Signs this device's versions for one folder.
@@ -115,6 +115,9 @@ pub struct FolderCore {
     /// Peers whose full send is in progress, with the index id it is of (their old entries were
     /// dropped at its start).
     receiving_full: BTreeMap<ShortId, u64>,
+    /// Needed paths this system cannot make at the version they were tried at (see
+    /// [`Puller::unsupported`]); kept until the folder restarts or [`Self::retry_unsupported`].
+    unsupported: BTreeMap<String, Unsupported>,
 }
 
 impl FolderCore {
@@ -148,6 +151,7 @@ impl FolderCore {
             new_file_id,
             ignore,
             receiving_full: BTreeMap::new(),
+            unsupported: BTreeMap::new(),
         };
         if core.cfg.access == Access::Write
             && let Some(key) = core.device_key.clone()
@@ -216,9 +220,22 @@ impl FolderCore {
             exec_bits: self.cfg.exec_bits,
             archive: self.cfg.archive,
             window,
+            unsupported: &self.unsupported,
             round: Default::default(),
         };
-        puller.pull(&mut *self.store)
+        let report = puller.pull(&mut *self.store)?;
+        self.unsupported = report.unsupported.iter().map(|u| (u.path.clone(), u.clone())).collect();
+        Ok(report)
+    }
+
+    /// The next pull tries the unsupported paths again (a rescan was asked for).
+    pub fn retry_unsupported(&mut self) {
+        self.unsupported.clear();
+    }
+
+    /// The need at `path` is one this system cannot make (it is not waited for).
+    pub fn is_unsupported(&self, path: &str, need: &NeedRecord) -> bool {
+        self.unsupported.get(path).is_some_and(|u| u.version == need.file.info.version)
     }
 
     /// Our entries with a sequence above `after`, at most `limit`, for a peer. A read-only device's
@@ -381,9 +398,23 @@ impl FolderCore {
         self.store.apply(ops)
     }
 
-    /// How much is still needed: (paths, bytes).
+    /// Whether `path` still needs pulling, so an issue about pulling it is still current.
+    pub fn still_needed(&self, path: &str) -> io::Result<bool> {
+        Ok(self.store.need(path)?.is_some_and(|n| n.need != crate::global::Need::Nothing))
+    }
+
+    /// How much is still needed: (paths, bytes), without the needs this system cannot make.
     pub fn need_totals(&self) -> io::Result<(u64, u64)> {
-        self.store.need_totals()
+        let (mut paths, mut bytes) = self.store.need_totals()?;
+        for p in self.unsupported.keys() {
+            if let Some(n) = self.store.need(p)?
+                && self.is_unsupported(p, &n)
+            {
+                paths = paths.saturating_sub(1);
+                bytes = bytes.saturating_sub(n.file.info.size);
+            }
+        }
+        Ok((paths, bytes))
     }
 
     /// The live files this device holds: (files, bytes). O(1).

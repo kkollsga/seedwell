@@ -1,6 +1,7 @@
 //! Restoring the torrent table from the store at start-up. No data is touched: Cold torrents
-//! start Cold, and are validated lazily when they wake. Everything resumes (a pause lasts until
-//! quit); the torrents that need an actor are brought up a few at a time (`boot.rs`).
+//! start Cold, and are validated lazily when they wake. Everything resumes except what the user
+//! paused (and what stopped at its seeding goal); the torrents that need an actor are brought up a
+//! few at a time (`boot.rs`).
 
 use std::time::Duration;
 
@@ -60,11 +61,14 @@ impl Session {
                 seeded_secs: st.counters.seeded_secs.min(u64::from(u32::MAX)) as u32,
                 seed_since: 0,
                 host,
-                // Everything resumes on start (the user's choice, SPEC §7.9): a pause lasts until
-                // the app quits. A fault from the last run is retried: if it persists it faults
-                // again. A torrent that stopped at its seeding goal stays stopped.
+                // Everything resumes on start (SPEC §10) except what the user paused, which stays
+                // paused until the user resumes it. What the app stopped by itself was stored as
+                // running (an older build's pause too: it ended at quit). A fault from the last run
+                // is retried: if it persists it faults again. A torrent that stopped at its seeding
+                // goal stays stopped.
                 want: match r.state {
-                    StoredState::Active | StoredState::Error(_) | StoredState::Paused => Want::Active,
+                    StoredState::Active | StoredState::Error(_) => Want::Active,
+                    StoredState::Paused => Want::Paused,
                     StoredState::GoalReached => Want::GoalReached,
                 },
                 priority: r.priority,
@@ -82,6 +86,10 @@ impl Session {
             // countdown. Nothing starts without the user seeing it.
             if r.awaiting_choice && r.pending_start {
                 c.flags3 |= H3_PENDING;
+                // A countdown the user stopped comes back stopped.
+                if r.pending_stopped {
+                    c.flags3 |= H3_COUNTDOWN_STOPPED;
+                }
             }
             c.set2(G_TRACKER_ERR, r.error_tracker);
             if r.error_tracker {

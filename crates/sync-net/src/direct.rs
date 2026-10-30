@@ -661,11 +661,11 @@ impl SyncHandle {
         let known = peer.as_ref().is_some_and(|p| d.has(&p.device_pk) || in_a_channel(ctx, &p.device_pk))
             || lock(&d.conversations).values().any(|c| DeviceId::of_public_key(&c.pk) == *device);
         if !known {
-            return Err(invalid("this Mac has no conversation with that device and shares no channel with it, so it cannot write to it privately"));
+            return Err(invalid(concat!("this ", trs_platform::computer!(), " has no conversation with that device and shares no channel with it, so it cannot write to it privately")));
         }
         let peer = peer.filter(|p| direct_ok(p)).ok_or_else(|| match ctx.registry.peer(device) {
             Some(p) if p.agreed.features & FEATURE_DIRECT == 0 => invalid("that device runs an older Seedwell: update it to write to it privately"),
-            _ => invalid("that device is not connected to this Mac directly; private messages go only over a direct connection between the two, never through another device, so write once both are online and can reach each other"),
+            _ => invalid(concat!("that device is not connected to this ", trs_platform::computer!(), " directly; private messages go only over a direct connection between the two, never through another device, so write once both are online and can reach each other")),
         })?;
         let key = lock(&peer.direct_key).ok_or_else(|| invalid("the connection with that device is just starting; try again in a moment"))?;
         if kind == MessageKind::Json && serde_json::from_str::<serde_json::Value>(body).is_err() {

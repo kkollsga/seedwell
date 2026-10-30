@@ -41,8 +41,12 @@ fn polling_reports_a_rename_as_two_halves() {
     assert_eq!(w.backend(), ActiveBackend::Poll);
     std::fs::rename(r.join("old"), r.join("new")).expect("rename");
     let evs = wait_for(&w, |e| path_event(e, "old").is_some() && path_event(e, "new").is_some());
-    assert_eq!(path_event(&evs, "old").map(|(k, _)| *k), Some(trs_fswatch::Hint::Renamed));
-    assert_eq!(path_event(&evs, "new").map(|(k, _)| *k), Some(trs_fswatch::Hint::Renamed));
+    // The poller pairs the halves by inode; Windows gives it none, so there it is a remove and a create
+    // (hints either way: the consumer stats both paths).
+    use trs_fswatch::Hint::{Created, Removed, Renamed};
+    let (old, new) = if cfg!(unix) { (Renamed, Renamed) } else { (Removed, Created) };
+    assert_eq!(path_event(&evs, "old").map(|(k, _)| *k), Some(old));
+    assert_eq!(path_event(&evs, "new").map(|(k, _)| *k), Some(new));
 }
 
 #[test]

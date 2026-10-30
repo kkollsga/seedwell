@@ -51,7 +51,7 @@ fn mail_goes_to_a_projects_inbox_and_its_status_comes_back() {
     // No channel open to agents yet: told where to switch it on.
     let o = run(&a, None, &["mail", "inbox", "--as", "api"], "");
     assert_eq!(o.code, 4, "{}", o.stderr);
-    assert!(o.stderr.contains("Agents on This Mac"), "{}", o.stderr);
+    assert!(o.stderr.contains(concat!("Agents on This ", trs_platform::computer!())), "{}", o.stderr);
     for d in [&a, &b] {
         d.json(&["chat", "agents", "Koding", "post"]);
     }

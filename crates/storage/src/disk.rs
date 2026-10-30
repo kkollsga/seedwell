@@ -18,7 +18,6 @@
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io;
-use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -1010,7 +1009,7 @@ impl TorrentShared {
                 continue;
             }
             let f = self.file_for_read(layout, s.file)?;
-            f.read_exact_at(dst, s.file_offset)
+            trs_platform::fs::read_exact_at(&f, dst, s.file_offset)
                 .map_err(|e| StorageError::from_io(s.file, e))?;
         }
         Ok(())
@@ -1026,7 +1025,7 @@ impl TorrentShared {
                 continue;
             }
             let f = self.file_for_write(layout, s.file)?;
-            f.write_all_at(&data[s.data_offset..s.data_offset + s.len], s.file_offset)
+            trs_platform::fs::write_all_at(&f, &data[s.data_offset..s.data_offset + s.len], s.file_offset)
                 .map_err(|e| StorageError::from_io(s.file, e))?;
         }
         Ok(())
@@ -1574,8 +1573,8 @@ impl TorrentHandle {
                     continue;
                 }
                 let (p, _) = t.current_path(&layout, i);
-                match File::open(&p) {
-                    Ok(f) => f.sync_all().map_err(|e| StorageError::from_io(i, e))?,
+                match trs_platform::fs::sync_file(&p) {
+                    Ok(()) => {}
                     Err(e) if is_not_found(&e) => {}
                     Err(e) => return Err(StorageError::from_io(i, e)),
                 }

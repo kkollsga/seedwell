@@ -1,49 +1,13 @@
 import SwiftUI
 
-/// The pending "Remove…" (SPEC §8.3): no alert, a small strip slides down from the torrent's row
-/// and asks there. One at a time; a new Remove… replaces it. It is dropped by Escape, Cancel, the user
-/// choosing another section, or its rows leaving the screen; never by the window or the app losing and
-/// regaining focus.
-@MainActor @Observable final class RemovalPrompt {
-    struct Pending: Equatable {
-        let ids: [String]
-        let title: String
-        let plural: Bool
-        let deleteFiles: Bool
-    }
-
-    private(set) var pending: Pending?
-
-    func ask(_ rows: [TransferRow], deleteFiles: Bool) {
-        let title = rows.count == 1 ? "“\(rows[0].displayName)”" : "\(rows.count) transfers"
-        withAnimation(.snappy(duration: 0.22)) { pending = Pending(ids: rows.map(\.id), title: title, plural: rows.count > 1, deleteFiles: deleteFiles) }
-    }
-
-    /// The user picked another place in the sidebar: the question was about rows of this one.
-    func userChangedSection() { cancel() }
-
-    /// The rows on screen changed. The question goes when none of its rows is there any more (removed,
-    /// or in another section); it stays while any is.
-    func visibleRowsChanged(_ visible: Set<String>) {
-        guard let p = pending, !p.ids.contains(where: visible.contains) else { return }
-        cancel()
-    }
-
-    /// Whether a Return should answer it: only while at least one of its rows is on screen.
-    func isAnswerable(visible: Set<String>) -> Bool {
-        pending.map { $0.ids.contains(where: visible.contains) } ?? false
-    }
-
-    func cancel() {
-        guard pending != nil else { return }
-        withAnimation(.snappy(duration: 0.18)) { pending = nil }
-    }
-}
+// The pending "Remove…" (SPEC §8.3): no alert, a small strip slides down from the torrent's row and asks there. The
+// core keeps it (`LibraryViewModel.removal`): one at a time, a new Remove… replaces it, and it goes with Escape, Cancel,
+// another place, or its rows leaving the screen; never with the window or the app losing and regaining focus.
 
 /// The question itself: one quiet line and two small buttons. Under the row for one torrent; in the
 /// title bar for a multi-selection, which spans rows and may run off screen (user, 2026-10-14).
 struct RemoveConfirmContent: View {
-    let pending: RemovalPrompt.Pending
+    let pending: RemovalQuestion
     let confirm: () -> Void
     let cancel: () -> Void
 
@@ -52,34 +16,28 @@ struct RemoveConfirmContent: View {
             Image(systemName: pending.deleteFiles ? "trash" : "minus.circle")
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
-            Text(message)
+            Text(pending.message)
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .truncationMode(.middle)
             Spacer(minLength: 8)
-            Button("Cancel", action: cancel)
+            Button(pending.cancelTitle, action: cancel)
                 .controlSize(.small)
                 .keyboardShortcut(.cancelAction)
-                .help("Keep \(pending.plural ? "them" : "it")")
+                .help(pending.cancelHelp)
             // Red text, not a tint: in the title bar the toolbar's button style drops tints.
-            Button(role: .destructive, action: confirm) { Text(pending.deleteFiles ? "Delete" : "Remove").foregroundStyle(.red) }
+            Button(role: .destructive, action: confirm) { Text(pending.confirmTitle).foregroundStyle(.red) }
                 .controlSize(.small)
-                .help(pending.deleteFiles ? "Remove from Seedwell and move the downloaded files to the Trash (Return)"
-                                          : "Remove from Seedwell; the downloaded files stay where they are (Return)")
+                .help(pending.confirmHelp)
         }
-    }
-
-    private var message: String {
-        pending.deleteFiles ? "Remove \(pending.title) and move \(pending.plural ? "their" : "its") files to the Trash?"
-                            : "Remove \(pending.title)? Files are kept."
     }
 }
 
 /// One torrent: the strip that slides down under its row.
 struct RemoveConfirmStrip: View {
     static let id = "remove-confirm-strip"
-    let pending: RemovalPrompt.Pending
+    let pending: RemovalQuestion
     let confirm: () -> Void
     let cancel: () -> Void
 
@@ -96,7 +54,7 @@ struct RemoveConfirmStrip: View {
 
 /// Several torrents: the same question in the title bar, trailing edge.
 struct RemoveConfirmToolbarItem: ToolbarContent {
-    let commands: Commands
+    let model: LibraryModel
 
     var body: some ToolbarContent {
         if #available(macOS 26.0, *) {
@@ -107,8 +65,8 @@ struct RemoveConfirmToolbarItem: ToolbarContent {
     }
 
     @ViewBuilder private var content: some View {
-        if let p = commands.removal.pending, p.plural {
-            RemoveConfirmContent(pending: p, confirm: commands.confirmedRemove, cancel: commands.removal.cancel)
+        if let p = model.view.removal, p.question.plural {
+            RemoveConfirmContent(pending: p.question, confirm: model.confirmRemoval, cancel: model.cancelRemoval)
                 .fixedSize()
                 .padding(.horizontal, 12)
                 .padding(.vertical, 5)

@@ -243,18 +243,13 @@ struct LaunchTests {
     }
 }
 
-// MARK: Labels
+// MARK: Files
 
-@Suite("Episode labels")
+// The episode labels of the Play menus are the core's (`play_episode_label`, tested in trs-ffi's row_commands).
+@Suite("Torrent files")
 struct LabelTests {
     func file(_ name: String) -> TorrentFile {
         TorrentFile(index: 0, path: "Show/\(name)", diskPath: "", name: name, length: 10, done: 0, wanted: true, priority: .normal, isVideo: true, isMp4Family: false)
-    }
-
-    @Test func episodeCodeWhenPresent() {
-        #expect(file("Example.Show.S01E02.1080p.mkv").episodeLabel == "S01E02")
-        #expect(file("example.show.s03e10.mkv").episodeLabel == "S03E10")
-        #expect(file("Sintel.2010.1080p.mkv").episodeLabel == "Sintel.2010.1080p")
     }
 
     @Test func finishedMeansEveryByte() {

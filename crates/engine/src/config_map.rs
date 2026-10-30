@@ -141,9 +141,10 @@ pub fn restart_required(old: &EngineConfig, new: &EngineConfig) -> Vec<String> {
     v
 }
 
-/// `~/Library/Application Support/Seedwell` for the current user.
+/// Seedwell's state folder for the current user (`trs_platform::dirs::state_dir`:
+/// `~/Library/Application Support/Seedwell` on macOS).
 pub fn default_state_dir() -> PathBuf {
-    expand_tilde("~/Library/Application Support/Seedwell")
+    trs_platform::dirs::state_dir().unwrap_or_else(|| PathBuf::from("Seedwell"))
 }
 
 #[cfg(test)]
@@ -176,6 +177,14 @@ mod tests {
         assert_eq!(e.up_limit, Some(123));
         assert!(e.by_status);
         assert_eq!(e.default_save_dir, PathBuf::from("/data/seed"));
+    }
+
+    #[test]
+    fn the_apps_own_limit_is_kept_when_the_file_is_applied_again() {
+        let base = EngineConfig { alt_speed: true, alt_by_app: true, ..EngineConfig::default() };
+        let e = engine_config(&Config::default(), &base);
+        assert!(!e.alt_speed, "the toggle is the file's");
+        assert!(e.alt_by_app && e.alt_active(), "the app's limit (on battery) is not in the file and stays");
     }
 
     #[test]
