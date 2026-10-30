@@ -155,8 +155,8 @@ mod tests {
         if short == long {
             return; // 8.3 names are off on this volume: nothing to tell apart
         }
-        assert!(inside_any(&long.join("state"), &[short.clone()]), "{} in {}", long.display(), short.display());
-        assert!(inside_any(&short.join("state"), &[long.clone()]));
+        assert!(inside_any(&long.join("state"), std::slice::from_ref(&short)), "{} in {}", long.display(), short.display());
+        assert!(inside_any(&short.join("state"), std::slice::from_ref(&long)));
         assert!(!inside_any(&dir.path().join("elsewhere"), &[short]));
     }
 
