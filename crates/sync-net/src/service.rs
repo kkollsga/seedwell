@@ -76,6 +76,10 @@ pub struct Options {
     pub protocol: (u32, u32),
     /// The feature bits to offer ([`trs_sync_proto::msg::FEATURES`]).
     pub features: u64,
+    /// An isolated (test) run: the real home (the user profile on Windows). A folder inside it is refused (a
+    /// temporary folder excepted); a first start finds no device over the Internet and relays nothing (LAN only),
+    /// and joined folders go to `Sync` in the state folder unless another place is set.
+    pub forbidden_root: Option<PathBuf>,
 }
 
 impl Options {
@@ -95,6 +99,7 @@ impl Options {
             dial_tcp: true,
             protocol: (trs_sync_proto::msg::MIN_PROTOCOL, trs_sync_proto::msg::PROTOCOL),
             features: trs_sync_proto::msg::FEATURES,
+            forbidden_root: None,
         }
     }
 }
@@ -243,6 +248,8 @@ pub(crate) struct Inner {
     pub(crate) stop_wait: Mutex<Duration>,
     /// The runtime the service runs on (its synchronous methods are called from other threads too).
     pub(crate) rt: tokio::runtime::Handle,
+    /// An isolated (test) run's forbidden root ([`Options::forbidden_root`]).
+    pub(crate) forbidden_root: Option<PathBuf>,
 }
 
 /// The running service. Cheap to clone.
@@ -292,7 +299,22 @@ impl SyncHandle {
         let dir = opts.state_dir.join("sync");
         std::fs::create_dir_all(&dir)?;
         let cfg_path = opts.state_dir.join("sync.toml");
+        let first = !cfg_path.exists();
         let mut cfg = SyncConfig::load(&cfg_path)?;
+        if opts.forbidden_root.is_some() {
+            let s = &mut cfg.settings;
+            if first {
+                s.dht_discovery = false;
+                s.relay_own_devices = false;
+                s.relay_everyone = false;
+            }
+            // Never the user's ~/Seedwell: the run's own state. (A place set inside the forbidden root is refused
+            // where it is set, and by the app's start.)
+            if s.default_location.trim().is_empty() {
+                s.default_location = opts.state_dir.join("Sync").display().to_string();
+            }
+            cfg.save(&cfg_path)?;
+        }
 
         let key = match opts.secrets.get(DEVICE_KEY)? {
             Some(pkcs8) => DeviceKey::from_pkcs8(&pkcs8).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("device key: {e:?}")))?,
@@ -356,6 +378,7 @@ impl SyncHandle {
             net: crate::relay::Net::default(),
             stop_wait: Mutex::new(STOP_WAIT),
             rt: tokio::runtime::Handle::current(),
+            forbidden_root: opts.forbidden_root,
         });
         let h = SyncHandle { inner };
 
@@ -674,6 +697,7 @@ impl SyncHandle {
             return Err(invalid(format!("{} is not a folder", path.display())));
         }
         refuse_cloud_root(&path)?;
+        self.refuse_forbidden(&path)?;
         self.refuse_overlap(&path)?;
         let secret = FolderSecret::generate(&mut ring::rand::SystemRandom::new()).map_err(io::Error::other)?;
         let id = FolderId::of_public_key(secret.public_key());
@@ -700,6 +724,7 @@ impl SyncHandle {
         }
         let path = absolute(&path)?;
         refuse_cloud_root(&path)?;
+        self.refuse_forbidden(&path)?;
         self.refuse_overlap(&path)?;
         let id = link.invite.folder_id();
         if self.inner.ctx.registry.folder(&id).is_some() {
@@ -792,6 +817,7 @@ impl SyncHandle {
             return Err(invalid(format!("{} already exists", new_path.display())));
         }
         refuse_cloud_root(&new_path)?;
+        self.refuse_forbidden(&new_path)?;
         let entry = lock(&self.inner.cfg).folder(&id.to_string()).cloned().ok_or(SyncError::NotFound)?;
         if new_path.starts_with(&entry.path) {
             return Err(invalid("a folder cannot move into itself"));
@@ -1312,6 +1338,9 @@ impl SyncHandle {
 
     /// Changes the device-wide settings (the port takes effect at the next start; `trs_control::sync::SyncSlot::move_port` starts the service again on it).
     pub fn set_settings(&self, s: Settings) -> Result<(), SyncError> {
+        if !s.default_location.trim().is_empty() {
+            self.refuse_forbidden(Path::new(&s.default_location))?;
+        }
         let renamed = !s.device_name.is_empty() && {
             let name: String = s.device_name.chars().take(64).collect();
             std::mem::replace(&mut *lock(&self.inner.ctx.device_name), name.clone()) != name
@@ -1806,6 +1835,24 @@ fn absolute(p: &Path) -> io::Result<PathBuf> {
 
 /// iCloud Drive and File Provider folders are refused: their files may be placeholders, and two sync
 /// engines on one folder fight (SPEC §7G.2).
+/// A folder an isolated run must not use: inside `forbidden` (the real home) and not in a temporary folder (Windows
+/// keeps those in the user's profile, under the home it forbids).
+pub fn inside_forbidden(p: &Path, forbidden: &Path) -> bool {
+    !p.as_os_str().is_empty() && p.starts_with(forbidden) && !trs_platform::dirs::in_temp_folder(p)
+}
+
+impl SyncHandle {
+    /// An isolated (test) run uses no folder inside its forbidden root.
+    fn refuse_forbidden(&self, p: &Path) -> Result<(), SyncError> {
+        match &self.inner.forbidden_root {
+            Some(root) if inside_forbidden(p, root) => {
+                Err(invalid(format!("an isolated (test) run uses no folder inside {}: {}", root.display(), p.display())))
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
 fn refuse_cloud_root(p: &Path) -> Result<(), SyncError> {
     if trs_platform::dirs::in_cloud_storage(p) {
         return Err(invalid("folders in iCloud Drive or other cloud storage cannot be synced"));

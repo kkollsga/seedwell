@@ -83,7 +83,8 @@ jobs:
     name: Windows build
     needs: gate
     runs-on: windows-latest
-    timeout-minutes: 90
+    # The full-LTO build takes about 12 minutes on a 24-thread PC; a 4-vCPU runner is 4-6x slower.
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@v7
       - name: Rust (version pinned in rust-toolchain.toml)

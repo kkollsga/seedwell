@@ -333,6 +333,10 @@ pub(crate) struct Session {
     pub dht: Option<trs_dht::DhtHandle>,
     pub writer: Writer,
     dirty: Dirty,
+    /// Torrents and direct downloads removed whose removal may not be stored yet (waiting in `dirty`, or with the
+    /// writer). A commit that bypasses the writer (`commit_now`, an add) for one of them first waits for it: else the
+    /// removal, stored after, would delete what the add wrote (its `.torrent` file and record).
+    removing: HashSet<TorrentId>,
     jobs: BTreeSet<(Instant, Job)>,
     pub epoch: u64,
     pub shutting_down: bool,
@@ -406,6 +410,7 @@ impl Session {
             tracker,
             dht,
             dirty: Dirty::default(),
+            removing: HashSet::new(),
             jobs: BTreeSet::new(),
             epoch: 0,
             shutting_down: false,
@@ -975,6 +980,7 @@ impl Session {
     pub(crate) fn dirty_direct_removed(&mut self, id: TorrentId) {
         self.dirty.directs.remove(&id);
         self.dirty.removed_directs.push(id);
+        self.note_removing(id);
         self.schedule_persist();
     }
 
@@ -985,7 +991,30 @@ impl Session {
         self.dirty.placements.retain(|(i, _)| *i != id);
         self.dirty.files.retain(|(i, _)| *i != id);
         self.dirty.removed.push(id);
+        self.note_removing(id);
         self.schedule_persist();
+    }
+
+    fn note_removing(&mut self, id: TorrentId) {
+        // Bounded: after many removals with no add of one of them, store them all and forget the list.
+        if self.removing.len() >= 4096 {
+            self.store_removals();
+        }
+        self.removing.insert(id);
+    }
+
+    /// Stores every removal so far (hands the waiting batch to the writer and waits for it).
+    pub(crate) fn store_removals(&mut self) {
+        self.flush_persist();
+        self.writer.flush();
+        self.removing.clear();
+    }
+
+    /// Before a commit that bypasses the writer: a removal of one of `ids` still on its way is stored first.
+    pub(crate) fn before_commit_now(&mut self, ids: impl IntoIterator<Item = TorrentId>) {
+        if !self.removing.is_empty() && ids.into_iter().any(|id| self.removing.contains(&id)) {
+            self.store_removals();
+        }
     }
 
     pub(crate) fn ensure_counters_job(&mut self) {

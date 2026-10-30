@@ -11,8 +11,8 @@
   minutes before they start, the most the setting allows, and the checks end long before), and nothing else reaches
   the network either (no DHT, PEX, LSD, UPnP or NAT-PMP).
 
-  Checks: render, handoff, separate, gate, selection, removal, info, alert, trash, choice, settings, quit (all of them:
-  all, the default).
+  Checks: render, handoff, separate, gate, selection, removal, info, alert, trash, choice, notray, settings, quit (all
+  of them: all, the default).
   -Build builds the app first (build.ps1). -Out keeps the pictures in <dir> (default: a temp folder, printed).
   Needs the seedwell CLI: target\debug\seedwell.exe (built with cargo when missing).
 #>
@@ -25,7 +25,7 @@ $Repo = Split-Path $App -Parent
 $Exe = Join-Path $App 'bin\x64\Release\net10.0-windows10.0.19041.0\win-x64\Seedwell.exe'
 $Cli = Join-Path $Repo 'target\debug\seedwell.exe'
 $Fixtures = Join-Path $Repo 'crates\metainfo\tests\fixtures'
-$All = @('render', 'handoff', 'separate', 'gate', 'selection', 'removal', 'info', 'alert', 'trash', 'choice', 'settings', 'quit')
+$All = @('render', 'handoff', 'separate', 'gate', 'selection', 'removal', 'info', 'alert', 'trash', 'choice', 'notray', 'settings', 'quit')
 
 if ($Build) {
   & powershell -NoProfile -File (Join-Path $App 'build.ps1') | Out-Host
@@ -373,10 +373,33 @@ $checks.settings = {
   $p = Start-App $dir -QaControl
   try {
     $cfg = "$dir\state\config.toml"
+    $before = @(Log $dir | Where-Object { $_ -like '*update: *automatic check*' }).Count
     (Get-Content $cfg -Raw) -replace 'start_delay_secs = 600', 'start_delay_secs = 599' | Set-Content -NoNewline -Encoding utf8 $cfg
     WaitFor { Log $dir | Where-Object { $_ -like '*settings changed: config.toml*' } } 10000 'the settings change' | Out-Null
+    # A change outside Settings (here a hand edit) reaches the updater too: it plans its next check again.
+    WaitFor { @(Log $dir | Where-Object { $_ -like '*update: *automatic check*' }).Count -gt $before } 5000 'the updater to plan again' | Out-Null
   } finally { Stop-App $dir $p; Remove-Item -Recurse -Force $dir }
   @()
+}
+
+# No notification area (Explorer not running, a session without a shell, as on a CI runner): the app runs on without
+# its icon (the core answers, the window opens and draws), and makes the icon when the taskbar is created. The first
+# icon fails by SEEDWELL_QA_NO_TRAY (a --state-dir run only); taskbar-created calls what TaskbarCreated calls.
+$checks.notray = {
+  $dir = New-State
+  $env:SEEDWELL_QA_NO_TRAY = '1'
+  try { $p = Start-App $dir -QaControl } finally { Remove-Item env:SEEDWELL_QA_NO_TRAY }
+  try {
+    WaitFor { Log $dir | Where-Object { $_ -like '*tray: no icon*' } } 5000 'the failed icon in app.log' | Out-Null
+    if ($p.HasExited) { Fail 'the app ended without its icon' }
+    Qa $dir @('window') | Out-Null
+    Qa $dir @('shot', 'notray') | Out-Null
+    Copy-Item "$dir\state\qa\notray.png" "$Out\notray.png"
+    $made = Qa $dir @('taskbar-created')
+    if ($made -notmatch 'tray created') { Fail "no icon after the taskbar was created: $made" }
+    if (-not (Log $dir | Where-Object { $_ -like '*tray: icon created*' })) { Fail 'no "tray: icon created" in app.log' }
+  } finally { Stop-App $dir $p; Remove-Item -Recurse -Force $dir }
+  @("$Out\notray.png")
 }
 
 $checks.quit = {

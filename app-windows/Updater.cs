@@ -50,6 +50,11 @@ sealed class Updater
         {
             timer.Interval = TimeSpan.FromMilliseconds(Math.Min(due, int.MaxValue));
             timer.Start();
+            AppLog.Write($"update: next automatic check in {due / 1000} s");
+        }
+        else
+        {
+            AppLog.Write("update: no automatic check");
         }
     }
 

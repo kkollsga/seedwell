@@ -551,3 +551,55 @@ async fn the_inactive_condition_history_survives_a_restart() {
     store.commit(Batch { torrents: vec![r], ..Batch::default() }).unwrap();
     assert!(store.load_torrents().unwrap()[0].record.idle.is_none(), "switched off: the history is dropped");
 }
+
+/// A torrent removed and at once added again (before the debounced write has stored the removal) keeps what the add
+/// wrote: its `.torrent` file and record, so its metadata and chooser work, and it is still there after a restart.
+/// Held for a choice, running, and a magnet.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_torrent_removed_and_added_again_at_once_keeps_its_metadata() {
+    let (sd, dd) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut n = snode(sd.path(), dd.path(), None, |_| {}).await;
+    let held = standard_named("held", 0, None, false, 311);
+    let running = standard_named("running", 0, None, false, 311);
+    let magnet = standard_named("magnet", 0, None, false, 311);
+    assert!(held.id != running.id && running.id != magnet.id && held.id != magnet.id);
+    let uri = format!("magnet:?xt=urn:btih:{}&dn=m", hex_of(&magnet.id));
+    for _ in 0..3 {
+        for (t, hold) in [(&held, true), (&running, false)] {
+            let opts = || AddOptions { hold: Some(hold), ..AddOptions::default() };
+            n.h.add_torrent_file(t.bytes.clone(), opts()).await.unwrap();
+            n.h.remove(&[t.id], false).await.unwrap();
+            n.h.add_torrent_file(t.bytes.clone(), opts()).await.unwrap();
+        }
+        n.h.add_magnet(&uri, AddOptions::default()).await.unwrap();
+        n.h.remove(&[magnet.id], false).await.unwrap();
+        n.h.add_magnet(&uri, AddOptions::default()).await.unwrap();
+        // The removals are stored now (each at the latest when its torrent is added again).
+        n.h.flush().await.unwrap();
+        for t in [&held, &running] {
+            assert!(n.store.load_torrent_file(&t.id).unwrap().is_some(), "the .torrent file of {} is kept", t.name);
+        }
+        let c = n.h.choice(held.id).await.expect("the chooser of the held torrent");
+        assert!(c.awaiting);
+        n.h.choice(running.id).await.expect("the file list of the running torrent");
+        let stored: Vec<TorrentId> = n.store.load_torrents().unwrap().into_iter().map(|s| s.record.id).collect();
+        for id in [held.id, running.id, magnet.id] {
+            assert!(stored.contains(&id), "{} is stored: {stored:?}", hex_of(&id));
+        }
+        // Next round: remove them for good first.
+        n.h.remove(&[held.id, running.id, magnet.id], false).await.unwrap();
+        n.h.flush().await.unwrap();
+        assert!(n.store.load_torrents().unwrap().is_empty());
+    }
+    // Once more, then a restart: all three come back with their metadata.
+    for (t, hold) in [(&held, true), (&running, false)] {
+        n.h.add_torrent_file(t.bytes.clone(), AddOptions { hold: Some(hold), ..AddOptions::default() }).await.unwrap();
+        n.h.remove(&[t.id], false).await.unwrap();
+        n.h.add_torrent_file(t.bytes.clone(), AddOptions { hold: Some(hold), ..AddOptions::default() }).await.unwrap();
+    }
+    n.engine.take().unwrap().shutdown(Duration::from_secs(5)).await;
+    drop(n);
+    let n = snode(sd.path(), dd.path(), None, |_| {}).await;
+    assert!(n.h.choice(held.id).await.expect("held, after a restart").awaiting);
+    n.h.choice(running.id).await.expect("running, after a restart");
+}

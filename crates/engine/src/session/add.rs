@@ -41,7 +41,19 @@ pub(crate) struct MetaPlanned {
 pub(crate) const MAX_MERGED_TRACKERS: usize = 8;
 
 impl Session {
-    pub(super) fn commit_now(&self, b: Batch) -> Result<(), EngineError> {
+    /// Commits `b` now, past the writer. A removal of one of its torrents that is not stored yet goes first (a
+    /// torrent removed and added again at once keeps what the add wrote).
+    pub(super) fn commit_now(&mut self, b: Batch) -> Result<(), EngineError> {
+        let ids: Vec<TorrentId> = b
+            .torrents
+            .iter()
+            .map(|r| r.id)
+            .chain(b.torrent_files.iter().map(|(i, _)| *i))
+            .chain(b.directs.iter().map(|d| d.id))
+            .chain(b.placements.iter().map(|(i, _)| *i))
+            .chain(b.resume.iter().map(|(i, _)| *i))
+            .collect();
+        self.before_commit_now(ids);
         self.sh.store.commit(b).map_err(|e| EngineError::Store(e.to_string()))
     }
 

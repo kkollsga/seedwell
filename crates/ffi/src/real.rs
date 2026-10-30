@@ -206,9 +206,20 @@ pub struct StartOptions {
 }
 
 /// A folder an isolated run must not use: inside `forbidden` (the real home) and not in a temporary folder (Windows
-/// keeps those in the user's profile, under the home it forbids).
+/// keeps those in the user's profile, under the home it forbids). Folder Sync applies the same rule.
 fn inside_forbidden(p: &Path, forbidden: &Path) -> bool {
-    !p.as_os_str().is_empty() && p.starts_with(forbidden) && !trs_platform::dirs::in_temp_folder(p)
+    trs_sync_net::service::inside_forbidden(p, forbidden)
+}
+
+/// The folders Folder Sync keeps in `sync.toml` (synced folders, where joined ones go), `~` expanded. An unreadable
+/// file names none: the service refuses it itself.
+fn sync_folders(dir: &Path) -> Vec<PathBuf> {
+    let Ok(c) = trs_sync_net::config::SyncConfig::load(&dir.join("sync.toml")) else { return Vec::new() };
+    let mut out: Vec<PathBuf> = c.folders.iter().map(|f| f.path.clone()).collect();
+    if !c.settings.default_location.trim().is_empty() {
+        out.push(crate::settings::expand_home(&c.settings.default_location));
+    }
+    out
 }
 
 /// Every folder `trackers.toml` makes the engine touch, `~` expanded.
@@ -241,7 +252,11 @@ impl RealBackend {
             let store = SettingsStore::new(&o.dir);
             let cfg = store.config();
             let inside = |p: &Path| inside_forbidden(p, forbidden);
-            if inside(&o.dir) || config_folders(&cfg).iter().any(|p| inside(p)) || profile_folders(&store.load_profiles_set()).iter().any(|p| inside(p)) {
+            if inside(&o.dir)
+                || config_folders(&cfg).iter().any(|p| inside(p))
+                || profile_folders(&store.load_profiles_set()).iter().any(|p| inside(p))
+                || sync_folders(&o.dir).iter().any(|p| inside(p))
+            {
                 return Err(failed(format!(
                     "Refusing to start: a folder of this isolated run lies inside {}",
                     forbidden.display()
@@ -288,7 +303,7 @@ impl RealBackend {
         let cfg = settings.config();
 
         // Folder sync starts in the background; the control server serves it once it is up.
-        let sync = crate::sync::RealSync::start(rt.handle(), &engine, &o.dir, o.secret_vault.clone());
+        let sync = crate::sync::RealSync::start(rt.handle(), &engine, &o.dir, o.secret_vault.clone(), o.forbidden_root.clone());
         // The control server for agents (SPEC 9A) lives on the engine's runtime.
         let server = trs_control::start_for_app_with_sync(
             rt.handle(),
@@ -1708,7 +1723,41 @@ mod files_done_tests {
 #[cfg(test)]
 mod isolation_tests {
     use super::inside_forbidden;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
+
+    /// A real home as an isolated run forbids it: outside the temporary folder (nothing is made there).
+    fn real_home() -> PathBuf {
+        PathBuf::from(if cfg!(windows) { r"C:\Users\seedwell-isolation-test" } else { "/Users/seedwell-isolation-test" })
+    }
+
+    #[test]
+    fn an_isolated_run_refuses_to_start_with_a_synced_folder_or_join_place_inside_the_home_it_forbids() {
+        let home = real_home();
+        for (folder, place) in [(Some(home.join("Docs")), None), (None, Some(home.join("Joined")))] {
+            let work = tempfile::tempdir().unwrap();
+            let dir = work.path().join("state");
+            std::fs::create_dir_all(&dir).unwrap();
+            let mut cfg = trs_sync_net::config::SyncConfig::default();
+            if let Some(f) = &folder {
+                cfg.folders.push(trs_sync_net::config::FolderEntry::new("x".into(), f.clone()));
+            }
+            if let Some(p) = &place {
+                cfg.settings.default_location = p.display().to_string();
+            }
+            cfg.save(&dir.join("sync.toml")).unwrap();
+            assert!(super::sync_folders(&dir).iter().any(|p| inside_forbidden(p, &home)));
+            let o = super::StartOptions {
+                dir: dir.clone(),
+                socket: dir.join("control.sock"),
+                allow_loopback_trackers: false,
+                forbidden_root: Some(home.clone()),
+                secret_vault: None,
+            };
+            let e = super::RealBackend::start(o).err().expect("refused");
+            assert!(e.to_string().contains("Refusing to start"), "{e}");
+        }
+        assert!(!home.exists());
+    }
 
     #[test]
     fn an_isolated_run_may_use_temporary_folders_inside_the_home_it_forbids_and_nothing_else_there() {

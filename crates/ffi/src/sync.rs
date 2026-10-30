@@ -7,7 +7,7 @@
 //! snapshot says so and every change is refused with a plain sentence. A sync failure never stops a
 //! torrent.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Instant;
 
@@ -752,7 +752,15 @@ fn is_test_run() -> bool {
 impl RealSync {
     /// Starts the service in the background: on all interfaces, IPv4 and IPv6 (`::`), LAN discovery on,
     /// the engine's DHT and port mapping lent to it. Tests bind to loopback and stay off the LAN.
-    pub fn start(rt: &tokio::runtime::Handle, engine: &EngineHandle, dir: &Path, vault: Option<Arc<dyn SecretVault>>) -> Arc<Self> {
+    /// `forbidden_root`: an isolated (test) run's real home: Folder Sync starts LAN only, keeps joined folders in the
+    /// run's state and refuses folders inside it (`trs_sync_net::service::Options::forbidden_root`).
+    pub fn start(
+        rt: &tokio::runtime::Handle,
+        engine: &EngineHandle,
+        dir: &Path,
+        vault: Option<Arc<dyn SecretVault>>,
+        forbidden_root: Option<PathBuf>,
+    ) -> Arc<Self> {
         let slot = SyncSlot::new();
         let problem = Arc::new(Mutex::new(None));
         let default_name = trs_control::sync::default_device_name();
@@ -761,11 +769,13 @@ impl RealSync {
         let (engine, dir) = (engine.clone(), dir.to_path_buf());
         // The same start again when the port changes (`SyncSlot::move_port`).
         let starter: trs_control::sync::Starter = Arc::new(move || {
-            let (dir, secrets, engine, default_name) = (dir.clone(), secrets.clone(), engine.clone(), default_name.clone());
+            let (dir, secrets, engine, default_name, forbidden_root) =
+                (dir.clone(), secrets.clone(), engine.clone(), default_name.clone(), forbidden_root.clone());
             Box::pin(async move {
                 let client = format!("Seedwell {}", env!("CARGO_PKG_VERSION"));
                 start_sync_with(&dir, client, secrets, Some(&engine), |o| {
                     o.default_device_name = default_name;
+                    o.forbidden_root = forbidden_root;
                     if is_test_run() {
                         o.bind = std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
                         o.lan_discovery = false;

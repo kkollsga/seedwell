@@ -3,6 +3,7 @@
 mod bundle;
 mod chat;
 mod direct;
+mod isolation;
 mod lan;
 mod relay;
 mod roles;

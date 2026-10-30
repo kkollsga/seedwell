@@ -24,6 +24,9 @@ public sealed partial class FlyoutWindow : Window
 
     readonly App app;
     readonly IntPtr hwnd;
+
+    /// <summary>Its window: top-level and kept for the app's life (TaskbarWatch listens on it).</summary>
+    internal IntPtr Hwnd => hwnd;
     readonly DispatcherQueueTimer refresh, focus;
     DateTime hiddenAt = DateTime.MinValue;
     string signature = "";

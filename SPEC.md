@@ -894,6 +894,10 @@ baseline every later version must still sync with:
     the password after every update.
   - Either way, the keys are never written into the synced folder, never logged, and returned through the agent
     interface only with Full permission (logged).
+- **Isolated (test) runs** (`--state-dir` with `--home-root`; a forbidden root): Folder Sync starts LAN only (no
+  Internet discovery, no relays, until the run turns them on), joined folders go to `Sync` in the run's state folder,
+  and no synced folder or join place may lie inside the real home (a temporary folder excepted): one there is
+  refused, and one already in `sync.toml` stops the run from starting, as the folders of `config.toml` do.
 
 ### 7G.2 The sync model
 

@@ -32,6 +32,8 @@ public partial class App : Application
     DispatcherQueue ui = null!;
     DispatcherQueueTimer iconTimer = null!;
     TaskbarIcon? tray;
+    /// <summary>QA (a --state-dir run with SEEDWELL_QA_NO_TRAY=1): the first icon fails as with no notification area.</summary>
+    bool failTrayOnce = Program.StateDir is not null && Environment.GetEnvironmentVariable("SEEDWELL_QA_NO_TRAY") == "1";
     IconLook? drawn;
     string? iconError;
     MainWindow? main;
@@ -101,6 +103,7 @@ public partial class App : Application
         Updater.Changed += () => flyout?.UpdateChanged();
         ApplySettings();
         flyout = new FlyoutWindow(this);
+        TaskbarWatch.Start(flyout.Hwnd, TaskbarCreated);
         CreateTray();
         iconTimer = ui.CreateTimer();
         iconTimer.IsRepeating = false;
@@ -226,6 +229,8 @@ public partial class App : Application
         {
             try { LoginItem.Apply(general.LaunchAtLogin); } catch { }
         }
+        // The update switches may have changed outside Settings (the CLI, an agent, a hand edit): the next check again.
+        Updater?.Schedule();
     }
 
     /// <summary>config.toml changed (the app, an agent, the CLI or a hand edit): apply its settings again.</summary>
@@ -246,7 +251,7 @@ public partial class App : Application
         menu.Items.Add(new MenuFlyoutSeparator());
         menu.Items.Add(quit);
 
-        tray = new TaskbarIcon
+        var icon = new TaskbarIcon
         {
             ToolTipText = "Seedwell",
             Icon = new System.Drawing.Icon(Path.Combine(AppContext.BaseDirectory, "Seedwell.ico")),
@@ -255,7 +260,39 @@ public partial class App : Application
             NoLeftClickDelay = true,
             LeftClickCommand = new Command(() => flyout?.Toggle()),
         };
-        tray.ForceCreate();
+        // No notification area (Explorer not running or restarting, a session without a shell): the app runs on
+        // without its icon (the core, the control socket and the window all work) and makes it when the taskbar comes.
+        try
+        {
+            if (failTrayOnce)
+            {
+                failTrayOnce = false;
+                throw new InvalidOperationException("simulated (SEEDWELL_QA_NO_TRAY)");
+            }
+            icon.ForceCreate();
+            tray = icon;
+            drawn = null;
+            AppLog.Write("tray: icon created");
+        }
+        catch (Exception e)
+        {
+            AppLog.Write($"tray: no icon ({e.GetType().Name}: {e.Message}); running without it until the taskbar is created");
+            try { icon.Dispose(); } catch { }
+            tray = null;
+        }
+    }
+
+    /// <summary>
+    /// The taskbar was created (Explorer started late or restarted; its TaskbarCreated message, or the QA command):
+    /// an app without its icon makes it now. An icon that exists is put back by H.NotifyIcon itself.
+    /// </summary>
+    internal void TaskbarCreated()
+    {
+        if (tray is null && !quitting)
+        {
+            CreateTray();
+            UpdateIcon();
+        }
     }
 
     /// <summary>
@@ -264,7 +301,7 @@ public partial class App : Application
     /// </summary>
     void UpdateIcon()
     {
-        if (quitting || tray is null)
+        if (quitting)
         {
             return;
         }
@@ -282,14 +319,18 @@ public partial class App : Application
             }
             wasDownloading = downloading;
             var model = IconState.Icon(snapshot, Now(), flyout?.IsOpen == true);
-            if (drawn is null || !drawn.Equals(model.Look))
+            // Without an icon (no taskbar yet) only the drawing waits; the power needs above go on.
+            if (tray is not null)
             {
-                var old = tray.Icon;
-                tray.Icon = TrayIcon.Draw(model.Look, TrayIcon.Size());
-                old?.Dispose();
-                drawn = model.Look;
+                if (drawn is null || !drawn.Equals(model.Look))
+                {
+                    var old = tray.Icon;
+                    tray.Icon = TrayIcon.Draw(model.Look, TrayIcon.Size());
+                    old?.Dispose();
+                    drawn = model.Look;
+                }
+                tray.ToolTipText = model.AccessibilityLabel;
             }
-            tray.ToolTipText = model.AccessibilityLabel;
             next = model.NextRefreshMs;
         }
         catch (Exception e)
@@ -439,8 +480,8 @@ public partial class App : Application
     /// after it. window | menu | place downloads|sharing|foldersync|settings|tracker &lt;id&gt; | rowclick &lt;title
     /// part&gt; [command] [shift] | key delete|return|escape|space|left|right|i [shift] [command] | remove &lt;title part&gt;
     /// [files] | info &lt;title part&gt; | control &lt;title part&gt; &lt;command&gt; | confirm | cancel | add-sheet |
-    /// search &lt;text&gt; | update-check | update-install | update-status | shot &lt;name&gt; (the library window to
-    /// &lt;state&gt;\qa\&lt;name&gt;.png).
+    /// search &lt;text&gt; | update-check | update-install | update-status | taskbar-created | shot &lt;name&gt; (the
+    /// library window to &lt;state&gt;\qa\&lt;name&gt;.png).
     /// </summary>
     internal void Qa(string[] words)
     {
@@ -530,6 +571,7 @@ public partial class App : Application
                 case "cancel": Library.CancelRemoval(); break;
                 case "add-sheet": Library.ShowAddSheet(); break;
                 case "search": Library.SetSearch(string.Join(' ', w.Skip(1))); break;
+                case "taskbar-created": TaskbarCreated(); result = $"tray {(tray is null ? "none" : "created")}"; break;
                 case "update-check": Updater.Check(false); break;
                 case "update-install": Updater.Install(); break;
                 case "update-status": result = $"status \"{Updater.Updates.Model(Now()).Status}\", on offer {Updater.Updates.AvailableVersion() ?? "none"}, version {Updater.Updates.CurrentVersion()}"; break;
