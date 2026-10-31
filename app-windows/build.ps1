@@ -31,8 +31,12 @@ $coreDir = if ($CoreProfile -eq 'Release') { 'release' } else { 'debug' }
 Step "core DLL (cargo rustc -p trs-ffi --crate-type cdylib, $coreDir)"
 Push-Location $repo
 try {
-    $profileArgs = if ($CoreProfile -eq 'Release') { @('--release') } else { @() }
-    cargo rustc -p trs-ffi --lib @profileArgs --crate-type cdylib
+    # Written out, not splatted: Windows PowerShell 5.1 mangles a splatted '--release' on its way to a native command.
+    if ($CoreProfile -eq 'Release') {
+        cargo rustc -p trs-ffi --lib --release --crate-type cdylib
+    } else {
+        cargo rustc -p trs-ffi --lib --crate-type cdylib
+    }
     Check 'cargo rustc'
 } finally { Pop-Location }
 $dll = Join-Path $repo "target\$coreDir\trs_ffi.dll"
