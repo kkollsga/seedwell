@@ -25,6 +25,8 @@
 //!
 //! Content handed to the app (`contents`) is a file the extension put in the container's `u/`; the core copies it.
 //! Files left in `t/` and `u/` are removed after [`LEFTOVER_AGE`].
+// The server runs on the Mac only (Unix sockets, APFS clones); elsewhere only the types the app API names are used.
+#![cfg_attr(not(unix), allow(dead_code))]
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::io::{Read, Write};
@@ -1797,6 +1799,6 @@ impl Core {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[path = "sync_host_tests.rs"]
 mod tests;

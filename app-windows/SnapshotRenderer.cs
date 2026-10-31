@@ -49,7 +49,7 @@ sealed class SnapshotRenderer(App app, FlyoutWindow flyout, string dir, string t
         // Stop syncing's inline question, on the first folder.
         if (app.Core.SyncSnapshot().Folders.FirstOrDefault() is SyncFolder folder)
         {
-            app.SyncRemoval.Toggle(folder.Id);
+            app.SyncRemoval.Toggle(folder.Id, app.Core.SyncOnlyHere(folder.Id));
             flyout.OpenPinned(withSync: true);
             await Settle();
             await Save(root, "menu-sync-confirm");

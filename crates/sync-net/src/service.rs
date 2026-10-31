@@ -3285,7 +3285,7 @@ fn bytes_name(b: &[u8]) -> std::ffi::OsString {
     #[cfg(not(unix))]
     {
         use std::os::windows::ffi::OsStringExt;
-        let units: Vec<u16> = b.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+        let units: Vec<u16> = b.as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes(*c)).collect();
         std::ffi::OsString::from_wide(&units)
     }
 }

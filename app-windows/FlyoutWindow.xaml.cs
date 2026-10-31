@@ -560,7 +560,7 @@ public sealed partial class FlyoutWindow : Window
             var id = r.Id;
             // NEED: the folder editor window (Edit); drawn, opens a placeholder for now.
             void Edit() => app.ShowPlaceholder(r.EditLabel);
-            void Remove() { app.SyncRemoval.Toggle(id); Refresh(false); }
+            void Remove() { app.SyncRemoval.Toggle(id, app.Core.SyncOnlyHere(id)); Refresh(false); }
             var pencil = IconButton("", r.EditLabel, Edit);
             buttons.Children.Add(pencil);
             var bin = IconButton("", r.RemoveLabel, Remove);

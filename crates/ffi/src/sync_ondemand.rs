@@ -678,7 +678,10 @@ impl Core {
             matches!((dev(std::path::Path::new(&path)), dev(&self.dir)), (Some(a), Some(b)) if a != b)
         };
         #[cfg(not(unix))]
-        let other = false;
+        let other = {
+            let _ = &path;
+            false
+        };
         crate::sync_text::on_demand_add_note(other)
     }
 
