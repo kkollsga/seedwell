@@ -38,7 +38,7 @@ sealed class Updater
         // Development builds (SPEC 12A) wait for install.ps1's keep-and-go-back and the build's own version: until then this
         // copy names no installer of its own (the core refuses to install builds) and is reopened as it was started.
         var dir = AppContext.BaseDirectory.TrimEnd('\\', '/');
-        var relaunch = Program.StateDir is null ? new List<string>() : new List<string> { "--state-dir", Program.StateDir };
+        string[] relaunch = Program.StateDir is null ? [] : ["--state-dir", Program.StateDir];
         Updates = new Updates(core, ReleaseBuild, repo, $"{v.Major}.{v.Minor}.{v.Build}", null, dir, "", relaunch, App.Now());
         timer = ui.CreateTimer();
         timer.IsRepeating = false;

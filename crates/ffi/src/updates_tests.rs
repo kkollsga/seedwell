@@ -326,6 +326,7 @@ fn set_dev(core: &Arc<Core>, on: bool, folder: Option<&Path>) {
 }
 
 /// Nothing downloading or moving in the mock (an install waits for both): every torrent removed.
+#[cfg(unix)]
 fn idle(core: &Arc<Core>) {
     for _ in 0..100 {
         let s = core.snapshot();

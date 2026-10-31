@@ -985,12 +985,14 @@ async fn update_calls_reach_the_apps_updater_and_a_daemon_says_it_has_none() {
         let s: UpdateStatusDto = serde_json::from_value(call(&mut c, "update.status", json!({})).await.unwrap()).unwrap();
         assert_eq!((s.version.as_str(), s.dev_builds), ("0.1.10.3", on));
         assert_eq!(call(&mut c, "update.install", json!({"path": "relative.zip"})).await.unwrap_err().code, ErrorCode::InvalidParams);
-        assert_eq!(call(&mut c, "update.install", json!({"path": "/a/../b.zip"})).await.unwrap_err().code, ErrorCode::InvalidParams);
-        let r = call(&mut c, "update.install", json!({"path": "/b/Seedwell-0.1.10.4.zip", "sha256": " AB "})).await;
+        // Absolute as this system writes it ("/b" has no drive on Windows: it is not absolute there).
+        let (up, zip) = if cfg!(windows) { (r"C:\a\..\b.zip", r"C:\b\Seedwell-0.1.10.4.zip") } else { ("/a/../b.zip", "/b/Seedwell-0.1.10.4.zip") };
+        assert_eq!(call(&mut c, "update.install", json!({"path": up})).await.unwrap_err().code, ErrorCode::InvalidParams);
+        let r = call(&mut c, "update.install", json!({"path": zip, "sha256": " AB "})).await;
         if on {
             let s: UpdateStatusDto = serde_json::from_value(r.unwrap()).unwrap();
             assert_eq!(s.note, "Installing");
-            assert_eq!(*fake.asked.lock().unwrap(), ["/b/Seedwell-0.1.10.4.zip Some(\"AB\")"]);
+            assert_eq!(*fake.asked.lock().unwrap(), [format!("{zip} Some(\"AB\")")]);
         } else {
             let e = r.unwrap_err();
             assert_eq!((e.code, e.message.as_str()), (ErrorCode::Invalid, "development builds are off"));

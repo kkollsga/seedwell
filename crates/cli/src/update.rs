@@ -90,9 +90,11 @@ mod tests {
     fn the_words_parse() {
         assert_eq!(p("").unwrap(), Cmd::Status);
         assert_eq!(p("status").unwrap(), Cmd::Status);
+        // An absolute path as this system writes one ("/b" has no drive on Windows: it is not absolute there).
+        let abs = if cfg!(windows) { r"C:\b\Seedwell-0.1.10.3.zip" } else { "/b/Seedwell-0.1.10.3.zip" };
         assert_eq!(
-            p("install /b/Seedwell-0.1.10.3.zip --sha256 ab").unwrap(),
-            Cmd::Install { zip: "/b/Seedwell-0.1.10.3.zip".into(), sha256: Some("ab".into()) }
+            p(&format!("install {abs} --sha256 ab")).unwrap(),
+            Cmd::Install { zip: abs.into(), sha256: Some("ab".into()) }
         );
         match p("install Seedwell-0.1.10.3.zip").unwrap() {
             Cmd::Install { zip, sha256: None } => assert!(zip.is_absolute() && zip.ends_with("Seedwell-0.1.10.3.zip")),
