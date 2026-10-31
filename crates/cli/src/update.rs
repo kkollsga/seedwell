@@ -100,7 +100,8 @@ mod tests {
             Cmd::Install { zip, sha256: None } => assert!(zip.is_absolute() && zip.ends_with("Seedwell-0.1.10.3.zip")),
             other => panic!("{other:?}"),
         }
-        assert_eq!(p("watch /b").unwrap(), Cmd::Watch(Some("/b".into())));
+        let dir = if cfg!(windows) { r"C:\b" } else { "/b" };
+        assert_eq!(p(&format!("watch {dir}")).unwrap(), Cmd::Watch(Some(dir.into())));
         assert_eq!(p("watch --off").unwrap(), Cmd::Watch(None));
         for bad in ["install", "watch", "watch /b --off", "status --sha256 x", "now", "install a b"] {
             assert!(p(bad).is_err(), "{bad}");
