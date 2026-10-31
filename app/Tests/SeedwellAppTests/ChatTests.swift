@@ -4,9 +4,10 @@ import Testing
 
 /// Channels (SPEC 7G.7): the words of the Chats page, its runs of messages, and its notifications.
 @Suite struct ChatTests {
-    static func channel(_ name: String = "Team", unread: UInt32 = 0, members: UInt32 = 3, online: UInt32 = 2, muted: Bool = false) -> SyncChannel {
+    static func channel(_ name: String = "Team", unread: UInt32 = 0, members: UInt32 = 3, online: UInt32 = 2, muted: Bool = false,
+                        agentChannel: Bool = false, agents: SyncAgentAccess = .off) -> SyncChannel {
         SyncChannel(id: "C-\(name)", name: name, role: .owner, shareUntilS: nil, members: members, online: online, unread: unread,
-                    lastMessageS: nil, muted: muted, agents: .off, wakeCommand: nil)
+                    lastMessageS: nil, muted: muted, agents: agents, agentChannel: agentChannel, wakeCommand: nil)
     }
 
     static func message(_ body: String, by device: String = "D1", name: String = "Studio iMac", user: String = "", at: UInt64 = 1_800_000_000,
@@ -23,6 +24,16 @@ import Testing
     @Test func agentsAccessIsSaidInWords() {
         // The sidebar's and the title bar's lines are the core's (crates/ffi/src/chat_text.rs).
         #expect(ChatText.agents(.readPost) == "Read and post")
+    }
+
+    @Test func anAgentChannelIsTaggedAndTheUsersOwnIsNot() {
+        // The tag the sidebar row and the channel's toolbar draw (the core's words and rule).
+        #expect(ChatText.agentTag(Self.channel("Family")) == nil)
+        let tag = ChatText.agentTag(Self.channel("Bridge", agentChannel: true, agents: .readPost))
+        #expect(tag?.text == "agents")
+        #expect(tag?.help.contains("Read and post") == true)
+        // Closed by the user: still tagged, and the tooltip says agents may do nothing now.
+        #expect(ChatText.agentTag(Self.channel("Bridge", agentChannel: true, agents: .off))?.help.contains(": Off") == true)
     }
 
     @Test func authorsAndAgentsAreNamed() {

@@ -73,10 +73,17 @@ pub async fn run(ctx: Arc<Ctx>, f: Arc<FolderShared>, mut stop: watch::Receiver<
     // (quitting) waits for that pool, and must not wait for FSEvents.
     let root = f.root.clone();
     let (started, watcher_rx) = tokio::sync::oneshot::channel();
-    let _ = std::thread::Builder::new().name("seedwell-sync-watch-start".into()).spawn(move || {
-        let _ = started.send(start_watcher(&root, tx));
-    });
-    let mut watcher = Some(watcher_rx);
+    // An on-demand folder's root is this device's content cache: only the core writes it (the host's changes come as
+    // calls), so there is nothing to watch.
+    if !f.on_demand {
+        let _ = std::thread::Builder::new().name("seedwell-sync-watch-start".into()).spawn(move || {
+            let _ = started.send(start_watcher(&root, tx));
+        });
+    }
+    let mut watcher = (!f.on_demand).then_some(watcher_rx);
+    if f.on_demand {
+        events = None;
+    }
     let mut catch_up = false;
     let mut agg = Aggregator::new();
     let started = Instant::now();
@@ -335,13 +342,33 @@ fn pass_status(ctx: &Ctx, root: &Path, core: &FolderCore) {
             }
             // Below the pass's own folder (`after` it with the slash, so a sibling such as "… 2/" never counts).
             let rel = format!("{}/{}/{}/", trs_sync::PASS_THROUGH, to.file_name().to_string_lossy(), pass.file_name().to_string_lossy());
-            let missing = core.store().needs(Some(&rel), 1).map_or(true, |n| n.first().is_some_and(|(p, _)| p.starts_with(&rel)));
+            // Arrived when nothing below is still needed, a version no device can give left out (it never comes).
+            let missing = still_needed(core.store(), &rel).unwrap_or(true);
             let want = if missing { "receiving" } else { "arrived" };
             if want != state {
                 let text = format!("computer: {}\nstate: {want}\nat: {}\n", lock(&ctx.device_name), crate::roles::now_s());
                 let _ = std::fs::write(&file, text);
             }
         }
+    }
+}
+
+/// Something below `rel` (a folder's path with its slash) is still needed and can come: every need there is read, a
+/// page at a time, so any number of versions no device can give never hide one that is on its way.
+fn still_needed(store: &dyn trs_sync::index::IndexStore, rel: &str) -> std::io::Result<bool> {
+    let mut after = rel.to_string();
+    loop {
+        let page = store.needs(Some(&after), 1000)?;
+        let Some((last, _)) = page.last().cloned() else { return Ok(false) };
+        for (p, _) in &page {
+            if !p.starts_with(rel) {
+                return Ok(false);
+            }
+            if store.unavailable_at(p)?.is_none() {
+                return Ok(true);
+            }
+        }
+        after = last;
     }
 }
 
@@ -374,12 +401,15 @@ async fn settle(f: &Arc<FolderShared>) {
         let fs = StdFs::new(f2.root.clone());
         let gone: Vec<String> = copies.into_iter().filter(|c| matches!(fs.lstat(c), Ok(None))).collect();
         let core = lock(&f2.core);
-        (core.need_totals().unwrap_or((0, 0)), core.local_totals().unwrap_or((0, 0)), gone, sample_pending(&core))
+        // Worked out before the needs: what no device can give is not needed (counted apart).
+        let unavailable = core.unavailable().map_or(0, |u| u.len() as u64);
+        (core.need_totals().unwrap_or((0, 0)), core.local_totals().unwrap_or((0, 0)), gone, sample_pending(&core), unavailable)
     })
     .await;
-    let Ok((need, local, gone, pending)) = totals else { return };
+    let Ok((need, local, gone, pending, unavailable)) = totals else { return };
     let mut live = lock(&f.live);
     live.need = need;
+    live.unavailable = unavailable;
     live.pending = pending;
     live.local = local;
     for c in &gone {
@@ -407,7 +437,8 @@ fn sample_pending(core: &FolderCore) -> (Vec<String>, bool) {
         let full = page.len() == PENDING_SAMPLE;
         after = page.last().map(|(p, _)| p.clone());
         for (path, n) in page {
-            if n.need == Need::Nothing || core.is_unsupported(&path, &n) {
+            // (Nor a version no device can give: it is counted apart, not pending.)
+            if n.need == Need::Nothing || core.is_unsupported(&path, &n) || core.store().unavailable_at(&path).ok().flatten().is_some() {
                 continue;
             }
             if out.len() == PENDING_SAMPLE {
@@ -491,6 +522,42 @@ mod tests {
     use super::{PENDING_SAMPLE, sample_pending, wire};
 
     #[test]
+    fn a_pass_is_still_receiving_while_a_need_below_it_can_come_however_many_cannot() {
+        use trs_sync::index::{IndexStore, NeedRecord, Op};
+        use trs_sync_proto::model::{FileInfo, FileKind, SignedFile, Version};
+        let mut store = MemStore::new(1);
+        let need = |p: &str| {
+            let info = FileInfo {
+                path: p.to_string(),
+                kind: FileKind::File,
+                size: 1,
+                mtime_ns: 0,
+                exec: false,
+                deleted: false,
+                version: Version::new(),
+                modified_by: trs_sync_proto::ids::ShortId(1),
+                file_id: [0; 16],
+                symlink_target: String::new(),
+                conflict_of: None,
+                chunks: Vec::new(),
+            };
+            Op::SetNeed(p.to_string(), Some(NeedRecord { need: trs_sync::global::Need::Take, file: SignedFile { info, sig: [0; 64] }, holders: Vec::new() }))
+        };
+        let rel = "P/web/x/";
+        // 1500 that no device can give, then one that can come.
+        let mut ops: Vec<Op> = (0..1500).flat_map(|n| {
+            let p = format!("{rel}a{n:05}");
+            [need(&p), Op::Unavailable(p, Some(1))]
+        }).collect();
+        ops.push(need(&format!("{rel}b")));
+        ops.push(need("P/web/y/other"));
+        store.apply(ops).unwrap();
+        assert!(super::still_needed(&store, rel).unwrap());
+        store.apply(vec![Op::SetNeed(format!("{rel}b"), None)]).unwrap();
+        assert!(!super::still_needed(&store, rel).unwrap(), "only what cannot come, and another pass's need");
+    }
+
+    #[test]
     fn a_watcher_path_becomes_the_wire_path_on_every_system() {
         use std::path::Path;
         assert_eq!(wire(Path::new("")).as_deref(), Some(""));
@@ -515,6 +582,7 @@ mod tests {
             byte_exact_names: false,
             exec_bits: true,
             archive: true,
+            on_demand: false,
         };
         let ids = Arc::new(AtomicU64::new(u64::from(seed) << 32));
         let new_id = Arc::new(move || {

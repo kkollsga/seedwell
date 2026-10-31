@@ -115,6 +115,12 @@ pub struct SyncFolder {
     pub last_synced_s: Option<u64>,
     /// The channel that goes with it on this Mac ([`Core::sync_set_channel`], or a link for both).
     pub channel_id: Option<String>,
+    /// On demand (SPEC 7G.11): every file is listed, only some are here (`files` and `bytes` count those); `path` is
+    /// where the Finder shows it.
+    pub on_demand: bool,
+    /// Files no device can give right now (SPEC 7G.11): not counted in `need_files`; "N files unavailable: no device
+    /// has them".
+    pub unavailable: u64,
 }
 
 /// A connected device.
@@ -221,7 +227,12 @@ pub struct SyncChannel {
     pub unread: u32,
     pub last_message_s: Option<u64>,
     pub muted: bool,
+    /// What agents on this Mac may do in it: the user's choice, else the channel's default (Read and post for an
+    /// agent channel, else Off).
     pub agents: SyncAgentAccess,
+    /// An agent channel: an agent made it, for agents to talk where the user can read (its owner's mark, the same on
+    /// every member device). Shown with a tag (`chat_agent_tag`); the user reads, posts and closes it like any other.
+    pub agent_channel: bool,
     pub wake_command: Option<String>,
 }
 
@@ -422,6 +433,9 @@ pub fn secret_store(vault: Option<Arc<dyn SecretVault>>, state_dir: &Path) -> Ar
     }
 }
 
+#[path = "sync_ondemand.rs"]
+pub mod ondemand;
+
 // ------------------------------------------------------------------------------------------ the contract
 
 /// What the UI can ask of folder sync. Calls may block (moving a folder copies across disks): the app
@@ -444,6 +458,24 @@ pub trait SyncBackend: Send + Sync {
     fn move_to(&self, id: &str, path: &str) -> Result<SyncFolder, CoreError>;
     /// Stops syncing; returns where the folder is (`Core::sync_remove` then moves it to the Trash when asked to).
     fn remove(&self, id: &str) -> Result<String, CoreError>;
+    /// Where a folder's files are on this computer, when not at its place (an on-demand folder's cache).
+    fn files_path(&self, _id: &str) -> Option<String> {
+        None
+    }
+    /// How many of a folder's files no other device is known to hold (reads its whole index).
+    fn only_here(&self, _id: &str) -> u64 {
+        0
+    }
+    /// [`Self::remove`] for a folder whose files go to the Trash next, from where they are (an on-demand folder's
+    /// from beside its cache, under its name); then [`Self::finish_removal`].
+    fn remove_for_trash(&self, id: &str) -> Result<String, CoreError> {
+        self.remove(id)
+    }
+    /// After [`Self::remove_for_trash`]: the files went to the Trash, or not (then an on-demand folder's go to its
+    /// place as an ordinary folder). Returns where they are.
+    fn finish_removal(&self, files: &str, place: &str, trashed: bool) -> Result<String, CoreError> {
+        Ok(if trashed { place } else { files }.to_string())
+    }
     fn pause(&self, id: &str, paused: bool) -> Result<(), CoreError>;
     fn rescan(&self, id: &str) -> Result<(), CoreError>;
     fn conflicts(&self, id: &str) -> Vec<SyncConflict>;
@@ -468,6 +500,62 @@ pub trait SyncBackend: Send + Sync {
     fn chat_mark_read(&self, id: &str, topic: Option<&str>);
     /// Newest activity first. Cheap.
     fn chat_topics(&self, id: &str) -> Vec<SyncTopic>;
+    /// On demand (SPEC 7G.11, [`ondemand`]): a folder full or on demand.
+    fn set_on_demand(&self, _id: &str, _on: bool, _path: Option<&str>) -> Result<SyncFolder, CoreError> {
+        Err(ondemand::not_on_demand().error)
+    }
+    fn join_on_demand(&self, _link: &str, _place: &str) -> Result<SyncFolder, CoreError> {
+        Err(ondemand::not_on_demand().error)
+    }
+    fn od_item(&self, _id: &str, _item: &str) -> Result<Option<ondemand::SyncItem>, ondemand::OdError> {
+        Err(ondemand::not_on_demand())
+    }
+    fn od_children(&self, _id: &str, _item: &str, _cursor: Option<&str>, _limit: u32) -> Result<ondemand::SyncItemPage, ondemand::OdError> {
+        Err(ondemand::not_on_demand())
+    }
+    fn od_changes(&self, _id: &str, _anchor: u64, _limit: u32) -> Result<ondemand::SyncChangePage, ondemand::OdError> {
+        Err(ondemand::not_on_demand())
+    }
+    /// The file manager's host of on-demand folders (the app's File Provider server), asked to let go of a folder
+    /// before it is removed or switched to full, whoever asks.
+    fn set_on_demand_host(&self, _host: Option<Arc<dyn trs_sync_net::OnDemandHost>>) {}
+    /// The anchor for "now": changes from it report only what comes after (File Provider's current sync anchor).
+    fn od_anchor(&self, _id: &str) -> Result<u64, ondemand::OdError> {
+        Err(ondemand::not_on_demand())
+    }
+    fn od_fetch(&self, _id: &str, _item: &str, _wait_ms: u64) -> Result<ondemand::SyncFetch, ondemand::OdError> {
+        Err(ondemand::not_on_demand())
+    }
+    fn od_cancel(&self, _id: &str, _item: &str) -> Result<(), ondemand::OdError> {
+        Err(ondemand::not_on_demand())
+    }
+    fn od_pin(&self, _id: &str, _item: &str, _on: bool) -> Result<ondemand::SyncItem, ondemand::OdError> {
+        Err(ondemand::not_on_demand())
+    }
+    fn od_evict(&self, _id: &str, _item: &str) -> Result<ondemand::SyncEvicted, ondemand::OdError> {
+        Err(ondemand::not_on_demand())
+    }
+    fn od_create(&self, _id: &str, _parent: &str, _name: &str, _dir: bool, _contents: Option<&str>) -> Result<ondemand::SyncItem, ondemand::OdError> {
+        Err(ondemand::not_on_demand())
+    }
+    fn od_modify(&self, _id: &str, _item: &str, _parent: Option<&str>, _name: Option<&str>, _contents: Option<&str>, _base: Option<&str>) -> Result<ondemand::SyncItem, ondemand::OdError> {
+        Err(ondemand::not_on_demand())
+    }
+    /// A delete of what the host saw: `seen` is the folder's version then (`od_newest_below`).
+    fn od_delete(&self, _id: &str, _item: &str, _seen: Option<trs_sync_net::DeleteSeen>) -> Result<ondemand::SyncDeleted, ondemand::OdError> {
+        Err(ondemand::not_on_demand())
+    }
+    /// Adds a folder of this computer on demand, whole or not at all (the mock: added, then switched).
+    fn add_folder_on_demand(&self, path: &str) -> Result<SyncFolder, CoreError> {
+        let f = self.add_folder(path)?;
+        self.set_on_demand(&f.id, true, None)
+    }
+    /// Whether a folder is in the configuration, and on demand (`Some(None)`: it is not); `None` while folder sync
+    /// is not running (nothing can be said).
+    fn configured(&self, id: &str) -> Option<Option<bool>> {
+        Some(self.snapshot().folders.iter().find(|f| f.id == id).map(|f| f.on_demand))
+    }
+
     fn chat_new_topic(&self, id: &str, title: &str) -> Result<SyncTopic, CoreError>;
     /// Every private conversation, newest first. Cheap.
     fn chat_directs(&self) -> Vec<SyncDirect>;
@@ -512,7 +600,7 @@ fn gone() -> CoreError {
 fn sync_err(e: SyncError) -> CoreError {
     match e {
         SyncError::NotFound => gone(),
-        SyncError::Invalid(why) => failed(trs_control::redact::scrub_keys(&why)),
+        SyncError::Invalid(why) | SyncError::OnDemand(_, why) => failed(trs_control::redact::scrub_keys(&why)),
         SyncError::Io(e) => failed(trs_control::redact::scrub_keys(&e.to_string())),
     }
 }
@@ -599,6 +687,8 @@ fn folder_of(f: &FolderStatus) -> SyncFolder {
         error: f.error.as_deref().map(|e| readable(&trs_control::redact::scrub_keys(e))),
         last_synced_s: f.last_synced_s,
         channel_id: f.channel_id.clone(),
+        on_demand: f.on_demand,
+        unavailable: f.unavailable,
     }
 }
 
@@ -655,6 +745,7 @@ fn channel_of(c: &ChannelStatus) -> SyncChannel {
         last_message_s: c.last_message_s,
         muted: c.muted,
         agents: agents_of(c.agents),
+        agent_channel: c.agent_channel,
         wake_command: c.wake_command.clone(),
     }
 }
@@ -743,6 +834,8 @@ pub struct RealSync {
     /// Why the service is not running, once its start failed.
     problem: Arc<Mutex<Option<String>>>,
     default_name: String,
+    /// The file manager's host of on-demand folders, kept across restarts of the service (`set_on_demand_host`).
+    od_host: trs_sync_net::OnDemandHostCell,
 }
 
 fn is_test_run() -> bool {
@@ -764,18 +857,27 @@ impl RealSync {
         let slot = SyncSlot::new();
         let problem = Arc::new(Mutex::new(None));
         let default_name = trs_control::sync::default_device_name();
-        let me = Arc::new(RealSync { rt: rt.clone(), slot: slot.clone(), engine: engine.clone(), problem: problem.clone(), default_name: default_name.clone() });
+        let od_host: trs_sync_net::OnDemandHostCell = Arc::new(Mutex::new(None));
+        let me = Arc::new(RealSync {
+            rt: rt.clone(),
+            slot: slot.clone(),
+            engine: engine.clone(),
+            problem: problem.clone(),
+            default_name: default_name.clone(),
+            od_host: od_host.clone(),
+        });
         let secrets = secret_store(vault, dir);
         let (engine, dir) = (engine.clone(), dir.to_path_buf());
         // The same start again when the port changes (`SyncSlot::move_port`).
         let starter: trs_control::sync::Starter = Arc::new(move || {
-            let (dir, secrets, engine, default_name, forbidden_root) =
-                (dir.clone(), secrets.clone(), engine.clone(), default_name.clone(), forbidden_root.clone());
+            let (dir, secrets, engine, default_name, forbidden_root, od_host) =
+                (dir.clone(), secrets.clone(), engine.clone(), default_name.clone(), forbidden_root.clone(), od_host.clone());
             Box::pin(async move {
                 let client = format!("Seedwell {}", env!("CARGO_PKG_VERSION"));
                 start_sync_with(&dir, client, secrets, Some(&engine), |o| {
                     o.default_device_name = default_name;
                     o.forbidden_root = forbidden_root;
+                    o.on_demand_host = od_host;
                     if is_test_run() {
                         o.bind = std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
                         o.lan_discovery = false;
@@ -813,6 +915,14 @@ impl RealSync {
         }
     }
 
+    /// A disk was mounted or unmounted: a folder waiting for the disk with its original files is tried again (in the
+    /// background).
+    pub fn volumes_changed(&self) {
+        if let Some(h) = self.slot.get() {
+            self.rt.spawn(async move { h.volumes_changed().await });
+        }
+    }
+
     fn handle(&self) -> Result<SyncHandle, CoreError> {
         self.slot.get().ok_or_else(|| {
             failed(lock(&self.problem).clone().unwrap_or_else(|| "Folder sync is still starting. Try again in a moment.".into()))
@@ -825,6 +935,60 @@ impl RealSync {
 }
 
 impl SyncBackend for RealSync {
+    fn set_on_demand(&self, id: &str, on: bool, path: Option<&str>) -> Result<SyncFolder, CoreError> {
+        self.od_set_mode(id, on, path)
+    }
+    fn join_on_demand(&self, link: &str, place: &str) -> Result<SyncFolder, CoreError> {
+        self.od_join(link, place)
+    }
+    fn od_item(&self, id: &str, item: &str) -> Result<Option<ondemand::SyncItem>, ondemand::OdError> {
+        RealSync::od_item(self, id, item)
+    }
+    fn od_children(&self, id: &str, item: &str, cursor: Option<&str>, limit: u32) -> Result<ondemand::SyncItemPage, ondemand::OdError> {
+        RealSync::od_children(self, id, item, cursor, limit)
+    }
+    fn od_changes(&self, id: &str, anchor: u64, limit: u32) -> Result<ondemand::SyncChangePage, ondemand::OdError> {
+        RealSync::od_changes(self, id, anchor, limit)
+    }
+    fn od_anchor(&self, id: &str) -> Result<u64, ondemand::OdError> {
+        RealSync::od_anchor(self, id)
+    }
+    fn set_on_demand_host(&self, host: Option<Arc<dyn trs_sync_net::OnDemandHost>>) {
+        *lock(&self.od_host) = host;
+    }
+    fn add_folder_on_demand(&self, path: &str) -> Result<SyncFolder, CoreError> {
+        let h = self.handle()?;
+        let p = folder_path(path, "the folder").map_err(api_err)?;
+        let f = self.rt.block_on(h.add_folder_on_demand(p)).map_err(sync_err)?;
+        Ok(folder_of(&f))
+    }
+    fn configured(&self, id: &str) -> Option<Option<bool>> {
+        let h = self.slot.get()?;
+        Some(folder_id(id).ok().and_then(|fid| h.configured(&fid)))
+    }
+    fn od_fetch(&self, id: &str, item: &str, wait_ms: u64) -> Result<ondemand::SyncFetch, ondemand::OdError> {
+        RealSync::od_fetch(self, id, item, wait_ms)
+    }
+    fn od_cancel(&self, id: &str, item: &str) -> Result<(), ondemand::OdError> {
+        RealSync::od_cancel(self, id, item)
+    }
+    fn od_pin(&self, id: &str, item: &str, on: bool) -> Result<ondemand::SyncItem, ondemand::OdError> {
+        RealSync::od_pin(self, id, item, on)
+    }
+    fn od_evict(&self, id: &str, item: &str) -> Result<ondemand::SyncEvicted, ondemand::OdError> {
+        RealSync::od_evict(self, id, item)
+    }
+    fn od_create(&self, id: &str, parent: &str, name: &str, dir: bool, contents: Option<&str>) -> Result<ondemand::SyncItem, ondemand::OdError> {
+        RealSync::od_create(self, id, parent, name, dir, contents)
+    }
+    fn od_modify(&self, id: &str, item: &str, parent: Option<&str>, name: Option<&str>, contents: Option<&str>, base: Option<&str>) -> Result<ondemand::SyncItem, ondemand::OdError> {
+        RealSync::od_modify(self, id, item, parent, name, contents, base)
+    }
+    fn od_delete(&self, id: &str, item: &str, seen: Option<trs_sync_net::DeleteSeen>) -> Result<ondemand::SyncDeleted, ondemand::OdError> {
+        RealSync::od_delete(self, id, item, seen)
+    }
+
+
     fn chat_channels(&self) -> Vec<SyncChannel> {
         self.slot.get().map(|h| h.chat_channels().iter().map(channel_of).collect()).unwrap_or_default()
     }
@@ -1081,6 +1245,29 @@ impl SyncBackend for RealSync {
         let fid = folder_id(id)?;
         let path = self.rt.block_on(h.remove_folder(&fid)).map_err(sync_err)?;
         Ok(path.display().to_string())
+    }
+
+    fn files_path(&self, id: &str) -> Option<String> {
+        let (Ok(h), Ok(fid)) = (self.handle(), folder_id(id)) else { return None };
+        h.folder_files(&fid).map(|p| p.display().to_string())
+    }
+
+    fn only_here(&self, id: &str) -> u64 {
+        let (Ok(h), Ok(fid)) = (self.handle(), folder_id(id)) else { return 0 };
+        h.only_here(&fid).unwrap_or(0)
+    }
+
+    fn remove_for_trash(&self, id: &str) -> Result<String, CoreError> {
+        let h = self.handle()?;
+        let fid = folder_id(id)?;
+        let path = self.rt.block_on(h.remove_folder_for_trash(&fid)).map_err(sync_err)?;
+        Ok(path.display().to_string())
+    }
+
+    fn finish_removal(&self, files: &str, place: &str, trashed: bool) -> Result<String, CoreError> {
+        let h = self.handle()?;
+        let at = self.rt.block_on(h.finish_removal(std::path::Path::new(files), std::path::Path::new(place), trashed)).map_err(sync_err)?;
+        Ok(at.display().to_string())
     }
 
     fn pause(&self, id: &str, paused: bool) -> Result<(), CoreError> {
@@ -1369,6 +1556,8 @@ struct MockChat {
     topics: Vec<SyncTopic>,
     muted: bool,
     agents: SyncAgentAccess,
+    /// Made by an agent.
+    agent_channel: bool,
     wake: Option<String>,
 }
 
@@ -1400,6 +1589,8 @@ struct MockState {
 pub struct MockSync {
     state: Mutex<MockState>,
     started: Instant,
+    /// On-demand folders' items ([`ondemand::MockOd`]), made when a folder is made on demand.
+    od: Mutex<std::collections::BTreeMap<String, ondemand::MockOd>>,
 }
 
 fn mock_id(n: u32) -> String {
@@ -1491,6 +1682,8 @@ impl MockSync {
             error: None,
             last_synced_s: Some(now_s().saturating_sub(120)),
             channel_id: None,
+            on_demand: false,
+            unavailable: 0,
         };
         let mut photos = mk(1, "Photos", SyncAccess::ReadWrite, SyncState::UpToDate, 3, 3);
         photos.role = SyncRole::Owner;
@@ -1563,7 +1756,7 @@ impl MockSync {
             read: 2,
         }];
         let state = MockState { folders, channels, directs, direct_agents: SyncAgentAccess::Off, settings: Self::default_settings(), next: 20 };
-        Arc::new(MockSync { state: Mutex::new(state), started: Instant::now() })
+        Arc::new(MockSync { state: Mutex::new(state), started: Instant::now(), od: Mutex::new(std::collections::BTreeMap::new()) })
     }
 
     /// Three channels: one with an agent's answer and a reply to it, one where agents read and post, one muted.
@@ -1629,7 +1822,7 @@ impl MockSync {
             f: family,
             members,
             invites: vec![mock_invite(11, 1, "Family", SyncRole::ReadWrite, 1, 7, true)],
-            chat: Some(MockChat { read: first_read(&messages, 3), messages, topics, muted: false, agents: SyncAgentAccess::Off, wake: None }),
+            chat: Some(MockChat { read: first_read(&messages, 3), messages, topics, muted: false, agents: SyncAgentAccess::Off, agent_channel: false, wake: None }),
         });
         let mut build = mk(12, "Release notes", SyncAccess::ReadWrite, SyncState::UpToDate, 2, 2);
         build.role = SyncRole::Admin;
@@ -1654,7 +1847,15 @@ impl MockSync {
             f: build,
             members: mock_members(SyncRole::Admin, &[("Studio iMac", SyncRole::Owner, true)], None),
             invites: Vec::new(),
-            chat: Some(MockChat { read: first_read(&messages, 2), messages, topics: Vec::new(), muted: false, agents: SyncAgentAccess::ReadPost, wake: Some("~/bin/wake-claude".into()) }),
+            chat: Some(MockChat {
+                read: first_read(&messages, 2),
+                messages,
+                topics: Vec::new(),
+                muted: false,
+                agents: SyncAgentAccess::ReadPost,
+                agent_channel: true,
+                wake: Some("~/bin/wake-claude".into()),
+            }),
         });
         let mut ola = mk(13, "Ola & Kristian", SyncAccess::ReadWrite, SyncState::UpToDate, 2, 0);
         ola.role = SyncRole::ReadWrite;
@@ -1666,7 +1867,7 @@ impl MockSync {
             f: ola,
             members: mock_members(SyncRole::ReadWrite, &[("Ola's MacBook Air", SyncRole::Owner, false)], Some(now + 5 * 86_400)),
             invites: Vec::new(),
-            chat: Some(MockChat { read: first_read(&messages, 0), messages, topics: Vec::new(), muted: true, agents: SyncAgentAccess::Off, wake: None }),
+            chat: Some(MockChat { read: first_read(&messages, 0), messages, topics: Vec::new(), muted: true, agents: SyncAgentAccess::Off, agent_channel: false, wake: None }),
         });
         out
     }
@@ -1706,6 +1907,7 @@ impl MockSync {
             last_message_s: c.messages.last().map(|x| x.at_s),
             muted: c.muted,
             agents: c.agents,
+            agent_channel: c.agent_channel,
             wake_command: c.wake.clone(),
         })
     }
@@ -1742,6 +1944,8 @@ impl MockSync {
             error: None,
             last_synced_s: None,
             channel_id: None,
+            on_demand: false,
+            unavailable: 0,
         };
         let members = mock_members(if joining { SyncRole::ReadOnly } else { role }, &[], None);
         s.folders.push(MockFolder { n, f: f.clone(), members, invites: Vec::new(), chat: None });
@@ -1758,6 +1962,47 @@ fn parent_of(path: &str) -> String {
 }
 
 impl SyncBackend for MockSync {
+    fn set_on_demand(&self, id: &str, on: bool, _path: Option<&str>) -> Result<SyncFolder, CoreError> {
+        self.od_set_mode(id, on)
+    }
+    fn join_on_demand(&self, link: &str, place: &str) -> Result<SyncFolder, CoreError> {
+        ondemand::mock_join(self, link, place)
+    }
+    fn od_item(&self, id: &str, item: &str) -> Result<Option<ondemand::SyncItem>, ondemand::OdError> {
+        MockSync::od_item(self, id, item)
+    }
+    fn od_children(&self, id: &str, item: &str, _cursor: Option<&str>, _limit: u32) -> Result<ondemand::SyncItemPage, ondemand::OdError> {
+        MockSync::od_children(self, id, item)
+    }
+    fn od_changes(&self, id: &str, anchor: u64, _limit: u32) -> Result<ondemand::SyncChangePage, ondemand::OdError> {
+        MockSync::od_changes(self, id, anchor)
+    }
+    fn od_anchor(&self, id: &str) -> Result<u64, ondemand::OdError> {
+        MockSync::od_changes(self, id, u64::MAX).map(|p| p.anchor)
+    }
+    fn od_fetch(&self, id: &str, item: &str, _wait_ms: u64) -> Result<ondemand::SyncFetch, ondemand::OdError> {
+        MockSync::od_fetch(self, id, item)
+    }
+    fn od_cancel(&self, id: &str, item: &str) -> Result<(), ondemand::OdError> {
+        MockSync::od_item(self, id, item).map(|_| ())
+    }
+    fn od_pin(&self, id: &str, item: &str, on: bool) -> Result<ondemand::SyncItem, ondemand::OdError> {
+        MockSync::od_pin(self, id, item, on)
+    }
+    fn od_evict(&self, id: &str, item: &str) -> Result<ondemand::SyncEvicted, ondemand::OdError> {
+        MockSync::od_evict(self, id, item)
+    }
+    fn od_create(&self, id: &str, parent: &str, name: &str, dir: bool, _contents: Option<&str>) -> Result<ondemand::SyncItem, ondemand::OdError> {
+        MockSync::od_create(self, id, parent, name, dir)
+    }
+    fn od_modify(&self, id: &str, item: &str, parent: Option<&str>, name: Option<&str>, _contents: Option<&str>, _base: Option<&str>) -> Result<ondemand::SyncItem, ondemand::OdError> {
+        self.od_rename(id, item, parent, name)
+    }
+    fn od_delete(&self, id: &str, item: &str, _seen: Option<trs_sync_net::DeleteSeen>) -> Result<ondemand::SyncDeleted, ondemand::OdError> {
+        MockSync::od_delete(self, id, item)
+    }
+
+
     fn chat_channels(&self) -> Vec<SyncChannel> {
         let mut out: Vec<SyncChannel> = lock(&self.state).channels.iter().filter_map(Self::channel_of).collect();
         out.sort_by_key(|c| c.name.to_lowercase());
@@ -1782,7 +2027,7 @@ impl SyncBackend for MockSync {
             f,
             members: mock_members(SyncRole::Owner, &[], None),
             invites: Vec::new(),
-            chat: Some(MockChat { messages: Vec::new(), read: Default::default(), topics: Vec::new(), muted: false, agents: SyncAgentAccess::Off, wake: None }),
+            chat: Some(MockChat { messages: Vec::new(), read: Default::default(), topics: Vec::new(), muted: false, agents: SyncAgentAccess::Off, agent_channel: false, wake: None }),
         };
         let c = Self::channel_of(&m).ok_or_else(gone)?;
         s.channels.push(m);
@@ -2569,6 +2814,12 @@ impl Core {
     /// Scans the whole folder now.
     pub fn sync_rescan(&self, id: String) -> Result<(), CoreError> {
         self.backend.sync().rescan(&id)
+    }
+
+    /// How many of a folder's files no other device is known to hold: they go from the others' reach when this
+    /// computer stops syncing it (reads its whole index: call when its removal question opens, not every second).
+    pub fn sync_only_here(&self, id: String) -> u64 {
+        self.backend.sync().only_here(&id)
     }
 
     /// The conflict copies in a folder (reads its whole index: call when its page opens, not every second).

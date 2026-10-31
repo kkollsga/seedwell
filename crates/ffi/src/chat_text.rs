@@ -7,6 +7,7 @@
 
 use trs_control::display as d;
 
+use crate::sidebar::SidebarTag;
 use crate::sync::{SyncAgentAccess, SyncChannel, SyncTopic};
 use crate::sync_text::role;
 
@@ -56,10 +57,31 @@ pub fn chat_agents_label(access: SyncAgentAccess) -> String {
     .into()
 }
 
-/// A channel page's line under its name: "Owner · 2 of 3 online · shared until 1 Nov · agents: read".
-/// `share_until_day`: the channel's share end in the user's own date style.
+/// An agent channel's tag ("agents"), the same in the sidebar and on its page; `None` for any other channel.
+pub(crate) fn agent_tag(channel: &SyncChannel) -> Option<SidebarTag> {
+    channel.agent_channel.then(|| SidebarTag {
+        text: "agents".into(),
+        help: format!(
+            concat!("Agent channel: an agent made it, so agents can talk where you can read. Agents on this ", trs_platform::computer!(), ": {} (⋯ ▸ Agents on This ", trs_platform::computer!(), ")"),
+            chat_agents_label(channel.agents)
+        ),
+    })
+}
+
+/// An agent channel's tag for its page (its toolbar, by its name): "agents", with what agents on this computer may
+/// do in its tooltip. `None` for any other channel.
+#[uniffi::export]
+pub fn chat_agent_tag(channel: SyncChannel) -> Option<SidebarTag> {
+    agent_tag(&channel)
+}
+
+/// A channel page's line under its name: "Owner · 2 of 3 online · shared until 1 Nov · agents: read", led by
+/// "Agent channel" for one. `share_until_day`: the channel's share end in the user's own date style.
 pub(crate) fn header(channel: &SyncChannel, share_until_day: Option<String>) -> String {
     let mut parts = vec![role(channel.role).to_owned(), subtitle(channel)];
+    if channel.agent_channel {
+        parts.insert(0, "Agent channel".into());
+    }
     if let Some(day) = share_until_day.filter(|_| channel.share_until_s.is_some()) {
         parts.push(format!("shared until {day}"));
     }
@@ -124,6 +146,7 @@ pub(crate) mod tests {
             last_message_s: None,
             muted,
             agents: SyncAgentAccess::Off,
+            agent_channel: false,
             wake_command: None,
         }
     }
@@ -152,6 +175,23 @@ pub(crate) mod tests {
         assert_eq!(header(&m, Some("1 Nov".into())), "Owner · 2 of 3 online · Muted · shared until 1 Nov · agents: read");
         assert_eq!(subtitle(&c), "2 of 3 online");
         assert_eq!(chat_agents_label(SyncAgentAccess::ReadPost), "Read and post");
+    }
+
+    #[test]
+    fn an_agent_channel_has_a_tag_and_says_so_on_its_page() {
+        let plain = channel("Family", 2, 1, 0, false);
+        assert_eq!(agent_tag(&plain), None, "the user's own channel: no tag");
+        let mut c = channel("Bridge", 2, 2, 0, false);
+        c.agent_channel = true;
+        c.agents = SyncAgentAccess::ReadPost;
+        let tag = chat_agent_tag(c.clone()).unwrap();
+        assert_eq!(tag.text, "agents");
+        assert!(tag.help.starts_with("Agent channel: an agent made it") && tag.help.contains(": Read and post (⋯ ▸ Agents on This "), "{}", tag.help);
+        assert_eq!(header(&c, None), "Agent channel · Owner · 2 of 2 online · agents: read and post");
+        // Closed by this computer's user: still an agent channel, and the tag says what agents may do now.
+        c.agents = SyncAgentAccess::Off;
+        assert!(agent_tag(&c).unwrap().help.contains(": Off (⋯"));
+        assert_eq!(header(&c, None), "Agent channel · Owner · 2 of 2 online");
     }
 
     #[cfg(target_os = "macos")]

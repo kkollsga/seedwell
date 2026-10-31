@@ -169,8 +169,15 @@ gh pr list --state open --json number,title,author,headRefName,statusCheckRollup
   curl -fsSL https://github.com/kkollsga/seedwell/releases/latest/download/latest.json
   ```
   For a minute or two after publishing, GitHub's `releases/latest` still answers with the previous release on some
-  requests. Repeat the check until several answers in a row name X.Y.Z before telling the user to press **Check Now**
-  (Settings › General › Updates, or the menu's Update row). Installed copies otherwise notice within a day.
+  requests. Repeat the check until several answers in a row name X.Y.Z. Installed copies notice within a day.
+- **Update the user's own app to the release** (the user's standing request): once `latest.json` names X.Y.Z,
+  `seedwell update dev-builds off` — development builds end with the release, and turning the switch off installs
+  the latest release. If the switch was already off (or the installed app has no `dev-builds` command), run the
+  release's own installer after checking it matches the tagged one:
+  `curl -fsSL -o <scratch>/install.sh https://github.com/kkollsga/seedwell/releases/download/vX.Y.Z/install.sh`,
+  `git show vX.Y.Z:install.sh | cmp - <scratch>/install.sh`, then `bash <scratch>/install.sh --version X.Y.Z`.
+  Confirm `/Applications/Seedwell.app` reports X.Y.Z and `spctl -a -vv` says "Notarized Developer ID", and that the
+  app is running again. Development builds are switched on again when development resumes.
 
 ## 8. Report
 

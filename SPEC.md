@@ -830,6 +830,11 @@ baseline every later version must still sync with:
   - **Removing a device:** an owner-signed statement.
     - Devices refuse sessions with a removed device and ignore every version it signs from then on.
     - Versions they already accepted stay valid.
+    - From then on it is no source to fetch from and no holder to rely on (a free, a rename, the removal question's
+      count, the availability report). What it announced stays and still decides which version is current: removal
+      changes who can serve, never which version wins, so no file is deleted or versioned because of it (a version
+      only it had becomes one no device can give, reported as such). The same when the sharing ends for a device; a
+      member that is only offline is unchanged.
     - It keeps the files it has; that cannot be prevented.
   - **Sharing end:** how long the folder is shared is an owner-signed statement: an end time, or none. Admins
     cannot set it; an owner's latest statement (by serial) counts.
@@ -1116,10 +1121,8 @@ baseline every later version must still sync with:
 
 - Encrypted members: names encrypted with AES-SIV, chunks with XChaCha20-Poly1305 (Syncthing's untrusted-device
   scheme).
-- On-demand folders, only as File Provider placeholders (iCloud Drive style). Finder lists every file, opening one
-  fetches it, and *Remove Download* frees it. The user chose this over a file browser in Seedwell's window. It needs
-  a Developer ID-signed build: an app group shared by the app and its extension, and the folder under
-  `~/Library/CloudStorage/`.
+- On-demand folders: the core and the Mac's File Provider extension are in (§7G.11); Windows' Cloud Files sync root
+  is next.
 - Renaming a folder on every device.
 - Device records in the DHT (BEP 44).
 - On the folder page: recent changes, and the archive with *Restore*. In the edit modal: archive length and local
@@ -1135,9 +1138,46 @@ Chat between devices, for people and agents (0.1.6).
 - **Sharing:** a channel stands on its own, not tied to a folder. It has an owner and members with the folder roles,
   shared with one or more devices by invitation link through the same Share dialog (single use, link expiry,
   sharing period). Roles decide who may post and who may share.
-- **Agents:** each channel says whether agents on this Mac may read it, or read and post. That is off by default,
-  and the Mac's agent permission level still applies; Settings › Agents does not open up chats, on purpose. An
-  agent told no is told where: *Chats ▸ <channel> ▸ ⋯ ▸ Agents on This Mac ▸ Read* (or *Read and post*).
+- **Agents:** each channel says whether agents on this Mac may read it, or read and post. That is off by default
+  for the user's own channels (an agent channel is open, below), and the Mac's agent permission level still
+  applies; Settings › Agents does not open up chats, on purpose. An agent told no is told where: *Chats ▸ <channel>
+  ▸ ⋯ ▸ Agents on This Mac ▸ Read* (or *Read and post*).
+  - **Only the user sets the switch, in the app** (2026-10-31). No control method or command changes it (there were
+    `chat.set_agents` and `chat.dm_set_agents`; `seedwell chat agents` and `chat dm agents` now only say where the
+    user does). The switch as the user set it is kept (in `sync.toml`) and wins over a channel's default. A headless
+    daemon, which has no app, takes `--chat-agents off|read|post` for every channel and private messages of its run
+    (in memory only).
+  - **Agent channels** (0.1.12, the user's rule of 2026-10-31: "agents use chats marked by agents"). A channel an
+    agent makes through the agent interface (`chat new`, `sync share --chat new`) is an *agent channel*: its owner
+    signs the mark into the channel's membership when it is made (statement kind 7, `PROTOCOL.md`), so every member
+    device knows it. On every device that has it (the one that made it, and one that joins it by link, whether its
+    agent or its user joins; once admitted) it is open to that device's agents at Read and post, so agents on
+    different computers (the Mac's and the Windows PC's development agents, say) talk there with nothing for the
+    user to open, where the user reads every message. The device's user can still close it, or set Read, with the
+    same switch; that choice is kept and wins. The user reads and posts in it like in any channel.
+    - The user's own channels (made in the app, or joined from a link the user pasted that is no agent channel) keep
+      the rule above: closed until the user opens them, invisible to agents while closed. Nothing turns a channel
+      into an agent channel later: no method, command or setting, and not the user's switch (which opens a channel
+      without marking it). There is no mark or unmark in the app either: the user's switch is all the user needs.
+    - While a device waits to be admitted it knows nothing of the channel, so it is closed there until then.
+    - The app shows an agent channel with a small *agents* tag (a quiet capsule, like a message's *agent* badge) after
+      its name in the sidebar and by its name in the toolbar, and its page's line starts "Agent channel"; the
+      tag's tooltip says what agents on this Mac may do in it now. The Windows app tags it in its sidebar.
+    - Agents see `"agent_channel": true` on it (`chat list`, and the channel in every reply).
+    - Older versions (before 0.1.12) keep the mark as a statement they do not know and pass it on; to them, and to
+      their agents, it is an ordinary channel.
+  - **A channel that is off does not exist for agents.** `chat.list` leaves it out and gives only how many there are
+    (`hidden`) and how the user opens one (`hint`, no names). Every method that names it (members, topics, read,
+    send, new topic, share, role, remove device, share until, mute, rename, address, wake, leave, and `sync.share
+    --chat`) answers exactly as for a channel that is not there ("no channel `X`", exit 3), never "permission denied",
+    so not even its existence is confirmed; `chat.join` with its link answers as the join of a new channel. Nothing
+    else gives it away: its messages are no `chat.message` events (checked again when an event is handed out, so one
+    published while the channel was open is not given, live or by `events`, once it is closed), the activity log as an
+    agent reads it (`activity`) leaves out what agents did in it (the user's view in Settings › Agents keeps all),
+    `sync.list`/`sync.status` give no `channel_id` for a folder whose chat it is, `sync.invites` leaves out a link that
+    carries it, and `sync.list` lists no device this Mac is connected to only for it (or for private messages while
+    those are closed); a notice of missed chat messages (`lagged`) says no count. QA control (`--qa-control`, which reads the windows)
+    runs only in an isolated copy (`--state-dir`), never in the user's Seedwell.
   - A message an agent sent carries an agent name (0.1.7): `--as NAME`, else `$SEEDWELL_AGENT`, else the
     `--client` name, else the project's (the folder name of the git repository it runs in, else of its working
     folder). The app shows it with the computer's name, so an agent need not say who it is or which Mac.
@@ -1160,7 +1200,8 @@ Chat between devices, for people and agents (0.1.6).
 - **Agent push:** agents are woken rather than polling.
   - `seedwell chat send|list|watch --json` (watch streams new messages: ids, replies, topics, times, sender, agent
     label; private ones carry `direct` and `peer_device`).
-  - The control socket's event stream carries messages.
+  - The control socket's event stream carries messages (only of channels open to agents, and private messages while
+    they are).
   - Per channel, an optional command runs when a message arrives (to wake an agent session). The message goes in as
     data on its standard input, never as arguments.
 - **Topics:** a channel holds named topics, like threads with a header. Anyone who may post makes one (*New
@@ -1196,7 +1237,10 @@ Chat between devices, for people and agents (0.1.6).
   - A *Direct Messages* section in the sidebar lists each conversation (name, a dot while connected directly,
     unread); the page's line says "Private · connected · end-to-end encrypted" or "not connected".
   - Agents: one Mac-wide setting for private messages (Off, Read, Read and post; Off by default), with the same
-    gates and trust marker as a channel, in a private page's ⋯ menu (*Agents on This Mac*).
+    gates and trust marker as a channel, in a private page's ⋯ menu (*Agents on This Mac*), set only by the user.
+    While it is off there are no conversations for agents: `chat.dm_list` is empty (with `agents: off` and a `hint`),
+    `chat.dm_read` and `chat.dm_delete` answer as for a device with no conversation, and a device is found only
+    among the members of channels open to agents.
 - **On disk** (0.1.9): each channel's and each conversation's messages are kept encrypted on this Mac, so a
   search, a backup or another program reading the state folder finds no text; only Seedwell shows them (the app,
   and agents through the agent interface). Each file has its own random key, kept with the other secrets (the
@@ -1212,9 +1256,10 @@ Chat between devices, for people and agents (0.1.6).
   Files go through a synced folder.
 - **Permissions** (§9A): `chat.read`, `chat.topics` and the `chat.message` events need read and the channel's
   agent switch at Read or above; `chat.send` and `chat.new_topic` need control and the switch at Read and post;
-  sharing, roles, the switch and the wake-up command need full. Private messages: `chat.dm_list` and `chat.dm_read`
-  need read and the Mac's switch at Read, `chat.dm_send` control and the switch at Read and post, `chat.dm_delete` full,
-  `chat.dm_set_agents` full. Every message in the agent interface carries `"trust"`: `this-device` for the user's
+  sharing, roles and the wake-up command need full; every channel method needs the channel open to agents (above).
+  No method changes a switch, or marks a channel; `chat.new` (and `sync.share` with `chat: "new"`) makes an agent
+  channel, and a channel's `agent_channel` says whether it is one. Private messages: `chat.dm_list` and `chat.dm_read` need read and the Mac's switch at
+  Read, `chat.dm_send` control and the switch at Read and post, `chat.dm_delete` full. Every message in the agent interface carries `"trust"`: `this-device` for the user's
   own posts on this Mac, else `untrusted-agent` (an agent's post here) or `untrusted-peer` (another device's).
   `chat.send`, `chat.new_topic` and `chat.dm_send` take an optional `agent` name (1 to 64 characters); without it
   the post goes under the client's name from `hello`.
@@ -1381,6 +1426,287 @@ is received, so passes never clog a disk.
   "received by web, and removed") while no agent there has looked, and `mail passes` lists every device's status.
 - **Leftovers:** `mail passes` lists the passes still in this Mac's pass-through folders (to, from, size, age);
   `--clean` removes those older than a week (`--older 1d`, `--older 0`).
+
+### 7G.11 On-demand folders
+
+A folder whose every file is listed on this device, but whose content is here only when it is asked for, kept here,
+or changed here (iCloud Drive and OneDrive style). The user chose the system's own placeholders for it, never a file
+browser in Seedwell's window: the Finder through a File Provider extension on the Mac (a Developer ID-signed build,
+an app group shared by the app and its extension), a Cloud Files sync root on Windows. The rules are the core's
+(`trs_sync::ondemand`, `FolderCore`'s on-demand calls); the hosts only draw and report.
+
+- **Modes.** A folder is *full* (every file here, as before) or *on demand*, chosen when joining (`join --on-demand`)
+  and changeable later. Full → on demand moves the folder's files into this device's cache, so nothing is fetched
+  again and everything starts downloaded; on demand → full moves the cache to the folder's place (which must be free),
+  and the folder runs full from there, fetching every file that was online only. Neither loses anything: a file is
+  never deleted by a switch. To full, the versions taken without their content are forgotten (each is needed again and
+  fetched like any), so the index holds only records Seedwell 0.1.11 can read. Nothing changes until the folder is stopped and moved: a switch refused (the folder still
+  busy) or failed leaves the folder as it was (mode, place, pins). A switch and a removal are noted in a small journal
+  (`<sync state>/<id>.journal`) before any file moves, so one cut off (a crash, the power) is finished at the next
+  start (moved but not saved: saved; a removal: the files go to the place, the folder is forgotten) or undone (never
+  moved: nothing happened); every error names where the files are. A move that is over is noted so (`done`) before
+  the configuration is saved: a start after that only saves it, and never touches what is at the old place by then. A move to another volume copies first and makes
+  the copy durable, then notes in the journal that it is whole (`copied`), then renames the original aside on its own
+  volume (`<name>.seedwell-moved`, so its place is whole or empty, never half deleted: a full folder there stops as
+  missing instead of scanning a half-deleted tree) and only then deletes it. A copy carries a mark
+  (`partial-copy` in its `.seedwell` state folder, which is never scanned or synced, so no user's file is ever taken
+  for it; a source's own stale mark is not copied) from its start until it is noted whole; a rename on one volume is noted done as such. At
+  the next start a move noted done is finished (the copy is never deleted; after a rename, whatever is at the old place
+  by then is left alone), one not noted is undone, and only a target that carries the mark is ever removed as a
+  partial copy, its mark removed last (a journal written before anything moved removes nothing; an empty folder at the
+  target goes only when the journal says the move made it).
+  A marked target is never taken as the folder: when the original is not there either (its disk not mounted yet), the
+  journal stays and the folder is held back, opened at neither end. Its row shows it as missing, "Waiting for the disk
+  with its original files" (status everywhere: control, CLI, the app). It is tried again whenever a disk is mounted
+  or unmounted (the app's volume notice, as for torrents) and every minute (a daemon hears of no mounts), so plugging
+  the disk back in finishes or undoes the move and starts the folder without a restart. While it waits it is not
+  moved, renamed or switched, nor joined again (one folder is never joined twice, running or not); removing it
+  forgets it, ends the wait and its journal, and deletes nothing on disk (the log says where the original and the
+  partial copy are). Any other error finishing a move shows the folder in error with the reason, tried again at the
+  next start only; so does a move whose copy is whole and noted but whose mark cannot be taken off (its journal
+  stays, and the next start finishes it). A copy to another volume keeps a manifest of its source beside the
+  journal (each entry's name with its case, kind, size, times, mode and inode), refuses beforehand names the target
+  volume would take for one another (differing only in case, or in Unicode form, where that volume folds them),
+  checks after copying that the copy holds every entry under its own name (as that volume compares names: HFS+ keeps
+  them in another Unicode form), and fails (deleting nothing) if the source changed while it was copied. Names are
+  kept as their own bytes. Sockets, devices and FIFOs are not copied (they are not synced either), and they go with the
+  original when it is deleted after the move. The manifest and
+  the walks are held in memory: about 300 bytes per entry, so a folder of a million entries needs some 300 MB while it
+  moves to another volume. An original is deleted only while it is exactly as the manifest says (its
+  change times too, so a write whose time was put back counts) and the copy still holds all of it: otherwise both are
+  kept, nothing is deleted, and the folder shows the error with both places. (Journals written by development builds before the mark existed are read as they are.) An
+  original that cannot be deleted all the way is left set aside, and the log says where; the switch still completes.
+  A folder is never opened again at a place that was partly deleted. The journal is written before anything is
+  touched (before the folder stops); any failure after that opens the folder again as it was. Moving a full folder
+  (`sync move`) is journaled the same way. A new place (a move, a switch to full) never overlaps another synced
+  folder, and joining on demand is refused while an earlier cache of the folder is still there (the error says
+  where): its files are never read in as this device's. One rule keeps a session from ever skipping a change: **a folder
+  that is not open here at any moment of a session's life is stale on that session**, and opening it again starts
+  every session where it is stale anew. It goes stale when it closes while linked (a pause, a stop for a move, a
+  switch or a removal, LAN-only for a session elsewhere: the folder is marked closed first, then each session that
+  has it linked, and a link made meanwhile checks the mark after it is in the sessions, so none is missed), and when
+  a peer offers it while it is closed here. A folder is linked on a session only if it went out in this
+  device's Join on it (at its start, offered since, or answering the peer's offer) and the peer's Join named it;
+  one the peer offered that this device's Join left out (it closed meanwhile) is stale (a folder this device does not
+  have is not: joining it later just offers it; one it has but that is not open, held back or failed to open
+  included, is). A folder removed here is no longer in any session's Join record, so joining it again offers it. A later Join from the peer for a folder not linked is answered (from
+  an earlier build, unless it is the answer to this device's own offer, which that build does not answer again), and
+  the peer's reply to that answer is no reopening. A folder already in this device's Join on a session is not
+  offered there again. Every open and close bumps
+  a generation; a session set up (or a Join handled) while it moved checks the folders the peer is a member of once
+  it is up: one closed here but linked goes stale, one open here but stale that the peer's Join named starts the
+  session anew, and one open here but in neither Join is offered. A Join for a folder already linked means the peer
+  opened it again (an earlier build says so that way): the session starts anew. With an earlier build (0.1.11 and
+  before) two limits remain, from its side: one that pauses and resumes a folder, or turns LAN-only off, offers it
+  again on no open session (it syncs again from that device's next session), and one whose offer this device took
+  for the answer to its own (a folder it offered that the earlier build had closed then) waits for an answer it
+  does not get until the session starts anew. Nothing of a stale folder is taken or sent on that session. Once the
+  folder is open again (the call returns then; the rest happens in the background), each such session is closed and
+  dialled again (devices not connected are dialled too); the new session's Join says what this device holds, and
+  since nothing was taken after the gap began, the peer sends exactly what is missing (any build: nothing new is
+  asked of it). A session that ended takes nothing more of what its peer sent. The cost is that transfers on that
+  session start over after a user's pause, resume, move or switch.
+- **Its place is the host's.** Renaming an on-demand folder changes the name and place it is shown at, and nothing on
+  disk; moving one is refused until the host side defines how its place moves. A new folder from the host where one
+  is already is nothing new; a new one records only itself.
+- **The Mac's host.** The File Provider extension (`SeedwellFileProvider.appex`, sandboxed, in the app group
+  `6GND8Z2C7Z.io.github.kkollsga.Seedwell` it shares with the app; Team-prefixed, so no provisioning profile) keeps
+  nothing: each of its calls is one request over the socket `fp` in the group's container (one JSON line each way,
+  versioned) to the running app, which answers from the core; what an item may do, whether it is kept and what an
+  error means to the system are decided there (trs-ffi `sync_host`). With the app not running, the extension starts it
+  in the menu bar (at most once in 30 s) and waits up to 10 s, else the call fails "Seedwell isn't running" (the system
+  tries again when signalled). Only the user's own app serves it: tests, QA and isolated runs never take the socket nor
+  register a domain. Only the app's own extension is served: its code signature is checked from the peer's audit
+  token before anything of a request is read (the team's Developer ID; in an ad-hoc build, exactly the extension in
+  the app's bundle), and content is taken only from a plain file the extension put in the container's `u/` (one
+  link, the user's, opened without following a link, and copied from that open file). Chats are not reachable there. One domain per on-demand folder (identifier = the folder's id, name = its name; the Finder shows
+  it at `~/Library/CloudStorage/Seedwell-<Name>`), added when the folder becomes on demand. The core reports the
+  domains only while folder sync runs, and the host only adds and renames from that list: a domain goes only when the
+  core lets go of its folder. Before an on-demand folder is removed or switched to full, by whoever asks (the app, the
+  control socket, an agent) and after the checks that need no host, the core asks the host to remove its domain, the
+  system's pending changes handed over first, and waits; the host's refusal refuses the removal or switch (nothing
+  changes); with no app running (a headless daemon) it goes on as before. The core waits at most two minutes; past that the
+  removal or switch is refused, and a removal the system completes late leaves the domain as it was (added back if it
+  went meanwhile). A removal is noted before the domain goes: if the app stops in the middle, the next start tells the
+  user that macOS may have kept changes (macOS tells the place only to the call that removed the domain, so Seedwell
+  cannot move them). What the system kept of a removed domain is
+  never thrown away (also when it comes late): it goes next to the folder's place as `<name> (changes not synced)` (numbered when taken; for a
+  folder no longer here, `~/Seedwell`), and the user is told where. A domain left from before (its folder removed or
+  switched while the app was not running) goes when the core says so. Each move of the core's change feed signals the
+  working set. macOS adds a domain
+  switched off: the app asks the user once, when the folder becomes on demand (a window with *Open Settings*, at
+  System Settings › General › Login Items & Extensions › File Providers, that notices by itself when it is on), and
+  the folder page says so while it is off. Items carry the core's identifiers (`root` is the root container), the
+  role's capabilities (a read-only member reads and deletes; the folder itself is neither renamed nor deleted from the
+  Finder), and a kept item downloads eagerly and is never evicted by the system; the Finder actions *Always Keep on
+  This Mac* and *Stop Keeping on This Mac* pin and unpin. A fetch reports progress and hands the extension a copy (a
+  clone) of the cache's file, and gives up after 30 s without a byte, taking its request back. The system's set of
+  items on disk is reported on each change; a file that left it (Remove Download, disk pressure) is freed by the core
+  as an evict (the first report after a start is the baseline). Files the core holds show downloaded, not online
+  only: once a run for each enabled domain, and again after a switch, the app reads the system's set, the core lists
+  the held files not in it, and the app asks the system for them in batches (50, 200 ms apart); their fetch hands back
+  clones of the cache, and one that is no longer held by then fails instead of downloading (the set read becomes the
+  baseline, so their arrival is never taken for a release). A delete of a file whose content moved on since the
+  user saw it is rejected (checked on the folder's core with the delete), and the item comes back as it is now. A folder's version for the host is an anchor of its
+  index (one from before the index was made anew is told apart) reaching at least the newest sequence below it, kept up from the change feed (listing a folder never walks what is below it; a change
+  below, a delete or a move out reports the folders above it again), and a folder's delete carries the
+  version the system saw (none, one that does not read, or one of another index counts as seeing nothing): the core refuses it, on the folder's core, when another device's version arrived below since
+  (a change the user has not seen), and the folder comes back as it is now. This device's own writes and deletes below
+  never refuse it (`rm -rf` deletes the files first; a temporary folder made, filled and deleted); a download of a
+  version already listed below does, once (its record is new: the index notes no separate arrival time for a version
+  and for its content), and the folder comes back with its new version. The folder's place stays where the user chose it
+  (joining) or where it was (switching): it is where the files go if it is switched to full or removed.
+- **Removing** an on-demand folder never deletes content: what is held here (changes no other device has, the
+  former folder after a switch, ignored files, the archive) becomes an ordinary folder at its place (or next to it,
+  `<name> 2`, when something is there); a folder still busy is not removed (it stays, try again). Nothing is forgotten
+  (its entry, keys, index) before the files are where they go. *Delete files* moves it to the Trash straight from the
+  cache, under the
+  folder's name (the Trash is checked for the cache's volume, where it goes from), never by way of the place; if the
+  Trash refuses after all, nothing is deleted and the files are left at the place as an ordinary folder. The host
+  removes its domain (File Provider) or sync root (Cloud Files) before it asks for the removal, so the place is an
+  ordinary folder again by then. The question before a removal (the menu's, the folder page's, `sync remove`'s plan)
+  counts the files no other device is known to hold (none announces this version or a later one held): "3 files exist
+  only on this Mac; other devices lose access to them" (otherwise "Other devices keep their copy"), with *Delete files*
+  or without (the files stay, but nobody serves them).
+- **The index is the whole tree.** Every file this device knows has a local record. One whose content is not here is
+  *dataless*: this device holds its version (it took it, as it would take any version) without the content. **A
+  device records a version of its own only with its bytes**, so a dataless record is always another device's version.
+  It is announced *dataless* (index entry flag bit 1, not signed) and *invalid*, so no device ever asks it for content or counts it as a copy; it counts nothing in the folder's
+  totals and serves no chunks. An on-demand device marks what it announces *on demand* (bit 2): it may let go of its
+  copy later (switching to on demand announces what is here again, so marked). Asking for a file sets `want` on its record: its
+  need is then computed as if nothing were here, and the ordinary puller fetches it.
+- **What an on-demand device fetches.** Only what is wanted: files asked for (opened, *Download Now*), files below a
+  pinned folder or pinned themselves (*Always Keep on This Device*; inherited, new files there included), and files
+  whose content is here already (a downloaded file stays current: a newer version elsewhere is fetched). Any other
+  new version is taken as its version alone (online only, the new size and time shown). Directories and links are
+  always made (they hold no content). Unpinning stops what was on its way; what is here stays.
+- **States** (per file): *online only* (dataless, not wanted), *downloading* (dataless, wanted), *downloaded* (here,
+  and another device holds this version too), *only here* (here, a change no other device holds yet). *Pinned* is a
+  flag beside them. **In sync**, for an on-demand folder, means: the current version of every item is recorded
+  (nothing left to take), and every wanted file's content is here. Online-only files are not "to fetch".
+- **Freeing space** (*Remove Download*, `evict`; the system's own eviction under disk pressure, reported by the host)
+  drops a file's content and keeps the file, online only. A file kept through a pinned folder above it can go: the
+  pin is split (OneDrive's rule), i.e. every pinned folder from that pin down to the file is unpinned and its other
+  children (files and folders, at each level) are pinned on their own, so everything else stays kept and only the
+  file is freed; files added to those folders later are no longer kept. A file pinned itself is not freed (the user
+  unpins it first), and no pin is split when nothing below can go. **A file goes only when another device, asked
+  right then, confirms it holds it**: before freeing, this device sends each device that announces the file held a
+  batched question over the live session (`HoldQuery`, message type 24, up to 1000 files; `HoldReply`, type 25), and
+  frees only what an answer confirms. Only writers whose build answers are asked (feature bit 2, *holds*: an earlier
+  build is never asked), and only a writer's yes counts (its role checked again
+  when the answer arrives). The holder answers from its index as it is now: yes for
+  content it holds (valid, not dataless, its disk as recorded) at this version or a strictly later one, and, when it is
+  on demand itself, only if its device id (short id) sorts above the asker's, so of two on-demand holders the higher
+  never relies on the lower and every chain ends at a full device or the top on-demand one. It answers from the
+  index's read-only handle, so a long pull never makes the asker wait. It answers no as a
+  read-only member (a change it makes is never sent: the version would be held nowhere), for a folder that is not
+  running (paused, missing, failed) or whose marker is gone, for files it ignores (not its to keep), and for files it
+  is freeing itself (from its first
+  question to the end of its free, however the free ends). The questions go out together and are waited for 10 s in all. No answer (not
+  connected, the folder removed there, the time up, or an earlier Seedwell, which reads the unknown message type and
+  skips it without ending the session) keeps the file with the reason "no other device that has it is connected"; so does the system's
+  disk-pressure eviction (the host refuses it with that reason). Freeing a file needs another device that holds it at
+  this version or a later one. A file changed in the cache since it was
+  recorded is a change, kept. A file that cannot be removed (open elsewhere) stays downloaded and is reported; the
+  others go all the same. A pinned file missing from the cache is fetched again.
+- **Where the content is.** The core keeps the content held here in this device's cache
+  (`<sync state>/<id>.cache`, a folder root of its own, ours alone, so it is not watched), and the host's tree (the
+  File Provider domain under `~/Library/CloudStorage/`, the Cloud Files sync root) is what the user sees. The core
+  does not write into the host's tree; it hands the host the path of the complete file in the cache (`fetch`), and
+  the host takes a copy: File Provider's `fetchContents` hands the system a file it then owns (a clone on APFS: no
+  space twice), Cloud Files reads it in ranges. So the cache can serve other devices and verify every chunk whatever
+  the host does with its copy, and the host's tree stays the system's. The cache holds exactly what is here: the
+  host reports what it lets go of (File Provider's materialized items), and the core frees the same.
+  - A file missing from the cache is a file no longer held here (online only), **never a delete**: deletes, renames
+    and new files come from the host as calls (`host_delete`, `host_rename`, `host_write`, `host_mkdir`), each a
+    version of this device like a scan's.
+  - **A rename or move is made by a device that holds every file there.** When this device does (each file valid,
+    with its content, its disk as recorded), it renames them itself: the new names are versions of this device with
+    the same file ids (the host's items keep their identifiers), each stored with its old name's delete. Otherwise it
+    asks a connected writer that announces every one of them held at the version it has (full devices first, then
+    on-demand ones) to make the rename (`RenameRequest`, message type 26, with a digest of the paths and versions it
+    saw and a time to live; `RenameReply`, type 27: done, refused or busy). That device starts the rename only if it
+    can within the time to live of receiving it (a pull may hold the folder; else it answers busy, and never renames
+    later), and answers with the outcome either way. It checks the asker is a writer, the names, that its records are
+    still those versions (else it refuses: changed meanwhile) and that it holds every file, then renames them as its
+    own change (its own pins stay); the result reaches the asker by normal sync, and the host's call returns once the
+    renamed items are here (the asker's pins follow them). The asker moves on to the next holder only after a refusal
+    or a busy answer. No answer in time (the time to live and a margin; an earlier Seedwell skips the message) is no
+    refusal: the host is told it failed, and if the renamed items arrive later the pins follow them. Only devices
+    whose build answers are asked (feature bit 3, *renames*; an earlier build is never asked). With no such device
+    connected the rename is refused: "Renaming needs a device that has these files to be connected". A conflict
+    copy renamed through the host stays one only under a conflict copy's name of the same original (moved along with
+    its folder); renamed to anything else it is an ordinary file, everywhere. (A full folder's scanner is stricter: a
+    renamed conflict copy is a new file to it, never a conflict copy.)
+    So a renamed version always has a device with its bytes, as any version does: a rename onto a name made
+    meanwhile elsewhere ends in a conflict copy, and a rename met by an edit of the old name keeps both.
+  - A device never deletes content it holds while that content is needed under another name: an on-demand device
+    that takes a rename moves its copy to the new name (downloaded, as it was), also when the new name arrived first
+    and was taken online only.
+  - The host's changes are checked (mode, role, names, what is there) before the cache is touched, so a refused one
+    leaves nothing behind. A delete that cannot remove a file (open elsewhere) keeps it and the folders above it, and
+    reports it; the rest go. Files in a deleted folder the host never saw (ignored, unknown, temps) are never deleted
+    for good: they go to the folder's `.seedwell/Archive`, as a replaced file does.
+  - A change of content carries the content it started from (`base`: the item's content version, checked before a
+    rename in the same change; a rename, or a new version with the same content, is no conflict). When the content
+    moved on since (another device's version arrived before the host reported the user's edit), the edit is written
+    as a conflict copy, named as a full folder names one, and the other version stays. A write without a base is a
+    new file: where something is now, it becomes a conflict copy too.
+  - The renamed records keep the stamp of the checked file only while its size, time and inode are unchanged after
+    the rename; otherwise the scanner reads it again. On a disk that folds case, the folders above the new name are
+    recorded as the disk (or the index) names them.
+  - Pins follow the paths: a renamed pinned folder stays kept under its new name, a deleted one's pin goes.
+  - A conflict copy is resolved (*keep original*, *keep the copy*, *keep both*, §7G.2) through these host changes,
+    only with both versions here ("Download both versions first"); what goes is kept in the cache's archive. Keeping
+    the copy is checked as a whole (both held as recorded, the names) before the original goes.
+  - Content found in the cache at an online-only path that is not the record's (put there behind the host's back)
+    goes to `.seedwell/Archive` and never becomes a version; the record's own content there marks it held.
+  - **A version no device can give** is a report only: since a version is recorded only with its bytes, it arises
+    only when every device that held it is gone from this device's view (its entries forgotten, or its index reset
+    and not announced again). It is shown in the state *unavailable*, conservatively: only when no device's index
+    (offline devices included) announces it, or a later version, held at its path, and this device holds its bytes in
+    no file. It can be passing (a device that reset its index announces it again): a fetch of it reports "No device
+    has this version right now" (the host shows it so), a folder's fetch skips it and names it, and the item becomes
+    fetchable again when a device announces it held; the host's feed reports each change of it, either way. Nothing
+    acts on it. On a full device the same version is a
+    need nobody can give. Either way it is **not counted as needed**: it is counted apart and shown in the folder's
+    status ("1 file unavailable: no device has it"), on every device, and listed by `seedwell sync unavailable
+    [<folder>]` (read from the index, never waiting for a folder's core). Resolving is the user's: the item is deleted
+    like any, on a device where the folder is on demand (the Finder there); a full device's status says so. Nothing
+    is ever deleted on its own.
+- **Items for the host.** Stable identifiers (the file id a version carries across renames; `root` for the folder;
+  a second live path with the same id, as after two devices renamed one file at once, or while a rename taken from
+  another device has its new name and not yet its old name's delete, gets a path identifier: the
+  file id's goes to the newer version, or between concurrent ones to the first path, so every device and every
+  restart agree; a rename's new name and its old name's delete are stored together), name, parent, kind, size, time,
+  a content version
+  (changes exactly when the content does) and a metadata version (changes with any version), the state and the pin.
+  Children are listed in pages; changes since an anchor (this device's index sequence, tagged with 16 bits of the
+  index id, so an anchor from before the index was made anew is refused as expired and the host lists everything
+  again) give the items as they are now and the identifiers deleted (a rename is a change of the item, not a delete;
+  a path that got another file id, deleted and made anew elsewhere and taken in one go, reports its old identifier
+  deleted, which names nothing from then on).
+  The host meets every parent before its children: a file is recorded only once its folder is, and a folder changed
+  after its files is reported ahead of them. What the host shows changes without a new version too: asking for a file
+  (downloading), pinning or unpinning (every item below shows it). Those are this device's own and never reach peers:
+  the records keep their sequences (what peers page by), and the changes go to the host's feed log (a small table in
+  the index: sequence → path, the latest per path), whose sequences come from the same counter, so the feed merges
+  both under one anchor. Identifiers retired from their paths are kept in the index too (on-demand folders only), so a
+  restart or a new handle still reports them; those older than the last million sequences go, and an anchor from
+  before them has expired. Item reads go through the index's read-only handle, so a host never waits for a pull
+  that holds the folder.
+- **Conflicts** are as in a full folder (§7G.2): an online-only file has no content of its own to lose, a downloaded
+  one changed on two devices makes the same conflict copy everywhere.
+- **Agents and the CLI** (§9A): `sync.items`, `sync.changes` (read); `sync.fetch`, `sync.cancel_fetch`, `sync.pin`,
+  `sync.unpin`, `sync.evict`, `sync.host_mkdir` (control); `sync.set_mode`, `sync.host_write`, `sync.host_delete`,
+  `sync.host_rename` (full: they move or replace files on disk, `host_write` from any file the daemon can read, or
+  reach every device). `seedwell sync join --on-demand`, `mode`, `items`, `fetch`, `pin`, `unpin`, `evict`.
+- **Read-only members** list and fetch. A delete on one acts as *Remove Download*: the content is freed, the file
+  stays listed online only and can be fetched again, and nothing goes to the other devices (a deleted pinned file is
+  unpinned, then freed; one kept through a pinned folder above it splits that pin, as Remove Download does; a deleted
+  folder frees everything below it). The outcome says so (`freed`), and the host puts
+  the item back (the Mac answers the delete `deletionRejected`, so it comes back dataless; Windows fails the delete
+  and dehydrates). Writes, new folders and renames stay refused.
 
 ## 8. User interface
 
@@ -1576,9 +1902,9 @@ Agents like Claude should be able to operate Seedwell as easily as a person: "ad
 | Watch | `wait <torrent>... [--any] [--timeout S]` · `watch` · `activity` · `log trackers` |
 | Debug | `dev on\|off\|status` · `debug health\|trackers\|peers\|perf\|announce` (§9A.5) |
 | Folder sync | `sync list\|status\|add\|join\|share [--role R] [--uses N\|unlimited] [--days N\|never] [--chat <channel>\|new]\|share-until <days>\|never [--extend]\|members\|invites\|revoke-invite\|role\|remove-device\|rename\|move\|pause\|resume\|rescan\|address\|remove\|settings` (§7G.5) · `relay [--port N]`. Read-only: `list`, `status`, `members`, `settings`; full: `share`, `share-until`, `invites`, `role`, `remove-device`, `rename`, `move`, changing `settings`, `remove --delete-files`; control: the rest |
-| Channels | `chat list\|new\|join\|share [--role R] [--uses N\|unlimited] [--days N\|never]\|members\|role\|remove-device\|share-until\|topics\|topic <title>\|send [--topic T] [--reply ID] [--as-json] -\|read [--topic T] [--since ID\|--last N]\|watch [<channel>...] [--topic T]\|dm list\|send <device> -\|read <device>\|watch\|agents off\|read\|post\|delete <device>\|address\|rename <name>\|mute\|agents off\|read\|post\|wake <command>\|off\|leave` (§7G.7); `rename` names the channel on this Mac only, as a folder's name. Read-only: `list`, `members`, `topics`, `read`, `watch`, `dm list`, `dm read`, `dm watch` (and the channel's agent switch, or the Mac's for private messages, at read); full: `share`, `role`, `remove-device`, `share-until`, `agents`, `wake`, `dm agents`, `dm delete`; control: the rest (`send`, `topic` and `dm send` also need the switch at post) |
+| Channels | `chat list\|new\|join\|share [--role R] [--uses N\|unlimited] [--days N\|never]\|members\|role\|remove-device\|share-until\|topics\|topic <title>\|send [--topic T] [--reply ID] [--as-json] -\|read [--topic T] [--since ID\|--last N]\|watch [<channel>...] [--topic T]\|dm list\|send <device> -\|read <device>\|watch\|delete <device>\|address\|rename <name>\|mute\|wake <command>\|off\|leave` (§7G.7); `rename` names the channel on this Mac only, as a folder's name. Every command needs the channel open to agents (its switch, which only the user sets in the app; a closed channel is not there for agents), or the Mac's switch for private messages. `new` makes an agent channel, open to agents at read and post on every device that has it unless that device's user closes it (`join` with its link: once admitted). Read-only: `list`, `members`, `topics`, `read`, `watch`, `dm list`, `dm read`, `dm watch`; full: `share`, `role`, `remove-device`, `share-until`, `wake`, `dm delete`; control: the rest (`send`, `topic` and `dm send` also need the switch at post) |
 | Test | `sim ...` (§9A.6) · `daemon ...` |
-| Agents | `skill show\|install\|uninstall` · `awake --for D\|off\|status` (§9A.7) · `help [command\|agents]` |
+| Agents | `skill show\|install\|uninstall` · `awake --for D\|off\|status` (§9A.7) · `update [status]\|install <zip>\|watch <folder>\|watch --off\|dev-builds on\|off` (§12A) · `help [command\|agents]` |
 
 - **Held torrents use the app's words.** A new or waiting torrent is confirmed with **Start** and dismissed with **Cancel** (§7A.6). `seedwell start` begins with every file ticked, like Start in the app (`--suggested` is the engine's preselection, `--files`/`--skip` choose); on a torrent in its start delay it starts at once. `seedwell cancel` removes the torrent and moves its `.torrent` file to the Trash (the engine's `held_source`, verified by info-hash); `--keep-file` keeps it, like ⇧-Cancel. Magnet links and web addresses have no file.
 - **Selecting torrents.** Every command that acts on torrents takes `<torrent>`: an id prefix (6+ hex characters), part of the name (title or raw name, any case), or filters `--all`, `--tracker X`, `--state S`, `--category C`. A term that matches several torrents is an error (exit 3) that lists the candidates; nothing is guessed. `pause --all` / `resume --all` use the engine's one-pass call.
@@ -1592,7 +1918,7 @@ Agents like Claude should be able to operate Seedwell as easily as a person: "ad
   - **Off** is the default until enabled.
   - **Read-only** allows status, list, info, choice, trackers, stats, rules, wait, watch, `log trackers` and every `debug` read.
   - **Control** adds add, start, cancel, pause, resume, priority, category, goals, files, limits, tracker caps, reannounce, recheck, removing without files, `debug announce`.
-  - **Full** adds removing with file deletion, moving files, changing settings (`dev on|off` included), the activity log and `sim`.
+  - **Full** adds removing with file deletion, moving files, changing settings (`dev on|off` and `update dev-builds on|off` included), the activity log and `sim`.
 - **Out of reach for every level:**
   - client identity and the compliance behaviour of §7B;
   - announce timing (manual re-announce still goes through the HostGate, §7C; `debug announce` never bypasses the gate: the answer says when the tracker may be asked again);
@@ -1703,8 +2029,12 @@ Two back ends, picked once at launch; the Settings group, its two switches and t
 
 **Development builds.** Settings › General › Updates has a third switch, **Allow development builds** (default off;
 `config.toml` `[updates] dev_builds`, absent means off, no format version change). With it on, the one installed
-copy, with the user's own settings, torrents, folders and chats, can run a build that is not a release. Agents never
-turn it on: the switch is the user's consent, and with it an agent installs a build only when the user asks.
+copy, with the user's own settings, torrents, folders and chats, can run a build that is not a release. There is one
+Seedwell, the user's, and agents may manage it (2026-10-31): `seedwell update dev-builds on|off` (control method
+`update.dev_builds`, Full permission, in the activity log) does exactly what the switch does (it saves `[updates]
+dev_builds`; the app follows the saved file as it follows its own switch, so off while a development build runs is
+the way back to the release below), and `seedwell update` shows it. An agent switches it and installs a build only
+when the user asks.
 
 - **Versions.** A development build is `X.Y.Z.N`: the release it builds on (`Cargo.toml`'s version, which moves only
   at a release) and a fourth number counted by `tools/dev-build.sh` from 1 for each version. So `0.1.10` <

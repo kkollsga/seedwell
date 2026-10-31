@@ -51,8 +51,10 @@ import SwiftUI
     /// The conversation `chatMessages` and `chatMembers` are of.
     private var chatLoaded: Section?
     /// The folder whose "Stop syncing" question is open under its page header, and its Trash choice.
-    var syncAskRemove: String?
+    var syncAskRemove: String? { didSet { if syncAskRemove != oldValue { syncOnlyHere = syncAskRemove.map { core.syncOnlyHere(id: $0) } ?? 0 } } }
     var syncTrash = false
+    /// How many of that folder's files no other device is known to hold (read once, when the question opens).
+    private(set) var syncOnlyHere: UInt64 = 0
     private(set) var trackerStats: TrackerStats?
     private(set) var daily: [DailyStat] = []
     @ObservationIgnored private var timer: Timer?

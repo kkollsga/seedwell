@@ -127,7 +127,7 @@ byte strings `varint len ‖ bytes`; lists `varint count ‖ items`; bools one b
 | 15 | RelayClose | session |
 | 16 | OwnerKey | folder_id 32, S 32 (an owner to a co-owner, inside TLS) |
 
-An `IndexEntry` is `sequence ‖ u8 entry flags (bit0 invalid) ‖ path str ‖ u8 kind ‖ size ‖ mtime_ns (zigzag) ‖
+An `IndexEntry` is `sequence ‖ u8 entry flags (bit0 invalid, bit1 dataless: the announcer has the version without its content, bit2 on demand: it may let go of its copy) ‖ path str ‖ u8 kind ‖ size ‖ mtime_ns (zigzag) ‖
 u8 file flags ‖ version ‖ modified_by 8 ‖ file_id 16 ‖ symlink_target str ‖ bool [conflict_of str] ‖ chunks ≤
 400 000: [len ‖ hash 32] ‖ sig 64`. A version is `count ≤ 256 ‖ n × (short id 8 BE ‖ value)`, and must be sorted,
 unique and non-zero. Paths are ≤ 4096 bytes, chunks ≤ 16 MiB. Unknown file-flag bits are refused (the signature

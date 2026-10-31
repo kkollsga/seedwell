@@ -1482,6 +1482,8 @@ impl Backend for RealBackend {
 
     fn volumes_changed(&self) {
         self.engine.volumes_changed();
+        // Folder sync too: a folder waiting for the disk with its original files may go on now.
+        self.sync.volumes_changed();
     }
 
     fn listen_port(&self) -> u16 {

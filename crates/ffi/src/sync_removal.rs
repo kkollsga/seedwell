@@ -25,25 +25,34 @@ fn remove(sync: &dyn SyncBackend, id: &str, trash: Option<Option<&Path>>) -> Res
     // A folder is never copied into a Trash folder: with one (a QA or stand-in folder) a folder on another volume is
     // refused; the Mac's own Trash keeps it on its own volume; the Recycle Bin refuses one it would delete at once.
     // Asked now, while nothing has changed yet.
-    let name = match trash {
+    // The check is made where the files go from: an on-demand folder's cache (they go to the Trash from beside it,
+    // under the folder's name, never by way of its place).
+    let folder = match trash {
         Some(dir) => sync.snapshot().folders.into_iter().find(|f| f.id == id).map(|f| {
-            let path = Path::new(&f.path);
+            let files = sync.files_path(id).unwrap_or_else(|| f.path.clone());
+            let path = Path::new(&files);
             if on_disk(path) {
                 trash_check(path, dir, OtherVolume::Refuse).map_err(|e| CoreError::Failed { message: sync_trash_refusal(&f.name, &e) })?;
             }
-            Ok::<_, CoreError>(f.name)
+            Ok::<_, CoreError>((f.name, f.path))
         }),
         None => None,
     }
     .transpose()?;
-    let path = sync.remove(id)?;
-    // Without the Trash, or nothing left on disk to move (a folder that is gone, one still joining).
-    let (Some(dir), Some(name)) = (trash, name) else { return Ok(None) };
-    let path = Path::new(&path);
+    // Without the Trash, or a folder not listed (nothing left on disk to move).
+    let (Some(dir), Some((name, place))) = (trash, folder) else {
+        sync.remove(id)?;
+        return Ok(None);
+    };
+    let files = sync.remove_for_trash(id)?;
+    let path = Path::new(&files);
     if !on_disk(path) {
         return Ok(None);
     }
-    Ok(move_to_trash(path, dir, OtherVolume::Refuse).err().map(|_| sync_trash_failed(name, trs_platform::dirs::shown(path))))
+    let trashed = move_to_trash(path, dir, OtherVolume::Refuse).is_ok();
+    // Refused: an on-demand folder's files are left at its place, as an ordinary folder.
+    let at = sync.finish_removal(&files, &place, trashed)?;
+    Ok((!trashed).then(|| sync_trash_failed(name, trs_platform::dirs::shown(Path::new(&at)))))
 }
 
 /// Something is there (a link counts: the link itself goes, never what it points at).

@@ -75,7 +75,7 @@ use redb::{
 use trs_sync_proto::codec::{DecodeError, Reader, put_ivarint, put_varint};
 use trs_sync_proto::ids::ShortId;
 use trs_sync_proto::model::{FileInfo, IndexEntry, MAX_CHUNK, MAX_COUNTERS, MAX_PATH, SignedFile};
-use trs_sync_proto::msg::{MAX_CHUNKS, decode_entry, encode_entry};
+use trs_sync_proto::msg::{MAX_CHUNKS, decode_entry, encode_entry, encode_index_entry};
 use trs_sync_proto::sign::Writer;
 
 use crate::global::Need;
@@ -90,11 +90,21 @@ const PEERS: TableDefinition<u64, &[u8]> = TableDefinition::new("peers");
 const WRITERS: TableDefinition<u64, &[u8]> = TableDefinition::new("writers");
 const NEED: TableDefinition<&str, &[u8]> = TableDefinition::new("need");
 const CHUNKS: TableDefinition<(&[u8; 32], &str, u64), ()> = TableDefinition::new("chunks");
+/// The host's feed log of an on-demand folder (SPEC §7G.11): sequence → path, and path → its one sequence. Made at
+/// the first write that needs it, so a file without them is read as empty logs and an earlier build ignores them.
+const SHOWN: TableDefinition<u64, &str> = TableDefinition::new("shown");
+const SHOWN_AT: TableDefinition<&str, u64> = TableDefinition::new("shown_at");
+/// Sequence → file id (16 bytes) ‖ path: a file id retired from its path.
+const RETIRED: TableDefinition<u64, &[u8]> = TableDefinition::new("retired");
+/// Path → size: the versions no device can give right now (made at the first write that needs it, like the above).
+const UNAVAILABLE: TableDefinition<&str, u64> = TableDefinition::new("unavailable");
 
 const SCHEMA_KEY: &str = "schema";
 const COUNTERS_KEY: &str = "counters";
 const TOTALS_KEY: &str = "need_totals";
 const LOCAL_TOTALS_KEY: &str = "local_totals";
+/// [`IndexStore::feed_floor`] (absent: 0).
+const FEED_FLOOR_KEY: &str = "feed_floor";
 
 /// Most holders one need record may list.
 const MAX_HOLDERS: usize = 1 << 16;
@@ -193,6 +203,10 @@ pub struct RedbStore {
     /// `Eventual` batches were committed since the last durable commit.
     unflushed: AtomicBool,
     report: OpenReport,
+    /// A view from a [`RedbReader`]: reads only (`apply` refuses), and never commits (no flush).
+    read_only: bool,
+    /// [`IndexStore::feeds_host`].
+    feeds_host: bool,
 }
 
 /// A read-only handle on an open index, for reads that must not wait for whoever holds the store: a device
@@ -207,6 +221,21 @@ impl RedbReader {
     /// Our record at a path, as [`IndexStore::local`].
     pub fn local(&self, path: &str) -> io::Result<Option<LocalRecord>> {
         read_local(&self.db, &self.path, path)
+    }
+
+    /// Every read of [`IndexStore`] on what is committed, without waiting for the store's owner: an on-demand
+    /// folder's host lists items while a pull holds the folder. It never commits (`local_since` reads what is
+    /// committed, durable or not), and `apply` refuses.
+    pub fn view(&self) -> RedbStore {
+        RedbStore {
+            db: self.db.clone(),
+            path: self.path.clone(),
+            durability: Durability::Immediate,
+            unflushed: AtomicBool::new(false),
+            report: OpenReport { created: false, migrated: None },
+            read_only: true,
+            feeds_host: false,
+        }
     }
 }
 
@@ -295,6 +324,8 @@ impl RedbStore {
                 path: path.to_path_buf(),
                 durability: opts.durability,
                 unflushed: AtomicBool::new(false),
+                read_only: false,
+                feeds_host: false,
                 report: OpenReport { created, migrated },
             })
         })
@@ -322,6 +353,9 @@ impl RedbStore {
 
     /// Applies the ops in one transaction with this durability (all or nothing).
     pub fn apply_with(&mut self, ops: Vec<Op>, d: Durability) -> io::Result<()> {
+        if self.read_only {
+            return Err(io::Error::new(io::ErrorKind::PermissionDenied, "a read-only view of the index"));
+        }
         guard(&self.path, || {
             let mut txn = self.db.begin_write().map_err(dbe)?;
             if d == Durability::Eventual {
@@ -618,12 +652,57 @@ fn enc_local(rec: &LocalRecord) -> Vec<u8> {
         }
         None => out.push(0),
     }
+    // On-demand state (SPEC §7G.11), only when set: a record of a folder that is not on demand is written as
+    // before, so an earlier build reads it.
+    let flags = u8::from(rec.dataless) | (u8::from(rec.want) << 1);
+    if flags != 0 {
+        out.push(flags);
+    }
     out
+}
+
+/// **Tests only:** the names of the tables in the file.
+#[doc(hidden)]
+pub fn table_names(store: &RedbStore) -> io::Result<Vec<String>> {
+    use redb::TableHandle;
+    let rtx = store.rtx()?;
+    Ok(rtx.list_tables().map_err(dbe)?.map(|t| t.name().to_string()).collect())
+}
+
+/// **Tests only:** every local record as stored, raw.
+#[doc(hidden)]
+pub fn raw_local_rows(store: &RedbStore) -> io::Result<Vec<(String, Vec<u8>)>> {
+    let rtx = store.rtx()?;
+    let t = rtx.open_table(LOCAL).map_err(dbe)?;
+    let mut out = Vec::new();
+    for row in t.iter().map_err(dbe)? {
+        let (k, v) = row.map_err(dbe)?;
+        out.push((k.value().to_string(), v.value().to_vec()));
+    }
+    Ok(out)
+}
+
+/// **Tests only:** `b` is a local record as Seedwell 0.1.11 and earlier write and read it: the entry, the stamp and the
+/// tier, and nothing after them (no on-demand flags).
+#[doc(hidden)]
+pub fn in_released_format(b: &[u8]) -> bool {
+    let mut r = Reader::new(b);
+    let ok = (|| -> Result<(), DecodeError> {
+        decode_entry(&mut r)?;
+        if r.bool("has stamp")? {
+            let _ = (r.varint("")?, r.ivarint("")?, r.ivarint("")?, r.varint("")?);
+        }
+        if r.bool("has tier")? {
+            let _ = (r.u32("")?, r.varint("")?);
+        }
+        Ok(())
+    })();
+    ok.is_ok() && r.remaining() == 0
 }
 
 fn dec_local(b: &[u8]) -> Result<LocalRecord, DecodeError> {
     let mut r = Reader::new(b);
-    let IndexEntry { sequence, invalid, file } = decode_entry(&mut r)?;
+    let IndexEntry { sequence, invalid, file, .. } = decode_entry(&mut r)?;
     let stamp = if r.bool("has stamp")? {
         Some(Stamp {
             size: r.varint("stamp size")?,
@@ -636,13 +715,17 @@ fn dec_local(b: &[u8]) -> Result<LocalRecord, DecodeError> {
     };
     let tier =
         if r.bool("has tier")? { Some(TierMemo { avg: r.u32("tier")?, chosen_at: r.varint("tier size")? }) } else { None };
+    let flags = if r.remaining() > 0 { r.u8("on-demand flags")? } else { 0 };
+    if flags & !0b11 != 0 {
+        return Err(DecodeError::Invalid("unknown on-demand flags"));
+    }
     done(&r)?;
-    Ok(LocalRecord { file, sequence, invalid, stamp, tier })
+    Ok(LocalRecord { file, sequence, invalid, stamp, tier, dataless: flags & 1 != 0, want: flags & 2 != 0 })
 }
 
 fn enc_entry(e: &IndexEntry) -> Vec<u8> {
     let mut out = Vec::with_capacity(160 + 36 * e.file.info.chunks.len());
-    encode_entry(&mut out, e.sequence, e.invalid, &e.file);
+    encode_index_entry(&mut out, e);
     out
 }
 
@@ -703,7 +786,7 @@ fn dec_writer(b: &[u8]) -> Result<Writer, DecodeError> {
 
 /// The chunk-map rows a local record contributes: only a valid, present file serves chunks.
 fn chunk_rows(rec: &LocalRecord) -> BTreeSet<([u8; 32], u64)> {
-    if rec.invalid || rec.file.info.deleted {
+    if rec.invalid || rec.dataless || rec.file.info.deleted {
         return BTreeSet::new();
     }
     offsets(&rec.file.info.chunks).map(|(off, c)| (c.hash, off)).collect()
@@ -712,6 +795,18 @@ fn chunk_rows(rec: &LocalRecord) -> BTreeSet<([u8; 32], u64)> {
 // ------------------------------------------------------------------ write path
 
 /// The tables of one write transaction.
+/// `slot`'s table, opened in `txn` the first time it is needed (which makes it in the file).
+fn opened<'s, 't, K: redb::Key + 'static, V: redb::Value + 'static>(
+    txn: &'t WriteTransaction,
+    slot: &'s mut Option<Table<'t, K, V>>,
+    def: TableDefinition<'static, K, V>,
+) -> io::Result<&'s mut Table<'t, K, V>> {
+    if slot.is_none() {
+        *slot = Some(txn.open_table(def).map_err(dbe)?);
+    }
+    Ok(slot.as_mut().expect("just opened"))
+}
+
 struct Writing<'t> {
     meta: Table<'t, &'static str, &'static [u8]>,
     local: Table<'t, &'static str, &'static [u8]>,
@@ -722,6 +817,13 @@ struct Writing<'t> {
     writers: Table<'t, u64, &'static [u8]>,
     need: Table<'t, &'static str, &'static [u8]>,
     chunks: Table<'t, (&'static [u8; 32], &'static str, u64), ()>,
+    /// The on-demand tables, opened (and so made) only by a write that needs them: an ordinary folder's file never
+    /// has them.
+    txn: &'t WriteTransaction,
+    shown: Option<Table<'t, u64, &'static str>>,
+    shown_at: Option<Table<'t, &'static str, u64>>,
+    retired: Option<Table<'t, u64, &'static [u8]>>,
+    unavailable: Option<Table<'t, &'static str, u64>>,
     /// Need totals, read at the first need change, written back at the end.
     totals: Option<(u64, u64)>,
     /// Local totals, the same way.
@@ -740,6 +842,11 @@ impl<'t> Writing<'t> {
             writers: txn.open_table(WRITERS).map_err(dbe)?,
             need: txn.open_table(NEED).map_err(dbe)?,
             chunks: txn.open_table(CHUNKS).map_err(dbe)?,
+            txn,
+            shown: None,
+            shown_at: None,
+            retired: None,
+            unavailable: None,
             totals: None,
             local_totals: None,
         })
@@ -785,6 +892,34 @@ impl<'t> Writing<'t> {
                 self.writers.remove(d.0).map_err(dbe)?;
             }
             Op::SetNeed(p, n) => self.set_need(&p, n.as_ref())?,
+            Op::Shown(p, seq) => {
+                let old = opened(self.txn, &mut self.shown_at, SHOWN_AT)?.insert(p.as_str(), seq).map_err(dbe)?.map(|v| v.value());
+                let shown = opened(self.txn, &mut self.shown, SHOWN)?;
+                if let Some(old) = old {
+                    shown.remove(old).map_err(dbe)?;
+                }
+                shown.insert(seq, p.as_str()).map_err(dbe)?;
+            }
+            Op::Retired(seq, p, fid) => {
+                let mut v = fid.to_vec();
+                v.extend_from_slice(p.as_bytes());
+                opened(self.txn, &mut self.retired, RETIRED)?.insert(seq, v.as_slice()).map_err(dbe)?;
+            }
+            Op::Unavailable(p, size) => {
+                let t = opened(self.txn, &mut self.unavailable, UNAVAILABLE)?;
+                match size {
+                    Some(s) => {
+                        t.insert(p.as_str(), s).map_err(dbe)?;
+                    }
+                    None => {
+                        t.remove(p.as_str()).map_err(dbe)?;
+                    }
+                }
+            }
+            Op::PruneRetired(upto) => {
+                opened(self.txn, &mut self.retired, RETIRED)?.retain(|s, _| s > upto).map_err(dbe)?;
+                self.meta.insert(FEED_FLOOR_KEY, upto.to_le_bytes().as_slice()).map_err(dbe)?;
+            }
         }
         Ok(())
     }
@@ -1019,6 +1154,18 @@ impl IndexStore for RedbStore {
         })
     }
 
+    fn peer_ids(&self) -> io::Result<Vec<ShortId>> {
+        guard(&self.path, || {
+            let rtx = self.rtx()?;
+            let t = rtx.open_table(PEERS).map_err(dbe)?;
+            let mut out = Vec::new();
+            for row in t.iter().map_err(dbe)? {
+                out.push(ShortId(row.map_err(dbe)?.0.value()));
+            }
+            Ok(out)
+        })
+    }
+
     fn writers(&self) -> io::Result<Vec<(ShortId, Writer)>> {
         guard(&self.path, || {
             let rtx = self.rtx()?;
@@ -1070,6 +1217,137 @@ impl IndexStore for RedbStore {
         guard(&self.path, || {
             let rtx = self.rtx()?;
             read_pair(&rtx.open_table(META).map_err(dbe)?, LOCAL_TOTALS_KEY)
+        })
+    }
+
+    fn shown_since(&self, after: u64, limit: usize) -> io::Result<Vec<(u64, String)>> {
+        guard(&self.path, || {
+            let rtx = self.rtx()?;
+            let t = match rtx.open_table(SHOWN) {
+                Ok(t) => t,
+                Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
+                Err(e) => return Err(dbe(e)),
+            };
+            let mut out = Vec::new();
+            for row in t.range(after.saturating_add(1)..).map_err(dbe)?.take(limit) {
+                let (k, v) = row.map_err(dbe)?;
+                out.push((k.value(), v.value().to_string()));
+            }
+            Ok(out)
+        })
+    }
+
+    fn any_unavailable(&self) -> io::Result<bool> {
+        guard(&self.path, || {
+            let rtx = self.rtx()?;
+            match rtx.open_table(UNAVAILABLE) {
+                Ok(t) => Ok(t.first().map_err(dbe)?.is_some()),
+                Err(redb::TableError::TableDoesNotExist(_)) => Ok(false),
+                Err(e) => Err(dbe(e)),
+            }
+        })
+    }
+
+    fn needs_at(&self, paths: &[String]) -> io::Result<Vec<(Option<NeedRecord>, bool)>> {
+        guard(&self.path, || {
+            let rtx = self.rtx()?;
+            let need = rtx.open_table(NEED).map_err(dbe)?;
+            let unavailable = match rtx.open_table(UNAVAILABLE) {
+                Ok(t) => Some(t),
+                Err(redb::TableError::TableDoesNotExist(_)) => None,
+                Err(e) => return Err(dbe(e)),
+            };
+            let mut out = Vec::with_capacity(paths.len());
+            for p in paths {
+                let n = match need.get(p.as_str()).map_err(dbe)? {
+                    Some(v) => Some(dec_need(v.value()).map_err(|e| bad("need", p, e))?),
+                    None => None,
+                };
+                let u = match &unavailable {
+                    Some(t) => t.get(p.as_str()).map_err(dbe)?.is_some(),
+                    None => false,
+                };
+                out.push((n, u));
+            }
+            Ok(out)
+        })
+    }
+
+    fn unavailable(&self) -> io::Result<Vec<(String, u64)>> {
+        guard(&self.path, || {
+            let rtx = self.rtx()?;
+            let t = match rtx.open_table(UNAVAILABLE) {
+                Ok(t) => t,
+                Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
+                Err(e) => return Err(dbe(e)),
+            };
+            let mut out = Vec::new();
+            for row in t.iter().map_err(dbe)? {
+                let (k, v) = row.map_err(dbe)?;
+                out.push((k.value().to_string(), v.value()));
+            }
+            Ok(out)
+        })
+    }
+
+    fn unavailable_at(&self, path: &str) -> io::Result<Option<u64>> {
+        guard(&self.path, || {
+            let rtx = self.rtx()?;
+            match rtx.open_table(UNAVAILABLE) {
+                Ok(t) => Ok(t.get(path).map_err(dbe)?.map(|v| v.value())),
+                Err(redb::TableError::TableDoesNotExist(_)) => Ok(None),
+                Err(e) => Err(dbe(e)),
+            }
+        })
+    }
+
+    fn feed_floor(&self) -> io::Result<u64> {
+        guard(&self.path, || {
+            let rtx = self.rtx()?;
+            let t = rtx.open_table(META).map_err(dbe)?;
+            Ok(t.get(FEED_FLOOR_KEY).map_err(dbe)?.and_then(|v| v.value().try_into().ok()).map_or(0, u64::from_le_bytes))
+        })
+    }
+
+    fn feeds_host(&self) -> bool {
+        self.feeds_host
+    }
+
+    fn set_feeds_host(&mut self, on: bool) {
+        self.feeds_host = on;
+    }
+
+    fn shown_at(&self, path: &str) -> io::Result<Option<u64>> {
+        guard(&self.path, || {
+            let rtx = self.rtx()?;
+            match rtx.open_table(SHOWN_AT) {
+                Ok(t) => Ok(t.get(path).map_err(dbe)?.map(|v| v.value())),
+                Err(redb::TableError::TableDoesNotExist(_)) => Ok(None),
+                Err(e) => Err(dbe(e)),
+            }
+        })
+    }
+
+    fn retired(&self, after: u64, upto: u64) -> io::Result<Vec<(u64, String, [u8; 16])>> {
+        if upto <= after {
+            return Ok(Vec::new());
+        }
+        guard(&self.path, || {
+            let rtx = self.rtx()?;
+            let t = match rtx.open_table(RETIRED) {
+                Ok(t) => t,
+                Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
+                Err(e) => return Err(dbe(e)),
+            };
+            let mut out = Vec::new();
+            for row in t.range(after + 1..=upto).map_err(dbe)? {
+                let (k, v) = row.map_err(dbe)?;
+                let v = v.value();
+                let fid: [u8; 16] = v.get(..16).and_then(|f| f.try_into().ok()).ok_or_else(|| bad("retired", "", "too short"))?;
+                let path = String::from_utf8(v[16..].to_vec()).map_err(|_| bad("retired", "", "not UTF-8"))?;
+                out.push((k.value(), path, fid));
+            }
+            Ok(out)
         })
     }
 

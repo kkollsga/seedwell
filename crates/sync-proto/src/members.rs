@@ -17,6 +17,8 @@
 //!   5 share   : until_s varint (0 = no end) ‖ serial varint ‖ at_s varint     (owners only)
 //!   6 profile : device name str ‖ user name str (empty = none) ‖ serial varint ‖ at_s varint
 //!               (signed by the device it names, a member)
+//!   7 channel : flags varint ‖ at_s varint     (owners only; a channel's own facts, 0.1.12)
+//!               flags bit 0: an agent channel (made by an agent, open to every member device's agents by default)
 //! invite = version u8 (1) ‖ folder pk(32) ‖ id(16) ‖ role u8 ‖ max_uses varint (0 = unlimited)
 //!          ‖ expires_s varint (0 = never) ‖ at_s varint ‖ issuer (signer) ‖ token pk(32) ‖ signature(64)
 //!   signed  = "seedwell-sync/v2/invite" ‖ everything before the signature
@@ -329,6 +331,15 @@ pub enum Body {
         /// When it was made.
         at_s: u64,
     },
+    /// What a channel is (owners only, 0.1.12): [`CHANNEL_AGENTS`] marks an agent channel. Signed once, when the
+    /// channel is made; any owner's statement with a flag sets it for good (nothing clears one). A device before
+    /// 0.1.12 keeps it as [`Body::Unknown`] and passes it on: to it the channel is an ordinary one.
+    Channel {
+        /// [`CHANNEL_AGENTS`]; bits this version does not know are kept and mean nothing here.
+        flags: u64,
+        /// When it was made.
+        at_s: u64,
+    },
     /// A kind this version does not know, or a body it cannot read (a role it does not know): kept and passed
     /// on unchanged, never counted for roles.
     Unknown {
@@ -341,6 +352,10 @@ pub enum Body {
 
 /// Longest statement body.
 const MAX_BODY: usize = 1024;
+
+/// [`Body::Channel`]'s flag of an agent channel: an agent made it (through the agent interface), for agents to talk
+/// where the user can read; every member device's agents may read and post in it unless that device's user closes it.
+pub const CHANNEL_AGENTS: u64 = 1;
 
 /// A name in a [`Body::Profile`]: at most [`MAX_DEVICE_NAME`] characters, no control characters, not blank (a user
 /// name may be empty: none yet).
@@ -413,6 +428,11 @@ impl Statement {
                 put_varint(&mut out, *serial);
                 put_varint(&mut out, *at_s);
                 6
+            }
+            Body::Channel { flags, at_s } => {
+                put_varint(&mut out, *flags);
+                put_varint(&mut out, *at_s);
+                7
             }
             Body::Unknown { kind, data } => {
                 out.extend_from_slice(data);
@@ -500,6 +520,7 @@ impl Statement {
                 }
                 Body::Profile { device_name, user_name, serial: r.varint("serial").ok()?, at_s: r.varint("time").ok()? }
             }
+            7 => Body::Channel { flags: r.varint("channel flags").ok()?, at_s: r.varint("time").ok()? },
             _ => return None,
         };
         let used = data.len() - r.remaining();
@@ -520,8 +541,9 @@ impl Statement {
             Body::Grant { invite: Some(i), .. } => invite_ok(i),
             // A published invitation is signed by its issuer.
             Body::Invite(i) => invite_ok(i) && i.issuer == self.signer,
-            // Only an owner removes or sets the share end; an admin's grant needs the invitation it admits with.
-            Body::Remove { .. } | Body::ShareUntil { .. } => self.signer == Signer::Folder,
+            // Only an owner removes, sets the share end or says what the channel is; an admin's grant needs the
+            // invitation it admits with.
+            Body::Remove { .. } | Body::ShareUntil { .. } | Body::Channel { .. } => self.signer == Signer::Folder,
             Body::Grant { invite: None, .. } => self.signer == Signer::Folder,
             Body::Revoke { .. } => true,
             // A device names only itself.
@@ -646,6 +668,8 @@ pub struct Membership {
     share_by: Option<[u8; 32]>,
     /// The time [`Membership::set_now`] gave (Unix seconds): after the share end only the owners count.
     now_s: u64,
+    /// An owner marked the channel an agent channel ([`CHANNEL_AGENTS`]).
+    agent_channel: bool,
 }
 
 impl Membership {
@@ -663,6 +687,7 @@ impl Membership {
             share_until: None,
             share_by: None,
             now_s: 0,
+            agent_channel: false,
         }
     }
 
@@ -690,7 +715,7 @@ impl Membership {
             statements.into_iter().filter(|st| st.verify(&self.folder_pk)).partition(|st| st.signer == Signer::Folder);
         // Profiles last: a grant in the same batch may make their signer a member.
         by_device.sort_by_key(|st| matches!(st.body, Body::Profile { .. }));
-        let before = (self.members.clone(), self.invites.clone(), self.share_until, self.profile_hashes());
+        let before = (self.members.clone(), self.invites.clone(), self.share_until, self.profile_hashes(), self.agent_channel);
         let mut new = false;
         for st in by_owner.drain(..) {
             new |= self.statements.insert(st.hash(), st).is_none();
@@ -725,7 +750,7 @@ impl Membership {
         if more {
             self.resolve();
         }
-        (new || more) && before != (self.members.clone(), self.invites.clone(), self.share_until, self.profile_hashes())
+        (new || more) && before != (self.members.clone(), self.invites.clone(), self.share_until, self.profile_hashes(), self.agent_channel)
     }
 
     /// The latest profile statement of a device, and its hash.
@@ -783,6 +808,11 @@ impl Membership {
     /// When the folder stops being shared (the owners' setting); `None` = no end.
     pub fn share_until(&self) -> Option<u64> {
         self.share_until
+    }
+
+    /// An owner marked this channel an agent channel ([`Body::Channel`] with [`CHANNEL_AGENTS`]).
+    pub fn agent_channel(&self) -> bool {
+        self.agent_channel
     }
 
     /// The device is a member whose access ended with the folder's sharing.
@@ -1025,6 +1055,10 @@ impl Membership {
         self.max_serial = max_serial;
         self.share_until = share.map(|(_, _, u, _)| u).filter(|u| *u != 0);
         self.share_by = share.map(|(_, _, _, h)| h);
+        self.agent_channel = self
+            .statements
+            .values()
+            .any(|st| st.signer == Signer::Folder && matches!(st.body, Body::Channel { flags, .. } if flags & CHANNEL_AGENTS != 0));
     }
 }
 
@@ -1311,6 +1345,35 @@ mod tests {
 
     fn profile(d: &DeviceKey, fid: &FolderId, name: &str, user: &str, serial: u64) -> Statement {
         Statement::by_device(d, fid, Body::Profile { device_name: name.into(), user_name: user.into(), serial, at_s: NOW })
+    }
+
+    #[test]
+    fn only_an_owner_marks_an_agent_channel_and_nothing_unmarks_it() {
+        let (s, mut m, me) = base();
+        let fid = m.folder_id();
+        let admin = dev(2);
+        assert!(m.add([grant(&s, &admin, Role::Admin, 2)]));
+        assert!(!m.agent_channel(), "an ordinary channel");
+        // An admin (or any device) cannot say what the channel is: refused at the signature check.
+        let by_admin = Statement::by_device(&admin, &fid, Body::Channel { flags: CHANNEL_AGENTS, at_s: NOW });
+        assert!(!by_admin.verify(s.public_key()));
+        assert!(!m.add([by_admin]) && !m.agent_channel());
+        // Flags this version does not know mean nothing, and are kept as they came.
+        let odd = Statement::by_owner(&s, Body::Channel { flags: 0b110, at_s: NOW });
+        assert_eq!(Statement::from_bytes(&odd.to_bytes()).unwrap(), odd);
+        assert!(!m.add([odd]) && !m.agent_channel(), "kept, and no change");
+        // The owner's mark: a change (so it is saved and passed on), and the same from every order.
+        let mark = Statement::by_owner(&s, Body::Channel { flags: CHANNEL_AGENTS, at_s: NOW });
+        let back = Statement::from_bytes(&mark.to_bytes()).unwrap();
+        assert_eq!((&back, back.verify(s.public_key())), (&mark, true));
+        assert!(m.add([back]), "marked: a change");
+        assert!(m.agent_channel());
+        let mut other = Membership::new(*s.public_key());
+        other.add(m.statements().cloned().collect::<Vec<_>>().into_iter().rev());
+        assert!(other.agent_channel() && other.role(me.public_key()) == Some(Role::Owner));
+        // Later statements (even an owner's flags of 0) leave it marked: there is no unmarking.
+        assert!(!m.add([Statement::by_owner(&s, Body::Channel { flags: 0, at_s: NOW + 9 })]));
+        assert!(m.agent_channel());
     }
 
     #[test]

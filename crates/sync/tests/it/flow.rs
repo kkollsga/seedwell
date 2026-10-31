@@ -109,6 +109,7 @@ fn dev_on(fs: MemFs, name: &'static str, seed: u8, key: &Key) -> Dev {
         byte_exact_names: false,
         exec_bits: trs_sync::path::probe_exec_bits(&fs).unwrap(),
         archive: true,
+        on_demand: false,
     };
     let ids = Arc::new(AtomicU64::new(u64::from(seed) << 32));
     let new_id = Arc::new(move || {
@@ -609,6 +610,7 @@ fn core_on_disk(fs: trs_sync::fs::StdFs, seed: u8, key: &Key) -> FolderCore {
         byte_exact_names: false,
         exec_bits: trs_sync::path::probe_exec_bits(&fs).unwrap(),
         archive: true,
+        on_demand: false,
     };
     let ids = Arc::new(AtomicU64::new(u64::from(seed) << 32));
     let new_id = Arc::new(move || {

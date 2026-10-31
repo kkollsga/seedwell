@@ -7,13 +7,18 @@
 //! seedwell daemon --state-dir D --download-dir X [--listen-port P] [--bind 127.0.0.1]
 //!     [--socket PATH] [--permission off|read_only|control|full|config] [--no-dht] [--no-trackers]
 //!     [--portmap] [--ask] [--max-active N] [--shutdown-secs S] [--allow-lan-trackers]
-//!     [--dev-mode] [--allow-loopback-trackers] [--no-sync]
+//!     [--dev-mode] [--allow-loopback-trackers] [--no-sync] [--chat-agents off|read|post]
 //! ```
 //!
 //! **Folder sync** (SPEC 7G) runs next to the engine unless `--no-sync`: `sync.toml` and `sync/` in the
 //! state directory, keys in `<state-dir>/sync/secrets` (0600), devices found over the engine's DHT, the
 //! sync port mapped by its port mapper, bound to `--bind` (LAN discovery is off on a loopback bind). It
 //! stops before the engine.
+//!
+//! `--chat-agents` is the agent switch of every channel and of private messages for the run (in memory, never written
+//! to `sync.toml`): a daemon has no app in which its user opens chats to agents. Without it a channel is as in the app
+//! (SPEC §7G.7): an agent channel (one an agent made) open at Read and post, any other closed; `off` closes even an
+//! agent channel. No control method changes a switch.
 //!
 //! `--dev-mode` switches developer mode on for the run (whatever `config.toml` says): every tracker
 //! exchange is written, secrets masked, to `<state-dir>/logs/trackers.log` (`seedwell log trackers`).
@@ -82,6 +87,10 @@ pub async fn run(mut o: Opts, g: &Global) -> Result<(), CliError> {
     let dev_mode = o.flag(&["--dev-mode"]);
     let shutdown_secs = o.number::<u64>(&["--shutdown-secs"])?.unwrap_or(10);
     let no_sync = o.flag(&["--no-sync"]);
+    let chat_agents = match o.value(&["--chat-agents"])? {
+        None => None,
+        Some(a) => Some(trs_sync_net::chat::AgentAccess::parse(&a).ok_or_else(|| bad(format!("--chat-agents is off, read or post, not `{a}`")))?),
+    };
     let permission = o.value(&["--permission"])?.unwrap_or_else(|| "control".into());
     let extra = o.finish()?;
     if let Some(x) = extra.first() {
@@ -130,7 +139,7 @@ pub async fn run(mut o: Opts, g: &Global) -> Result<(), CliError> {
         .with_tz_offset(|| trs_engine::util::local_utc_offset(trs_engine::util::unix_secs() as i64));
     let options = trs_control::ServerOptions::default().with_config(&state.config());
     let slot = SyncSlot::new();
-    let sync = if no_sync { None } else { start_folder_sync(&state_dir, &engine, bind, &slot).await };
+    let sync = if no_sync { None } else { start_folder_sync(&state_dir, &engine, bind, chat_agents, &slot).await };
     slot.set(sync.clone());
     let backend = Arc::new(EngineBackend::new(engine.clone()).with_sync(slot.clone()));
     let server = serve_backend(backend, state, &socket, perm, options).await.map_err(|e| fail(format!("cannot serve {}: {e}", socket.display())))?;
@@ -164,7 +173,13 @@ pub async fn run(mut o: Opts, g: &Global) -> Result<(), CliError> {
 
 /// The folder sync service next to the engine. A failure is reported and the daemon runs on without
 /// it: a sync problem never stops torrents (SPEC 7G).
-async fn start_folder_sync(state_dir: &std::path::Path, engine: &trs_engine::EngineHandle, bind: std::net::Ipv4Addr, slot: &SyncSlot) -> Option<trs_sync_net::SyncHandle> {
+async fn start_folder_sync(
+    state_dir: &std::path::Path,
+    engine: &trs_engine::EngineHandle,
+    bind: std::net::Ipv4Addr,
+    chat_agents: Option<trs_sync_net::chat::AgentAccess>,
+    slot: &SyncSlot,
+) -> Option<trs_sync_net::SyncHandle> {
     let secrets: Arc<dyn trs_sync_net::secrets::SecretStore> = Arc::new(FileSecrets::new(state_dir.join("sync").join("secrets")));
     let (state_dir, engine) = (state_dir.to_path_buf(), engine.clone());
     // The same start again when the port changes (`SyncSlot::move_port`).
@@ -176,6 +191,7 @@ async fn start_folder_sync(state_dir: &std::path::Path, engine: &trs_engine::Eng
                 o.bind = std::net::IpAddr::V4(bind);
                 // Announcing test daemons on the real LAN would only add noise.
                 o.lan_discovery = !bind.is_loopback();
+                o.chat_agents = chat_agents;
             })
             .await
         })

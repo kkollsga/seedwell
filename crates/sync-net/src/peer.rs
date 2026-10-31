@@ -60,6 +60,17 @@ pub async fn run(ctx: Arc<Ctx>, conn: Connected, candidates: Vec<FolderId>) -> i
     let (rd, wr) = tokio::io::split(conn.stream);
     let mut reader = Reader::new(rd);
     let mut writer = Writer::new(wr);
+    // Folders that open or close while this session is set up are checked again once it is up ([`reconcile`]). Read
+    // before the folders to offer are, so one opened since is either offered or seen to have moved it.
+    let at_gen = ctx.folder_gen.load(Ordering::SeqCst);
+    // (What the caller asked for is what a refusal is noted against: all joining folders for an incoming session.)
+    let asked = candidates.clone();
+    let mut candidates = candidates;
+    for f in ctx.registry.spaces() {
+        if f.members.read().unwrap_or_else(|e| e.into_inner()).contains(&device) && !candidates.contains(&f.id) {
+            candidates.push(f.id);
+        }
+    }
 
     let setup = async {
         let name = lock(&ctx.device_name).clone();
@@ -150,6 +161,9 @@ pub async fn run(ctx: Arc<Ctx>, conn: Connected, candidates: Vec<FolderId>) -> i
             }
             let ids: Vec<FolderId> = checked.shared.iter().map(|(f, _, _)| *f).collect();
             let join = own_join(&ctx, &ids, &est.exporter, device, lan).await;
+            // (Tests: the answer is made, the session not up yet.)
+            let wait = *lock(&ctx.setup_wait);
+            tokio::time::sleep(wait).await;
             sent.extend(join.folders.iter().map(|f| f.folder_id));
             writer.send(&Message::Join(join)).await?;
             if chat {
@@ -165,7 +179,7 @@ pub async fn run(ctx: Arc<Ctx>, conn: Connected, candidates: Vec<FolderId>) -> i
         Ok::<_, io::Error>((hello, agreed, checked, sent))
     };
     let setup = tokio::time::timeout(SETUP_TIMEOUT, setup).await.map_err(|_| bad("setup timed out"))?;
-    let (hello, agreed, checked, sent) = setup.inspect_err(|e| note_refusal(&ctx, &candidates, device, e))?;
+    let (hello, agreed, checked, sent) = setup.inspect_err(|e| note_refusal(&ctx, &asked, device, e))?;
     // The two Seedwells talk: a version problem with this device is over.
     for f in ctx.registry.spaces() {
         lock(&f.notes).incompatible.remove(&device);
@@ -187,17 +201,34 @@ pub async fn run(ctx: Arc<Ctx>, conn: Connected, candidates: Vec<FolderId>) -> i
 
     let (peer, crx, drx) = PeerHandle::new(est.peer_pk, hello.device_name, hello.client, agreed, remote, local, est.exporter, dialed, via);
     *lock(&peer.user_name) = checked.user_name;
+    let old = ctx.plays_0_1_11();
+    // What the two Joins covered: a folder is linked only if it is in both.
+    lock(&peer.joined).extend(sent.iter().copied());
+    lock(&peer.got).extend(checked.named.iter().copied());
+    if !old {
+        lock(&peer.stale).extend(checked.closed);
+    }
     if !ctx.registry.add_peer(&ctx.me, peer.clone()) {
         let _ = writer.send(&Message::Close(Close { reason: "already connected".into() })).await;
         return Ok(());
     }
     let _ = ctx.hub.send(HubMsg::PeerUp(device));
+    ctx.sessions.fetch_add(1, Ordering::SeqCst);
 
     let writer_task = tokio::spawn(write_loop(writer, crx, drx, peer.clone()));
     let serve = Arc::new(Semaphore::new(SERVE_BUDGET_KIB));
     let mut links = Vec::new();
     for (folder, access, their) in shared {
+        // Offered by the peer, but left out of our Join (it closed while that was made): stale, never linked.
+        if !old && !sent.contains(&folder) {
+            lock(&peer.stale).insert(folder);
+            continue;
+        }
         links.push(start_link(&ctx, &peer, folder, access, their));
+    }
+    // Every folder that opened or closed since setup began is as it should be, or the session starts anew.
+    if !old && ctx.folder_gen.load(Ordering::SeqCst) != at_gen {
+        reconcile(&ctx, &peer).await;
     }
     for (channel, access) in channels {
         links.push(start_chat_link(&ctx, &peer, channel, access));
@@ -210,7 +241,7 @@ pub async fn run(ctx: Arc<Ctx>, conn: Connected, candidates: Vec<FolderId>) -> i
     offer_joining(&ctx, &peer, &sent).await;
     let result = read_loop(&ctx, &peer, &mut reader, &serve, &est, sent, &mut links).await;
     if let Err(e) = &result {
-        note_refusal(&ctx, &candidates, device, e);
+        note_refusal(&ctx, &asked, device, e);
     }
 
     peer.close();
@@ -227,13 +258,15 @@ pub async fn run(ctx: Arc<Ctx>, conn: Connected, candidates: Vec<FolderId>) -> i
 /// another one, as when a link for a folder and its channel is used), as when one is opened while connected.
 async fn offer_joining(ctx: &Ctx, peer: &PeerHandle, sent: &BTreeSet<FolderId>) {
     for f in ctx.registry.spaces() {
-        if sent.contains(&f.id) || lock(&f.invite).is_none() || f.role_of(ctx.key.public_key()).is_some() {
+        if sent.contains(&f.id) || lock(&peer.joined).contains(&f.id) || lock(&f.invite).is_none() || f.role_of(ctx.key.public_key()).is_some() {
             continue;
         }
         match f.kind {
             SpaceKind::Folder => {
                 let join = own_join(ctx, &[f.id], &peer.exporter, peer.device, peer.lan).await;
                 if !join.folders.is_empty() {
+                    lock(&peer.joined).insert(f.id);
+                    lock(&peer.offered).insert(f.id);
                     let _ = peer.control.send(Message::Join(join)).await;
                 }
             }
@@ -338,6 +371,11 @@ struct Checked {
     conversation: bool,
     /// The peer's user's name, from its DirectJoin.
     user_name: String,
+    /// Folders the peer offered that are not open here (paused, stopped, LAN-only, not here at all): stale on this
+    /// session, so opening one starts the session anew (and it links then).
+    closed: Vec<FolderId>,
+    /// Every folder the peer's Join named (that this check looked at).
+    named: Vec<FolderId>,
 }
 
 impl Checked {
@@ -357,12 +395,29 @@ impl Checked {
 /// when this device is an owner or admin. `answered_only` (non-empty for a dialer) limits the answer to folders
 /// we asked about.
 fn check_join(ctx: &Ctx, j: &Join, est: &crate::tls::Established, answered_only: &BTreeSet<FolderId>, lan: bool) -> Checked {
-    let mut out = Checked { shared: Vec::new(), channels: Vec::new(), refused: Vec::new(), changed: Vec::new(), conversation: false, user_name: String::new() };
+    let mut out = Checked {
+        shared: Vec::new(),
+        channels: Vec::new(),
+        refused: Vec::new(),
+        changed: Vec::new(),
+        conversation: false,
+        user_name: String::new(),
+        closed: Vec::new(),
+        named: Vec::new(),
+    };
     for jf in &j.folders {
         if !answered_only.is_empty() && !answered_only.contains(&jf.folder_id) {
             continue;
         }
-        let Some(f) = ctx.registry.folder(&jf.folder_id).filter(|f| f.allowed_with(lan)) else { continue };
+        out.named.push(jf.folder_id);
+        // Ours but not open here (paused, LAN-only, stopped, held back, failed to open): stale. One this device does
+        // not have is nothing.
+        let Some(f) = ctx.registry.folder(&jf.folder_id).filter(|f| f.allowed_with(lan)) else {
+            if ctx.registry.folder(&jf.folder_id).is_some() || lock(&ctx.ours).contains(&jf.folder_id) {
+                out.closed.push(jf.folder_id);
+            }
+            continue;
+        };
         let mut changed = false;
         match crate::roles::check(ctx, &f, &est.peer_pk, &est.exporter, &jf.proofs, &mut changed) {
             crate::roles::Proved::Member(a) => out.shared.push((jf.folder_id, a, jf.clone())),
@@ -378,7 +433,7 @@ fn check_join(ctx: &Ctx, j: &Join, est: &crate::tls::Established, answered_only:
 
 /// Starts sending our index of `folder` to the peer: everything new since what it holds of it, then
 /// every change as it happens.
-fn start_link(
+pub(crate) fn start_link(
     ctx: &Arc<Ctx>,
     peer: &Arc<PeerHandle>,
     folder: FolderId,
@@ -386,15 +441,26 @@ fn start_link(
     their: JoinFolder,
 ) -> tokio::task::JoinHandle<()> {
     peer.folders.write().unwrap_or_else(|e| e.into_inner()).insert(folder, access);
-    let (ctx, peer) = (ctx.clone(), peer.clone());
-    tokio::spawn(async move {
+    let (ctx2, peer2) = (ctx.clone(), peer.clone());
+    let task = tokio::spawn(async move {
+        let (ctx, peer) = (ctx2, peer2);
         let Some(f) = ctx.registry.folder(&folder) else { return };
         f.members.write().unwrap_or_else(|e| e.into_inner()).insert(peer.device);
         let _ = ctx.hub.send(HubMsg::MemberSeen { folder, device: peer.device });
         if let Err(e) = send_index(&f, &peer, their).await {
             let _ = peer.control.send(Message::Close(Close { reason: format!("index: {e}") })).await;
         }
-    })
+    });
+    // One sender per folder: one linked again replaces the one before.
+    if let Some(old) = peer.links.lock().unwrap_or_else(|e| e.into_inner()).insert(folder, task.abort_handle()) {
+        old.abort();
+    }
+    // Closed meanwhile (its check passed, then it was paused or stopped)? A closer sets its flag before it looks at
+    // the sessions, and this link is in them now: either it saw this link, or this sees its flag. Stale either way.
+    if !ctx.plays_0_1_11() && ctx.registry.folder(&folder).filter(|f| f.allowed_with(peer.lan)).is_none() {
+        peer.close_folder(&folder);
+    }
+    task
 }
 
 async fn send_index(f: &Arc<FolderShared>, peer: &Arc<PeerHandle>, their: JoinFolder) -> io::Result<()> {
@@ -409,7 +475,11 @@ async fn send_index(f: &Arc<FolderShared>, peer: &Arc<PeerHandle>, their: JoinFo
     // What the peer holds of our index decides between changes only and a full send.
     let (mut full, mut sent) = if their.your_index_id == index_id { (false, their.your_max_seq) } else { (true, 0) };
     let mut changes = f.local_seq.subscribe();
+    let mut stopped = f.stopped.subscribe();
     loop {
+        if *stopped.borrow() {
+            return Ok(());
+        }
         loop {
             let f2 = f.clone();
             let batch = tokio::task::spawn_blocking(move || lock(&f2.core).announce_since(sent, MAX_INDEX_ENTRIES))
@@ -441,6 +511,8 @@ async fn send_index(f: &Arc<FolderShared>, peer: &Arc<PeerHandle>, their: JoinFo
         tokio::select! {
             r = changes.changed() => if r.is_err() { return Ok(()) },
             _ = closed.wait_for(|c| *c) => return Ok(()),
+            // The folder is stopping here: let go of it (the peer stays connected for the others).
+            _ = stopped.wait_for(|s| *s) => return Ok(()),
         }
     }
 }
@@ -575,6 +647,7 @@ async fn read_loop(
                 }
             }
             Message::Index(idx) => {
+                // (Nothing of a folder stale on this session: it is sent again on the next one.)
                 let Some(f) = shared_folder(ctx, peer, &idx.folder_id) else { continue };
                 let ri = RemoteIndex { index_id: idx.index_id, full: idx.full, done: idx.done, entries: idx.entries };
                 apply.send(Apply::Index(f, ri)).await.map_err(|_| applier_gone())?;
@@ -606,24 +679,136 @@ async fn read_loop(
                 peer.rx_bytes.fetch_add(r.data.len() as u64, Ordering::Relaxed);
                 peer.answer(r);
             }
+            // (A build without the feature does not know the type: it skips it.)
+            Message::HoldQuery(_) if ctx.silent_ondemand.load(Ordering::SeqCst) || ctx.features & trs_sync_proto::msg::FEATURE_HOLDS == 0 => {}
+            Message::HoldQuery(q) => {
+                // Answered from our index as it is now, through its read-only handle, so a pull that holds the folder's
+                // core never makes the asker wait (a folder not shared with the peer, gone, paused or missing holds
+                // nothing for it).
+                let f = shared_folder(ctx, peer, &q.folder_id).filter(|f| {
+                    let running = !matches!(
+                        lock(&f.live).state,
+                        crate::status::FolderState::Paused | crate::status::FolderState::Missing | crate::status::FolderState::Error
+                    );
+                    running && !f.paused.load(Ordering::Relaxed)
+                });
+                let (peer2, ctx2) = (peer.clone(), ctx.clone());
+                let lie = ctx.yes_to_holds.load(Ordering::SeqCst);
+                tokio::spawn(async move {
+                    let n = q.files.len();
+                    let asker = peer2.device.short();
+                    let me = ctx2.me.short();
+                    let writer = f.as_ref().is_some_and(|f| f.role_of(ctx2.key.public_key()).is_some_and(|r| r.access() == Access::Write));
+                    let held = match f {
+                        Some(f) => tokio::task::spawn_blocking(move || {
+                            let (view, fs) = (f.index.view(), StdFs::new(f.root.clone()));
+                            let freeing = |p: &str| lock(&f.freeing).contains_key(p);
+                            let holder = trs_sync::ondemand::Holder { store: &view, fs: &fs, me, writer, on_demand: f.on_demand, freeing: &freeing, ignore: &f.ignore };
+                            holder.answer(asker, &q.files)
+                        })
+                        .await
+                        .unwrap_or_else(|_| vec![false; n]),
+                        None => vec![false; n],
+                    };
+                    let held = if lie { vec![true; n] } else { held };
+                    let _ = peer2.control.send(Message::HoldReply(trs_sync_proto::msg::HoldReply { id: q.id, held })).await;
+                });
+            }
+            Message::HoldReply(r) => peer.answer_holds(r),
+            Message::RenameRequest(_) if ctx.silent_ondemand.load(Ordering::SeqCst) || ctx.features & trs_sync_proto::msg::FEATURE_RENAMES == 0 => {}
+            Message::RenameRequest(q) => {
+                // Made here as this device's own rename, only for a writer of a folder it shares with us that runs here,
+                // and only if it can start within the request's time to live (counted from now); answered either way.
+                let by = std::time::Instant::now() + Duration::from_millis(u64::from(q.ttl_ms).min(MAX_RENAME_TTL_MS));
+                let f = shared_folder(ctx, peer, &q.folder_id).filter(|f| {
+                    !matches!(
+                        lock(&f.live).state,
+                        crate::status::FolderState::Paused | crate::status::FolderState::Missing | crate::status::FolderState::Error
+                    )
+                });
+                let writer = f.as_ref().is_some_and(|f| f.role_of(&peer.device_pk).is_some_and(|r| r.access() == Access::Write));
+                let peer2 = peer.clone();
+                tokio::spawn(async move {
+                    use trs_sync_proto::msg::RenameOutcome;
+                    let (outcome, reason) = match f {
+                        Some(f) if writer => rename_for_peer(f, q.from, q.to, q.seen, by).await,
+                        Some(_) => (RenameOutcome::Refused, "only a member that can write may rename".to_string()),
+                        None => (RenameOutcome::Refused, "the folder is not running here".to_string()),
+                    };
+                    let mut reply = trs_sync_proto::msg::RenameReply { id: q.id, outcome, reason };
+                    reply.reason.truncate(reply.reason.floor_char_boundary(trs_sync_proto::msg::MAX_RENAME_REASON));
+                    let _ = peer2.control.send(Message::RenameReply(reply)).await;
+                });
+            }
+            Message::RenameReply(r) => peer.answer_rename(r),
             Message::Join(j) => {
                 // A folder added while connected (a refused invitation is not worth ending the session over).
+                let at_gen = ctx.folder_gen.load(Ordering::SeqCst);
+                let old = ctx.plays_0_1_11();
                 let checked = check_join(ctx, &j, est, &BTreeSet::new(), peer.lan);
+                lock(&peer.got).extend(checked.named.iter().copied());
+                if !old {
+                    lock(&peer.stale).extend(checked.closed.iter().copied());
+                }
                 for id in &checked.changed {
                     if let Some(f) = ctx.registry.space(id) {
                         crate::roles::changed(ctx, &f).await;
                     }
                 }
                 for (folder, access, their) in checked.shared {
-                    if peer.access(&folder).is_some() {
+                    if old {
+                        // As 0.1.11: linked already, ignored; answered unless it named the folder itself before.
+                        if peer.access(&folder).is_some() {
+                            continue;
+                        }
+                        if !sent.contains(&folder) {
+                            let join = own_join(ctx, &[folder], &est.exporter, peer.device, peer.lan).await;
+                            sent.extend(join.folders.iter().map(|f| f.folder_id));
+                            let _ = peer.control.send(Message::Join(join)).await;
+                        }
+                        links.push(start_link(ctx, peer, folder, access, their));
                         continue;
                     }
-                    if !sent.contains(&folder) {
-                        let join = own_join(ctx, &[folder], &est.exporter, peer.device, peer.lan).await;
-                        sent.extend(join.folders.iter().map(|f| f.folder_id));
-                        let _ = peer.control.send(Message::Join(join)).await;
+                    // Stale on this session (it closed here: the session starts anew once it is open).
+                    if peer.is_stale(&folder) {
+                        continue;
                     }
-                    links.push(start_link(ctx, peer, folder, access, their));
+                    // Linked already: the peer opened it again (moved it, added it again: an earlier build says so
+                    // with a Join on the same session). What it dropped meanwhile it takes again only from a new
+                    // session's Join: this one starts anew.
+                    if peer.access(&folder).is_some() {
+                        // (Unless it is the peer's reply to our answer.)
+                        if lock(&peer.answered).remove(&folder) {
+                            continue;
+                        }
+                        let reason = "the peer opened a folder again: starting the session anew".to_string();
+                        let _ = peer.control.send(Message::Close(Close { reason })).await;
+                        continue;
+                    }
+                    // Answered, and the answer noted (the peer's reply to it is no reopening). A new build answers
+                    // every Join for a folder it has not linked, so an answer to our own offer is answered too, and
+                    // its reply to that is noted the same way. An earlier build does not reply to the answer of an
+                    // offer of ours: its Join for one we offered is that answer.
+                    let earlier = !peer.has(trs_sync_proto::msg::FEATURE_HOLDS);
+                    let ours_first = lock(&peer.offered).remove(&folder) && earlier;
+                    if !ours_first {
+                        let join = own_join(ctx, &[folder], &est.exporter, peer.device, peer.lan).await;
+                        if join.folders.iter().any(|f| f.folder_id == folder) {
+                            lock(&peer.joined).insert(folder);
+                            lock(&peer.answered).insert(folder);
+                            let _ = peer.control.send(Message::Join(join)).await;
+                        }
+                    }
+                    // Linked only if it went out in our Join on this session; else (it closed meanwhile) stale.
+                    if lock(&peer.joined).contains(&folder) {
+                        links.push(start_link(ctx, peer, folder, access, their));
+                    } else {
+                        lock(&peer.stale).insert(folder);
+                    }
+                }
+                // A folder opened or closed while this Join was handled: the session's folders are checked again.
+                if !old && ctx.folder_gen.load(Ordering::SeqCst) != at_gen {
+                    reconcile(ctx, peer).await;
                 }
             }
             Message::Addresses(a) => {
@@ -684,13 +869,24 @@ async fn apply_loop(ctx: Arc<Ctx>, peer: Arc<PeerHandle>, mut queue: mpsc::Recei
                 crate::direct::on_messages(&ctx, &peer, msgs).await;
                 continue;
             }
+            // A session that ended takes nothing more of its peer's index: the next one says what we hold, and the
+            // peer sends from there (a late batch of this one would land after that one's).
+            Apply::Index(..) if peer.is_closed() => continue,
             a => a,
         };
+        let session = peer.clone();
         let res = tokio::task::spawn_blocking(move || match a {
             Apply::Members(..) | Apply::OwnerKey(..) | Apply::Chat(..) | Apply::Direct(..) => Ok::<(), String>(()),
             Apply::Index(f, ri) => {
                 let done = ri.done;
-                let stored = lock(&f.core).apply_remote(who, ri).map_err(|e| e.to_string())?;
+                let mut core = lock(&f.core);
+                // Checked again under the core's lock: the session may have ended while this waited for it (a new
+                // one's batches may be in already), or the folder gone stale on it.
+                if session.is_closed() || session.is_stale(&f.id) {
+                    return Ok(());
+                }
+                let stored = core.apply_remote(who, ri).map_err(|e| e.to_string())?;
+                drop(core);
                 if stored > 0 || done {
                     f.remote_changed.notify_one();
                 }
@@ -721,6 +917,78 @@ fn shared_channel(ctx: &Ctx, peer: &PeerHandle, id: &FolderId) -> Option<Arc<cra
 }
 
 /// A folder this session shares with the peer (and is not paused).
+/// Renames `from` to `to` for a writer that asked ([`trs_sync::folder::FolderCore::rename_for_peer`]), on the folder's
+/// core, and tells the sessions of the change. The error is the reason sent back.
+/// Longest time to live of a rename request this device honours.
+const MAX_RENAME_TTL_MS: u64 = 60_000;
+
+/// Renames `from` to `to` for a writer that asked ([`trs_sync::folder::FolderCore::rename_for_peer`]), on the folder's
+/// core, if it gets the core by `by` (a pull may hold it): otherwise busy, and it never starts later. Tells the
+/// sessions of the change. Returns the outcome and, when it is not done, why.
+async fn rename_for_peer(f: Arc<FolderShared>, from: String, to: String, seen: [u8; 32], by: std::time::Instant) -> (trs_sync_proto::msg::RenameOutcome, String) {
+    use trs_sync_proto::msg::RenameOutcome;
+    let f2 = f.clone();
+    let done = tokio::task::spawn_blocking(move || loop {
+        let core = match f2.core.try_lock() {
+            Ok(c) => Some(c),
+            Err(std::sync::TryLockError::Poisoned(p)) => Some(p.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => None,
+        };
+        match core {
+            Some(mut core) => {
+                let r = core.rename_for_peer(&from, &to, &seen);
+                break Some((r, core.index_state().map(|(_, s)| s).unwrap_or(0)));
+            }
+            None if std::time::Instant::now() >= by => break None,
+            None => std::thread::sleep(Duration::from_millis(10)),
+        }
+    })
+    .await;
+    match done {
+        Ok(Some((r, seq))) => {
+            f.local_seq.send_if_modified(|s| std::mem::replace(s, seq) != seq);
+            match r {
+                Ok(_) => (RenameOutcome::Done, String::new()),
+                Err(e) => (RenameOutcome::Refused, e.to_string()),
+            }
+        }
+        Ok(None) => (RenameOutcome::Busy, "busy (a scan or a transfer); try again in a moment".to_string()),
+        Err(e) => (RenameOutcome::Refused, e.to_string()),
+    }
+}
+
+/// A session's folders checked against what is open here and what the Joins covered (a folder opened or closed while
+/// it was set up, or while a Join was handled), for every folder the peer is a member of:
+/// - closed here but linked: stale ([`PeerHandle::close_folder`]);
+/// - open here but stale, and named by the peer's Join: the session starts anew (its Join then says what we hold);
+/// - open here, neither linked nor stale, and not in our Join: offered now (the peer answers if it has it open).
+pub(crate) async fn reconcile(ctx: &Arc<Ctx>, peer: &Arc<PeerHandle>) {
+    let mut restart = false;
+    for f in ctx.registry.spaces().into_iter().filter(|f| f.kind == SpaceKind::Folder && f.role_of(&peer.device_pk).is_some()) {
+        let open = ctx.registry.folder(&f.id).is_some_and(|x| x.allowed_with(peer.lan));
+        let stale = peer.is_stale(&f.id);
+        let linked = !stale && peer.folders.read().unwrap_or_else(|e| e.into_inner()).contains_key(&f.id);
+        if !open {
+            if linked {
+                peer.close_folder(&f.id);
+            }
+        } else if stale {
+            restart |= lock(&peer.got).contains(&f.id);
+        } else if !linked && !lock(&peer.joined).contains(&f.id) {
+            let join = own_join(ctx, &[f.id], &peer.exporter, peer.device, peer.lan).await;
+            if join.folders.iter().any(|x| x.folder_id == f.id) {
+                lock(&peer.joined).insert(f.id);
+                lock(&peer.offered).insert(f.id);
+                let _ = peer.control.send(Message::Join(join)).await;
+            }
+        }
+    }
+    if restart {
+        let reason = "a folder opened while the session was set up: starting it anew".to_string();
+        let _ = peer.control.send(Message::Close(Close { reason })).await;
+    }
+}
+
 fn shared_folder(ctx: &Ctx, peer: &PeerHandle, id: &FolderId) -> Option<Arc<FolderShared>> {
     peer.access(id)?;
     ctx.registry.folder(id).filter(|f| f.allowed_with(peer.lan))
@@ -732,7 +1000,7 @@ fn serve_chunk(f: &FolderShared, req: &Request) -> Response {
     let fail = |code| Response { id: req.id, code, data: vec![] };
     let Some(rec) = f.index.local(&req.path).ok().flatten() else { return fail(ResponseCode::NoSuchFile) };
     let info = &rec.file.info;
-    if rec.invalid || info.deleted || info.kind != FileKind::File {
+    if rec.invalid || rec.dataless || info.deleted || info.kind != FileKind::File {
         return fail(ResponseCode::NoSuchFile);
     }
     let listed = trs_sync::index::offsets(&info.chunks).any(|(off, c)| off == req.offset && c.len == req.len && c.hash == req.hash);

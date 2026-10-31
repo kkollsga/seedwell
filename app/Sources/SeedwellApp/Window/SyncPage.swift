@@ -176,7 +176,7 @@ struct SyncFolderPage: View {
                     .help("Stop syncing this folder on this Mac; other devices keep their copy")
             }
             HStack(spacing: 6) {
-                Text(Notifier.abbreviate(folder.path)).lineLimit(1).truncationMode(.middle)
+                Text(syncPlaceLine(folder: folder, pathShown: Notifier.abbreviate(folder.path))).lineLimit(1).truncationMode(.middle)
                 Button { actions.reveal(folder) } label: { Image(systemName: "magnifyingglass") }
                     .buttonStyle(.plain).foregroundStyle(.secondary).help("Show in Finder")
                     .accessibilityLabel("Show \(folder.name) in Finder")
@@ -191,6 +191,19 @@ struct SyncFolderPage: View {
             if folder.state == .missing {
                 Text("The folder or its disk is not there. Nothing is deleted on other devices; syncing starts again when it is back.")
                     .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+            // macOS keeps a new File Provider domain switched off until the user allows it.
+            if folder.onDemand, let fp = actions.fileProvider, fp.disabled.contains(folder.id) {
+                HStack(spacing: 8) {
+                    Text(syncOnDemandOffLine()).font(.system(size: 12)).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 8)
+                    let n = syncOnDemandNotice(enabled: false)
+                    if let b = n.button {
+                        Button(b, action: FileProviderSettings.open).controlSize(.small).help(n.help)
+                            .accessibilityIdentifier("sync-on-demand-allow")
+                    }
+                }
+                .padding(.top, 2)
             }
         }
     }
@@ -207,7 +220,7 @@ struct SyncFolderPage: View {
         HStack(spacing: 10) {
             Image(systemName: model.syncTrash ? "trash" : "minus.circle").font(.system(size: 11)).foregroundStyle(.secondary)
             VStack(alignment: .leading, spacing: 6) {
-                Text(syncRemoveQuestion(name: folder.name)).font(.system(size: 12)).foregroundStyle(.secondary)
+                Text(syncRemoveQuestion(name: folder.name, onlyHere: model.syncOnlyHere)).font(.system(size: 12)).foregroundStyle(.secondary)
                 Toggle(syncRemoveTrashLabel(), isOn: $model.syncTrash).toggleStyle(.checkbox).font(.system(size: 12))
             }
             Spacer(minLength: 8)

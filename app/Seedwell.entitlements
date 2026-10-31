@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  Hardened runtime entitlements for Seedwell: none.
+  Hardened runtime entitlements for Seedwell: the app group, nothing else.
 
   Seedwell is not sandboxed (SPEC 12 #19: watch folders, library organizing, the agent socket), so the
   network entitlements (com.apple.security.network.client/server) and user-selected files only exist
@@ -13,7 +13,14 @@
   Library validation stays ON: the only library loaded from outside is Sparkle.framework, signed with
   the same identity as the app. (Ad-hoc builds have no team id, so sign.sh adds
   disable-library-validation to those only; they are not distributable.)
+
+  The app group (SPEC 7G.11) is shared with the File Provider extension: its container holds the socket the
+  extension asks the app through. Team-prefixed, so a Developer ID build needs no provisioning profile
+  (docs/concepts/file-provider-spike.md); sign.sh gives the extension the same group.
 -->
 <plist version="1.0">
-<dict/>
+<dict>
+    <key>com.apple.security.application-groups</key>
+    <array><string>6GND8Z2C7Z.io.github.kkollsga.Seedwell</string></array>
+</dict>
 </plist>

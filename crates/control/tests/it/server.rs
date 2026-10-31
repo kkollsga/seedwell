@@ -98,6 +98,7 @@ async fn permission_matrix_every_method_every_level() {
             Method::WaitFor => json!({"ids": ["bbbbbb"], "timeout_secs": 1}),
             Method::AwakeSet => json!({"key": "matrix", "secs": 60}),
             Method::UpdateInstall => json!({"path": "/tmp/Seedwell-0.0.1.1.zip"}),
+            Method::UpdateDevBuilds => json!({"on": false}),
             Method::SyncStatus
             | Method::SyncShare
             | Method::SyncPause
@@ -118,6 +119,17 @@ async fn permission_matrix_every_method_every_level() {
             Method::SyncRename => json!({"folder": "Docs", "name": "Papers"}),
             Method::SyncMove => json!({"folder": "Docs", "path": "/tmp/seedwell-test-sync-2"}),
             Method::SyncAddAddress => json!({"folder": "Docs", "address": "127.0.0.1:9"}),
+            Method::SyncSetMode => json!({"folder": "Docs", "mode": "on_demand"}),
+            Method::SyncItems | Method::SyncChanges | Method::SyncUnavailable => json!({"folder": "Docs"}),
+            Method::SyncFetch
+            | Method::SyncCancelFetch
+            | Method::SyncPin
+            | Method::SyncUnpin
+            | Method::SyncEvict
+            | Method::SyncHostMkdir
+            | Method::SyncHostDelete => json!({"folder": "Docs", "path": "a.txt"}),
+            Method::SyncHostWrite => json!({"folder": "Docs", "path": "a.txt", "from": "/tmp/seedwell-test-a.txt"}),
+            Method::SyncHostRename => json!({"folder": "Docs", "from": "a.txt", "to": "b.txt"}),
             Method::SyncRemoveConfirm => json!({"token": "nope"}),
             Method::SyncSetSettings => json!({"device_name": "Studio"}),
             Method::ChatNew => json!({"name": "Plans"}),
@@ -135,9 +147,7 @@ async fn permission_matrix_every_method_every_level() {
             Method::ChatNewTopic => json!({"channel": "Plans", "title": "Dinner"}),
             Method::ChatDmRead => json!({"device": "NOPE"}),
             Method::ChatDmSend => json!({"device": "NOPE", "body": "hi"}),
-            Method::ChatDmSetAgents => json!({"agents": "read"}),
             Method::ChatDmDelete => json!({"device": "NOPE"}),
-            Method::ChatSetAgents => json!({"channel": "Plans", "agents": "read"}),
             Method::ChatSetWake => json!({"channel": "Plans", "command": "true"}),
             _ => json!({}),
         }
@@ -948,16 +958,26 @@ async fn debug_methods_answer_at_read_only_and_never_leak_a_secret() {
 
 /// A stand-in for the app's updater: it refuses unless "on", and remembers what it was asked.
 struct FakeBuilds {
-    on: bool,
+    on: std::sync::atomic::AtomicBool,
     asked: std::sync::Mutex<Vec<String>>,
+}
+
+impl FakeBuilds {
+    fn new(on: bool) -> std::sync::Arc<FakeBuilds> {
+        std::sync::Arc::new(FakeBuilds { on: on.into(), asked: Default::default() })
+    }
+
+    fn on(&self) -> bool {
+        self.on.load(std::sync::atomic::Ordering::SeqCst)
+    }
 }
 
 impl trs_control::Builds for FakeBuilds {
     fn status(&self) -> UpdateStatusDto {
-        UpdateStatusDto { version: "0.1.10.3".into(), development: true, dev_builds: self.on, status: "fine".into(), ..Default::default() }
+        UpdateStatusDto { version: "0.1.10.3".into(), development: true, dev_builds: self.on(), status: "fine".into(), ..Default::default() }
     }
     fn install(&self, zip: &std::path::Path, sha256: Option<&str>) -> Result<String, String> {
-        if !self.on {
+        if !self.on() {
             return Err("development builds are off".into());
         }
         self.asked.lock().unwrap().push(format!("{} {sha256:?}", zip.display()));
@@ -966,6 +986,11 @@ impl trs_control::Builds for FakeBuilds {
     fn watch(&self, folder: Option<&std::path::Path>) -> Result<String, String> {
         self.asked.lock().unwrap().push(format!("watch {folder:?}"));
         Ok("Watching".into())
+    }
+    fn set_dev_builds(&self, on: bool) -> Result<String, String> {
+        self.asked.lock().unwrap().push(format!("dev_builds {on}"));
+        self.on.store(on, std::sync::atomic::Ordering::SeqCst);
+        Ok(if on { "Development builds are allowed now" } else { "Development builds are off" }.into())
     }
 }
 
@@ -977,7 +1002,7 @@ async fn update_calls_reach_the_apps_updater_and_a_daemon_says_it_has_none() {
     assert_eq!(e.code, ErrorCode::Unsupported, "{e}");
 
     for on in [false, true] {
-        let fake = std::sync::Arc::new(FakeBuilds { on, asked: Default::default() });
+        let fake = FakeBuilds::new(on);
         let opts = ServerOptions::default();
         opts.builds.set(fake.clone());
         let rig = Rig::with(Permission::Control, opts, vec![]).await;
@@ -1000,9 +1025,62 @@ async fn update_calls_reach_the_apps_updater_and_a_daemon_says_it_has_none() {
     }
     // Read-only agents may look, not install.
     let opts = ServerOptions::default();
-    opts.builds.set(std::sync::Arc::new(FakeBuilds { on: true, asked: Default::default() }));
+    opts.builds.set(FakeBuilds::new(true));
     let rig = Rig::with(Permission::ReadOnly, opts, vec![]).await;
     let mut c = rig.client("seedwell-cli").await;
     assert!(call(&mut c, "update.status", json!({})).await.is_ok());
     assert_eq!(call(&mut c, "update.watch", json!({"folder": "/b"})).await.unwrap_err().code, ErrorCode::PermissionDenied);
+}
+
+/// `update.dev_builds` is the "Allow development builds" switch for agents: at full only, through the app's updater
+/// (which does what the Settings switch does), and in the activity log.
+#[tokio::test]
+async fn development_builds_are_switched_at_full_and_logged() {
+    // Below full: refused, and the switch stays as it is.
+    for level in [Permission::ReadOnly, Permission::Control] {
+        let fake = FakeBuilds::new(false);
+        let opts = ServerOptions::default();
+        opts.builds.set(fake.clone());
+        let rig = Rig::with(level, opts, vec![]).await;
+        let mut c = rig.client("claude").await;
+        let e = call(&mut c, "update.dev_builds", json!({"on": true})).await.unwrap_err();
+        assert_eq!(e.code, ErrorCode::PermissionDenied, "{level:?}");
+        assert!(!fake.on() && fake.asked.lock().unwrap().is_empty());
+    }
+    // A daemon has no updater.
+    let rig = Rig::new(Permission::Full).await;
+    let mut c = rig.client("claude").await;
+    assert_eq!(call(&mut c, "update.dev_builds", json!({"on": true})).await.unwrap_err().code, ErrorCode::Unsupported);
+
+    let fake = FakeBuilds::new(false);
+    let opts = ServerOptions::default();
+    opts.builds.set(fake.clone());
+    let rig = Rig::with(Permission::Full, opts, vec![]).await;
+    let mut c = rig.client("claude").await;
+    assert!(Request::decode("update.dev_builds", json!({})).is_err(), "`on` is required");
+    assert!(Request::decode("update.dev_builds", json!({"on": "yes"})).is_err());
+    let zip = if cfg!(windows) { r"C:\b\Seedwell-0.1.10.4.zip" } else { "/b/Seedwell-0.1.10.4.zip" };
+    assert_eq!(call(&mut c, "update.install", json!({"path": zip})).await.unwrap_err().code, ErrorCode::Invalid, "off: no build");
+    let s: UpdateStatusDto = serde_json::from_value(call(&mut c, "update.dev_builds", json!({"on": true})).await.unwrap()).unwrap();
+    assert!(s.dev_builds && fake.on(), "{s:?}");
+    assert_eq!(s.note, "Development builds are allowed now");
+    let s: UpdateStatusDto = serde_json::from_value(call(&mut c, "update.status", json!({})).await.unwrap()).unwrap();
+    assert!(s.dev_builds, "update.status shows it");
+    call(&mut c, "update.install", json!({"path": zip})).await.unwrap();
+    let s: UpdateStatusDto = serde_json::from_value(call(&mut c, "update.dev_builds", json!({"on": false})).await.unwrap()).unwrap();
+    assert!(!s.dev_builds && !fake.on());
+    assert_eq!(*fake.asked.lock().unwrap(), ["dev_builds true".to_owned(), format!("{zip} None"), "dev_builds false".to_owned()]);
+    // Both changes are in the activity log, under the agent's name, also as the agent reads it.
+    let log = rig.server.activity().recent(10);
+    let mine: Vec<(&str, &str, &str)> =
+        log.iter().filter(|e| e.method == "update.dev_builds").map(|e| (e.client.as_str(), e.summary.as_str(), e.outcome.as_str())).collect();
+    assert_eq!(
+        mine,
+        [
+            ("claude", "turn development builds off -> Development builds are off", "ok"),
+            ("claude", "turn development builds on -> Development builds are allowed now", "ok")
+        ]
+    );
+    let seen = call(&mut c, "activity", json!({})).await.unwrap().to_string();
+    assert!(seen.contains("turn development builds on") && seen.contains("turn development builds off"), "{seen}");
 }

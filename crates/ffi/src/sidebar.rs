@@ -8,7 +8,7 @@ use std::cmp::Ordering;
 use trs_control::display as d;
 use trs_platform::shortcut;
 
-use crate::chat_text::{general_unread, named, subtitle, topic_line};
+use crate::chat_text::{agent_tag, general_unread, named, subtitle, topic_line};
 use crate::display::{rate_limit_help, RateDirection};
 use crate::library::LibraryPlace;
 use crate::menu::APP_NAME;
@@ -43,6 +43,14 @@ pub struct SidebarFlag {
     pub accessibility: String,
 }
 
+/// A small word after an item's title, drawn as a quiet capsule like a message's "agent" badge, with its tooltip:
+/// "agents" on an agent channel.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, uniffi::Record)]
+pub struct SidebarTag {
+    pub text: String,
+    pub help: String,
+}
+
 /// One item of the sidebar: a place the window can show.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, uniffi::Record)]
 pub struct SidebarItem {
@@ -60,6 +68,8 @@ pub struct SidebarItem {
     pub count: Option<u32>,
     pub help: String,
     pub flag: Option<SidebarFlag>,
+    /// A tag after the title (an agent channel's "agents").
+    pub tag: Option<SidebarTag>,
 }
 
 /// "New Topic…", "New Channel…": a quiet button with a plus.
@@ -276,7 +286,7 @@ pub(crate) struct SidebarInputs<'a> {
 }
 
 fn item(place: LibraryPlace, title: impl Into<String>, icon: SidebarIcon, help: impl Into<String>) -> SidebarItem {
-    SidebarItem { place, title: title.into(), icon, badge: 0, unread: 0, online: None, count: None, help: help.into(), flag: None }
+    SidebarItem { place, title: title.into(), icon, badge: 0, unread: 0, online: None, count: None, help: help.into(), flag: None, tag: None }
 }
 
 fn places(i: &SidebarInputs) -> Vec<SidebarItem> {
@@ -300,7 +310,7 @@ fn channel(c: &SyncChannel, topics: &[SyncTopic], open: bool) -> SidebarChannel 
     let unread = if c.muted { 0 } else if open { general_unread(c, topics) } else { c.unread };
     let icon = if c.muted { SidebarIcon::MutedChannel } else { SidebarIcon::Channel };
     SidebarChannel {
-        item: SidebarItem { unread, ..item(general, c.name.clone(), icon, format!("{}: {}", c.name, subtitle(c))) },
+        item: SidebarItem { unread, tag: agent_tag(c), ..item(general, c.name.clone(), icon, format!("{}: {}", c.name, subtitle(c))) },
         open,
         topics: topics
             .iter()
@@ -374,7 +384,7 @@ fn signature(m: &SidebarModel) -> String {
         s.push_str(&format!("{:?}{},", p.place, p.flag.is_some() as u8));
     }
     for c in &m.chats.channels {
-        s.push_str(&format!("|{}{}{}:", c.item.title, c.open as u8, c.new_topic.is_some() as u8));
+        s.push_str(&format!("|{}{}{}{}:", c.item.title, c.open as u8, c.new_topic.is_some() as u8, c.item.tag.as_ref().map_or("", |t| t.help.as_str())));
         for t in &c.topics {
             s.push_str(&format!("{:?},", t.place));
         }

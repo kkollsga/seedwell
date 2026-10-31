@@ -135,6 +135,36 @@ jobs:
         shell: powershell
         run: app-windows\qa\run.ps1 all -Build -CoreProfile Debug
 
+  # The Windows release build (release core, full LTO), as release.yml makes it, on every push to main: main is what a
+  # tag is made from, so a release never finds a broken release path first (0.1.11's first tag did). Not on pull
+  # requests: it takes as long as the release job.
+  windows-release:
+    name: Windows release build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: windows-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v7
+      - name: Rust (version pinned in rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: "10.0.x"
+      - name: uniffi-bindgen-cs from the cache
+        id: uniffi-cs
+        uses: actions/cache@v6
+        with:
+          path: ~/.uniffi-bindgen-cs
+          key: uniffi-bindgen-cs-${{ runner.os }}-${{ env.UNIFFI_CS_TAG }}
+      - name: uniffi-bindgen-cs (the C# bindings' generator), when not cached
+        if: steps.uniffi-cs.outputs.cache-hit != 'true'
+        run: cargo install uniffi-bindgen-cs --git https://github.com/NordSecurity/uniffi-bindgen-cs --tag "$env:UNIFFI_CS_TAG" --root "$HOME/.uniffi-bindgen-cs"
+      - name: uniffi-bindgen-cs on PATH
+        run: Add-Content $env:GITHUB_PATH "$HOME\.uniffi-bindgen-cs\bin"
+      - name: Release zip (as release.yml builds it)
+        shell: powershell
+        run: app-windows\release-zip.ps1
+
   clippy-windows:
     name: Clippy (Windows)
     runs-on: windows-latest

@@ -12,7 +12,7 @@ import Testing
         SyncFolder(id: id ?? "ID-\(name)", name: name, path: "/Users/me/Seedwell/\(name)", access: access, role: role, shareUntilS: nil, state: state,
                    files: 10, bytes: bytes, needFiles: need > 0 ? 3 : 0, needBytes: need, rateIn: rate, rateOut: 0,
                    connected: connected, members: connected, conflicts: conflicts, lanOnly: false, issues: [], error: nil, lastSyncedS: nil,
-                   channelId: nil)
+                   channelId: nil, onDemand: false, unavailable: 0)
     }
 
     static func folder(_ state: SyncState, bytes: UInt64 = 1_000_000_000, need: UInt64 = 0, rate: UInt64 = 0,
@@ -55,7 +55,7 @@ import Testing
 
     @Test func theSubmenuDrawsTheCoresModel() {
         let removal = SyncRemoval()
-        removal.toggle(id: "ID-B")
+        removal.toggle(id: "ID-B", onlyHere: 0)
         let m = syncMenuModel(snapshot: Self.snap([Self.folder("A"), Self.folder("B")]), removal: removal)
         #expect(m.rows.map(\.title) == ["A", "B"] && m.rows.map(\.confirming) == [false, true])
         #expect(m.confirm?.question == "Stop syncing “B” on this Mac? Other devices keep their copy.")

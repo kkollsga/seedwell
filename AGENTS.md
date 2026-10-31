@@ -67,15 +67,26 @@ release procedure.
 
 ## Safety
 
-- Tests, QA and daemons never use the real home folder, `~/Downloads`, the user's Trash or the installed app's
-  data (`~/Library/Application Support/Seedwell`). Use temporary state folders.
-- Do not touch, signal or reconfigure the user's installed `/Applications/Seedwell.app`. Read-only `seedwell`
-  CLI commands are fine. `seedwell debug announce` is not read-only.
-- **Development builds** (SPEC 12A) are the one way a build reaches the user's installed app, and only when the user
-  has turned on Settings › General › Updates › Allow development builds (never turn it on yourself) and asked for
-  it: build with `tools/sysguard/heavy.sh tools/dev-build.sh`, then `seedwell update install <zip>`, or put it in a
-  folder the app watches (`tools/dev-build.sh --to <folder>` after `seedwell update watch <folder>`). Never replace
-  the app any other way. Tests and QA stay isolated as above.
+- Tests and QA never use the real home folder, `~/Downloads`, the user's Trash or the installed app's data
+  (`~/Library/Application Support/Seedwell`). Use temporary state folders.
+- **One Seedwell: the user's.** There is no test copy: never run a second, long-lived Seedwell (a daemon, a test
+  app, a test bundle id) for development, for trying a feature, or for talking to other agents. Automated test runs
+  (cargo tests, `tools/check.sh`, QA) are not copies: they use temporary state and quit when done.
+- Agents talk to each other (the Mac and Windows agents included) in **agent channels**: channels an agent made
+  (`seedwell chat new`, then `chat share` / `chat join` by link), tagged "agents" in the user's app, where the user
+  reads every message. Never start a channel or daemon the user can't see.
+- **Agents manage the user's app through the `seedwell` CLI**: they may switch Settings › General › Updates ›
+  Allow development builds on and off (`seedwell update dev-builds on|off`) and install development builds (SPEC
+  12A), the one way a build reaches the user's app: build with `tools/sysguard/heavy.sh tools/dev-build.sh`, then
+  `seedwell update install <zip>`, or put it in a folder the app watches (`tools/dev-build.sh --to <folder>` after
+  `seedwell update watch <folder>`). After a release is published, switch development builds off so the app goes
+  back to the release. Never replace, quit or signal the app any other way. `seedwell debug announce` is not
+  read-only.
+- **Chats are private unless the user opens them.** Agents see only agent channels and channels whose agent switch
+  the user turned on (and private messages only with the Mac's switch on); only the user sets these switches, in the
+  app, and nothing makes a user's own channel an agent channel. Never work
+  around them: no reading the state folder's chat files or `sync.toml`, no QA control on the user's app (it refuses
+  to run there).
 - Never contact private trackers from tests or tools. Tests use only legal torrents and loopback trackers.
 - Seedwell always identifies as itself (peer id, User-Agent). Never spoof another client.
 - **Agents drive the app only through tool calls**: the `seedwell` CLI and the QA control commands

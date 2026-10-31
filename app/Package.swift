@@ -24,6 +24,19 @@ let package = Package(
             swiftSettings: [.unsafeFlags(["-application-extension"])],
             linkerSettings: [.linkedFramework("FinderSync"), .unsafeFlags(["-Xlinker", "-application_extension"])]
         ),
+        // On-demand folders in the Finder (SPEC 7G.11): what the File Provider extension shares with the app and the
+        // tests (the socket client, the wire, the mapping onto File Provider's types).
+        .target(name: "SeedwellFileProviderShared", path: "Sources/SeedwellFileProviderShared",
+                swiftSettings: [.unsafeFlags(["-application-extension"])],
+                linkerSettings: [.linkedFramework("FileProvider")]),
+        // The File Provider extension; build.sh wraps it into Seedwell.app/Contents/PlugIns/SeedwellFileProvider.appex.
+        .executableTarget(
+            name: "SeedwellFileProvider",
+            dependencies: ["SeedwellFileProviderShared"],
+            path: "Sources/SeedwellFileProvider",
+            swiftSettings: [.unsafeFlags(["-application-extension"])],
+            linkerSettings: [.linkedFramework("FileProvider"), .unsafeFlags(["-Xlinker", "-application_extension"])]
+        ),
         // Seedwell in the system Share menu; build.sh wraps it into Seedwell.app/Contents/PlugIns/SeedwellShare.appex.
         .executableTarget(
             name: "SeedwellShare",
@@ -33,7 +46,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "SeedwellApp",
-            dependencies: ["trs_ffiFFI", "Sparkle", "SeedwellFinderShared"],
+            dependencies: ["trs_ffiFFI", "Sparkle", "SeedwellFinderShared", "SeedwellFileProviderShared"],
             path: "Sources/SeedwellApp",
             linkerSettings: [.unsafeFlags([
                 "-L\(root)/build/rust", "-ltrs_ffi",
@@ -42,6 +55,6 @@ let package = Package(
             ])]
         ),
         // Swift Testing: `swift test` (detection, ordering and launch plans of the video players).
-        .testTarget(name: "SeedwellAppTests", dependencies: ["SeedwellApp", "SeedwellFinderShared"], path: "Tests/SeedwellAppTests"),
+        .testTarget(name: "SeedwellAppTests", dependencies: ["SeedwellApp", "SeedwellFinderShared", "SeedwellFileProviderShared"], path: "Tests/SeedwellAppTests"),
     ]
 )

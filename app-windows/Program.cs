@@ -26,7 +26,8 @@ public static class Program
     internal static string? StateDir { get; private set; }
 
     /// <summary>
-    /// This instance was started with <c>--qa-control</c> (the Mac's --qa-control): only then are second launches' --qa
+    /// This instance was started with <c>--qa-control</c> and <c>--state-dir</c> (the Mac's --qa-control, which needs an
+    /// isolated run too): only then are second launches' --qa
     /// commands run. Otherwise any local program could drive the app around the core's agent permission
     /// (Settings › Agents), the only way other programs may act on Seedwell.
     /// </summary>
@@ -45,13 +46,14 @@ public static class Program
             return 0;
         }
         Sources = SourcesIn(args);
-        QaControl = args.Contains("--qa-control");
         int dir = Array.IndexOf(args, "--state-dir");
         if (dir >= 0 && dir + 1 < args.Length)
         {
             // One folder, one key: "state", "state\" and ".\state" are the same instance (a drive's root keeps its \).
             StateDir = Path.TrimEndingDirectorySeparator(Path.GetFullPath(args[dir + 1]));
         }
+        // QA commands read the app's windows: only a copy on its own data folder takes them, never the user's Seedwell.
+        QaControl = args.Contains("--qa-control") && StateDir is not null;
         int at = Array.IndexOf(args, "--render-snapshots");
         if (at >= 0 && at + 1 < args.Length)
         {

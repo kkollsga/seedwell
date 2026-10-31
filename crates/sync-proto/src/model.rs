@@ -227,6 +227,20 @@ pub struct FileInfo {
 }
 
 impl FileInfo {
+    /// A digest of what [`Self::same_content`] compares: equal for the same content.
+    pub fn content_digest(&self) -> [u8; 32] {
+        let mut b = Vec::with_capacity(48 + 36 * self.chunks.len() + self.symlink_target.len());
+        b.extend_from_slice(&[self.kind as u8, u8::from(self.deleted), u8::from(self.exec)]);
+        b.extend_from_slice(&self.size.to_le_bytes());
+        b.extend_from_slice(&(self.symlink_target.len() as u64).to_le_bytes());
+        b.extend_from_slice(self.symlink_target.as_bytes());
+        for c in &self.chunks {
+            b.extend_from_slice(&c.len.to_le_bytes());
+            b.extend_from_slice(&c.hash);
+        }
+        ring::digest::digest(&ring::digest::SHA256, &b).as_ref().try_into().expect("32 bytes")
+    }
+
     /// The same content as `other` (kind, size, chunks, exec bit, link target, deleted): two devices
     /// that made the same change concurrently are not in conflict.
     pub fn same_content(&self, other: &FileInfo) -> bool {
@@ -279,6 +293,13 @@ pub struct IndexEntry {
     /// this device. A read-only device sets it on a file it changed locally (it cannot sign its own version).
     /// Like `sequence`, this belongs to the announcer and is not covered by the signature.
     pub invalid: bool,
+    /// The announcer has this version without its content (an on-demand folder's online-only file, SPEC §7G.11):
+    /// the version counts like any other, but the announcer holds no copy of it and serves no chunks. Not signed
+    /// either; a device that does not know the flag reads the entry as valid and finds no chunks there.
+    pub dataless: bool,
+    /// The announcer holds the folder on demand (SPEC §7G.11): it may let go of its copy later, so a device that
+    /// frees its own relies on it only by a fixed order (the higher device id never on the lower). Not signed.
+    pub on_demand: bool,
     /// The version.
     pub file: SignedFile,
 }
@@ -433,5 +454,7 @@ mod tests {
         assert_eq!(validate_path(&"x".repeat(256)), Err(BadPath::Component));
         assert_eq!(validate_path(".seedwell/Archive/x"), Err(BadPath::Reserved));
         assert_eq!(validate_path(".seedwell"), Err(BadPath::Reserved));
+        // A name like the partial-copy mark's is the user's: the mark is inside the state folder.
+        assert_eq!(validate_path(".seedwell-partial-copy"), Ok(()));
     }
 }

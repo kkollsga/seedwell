@@ -1,11 +1,13 @@
 //! `seedwell update`: what this Seedwell runs, and installing development builds (SPEC 12A). A build is handed over
 //! as its zip (`update install`), or the app follows a folder and installs each newer build put there (`update
-//! watch`). Both need "Allow development builds" on in Settings › General › Updates; the app decides, this only asks.
+//! watch`). Both need "Allow development builds" on (Settings › General › Updates, or `update dev-builds on`, which
+//! sets that switch; off while a development build runs goes back to the latest release); the app decides, this only
+//! asks.
 #![allow(missing_docs)] // variant fields are named after the options they hold
 
 use std::path::PathBuf;
 
-use trs_control::proto::{Empty, Request, UpdateInstallParams, UpdateWatchParams};
+use trs_control::proto::{Empty, Request, UpdateDevBuildsParams, UpdateInstallParams, UpdateWatchParams};
 use trs_control::types::UpdateStatusDto;
 
 use crate::args::{Opts, Usage};
@@ -20,9 +22,11 @@ pub enum Cmd {
     Install { zip: PathBuf, sha256: Option<String> },
     /// Follow this folder, or stop (`None`).
     Watch(Option<PathBuf>),
+    /// "Allow development builds" on or off.
+    DevBuilds(bool),
 }
 
-const USAGE: &str = "usage: seedwell update [status] | install <Seedwell-X.Y.Z.N.zip> [--sha256 HEX] | watch <folder> | watch --off";
+const USAGE: &str = "usage: seedwell update [status] | install <Seedwell-X.Y.Z.N.zip> [--sha256 HEX] | watch <folder> | watch --off | dev-builds on|off";
 
 /// A path as the app needs it: absolute (the app may run in another folder).
 fn absolute(p: &str) -> PathBuf {
@@ -42,6 +46,8 @@ pub fn parse(args: Vec<String>) -> Result<Cmd, Usage> {
         (["install", zip], sha256, false) => Cmd::Install { zip: absolute(zip), sha256 },
         (["watch", folder], None, false) => Cmd::Watch(Some(absolute(folder))),
         (["watch"], None, true) => Cmd::Watch(None),
+        (["dev-builds", "on"], None, false) => Cmd::DevBuilds(true),
+        (["dev-builds", "off"], None, false) => Cmd::DevBuilds(false),
         _ => return Err(Usage(USAGE.into())),
     })
 }
@@ -53,6 +59,7 @@ pub async fn run(cmd: Cmd, g: &Global) -> R {
         Cmd::Status => Request::UpdateStatus(Empty {}),
         Cmd::Install { zip, sha256 } => Request::UpdateInstall(UpdateInstallParams { path: zip.display().to_string(), sha256 }),
         Cmd::Watch(folder) => Request::UpdateWatch(UpdateWatchParams { folder: folder.map(|f| f.display().to_string()) }),
+        Cmd::DevBuilds(on) => Request::UpdateDevBuilds(UpdateDevBuildsParams { on }),
     };
     let (raw, d): (_, UpdateStatusDto) = ask(&mut c, req).await?;
     show(g, &raw, || words(&d));
@@ -68,7 +75,7 @@ pub fn words(d: &UpdateStatusDto) -> String {
     let version = if d.development { format!("{} (development build)", d.version) } else { d.version.clone() };
     lines.push(format!("Seedwell {version}: {}", d.status));
     lines.push(match (&d.watching, d.dev_builds) {
-        (_, false) => "Development builds: off (Settings › General › Updates › Allow development builds).".into(),
+        (_, false) => "Development builds: off (Settings › General › Updates › Allow development builds, or seedwell update dev-builds on).".into(),
         (Some(f), true) => format!("Development builds: on, watching {f}."),
         (None, true) => "Development builds: on (seedwell update install <zip>, or watch <folder>).".into(),
     });
@@ -103,7 +110,9 @@ mod tests {
         let dir = if cfg!(windows) { r"C:\b" } else { "/b" };
         assert_eq!(p(&format!("watch {dir}")).unwrap(), Cmd::Watch(Some(dir.into())));
         assert_eq!(p("watch --off").unwrap(), Cmd::Watch(None));
-        for bad in ["install", "watch", "watch /b --off", "status --sha256 x", "now", "install a b"] {
+        assert_eq!(p("dev-builds on").unwrap(), Cmd::DevBuilds(true));
+        assert_eq!(p("dev-builds off").unwrap(), Cmd::DevBuilds(false));
+        for bad in ["install", "watch", "watch /b --off", "status --sha256 x", "now", "install a b", "dev-builds", "dev-builds maybe", "dev-builds on --off", "dev-builds on off"] {
             assert!(p(bad).is_err(), "{bad}");
         }
     }
@@ -116,6 +125,9 @@ mod tests {
             "Seedwell 0.1.10.3 (development build): watching for newer builds\nDevelopment builds: on, watching /b.\nKept to go back to: 0.1.10.2."
         );
         let off = UpdateStatusDto { version: "0.1.10".into(), status: "up to date".into(), note: "Stopped watching".into(), ..Default::default() };
-        assert_eq!(words(&off), "Stopped watching.\nSeedwell 0.1.10: up to date\nDevelopment builds: off (Settings › General › Updates › Allow development builds).");
+        assert_eq!(
+            words(&off),
+            "Stopped watching.\nSeedwell 0.1.10: up to date\nDevelopment builds: off (Settings › General › Updates › Allow development builds, or seedwell update dev-builds on)."
+        );
     }
 }

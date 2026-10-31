@@ -950,7 +950,8 @@ pub struct EventDto {
     /// `direct_restarted`, `watch_error`, `config_reloaded`, `config_rejected`, `lagged`,
     /// `choice_needed`, `choice_resolved`, `pending` (`data.change`: added, paused, resumed, started, chosen), `locations_changed`, `move_started`, `move_progress`,
     /// `move_finished`, `move_failed`, `chat.message` (`id`: the channel, or for a private message the other device;
-    /// `data`: the message, untrusted unless it is from this Mac; only where the agent switch allows reading).
+    /// `data`: the message, untrusted unless it is from this Mac; only while the agent switch allows reading, also
+    /// when it is replayed by `events`).
     pub kind: String,
     /// Transfer id, when the event is about one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1002,7 +1003,7 @@ pub struct AwakeDto {
     pub kept: bool,
 }
 
-/// `update.status`, and the result of `update.install` and `update.watch`.
+/// `update.status`, and the result of `update.install`, `update.watch` and `update.dev_builds`.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct UpdateStatusDto {
     /// The running version: `X.Y.Z`, or `X.Y.Z.N` for a development build.
@@ -1019,7 +1020,7 @@ pub struct UpdateStatusDto {
     pub kept: Option<String>,
     /// The Updates status line ("Installing 0.1.10.4…").
     pub status: String,
-    /// What the call did, as a sentence (`update.install`, `update.watch`).
+    /// What the call did, as a sentence (`update.install`, `update.watch`, `update.dev_builds`).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub note: String,
 }
@@ -1037,6 +1038,14 @@ pub struct ActivityDto {
     pub summary: String,
     /// `ok`, `denied` or `error: <code>`.
     pub outcome: String,
+    /// The channel the call named (its id), when it found one: an agent's `activity` leaves the entry out while
+    /// that channel is closed to agents. Not sent.
+    #[serde(skip)]
+    pub channel: Option<String>,
+    /// The call was about private messages: an agent's `activity` leaves it out while they are closed to agents.
+    /// Not sent.
+    #[serde(skip)]
+    pub direct: bool,
 }
 
 /// `hello` result.
@@ -1446,6 +1455,13 @@ pub struct SyncFolderDto {
     /// The channel that goes with it on this Mac (its id).
     #[serde(default)]
     pub channel_id: Option<String>,
+    /// On demand (SPEC §7G.11): every file is listed, only some are on this Mac (`files` and `bytes` count those);
+    /// `path` is where the Finder shows it.
+    #[serde(default)]
+    pub on_demand: bool,
+    /// Files no device can give right now (not counted in `need_files`).
+    #[serde(default)]
+    pub unavailable: u64,
 }
 
 /// One unresolved conflict copy (`sync.conflicts`).
@@ -1460,6 +1476,156 @@ pub struct SyncConflictDto {
     /// When, as the copy's name says it (`2026-10-25 14.32z`, UTC; copies named before 0.1.9 say local time
     /// without the `z`; empty when the name does not say).
     pub when: String,
+}
+
+/// One item of an on-demand folder (SPEC §7G.11).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct SyncItemDto {
+    /// Stable across renames and moves (`root` for the folder itself).
+    pub id: String,
+    /// The parent's identifier (`root` at the top).
+    pub parent_id: String,
+    /// The path in the folder (`/` between names; empty for the folder itself).
+    pub path: String,
+    /// The name.
+    pub name: String,
+    /// `file`, `dir` or `symlink`.
+    pub kind: String,
+    /// Bytes.
+    pub size: u64,
+    /// Modification time, Unix nanoseconds.
+    pub mtime_ns: i64,
+    /// `online_only`, `downloading`, `downloaded` or `modified_here` (on this Mac only: no other device holds it yet).
+    pub state: String,
+    /// Kept on this Mac (pinned, or below a pinned folder).
+    pub pinned: bool,
+    /// Changes exactly when the content does.
+    pub content_version: String,
+    /// Changes whenever the version does.
+    pub metadata_version: String,
+    /// The executable bit.
+    #[serde(default)]
+    pub exec: bool,
+    /// A link's target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symlink_target: Option<String>,
+    /// A conflict copy: the path it is a conflict of.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conflict_of: Option<String>,
+}
+
+/// `sync.items` result: a folder's items (one page), or one item.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct SyncItemsDto {
+    /// The folder id.
+    pub folder: String,
+    /// The item asked about.
+    pub item: SyncItemDto,
+    /// Its children (a folder; empty for a file), one page.
+    pub items: Vec<SyncItemDto>,
+    /// Pass as `cursor` for the next page; absent on the last.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next: Option<String>,
+}
+
+/// `sync.changes` result: what changed in an on-demand folder since an anchor.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct SyncChangesDto {
+    /// Items new or changed, as they are now.
+    pub items: Vec<SyncItemDto>,
+    /// Identifiers of items deleted.
+    pub deleted: Vec<String>,
+    /// Ask from here next time.
+    pub anchor: u64,
+    /// More changes follow (ask again from `anchor`).
+    pub more: bool,
+}
+
+/// `sync.fetch` result.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct SyncFetchDto {
+    /// The item, as it is now.
+    pub item: SyncItemDto,
+    /// Where its content is on this Mac, once it is here (absent: still on its way when `wait_s` ran out).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_path: Option<String>,
+    /// Bytes here so far (a file).
+    pub done: u64,
+    /// The file's size.
+    pub total: u64,
+    /// A folder's files no device can give right now (not waited for).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unavailable: Vec<String>,
+}
+
+/// `sync.unavailable` result: per folder, the files no device can give right now.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct SyncUnavailableDto {
+    /// The folders that have some.
+    pub folders: Vec<SyncUnavailableFolderDto>,
+}
+
+/// A folder's files no device can give.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct SyncUnavailableFolderDto {
+    /// The folder id.
+    pub id: String,
+    /// Its name.
+    pub name: String,
+    /// The files.
+    pub files: Vec<SyncUnavailableFileDto>,
+}
+
+/// A file no device can give.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct SyncUnavailableFileDto {
+    /// Its path in the folder.
+    pub path: String,
+    /// Its size.
+    pub size: u64,
+}
+
+/// `sync.evict` result.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct SyncEvictDto {
+    /// Files whose content left this Mac.
+    pub files: u64,
+    /// Their bytes.
+    pub bytes: u64,
+    /// Files kept: pinned, or no other device that has them is connected.
+    pub kept: u64,
+    /// The files kept, and why (`error` is the reason).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub kept_why: Vec<SyncFailedDto>,
+    /// Files that could not be freed or deleted (open elsewhere, say): they stay as they were.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failed: Vec<SyncFailedDto>,
+}
+
+/// An item a change could not touch, and why.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct SyncFailedDto {
+    /// Its path in the folder.
+    pub path: String,
+    /// Why.
+    pub error: String,
+}
+
+/// Result of the host's changes (`sync.host_*`), and of `sync.pin` and `sync.unpin`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct SyncHostDto {
+    /// The item, as it is now (absent after a delete).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item: Option<SyncItemDto>,
+    /// How many items the change touched.
+    pub count: u64,
+    /// `sync.host_delete` on a read-only member: nothing was deleted, the content was freed instead (the items stay,
+    /// online only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freed: Option<SyncEvictDto>,
+    /// Items the change could not touch (open elsewhere, say): they stay.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failed: Vec<SyncFailedDto>,
 }
 
 /// `sync.conflicts` result: the unresolved conflict copies of a folder.
@@ -1526,6 +1692,10 @@ pub struct ChatChannelDto {
     pub muted: bool,
     /// What agents on this Mac may do in it: `off`, `read` or `post`.
     pub agents: String,
+    /// An agent channel: an agent made it (`chat.new`), for agents to talk where the user can read. Its owner's mark,
+    /// so every member device knows; open to agents at `post` there unless that device's user closed it.
+    #[serde(default)]
+    pub agent_channel: bool,
     /// The wake-up command, if set.
     #[serde(default)]
     pub wake_command: Option<String>,
@@ -1537,8 +1707,14 @@ pub struct ChatChannelDto {
 /// `chat.list` result.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ChatListDto {
-    /// The channels, by name.
+    /// The channels open to agents on this Mac (their switch at read or post), by name.
     pub channels: Vec<ChatChannelDto>,
+    /// How many channels on this Mac are closed to agents (their switch off). Nothing else about them is given.
+    #[serde(default)]
+    pub hidden: u32,
+    /// With `hidden`: how the user opens one to agents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
 }
 
 /// One message (`chat.read`, `chat.send`, the `chat.message` event, and what a wake-up command reads).
@@ -1650,8 +1826,11 @@ pub struct ChatDirectDto {
 pub struct ChatDirectsDto {
     /// What agents on this Mac may do with private messages: `off`, `read` or `post`.
     pub agents: String,
-    /// The conversations, newest first.
+    /// The conversations, newest first (none while `agents` is `off`).
     pub conversations: Vec<ChatDirectDto>,
+    /// While `agents` is `off`: how the user opens private messages to agents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
 }
 
 /// `chat.read` result.
@@ -1800,6 +1979,9 @@ pub struct SyncRemovePlanDto {
     pub delete_files: bool,
     /// The folder.
     pub folder: SyncFolderDto,
+    /// Files no other device is known to hold: the others lose access to them once this device stops syncing.
+    #[serde(default)]
+    pub only_here: u64,
     /// Plain-language summary to show a person.
     pub summary: String,
 }

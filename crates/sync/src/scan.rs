@@ -144,6 +144,39 @@ pub struct Scanner<'a> {
     pub new_file_id: &'a dyn Fn() -> [u8; 16],
     /// Records are committed in batches of this many changes.
     pub batch_size: usize,
+    /// An on-demand folder (SPEC §7G.11): the disk is the content cache, so a file missing there is a file no
+    /// longer held here (online only from now on), never a delete. Deletes come from the host
+    /// ([`crate::folder::FolderCore::host_delete`]). It says which paths are kept on this device (pinned): one of
+    /// those missing from the cache is fetched again.
+    pub on_demand: Option<&'a dyn Fn(&str) -> bool>,
+    /// On demand: the content found is the host's change (`host_written`), so it becomes this device's version even
+    /// where the record is online only. Otherwise content found at an online-only path that is not the record's goes
+    /// to the archive and never becomes a version (in an on-demand folder edits come from the host only).
+    pub host_write: bool,
+}
+
+impl Scanner<'_> {
+    /// Moves the file at `rel` into the folder's archive, as a replaced file is kept.
+    fn archive_stray(&self, rel: &str) -> io::Result<()> {
+        let stamp = crate::clock::compact_stamp(i64::try_from(self.now_s).unwrap_or(i64::MAX).saturating_mul(1_000_000_000));
+        let mut to = crate::conflict::archive_path(rel, &stamp);
+        let mut n = 2;
+        while self.fs.lstat(&to)?.is_some() {
+            to = crate::conflict::archive_path(rel, &format!("{stamp}-{n}"));
+            n += 1;
+        }
+        let mut dir = String::new();
+        for c in to.split('/').collect::<Vec<_>>().split_last().map_or(&[][..], |(_, d)| d) {
+            if !dir.is_empty() {
+                dir.push('/');
+            }
+            dir.push_str(c);
+            if self.fs.lstat(&dir)?.is_none() {
+                self.fs.create_dir(&dir)?;
+            }
+        }
+        self.fs.rename(rel, &to)
+    }
 }
 
 /// Temp files of the puller (`.seedwell.<name>.tmp`) and the state directory are never scanned.
@@ -251,6 +284,7 @@ impl Scanner<'_> {
                 names.sort_unstable_by(|a, b| b.cmp(a));
                 for name in names {
                     if is_ours(&name) {
+                        // (The state directory and the partial-copy mark are skipped, never removed.)
                         if name != STATE_DIR && !temp_is_wanted(&*store, &rel, &name)? {
                             // A pull's temp file whose path needs nothing any more (deleted or renamed
                             // on the other side meanwhile): no pull will finish it.
@@ -286,7 +320,7 @@ impl Scanner<'_> {
                 // A read-only device's local delete keeps the received version (invalid, no stamp):
                 // already recorded, so not recorded again (a new sequence on every scan, forever). Its
                 // local file over a received delete (invalid, stamped) is a change that can go, though.
-                let recorded = if rec.invalid { rec.stamp.is_none() } else { rec.file.info.deleted };
+                let recorded = rec.dataless || if rec.invalid { rec.stamp.is_none() } else { rec.file.info.deleted };
                 if recorded || self.ignore.is_ignored(p, rec.file.info.kind == FileKind::Dir) {
                     continue;
                 }
@@ -296,7 +330,15 @@ impl Scanner<'_> {
                     Ok(Some(_)) if self.case_insensitive => !self.listed(p, &mut listing),
                     _ => false,
                 };
-                if gone {
+                if let (true, Some(pinned)) = (gone, self.on_demand) {
+                    // Gone from the cache: the content is no longer here. A file becomes online only (one kept on
+                    // this device is fetched again); a directory or link holds no content and stays as it is (the
+                    // puller makes it again).
+                    if rec.file.info.kind == FileKind::File && !rec.file.info.deleted {
+                        let want = pinned(p);
+                        batch.put_local(LocalRecord { invalid: true, stamp: None, tier: None, dataless: true, want, ..rec });
+                    }
+                } else if gone {
                     self.record_delete(&mut batch, rec);
                     report.deleted += 1;
                 }
@@ -345,7 +387,10 @@ impl Scanner<'_> {
         let old = batch.local(rel)?;
         let stamp = stamp_of(meta);
         if let Some(o) = &old {
-            let unchanged = if o.invalid {
+            let unchanged = if o.dataless {
+                // Online only, and now there is a file: fetched (a crash before it was recorded), or the host's.
+                false
+            } else if o.invalid {
                 // A read-only device's own change keeps the received version in its record (another
                 // kind or size than the disk), so only the stamp says whether the disk moved since (any
                 // stamp, for a directory). No stamp: it was deleted here, and is back now.
@@ -425,7 +470,13 @@ impl Scanner<'_> {
             && !o.file.info.deleted
             && same_for_sync(&o.file.info, &info)
         {
-            batch.restamp_local(LocalRecord { stamp: Some(stamp), tier, ..o.clone() });
+            if o.dataless {
+                // The content of an online-only version arrived: this device holds it now (announced valid again).
+                batch.put_local(LocalRecord { invalid: false, stamp: Some(stamp), tier, dataless: false, want: false, ..o.clone() });
+                report.changed += 1;
+            } else {
+                batch.restamp_local(LocalRecord { stamp: Some(stamp), tier, ..o.clone() });
+            }
             return Ok(());
         }
         // The same content as the version this device is about to take (a crash between the puller
@@ -436,8 +487,15 @@ impl Scanner<'_> {
         {
             let others: Vec<Version> = batch.remote_versions(rel)?;
             let file = adopt(self.signer, self.me, old.as_ref(), n.file, &others);
-            batch.put_local(LocalRecord { file, sequence: 0, invalid: false, stamp: Some(stamp), tier });
+            batch.put_local(LocalRecord { file, sequence: 0, invalid: false, stamp: Some(stamp), tier, dataless: false, want: false });
             report.changed += 1;
+            return Ok(());
+        }
+
+        if self.on_demand.is_some() && !self.host_write && old.as_ref().is_some_and(|o| o.dataless) {
+            // Something put content at an online-only path behind the host's back: it is kept, never a version that
+            // could beat another device's newer one.
+            self.archive_stray(rel)?;
             return Ok(());
         }
 
@@ -445,7 +503,7 @@ impl Scanner<'_> {
             Some(signer) => {
                 info.version = base.map_or_else(Version::new, |b| b.version.clone()).bump(self.me, self.now_s);
                 let file = signer.sign(info);
-                batch.put_local(LocalRecord { file, sequence: 0, invalid: false, stamp: Some(stamp), tier });
+                batch.put_local(LocalRecord { file, sequence: 0, invalid: false, stamp: Some(stamp), tier, dataless: false, want: false });
             }
             None => {
                 // Read-only: keep the version we received (if any) and mark our copy as differing. A
@@ -454,7 +512,7 @@ impl Scanner<'_> {
                     Some(o) if !o.file.info.version.is_empty() => o.file.clone(),
                     _ => SignedFile { info, sig: [0; 64] },
                 };
-                batch.put_local(LocalRecord { file, sequence: 0, invalid: true, stamp: Some(stamp), tier });
+                batch.put_local(LocalRecord { file, sequence: 0, invalid: true, stamp: Some(stamp), tier, dataless: false, want: false });
             }
         }
         report.changed += 1;
@@ -463,27 +521,33 @@ impl Scanner<'_> {
 
     /// A record whose path is gone from disk.
     fn record_delete<S: IndexStore + ?Sized>(&self, batch: &mut Batch<'_, S>, rec: LocalRecord) {
-        match self.signer {
-            Some(signer) => {
-                let o = &rec.file.info;
-                let info = FileInfo {
-                    path: o.path.clone(),
-                    kind: o.kind,
-                    size: 0,
-                    mtime_ns: o.mtime_ns,
-                    exec: false,
-                    deleted: true,
-                    version: o.version.bump(self.me, self.now_s),
-                    modified_by: self.me,
-                    file_id: o.file_id,
-                    symlink_target: String::new(),
-                    conflict_of: None,
-                    chunks: Vec::new(),
-                };
-                batch.put_local(LocalRecord { file: signer.sign(info), sequence: 0, invalid: false, stamp: None, tier: None });
-            }
-            // Read-only: a local delete is a local change like any other.
-            None => batch.put_local(LocalRecord { invalid: true, stamp: None, ..rec }),
+        batch.put_local(tombstone(self.signer, self.me, self.now_s, rec));
+    }
+}
+
+/// The record of a delete of `rec`'s path by this device: a signed tombstone that has seen `rec`'s version, or on a
+/// read-only device a local change (the version received, marked invalid, nothing on disk).
+pub(crate) fn tombstone(signer: Option<&dyn Signer>, me: ShortId, now_s: u64, rec: LocalRecord) -> LocalRecord {
+    match signer {
+        Some(signer) => {
+            let o = &rec.file.info;
+            let info = FileInfo {
+                path: o.path.clone(),
+                kind: o.kind,
+                size: 0,
+                mtime_ns: o.mtime_ns,
+                exec: false,
+                deleted: true,
+                version: o.version.bump(me, now_s),
+                modified_by: me,
+                file_id: o.file_id,
+                symlink_target: String::new(),
+                conflict_of: None,
+                chunks: Vec::new(),
+            };
+            LocalRecord { file: signer.sign(info), sequence: 0, invalid: false, stamp: None, tier: None, dataless: false, want: false }
         }
+        // Read-only: a local delete is a local change like any other.
+        None => LocalRecord { invalid: true, stamp: None, dataless: false, want: false, ..rec },
     }
 }

@@ -26,8 +26,20 @@ pub enum Cmd {
     Status { folder: String },
     /// `sync add <path>`
     Add { path: String },
-    /// `sync join <link> [--to <path>]` (`-` reads the link from standard input)
-    Join { key: String, to: Option<String> },
+    /// `sync join <link> [--to <path>] [--on-demand]` (`-` reads the link from standard input)
+    Join { key: String, to: Option<String>, on_demand: bool },
+    /// `sync mode <folder> full|on-demand [--to <path>]`
+    Mode { folder: String, on_demand: bool, to: Option<String> },
+    /// `sync items <folder> [<path>] [--more <cursor>]`: an on-demand folder's items.
+    Items { folder: String, path: String, cursor: Option<String> },
+    /// `sync fetch <folder> <path> [--wait S | --no-wait]`
+    Fetch { folder: String, path: String, wait_s: u64 },
+    /// `sync pin <folder> <path>` / `sync unpin <folder> <path>`
+    Pin { folder: String, path: String, on: bool },
+    /// `sync evict <folder> <path>`
+    Evict { folder: String, path: String },
+    /// `sync unavailable [<folder>]`
+    Unavailable { folder: Option<String> },
     /// `sync share <folder> [--role R] [--uses N|unlimited] [--days N|never] [--chat <channel>|new]`
     Share { folder: String, role: Option<String>, uses: Option<u32>, days: Option<u32>, chat: Option<String> },
     /// `sync share-until <folder> <days>|never [--extend]`: `days` 0 = no end; `extend` counts from the current end.
@@ -71,7 +83,7 @@ pub enum Cmd {
 }
 
 /// The one-line usage.
-pub const USAGE: &str = "usage: seedwell sync list | status <folder> | add <path> | join <link> [--to <path>] | share <folder> [--role read_write|read_only|admin|owner] [--uses N|unlimited] [--days N|never] [--chat <channel>|new] | share-until <folder> <days>|never [--extend] | members <folder> | invites <folder> | revoke-invite <folder> <invite-id> | role <folder> <device> owner|admin|read_write|read_only | remove-device <folder> <device> | rename <folder> <name> | move <folder> <path> | pause <folder> | resume <folder> | rescan <folder> | lan-only <folder> on|off | conflicts <folder> | resolve <folder> <copy> --keep original|copy|both | address <folder> <host:port> | remove <folder> [--delete-files] [-y] | remove-confirm <token> | settings [--device-name N] [--user-name N] [--port N] [--lan on|off] [--dht on|off] [--relay-own on|off] [--relay-everyone on|off] [--up R] [--down R] [--default-location PATH]";
+pub const USAGE: &str = "usage: seedwell sync list | status <folder> | add <path> | join <link> [--to <path>] [--on-demand] | mode <folder> full|on-demand [--to <path>] | items <folder> [<path>] | fetch <folder> <path> [--wait S|--no-wait] | pin <folder> <path> | unpin <folder> <path> | evict <folder> <path> | unavailable [<folder>] | share <folder> [--role read_write|read_only|admin|owner] [--uses N|unlimited] [--days N|never] [--chat <channel>|new] | share-until <folder> <days>|never [--extend] | members <folder> | invites <folder> | revoke-invite <folder> <invite-id> | role <folder> <device> owner|admin|read_write|read_only | remove-device <folder> <device> | rename <folder> <name> | move <folder> <path> | pause <folder> | resume <folder> | rescan <folder> | lan-only <folder> on|off | conflicts <folder> | resolve <folder> <copy> --keep original|copy|both | address <folder> <host:port> | remove <folder> [--delete-files] [-y] | remove-confirm <token> | settings [--device-name N] [--user-name N] [--port N] [--lan on|off] [--dht on|off] [--relay-own on|off] [--relay-everyone on|off] [--up R] [--down R] [--default-location PATH]";
 
 fn on_off(v: Option<String>, name: &str) -> Result<Option<bool>, Usage> {
     match v.as_deref() {
@@ -105,7 +117,50 @@ pub fn parse(args_in: Vec<String>) -> Result<Cmd, Usage> {
         "add" => Cmd::Add { path: one(o, "add <path>")? },
         "join" => {
             let to = o.value(&["--to"])?;
-            Cmd::Join { key: one(o, "join <link> [--to <path>]   (- reads the link from standard input)")?, to }
+            let on_demand = o.flag(&["--on-demand"]);
+            Cmd::Join { key: one(o, "join <link> [--to <path>] [--on-demand]   (- reads the link from standard input)")?, to, on_demand }
+        }
+        "mode" => {
+            let to = o.value(&["--to"])?;
+            let mut p = args(o, 2, "mode <folder> full|on-demand [--to <path>]")?;
+            let on_demand = match p.remove(1).as_str() {
+                "on-demand" | "on_demand" | "ondemand" => true,
+                "full" => false,
+                x => return Err(Usage(format!("the mode is full or on-demand, not `{x}`"))),
+            };
+            Cmd::Mode { folder: p.remove(0), on_demand, to }
+        }
+        "items" | "files" => {
+            let cursor = o.value(&["--more"])?;
+            let mut p = o.finish()?;
+            if p.is_empty() || p.len() > 2 {
+                return Err(Usage("usage: seedwell sync items <folder> [<path>] [--more <cursor>]".into()));
+            }
+            let path = if p.len() == 2 { p.remove(1) } else { String::new() };
+            Cmd::Items { folder: p.remove(0), path: in_folder(&path), cursor }
+        }
+        "fetch" | "download" => {
+            let no_wait = o.flag(&["--no-wait"]);
+            let wait = o.number::<u64>(&["--wait"])?;
+            let mut p = args(o, 2, "fetch <folder> <path> [--wait S|--no-wait]")?;
+            let wait_s = if no_wait { 0 } else { wait.unwrap_or(600).min(3600) };
+            Cmd::Fetch { path: in_folder(&p.remove(1)), folder: p.remove(0), wait_s }
+        }
+        "pin" | "keep" | "unpin" => {
+            let on = sub != "unpin";
+            let mut p = args(o, 2, if on { "pin <folder> <path>   (/ = the whole folder)" } else { "unpin <folder> <path>" })?;
+            Cmd::Pin { path: in_folder(&p.remove(1)), folder: p.remove(0), on }
+        }
+        "unavailable" => {
+            let mut p = o.finish()?;
+            if p.len() > 1 {
+                return Err(Usage("usage: seedwell sync unavailable [<folder>]".into()));
+            }
+            Cmd::Unavailable { folder: p.pop() }
+        }
+        "evict" | "remove-download" => {
+            let mut p = args(o, 2, "evict <folder> <path>   (/ = the whole folder)")?;
+            Cmd::Evict { path: in_folder(&p.remove(1)), folder: p.remove(0) }
         }
         "share" | "invite" => {
             let role = o.value(&["--role"])?;
@@ -215,6 +270,12 @@ pub fn parse(args_in: Vec<String>) -> Result<Cmd, Usage> {
     })
 }
 
+/// A path in a folder as the protocol has it: `/` between names, none at either end (`/` or `.` alone is the folder).
+fn in_folder(p: &str) -> String {
+    let p = p.trim().trim_matches('/');
+    if p == "." { String::new() } else { p.to_owned() }
+}
+
 /// A path as the app needs it: `~/…` stays (the app expands it), anything else is made absolute against the
 /// current folder (the app does not know where the CLI runs).
 fn abs(p: &str) -> R<String> {
@@ -259,10 +320,78 @@ pub async fn run(cmd: Cmd, g: &Global) -> R {
             let (raw, d): (_, SyncFolderDto) = ask(&mut c, Request::SyncAdd(SyncAddParams { path: abs(&path)? })).await?;
             show(g, &raw, || format!(concat!("Sharing {} from {} (this ", trs_platform::computer!(), " is its owner).\nInvite another device: seedwell sync share {}"), d.name, d.path, first_group(&d.id)));
         }
-        Cmd::Join { key, to } => {
+        Cmd::Mode { folder: f, on_demand, to } => {
+            let path = to.as_deref().map(abs).transpose()?;
+            let mode = if on_demand { "on_demand" } else { "full" }.to_string();
+            let (raw, d): (_, SyncFolderDto) = ask(&mut c, Request::SyncSetMode(SyncModeParams { folder: f, mode, path })).await?;
+            show(g, &raw, || {
+                if on_demand {
+                    format!("{} is on demand: every file stays listed, and only what you fetch or pin is on this {}. Its files moved to this {}'s cache.", d.name, trs_platform::computer!(), trs_platform::computer!())
+                } else {
+                    format!("{} is full again, at {}: every file is on its way to this {}.", d.name, d.path, trs_platform::computer!())
+                }
+            });
+        }
+        Cmd::Items { folder: f, path, cursor } => {
+            let p = SyncItemsParams { folder: f, item: None, path: Some(path), cursor, limit: Some(1000) };
+            let (raw, d): (_, SyncItemsDto) = ask(&mut c, Request::SyncItems(p)).await?;
+            show(g, &raw, || items(&d));
+        }
+        Cmd::Fetch { folder: f, path, wait_s } => {
+            let p = SyncFetchParams { folder: f, item: None, path: Some(path.clone()), wait_s: Some(wait_s) };
+            let (raw, d): (_, SyncFetchDto) = ask(&mut c, Request::SyncFetch(p)).await?;
+            show(g, &raw, || match &d.local_path {
+                Some(at) => format!("{} is on this {} ({}).", shown(&path), trs_platform::computer!(), at),
+                None if wait_s == 0 => format!("Fetching {}.", shown(&path)),
+                None => format!("Fetching {}: {} of {} so far (no device that has it is connected?).", shown(&path), human::bytes(d.done), human::bytes(d.total)),
+            });
+        }
+        Cmd::Pin { folder: f, path, on } => {
+            let p = SyncItemParams { folder: f, item: None, path: Some(path.clone()) };
+            let r = if on { Request::SyncPin(p) } else { Request::SyncUnpin(p) };
+            let (raw, _d): (_, SyncHostDto) = ask(&mut c, r).await?;
+            show(g, &raw, || {
+                if on {
+                    format!("{} stays on this {}: what is not here yet is on its way, and new files there come too.", shown(&path), trs_platform::computer!())
+                } else {
+                    format!("{} is no longer kept on this {}; what is here stays (seedwell sync evict frees it).", shown(&path), trs_platform::computer!())
+                }
+            });
+        }
+        Cmd::Unavailable { folder } => {
+            let (raw, d): (_, SyncUnavailableDto) = ask(&mut c, Request::SyncUnavailable(SyncUnavailableParams { folder })).await?;
+            show(g, &raw, || {
+                if d.folders.is_empty() {
+                    return "No file is unavailable.".to_string();
+                }
+                let mut t = String::new();
+                for f in &d.folders {
+                    t.push_str(&format!("{}: {} file(s) unavailable (no device has them right now):\n", f.name, f.files.len()));
+                    for x in &f.files {
+                        t.push_str(&format!("  {} ({})\n", x.path, human::bytes(x.size)));
+                    }
+                }
+                t.push_str("Each can be deleted like any file, on a device where the folder is on demand (in the Finder).");
+                t
+            });
+        }
+        Cmd::Evict { folder: f, path } => {
+            let (raw, d): (_, SyncEvictDto) = ask(&mut c, Request::SyncEvict(SyncItemParams { folder: f, item: None, path: Some(path.clone()) })).await?;
+            show(g, &raw, || {
+                let mut t = format!("Removed the download of {} files ({}) in {}; they stay listed, online only.", d.files, human::bytes(d.bytes), shown(&path));
+                for k in &d.kept_why {
+                    t.push_str(&format!("\nKept {}: {}", k.path, k.error));
+                }
+                for f in &d.failed {
+                    t.push_str(&format!("\nCould not free {}: {}", f.path, f.error));
+                }
+                t
+            });
+        }
+        Cmd::Join { key, to, on_demand } => {
             let key = if key == "-" { key_from_stdin()? } else { key };
             let path = to.as_deref().map(abs).transpose()?;
-            let (raw, d): (_, SyncFolderDto) = ask(&mut c, Request::SyncJoin(SyncJoinParams { key_or_link: key, path })).await?;
+            let (raw, d): (_, SyncFolderDto) = ask(&mut c, Request::SyncJoin(SyncJoinParams { key_or_link: key, path, on_demand })).await?;
             show(g, &raw, || {
                 let mut t = match d.role.as_deref() {
                     Some(r) => format!("Joined {} at {} ({}).", d.name, d.path, role(r)),
@@ -575,8 +704,18 @@ pub fn status(f: &SyncFolderDto) -> String {
     if let Some(c) = &f.channel_id {
         let _ = writeln!(o, "  channel    {} (seedwell chat read {})", first_group(c), first_group(c));
     }
+    if f.unavailable > 0 {
+        let _ = writeln!(
+            o,
+            "  unavailable {} file(s): no device has them right now (seedwell sync unavailable; delete them on a device where the folder is on demand)",
+            f.unavailable
+        );
+    }
     if f.need_files > 0 || f.need_bytes > 0 {
         let _ = writeln!(o, "  to fetch   {} files, {}", f.need_files, human::bytes(f.need_bytes));
+    }
+    if f.on_demand {
+        let _ = writeln!(o, "  on demand  {} files ({}) on this {}; the rest online only", f.files, human::bytes(f.bytes), trs_platform::computer!());
     }
     let _ = writeln!(o, "  in sync    {}", ago(f.last_synced_at));
     if f.conflicts > 0 {
@@ -587,6 +726,42 @@ pub fn status(f: &SyncFolderDto) -> String {
         for i in f.issues.iter().take(20) {
             let _ = writeln!(o, "    {}: {}", i.path, i.reason);
         }
+    }
+    o.trim_end().to_owned()
+}
+
+/// A path in a folder, for a sentence.
+fn shown(path: &str) -> String {
+    if path.is_empty() { "The whole folder".into() } else { path.to_owned() }
+}
+
+/// `sync items`.
+pub fn items(d: &SyncItemsDto) -> String {
+    let state = |i: &SyncItemDto| match i.state.as_str() {
+        _ if i.kind == "dir" => "folder",
+        "online_only" => "online only",
+        "downloading" => "downloading",
+        "modified_here" => "only here",
+        "unavailable" => "unavailable (no device has this version any more)",
+        _ => "here",
+    };
+    let line = |i: &SyncItemDto| {
+        let size = if i.kind == "file" { human::bytes(i.size) } else { String::new() };
+        format!("{:<12} {:>10}{}  {}{}", state(i), size, if i.pinned { "  kept" } else { "      " }, i.name, if i.kind == "dir" { "/" } else { "" })
+    };
+    if d.item.kind != "dir" {
+        return format!("{}\n{}", d.item.path, line(&d.item));
+    }
+    let mut o = String::new();
+    let _ = writeln!(o, "{}", if d.item.path.is_empty() { "(the folder)".to_string() } else { format!("{}/", d.item.path) });
+    if d.items.is_empty() {
+        let _ = writeln!(o, "  (empty)");
+    }
+    for i in &d.items {
+        let _ = writeln!(o, "  {}", line(i));
+    }
+    if let Some(n) = &d.next {
+        let _ = writeln!(o, "More: --more {n}");
     }
     o.trim_end().to_owned()
 }
@@ -706,8 +881,19 @@ mod tests {
         assert_eq!(parse(w("list")).unwrap(), Cmd::List);
         assert_eq!(parse(w("status MFZWI3D")).unwrap(), Cmd::Status { folder: "MFZWI3D".into() });
         assert_eq!(parse(w("add ~/Documents/Shared")).unwrap(), Cmd::Add { path: "~/Documents/Shared".into() });
-        assert_eq!(parse(w("join seedwell://sync/ABC --to /tmp/x")).unwrap(), Cmd::Join { key: "seedwell://sync/ABC".into(), to: Some("/tmp/x".into()) });
-        assert_eq!(parse(w("join -")).unwrap(), Cmd::Join { key: "-".into(), to: None });
+        assert_eq!(parse(w("join seedwell://sync/ABC --to /tmp/x")).unwrap(), Cmd::Join { on_demand: false, key: "seedwell://sync/ABC".into(), to: Some("/tmp/x".into()) });
+        assert_eq!(parse(w("join -")).unwrap(), Cmd::Join { key: "-".into(), to: None, on_demand: false });
+        assert_eq!(parse(w("join - --on-demand")).unwrap(), Cmd::Join { key: "-".into(), to: None, on_demand: true });
+        assert_eq!(parse(w("mode Docs on-demand")).unwrap(), Cmd::Mode { folder: "Docs".into(), on_demand: true, to: None });
+        assert_eq!(parse(w("mode Docs full --to /tmp/d")).unwrap(), Cmd::Mode { folder: "Docs".into(), on_demand: false, to: Some("/tmp/d".into()) });
+        assert!(parse(w("mode Docs sometimes")).is_err());
+        assert_eq!(parse(w("items Docs")).unwrap(), Cmd::Items { folder: "Docs".into(), path: String::new(), cursor: None });
+        assert_eq!(parse(w("items Docs /a/b/")).unwrap(), Cmd::Items { folder: "Docs".into(), path: "a/b".into(), cursor: None });
+        assert_eq!(parse(w("fetch Docs a/b.txt")).unwrap(), Cmd::Fetch { folder: "Docs".into(), path: "a/b.txt".into(), wait_s: 600 });
+        assert_eq!(parse(w("fetch Docs a --no-wait")).unwrap(), Cmd::Fetch { folder: "Docs".into(), path: "a".into(), wait_s: 0 });
+        assert_eq!(parse(w("pin Docs /")).unwrap(), Cmd::Pin { folder: "Docs".into(), path: String::new(), on: true });
+        assert_eq!(parse(w("unpin Docs a")).unwrap(), Cmd::Pin { folder: "Docs".into(), path: "a".into(), on: false });
+        assert_eq!(parse(w("evict Docs .")).unwrap(), Cmd::Evict { folder: "Docs".into(), path: String::new() });
         assert_eq!(parse(w("share Docs")).unwrap(), Cmd::Share { folder: "Docs".into(), role: None, uses: None, days: None, chat: None });
         assert_eq!(
             parse(w("share Docs --role ro --uses unlimited --days never")).unwrap(),

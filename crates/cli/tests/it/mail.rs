@@ -40,21 +40,30 @@ fn json(d: &Daemon, args: &[&str], input: &str) -> Value {
 #[test]
 fn mail_goes_to_a_projects_inbox_and_its_status_comes_back() {
     let root = tempfile::tempdir().unwrap();
-    let a = Daemon::start(root.path(), "a", "full");
-    let b = Daemon::start(root.path(), "b", "full");
+    // No channel open to agents: told where the user switches one on. A daemon's channels are as --chat-agents
+    // says (it has no app where its user would): off closes even the agent channel an agent makes.
+    let closed = Daemon::start_with(root.path(), "closed", "full", &["--chat-agents", "off"]);
+    closed.json(&["chat", "new", "Koding"]);
+    let o = run(&closed, None, &["mail", "inbox", "--as", "api"], "");
+    assert_eq!(o.code, 4, "{}", o.stderr);
+    assert!(o.stderr.contains(concat!("Agents on This ", trs_platform::computer!())), "{}", o.stderr);
+    drop(closed);
+    // Without --chat-agents, as in the app: the channel an agent makes is an agent channel, open to agents.
+    let plain = Daemon::start(root.path(), "plain", "full");
+    let made = plain.json(&["chat", "new", "Koding"]);
+    assert_eq!((made["agents"].as_str(), made["agent_channel"].as_bool()), (Some("post"), Some(true)), "{made}");
+    let o = run(&plain, None, &["mail", "inbox", "--as", "api"], "");
+    assert_eq!(o.code, 0, "{}", o.stderr);
+    drop(plain);
+
+    let a = Daemon::start_with(root.path(), "a", "full", &["--chat-agents", "post"]);
+    let b = Daemon::start_with(root.path(), "b", "full", &["--chat-agents", "post"]);
     a.json(&["chat", "new", "Koding"]);
     let link = a.json(&["chat", "share", "Koding"])["link"].as_str().unwrap().to_owned();
     assert_eq!(run(&b, None, &["chat", "join", "-"], &link).code, 0);
     let port = a.json(&["sync", "list"])["port"].as_u64().unwrap();
     b.json(&["chat", "address", "Koding", &format!("127.0.0.1:{port}")]);
     wait_until(30, "B admitted", || b.json(&["chat", "list"])["channels"][0]["role"].as_str().map(str::to_owned));
-    // No channel open to agents yet: told where to switch it on.
-    let o = run(&a, None, &["mail", "inbox", "--as", "api"], "");
-    assert_eq!(o.code, 4, "{}", o.stderr);
-    assert!(o.stderr.contains(concat!("Agents on This ", trs_platform::computer!())), "{}", o.stderr);
-    for d in [&a, &b] {
-        d.json(&["chat", "agents", "Koding", "post"]);
-    }
 
     // web (on B) asks api (on A) for a field. The channel is found by itself (the one open to agents).
     let sent = json(&b, &["mail", "send", "api", "--as", "web", "--type", "request", "-"], "## Add eta_minutes\n\nThe order page shows an ETA.");
@@ -295,8 +304,8 @@ fn the_hook_goes_into_the_projects_local_settings_and_out_again() {
 #[test]
 fn a_big_file_passes_through_the_synced_folder_and_is_gone_once_received() {
     let root = tempfile::tempdir().unwrap();
-    let a = Daemon::start(root.path(), "a", "full");
-    let b = Daemon::start(root.path(), "b", "full");
+    let a = Daemon::start_with(root.path(), "a", "full", &["--chat-agents", "post"]);
+    let b = Daemon::start_with(root.path(), "b", "full", &["--chat-agents", "post"]);
     let docs = root.path().join("a-Team");
     std::fs::create_dir_all(&docs).unwrap();
     a.json(&["sync", "add", docs.to_str().unwrap()]);
@@ -309,10 +318,6 @@ fn a_big_file_passes_through_the_synced_folder_and_is_gone_once_received() {
         let ok = b.json(&["chat", "list"])["channels"][0]["role"].is_string() && b.json(&["sync", "list"])["folders"][0]["role"].is_string();
         ok.then_some(())
     });
-    for d in [&a, &b] {
-        let ch = d.json(&["chat", "list"])["channels"][0]["id"].as_str().unwrap().to_owned();
-        d.json(&["chat", "agents", &ch, "post"]);
-    }
     // web (on B) makes its inbox known, so api's mail goes to a project that exists.
     json(&b, &["mail", "inbox", "--as", "web"], "");
 

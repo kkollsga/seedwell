@@ -40,9 +40,13 @@ pub const FEATURE_CHAT: u64 = 1 << 0;
 /// device with it takes a private message only from its author, sends one only to its recipient, and sends only
 /// its own key record. A device without it is not written to privately.
 pub const FEATURE_DIRECT: u64 = 1 << 1;
+/// Feature bit 2: answers [`HoldQuery`] (type 24) with a [`HoldReply`] (type 25). Only a device with it is asked.
+pub const FEATURE_HOLDS: u64 = 1 << 2;
+/// Feature bit 3: answers [`RenameRequest`] (type 26) with a [`RenameReply`] (type 27). Only a device with it is asked.
+pub const FEATURE_RENAMES: u64 = 1 << 3;
 /// The optional behaviours this build supports, one bit each; a session uses those both sides have (the AND). A new
 /// one takes the next free bit, documented here and in `PROTOCOL.md`; bits are never reused.
-pub const FEATURES: u64 = FEATURE_CHAT | FEATURE_DIRECT;
+pub const FEATURES: u64 = FEATURE_CHAT | FEATURE_DIRECT | FEATURE_HOLDS | FEATURE_RENAMES;
 /// Channels in one [`ChatJoin`].
 pub const MAX_JOIN_CHANNELS: usize = 1024;
 /// Messages in one [`ChatMessages`] (and [`DirectMessages`]).
@@ -145,6 +149,90 @@ pub struct JoinFolder {
     pub your_index_id: u64,
     /// The receiver's highest sequence the sender has, under `your_index_id`.
     pub your_max_seq: u64,
+}
+
+/// Most files one [`HoldQuery`] asks about.
+pub const MAX_HOLD_FILES: usize = 1000;
+
+/// Type 24: does the receiver hold these versions now (SPEC §7G.11, freeing space)? The sender is about to let go of
+/// its copies and frees only what the answer confirms. A receiver that does not know the type ignores it (no answer:
+/// the sender keeps its copies).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HoldQuery {
+    /// Matches the [`HoldReply`].
+    pub id: u32,
+    /// The folder.
+    pub folder_id: FolderId,
+    /// The files, at most [`MAX_HOLD_FILES`].
+    pub files: Vec<HeldFile>,
+}
+
+/// A version asked about in a [`HoldQuery`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HeldFile {
+    /// Its path.
+    pub path: String,
+    /// The version.
+    pub version: Version,
+    /// [`crate::model::FileInfo::content_digest`] of it.
+    pub content: [u8; 32],
+}
+
+/// Type 25: the answer to a [`HoldQuery`], one flag per file, in its order: held now, with this content, and (when
+/// the receiver is on demand itself) it ranks above the asker, so the asker may rely on it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HoldReply {
+    /// The query's id.
+    pub id: u32,
+    /// Yes or no, per file.
+    pub held: Vec<bool>,
+}
+
+/// Type 26: rename `from` to `to` (SPEC §7G.11): the sender, an on-demand writer without the bytes, asks the receiver,
+/// which announces them held, to make the rename (a device records a version only if it holds its bytes). The receiver
+/// renames as its own change when the sender writes the folder, its records are what the sender saw (`seen`) and it
+/// holds every file there; the result reaches the sender by normal sync. A receiver that does not know the type ignores
+/// it (no answer: the sender says the rename needs a device that has the files).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RenameRequest {
+    /// Matches the [`RenameReply`].
+    pub id: u32,
+    /// The folder.
+    pub folder_id: FolderId,
+    /// The path renamed (a file, or a folder and everything below it).
+    pub from: String,
+    /// Its new path.
+    pub to: String,
+    /// A digest of the paths and versions at and below `from` the sender has.
+    pub seen: [u8; 32],
+    /// The receiver starts the rename only within this many milliseconds of receiving the request (else it answers
+    /// [`RenameOutcome::Busy`]); it answers with the outcome either way.
+    pub ttl_ms: u32,
+}
+
+/// What became of a [`RenameRequest`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RenameOutcome {
+    /// Renamed, as the receiver's own change (on its way to the sender).
+    Done,
+    /// Not renamed, and it will not be (the reason says why).
+    Refused,
+    /// Not renamed: it could not start in time. It will not be.
+    Busy,
+}
+
+/// Most bytes of a [`RenameReply`]'s reason.
+pub const MAX_RENAME_REASON: usize = 512;
+
+/// Type 27: the answer to a [`RenameRequest`]: renamed, or why not.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RenameReply {
+    /// The request's id.
+    pub id: u32,
+    /// What became of it.
+    pub outcome: RenameOutcome,
+    /// Why not (empty when done).
+    pub reason: String,
 }
 
 /// Type 2: the folders the sender shares with the receiver, and its proof for each.
@@ -534,6 +622,14 @@ pub enum Message {
     DirectMessages(DirectMessages),
     /// 23.
     DirectJoin(DirectJoin),
+    /// 24.
+    HoldQuery(HoldQuery),
+    /// 25.
+    HoldReply(HoldReply),
+    /// 26.
+    RenameRequest(RenameRequest),
+    /// 27.
+    RenameReply(RenameReply),
     /// A type this version does not know: skipped, not an error. Encodes as an empty frame of that type.
     Unknown(u8),
 }
@@ -565,6 +661,10 @@ impl Message {
             Message::DirectHave(_) => 21,
             Message::DirectMessages(_) => 22,
             Message::DirectJoin(_) => 23,
+            Message::HoldQuery(_) => 24,
+            Message::HoldReply(_) => 25,
+            Message::RenameRequest(_) => 26,
+            Message::RenameReply(_) => 27,
             Message::Unknown(k) => *k,
         }
     }
@@ -691,6 +791,38 @@ impl Message {
                 put_bool(out, m.conversation);
                 put_str(out, &m.user_name);
             }
+            Message::HoldQuery(m) => {
+                put_varint(out, u64::from(m.id));
+                out.extend_from_slice(&m.folder_id.0);
+                put_len(out, m.files.len());
+                for f in &m.files {
+                    put_str(out, &f.path);
+                    put_version(out, &f.version);
+                    out.extend_from_slice(&f.content);
+                }
+            }
+            Message::HoldReply(m) => {
+                put_varint(out, u64::from(m.id));
+                put_len(out, m.held.len());
+                out.extend(m.held.iter().map(|h| u8::from(*h)));
+            }
+            Message::RenameRequest(m) => {
+                put_varint(out, u64::from(m.id));
+                out.extend_from_slice(&m.folder_id.0);
+                put_str(out, &m.from);
+                put_str(out, &m.to);
+                out.extend_from_slice(&m.seen);
+                put_varint(out, u64::from(m.ttl_ms));
+            }
+            Message::RenameReply(m) => {
+                put_varint(out, u64::from(m.id));
+                out.push(match m.outcome {
+                    RenameOutcome::Done => 0,
+                    RenameOutcome::Refused => 1,
+                    RenameOutcome::Busy => 2,
+                });
+                put_str(out, &m.reason);
+            }
         }
     }
 
@@ -783,6 +915,35 @@ impl Message {
             21 => Message::DirectHave(DirectHave { authors: records(r, crate::chat::MAX_AUTHORS, "authors", crate::chat::AuthorHave::read)? }),
             22 => Message::DirectMessages(DirectMessages { messages: records(r, MAX_CHAT_MESSAGES, "direct messages", crate::direct::DirectMessage::read)? }),
             23 => Message::DirectJoin(DirectJoin { conversation: r.bool("conversation")?, user_name: device_name(r)? }),
+            24 => Message::HoldQuery(HoldQuery {
+                id: u32::try_from(r.varint("query id")?).map_err(|_| DecodeError::Invalid("query id"))?,
+                folder_id: FolderId(r.array("folder id")?),
+                files: r.list(MAX_HOLD_FILES, 35, "held files", |r| {
+                    Ok(HeldFile { path: r.str(MAX_PATH, "path")?, version: version(r)?, content: r.array("content")? })
+                })?,
+            }),
+            25 => Message::HoldReply(HoldReply {
+                id: u32::try_from(r.varint("query id")?).map_err(|_| DecodeError::Invalid("query id"))?,
+                held: r.list(MAX_HOLD_FILES, 1, "held", |r| r.bool("held"))?,
+            }),
+            26 => Message::RenameRequest(RenameRequest {
+                id: u32::try_from(r.varint("request id")?).map_err(|_| DecodeError::Invalid("request id"))?,
+                folder_id: FolderId(r.array("folder id")?),
+                from: r.str(MAX_PATH, "path")?,
+                to: r.str(MAX_PATH, "path")?,
+                seen: r.array("seen")?,
+                ttl_ms: u32::try_from(r.varint("time to live")?).map_err(|_| DecodeError::Invalid("time to live"))?,
+            }),
+            27 => Message::RenameReply(RenameReply {
+                id: u32::try_from(r.varint("request id")?).map_err(|_| DecodeError::Invalid("request id"))?,
+                outcome: match r.u8("outcome")? {
+                    0 => RenameOutcome::Done,
+                    1 => RenameOutcome::Refused,
+                    2 => RenameOutcome::Busy,
+                    _ => return Err(DecodeError::Invalid("outcome")),
+                },
+                reason: r.str(MAX_RENAME_REASON, "reason")?,
+            }),
             k => Message::Unknown(k),
         })
     }
@@ -891,22 +1052,36 @@ fn version(r: &mut Reader<'_>) -> Result<Version, DecodeError> {
     Version::from_counters(counters).map_err(|_| DecodeError::Invalid("version"))
 }
 
-/// Entry flags (the announcer's, not signed): bit 0 invalid. Other bits are reserved and ignored.
+/// Entry flags (the announcer's, not signed): bit 0 invalid, bit 1 dataless, bit 2 on demand. Other bits are reserved
+/// and ignored.
 const ENTRY_INVALID: u8 = 1;
+const ENTRY_DATALESS: u8 = 2;
+const ENTRY_ON_DEMAND: u8 = 4;
 /// File flags (signed): bit 0 executable, bit 1 deleted. Other bits are refused, since the signature cannot cover
 /// them.
 const FILE_FLAGS: u8 = 0b11;
 
 fn put_entry(out: &mut Vec<u8>, e: &IndexEntry) {
     // Inside an Index each entry has its length first (put_records); stores keep the bare form.
-    encode_entry(out, e.sequence, e.invalid, &e.file);
+    encode_index_entry(out, e);
 }
 
 /// Appends one index entry in its wire form (as in `Index` and `IndexUpdate`), from its parts so a caller
 /// holding a [`SignedFile`] elsewhere need not build an [`IndexEntry`]. Stores reuse it for their records.
 pub fn encode_entry(out: &mut Vec<u8>, sequence: u64, invalid: bool, file: &SignedFile) {
+    encode_flagged(out, sequence, if invalid { ENTRY_INVALID } else { 0 }, file);
+}
+
+/// [`encode_entry`] of a whole entry, every flag of it.
+pub fn encode_index_entry(out: &mut Vec<u8>, e: &IndexEntry) {
+    let flag = |on: bool, bit: u8| if on { bit } else { 0 };
+    let flags = flag(e.invalid, ENTRY_INVALID) | flag(e.dataless, ENTRY_DATALESS) | flag(e.on_demand, ENTRY_ON_DEMAND);
+    encode_flagged(out, e.sequence, flags, &e.file);
+}
+
+fn encode_flagged(out: &mut Vec<u8>, sequence: u64, flags: u8, file: &SignedFile) {
     put_varint(out, sequence);
-    out.push(if invalid { ENTRY_INVALID } else { 0 });
+    out.push(flags);
     let f = &file.info;
     put_str(out, &f.path);
     out.push(kind_byte(f.kind));
@@ -939,7 +1114,8 @@ pub fn decode_entry(r: &mut Reader<'_>) -> Result<IndexEntry, DecodeError> {
 
 fn entry(r: &mut Reader<'_>) -> Result<IndexEntry, DecodeError> {
     let sequence = r.varint("sequence")?;
-    let invalid = r.u8("entry flags")? & ENTRY_INVALID != 0;
+    let flags = r.u8("entry flags")?;
+    let (invalid, dataless, on_demand) = (flags & ENTRY_INVALID != 0, flags & ENTRY_DATALESS != 0, flags & ENTRY_ON_DEMAND != 0);
     let path = r.str(MAX_PATH, "path")?;
     let kind = match r.u8("kind")? {
         0 => FileKind::File,
@@ -967,7 +1143,7 @@ fn entry(r: &mut Reader<'_>) -> Result<IndexEntry, DecodeError> {
         conflict_of: if r.bool("has conflict of")? { Some(r.str(MAX_PATH, "conflict of")?) } else { None },
         chunks: r.list(MAX_CHUNKS, 33, "chunks", chunk)?,
     };
-    Ok(IndexEntry { sequence, invalid, file: SignedFile { info, sig: r.array("signature")? } })
+    Ok(IndexEntry { sequence, invalid, dataless, on_demand, file: SignedFile { info, sig: r.array("signature")? } })
 }
 
 fn chunk(r: &mut Reader<'_>) -> Result<ChunkRef, DecodeError> {
@@ -1036,13 +1212,16 @@ mod tests {
         let me = hello(PROTOCOL, MIN_PROTOCOL, FEATURES);
         assert_eq!(agree(&me, &me), Ok(Agreed { protocol: PROTOCOL, features: FEATURES }));
         // A newer device that still speaks ours, with features we do not have.
-        let newer = hello(PROTOCOL + 3, PROTOCOL, 0b1000);
+        let newer = hello(PROTOCOL + 3, PROTOCOL, 1 << 40);
         assert_eq!(agree(&me, &newer), Ok(Agreed { protocol: PROTOCOL, features: 0 }), "no chat bit: no chat");
         // 0.1.8 has channels, not the direct bit.
         assert_eq!(agree(&me, &hello(PROTOCOL, PROTOCOL, FEATURE_CHAT)), Ok(Agreed { protocol: PROTOCOL, features: FEATURE_CHAT }));
-        let chat = hello(PROTOCOL, PROTOCOL, FEATURE_CHAT | 0b1000);
+        let chat = hello(PROTOCOL, PROTOCOL, FEATURE_CHAT | 1 << 40);
         assert_eq!(agree(&me, &chat), Ok(Agreed { protocol: PROTOCOL, features: FEATURE_CHAT }));
         assert_eq!(agree(&hello(5, 2, 0b0110), &hello(4, 3, 0b0011)), Ok(Agreed { protocol: 4, features: 0b0010 }));
+        // 0.1.11 (channels and direct): none of the on-demand bits, so it is never asked their questions.
+        let old = agree(&me, &hello(PROTOCOL, PROTOCOL, FEATURE_CHAT | FEATURE_DIRECT)).unwrap();
+        assert_eq!(old.features & (FEATURE_HOLDS | FEATURE_RENAMES), 0);
         // One that no longer does, and one this device no longer speaks.
         assert_eq!(agree(&me, &hello(PROTOCOL + 2, PROTOCOL + 1, 0)), Err(Incompatible::PeerTooNew));
         assert_eq!(agree(&hello(4, 3, 0), &hello(2, 1, 0)), Err(Incompatible::PeerTooOld));
@@ -1069,6 +1248,37 @@ mod tests {
         name(65).encode(&mut out);
         let (frame, _) = Frame::split(&out).unwrap().unwrap();
         assert_eq!(Message::decode(frame), Err(DecodeError::TooLong { what: "device name", max: 64 }));
+    }
+
+    #[test]
+    fn hold_queries_and_replies_roundtrip() {
+        let v = Version::from_counters(vec![Counter { id: ShortId(7), value: 3 }]).unwrap();
+        let q = Message::HoldQuery(HoldQuery {
+            id: 9,
+            folder_id: FolderId([4; 32]),
+            files: vec![HeldFile { path: "a/b.txt".into(), version: v, content: [5; 32] }],
+        });
+        assert_eq!(roundtrip(&q), q);
+        let r = Message::HoldReply(HoldReply { id: 9, held: vec![true, false, true] });
+        assert_eq!(roundtrip(&r), r);
+        // A build before them reads the types as unknown and skips them (no answer: the asker keeps its copies).
+        assert_eq!((q.kind(), r.kind()), (24, 25));
+    }
+
+    #[test]
+    fn rename_requests_and_replies_roundtrip() {
+        let q = Message::RenameRequest(RenameRequest { id: 3, folder_id: FolderId([4; 32]), from: "a/b".into(), to: "c/d".into(), seen: [6; 32], ttl_ms: 1500 });
+        assert_eq!(roundtrip(&q), q);
+        for outcome in [RenameOutcome::Done, RenameOutcome::Refused, RenameOutcome::Busy] {
+            let r = Message::RenameReply(RenameReply { id: 3, outcome, reason: "changed".into() });
+            assert_eq!(roundtrip(&r), r);
+        }
+        // A build before them skips them (no answer: the asker says no device that has the files is connected).
+        assert_eq!((q.kind(), Message::RenameReply(RenameReply { id: 3, outcome: RenameOutcome::Done, reason: String::new() }).kind()), (26, 27));
+        let mut out = Vec::new();
+        Message::RenameReply(RenameReply { id: 3, outcome: RenameOutcome::Refused, reason: "x".repeat(MAX_RENAME_REASON + 1) }).encode(&mut out);
+        let (frame, _) = Frame::split(&out).unwrap().unwrap();
+        assert!(Message::decode(frame).is_err(), "a reason longer than the limit");
     }
 
     #[test]

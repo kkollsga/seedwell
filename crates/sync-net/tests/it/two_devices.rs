@@ -513,11 +513,40 @@ async fn a_burst_that_overflows_the_watcher_still_syncs_every_file() {
         std::fs::write(fa.path().join("burst").join(format!("file-{i:05}-with-a-name-long-enough-to-fill-the-buffer.txt")), i.to_string()).unwrap();
     }
     trs_fswatch::debug::hold_reads(false);
-    until(180, "B has every file of the burst", || std::fs::read_dir(dest.join("burst")).is_ok_and(|d| d.count() == n)).await;
+    // (The puller's temp files count for nothing: one of them beside 999 files is not the 1000th.)
+    let files = |d: std::fs::ReadDir| d.flatten().filter(|e| !e.file_name().to_string_lossy().starts_with(".seedwell.")).count();
+    until(180, "B has every file of the burst", || std::fs::read_dir(dest.join("burst")).is_ok_and(|d| files(d) == n)).await;
     assert_eq!(read(&dest.join("burst").join("file-00999-with-a-name-long-enough-to-fill-the-buffer.txt")).as_deref(), Some(&b"999"[..]));
     if cfg!(windows) {
         assert!(trs_fswatch::debug::overflows() > overflows, "the burst overflowed the system's buffer");
     }
+    a.h.shutdown().await;
+    b.h.shutdown().await;
+}
+
+/// Moving a folder on one device while the other is connected: the folder stops (its index closes, though the session
+/// to the other device stays), starts again at its new place, and both keep syncing, changes made meanwhile included.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_folder_moved_while_the_other_device_is_connected_keeps_syncing() {
+    let (a, b) = (device("Alpha").await, device("Beta").await);
+    let (fa, fb) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    std::fs::write(fa.path().join("first.txt"), b"first").unwrap();
+    let st = a.h.add_folder(fa.path().to_path_buf()).await.unwrap();
+    let id: FolderId = st.id.parse().unwrap();
+    let key = a.h.create_invite(&id, Role::ReadWrite, 1, 1).unwrap().link;
+    let dest = fb.path().join("Shared");
+    b.h.join_folder(&key, dest.clone()).await.unwrap();
+    b.h.add_address(&id, addr(&a)).unwrap();
+    until(20, "B has A's file", || read(&dest.join("first.txt")).is_some()).await;
+
+    let moved = fb.path().join("Moved");
+    b.h.move_folder(&id, moved.clone()).await.unwrap();
+    assert!(read(&moved.join("first.txt")).is_some() && !dest.exists());
+    std::fs::write(fa.path().join("after.txt"), b"made on A after the move").unwrap();
+    until(30, "A's new file reaches the moved folder", || read(&moved.join("after.txt")).is_some()).await;
+    std::fs::write(moved.join("from-b.txt"), b"made on B after the move").unwrap();
+    until(30, "B's new file reaches A", || read(&fa.path().join("from-b.txt")).is_some()).await;
+    assert_eq!(a.h.snapshot().devices.len(), 1, "one session all along");
     a.h.shutdown().await;
     b.h.shutdown().await;
 }

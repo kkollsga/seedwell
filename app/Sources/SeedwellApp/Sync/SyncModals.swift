@@ -74,10 +74,14 @@ import SwiftUI
         let (core, form) = (core, form)
         Task {
             let r: Result<SyncFolder, Error> = await Task.detached(priority: .userInitiated) {
-                Result {
-                    switch form.mode {
-                    case .local: try core.syncAddFolder(path: form.folder)
-                    case .shared: try core.syncJoin(keyOrLink: form.key.trimmingCharacters(in: .whitespacesAndNewlines), path: form.location)
+                Result { () throws -> SyncFolder in
+                    let key = form.key.trimmingCharacters(in: .whitespacesAndNewlines)
+                    switch (form.mode, form.onDemand) {
+                    case (.local, false): return try core.syncAddFolder(path: form.folder)
+                    // Its files go into this Mac's storage before it ever opens: added whole or not at all.
+                    case (.local, true): return try core.syncAddFolderOnDemand(path: form.folder)
+                    case (.shared, false): return try core.syncJoin(keyOrLink: key, path: form.location)
+                    case (.shared, true): return try core.syncJoinOnDemand(link: key, place: form.location)
                     }
                 }
             }.value
@@ -151,6 +155,7 @@ struct SyncAddView: View {
                 }
             }
             .padding(.top, 18)
+            onDemand.padding(.top, 14)
             if let e = model.error { ModalError(text: e).padding(.top, 14) }
             ModalButtons(primary: "Start", enabled: model.form.canStart, busy: model.busy,
                          primaryHelp: model.form.mode == .local ? "Start syncing this folder" : "Join the shared folder",
@@ -221,6 +226,22 @@ struct SyncAddView: View {
         .font(.system(size: 13))
     }
 
+    /// Files on demand (SPEC 7G.11), and what it means for this way in.
+    private var onDemand: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Toggle(syncOnDemandLabel(), isOn: $model.form.onDemand)
+                .toggleStyle(.checkbox).help(syncOnDemandHelp())
+                .accessibilityIdentifier("sync-on-demand")
+            if model.form.onDemand {
+                Text(model.form.mode == .local ? model.core.syncOnDemandAddNote(path: model.form.folder) : syncOnDemandNote(change: .join, placeShown: ""))
+                    .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("sync-on-demand-note")
+            }
+        }
+        .font(.system(size: 13))
+        .padding(.leading, 92)
+    }
+
     private static let choose = "\u{1}choose"
 
     /// The popup's places: the default for this link, and the one the user chose.
@@ -243,7 +264,11 @@ struct SyncAddView: View {
     var newParent: String?
     var paused = false
     var lanOnly = false
+    /// Files on demand (SPEC 7G.11).
+    var onDemand = false
     var optionsOpen = false
+    /// The Finder's side of on-demand folders (its domain goes first when switching back to full).
+    @ObservationIgnored var fileProvider: FileProviderHost?
     var error: String?
     var busy = false
 
@@ -259,12 +284,22 @@ struct SyncAddView: View {
             name = f.name
             paused = f.state == .paused
             lanOnly = f.lanOnly
+            onDemand = f.onDemand
         }
     }
 
     var parent: String { newParent ?? ((folder?.path ?? "") as NSString).deletingLastPathComponent }
     var target: String { (parent as NSString).appendingPathComponent(name.trimmingCharacters(in: .whitespaces)) }
-    var changed: Bool { folder.map { target != $0.path || paused != ($0.state == .paused) || lanOnly != $0.lanOnly } ?? false }
+    var changed: Bool {
+        folder.map { target != $0.path || paused != ($0.state == .paused) || lanOnly != $0.lanOnly || onDemand != $0.onDemand } ?? false
+    }
+
+    /// What Files on demand means as it is set now (`nil` for a full folder that stays full).
+    var onDemandNote: String? {
+        guard let f = folder else { return nil }
+        let change: SyncOnDemandChange? = onDemand ? (f.onDemand ? .stays : .turnOn) : (f.onDemand ? .turnOff : nil)
+        return change.map { syncOnDemandNote(change: $0, placeShown: Notifier.abbreviate(f.path)) }
+    }
 
     func move() {
         let panel = NSOpenPanel()
@@ -289,18 +324,26 @@ struct SyncAddView: View {
         let (core, id, target, newName, moved) = (core, id, target, name.trimmingCharacters(in: .whitespaces), newParent != nil)
         let pause = paused != (f.state == .paused) ? Optional(paused) : nil
         let lan = lanOnly != f.lanOnly ? Optional(lanOnly) : nil
+        let mode = onDemand != f.onDemand ? Optional(onDemand) : nil
         let place = target != f.path
+        let fp = fileProvider
         busy = true
         error = nil
         Task {
+            // (Back to full: the core has the Finder's domain removed first, so the place is an ordinary folder again.)
             let r: Result<Void, Error> = await Task.detached(priority: .userInitiated) {
                 Result {
+                    if mode == false { _ = try core.syncSetOnDemand(id: id, onDemand: false, path: nil) }
                     if place, moved { _ = try core.syncMove(id: id, path: target) }
                     else if place { _ = try core.syncRename(id: id, name: newName) }
                     if let pause { try core.syncPause(id: id, paused: pause) }
                     if let lan { try core.syncSetLanOnly(id: id, lanOnly: lan) }
+                    if mode == true { _ = try core.syncSetOnDemand(id: id, onDemand: true, path: nil) }
                 }
             }.value
+            if mode == true, let now = core.syncSnapshot().folders.first(where: { $0.id == id }), now.onDemand {
+                await fp?.added(now)
+            }
             busy = false
             switch r {
             case .success: done()
@@ -350,12 +393,23 @@ struct SyncEditView: View {
             }
             HStack(spacing: 10) {
                 Text("Location").frame(width: 82, alignment: .leading)
-                Text(Notifier.abbreviate(model.parent))
+                Text(model.folder.map { syncPlaceLine(folder: $0, pathShown: Notifier.abbreviate(model.parent)) } ?? "")
                     .foregroundStyle(model.newParent == nil ? .secondary : .primary)
                     .lineLimit(1).truncationMode(.middle)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .help(model.target)
+                // An on-demand folder is where the Finder shows it; it moves once it is full again.
                 Button("Move…", action: model.move).help("Choose another folder for it on this Mac; it keeps its name")
+                    .disabled(model.folder?.onDemand == true)
+            }
+            Divider().padding(.vertical, 2)
+            VStack(alignment: .leading, spacing: 5) {
+                Toggle(syncOnDemandLabel(), isOn: $model.onDemand)
+                    .toggleStyle(.switch).controlSize(.small).help(syncOnDemandHelp())
+                    .accessibilityIdentifier("sync-edit-on-demand")
+                if let note = model.onDemandNote {
+                    Text(note).font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                }
             }
             Divider().padding(.vertical, 2)
             VStack(alignment: .leading, spacing: 8) {
@@ -398,6 +452,7 @@ struct SyncEditView: View {
     private var add: (NSWindow, SyncAddModel)?
     private var edits: [String: NSWindow] = [:]
     private var finder: NSWindow?
+    private var fileProvider: NSWindow?
     private var shares: [String: NSWindow] = [:]
 
     var qaAddModel: SyncAddModel? { add?.1 }
@@ -412,6 +467,8 @@ struct SyncEditView: View {
         let model = SyncAddModel(core: actions.core, prefill: prefill ?? actions.pastedKey())
         let view = SyncAddView(model: model, cancel: { [weak self] in self?.closeAdd() }, done: { [weak self] f, mode in
             self?.closeAdd()
+            // On demand: its domain now, and the window that asks the user to allow it when macOS keeps it off.
+            if f.onDemand, let fp = actions.fileProvider { Task { await fp.added(f) } }
             // A folder shared from this Mac: the next step is sharing it.
             if mode == .local { self?.showShare(id: f.id, actions: actions) }
         })
@@ -424,6 +481,7 @@ struct SyncEditView: View {
     func showEdit(id: String, actions: SyncActions) {
         if let w = edits[id] { NSApp.activate(); w.makeKeyAndOrderFront(nil); return }
         let model = SyncEditModel(core: actions.core, id: id)
+        model.fileProvider = actions.fileProvider
         let view = SyncEditView(model: model, actions: actions, cancel: { [weak self] in self?.closeEdit(id) }, done: { [weak self] in self?.closeEdit(id) })
         let w = makeWindow(NSHostingController(rootView: view), id: "sync-edit-\(id)")
         edits[id] = w
@@ -483,6 +541,24 @@ struct SyncEditView: View {
         w.close()
     }
 
+    /// Allowing Seedwell's on-demand folders in the Finder (macOS starts the domain switched off).
+    func showFileProviderSetup(host: FileProviderHost) {
+        if let w = fileProvider { NSApp.activate(); w.makeKeyAndOrderFront(nil); return }
+        let view = FileProviderSetupView(host: host, done: { [weak self] in self?.closeFileProviderSetup() })
+        let w = makeWindow(NSHostingController(rootView: view), id: "file-provider-setup")
+        fileProvider = w
+        NSApp.activate()
+        w.makeKeyAndOrderFront(nil)
+    }
+
+    func closeFileProviderSetup() {
+        guard let w = fileProvider else { return }
+        fileProvider = nil
+        w.delegate = nil
+        w.contentViewController = nil
+        w.close()
+    }
+
     private func makeWindow<V: View>(_ host: NSHostingController<V>, id: String) -> NSWindow {
         host.sizingOptions = .preferredContentSize
         let w = NSWindow(contentViewController: host)
@@ -515,6 +591,7 @@ struct SyncEditView: View {
     func closeAll() {
         closeAdd()
         closeFinderSetup()
+        closeFileProviderSetup()
         for id in Array(edits.keys) { closeEdit(id) }
         for id in Array(shares.keys) { closeShare(id) }
     }
@@ -523,6 +600,7 @@ struct SyncEditView: View {
         guard let w = notification.object as? NSWindow else { return }
         if add?.0 === w { add = nil }
         if finder === w { finder = nil }
+        if fileProvider === w { fileProvider = nil }
         if let id = shares.first(where: { $0.value === w })?.key { shares[id] = nil }
         if let id = edits.first(where: { $0.value === w })?.key { edits[id] = nil }
         w.delegate = nil

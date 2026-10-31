@@ -3,6 +3,14 @@ import Testing
 
 /// The QA control file's protocol (QAControl): the lines a script appended, and `wait`'s argument.
 @MainActor @Suite struct QAControlTests {
+    /// QA commands read the windows, chats among them: only an isolated copy takes them, never the user's Seedwell.
+    @Test func qaControlNeedsAnIsolatedRun() {
+        #expect(LaunchOptions(["--qa-control", "/tmp/ctl"]).configurationError == "--qa-control needs --state-dir and --home-root.")
+        #expect(LaunchOptions(["--qa-control", "/tmp/ctl", "--state-dir", "/tmp/s", "--home-root", "/tmp/h"]).configurationError == nil)
+        #expect(LaunchOptions(["--mock", "--qa-control", "/tmp/ctl"]).configurationError == nil, "mock data is no one's")
+        #expect(LaunchOptions([]).configurationError == nil)
+    }
+
     @Test func onlyCompleteLinesAreRunAndEmptyOnesCount() {
         // A line still being written (no newline yet) waits; an empty line counts, as `wc -l` counts it in qa_cmd.
         #expect(QAControl.completeLines("") == [])

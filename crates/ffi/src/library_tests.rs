@@ -4,7 +4,7 @@ use crate::library_rows::tests::{download, seed};
 use crate::library_rows::{GroupMore, ListCommand, ListGroup, RowControlKind};
 use crate::row_text::TextTone;
 use crate::sidebar::{tracker_order, SidebarCommand, SidebarIcon};
-use crate::sync::SyncRole;
+use crate::sync::{SyncAgentAccess, SyncRole};
 use crate::types::{PendingStart, SharingCounts, TrackerSummary, TransferRow, TransferState};
 use crate::CoreOptions;
 
@@ -542,6 +542,34 @@ fn the_sidebar_lists_channels_with_their_unread_messages() {
     assert_eq!(chats.add.title, "New Channel…");
     assert_eq!(chats.add.help, "Make a channel with your devices, the people you share with and their agents, or join one with a link");
     assert!(model(&i, &st).sidebar.directs.is_none(), "no Direct Messages without any");
+    assert!(chats.channels.iter().all(|c| c.item.tag.is_none() && c.topics.iter().all(|t| t.tag.is_none())), "the user's channels: no tag");
+}
+
+#[test]
+fn an_agent_channel_is_tagged_in_the_sidebar_and_named_on_its_page() {
+    let mut bridge = channel("Bridge", 2, 2, 0, false);
+    bridge.agent_channel = true;
+    bridge.agents = SyncAgentAccess::ReadPost;
+    let mut i = inputs(snap());
+    i.channels = vec![bridge.clone(), channel("Family", 3, 1, 0, false)];
+    i.topics = vec![vec![topic("Mac", "Bridge", 0)], vec![]];
+    let mut st = state(LibraryPlace::Chat { channel_id: "Bridge".into(), topic_id: None });
+    st.open_channels.insert("Bridge".into());
+    let m = model(&i, &st);
+    let chats = &m.sidebar.chats;
+    let tag = chats.channels[0].item.tag.as_ref().expect("an agent channel is tagged");
+    assert_eq!(tag.text, "agents");
+    assert!(tag.help.contains("Read and post"), "{}", tag.help);
+    assert!(chats.channels[0].topics[0].tag.is_none() && chats.channels[1].item.tag.is_none(), "its topics and the user's channel: none");
+    assert_eq!(m.summary, "Agent channel · Owner · 2 of 2 online · agents: read and post");
+    // Closed by this computer's user: the tag stays (what it is), its tooltip says what agents may do now, and the
+    // sidebar is drawn again.
+    let before = m.sidebar.signature.clone();
+    i.channels[0].agents = SyncAgentAccess::Off;
+    let m = model(&i, &st);
+    assert!(m.sidebar.chats.channels[0].item.tag.as_ref().unwrap().help.contains(": Off"));
+    assert_ne!(m.sidebar.signature, before);
+    assert_eq!(m.summary, "Agent channel · Owner · 2 of 2 online");
 }
 
 #[test]

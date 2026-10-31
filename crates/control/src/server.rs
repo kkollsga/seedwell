@@ -430,6 +430,7 @@ async fn serve_conn<B: Backend>(ctx: &Arc<Ctx<B>>, stream: transport::Conn) {
             },
             ev = next_event(&mut conn.sub) => {
                 let line = match ev {
+                    Ok(e) if !event_visible(ctx, &e) => continue,
                     Ok(e) => ServerLine::event(&e),
                     Err(broadcast::error::RecvError::Lagged(n)) => ServerLine::event(&EventDto {
                         kind: "lagged".into(),
@@ -452,12 +453,51 @@ struct Reply {
     value: Value,
     /// Extra text for the activity log (names of what was removed, ...).
     note: Option<String>,
+    /// The channel the call was about (its id), so an agent's `activity` leaves the entry out while the channel is
+    /// closed to agents ([`ActivityDto::channel`]).
+    channel: Option<String>,
+    /// The call was about private messages ([`ActivityDto::direct`]).
+    direct: bool,
 }
 
 fn reply<T: Serialize>(v: &T) -> Result<Reply, ApiError> {
     serde_json::to_value(v)
-        .map(|value| Reply { value, note: None })
+        .map(|value| Reply { value, note: None, channel: None, direct: false })
         .map_err(|e| ApiError::internal(format!("cannot encode result: {e}")))
+}
+
+/// An event an agent may be given now. A `chat.message` was published only while its channel (or, for a private
+/// message, the Mac's switch) let agents read, but the user may have switched that off since: it is checked again
+/// whenever the event is handed out, live or replayed by `events`.
+fn event_visible<B: Backend>(ctx: &Ctx<B>, e: &EventDto) -> bool {
+    e.kind != "chat.message" || chat_event_visible(ctx, e)
+}
+
+#[cfg(feature = "sync")]
+fn chat_event_visible<B: Backend>(ctx: &Ctx<B>, e: &EventDto) -> bool {
+    ctx.backend.sync().is_some_and(|h| chat_methods::message_visible(&h, &e.data))
+}
+
+#[cfg(not(feature = "sync"))]
+fn chat_event_visible<B: Backend>(_ctx: &Ctx<B>, _e: &EventDto) -> bool {
+    false
+}
+
+/// An activity entry an agent may be given now: none about a channel, or private messages, closed to agents.
+#[cfg(feature = "sync")]
+fn activity_visible<B: Backend>(ctx: &Ctx<B>, e: &ActivityDto) -> bool {
+    if e.channel.is_none() && !e.direct {
+        return true;
+    }
+    ctx.backend.sync().is_some_and(|h| {
+        let channel_ok = e.channel.as_deref().is_none_or(|id| chat_methods::channel_visible(&h, id));
+        channel_ok && (!e.direct || chat_methods::directs_visible(&h))
+    })
+}
+
+#[cfg(not(feature = "sync"))]
+fn activity_visible<B: Backend>(_ctx: &Ctx<B>, e: &ActivityDto) -> bool {
+    e.channel.is_none() && !e.direct
 }
 
 async fn handle_line<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &mut Conn, limiter: &mut RateLimiter, line: &[u8]) -> Vec<u8> {
@@ -505,10 +545,10 @@ async fn handle_line<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &mut Conn, limiter: &m
     };
     if method.mutating() {
         let who = client.or_else(|| conn.client.clone()).unwrap_or_else(|| "unknown".into());
-        let (outcome, note) = match &result {
-            Ok(r) => ("ok".to_owned(), r.note.clone()),
-            Err(_) if denied => ("denied".to_owned(), None),
-            Err(e) => (format!("error: {}", e.code.as_str()), None),
+        let (outcome, note, channel, direct) = match &result {
+            Ok(r) => ("ok".to_owned(), r.note.clone(), r.channel.clone(), r.direct),
+            Err(_) if denied => ("denied".to_owned(), None, None, false),
+            Err(e) => (format!("error: {}", e.code.as_str()), None, None, false),
         };
         let mut summary = request.as_ref().map_or_else(|| format!("{} (refused)", method.name()), describe);
         if let Some(n) = note {
@@ -522,6 +562,8 @@ async fn handle_line<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &mut Conn, limiter: &m
             // Folder keys never reach the log, whatever field they were pasted into.
             summary: clip(&crate::redact::scrub_keys(&summary), 600),
             outcome,
+            channel,
+            direct,
         });
     }
     match result {
@@ -724,7 +766,9 @@ async fn dispatch<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &mut Conn, req: Request) 
         }
         Request::Events(p) => {
             let kinds = p.kinds.map(|k| k.into_iter().take(32).collect::<HashSet<_>>());
-            reply(&ctx.hub.since(p.since, p.limit.unwrap_or(100).min(500) as usize, kinds.as_ref()))
+            let mut out = ctx.hub.since(p.since, p.limit.unwrap_or(100).min(500) as usize, kinds.as_ref());
+            out.events.retain(|e| event_visible(ctx, e));
+            reply(&out)
         }
         Request::WaitFor(p) => wait_for(ctx, p).await,
         Request::AwakeSet(p) => {
@@ -758,6 +802,18 @@ async fn dispatch<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &mut Conn, req: Request) 
             })
             .await??;
             reply(&out)
+        }
+        Request::UpdateDevBuilds(p) => {
+            let b = updater(ctx)?;
+            let out = blocking(move || -> Result<UpdateStatusDto, ApiError> {
+                let note = b.set_dev_builds(p.on).map_err(ApiError::invalid)?;
+                Ok(UpdateStatusDto { note, ..b.status() })
+            })
+            .await??;
+            // The user sees in Settings › Agents what it led to (the way back to the release, say).
+            let mut r = reply(&out)?;
+            r.note = Some(out.note);
+            Ok(r)
         }
         Request::UpdateWatch(p) => {
             let b = updater(ctx)?;
@@ -793,7 +849,13 @@ async fn dispatch<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &mut Conn, req: Request) 
             .await?;
             reply(&out)
         }
-        Request::Activity(p) => reply(&json!({ "entries": ctx.activity.recent(p.limit.unwrap_or(50).min(1000) as usize) })),
+        Request::Activity(p) => {
+            // What agents did in a channel closed to agents (or with private messages, while those are) is left out:
+            // its entries name the channel. The user sees every entry in the app.
+            let limit = p.limit.unwrap_or(50).min(1000) as usize;
+            let entries: Vec<ActivityDto> = ctx.activity.recent(1000).into_iter().filter(|e| activity_visible(ctx, e)).take(limit).collect();
+            reply(&json!({ "entries": entries }))
+        }
 
         Request::Add(p) => add(ctx, p).await,
         Request::Pause(t) => bulk(ctx, t, "paused").await,
@@ -1073,7 +1135,20 @@ async fn dispatch<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &mut Conn, req: Request) 
         | Request::SyncRemove(_)
         | Request::SyncRemoveConfirm(_)
         | Request::SyncSettings(_)
-        | Request::SyncSetSettings(_)) => sync_call(ctx, conn, r).await,
+        | Request::SyncSetSettings(_)
+        | Request::SyncSetMode(_)
+        | Request::SyncItems(_)
+        | Request::SyncUnavailable(_)
+        | Request::SyncChanges(_)
+        | Request::SyncFetch(_)
+        | Request::SyncCancelFetch(_)
+        | Request::SyncPin(_)
+        | Request::SyncUnpin(_)
+        | Request::SyncEvict(_)
+        | Request::SyncHostWrite(_)
+        | Request::SyncHostMkdir(_)
+        | Request::SyncHostDelete(_)
+        | Request::SyncHostRename(_)) => sync_call(ctx, conn, r).await,
         r @ (Request::ChatList(_)
         | Request::ChatNew(_)
         | Request::ChatJoin(_)
@@ -1087,7 +1162,6 @@ async fn dispatch<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &mut Conn, req: Request) 
         | Request::ChatMute(_)
         | Request::ChatRename(_)
         | Request::ChatAddAddress(_)
-        | Request::ChatSetAgents(_)
         | Request::ChatSetWake(_)
         | Request::ChatLeave(_)
         | Request::ChatTopics(_)
@@ -1095,7 +1169,6 @@ async fn dispatch<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &mut Conn, req: Request) 
         | Request::ChatDmList(_)
         | Request::ChatDmRead(_)
         | Request::ChatDmSend(_)
-        | Request::ChatDmSetAgents(_)
         | Request::ChatDmDelete(_)) => chat_call(ctx, conn, r).await,
         Request::SettingsSet(p) => {
             let st = ctx.state.clone();

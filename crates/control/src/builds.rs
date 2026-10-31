@@ -1,5 +1,5 @@
 //! Installing builds over the control socket (SPEC 12A, Development builds): `update.status`, `update.install` (a
-//! zip handed over) and `update.watch` (a folder to follow). The app's updater does the work and decides what is
+//! zip handed over), `update.watch` (a folder to follow) and `update.dev_builds` (the switch itself). The app's updater does the work and decides what is
 //! allowed (the "Allow development builds" switch); this is only where the server finds it, filled in once the
 //! updater runs. A daemon has none, and says so.
 
@@ -17,6 +17,9 @@ pub trait Builds: Send + Sync {
     fn install(&self, zip: &Path, sha256: Option<&str>) -> Result<String, String>;
     /// Follow `folder` (an absolute path), or stop following one (`None`).
     fn watch(&self, folder: Option<&Path>) -> Result<String, String>;
+    /// Turn "Allow development builds" on or off, as its switch in Settings does (off while a development build
+    /// runs: the way back to the latest release).
+    fn set_dev_builds(&self, on: bool) -> Result<String, String>;
 }
 
 /// Where the control server finds the updater (empty until the app's updater registers itself).

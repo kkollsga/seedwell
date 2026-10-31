@@ -1059,6 +1059,8 @@ mod tests {
             error: None,
             last_synced_s: None,
             channel_id: None,
+            on_demand: false,
+            unavailable: 0,
         }
     }
 

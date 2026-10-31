@@ -26,23 +26,27 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 struct RemovalState {
     /// The folder whose confirmation is open.
     open: Option<String>,
+    /// How many of its files no other device is known to hold (given when it opened).
+    only_here: u64,
     /// "Also move the files to the Trash".
     trash: bool,
 }
 
 impl RemovalState {
-    fn toggle(&mut self, id: &str) {
+    fn toggle(&mut self, id: &str, only_here: u64) {
         if self.open.as_deref() == Some(id) {
             self.close();
         } else {
             self.open = Some(id.to_string());
             self.trash = false;
+            self.only_here = only_here;
         }
     }
 
     fn close(&mut self) {
         self.open = None;
         self.trash = false;
+        self.only_here = 0;
     }
 
     fn keep_only(&mut self, ids: &HashSet<&str>) {
@@ -67,9 +71,10 @@ impl SyncRemoval {
         Arc::new(Self::default())
     }
 
-    /// The trash button of a row: opens its confirmation (closing another one), or closes its own.
-    pub fn toggle(&self, id: String) {
-        lock(&self.state).toggle(&id);
+    /// The trash button of a row: opens its confirmation (closing another one), or closes its own. `only_here`: how
+    /// many of the folder's files no other device is known to hold (`Core::sync_only_here`), for its question.
+    pub fn toggle(&self, id: String, only_here: u64) {
+        lock(&self.state).toggle(&id, only_here);
     }
 
     /// Cancel, Remove, and every opening of the menu.
@@ -123,7 +128,7 @@ pub struct SyncMenuRow {
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct SyncMenuConfirm {
     pub folder_id: String,
-    /// "Stop syncing “Photos” on this Mac? Other devices keep their copy."
+    /// "Stop syncing “Photos” on this Mac? Other devices keep their copy." (or which files only this Mac has)
     pub question: String,
     pub trash_label: String,
     /// The Trash option is ticked.
@@ -187,7 +192,7 @@ fn build(s: &SyncSnapshot, r: &RemovalState) -> SyncMenuModel {
         .collect();
     let confirm = open.and_then(|id| s.folders.iter().find(|f| f.id == id)).map(|f| SyncMenuConfirm {
         folder_id: f.id.clone(),
-        question: sync_remove_question(f.name.clone()),
+        question: sync_remove_question(f.name.clone(), r.only_here),
         trash_label: sync_remove_trash_label(),
         trash: r.trash,
         cancel_title: "Cancel".into(),
@@ -231,18 +236,18 @@ mod tests {
     fn one_delete_confirmation_is_open_at_a_time() {
         let r = SyncRemoval::new();
         assert_eq!(r.open_folder(), None);
-        r.toggle("A".into());
+        r.toggle("A".into(), 0);
         assert!(r.is_open("A".into()));
         r.set_trash(true);
-        r.toggle("B".into());
+        r.toggle("B".into(), 0);
         assert!(r.is_open("B".into()) && !r.is_open("A".into()), "another row closes the first");
         assert!(!r.trash(), "each opening starts without the Trash");
-        r.toggle("B".into());
+        r.toggle("B".into(), 0);
         assert_eq!(r.open_folder(), None, "the trash button again closes it");
-        r.toggle("C".into());
+        r.toggle("C".into(), 0);
         lock(&r.state).keep_only(&["A", "B"].into_iter().collect());
         assert_eq!(r.open_folder(), None, "a folder removed elsewhere takes its question with it");
-        r.toggle("A".into());
+        r.toggle("A".into(), 0);
         r.set_trash(true);
         r.close(); // every opening of the menu
         assert_eq!((r.open_folder(), r.trash()), (None, false));
@@ -276,7 +281,7 @@ mod tests {
     #[test]
     fn the_confirmation_goes_under_its_row_with_its_texts() {
         let removal = SyncRemoval::new();
-        removal.toggle("ID-B".into());
+        removal.toggle("ID-B".into(), 0);
         removal.set_trash(true);
         let m = sync_menu_model(snap(vec![folder("A", SyncState::UpToDate), folder("B", SyncState::UpToDate)]), removal.clone());
         assert_eq!(m.rows.iter().map(|r| r.confirming).collect::<Vec<_>>(), [false, true]);
@@ -303,7 +308,7 @@ mod tests {
         assert_ne!(sig(vec![folder("A", SyncState::UpToDate), folder("B", SyncState::UpToDate)], &r), one, "a folder added");
         let renamed = crate::sync::SyncFolder { name: "A2".into(), ..folder("A", SyncState::UpToDate) };
         assert_ne!(sig(vec![renamed], &r), one, "a folder renamed");
-        r.toggle("ID-A".into());
+        r.toggle("ID-A".into(), 0);
         assert_ne!(sig(vec![folder("A", SyncState::UpToDate)], &r), one, "a confirmation opened");
         r.close();
         assert_eq!(sig(vec![folder("A", SyncState::UpToDate)], &r), one);

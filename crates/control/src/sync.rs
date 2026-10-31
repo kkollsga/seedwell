@@ -260,7 +260,7 @@ pub fn not_running() -> ApiError {
 pub fn err(e: SyncError) -> ApiError {
     match e {
         SyncError::NotFound => ApiError::not_found("no such synced folder (see `seedwell sync list`)"),
-        SyncError::Invalid(why) => ApiError::invalid(clip(&scrub_keys(&why), 300)),
+        SyncError::Invalid(why) | SyncError::OnDemand(_, why) => ApiError::invalid(clip(&scrub_keys(&why), 300)),
         SyncError::Io(e) => ApiError::new(ErrorCode::Engine, clip(&scrub_keys(&e.to_string()), 300)),
     }
 }
@@ -385,6 +385,8 @@ pub fn folder_dto(f: &FolderStatus) -> SyncFolderDto {
         error: f.error.as_deref().map(|e| clip(&scrub_keys(e), 300)),
         last_synced_at: f.last_synced_s,
         channel_id: f.channel_id.clone(),
+        on_demand: f.on_demand,
+        unavailable: f.unavailable,
     }
 }
 
@@ -566,6 +568,16 @@ pub fn move_to_trash(folder: &Path, trash_dir: Option<&Path>) -> Result<Trashed,
     trs_platform::fs::move_to_trash(folder, trash_dir, OtherVolume::Refuse)
 }
 
+/// What stopping a folder on this computer leaves the other devices: `only_here` is how many of its files no other
+/// device is known to hold ([`trs_sync_net::SyncHandle::only_here`]).
+pub fn others_after_removal(only_here: u64) -> String {
+    match only_here {
+        0 => "Other devices keep their copy.".into(),
+        1 => concat!("1 file exists only on this ", trs_platform::computer!(), "; other devices lose access to it.").into(),
+        n => format!(concat!("{} files exist only on this ", trs_platform::computer!(), "; other devices lose access to them."), n),
+    }
+}
+
 /// " (where)" for a folder moved to a Trash folder; nothing for the Recycle Bin, which has no path.
 pub fn trash_shown(t: &Trashed) -> String {
     t.path().map(|p| format!(" ({})", p.display())).unwrap_or_default()
@@ -607,6 +619,7 @@ pub fn channel_dto(c: &trs_sync_net::chat::ChannelStatus) -> ChatChannelDto {
         last_message_at: c.last_message_s,
         muted: c.muted,
         agents: c.agents.name().into(),
+        agent_channel: c.agent_channel,
         wake_command: c.wake_command.clone(),
         issues: c.issues.iter().take(50).map(|i| clip(i, 300)).collect(),
     }
@@ -727,6 +740,8 @@ mod tests {
             error: None,
             last_synced_s: None,
             channel_id: None,
+            on_demand: false,
+            unavailable: 0,
         }
     }
 

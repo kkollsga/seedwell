@@ -62,6 +62,9 @@ pub struct Options {
     pub bind: IpAddr,
     /// Run LAN discovery (off in tests that run several devices on one machine).
     pub lan_discovery: bool,
+    /// How often a folder held back by an unfinished move (its original's disk not there) is tried again, besides
+    /// [`SyncHandle::volumes_changed`].
+    pub held_retry: Duration,
     /// LAN discovery's UDP port ([`crate::lan::PORT`]; tests pick their own).
     pub lan_port: u16,
     /// Where every LAN announcement also goes, by unicast (tests: the other services on loopback). With
@@ -71,6 +74,9 @@ pub struct Options {
     pub utp: bool,
     /// Dial over TCP (tests turn it off to force uTP).
     pub dial_tcp: bool,
+    /// **Tests:** at most this many direct dials, from the start (`None`: no limit). See
+    /// [`SyncHandle::test_dials_left`].
+    pub dials: Option<u32>,
     /// The protocol versions to speak, lowest and highest ([`trs_sync_proto::msg::MIN_PROTOCOL`],
     /// [`trs_sync_proto::msg::PROTOCOL`]); tests play older or newer devices with others.
     pub protocol: (u32, u32),
@@ -80,6 +86,39 @@ pub struct Options {
     /// temporary folder excepted); a first start finds no device over the Internet and relays nothing (LAN only),
     /// and joined folders go to `Sync` in the state folder unless another place is set.
     pub forbidden_root: Option<PathBuf>,
+    /// A headless daemon's agent switch (`seedwell daemon --chat-agents`), which has no app for the user to set
+    /// it in: every channel (those it has, makes or joins) and private messages are at this level for the run, in
+    /// memory only (never written to `sync.toml`). The app leaves it `None`: there only the user sets each switch.
+    pub chat_agents: Option<crate::chat::AgentAccess>,
+    /// The host that shows on-demand folders in the file manager, once there is one (the app sets it when it serves
+    /// the Mac's File Provider; a headless daemon has none). Shared, so it outlives a restart of the service.
+    pub on_demand_host: OnDemandHostCell,
+}
+
+/// The host that shows on-demand folders in the file manager (the Mac's File Provider domain, SPEC 7G.11). Before a
+/// folder is removed or switched to full, by whoever asks (the app, the control socket, an agent), and after the
+/// checks that need no host, the host lets go of it, so its place is an ordinary folder again.
+pub trait OnDemandHost: Send + Sync {
+    /// Lets go of folder `folder` (called `name`, at `place`): its pending changes handed over first, what the system
+    /// kept put where the user finds it. Blocks until done. An error refuses the removal or switch: nothing changes.
+    fn release(&self, folder: &str, name: &str, place: &Path) -> Result<(), String>;
+    /// The removal or switch is over, done or not (the host shows the folder again if it is still on demand).
+    fn settled(&self, folder: &str);
+}
+
+/// Where the host is, if there is one ([`Options::on_demand_host`]).
+pub type OnDemandHostCell = Arc<Mutex<Option<Arc<dyn OnDemandHost>>>>;
+
+/// Tells the host a removal or switch is over, however it ended.
+pub(crate) struct Settle {
+    host: Arc<dyn OnDemandHost>,
+    folder: String,
+}
+
+impl Drop for Settle {
+    fn drop(&mut self) {
+        self.host.settled(&self.folder);
+    }
 }
 
 impl Options {
@@ -93,13 +132,17 @@ impl Options {
             discovery: None,
             bind: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
             lan_discovery: true,
+            held_retry: Duration::from_secs(60),
             lan_port: crate::lan::PORT,
             lan_targets: Vec::new(),
             utp: true,
             dial_tcp: true,
+            dials: None,
             protocol: (trs_sync_proto::msg::MIN_PROTOCOL, trs_sync_proto::msg::PROTOCOL),
             features: trs_sync_proto::msg::FEATURES,
             forbidden_root: None,
+            chat_agents: None,
+            on_demand_host: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -109,6 +152,8 @@ impl Options {
 pub enum SyncError {
     /// No such folder.
     NotFound,
+    /// An on-demand call refused for a reason a host acts on (SPEC 7G.11), with the words to show.
+    OnDemand(OnDemandError, String),
     /// The request is not acceptable (a bad key, a path in use, …), with the reason.
     Invalid(String),
     /// Reading or writing failed.
@@ -119,6 +164,7 @@ impl std::fmt::Display for SyncError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             SyncError::NotFound => f.write_str("no such folder"),
+            SyncError::OnDemand(_, why) => f.write_str(why),
             SyncError::Invalid(why) => f.write_str(why),
             SyncError::Io(e) => write!(f, "{e}"),
         }
@@ -127,11 +173,45 @@ impl std::fmt::Display for SyncError {
 
 impl std::error::Error for SyncError {}
 
+/// What the host saw of an item it deletes (SPEC 7G.11): the delete is refused when that moved on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DeleteSeen {
+    /// A folder: the newest sequence below it then (another device's version below since refuses).
+    Folder(u64),
+    /// A file: its content version then.
+    File(String),
+}
+
+/// Why an on-demand call failed, for a host that acts on it (a File Provider error, a Cloud Files status).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OnDemandError {
+    /// The folder is not on demand.
+    NotOnDemand,
+    /// No such item (any more).
+    NoItem,
+    /// The anchor is from before the folder's index was made anew: list everything again.
+    AnchorExpired,
+    /// No device has this version right now.
+    Unavailable,
+    /// A fetch waited its time and the content is not here yet.
+    NotHereYet,
+    /// Something there changed since the host saw it (a folder deleted with a version that is not its newest).
+    Changed,
+}
+
+pub(crate) fn on_demand(kind: OnDemandError, why: impl Into<String>) -> SyncError {
+    SyncError::OnDemand(kind, why.into())
+}
+
 impl From<io::Error> for SyncError {
     fn from(e: io::Error) -> Self {
         SyncError::Io(e)
     }
 }
+
+#[path = "service_ondemand.rs"]
+mod ondemand;
+pub use ondemand::{FetchProgress, Fetched};
 
 pub(crate) fn invalid(why: impl Into<String>) -> SyncError {
     SyncError::Invalid(why.into())
@@ -246,10 +326,24 @@ pub(crate) struct Inner {
     pub(crate) net: crate::relay::Net,
     /// How long stopping a folder waits for it to let go ([`STOP_WAIT`]; shorter in tests).
     pub(crate) stop_wait: Mutex<Duration>,
+    /// **Tests:** how long a moved folder stays closed before it opens again (a resumed one, before its sessions
+    /// start anew).
+    pub(crate) reopen_wait: Mutex<Duration>,
+    /// **Tests:** how many more direct dials this device makes (`None`: no limit).
+    pub(crate) dials_left: Mutex<Option<u32>>,
+    /// Folders held back by a move cut off that cannot be finished yet (the original's disk not there), with why: shown
+    /// as missing, tried again when volumes change and on [`Options::held_retry`].
+    pub(crate) held: Mutex<BTreeMap<FolderId, Held>>,
+    /// One retry of the held-back folders at a time (a mount and the timer at once).
+    held_retrying: tokio::sync::Mutex<()>,
     /// The runtime the service runs on (its synchronous methods are called from other threads too).
     pub(crate) rt: tokio::runtime::Handle,
     /// An isolated (test) run's forbidden root ([`Options::forbidden_root`]).
     pub(crate) forbidden_root: Option<PathBuf>,
+    /// A daemon's agent switch for every channel ([`Options::chat_agents`]).
+    pub(crate) chat_agents: Option<crate::chat::AgentAccess>,
+    /// The file manager's host of on-demand folders ([`Options::on_demand_host`]).
+    pub(crate) on_demand_host: OnDemandHostCell,
 }
 
 /// The running service. Cheap to clone.
@@ -356,8 +450,18 @@ impl SyncHandle {
             features: opts.features,
             chat_events: tokio::sync::broadcast::channel(1024).0,
             direct,
+            hold_wait: Mutex::new(Duration::from_secs(10)),
+            silent_ondemand: AtomicBool::new(false),
+            folder_gen: std::sync::atomic::AtomicU64::new(0),
+            sessions: std::sync::atomic::AtomicU64::new(0),
+            ours: Mutex::new(cfg.folders.iter().filter_map(|f| f.id.parse().ok()).collect()),
+            setup_wait: Mutex::new(Duration::ZERO),
+            yes_to_holds: AtomicBool::new(false),
         });
         ctx.limits.set_kib(cfg.settings.up_kib, cfg.settings.down_kib);
+        if let Some(a) = opts.chat_agents {
+            lock(&ctx.direct.settings).agents = a;
+        }
         let lan = crate::lan::Lan::new(ctx.clone(), opts.bind, opts.lan_port, opts.lan_targets);
         let inner = Arc::new(Inner {
             ctx,
@@ -377,8 +481,14 @@ impl SyncHandle {
             dial_tcp: opts.dial_tcp,
             net: crate::relay::Net::default(),
             stop_wait: Mutex::new(STOP_WAIT),
+            reopen_wait: Mutex::new(Duration::ZERO),
+            dials_left: Mutex::new(opts.dials),
+            held: Mutex::new(BTreeMap::new()),
+            held_retrying: tokio::sync::Mutex::new(()),
             rt: tokio::runtime::Handle::current(),
             forbidden_root: opts.forbidden_root,
+            chat_agents: opts.chat_agents,
+            on_demand_host: opts.on_demand_host,
         });
         let h = SyncHandle { inner };
 
@@ -409,8 +519,14 @@ impl SyncHandle {
             }
             eprintln!(concat!("seedwell sync: channel {} was made by a test build; it is no longer on this ", trs_platform::computer!()), e.name);
         }
+        let stopped = h.recover_journals().await;
+        *lock(&h.inner.held) = stopped.clone();
         let entries = lock(&h.inner.cfg).folders.clone();
         for e in entries {
+            // A move cut off that cannot be finished yet (the original's disk not there): never opened at either end.
+            if e.id.parse::<FolderId>().is_ok_and(|id| stopped.contains_key(&id)) {
+                continue;
+            }
             if let Err(err) = h.open_folder(&e).await {
                 // A folder that cannot open (its key is gone, its disk is missing) stays in the configuration;
                 // removing it again (sync.remove) clears it.
@@ -429,6 +545,7 @@ impl SyncHandle {
             tokio::spawn(hub_loop(h.clone(), hub_rx)),
             tokio::spawn(dial_loop(h.clone())),
             tokio::spawn(access_clock(h.clone())),
+            tokio::spawn(held_loop(h.clone(), opts.held_retry)),
         ];
         if h.inner.discovery.is_some() {
             tasks.push(tokio::spawn(dht_loop(h.clone())));
@@ -522,6 +639,11 @@ impl SyncHandle {
         self.inner.dir.join(format!("{id}.redb"))
     }
 
+    /// Where an on-demand folder keeps the content held on this device.
+    pub(crate) fn cache_path(&self, id: &FolderId) -> PathBuf {
+        self.inner.dir.join(format!("{id}.cache"))
+    }
+
     pub(crate) fn members_path(&self, id: &FolderId) -> PathBuf {
         self.inner.dir.join(format!("{id}.members"))
     }
@@ -587,11 +709,16 @@ impl SyncHandle {
         // Joined with write access and not admitted yet: its changes meanwhile become its own once it is.
         let awaiting = role.is_none() && invite.as_ref().is_some_and(|i| i.invite.role.access() == Access::Write);
         let writers = membership.writers();
-        let root = e.path.clone();
+        let members = crate::roles::member_ids(&membership);
+        // An on-demand folder's files are this device's content cache, which is ours: its marker is made here.
+        let root = if e.on_demand { self.cache_path(&id) } else { e.path.clone() };
+        if e.on_demand {
+            std::fs::create_dir_all(root.join(STATE_DIR))?;
+        }
         let index = self.index_path(&id);
         let ctx = self.inner.ctx.clone();
         let entry = e.clone();
-        let core = tokio::task::spawn_blocking(move || -> Result<(FolderCore, RedbReader), SyncError> {
+        let core = tokio::task::spawn_blocking(move || -> Result<(FolderCore, RedbReader, Ignore), SyncError> {
             let fs = StdFs::new(root.clone());
             let (case_insensitive, exec_bits) = match fs.lstat(STATE_DIR) {
                 Ok(Some(_)) => (
@@ -611,33 +738,59 @@ impl SyncHandle {
                 byte_exact_names: !cfg!(target_os = "macos"),
                 exec_bits,
                 archive: entry.archive,
+                on_demand: entry.on_demand,
             };
             let ignore = load_ignore(&fs, &entry.ignore);
             let clock: Arc<dyn trs_sync::clock::Clock> = Arc::new(SystemClock);
-            let mut core = FolderCore::new(cfg, Box::new(store), Arc::new(fs), Some(ctx.key.clone()), clock, Arc::new(random_id), ignore)
+            let mut core = FolderCore::new(cfg, Box::new(store), Arc::new(fs), Some(ctx.key.clone()), clock, Arc::new(random_id), ignore.clone())
                 .map_err(|e| invalid(e.to_string()))?;
             core.set_membership(&writers, access).map_err(|e| invalid(e.to_string()))?;
             core.set_awaiting_write(awaiting);
-            Ok((core, reader))
+            // Who is no member any more is no source or holder (as `roles::changed` keeps it).
+            if role.is_some() {
+                core.set_members(&members)?;
+            }
+            core.set_pins(entry.pins.iter().cloned());
+            if entry.mode_switched {
+                // Switched: to full, what is still online only is fetched now; to on demand, what is here is
+                // announced again as an on-demand device's.
+                core.set_on_demand(entry.on_demand)?;
+            }
+            Ok((core, reader, ignore))
         })
         .await
         .map_err(io::Error::other)??;
-        let (core, reader) = core;
+        let (core, reader, ignore) = core;
+        if e.mode_switched {
+            if let Some(c) = lock(&self.inner.cfg).folder_mut(&e.id) {
+                c.mode_switched = false;
+            }
+            self.save_config()?;
+        }
 
         let (seq_tx, _) = watch::channel(core.index_state().map(|(_, s)| s).unwrap_or(0));
         let name = e.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let space = Space::new(id, SpaceKind::Folder, FolderKey::Member(pk), secret, membership, members_path, invite, links, name);
         space.paused.store(e.paused, Ordering::Relaxed);
         space.lan_only.store(e.lan_only, Ordering::Relaxed);
+        let mut items = trs_sync::ondemand::Items::default();
+        items.set_not_members(core.not_members());
         let shared = Arc::new(FolderShared {
             space: Arc::new(space),
-            root: e.path.clone(),
+            root: if e.on_demand { self.cache_path(&id) } else { e.path.clone() },
+            place: Mutex::new(e.path.clone()),
+            on_demand: e.on_demand,
+            pins: Mutex::new(e.pins.iter().cloned().collect()),
+            items: Mutex::new(items),
+            freeing: Mutex::new(BTreeMap::new()),
+            ignore,
             core: Mutex::new(core),
             index: reader,
             local_seq: seq_tx,
             remote_changed: Notify::new(),
             live: Mutex::new(Live::default()),
             rescan: Notify::new(),
+            stopped: watch::channel(false).0,
             retention: Retention { max_age_s: i64::from(e.archive_days) * 86_400, ..Retention::default() },
             fetched: crate::limit::Meter::default(),
             served: crate::limit::Meter::default(),
@@ -663,6 +816,7 @@ impl SyncHandle {
             }
         }
         self.inner.ctx.registry.add_folder(shared.clone());
+        self.folders_moved();
         let (stop, rx) = watch::channel(false);
         let task = tokio::spawn(crate::runtime::run(self.inner.ctx.clone(), shared, rx));
         lock(&self.inner.runners).insert(id, Runner { stop, task });
@@ -678,14 +832,49 @@ impl SyncHandle {
     /// with us, and a device that does not hold this folder's key learns only its id. Those that hold it
     /// answer with their own Join, and the folder starts syncing over the existing session.
     async fn offer_folder(&self, folder: FolderId) {
+        // Devices not connected now (one that dialled while it was closed found nothing to share) are dialled.
+        self.inner.wake_dialer.notify_one();
         for p in self.inner.ctx.registry.peers() {
-            if p.access(&folder).is_some() {
+            // Stale on that session (it closed here while linked): the session starts anew, and the new one's Join
+            // says what we hold, so the peer sends again everything since (nothing of it was taken meanwhile).
+            if p.is_stale(&folder) && !self.plays_0_1_11() {
+                let reason = "a folder was opened again here: starting the session anew".to_string();
+                let _ = p.control.send(Message::Close(trs_sync_proto::msg::Close { reason })).await;
+                self.inner.wake_dialer.notify_one();
+                continue;
+            }
+            // Linked, or in our Join on this session already (offered, its answer pending): not again.
+            if p.access(&folder).is_some() || (!self.plays_0_1_11() && lock(&p.joined).contains(&folder)) {
                 continue;
             }
             let join = crate::peer::own_join(&self.inner.ctx, &[folder], &p.exporter, p.device, p.lan).await;
             if !join.folders.is_empty() {
+                lock(&p.joined).insert(folder);
+                lock(&p.offered).insert(folder);
                 let _ = p.control.send(Message::Join(join)).await;
             }
+        }
+    }
+
+    /// **Tests:** [`Ctx::plays_0_1_11`](crate::shared::Ctx::plays_0_1_11).
+    fn plays_0_1_11(&self) -> bool {
+        self.inner.ctx.plays_0_1_11()
+    }
+
+    /// A folder opened or closed here: sessions being set up check their folders again.
+    fn folders_moved(&self) {
+        self.inner.ctx.folder_gen.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// The folder closes here (paused, stopped): every session that has it linked marks it stale at this moment
+    /// ([`crate::shared::PeerHandle::close_folder`]).
+    fn close_on_sessions(&self, folder: &FolderId) {
+        for p in self.inner.ctx.registry.peers() {
+            // (As 0.1.11: nothing marked; what peers send meanwhile is dropped, and not asked for again.)
+            if self.plays_0_1_11() {
+                continue;
+            }
+            p.close_folder(folder);
         }
     }
 
@@ -707,7 +896,74 @@ impl SyncHandle {
         m.add([grant]);
         crate::roles::save(&self.members_path(&id), &m)?;
         self.inner.secrets.put(&crate::roles::secret_name(&id), secret.as_bytes())?;
-        self.install(*secret.public_key(), path, None).await
+        self.install(*secret.public_key(), path, None, false).await
+    }
+
+    /// Adds a folder of this device on demand (SPEC §7G.11): its files go into this device's cache before the folder
+    /// ever opens, so no scan holds it busy, and the add ends on demand or adds nothing. The configuration and the
+    /// journal of the move come first: a move cut off is finished (or undone) at the next start, as a switch's is; a
+    /// move that cannot be finished now keeps the folder, held back, and says so; any other failure forgets it again,
+    /// its files where they were.
+    pub async fn add_folder_on_demand(&self, path: PathBuf) -> Result<FolderStatus, SyncError> {
+        let path = absolute(&path)?;
+        let meta = std::fs::metadata(&path).map_err(|_| invalid(format!("{} does not exist", path.display())))?;
+        if !meta.is_dir() {
+            return Err(invalid(format!("{} is not a folder", path.display())));
+        }
+        refuse_cloud_root(&path)?;
+        self.refuse_forbidden(&path)?;
+        self.refuse_overlap(&path)?;
+        let secret = FolderSecret::generate(&mut ring::rand::SystemRandom::new()).map_err(io::Error::other)?;
+        let id = FolderId::of_public_key(secret.public_key());
+        let me = *self.inner.ctx.key.public_key();
+        let grant = Statement::by_owner(&secret, Body::Grant { device: me, role: Role::Owner, serial: 1, at_s: crate::roles::now_s(), invite: None });
+        let mut m = Membership::new(*secret.public_key());
+        m.add([grant]);
+        crate::roles::save(&self.members_path(&id), &m)?;
+        self.inner.secrets.put(&crate::roles::secret_name(&id), secret.as_bytes())?;
+        let mut entry = FolderEntry::new(id.to_string(), path.clone());
+        entry.folder_pk = hex(secret.public_key());
+        {
+            let mut cfg = lock(&self.inner.cfg);
+            cfg.folders.retain(|f| f.id != entry.id);
+            cfg.folders.push(entry.clone());
+        }
+        lock(&self.inner.ctx.ours).insert(id);
+        let undo = |me: &Self, why: String| {
+            let _ = me.forget_folder(&id);
+            prune_state(&path);
+            invalid(why)
+        };
+        if let Err(e) = self.save_config().and_then(|()| std::fs::create_dir_all(path.join(STATE_DIR))) {
+            return Err(undo(self, format!("the folder could not be added ({e}); nothing changed")));
+        }
+        let cache = self.cache_path(&id);
+        let j = Journal::Switch { on: true, from: path.clone(), to: cache.clone(), place: path.clone(), copied: false, renamed: false, made_to: !cache.exists(), done: false };
+        if let Err(e) = write_journal_at(&self.journal_path(&id), &j) {
+            return Err(undo(self, format!("the move could not be noted ({e}); nothing changed")));
+        }
+        match self.noted_move(&id, j).await {
+            Err(e) if unfinished(&e) => return Err(self.hold_unfinished(&id, &e)),
+            Err(e) => {
+                self.drop_journal(&id);
+                return Err(undo(self, format!("its files could not be moved into this device's storage ({e}); nothing was added, they are in {}", path.display())));
+            }
+            // From another volume, an original that could not be deleted all the way is left set aside: said where,
+            // as a switch says it.
+            Ok(Some(left)) => eprintln!("seedwell sync: the folder's files are in {}; a copy left behind could not be deleted: {}", cache.display(), left.display()),
+            Ok(None) => {}
+        }
+        entry.on_demand = true;
+        entry.mode_switched = true;
+        if let Some(e) = lock(&self.inner.cfg).folder_mut(&id.to_string()) {
+            *e = entry.clone();
+        }
+        // Saved, the journal goes; not saved, it stays and the next start finishes the switch.
+        if self.save_config().is_ok() {
+            self.drop_journal(&id);
+        }
+        self.open_folder(&entry).await?;
+        self.folder_status(&id).ok_or(SyncError::NotFound)
     }
 
     /// Joins a shared folder with an invitation link, at `path` (created when missing). The folder waits until
@@ -717,18 +973,31 @@ impl SyncHandle {
     /// this device. Both invitations are checked first: an expired one refuses the whole join; one that is used up
     /// or revoked is refused by whoever admits, for each.
     pub async fn join_folder(&self, key_or_link: &str, path: PathBuf) -> Result<FolderStatus, SyncError> {
+        self.join_with(key_or_link, path, false).await
+    }
+
+    async fn join_with(&self, key_or_link: &str, path: PathBuf, on_demand: bool) -> Result<FolderStatus, SyncError> {
         let (link, chat) = InviteLink::parse_bundle(key_or_link).map_err(|e| invalid(e.to_string()))?;
         let now = crate::roles::now_s();
         if link.invite.expired(now) || chat.as_ref().is_some_and(|c| c.invite.expired(now)) {
             return Err(invalid("this link has expired"));
         }
         let path = absolute(&path)?;
-        refuse_cloud_root(&path)?;
+        // An on-demand folder's place is where the host shows it, inside the system's cloud folders on a Mac.
+        if !on_demand {
+            refuse_cloud_root(&path)?;
+        }
         self.refuse_forbidden(&path)?;
         self.refuse_overlap(&path)?;
         let id = link.invite.folder_id();
-        if self.inner.ctx.registry.folder(&id).is_some() {
+        // Running or not (held back by an unfinished move, failed to open): one folder is never joined twice.
+        if self.inner.ctx.registry.folder(&id).is_some() || lock(&self.inner.cfg).folder(&id.to_string()).is_some() {
             return Err(invalid(concat!("this folder is already synced on this ", trs_platform::computer!())));
+        }
+        // Files of an earlier time on demand are never read in as this device's: the user decides what they are.
+        let cache = self.cache_path(&id);
+        if on_demand && cache.exists() {
+            return Err(invalid(format!("files this folder had on this {} earlier are still in {}: move them away first", trs_platform::computer!(), cache.display())));
         }
         let channel = chat.as_ref().map(|c| c.invite.folder_id());
         if let Some(c) = chat
@@ -736,62 +1005,384 @@ impl SyncHandle {
         {
             self.chat_join_link(c).await?;
         }
-        std::fs::create_dir_all(&path)?;
+        if !on_demand {
+            std::fs::create_dir_all(&path)?;
+        }
         self.inner.secrets.put(&crate::roles::invite_name(&id), link.format().as_bytes())?;
-        self.install(link.invite.folder_pk, path, channel).await
+        self.install(link.invite.folder_pk, path, channel, on_demand).await
     }
 
-    async fn install(&self, folder_pk: [u8; 32], path: PathBuf, channel: Option<FolderId>) -> Result<FolderStatus, SyncError> {
+    async fn install(&self, folder_pk: [u8; 32], path: PathBuf, channel: Option<FolderId>, on_demand: bool) -> Result<FolderStatus, SyncError> {
         let id = FolderId::of_public_key(&folder_pk);
-        std::fs::create_dir_all(path.join(STATE_DIR))?;
+        if on_demand {
+            std::fs::create_dir_all(self.cache_path(&id).join(STATE_DIR))?;
+        } else {
+            std::fs::create_dir_all(path.join(STATE_DIR))?;
+        }
         let mut entry = FolderEntry::new(id.to_string(), path);
         entry.folder_pk = hex(&folder_pk);
+        entry.on_demand = on_demand;
         entry.channel = channel.map(|c| c.to_string()).unwrap_or_default();
         {
             let mut cfg = lock(&self.inner.cfg);
             cfg.folders.retain(|f| f.id != entry.id);
             cfg.folders.push(entry.clone());
         }
+        lock(&self.inner.ctx.ours).insert(id);
         self.save_config()?;
         self.open_folder(&entry).await?;
         self.folder_status(&id).ok_or(SyncError::NotFound)
     }
 
+    /// Asks the file manager's host, if there is one, to let go of on-demand folder `id` ([`OnDemandHost::release`]):
+    /// its refusal is the caller's. The returned guard tells the host when the caller is done.
+    pub(crate) async fn release_host(&self, id: &FolderId, entry: &FolderEntry) -> Result<Option<Settle>, SyncError> {
+        let Some(host) = lock(&self.inner.on_demand_host).clone() else { return Ok(None) };
+        let (folder, place) = (id.to_string(), entry.path.clone());
+        let name = place.file_name().map_or_else(|| folder.clone(), |n| n.to_string_lossy().into_owned());
+        let h = host.clone();
+        let f = folder.clone();
+        tokio::task::spawn_blocking(move || h.release(&f, &name, &place))
+            .await
+            .map_err(|e| invalid(e.to_string()))?
+            .map_err(|why| invalid(format!("its folder in the file manager could not be let go of first: {why}; nothing changed")))?;
+        Ok(Some(Settle { host, folder }))
+    }
+
+    /// Whether folder `id` is in this device's configuration, and on demand: `None` when it is not (removed, or
+    /// never here). From the configuration only, so a folder that could not open, or is stopped for a move, counts.
+    pub fn configured(&self, id: &FolderId) -> Option<bool> {
+        lock(&self.inner.cfg).folder(&id.to_string()).map(|e| e.on_demand)
+    }
+
+    /// The file manager's host of on-demand folders, or none ([`Options::on_demand_host`]).
+    pub fn set_on_demand_host(&self, host: Option<Arc<dyn OnDemandHost>>) {
+        *lock(&self.inner.on_demand_host) = host;
+    }
+
     /// Stops syncing a folder on this device. The files stay; its index and `.seedwell` go. (Moving the
-    /// files to the Trash is the app's job, which knows the user's Trash.)
+    /// files to the Trash is the app's job, which knows the user's Trash.) Returns where the files are.
     pub async fn remove_folder(&self, id: &FolderId) -> Result<PathBuf, SyncError> {
-        let path = match self.stop_folder(id).await {
-            // Still open: its index file goes all the same (an open file can be removed), the rest as usual.
-            Ok((p, _)) => p,
-            // In the configuration but not running (it could not open): only its entry and state go.
-            Err(SyncError::NotFound) => lock(&self.inner.cfg).folder(&id.to_string()).map(|e| e.path.clone()).ok_or(SyncError::NotFound)?,
-            Err(e) => return Err(e),
-        };
-        {
-            let mut cfg = lock(&self.inner.cfg);
-            cfg.folders.retain(|f| f.id != id.to_string());
+        self.remove(id, false).await
+    }
+
+    /// How many files of a folder no other device is known to hold (they go from the others' reach if this device stops
+    /// syncing it; SPEC §7G.11). Reads the folder's whole index (through its read-only handle): ask when a removal is
+    /// about to be confirmed, not every second.
+    pub fn only_here(&self, id: &FolderId) -> Result<u64, SyncError> {
+        let f = self.inner.ctx.registry.folder(id).ok_or(SyncError::NotFound)?;
+        let view = f.index.view();
+        // Devices with entries here that are no members any more hold nothing for the others.
+        let members = crate::roles::member_ids(&f.membership.read().unwrap_or_else(|e| e.into_inner()));
+        let gone = trs_sync::index::IndexStore::peer_ids(&view)?.into_iter().filter(|d| !members.contains(d)).collect();
+        Ok(trs_sync::ondemand::files_only_here(&view, &gone)?)
+    }
+
+    /// Where a folder's files are on this device: an on-demand folder's in its cache, a full folder's at its place
+    /// (running or not).
+    pub fn folder_files(&self, id: &FolderId) -> Option<PathBuf> {
+        let e = lock(&self.inner.cfg).folder(&id.to_string()).cloned()?;
+        Some(if e.on_demand { self.cache_path(id) } else { e.path })
+    }
+
+    /// Stops syncing a folder whose files go to the Trash next, from where they are: an on-demand folder's cache is not
+    /// moved to the folder's place first (another volume, maybe, with a Trash of its own) but renamed under the
+    /// folder's name beside it (`<id>.removed/<name>`, the same volume, so a Trash check of the cache holds for it).
+    /// Returns the files to move to the Trash; then [`Self::finish_removal`] says how that went.
+    pub async fn remove_folder_for_trash(&self, id: &FolderId) -> Result<PathBuf, SyncError> {
+        self.remove(id, true).await
+    }
+
+    /// After [`Self::remove_folder_for_trash`]: `files` went to the Trash, or not (it refused): then an on-demand
+    /// folder's files go to its `place` (or next to it) as an ordinary folder, never deleted. Returns where they are.
+    pub async fn finish_removal(&self, files: &Path, place: &Path, trashed: bool) -> Result<PathBuf, SyncError> {
+        let holder = files.parent().filter(|h| h.parent() == Some(self.inner.dir.as_path()) && h.extension().is_some_and(|x| x == "removed"));
+        let Some(holder) = holder.map(Path::to_path_buf) else { return Ok(files.to_path_buf()) };
+        let id = holder.file_stem().and_then(|s| s.to_str()).and_then(|s| s.parse::<FolderId>().ok());
+        if trashed {
+            let _ = std::fs::remove_dir(&holder);
+            id.inspect(|id| self.drop_journal(id));
+            return Ok(place.to_path_buf());
         }
+        let to = free_place(place);
+        let moved = match id {
+            Some(id) => self.journaled_move(&id, Journal::Remove { from: files.to_path_buf(), to: to.clone(), place: place.to_path_buf(), copied: false, renamed: false, made_to: !to.exists(), done: false }).await?,
+            None => move_tree(files, &to),
+        };
+        moved.map_err(|e| invalid(format!("the folder's files could not be moved to {} ({e}); they are in {}", to.display(), files.display())))?;
+        let _ = std::fs::remove_dir(&holder);
+        id.inspect(|id| self.drop_journal(id));
+        Ok(to)
+    }
+
+    async fn remove(&self, id: &FolderId, for_trash: bool) -> Result<PathBuf, SyncError> {
+        let entry = lock(&self.inner.cfg).folder(&id.to_string()).cloned();
+        // The file manager's host lets go of an on-demand folder first (told when it is over).
+        let _settle = match entry.as_ref().filter(|e| e.on_demand) {
+            Some(e) => self.release_host(id, e).await?,
+            None => None,
+        };
+        if lock(&self.inner.held).contains_key(id) {
+            return self.remove_held(id).await;
+        }
+        // (An on-demand folder's root is its cache; its place is where the host shows it.)
+        let cache = self.cache_path(id);
+        let place = entry.as_ref().filter(|e| e.on_demand && cache.exists()).map(|e| e.path.clone());
+        // An on-demand folder's files held here (changes no other device has, the former folder after a switch to on
+        // demand, ignored files, the archive) are never deleted: they become an ordinary folder at the folder's place
+        // (or next to it, when something is there), where the user finds them; for the Trash, they go from beside the
+        // cache. The journal first, before anything is touched: a crash from here on finishes the removal at the next
+        // start (the files at the place), and nothing is forgotten before the files are where they go.
+        let planned = match &place {
+            Some(place) => {
+                let to = if for_trash {
+                    let holder = self.inner.dir.join(format!("{id}.removed"));
+                    holder.join(place.file_name().map_or_else(|| std::ffi::OsString::from(id.to_string()), |n| n.to_os_string()))
+                } else {
+                    free_place_name(place)
+                };
+                let j = Journal::Remove { from: cache.clone(), to: to.clone(), place: place.clone(), copied: false, renamed: false, made_to: !to.exists(), done: false };
+                write_journal_at(&self.journal_path(id), &j).map_err(|e| invalid(format!("the removal could not be noted ({e}); nothing changed")))?;
+                Some((to, j))
+            }
+            None => None,
+        };
+        let path = match self.stop_folder(id).await {
+            Ok((p, closed)) => {
+                if let (Some(_), Some(e)) = (&planned, &entry)
+                    && !closed.load(Ordering::SeqCst)
+                {
+                    // Its core still runs somewhere: the cache is not moved under it. Nothing changes.
+                    self.drop_journal(id);
+                    self.reopen_when_closed(closed, e.clone());
+                    return Err(invalid(format!(
+                        "the folder is still busy (a scan or a transfer); it stays, its files in {}: try again in a moment",
+                        cache.display()
+                    )));
+                }
+                p
+            }
+            // In the configuration but not running (it could not open): only its entry and state go.
+            Err(SyncError::NotFound) => entry.as_ref().map(|e| e.path.clone()).ok_or(SyncError::NotFound)?,
+            Err(e) => {
+                self.drop_journal(id);
+                return Err(e);
+            }
+        };
+        let Some((to, j)) = planned else {
+            self.forget_folder(id)?;
+            prune_state(&path);
+            return Ok(path);
+        };
+        // An empty folder there (the host's) is taken over.
+        let r = match take_over_empty(&to) {
+            Ok(()) => self.noted_move(id, j).await,
+            Err(e) => Err(e),
+        };
+        if let Err(e) = &r
+            && unfinished(e)
+        {
+            return Err(self.hold_unfinished(id, e));
+        }
+        let leftover = match r {
+            Ok(leftover) => leftover,
+            Err(e) => {
+                // Nothing changed: the folder syncs on, its files in the cache.
+                self.drop_journal(id);
+                if let Some(e) = &entry {
+                    let _ = self.open_folder(e).await;
+                }
+                return Err(invalid(format!("its files could not be moved to {} ({e}); the folder stays, its files in {}", to.display(), cache.display())));
+            }
+        };
+        prune_state(&to);
+        self.forget_folder(id)?;
+        if !for_trash {
+            self.drop_journal(id);
+        }
+        if let Some(l) = leftover {
+            eprintln!("seedwell sync: the folder's files are in {}; a copy left behind could not be deleted: {}", to.display(), l.display());
+        }
+        Ok(to)
+    }
+
+    /// Moves `j`'s files (`from` → `to`) with the journal written first and noted once a copy is whole
+    /// ([`move_tree_noted`]): the outer error is the journal's, the inner the move's (nothing moved).
+    async fn journaled_move(&self, id: &FolderId, j: Journal) -> io::Result<io::Result<Option<PathBuf>>> {
+        write_journal_at(&self.journal_path(id), &j)?;
+        Ok(self.noted_move(id, j).await)
+    }
+
+    /// An [`Unfinished`] move of the folder: its journal stays, the folder is held (shown in error, with why) until a
+    /// start finishes the move. Returns the error to report.
+    pub(crate) fn hold_unfinished(&self, id: &FolderId, e: &io::Error) -> SyncError {
+        let why = format!("A move could not be finished ({e}); it is finished when Seedwell starts again");
+        lock(&self.inner.held).insert(*id, Held { why: why.clone(), waiting: false });
+        invalid(why)
+    }
+
+    /// Moves `j`'s files, its journal written already: noted whole once a copy is ([`move_tree_noted`]), and over once
+    /// it is (a start after that only saves what follows the move, whatever is at `from` by then).
+    pub(crate) async fn noted_move(&self, id: &FolderId, j: Journal) -> io::Result<Option<PathBuf>> {
+        let path = self.journal_path(id);
+        let (from, to) = j.paths();
+        tokio::task::spawn_blocking(move || {
+            let manifest = path.with_extension("manifest");
+            let leftover = move_tree_kept(&from, &to, |by_rename| write_journal_at(&path, &j.copied(by_rename)), false, Some(&manifest))?;
+            if let Err(e) = write_journal_at(&path, &j.finished()) {
+                eprintln!("seedwell sync: {} moved to {}, but that could not be noted ({e})", from.display(), to.display());
+            }
+            Ok(leftover)
+        })
+        .await
+        .unwrap_or_else(|e| Err(io::Error::other(e)))
+    }
+
+    /// Removes a folder held back by an unfinished move: it is forgotten, its retry ends and its journal goes, and
+    /// nothing on disk is touched. Returns where its original files are; the log also names the partial copy. (Under
+    /// the retry's guard: a retry never finishes a move of a folder removed meanwhile.)
+    async fn remove_held(&self, id: &FolderId) -> Result<PathBuf, SyncError> {
+        let _one = self.inner.held_retrying.lock().await;
+        let j: Option<Journal> = std::fs::read(self.journal_path(id)).ok().and_then(|b| serde_json::from_slice(&b).ok());
+        let place = lock(&self.inner.cfg).folder(&id.to_string()).map(|e| e.path.clone()).unwrap_or_default();
+        lock(&self.inner.held).remove(id);
+        self.forget_folder(id)?;
+        self.drop_journal(id);
+        let (from, to) = j.map(|j| j.paths()).unwrap_or_else(|| (place.clone(), place.clone()));
+        eprintln!(
+            "seedwell sync: folder {id} no longer syncs; nothing was deleted: its original files are in {} (on a disk not mounted now), a partial copy is in {}",
+            from.display(),
+            to.display()
+        );
+        Ok(from)
+    }
+
+    /// Forgets a stopped folder: its entry, keys, index and membership, and the devices met only there.
+    fn forget_folder(&self, id: &FolderId) -> Result<(), SyncError> {
+        lock(&self.inner.ctx.ours).remove(id);
+        // Joined again later in the same session, it is offered again there.
+        for p in self.inner.ctx.registry.peers() {
+            lock(&p.joined).remove(id);
+            lock(&p.offered).remove(id);
+            lock(&p.answered).remove(id);
+        }
+        lock(&self.inner.cfg).folders.retain(|f| f.id != id.to_string());
         self.save_config()?;
         for name in [crate::roles::secret_name(id), crate::roles::invite_name(id), crate::roles::links_name(id)] {
             self.inner.secrets.delete(&name)?;
         }
         let _ = std::fs::remove_file(self.index_path(id));
         let _ = std::fs::remove_file(self.members_path(id));
-        let state = path.join(STATE_DIR);
-        // The archive may hold the only copy of something: keep it, only the marker's other parts go.
-        if state.join("Archive").exists() {
-            let _ = std::fs::remove_file(state.join("case-probe.tmp"));
-        } else {
-            let _ = std::fs::remove_dir_all(&state);
-        }
         self.forget_strangers();
-        Ok(path)
+        Ok(())
     }
+
+    pub(crate) fn journal_path(&self, id: &FolderId) -> PathBuf {
+        self.inner.dir.join(format!("{id}.journal"))
+    }
+
+    pub(crate) fn drop_journal(&self, id: &FolderId) {
+        let _ = std::fs::remove_file(self.journal_path(id));
+        let _ = std::fs::remove_file(self.manifest_path(id));
+    }
+
+    /// Where a move to another volume keeps the manifest of its source (beside its journal).
+    pub(crate) fn manifest_path(&self, id: &FolderId) -> PathBuf {
+        self.journal_path(id).with_extension("manifest")
+    }
+
+    /// At start, before any folder opens: a removal or switch that was cut off (a crash, the power) is finished, or
+    /// undone when its files never moved. Never deletes a file.
+    /// Returns the folders whose change could not be finished: they stay stopped (with the reason) until a start that
+    /// can.
+    async fn recover_journals(&self) -> BTreeMap<FolderId, Held> {
+        let mut stopped = BTreeMap::new();
+        let Ok(dir) = std::fs::read_dir(&self.inner.dir) else { return stopped };
+        for e in dir.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let Some(id) = name.strip_suffix(".journal").and_then(|i| i.parse::<FolderId>().ok()) else { continue };
+            let j: Option<Journal> = std::fs::read(e.path()).ok().and_then(|b| serde_json::from_slice(&b).ok());
+            if let Err(err) = self.recover(&id, j).await {
+                eprintln!("seedwell sync: folder {id}: an interrupted change could not be finished ({err}); it stays stopped, and it is tried again when a disk is mounted");
+                stopped.insert(id, held_of(&err));
+                continue;
+            }
+            self.drop_journal(&id);
+        }
+        stopped
+    }
+
+    async fn recover(&self, id: &FolderId, j: Option<Journal>) -> Result<(), SyncError> {
+        match j {
+            None => Ok(()),
+            Some(Journal::Remove { from, to, place, copied, renamed, made_to, done }) => {
+                // The move is finished (or a partial copy undone), then the files go to the place if they are not
+                // there (a removal on its way to the Trash), then the folder is forgotten, as the removal would have.
+                let at = match finish_or_done(&from, &to, copied, renamed, made_to, done, self.manifest_path(id)).await? {
+                    Some(leftover) => {
+                        if let Some(l) = leftover {
+                            eprintln!("seedwell sync: folder {id}: a copy left behind could not be deleted: {}", l.display());
+                        }
+                        to
+                    }
+                    None => from,
+                };
+                if at.exists() && at.starts_with(&self.inner.dir) {
+                    let dest = free_place(&place);
+                    let j = Journal::Remove { from: at.clone(), to: dest.clone(), place, copied: false, renamed: false, made_to: !dest.exists(), done: false };
+                    self.journaled_move(id, j).await?.map_err(|e| invalid(format!("its files stay in {} ({e})", at.display())))?;
+                    prune_state(&dest);
+                }
+                let _ = std::fs::remove_dir(self.inner.dir.join(format!("{id}.removed")));
+                self.forget_folder(id)
+            }
+            Some(Journal::Move { from, to, copied, renamed, made_to, done }) => {
+                // Finished when its copy was whole (or it was a rename), undone otherwise; over, only saved.
+                if let Some(leftover) = finish_or_done(&from, &to, copied, renamed, made_to, done, self.manifest_path(id)).await? {
+                    if let Some(l) = leftover {
+                        eprintln!("seedwell sync: folder {id}: a copy left behind could not be deleted: {}", l.display());
+                    }
+                    if let Some(e) = lock(&self.inner.cfg).folder_mut(&id.to_string()).filter(|e| e.path == from) {
+                        e.path = to;
+                    }
+                    self.save_config()?;
+                }
+                Ok(())
+            }
+            Some(Journal::Switch { on, from, to, place, copied, renamed, made_to, done: over }) => {
+                let done = lock(&self.inner.cfg).folder(&id.to_string()).is_none_or(|e| e.on_demand == on);
+                if done {
+                    return Ok(());
+                }
+                // Finished when its copy was whole (or it was a rename), undone otherwise: never a half-deleted place.
+                // Over, only saved.
+                if let Some(leftover) = finish_or_done(&from, &to, copied, renamed, made_to, over, self.manifest_path(id)).await? {
+                    if let Some(l) = leftover {
+                        eprintln!("seedwell sync: folder {id}: a copy left behind could not be deleted: {}", l.display());
+                    }
+                    if let Some(e) = lock(&self.inner.cfg).folder_mut(&id.to_string()) {
+                        e.on_demand = on;
+                        e.pins = Vec::new();
+                        e.mode_switched = true;
+                        e.path = place;
+                    }
+                    self.save_config()?;
+                }
+                Ok(())
+            }
+        }
+    }
+
 
     /// Stops a folder's runtime and takes it out of the registry. Its root, and a flag that is up once its index is
     /// closed: it waits (a minute at most) until nothing holds the folder any more, which on a loaded Mac takes a while.
     async fn stop_folder(&self, id: &FolderId) -> Result<(PathBuf, Arc<AtomicBool>), SyncError> {
+        // Closed first (out of the registry), then stale on every session that has it linked (opened again, those
+        // sessions start anew); a link made meanwhile finds it gone ([`crate::peer::start_link`]).
         let f = self.inner.ctx.registry.remove_folder(id).ok_or(SyncError::NotFound)?;
+        self.folders_moved();
+        self.close_on_sessions(id);
+        f.stopped.send_replace(true);
         let runner = lock(&self.inner.runners).remove(id);
         let end = Instant::now() + *lock(&self.inner.stop_wait);
         if let Some(r) = runner {
@@ -812,64 +1403,120 @@ impl SyncHandle {
     /// Moves a folder on this Mac to `new_path` (a rename when only the last name changes). Sync stops for
     /// the move and starts again at the new place; other devices are not affected.
     pub async fn move_folder(&self, id: &FolderId, new_path: PathBuf) -> Result<FolderStatus, SyncError> {
+        self.refuse_held(id)?;
         let new_path = absolute(&new_path)?;
         if new_path.exists() {
             return Err(invalid(format!("{} already exists", new_path.display())));
         }
         refuse_cloud_root(&new_path)?;
         self.refuse_forbidden(&new_path)?;
+        self.refuse_overlap_other(&new_path, Some(id))?;
         let entry = lock(&self.inner.cfg).folder(&id.to_string()).cloned().ok_or(SyncError::NotFound)?;
+        if entry.on_demand {
+            return Err(invalid(
+                "an on-demand folder's place belongs to the system's file provider (its files are in this device's cache): it cannot be moved here; rename it, or switch it to full first",
+            ));
+        }
         if new_path.starts_with(&entry.path) {
             return Err(invalid("a folder cannot move into itself"));
         }
-        let (_, closed) = self.stop_folder(id).await?;
+        // The journal first: a move to another volume cut off is finished (its copy whole) or undone at the next start.
+        let j = Journal::Move { from: entry.path.clone(), to: new_path.clone(), copied: false, renamed: false, made_to: !new_path.exists(), done: false };
+        write_journal_at(&self.journal_path(id), &j).map_err(|e| invalid(format!("the move could not be noted ({e}); nothing changed")))?;
+        let closed = match self.stop_folder(id).await {
+            Ok((_, closed)) => closed,
+            Err(e) => {
+                self.drop_journal(id);
+                return Err(e);
+            }
+        };
         if !closed.load(Ordering::SeqCst) {
             // Its core still runs somewhere (a scan on a loaded Mac): moving the files under it would read as
             // deletions. They stay, and the folder starts again where it is once its index is free.
-            let (me, entry) = (self.clone(), entry.clone());
-            tokio::spawn(async move {
-                let end = Instant::now() + Duration::from_secs(600);
-                while !closed.load(Ordering::SeqCst) && Instant::now() < end {
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                }
-                if let Err(e) = me.open_folder(&entry).await {
-                    eprintln!("seedwell sync: {} could not start again after a refused move: {e}", entry.path.display());
-                }
-            });
+            self.drop_journal(id);
+            self.reopen_when_closed(closed, entry);
             return Err(invalid("the folder is still busy (a scan or a transfer); it stays where it is, try again in a moment"));
         }
-        let from = entry.path.clone();
-        let to = new_path.clone();
-        let moved = tokio::task::spawn_blocking(move || move_tree(&from, &to)).await.map_err(io::Error::other)?;
+        let moved = self.noted_move(id, j).await;
+        if let Err(e) = &moved
+            && unfinished(e)
+        {
+            return Err(self.hold_unfinished(id, e));
+        }
         let mut entry2 = entry.clone();
+        let mut saved = Ok(());
         if moved.is_ok() {
             entry2.path = new_path;
             if let Some(e) = lock(&self.inner.cfg).folder_mut(&id.to_string()) {
                 e.path = entry2.path.clone();
             }
-            self.save_config()?;
+            saved = self.save_config();
         }
-        // Back to syncing, at the new place or (if the move failed) the old one.
+        // Saved (or nothing moved), the journal goes; not saved, the next start finishes the move.
+        if moved.is_err() || saved.is_ok() {
+            self.drop_journal(id);
+        }
+        // Back to syncing, at the new place or (if the move failed, the original untouched) the old one.
+        let wait = *lock(&self.inner.reopen_wait);
+        tokio::time::sleep(wait).await;
         self.open_folder(&entry2).await?;
-        moved?;
+        saved?;
+        if let Some(l) = moved? {
+            eprintln!("seedwell sync: {} moved to {}; a copy left behind could not be deleted: {}", entry.path.display(), entry2.path.display(), l.display());
+        }
         self.folder_status(id).ok_or(SyncError::NotFound)
+    }
+
+    /// Opens `entry` again once the index of its stopped folder is closed (ten minutes at most): a move or switch that
+    /// found it still busy changed nothing, and the folder goes on as it was.
+    pub(crate) fn reopen_when_closed(&self, closed: Arc<AtomicBool>, entry: FolderEntry) {
+        let me = self.clone();
+        tokio::spawn(async move {
+            let end = Instant::now() + Duration::from_secs(600);
+            while !closed.load(Ordering::SeqCst) && Instant::now() < end {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            if let Err(e) = me.open_folder(&entry).await {
+                eprintln!("seedwell sync: {} could not start again after a refused move: {e}", entry.path.display());
+            }
+        });
     }
 
     /// Renames a folder on this Mac (its directory). Other devices keep their own names.
     pub async fn rename_folder(&self, id: &FolderId, name: &str) -> Result<FolderStatus, SyncError> {
+        self.refuse_held(id)?;
         let name = name.trim();
         if name.is_empty() || name.contains('/') || name == "." || name == ".." || name.starts_with('.') {
             return Err(invalid("not a usable folder name"));
         }
-        let path = lock(&self.inner.cfg).folder(&id.to_string()).map(|e| e.path.clone()).ok_or(SyncError::NotFound)?;
-        let parent = path.parent().ok_or_else(|| invalid("the folder has no parent"))?;
-        self.move_folder(id, parent.join(name)).await
+        let entry = lock(&self.inner.cfg).folder(&id.to_string()).cloned().ok_or(SyncError::NotFound)?;
+        let parent = entry.path.parent().ok_or_else(|| invalid("the folder has no parent"))?;
+        let to = parent.join(name);
+        if entry.on_demand {
+            // Its files are in this device's cache, and its place is the host's: only the name it shows changes.
+            if let Some(e) = lock(&self.inner.cfg).folder_mut(&id.to_string()) {
+                e.path = to.clone();
+            }
+            self.save_config()?;
+            if let Some(f) = self.inner.ctx.registry.folder(id) {
+                *lock(&f.place) = to;
+                *lock(&f.name) = name.to_string();
+            }
+            return self.folder_status(id).ok_or(SyncError::NotFound);
+        }
+        self.move_folder(id, to).await
     }
 
     /// Pauses or resumes a folder.
     pub async fn set_paused(&self, id: &FolderId, paused: bool) -> Result<(), SyncError> {
         let f = self.inner.ctx.registry.folder(id).ok_or(SyncError::NotFound)?;
-        f.paused.store(paused, Ordering::Relaxed);
+        // Closed first, then stale on every session that has it linked: a link made meanwhile sees the flag
+        // ([`crate::peer::start_link`]), so none is missed, and nothing of it is taken from a stale session.
+        f.paused.store(paused, Ordering::SeqCst);
+        self.folders_moved();
+        if paused {
+            self.close_on_sessions(id);
+        }
         if let Some(e) = lock(&self.inner.cfg).folder_mut(&id.to_string()) {
             e.paused = paused;
         }
@@ -879,6 +1526,17 @@ impl SyncHandle {
         } else {
             lock(&f.live).state = FolderState::Starting;
             f.rescan.notify_one();
+            // In the background (the call never waits on the network): sessions where it went stale start anew;
+            // others link it now (a session that began while it was paused has not). (0.1.11 did nothing here.)
+            let (me, id) = (self.clone(), *id);
+            if self.plays_0_1_11() {
+                return Ok(());
+            }
+            tokio::spawn(async move {
+                let wait = *lock(&me.inner.reopen_wait);
+                tokio::time::sleep(wait).await;
+                me.offer_folder(id).await;
+            });
         }
         Ok(())
     }
@@ -916,28 +1574,18 @@ impl SyncHandle {
         };
         let root = f.root.clone();
         let (copy_path, original) = (copy.to_string(), original.to_string());
+        if f.on_demand {
+            self.resolve_on_demand(&f, copy_path, original, keep).await?;
+            lock(&f.live).conflicts.remove(copy);
+            return Ok(());
+        }
         tokio::task::spawn_blocking(move || -> io::Result<()> {
             let copy = copy_path;
             let fs = StdFs::new(root);
             if fs.lstat(STATE_DIR)?.is_none() {
                 return Err(io::Error::other("the folder is missing"));
             }
-            let stamp = trs_sync::clock::compact_stamp(trs_sync::clock::Clock::now_ns(&SystemClock));
-            let to_archive = |p: &str| -> io::Result<()> {
-                if fs.lstat(p)?.is_none() {
-                    return Ok(());
-                }
-                let mut dest = trs_sync::conflict::archive_path(p, &stamp);
-                let mut n = 2;
-                while fs.lstat(&dest)?.is_some() {
-                    dest = trs_sync::conflict::archive_path(p, &format!("{stamp}-{n}"));
-                    n += 1;
-                }
-                if let Some((dir, _)) = dest.rsplit_once('/') {
-                    std::fs::create_dir_all(fs.root().join(dir))?;
-                }
-                fs.rename(p, &dest)
-            };
+            let to_archive = |p: &str| to_archive(&fs, p);
             match keep {
                 Keep::Original => to_archive(&copy),
                 Keep::Copy => {
@@ -945,18 +1593,7 @@ impl SyncHandle {
                     fs.rename(&copy, &original)
                 }
                 Keep::Both => {
-                    // The copy becomes an ordinary file: "Report (MacBook, 2026-10-25 14.32).docx".
-                    let at = copy.rfind(" (conflict, ").ok_or_else(|| io::Error::other("not a conflict copy"))?;
-                    let base = format!("{} ({}", &copy[..at], &copy[at + " (conflict, ".len()..]);
-                    let mut name = base.clone();
-                    let mut n = 2;
-                    while fs.lstat(&name)?.is_some() {
-                        name = match base.rsplit_once('.') {
-                            Some((stem, ext)) if !ext.contains(['/', ' ', ')']) => format!("{stem} {n}.{ext}"),
-                            _ => format!("{base} {n}"),
-                        };
-                        n += 1;
-                    }
+                    let name = plain_name(&copy, |p| Ok(fs.lstat(p)?.is_some()))?;
                     fs.rename(&copy, &name)
                 }
             }
@@ -966,6 +1603,47 @@ impl SyncHandle {
         lock(&f.live).conflicts.remove(copy);
         f.rescan.notify_one();
         Ok(())
+    }
+
+    /// [`Self::resolve_conflict`] in an on-demand folder: through the core's host changes (the cache is no folder a
+    /// scan reads changes from), with both versions here; what goes is kept in the cache's archive, as a full folder
+    /// keeps it.
+    async fn resolve_on_demand(&self, f: &Arc<FolderShared>, copy: String, original: String, keep: Keep) -> Result<(), SyncError> {
+        let root = f.root.clone();
+        let refused = self
+            .with_core(f, move |c| {
+                use trs_sync::ondemand::ItemState;
+                if !c.signs() {
+                    return Err(trs_sync::folder::HostError::ReadOnly);
+                }
+                for p in [&copy, &original] {
+                    if !c.item_at(p)?.is_some_and(|i| matches!(i.state, ItemState::Downloaded | ItemState::ModifiedHere)) {
+                        return Ok(Some("Download both versions first"));
+                    }
+                }
+                let fs = StdFs::new(root);
+                match keep {
+                    Keep::Original => {
+                        to_archive(&fs, &copy)?;
+                        c.host_delete(&copy, &[])?;
+                    }
+                    // Checked as a whole first: a refusal changes nothing.
+                    Keep::Copy => {
+                        c.host_replace(&copy, &original)?;
+                    }
+                    Keep::Both => {
+                        // Free in the index too: an online-only file there has no file in the cache.
+                        let name = plain_name(&copy, |p| Ok(fs.lstat(p)?.is_some() || c.item_at(p)?.is_some()))?;
+                        c.host_rename(&copy, &name)?;
+                    }
+                }
+                Ok(None)
+            })
+            .await?;
+        match refused {
+            Some(why) => Err(invalid(why)),
+            None => Ok(()),
+        }
     }
 
     /// Scans the whole folder now.
@@ -1361,23 +2039,35 @@ impl SyncHandle {
     /// devices stop sharing it at once; they keep the folders that are still allowed.
     pub fn set_lan_only(&self, id: &FolderId, lan_only: bool) -> Result<(), SyncError> {
         let f = self.inner.ctx.registry.folder(id).ok_or(SyncError::NotFound)?;
-        f.lan_only.store(lan_only, Ordering::Relaxed);
+        f.lan_only.store(lan_only, Ordering::SeqCst);
+        self.folders_moved();
         if let Some(e) = lock(&self.inner.cfg).folder_mut(&id.to_string()) {
             e.lan_only = lan_only;
         }
         self.save_config()?;
         if lan_only {
             for p in self.inner.ctx.registry.peers().into_iter().filter(|p| !p.lan) {
-                p.folders.write().unwrap_or_else(|e| e.into_inner()).remove(id);
+                p.close_folder(id);
             }
         } else {
             self.inner.wake_dialer.notify_one();
+            // Sessions where it went stale start anew; the others link it now.
+            if let Ok(rt) = tokio::runtime::Handle::try_current() {
+                let (me, id) = (self.clone(), *id);
+                rt.spawn(async move { me.offer_folder(id).await });
+            }
         }
         Ok(())
     }
 
     fn refuse_overlap(&self, path: &Path) -> Result<(), SyncError> {
-        for e in &lock(&self.inner.cfg).folders {
+        self.refuse_overlap_other(path, None)
+    }
+
+    /// [`Self::refuse_overlap`] but for the folder `own` itself (a new place for it).
+    pub(crate) fn refuse_overlap_other(&self, path: &Path, own: Option<&FolderId>) -> Result<(), SyncError> {
+        let own = own.map(ToString::to_string);
+        for e in lock(&self.inner.cfg).folders.iter().filter(|e| Some(&e.id) != own.as_ref()) {
             if path.starts_with(&e.path) || e.path.starts_with(path) {
                 return Err(invalid(format!("{} overlaps the synced folder {}", path.display(), e.path.display())));
             }
@@ -1386,7 +2076,10 @@ impl SyncHandle {
     }
 
     fn folder_status(&self, id: &FolderId) -> Option<FolderStatus> {
-        let f = self.inner.ctx.registry.folder(id)?;
+        let Some(f) = self.inner.ctx.registry.folder(id) else {
+            let held = lock(&self.inner.held).get(id).cloned()?;
+            return self.held_status(id, &held);
+        };
         Some(self.status_of(&f))
     }
 
@@ -1421,7 +2114,7 @@ impl SyncHandle {
         FolderStatus {
             id: f.id.to_string(),
             name: lock(&f.name).clone(),
-            path: f.root.display().to_string(),
+            path: lock(&f.place).display().to_string(),
             access: role.map_or(Access::Read, Role::access),
             role,
             share_until,
@@ -1440,12 +2133,95 @@ impl SyncHandle {
             error: live.error,
             last_synced_s: live.last_synced_s,
             channel_id,
+            on_demand: f.on_demand,
+            unavailable: live.unavailable,
         }
+    }
+
+    /// A disk was mounted or unmounted (the app says so; a daemon tries again on [`Options::held_retry`]): a folder held
+    /// back by a move cut off is tried again, so plugging the disk with its original files in finishes or undoes the
+    /// move, and the folder starts, without a restart.
+    pub async fn volumes_changed(&self) {
+        let _one = self.inner.held_retrying.lock().await;
+        let held: Vec<FolderId> = lock(&self.inner.held).iter().filter(|(_, h)| h.waiting).map(|(i, _)| *i).collect();
+        for id in held {
+            // Removed meanwhile (the user stopped syncing it): nothing to finish.
+            if !lock(&self.inner.held).contains_key(&id) || lock(&self.inner.cfg).folder(&id.to_string()).is_none() {
+                continue;
+            }
+            let j: Option<Journal> = std::fs::read(self.journal_path(&id)).ok().and_then(|b| serde_json::from_slice(&b).ok());
+            match self.recover(&id, j).await {
+                Ok(()) => {
+                    self.drop_journal(&id);
+                    lock(&self.inner.held).remove(&id);
+                    // Finished or undone: the folder starts where its entry says (a removal forgot it).
+                    let entry = lock(&self.inner.cfg).folder(&id.to_string()).cloned();
+                    if let Some(e) = entry
+                        && let Err(err) = self.open_folder(&e).await
+                    {
+                        eprintln!("seedwell sync: folder {id}: {err}");
+                    }
+                }
+                Err(err) => {
+                    lock(&self.inner.held).insert(id, held_of(&err));
+                }
+            }
+        }
+    }
+
+    /// A held-back folder is not moved, renamed or switched: its unfinished move comes first.
+    pub(crate) fn refuse_held(&self, id: &FolderId) -> Result<(), SyncError> {
+        match lock(&self.inner.held).get(id) {
+            Some(h) if h.waiting => Err(invalid("the folder is waiting for the disk with its original files (an unfinished move): plug it in first, or remove the folder")),
+            Some(h) => Err(invalid(format!("{}: remove the folder, or start Seedwell again", h.why))),
+            None => Ok(()),
+        }
+    }
+
+    /// A folder held back ([`Inner::held`]) as the UI shows it: missing, with why, from its entry.
+    fn held_status(&self, id: &FolderId, held: &Held) -> Option<FolderStatus> {
+        let e = lock(&self.inner.cfg).folder(&id.to_string()).cloned()?;
+        let pk = public_key_from_hex(&e.folder_pk);
+        let role = pk.and_then(|pk| crate::roles::load(&self.members_path(id), pk).ok()).and_then(|m| m.role(self.inner.ctx.key.public_key()));
+        Some(FolderStatus {
+            id: e.id.clone(),
+            name: e.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+            path: e.path.display().to_string(),
+            access: role.map_or(Access::Read, Role::access),
+            role,
+            share_until: None,
+            state: if held.waiting { FolderState::Missing } else { FolderState::Error },
+            files: 0,
+            bytes: 0,
+            need_files: 0,
+            need_bytes: 0,
+            rate_in: 0,
+            rate_out: 0,
+            connected: 0,
+            members: 0,
+            conflicts: 0,
+            lan_only: e.lan_only,
+            issues: Vec::new(),
+            error: Some(held.why.clone()),
+            last_synced_s: None,
+            channel_id: None,
+            on_demand: e.on_demand,
+            unavailable: 0,
+        })
     }
 
     /// Everything, for the UI.
     pub fn snapshot(&self) -> Snapshot {
-        let folders = self.inner.ctx.registry.folders().iter().map(|f| self.status_of(f)).collect();
+        let held: Vec<(FolderId, Held)> = lock(&self.inner.held).iter().map(|(i, w)| (*i, w.clone())).collect();
+        let folders = self
+            .inner
+            .ctx
+            .registry
+            .folders()
+            .iter()
+            .map(|f| self.status_of(f))
+            .chain(held.iter().filter_map(|(id, why)| self.held_status(id, why)))
+            .collect();
         let devices = self
             .inner
             .ctx
@@ -1678,10 +2454,87 @@ impl SyncHandle {
         self.inner.ctx.registry.folder(id).map(|f| Box::new(f) as Box<dyn std::any::Any + Send + Sync>)
     }
 
+    /// **Tests only:** how long a device asked whether it holds files may take to answer.
+    #[doc(hidden)]
+    pub fn test_hold_wait(&self, wait: Duration) {
+        *lock(&self.inner.ctx.hold_wait) = wait;
+    }
+
+    /// **Tests only:** files of a folder with a free in progress here.
+    #[doc(hidden)]
+    pub fn test_freeing(&self, id: &FolderId) -> usize {
+        self.inner.ctx.registry.folder(id).map_or(0, |f| lock(&f.freeing).len())
+    }
+
+    /// **Tests only:** holds the folder's core (as a long pull does) for `d`, on a thread of its own.
+    #[doc(hidden)]
+    pub fn test_lock_core(&self, id: &FolderId, d: Duration) {
+        if let Some(f) = self.inner.ctx.registry.folder(id) {
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _core = lock(&f.core);
+                let _ = tx.send(());
+                std::thread::sleep(d);
+            });
+            let _ = rx.recv();
+        }
+    }
+
+    /// **Tests only:** hold queries of ours still waiting for an answer, over every session.
+    #[doc(hidden)]
+    pub fn test_holds_waiting(&self) -> usize {
+        self.inner.ctx.registry.peers().iter().map(|p| p.holds_waiting()).sum()
+    }
+
+    /// **Tests only:** rename requests of ours still waiting for an answer, over every session.
+    #[doc(hidden)]
+    pub fn test_renames_waiting(&self) -> usize {
+        self.inner.ctx.registry.peers().iter().map(|p| p.renames_waiting()).sum()
+    }
+
+    /// **Tests only:** leave hold queries and rename requests unanswered, as an earlier Seedwell does (it reads them as
+    /// message types it does not know, and skips them).
+    #[doc(hidden)]
+    pub fn test_silent_ondemand(&self, on: bool) {
+        self.inner.ctx.silent_ondemand.store(on, Ordering::SeqCst);
+    }
+
+    /// **Tests only:** answer every hold query yes, whatever is held (a member that lies).
+    #[doc(hidden)]
+    pub fn test_yes_to_holds(&self, on: bool) {
+        self.inner.ctx.yes_to_holds.store(on, Ordering::SeqCst);
+    }
+
+    /// **Tests only:** how many sessions this device has set up so far.
+    #[doc(hidden)]
+    pub fn test_sessions(&self) -> u64 {
+        self.inner.ctx.sessions.load(Ordering::SeqCst)
+    }
+
+    /// **Tests only:** this device makes at most `n` more direct dials (`None`: as many as it wants).
+    #[doc(hidden)]
+    pub fn test_dials_left(&self, n: Option<u32>) {
+        *lock(&self.inner.dials_left) = n;
+        self.inner.wake_dialer.notify_one();
+    }
+
+    /// **Tests only:** an answering session waits this long after making its Join (the session is not up yet).
+    #[doc(hidden)]
+    pub fn test_setup_wait(&self, wait: Duration) {
+        *lock(&self.inner.ctx.setup_wait) = wait;
+    }
+
     /// **Tests only:** how long stopping a folder waits for it to let go.
     #[doc(hidden)]
     pub fn test_stop_wait(&self, wait: Duration) {
         *lock(&self.inner.stop_wait) = wait;
+    }
+
+    /// **Tests only:** a moved folder stays closed this long before it opens again, and a resumed one waits this long
+    /// before its stale sessions start anew (what peers send meanwhile is not taken, and comes again).
+    #[doc(hidden)]
+    pub fn test_reopen_wait(&self, wait: Duration) {
+        *lock(&self.inner.reopen_wait) = wait;
     }
 
     /// **Tests only:** from now on, neither dial nor accept direct (TCP or uTP) sessions with `device`, and
@@ -1771,6 +2624,12 @@ impl SyncHandle {
     /// Dials `addr` (for a known `device`, or for the folders in `candidates`), unless its backoff holds it back:
     /// then when it may be dialed again.
     fn dial(&self, addr: SocketAddr, device: Option<DeviceId>, candidates: Vec<FolderId>) -> Option<Instant> {
+        if let Some(left) = lock(&self.inner.dials_left).as_mut() {
+            if *left == 0 {
+                return None;
+            }
+            *left -= 1;
+        }
         {
             let mut book = lock(&self.inner.book);
             let now = Instant::now();
@@ -1866,24 +2725,758 @@ fn load_ignore(fs: &StdFs, local: &[String]) -> Ignore {
     Ignore::parse_all(&[&synced, &local]).0
 }
 
-/// Moves a directory: a rename on the same volume, else a copy then a delete of the original.
-fn move_tree(from: &Path, to: &Path) -> io::Result<()> {
+/// A folder not opened because a change cut off could not be finished at the start.
+#[derive(Clone, Debug)]
+pub(crate) struct Held {
+    /// For its row.
+    why: String,
+    /// The original's disk is not there: tried again when volumes change and on a timer. Otherwise (any other error)
+    /// the folder is shown in error with the reason, and not tried again until the next start.
+    waiting: bool,
+}
+
+/// Why a folder is held back, for its row: the move cut off waits for the original's disk, or failed otherwise.
+fn held_of(err: &SyncError) -> Held {
+    let waiting = matches!(err, SyncError::Io(e) if e.kind() == io::ErrorKind::NotFound);
+    let why = if waiting { format!("Waiting for the disk with its original files ({err})") } else { format!("An interrupted move could not be finished: {err}") };
+    Held { why, waiting }
+}
+
+/// Tries the held-back folders again every `every` (a headless daemon hears of no mounts).
+async fn held_loop(h: SyncHandle, every: Duration) {
+    loop {
+        tokio::time::sleep(every).await;
+        if lock(&h.inner.held).values().any(|h| h.waiting) {
+            h.volumes_changed().await;
+        }
+    }
+}
+
+/// A change of a folder's files noted before it starts (`<id>.journal` in the sync state), so one cut off is finished
+/// or undone at the next start. `copied`: the files were copied to another volume and the copy is whole (from then on
+/// the move is finished, never undone).
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum Journal {
+    /// An on-demand folder is being removed: its files move from `from` to `to`, and end at `place` (or next to it).
+    Remove {
+        from: PathBuf,
+        to: PathBuf,
+        place: PathBuf,
+        copied: bool,
+        #[serde(default)]
+        renamed: bool,
+        /// `to` was not there when the journal was written: an empty folder left there is the move's own.
+        #[serde(default)]
+        made_to: bool,
+        /// The move is over (the files are at `to`): what is at `from` now is not the folder's.
+        #[serde(default)]
+        done: bool,
+    },
+    /// A switch to `on` demand (true) or full: the files move from `from` to `to`; `place` is the folder's place after.
+    Switch {
+        on: bool,
+        from: PathBuf,
+        to: PathBuf,
+        place: PathBuf,
+        copied: bool,
+        #[serde(default)]
+        renamed: bool,
+        /// `to` was not there when the journal was written: an empty folder left there is the move's own.
+        #[serde(default)]
+        made_to: bool,
+        /// The move is over (the files are at `to`): what is at `from` now is not the folder's.
+        #[serde(default)]
+        done: bool,
+    },
+    /// A full folder moves from `from` to `to`.
+    Move {
+        from: PathBuf,
+        to: PathBuf,
+        copied: bool,
+        #[serde(default)]
+        renamed: bool,
+        /// `to` was not there when the journal was written: an empty folder left there is the move's own.
+        #[serde(default)]
+        made_to: bool,
+        /// The move is over (the files are at `to`): what is at `from` now is not the folder's.
+        #[serde(default)]
+        done: bool,
+    },
+}
+
+impl Journal {
+    fn paths(&self) -> (PathBuf, PathBuf) {
+        match self {
+            Journal::Remove { from, to, .. } | Journal::Switch { from, to, .. } | Journal::Move { from, to, .. } => (from.clone(), to.clone()),
+        }
+    }
+
+    /// The same, done: its copy whole, or (`by_rename`) renamed in one step (the original is gone: whatever is at
+    /// `from` later is not it).
+    fn copied(&self, by_rename: bool) -> Journal {
+        let mut j = self.clone();
+        match &mut j {
+            Journal::Remove { copied, renamed, .. } | Journal::Switch { copied, renamed, .. } | Journal::Move { copied, renamed, .. } => {
+                *copied = true;
+                *renamed = by_rename;
+            }
+        }
+        j
+    }
+
+    /// The same, its move over: recovery finishes what came after it (the configuration) and never touches `from`.
+    fn finished(&self) -> Journal {
+        let mut j = self.clone();
+        match &mut j {
+            Journal::Remove { done, .. } | Journal::Switch { done, .. } | Journal::Move { done, .. } => *done = true,
+        }
+        j
+    }
+
+}
+
+/// Writes a journal durably (written aside, synced, renamed).
+pub(crate) fn write_journal_at(path: &Path, j: &Journal) -> io::Result<()> {
+    let tmp = path.with_extension("journal.tmp");
+    std::fs::write(&tmp, serde_json::to_vec(j).map_err(io::Error::other)?)?;
+    std::fs::File::open(&tmp)?.sync_all()?;
+    std::fs::rename(&tmp, path)?;
+    if let Some(d) = path.parent() {
+        trs_platform::fs::sync_dir(d)?;
+    }
+    Ok(())
+}
+
+/// Moves `p` (if it is there) into the folder's archive, as a replaced file is kept.
+fn to_archive(fs: &StdFs, p: &str) -> io::Result<()> {
+    if fs.lstat(p)?.is_none() {
+        return Ok(());
+    }
+    let stamp = trs_sync::clock::compact_stamp(trs_sync::clock::Clock::now_ns(&SystemClock));
+    let mut dest = trs_sync::conflict::archive_path(p, &stamp);
+    let mut n = 2;
+    while fs.lstat(&dest)?.is_some() {
+        dest = trs_sync::conflict::archive_path(p, &format!("{stamp}-{n}"));
+        n += 1;
+    }
+    if let Some((dir, _)) = dest.rsplit_once('/') {
+        std::fs::create_dir_all(fs.root().join(dir))?;
+    }
+    fs.rename(p, &dest)
+}
+
+/// The plain name a conflict copy gets when both are kept ("Report (MacBook, 2026-10-25 14.32).docx"), numbered while
+/// `taken` says a name is.
+fn plain_name(copy: &str, mut taken: impl FnMut(&str) -> io::Result<bool>) -> io::Result<String> {
+    let at = copy.rfind(" (conflict, ").ok_or_else(|| io::Error::other("not a conflict copy"))?;
+    let base = format!("{} ({}", &copy[..at], &copy[at + " (conflict, ".len()..]);
+    let mut name = base.clone();
+    let mut n = 2;
+    while taken(&name)? {
+        name = match base.rsplit_once('.') {
+            Some((stem, ext)) if !ext.contains(['/', ' ', ')']) => format!("{stem} {n}.{ext}"),
+            _ => format!("{base} {n}"),
+        };
+        n += 1;
+    }
+    Ok(name)
+}
+
+/// A move whose copy is whole and noted but that could not be finished: its journal stays (the next start finishes it),
+/// and the folder is held until then.
+#[derive(Debug)]
+pub(crate) struct Unfinished(String);
+
+impl std::fmt::Display for Unfinished {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Unfinished {}
+
+/// The move failed as [`Unfinished`].
+pub(crate) fn unfinished(e: &io::Error) -> bool {
+    e.get_ref().is_some_and(|i| i.is::<Unfinished>())
+}
+
+/// A removed folder's marker: its archive may hold the only copy of something, so only the marker's other parts go.
+fn prune_state(files: &Path) {
+    let state = files.join(STATE_DIR);
+    if state.join("Archive").exists() {
+        let _ = std::fs::remove_file(state.join("case-probe.tmp"));
+    } else {
+        let _ = std::fs::remove_dir_all(&state);
+    }
+}
+
+/// `path` if nothing is there (or an empty folder, which is taken over), else the first free `<name> 2`, `<name> 3`, …
+/// next to it. The empty folder is removed ([`free_place_name`] only picks).
+fn free_place(path: &Path) -> PathBuf {
+    let to = free_place_name(path);
+    let _ = take_over_empty(&to);
+    to
+}
+
+/// [`free_place`]'s choice, touching nothing.
+fn free_place_name(path: &Path) -> PathBuf {
+    let free = |p: &Path| !p.exists() || std::fs::read_dir(p).is_ok_and(|mut d| d.next().is_none());
+    if free(path) {
+        return path.to_path_buf();
+    }
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    (2..).map(|n| path.with_file_name(format!("{name} {n}"))).find(|p| !p.exists()).expect("a free name")
+}
+
+/// An empty folder at `to` goes, so a move can put a folder there.
+fn take_over_empty(to: &Path) -> io::Result<()> {
+    if to.is_dir() && std::fs::read_dir(to)?.next().is_none() {
+        std::fs::remove_dir(to)?;
+    }
+    Ok(())
+}
+
+/// Moves a directory: a rename on the same volume, else a copy then a delete of the original ([`move_tree_noted`],
+/// with nothing to note).
+fn move_tree(from: &Path, to: &Path) -> io::Result<Option<PathBuf>> {
+    move_tree_noted(from, to, |_| Ok(()), false)
+}
+
+/// Where an original goes once its copy is whole, before it is deleted: beside it, on its own volume.
+pub(crate) fn aside_of(from: &Path) -> PathBuf {
+    let name = from.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    from.with_file_name(format!("{name}.seedwell-moved"))
+}
+
+/// Marks a copy in progress: written into `to`'s state folder (`.seedwell`, never scanned or synced, so no user's file
+/// can be it) before anything is copied, removed once the copy is noted whole. Only a `to` that carries it is ever
+/// removed as a partial copy, and one that carries it is never taken as the folder.
+const PARTIAL: &str = ".seedwell/partial-copy";
+
+/// Marks `to` as a partial copy ([`PARTIAL`]).
+fn mark_partial(to: &Path) -> io::Result<()> {
+    std::fs::create_dir_all(to.join(STATE_DIR))?;
+    std::fs::write(to.join(PARTIAL), b"")?;
+    trs_platform::fs::sync_dir(&to.join(STATE_DIR))
+}
+
+/// `to` carries the partial-copy mark.
+fn is_partial(to: &Path) -> bool {
+    to.join(PARTIAL).exists()
+}
+
+#[cfg(test)]
+thread_local! {
+    /// **Unit tests:** taking a mark off fails (on this thread).
+    static UNMARK_FAILS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Takes the mark off `to` (gone already is fine).
+fn unmark_partial(to: &Path) -> io::Result<()> {
+    #[cfg(test)]
+    if UNMARK_FAILS.get() {
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied, "test: the mark stays"));
+    }
+    match std::fs::remove_file(to.join(PARTIAL)) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+        _ => {}
+    }
+    trs_platform::fs::sync_dir(&to.join(STATE_DIR)).or_else(|_| trs_platform::fs::sync_dir(to))
+}
+
+/// Moves a directory: a rename on the same volume (or with `copy`, always) else a copy, made durable, then `copied`
+/// (the caller notes the move is done, or the copy whole), then the original renamed aside on its own volume
+/// ([`aside_of`]: its place is whole or empty, never half deleted, so a folder there stops as missing instead of
+/// scanning a half-deleted tree), then deleted. A rename is noted done too. A failure before `copied` removes the
+/// partial copy and leaves the original as it was (the error); after it the move stands. Returns an original that
+/// could not be set aside or deleted, and where it is.
+pub(crate) fn move_tree_noted(from: &Path, to: &Path, copied: impl FnOnce(bool) -> io::Result<()>, copy: bool) -> io::Result<Option<PathBuf>> {
+    move_tree_kept(from, to, copied, copy, None)
+}
+
+/// [`move_tree_noted`]; a copy to another volume also keeps a manifest of the source as it was copied at `manifest`
+/// (so a start that finishes the move deletes the original only if it is still exactly that), refuses names that the
+/// target volume would take for one another (case, normalization), and checks the copy holds every source entry.
+pub(crate) fn move_tree_kept(
+    from: &Path,
+    to: &Path,
+    copied: impl FnOnce(bool) -> io::Result<()>,
+    copy: bool,
+    manifest: Option<&Path>,
+) -> io::Result<Option<PathBuf>> {
     if let Some(parent) = to.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    match std::fs::rename(from, to) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == io::ErrorKind::CrossesDevices => {
-            // EXDEV: another volume.
-            copy_new_tree(from, to)?;
-            std::fs::remove_dir_all(from)
-        }
-        Err(e) => Err(e),
+    // The source is an open folder: a mark in it is a stale one (a move of it cut off long ago), never carried along.
+    match std::fs::remove_file(from.join(PARTIAL)) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+        _ => {}
     }
+    if !copy {
+        match std::fs::rename(from, to) {
+            Ok(()) => {
+                // Done: noted, so a start after a crash never takes `to` for a partial copy. Not noted: the move is
+                // undone (renamed back) and fails; if that cannot be, it stands (a start finds the original gone and
+                // `to` there, and finishes it).
+                if let Err(e) = copied(true)
+                    && std::fs::rename(to, from).is_ok()
+                {
+                    return Err(e);
+                }
+                return Ok(None);
+            }
+            // EXDEV: another volume.
+            Err(e) if e.kind() == io::ErrorKind::CrossesDevices => {}
+            Err(e) => return Err(e),
+        }
+    }
+    std::fs::create_dir(to)?;
+    let made = (|| {
+        mark_partial(to)?;
+        trs_platform::fs::sync_dir(to)?;
+        let source = Manifest::of(from)?;
+        let (fold_case, fold_norm) = folds(to)?;
+        let clashes = clashes(&source, fold_case, fold_norm);
+        if !clashes.is_empty() {
+            let named: Vec<String> = clashes.iter().take(5).map(|(a, b)| format!("{a} / {b}")).collect();
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("{} would merge names that differ only in case or form, and lose files: {}", to.display(), named.join(", ")),
+            ));
+        }
+        if let Some(m) = manifest {
+            source.save(m)?;
+        }
+        copy_tree(from, to)?;
+        sync_tree(to)?;
+        source.copied_whole(to, fold_case, fold_norm)?;
+        // Changed while it was copied (a tool wrote there): the copy may hold an older state. Not this time.
+        if Manifest::of(from)? != source {
+            return Err(io::Error::other(format!("{} changed while it was copied; nothing was moved", from.display())));
+        }
+        copied(false)
+    })();
+    if let Err(e) = made {
+        // Not whole, or not noted as whole: the copy goes, the original stays.
+        let _ = remove_partial(to);
+        return Err(e);
+    }
+    // Whole and noted, but still marked: not finished. The journal stays (it says the copy is whole), and the folder is
+    // held until a start finishes the move ([`Unfinished`]).
+    unmark_partial(to).map_err(|e| io::Error::new(e.kind(), Unfinished(format!("the copy at {} could not be marked whole ({e})", to.display()))))?;
+    let aside = aside_of(from);
+    if std::fs::rename(from, &aside).is_err() {
+        return Ok(Some(from.to_path_buf()));
+    }
+    Ok(std::fs::remove_dir_all(&aside).err().map(|_| aside))
+}
+
+/// Removes a partial copy, its mark last: one that cannot be removed all the way still carries the mark, so it is
+/// still known for a partial copy (never taken for anything else).
+fn remove_partial(to: &Path) -> io::Result<()> {
+    let state = to.join(STATE_DIR);
+    let mark = to.join(PARTIAL);
+    let remove = |dir: &Path| -> io::Result<()> {
+        for e in std::fs::read_dir(dir)? {
+            let e = e?;
+            let p = e.path();
+            if p == state || p == mark {
+                continue;
+            }
+            if e.file_type()?.is_dir() {
+                std::fs::remove_dir_all(&p)?;
+            } else {
+                std::fs::remove_file(&p)?;
+            }
+        }
+        Ok(())
+    };
+    remove(to)?;
+    if state.is_dir() {
+        remove(&state)?;
+    }
+    match std::fs::remove_file(&mark) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+        _ => {}
+    }
+    if state.is_dir() {
+        std::fs::remove_dir(&state)?;
+    }
+    std::fs::remove_dir(to)
+}
+
+/// [`finish_move_off`], or for a move that was over (`done`) nothing: the files are at `to`, and whatever is at `from`
+/// now is not the folder's (never renamed aside or deleted).
+async fn finish_or_done(from: &Path, to: &Path, copied: bool, renamed: bool, made_to: bool, done: bool, manifest: PathBuf) -> io::Result<Option<Option<PathBuf>>> {
+    if done {
+        return Ok(Some(None));
+    }
+    finish_move_off(from, to, copied, renamed, made_to, manifest).await
+}
+
+/// [`finish_move`] off the async workers (it may delete a tree).
+async fn finish_move_off(from: &Path, to: &Path, copied: bool, renamed: bool, made_to: bool, manifest: PathBuf) -> io::Result<Option<Option<PathBuf>>> {
+    let (from, to) = (from.to_path_buf(), to.to_path_buf());
+    tokio::task::spawn_blocking(move || finish_move_kept(&from, &to, copied, renamed, made_to, Some(&manifest))).await.map_err(io::Error::other)?
+}
+
+/// After a move cut off: `copied` says it was noted done (its copy whole, or with `renamed`, renamed in one step).
+/// Noted done, it is finished: a copy's original is set aside and deleted (`to` is never deleted then); after a rename
+/// whatever is at `from` is left alone. Not noted, it is undone: `to` is removed only when it carries the partial-copy
+/// mark ([`PARTIAL`]) and the original is there (a marked `to` with the original missing is an error of kind
+/// `NotFound`: the original's disk is not mounted, and nothing is touched), or when it is an empty folder the move made
+/// itself (`made_to`); anything else at `to` is never touched. `Ok(None)`: not moved; `Ok(Some(leftover))`: moved,
+/// with an original that could not be deleted.
+#[cfg(test)]
+pub(crate) fn finish_move(from: &Path, to: &Path, copied: bool, renamed: bool, made_to: bool) -> io::Result<Option<Option<PathBuf>>> {
+    finish_move_kept(from, to, copied, renamed, made_to, None)
+}
+
+/// [`finish_move`]; with the `manifest` the copy kept of the source, an original is deleted only while it is exactly
+/// that (each entry's name, kind, size, times, mode and inode, on its own volume); without one (a journal from before
+/// manifests), only while it is as the copy holds it.
+pub(crate) fn finish_move_kept(
+    from: &Path,
+    to: &Path,
+    copied: bool,
+    renamed: bool,
+    made_to: bool,
+    manifest: Option<&Path>,
+) -> io::Result<Option<Option<PathBuf>>> {
+    let aside = aside_of(from);
+    if renamed {
+        // Done in one step: whatever is at `from` now is not the original.
+        return Ok(Some(None));
+    }
+    if copied {
+        // The original changed after it was copied (edited while the move waited to be finished): nothing is
+        // deleted; both stay, and the error names them.
+        let kept = manifest.and_then(Manifest::load);
+        let changed = match &kept {
+            Some(m) => from.exists() && Manifest::of(from)? != *m,
+            None => from.exists() && changed_since_copied(from, to, Path::new(""))?,
+        };
+        // And the copy still holds all of it (nothing removed from it since): else the original stays too.
+        if let Some(m) = &kept
+            && from.exists()
+        {
+            // The copy's disk not mounted: waits (held), never probed (that would make a folder where it is not).
+            if !to.exists() {
+                return Err(io::Error::new(io::ErrorKind::NotFound, format!("{} is not there (its disk is not mounted?)", to.display())));
+            }
+            let (fold_case, fold_norm) = folds(to)?;
+            m.copied_whole(to, fold_case, fold_norm)?;
+        }
+        if changed {
+            return Err(io::Error::other(format!(
+                "{} changed after it was copied to {}: both are kept and nothing is deleted; keep the one you want and remove the folder from Seedwell, then add it again",
+                from.display(),
+                to.display()
+            )));
+        }
+        unmark_partial(to)?;
+        if from.exists() && std::fs::rename(from, &aside).is_err() {
+            return Ok(Some(Some(from.to_path_buf())));
+        }
+        if aside.exists() && std::fs::remove_dir_all(&aside).is_err() {
+            return Ok(Some(Some(aside)));
+        }
+        return Ok(Some(None));
+    }
+    if is_partial(to) {
+        if !from.exists() {
+            // A partial copy, and the original not here (its disk not mounted yet): neither is the folder. The move is
+            // finished or undone at a start that finds the original.
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("{} is not there (its disk is not mounted?), and {} is a copy of it cut off halfway", from.display(), to.display()),
+            ));
+        }
+        // A copy cut off before it was whole: the original is.
+        remove_partial(to)?;
+        return Ok(None);
+    }
+    if from.exists() {
+        // Nothing moved. A folder the move made at `to` and left as the move leaves it before its mark (empty, or with
+        // only the empty state folder the mark goes into) goes; anything else at `to` stays.
+        if made_to && only_the_moves(to)? {
+            let _ = std::fs::remove_dir(to.join(STATE_DIR));
+            std::fs::remove_dir(to)?;
+        }
+        return Ok(None);
+    }
+    // Renamed (one volume), not noted: done. Or nothing there at all.
+    Ok(to.exists().then_some(None))
+}
+
+/// Something in the original `from` (below `rel`) is not in its copy `to` as it was copied (a file's size or time, a
+/// link's target, a kind): it changed after the copy. (The copy keeps each file's time.) The mark is left out.
+fn changed_since_copied(from: &Path, to: &Path, rel: &Path) -> io::Result<bool> {
+    for e in std::fs::read_dir(from.join(rel))? {
+        let e = e?;
+        let r = rel.join(e.file_name());
+        if r == Path::new(PARTIAL) {
+            continue;
+        }
+        let (a, b) = (std::fs::symlink_metadata(from.join(&r))?, std::fs::symlink_metadata(to.join(&r)));
+        let Ok(b) = b else { return Ok(true) };
+        let t = a.file_type();
+        if t.is_dir() != b.file_type().is_dir() || t.is_symlink() != b.file_type().is_symlink() {
+            return Ok(true);
+        }
+        if t.is_dir() {
+            if changed_since_copied(from, to, &r)? {
+                return Ok(true);
+            }
+        } else if t.is_symlink() {
+            if trs_platform::fs::read_link(&from.join(&r))? != trs_platform::fs::read_link(&to.join(&r))? {
+                return Ok(true);
+            }
+        } else if a.len() != b.len() || a.modified().ok() != b.modified().ok() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// The source of a copy as it was copied, entry by entry (its path below it as name components, each the name's own
+/// bytes, so a name holding `\\` or bytes that are not UTF-8 stays itself; kind, size, times, mode, inode), in path
+/// order. The partial-copy mark and special files (sockets, devices, FIFOs: never copied or synced) are left out.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct Manifest(Vec<ManifestEntry>);
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct ManifestEntry {
+    path: Vec<Vec<u8>>,
+    /// 0 file, 1 folder, 2 link.
+    kind: u8,
+    size: u64,
+    mtime_ns: i128,
+    ctime_ns: i128,
+    mode: u32,
+    inode: u64,
+}
+
+/// A path below a folder, as its names' own bytes.
+type Components = Vec<Vec<u8>>;
+
+/// A name's own bytes (on Windows, its UTF-16 units).
+fn name_bytes(n: &std::ffi::OsStr) -> Vec<u8> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        n.as_bytes().to_vec()
+    }
+    #[cfg(not(unix))]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        n.encode_wide().flat_map(u16::to_le_bytes).collect()
+    }
+}
+
+/// The name of [`name_bytes`].
+fn bytes_name(b: &[u8]) -> std::ffi::OsString {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        std::ffi::OsString::from_vec(b.to_vec())
+    }
+    #[cfg(not(unix))]
+    {
+        use std::os::windows::ffi::OsStringExt;
+        let units: Vec<u16> = b.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+        std::ffi::OsString::from_wide(&units)
+    }
+}
+
+impl ManifestEntry {
+    /// Its path below the root, as this system names it.
+    fn rel(&self) -> PathBuf {
+        self.path.iter().map(|c| bytes_name(c)).collect()
+    }
+
+    /// Its path, readable (for messages only).
+    fn shown(&self) -> String {
+        self.rel().to_string_lossy().into_owned()
+    }
+}
+
+/// How a volume that folds case (`fold_case`) or Unicode form (`fold_norm`) compares a name: names it takes for one
+/// another have one key. A name that is not UTF-8 is its own key.
+fn fold_key(name: &std::ffi::OsStr, fold_case: bool, fold_norm: bool) -> Vec<u8> {
+    let Some(s) = name.to_str() else { return name_bytes(name) };
+    match (fold_norm, fold_case) {
+        // As the folder's own names are compared ([`trs_sync::path::key`]).
+        (true, _) => trs_sync::path::key(s, fold_case).into_bytes(),
+        (false, true) => {
+            let mut out = String::with_capacity(s.len());
+            s.chars().for_each(|c| trs_sync::path::fold_char(c, &mut out));
+            out.into_bytes()
+        }
+        (false, false) => s.as_bytes().to_vec(),
+    }
+}
+
+impl Manifest {
+    fn of(root: &Path) -> io::Result<Manifest> {
+        let mut out = Vec::new();
+        Self::walk(root, &mut Vec::new(), &mut out)?;
+        Ok(Manifest(out))
+    }
+
+    fn walk(root: &Path, rel: &mut Vec<Vec<u8>>, out: &mut Vec<ManifestEntry>) -> io::Result<()> {
+        let dir: PathBuf = std::iter::once(root.as_os_str().to_owned()).chain(rel.iter().map(|c| bytes_name(c))).collect();
+        let mut names: Vec<std::ffi::OsString> = std::fs::read_dir(&dir)?.map(|e| e.map(|e| e.file_name())).collect::<io::Result<_>>()?;
+        names.sort();
+        for n in names {
+            if rel.len() == 1 && rel[0] == name_bytes(std::ffi::OsStr::new(STATE_DIR)) && n == "partial-copy" {
+                continue;
+            }
+            let m = std::fs::symlink_metadata(dir.join(&n))?;
+            let t = m.file_type();
+            let kind = if t.is_symlink() {
+                2
+            } else if t.is_dir() {
+                1
+            } else if t.is_file() {
+                0
+            } else {
+                // A socket, device or FIFO: never copied (opening one may wait forever), never synced.
+                continue;
+            };
+            let ns = |t: io::Result<std::time::SystemTime>| t.ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_nanos() as i128);
+            #[cfg(unix)]
+            let (ctime_ns, mode, inode) = {
+                use std::os::unix::fs::MetadataExt;
+                (i128::from(m.ctime()) * 1_000_000_000 + i128::from(m.ctime_nsec()), m.mode(), m.ino())
+            };
+            #[cfg(not(unix))]
+            let (ctime_ns, mode, inode) = (ns(m.created()), u32::from(m.permissions().readonly()), 0u64);
+            rel.push(name_bytes(&n));
+            out.push(ManifestEntry { path: rel.clone(), kind, size: if kind == 0 { m.len() } else { 0 }, mtime_ns: ns(m.modified()), ctime_ns, mode, inode });
+            if kind == 1 {
+                Self::walk(root, rel, out)?;
+            }
+            rel.pop();
+        }
+        Ok(())
+    }
+
+    /// Written durably (aside, synced, renamed).
+    fn save(&self, at: &Path) -> io::Result<()> {
+        let tmp = at.with_extension("manifest.tmp");
+        std::fs::write(&tmp, serde_json::to_vec(self).map_err(io::Error::other)?)?;
+        std::fs::File::open(&tmp)?.sync_all()?;
+        std::fs::rename(&tmp, at)?;
+        if let Some(d) = at.parent() {
+            trs_platform::fs::sync_dir(d)?;
+        }
+        Ok(())
+    }
+
+    fn load(at: &Path) -> Option<Manifest> {
+        std::fs::read(at).ok().and_then(|b| serde_json::from_slice(&b).ok())
+    }
+
+    /// The copy at `to` holds every entry, under its name as the target volume compares names (it may store a name in
+    /// another form: HFS+ keeps NFD), with its kind, a file at its size. One folder's listing at a time.
+    fn copied_whole(&self, to: &Path, fold_case: bool, fold_norm: bool) -> io::Result<()> {
+        // The listings of the folders along the current path (entries come in walk order: a folder, then what is in
+        // it), each read once.
+        let mut listed: Vec<(Components, BTreeSet<Vec<u8>>)> = Vec::new();
+        for e in &self.0 {
+            let (parent, name) = e.path.split_at(e.path.len() - 1);
+            while listed.last().is_some_and(|(p, _)| !parent.starts_with(p)) {
+                listed.pop();
+            }
+            if listed.last().is_none_or(|(p, _)| p.as_slice() != parent) {
+                let dir: PathBuf = std::iter::once(to.as_os_str().to_owned()).chain(parent.iter().map(|c| bytes_name(c))).collect();
+                let names = std::fs::read_dir(&dir)?.map(|x| x.map(|x| fold_key(&x.file_name(), fold_case, fold_norm))).collect::<io::Result<_>>()?;
+                listed.push((parent.to_vec(), names));
+            }
+            let key = fold_key(&bytes_name(&name[0]), fold_case, fold_norm);
+            let there = std::fs::symlink_metadata(to.join(e.rel())).ok();
+            let fine = listed.last().is_some_and(|(_, names)| names.contains(&key))
+                && there.is_some_and(|m| {
+                    let kind = if m.file_type().is_symlink() { 2 } else if m.is_dir() { 1 } else { 0 };
+                    kind == e.kind && (kind != 0 || m.len() == e.size)
+                });
+            if !fine {
+                return Err(io::Error::other(format!("{} is not in the copy at {} as it is in the original; nothing was moved", e.shown(), to.display())));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Whether the volume of the folder `at` takes names that differ only in case, or only in Unicode form, for one
+/// another (found by trying, in its state folder).
+fn folds(at: &Path) -> io::Result<(bool, bool)> {
+    let dir = at.join(STATE_DIR);
+    std::fs::create_dir_all(&dir)?;
+    let probe = |made: &str, other: &str| -> io::Result<bool> {
+        let p = dir.join(made);
+        std::fs::write(&p, b"")?;
+        let same = dir.join(other).exists();
+        std::fs::remove_file(&p)?;
+        Ok(same)
+    };
+    Ok((probe("case-probe-a", "CASE-PROBE-A")?, probe("form-probe-\u{e9}", "form-probe-e\u{301}")?))
+}
+
+/// Pairs of entries (in one folder) that a volume folding case (`fold_case`) and/or form (`fold_norm`) would take for
+/// one name.
+fn clashes(m: &Manifest, fold_case: bool, fold_norm: bool) -> Vec<(String, String)> {
+    if !fold_case && !fold_norm {
+        return Vec::new();
+    }
+    let mut seen: BTreeMap<(Vec<Vec<u8>>, Vec<u8>), &ManifestEntry> = BTreeMap::new();
+    let mut out = Vec::new();
+    for e in &m.0 {
+        let (parent, name) = e.path.split_at(e.path.len() - 1);
+        let key = (parent.to_vec(), fold_key(&bytes_name(&name[0]), fold_case, fold_norm));
+        match seen.get(&key) {
+            Some(first) => out.push((first.shown(), e.shown())),
+            None => {
+                seen.insert(key, e);
+            }
+        }
+    }
+    out
+}
+
+/// `to` is a folder holding nothing, or only an empty state folder (what a move makes before its mark).
+fn only_the_moves(to: &Path) -> io::Result<bool> {
+    if !to.is_dir() {
+        return Ok(false);
+    }
+    for e in std::fs::read_dir(to)? {
+        let e = e?;
+        if e.file_name() != STATE_DIR || !e.file_type()?.is_dir() || std::fs::read_dir(e.path())?.next().is_some() {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Makes a copied tree durable: every file's data and every folder's entries.
+fn sync_tree(p: &Path) -> io::Result<()> {
+    for e in std::fs::read_dir(p)? {
+        let e = e?;
+        let t = e.file_type()?;
+        if t.is_dir() {
+            sync_tree(&e.path())?;
+        } else if t.is_file() {
+            std::fs::File::open(e.path())?.sync_all()?;
+        }
+    }
+    trs_platform::fs::sync_dir(p)
 }
 
 /// Copies `from` to `to`, which must not exist yet. A copy that fails halfway (a full disk, a link
 /// this system cannot make) removes what it made, so only the original is left.
+#[cfg(test)]
 fn copy_new_tree(from: &Path, to: &Path) -> io::Result<()> {
     std::fs::create_dir(to)?;
     copy_tree(from, to).inspect_err(|_| {
@@ -1894,21 +3487,56 @@ fn copy_new_tree(from: &Path, to: &Path) -> io::Result<()> {
 
 /// Copies the contents of `from` into the folder `to`.
 fn copy_tree(from: &Path, to: &Path) -> io::Result<()> {
+    copy_tree_in(from, to, true)
+}
+
+/// [`copy_tree`]; at the `top`, the state folder may be there already (it carries the mark), and the source's own
+/// mark (from a move of it cut off earlier) is not copied.
+fn copy_tree_in(from: &Path, to: &Path, top: bool) -> io::Result<()> {
     for e in std::fs::read_dir(from)? {
         let e = e?;
         let (src, dst) = (e.path(), to.join(e.file_name()));
         let t = e.file_type()?;
+        if top && e.file_name() == STATE_DIR && t.is_dir() {
+            std::fs::create_dir_all(&dst)?;
+            for s in std::fs::read_dir(&src)? {
+                let s = s?;
+                if src.join(s.file_name()) == from.join(PARTIAL) {
+                    continue;
+                }
+                let (ss, sd) = (s.path(), dst.join(s.file_name()));
+                if s.file_type()?.is_dir() {
+                    std::fs::create_dir(&sd)?;
+                    copy_tree_in(&ss, &sd, false)?;
+                } else {
+                    copy_entry(&ss, &sd, s.file_type()?)?;
+                }
+            }
+            continue;
+        }
         if t.is_dir() {
             std::fs::create_dir(&dst)?;
-            copy_tree(&src, &dst)?;
-        } else if t.is_symlink() {
-            trs_platform::fs::symlink(&trs_platform::fs::read_link(&src)?, &dst)?;
+            copy_tree_in(&src, &dst, false)?;
         } else {
-            std::fs::copy(&src, &dst)?;
-            let m = std::fs::metadata(&src)?;
-            if let Ok(t) = m.modified() {
-                std::fs::File::options().write(true).open(&dst)?.set_modified(t)?;
-            }
+            copy_entry(&src, &dst, t)?;
+        }
+    }
+    Ok(())
+}
+
+/// Copies one file or link, the file's time with it.
+fn copy_entry(src: &Path, dst: &Path, t: std::fs::FileType) -> io::Result<()> {
+    // A socket, device or FIFO is not copied (opening one can wait forever) nor synced: it stays with the original.
+    if !t.is_symlink() && !t.is_file() {
+        return Ok(());
+    }
+    if t.is_symlink() {
+        trs_platform::fs::symlink(&trs_platform::fs::read_link(src)?, dst)?;
+    } else {
+        std::fs::copy(src, dst)?;
+        let m = std::fs::metadata(src)?;
+        if let Ok(t) = m.modified() {
+            std::fs::File::options().write(true).open(dst)?.set_modified(t)?;
         }
     }
     Ok(())
@@ -2206,5 +3834,337 @@ mod tests {
             assert!(!to2.exists(), "the half copy is removed");
             assert!(from.join("a/b/f").exists(), "the original stays");
         }
+    }
+
+    /// A tree with two files, at `p`.
+    fn tree(p: &Path) {
+        std::fs::create_dir_all(p.join("sub")).unwrap();
+        std::fs::write(p.join("a.txt"), b"a").unwrap();
+        std::fs::write(p.join("sub/b.txt"), b"b").unwrap();
+    }
+
+    /// The mark is Seedwell's alone: a user's file of its old name moves like any, a source's stale mark is not
+    /// copied, and only the mark makes a partial copy.
+    #[test]
+    fn the_partial_copy_mark_is_in_the_state_folder_and_no_users_file_is_taken_for_it() {
+        let t = tempfile::tempdir().unwrap();
+        let (from, to) = (t.path().join("from"), t.path().join("to"));
+        tree(&from);
+        std::fs::write(from.join(".seedwell-partial-copy"), b"the user's").unwrap();
+        std::fs::create_dir_all(from.join(".seedwell/Archive")).unwrap();
+        std::fs::write(from.join(".seedwell/Archive/old.txt"), b"kept").unwrap();
+        std::fs::write(from.join(PARTIAL), b"").unwrap();
+        assert_eq!(move_tree_noted(&from, &to, |_| Ok(()), true).unwrap(), None);
+        assert!(whole(&to) && !from.exists());
+        assert_eq!(std::fs::read(to.join(".seedwell-partial-copy")).unwrap(), b"the user's");
+        assert_eq!(std::fs::read(to.join(".seedwell/Archive/old.txt")).unwrap(), b"kept");
+        assert!(!to.join(PARTIAL).exists(), "no mark left");
+        // A plain copy of it (the source still marked from a move cut off earlier) does not carry its mark.
+        let again = t.path().join("again");
+        std::fs::create_dir_all(to.join(".seedwell")).unwrap();
+        std::fs::write(to.join(PARTIAL), b"").unwrap();
+        copy_new_tree(&to, &again).unwrap();
+        assert!(!again.join(PARTIAL).exists() && again.join(".seedwell-partial-copy").exists());
+        std::fs::remove_file(to.join(PARTIAL)).unwrap();
+    }
+
+    /// A move never carries a stale mark, never leaves one it could not take off unreported, and recovery knows what a
+    /// move cut off before its mark leaves (and no other name is a mark).
+    #[test]
+    #[cfg(unix)]
+    fn marks_are_handled_strictly() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = tempfile::tempdir().unwrap();
+        let (from, to) = (t.path().join("from"), t.path().join("to"));
+        // A stale mark in the source, a rename on one volume: not carried along.
+        tree(&from);
+        std::fs::create_dir_all(from.join(STATE_DIR)).unwrap();
+        std::fs::write(from.join(PARTIAL), b"").unwrap();
+        assert_eq!(move_tree_noted(&from, &to, |_| Ok(()), false).unwrap(), None);
+        assert!(whole(&to) && !is_partial(&to));
+        std::fs::remove_dir_all(&to).unwrap();
+        // The rename cannot be noted: renamed back, the move failed.
+        tree(&from);
+        assert!(move_tree_noted(&from, &to, |_| Err(io::Error::other("disk full")), false).is_err());
+        assert!(whole(&from) && !to.exists());
+        // Noted whole but the mark cannot come off: an error, and the original stays.
+        copy_new_tree(&from, &to).unwrap();
+        mark_partial(&to).unwrap();
+        std::fs::set_permissions(to.join(STATE_DIR), std::fs::Permissions::from_mode(0o555)).unwrap();
+        assert!(finish_move(&from, &to, true, false, true).is_err());
+        assert!(whole(&from), "the original stays");
+        std::fs::set_permissions(to.join(STATE_DIR), std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(finish_move(&from, &to, true, false, true).unwrap(), Some(None), "then finished");
+        assert!(whole(&to) && !from.exists() && !is_partial(&to));
+        std::fs::remove_dir_all(&to).unwrap();
+        // Noted whole but the mark cannot come off during the move: unfinished (the journal stays, the next start
+        // finishes it), the original as it was, the copy whole and marked.
+        tree(&from);
+        UNMARK_FAILS.set(true);
+        let e = move_tree_noted(&from, &to, |_| Ok(()), true).unwrap_err();
+        UNMARK_FAILS.set(false);
+        assert!(unfinished(&e), "{e}");
+        assert!(whole(&from) && whole(&to) && is_partial(&to));
+        // Edited in the original meanwhile: nothing is deleted, the error names both.
+        std::fs::write(from.join("sub/b.txt"), b"edited after the copy").unwrap();
+        let e = finish_move(&from, &to, true, false, true).unwrap_err();
+        assert!(e.to_string().contains("changed after it was copied"), "{e}");
+        assert_eq!(std::fs::read(from.join("sub/b.txt")).unwrap(), b"edited after the copy");
+        assert!(whole(&to));
+        std::fs::write(from.join("sub/b.txt"), b"b").unwrap();
+        std::fs::write(from.join("new.txt"), b"added after the copy").unwrap();
+        assert!(finish_move(&from, &to, true, false, true).is_err(), "a file added there");
+        std::fs::remove_file(from.join("new.txt")).unwrap();
+        // As it was copied (its times too): the next start finishes it.
+        std::fs::remove_dir_all(&from).unwrap();
+        copy_new_tree(&to, &from).unwrap();
+        assert_eq!(finish_move(&from, &to, true, false, true).unwrap(), Some(None), "the next start finishes it");
+        assert!(whole(&to) && !from.exists() && !is_partial(&to));
+        std::fs::remove_dir_all(&to).unwrap();
+        // A user's file of the name development builds once gave the mark is no mark, whatever the journal says.
+        tree(&from);
+        copy_new_tree(&from, &to).unwrap();
+        std::fs::write(to.join(".seedwell-partial-copy"), b"the user's").unwrap();
+        assert_eq!(finish_move(&from, &to, false, false, false).unwrap(), None);
+        assert_eq!(std::fs::read(to.join(".seedwell-partial-copy")).unwrap(), b"the user's", "left alone");
+        std::fs::remove_dir_all(&to).unwrap();
+        // Cut off between making the state folder and writing the mark: the move's own, it goes; not the move's
+        // (`made_to` false), it stays.
+        std::fs::create_dir_all(to.join(STATE_DIR)).unwrap();
+        assert_eq!(finish_move(&from, &to, false, false, false).unwrap(), None);
+        assert!(to.exists());
+        assert_eq!(finish_move(&from, &to, false, false, true).unwrap(), None);
+        assert!(!to.exists() && whole(&from));
+    }
+
+    /// A copy keeps a manifest of its source; a start finishing the move deletes the original only while it is exactly
+    /// that, even a permission change or a file whose time was put back keeps it.
+    #[test]
+    #[cfg(unix)]
+    fn an_original_is_deleted_only_while_it_is_exactly_as_it_was_copied() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = tempfile::tempdir().unwrap();
+        let (from, to, m) = (t.path().join("from"), t.path().join("to"), t.path().join("x.manifest"));
+        tree(&from);
+        UNMARK_FAILS.set(true);
+        assert!(unfinished(&move_tree_kept(&from, &to, |_| Ok(()), true, Some(&m)).unwrap_err()));
+        UNMARK_FAILS.set(false);
+        assert!(Manifest::load(&m).is_some_and(|x| x == Manifest::of(&from).unwrap()), "kept as copied");
+        // A permission change, then a write whose time is put back: still not the original as copied.
+        std::fs::set_permissions(from.join("a.txt"), std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(finish_move_kept(&from, &to, true, false, true, Some(&m)).is_err());
+        assert!(whole(&from) && whole(&to));
+        // Copied again; then a write of the same size whose time is put back (as some tools do): still kept.
+        std::fs::remove_dir_all(&from).unwrap();
+        std::fs::remove_dir_all(&to).unwrap();
+        tree(&from);
+        UNMARK_FAILS.set(true);
+        let _ = move_tree_kept(&from, &to, |_| Ok(()), true, Some(&m));
+        UNMARK_FAILS.set(false);
+        let when = std::fs::metadata(from.join("a.txt")).unwrap().modified().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(from.join("a.txt"), b"A").unwrap();
+        std::fs::File::options().write(true).open(from.join("a.txt")).unwrap().set_modified(when).unwrap();
+        assert!(finish_move_kept(&from, &to, true, false, true, Some(&m)).is_err(), "its change time tells");
+        std::fs::remove_dir_all(&from).unwrap();
+        std::fs::remove_dir_all(&to).unwrap();
+        // Unchanged: finished.
+        tree(&from);
+        UNMARK_FAILS.set(true);
+        let _ = move_tree_kept(&from, &to, |_| Ok(()), true, Some(&m));
+        UNMARK_FAILS.set(false);
+        assert_eq!(finish_move_kept(&from, &to, true, false, true, Some(&m)).unwrap(), Some(None));
+        assert!(whole(&to) && !from.exists());
+    }
+
+    /// Names a case-insensitive (or form-insensitive) volume would take for one another are found before a copy; a
+    /// copy missing an entry is never taken for whole.
+    #[test]
+    fn a_copy_never_merges_names_or_loses_an_entry() {
+        let e = |p: &str| ManifestEntry {
+            path: p.split('/').map(|c| name_bytes(std::ffi::OsStr::new(c))).collect(),
+            kind: 0,
+            size: 1,
+            mtime_ns: 0,
+            ctime_ns: 0,
+            mode: 0,
+            inode: 0,
+        };
+        let m = Manifest(vec![e("Notes/a.txt"), e("Notes/A.txt"), e("caf\u{e9}.txt"), e("cafe\u{301}.txt"), e("x/y"), e("Notes2/a.txt")]);
+        assert!(clashes(&m, false, false).is_empty(), "a volume that folds nothing");
+        assert_eq!(clashes(&m, true, true), [("Notes/a.txt".to_string(), "Notes/A.txt".to_string()), ("caf\u{e9}.txt".to_string(), "cafe\u{301}.txt".to_string())]);
+        assert_eq!(clashes(&m, false, true).len(), 1, "only the forms");
+        assert_eq!(clashes(&m, true, false), [("Notes/a.txt".to_string(), "Notes/A.txt".to_string())], "case only (NTFS): the forms are two names");
+        let t = tempfile::tempdir().unwrap();
+        let (from, to) = (t.path().join("from"), t.path().join("to"));
+        tree(&from);
+        let src = Manifest::of(&from).unwrap();
+        copy_new_tree(&from, &to).unwrap();
+        src.copied_whole(&to, true, true).unwrap();
+        std::fs::remove_file(to.join("sub/b.txt")).unwrap();
+        assert!(src.copied_whole(&to, true, true).is_err());
+        std::fs::write(to.join("sub/b.txt"), b"longer than it was").unwrap();
+        assert!(src.copied_whole(&to, true, true).is_err(), "not at its size");
+        // A name the target stores in another form (HFS+ keeps NFD) is found by the target's own comparison; on a
+        // volume that keeps forms apart (NTFS), it is another name.
+        let n = Manifest(vec![e("Ma\u{30a}ke.txt")]);
+        std::fs::write(to.join("M\u{e5}ke.txt"), b"").unwrap();
+        let m = Manifest(vec![ManifestEntry { size: 0, ..n.0[0].clone() }]);
+        if folds(&to).unwrap().1 {
+            assert!(m.copied_whole(&to, true, true).is_ok());
+        }
+        assert!(m.copied_whole(&to, true, false).is_err());
+        // Folded as the folder's names are: a final sigma is a sigma, a long s an s.
+        assert_eq!(fold_key(std::ffi::OsStr::new("\u{3a3}\u{3c2}"), true, false), fold_key(std::ffi::OsStr::new("\u{3c3}\u{3c3}"), true, false));
+        assert_eq!(fold_key(std::ffi::OsStr::new("\u{17f}"), true, true), fold_key(std::ffi::OsStr::new("S"), true, true));
+    }
+
+    /// Names are their own bytes: a backslash stays in its name, a name that is not UTF-8 moves as it is, and a FIFO
+    /// (never synced) is not copied, so a move never waits on one.
+    #[test]
+    #[cfg(unix)]
+    fn a_move_keeps_names_as_they_are_and_skips_special_files() {
+        use std::os::unix::ffi::OsStrExt;
+        let t = tempfile::tempdir().unwrap();
+        let (from, to) = (t.path().join("from"), t.path().join("to"));
+        tree(&from);
+        std::fs::write(from.join("back\\slash.txt"), b"bs").unwrap();
+        let odd = std::ffi::OsStr::from_bytes(b"latin1-\xe9.txt");
+        // (A volume that only takes UTF-8 names refuses it: then that part is left out.)
+        let odd_made = std::fs::write(from.join(odd), b"odd").is_ok();
+        let fifo = from.join("pipe");
+        assert!(std::process::Command::new("mkfifo").arg(&fifo).status().unwrap().success());
+        let m = Manifest::of(&from).unwrap();
+        assert!(m.0.iter().any(|e| e.path == [b"back\\slash.txt".to_vec()]), "one name, not a folder and a file");
+        assert!(!m.0.iter().any(|e| e.path == [b"pipe".to_vec()]), "the FIFO is no entry");
+        assert_eq!(move_tree_noted(&from, &to, |_| Ok(()), true).unwrap(), None);
+        assert!(whole(&to) && !from.exists());
+        assert_eq!(std::fs::read(to.join("back\\slash.txt")).unwrap(), b"bs");
+        if odd_made {
+            assert_eq!(std::fs::read(to.join(odd)).unwrap(), b"odd");
+        }
+        assert!(!to.join("pipe").exists());
+    }
+
+    /// Finishing a move after a crash deletes the original only while the copy still holds all of it.
+    #[test]
+    #[cfg(unix)]
+    fn a_start_never_deletes_an_original_whose_copy_lost_files() {
+        let t = tempfile::tempdir().unwrap();
+        let (from, to, m) = (t.path().join("from"), t.path().join("to"), t.path().join("x.manifest"));
+        tree(&from);
+        UNMARK_FAILS.set(true);
+        assert!(unfinished(&move_tree_kept(&from, &to, |_| Ok(()), true, Some(&m)).unwrap_err()));
+        UNMARK_FAILS.set(false);
+        std::fs::remove_file(to.join("sub/b.txt")).unwrap();
+        assert!(finish_move_kept(&from, &to, true, false, true, Some(&m)).is_err());
+        assert!(whole(&from), "the original stays");
+        // The copy's disk not mounted: it waits (held, tried again on a mount), and nothing is made where it was.
+        let away = t.path().join("unmounted");
+        std::fs::rename(&to, &away).unwrap();
+        let e = finish_move_kept(&from, &to, true, false, true, Some(&m)).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::NotFound, "{e}");
+        assert!(!to.exists() && whole(&from));
+    }
+
+    fn whole(p: &Path) -> bool {
+        std::fs::read(p.join("a.txt")).ok().as_deref() == Some(b"a") && std::fs::read(p.join("sub/b.txt")).ok().as_deref() == Some(b"b")
+    }
+
+    /// A copy to another volume (forced here) is noted whole before the original goes, and the original is set aside on
+    /// its own volume first: its place is whole or empty, never half deleted. Each crash point, then the start after it.
+    #[test]
+    fn a_move_across_volumes_is_finished_or_undone_never_half_deleted() {
+        let t = tempfile::tempdir().unwrap();
+        let (from, to) = (t.path().join("from"), t.path().join("to"));
+
+        // Whole: the copy is noted, the original goes.
+        tree(&from);
+        let mut noted = false;
+        assert_eq!(move_tree_noted(&from, &to, |_| { noted = true; Ok(()) }, true).unwrap(), None);
+        assert!(noted && whole(&to) && !from.exists() && !aside_of(&from).exists());
+        std::fs::remove_dir_all(&to).unwrap();
+
+        // Cut off before the copy was noted whole: undone (the partial copy, marked as one, goes; the original stays).
+        tree(&from);
+        copy_new_tree(&from, &to).unwrap();
+        mark_partial(&to).unwrap();
+        std::fs::remove_file(to.join("sub/b.txt")).unwrap();
+        assert_eq!(finish_move(&from, &to, false, false, true).unwrap(), None);
+        assert!(whole(&from) && !to.exists());
+
+        // The journal was written, nothing moved, something is at `to` (the host's empty place, or anything): it is
+        // never removed without the mark.
+        std::fs::create_dir_all(to.join("host's")).unwrap();
+        assert_eq!(finish_move(&from, &to, false, false, true).unwrap(), None);
+        assert!(whole(&from) && to.join("host's").exists());
+        std::fs::remove_dir_all(&to).unwrap();
+        // An empty folder left at `to` that the move made (cut off before its mark): it goes; one that was there
+        // before the move (the host's) stays.
+        std::fs::create_dir(&to).unwrap();
+        assert_eq!(finish_move(&from, &to, false, false, false).unwrap(), None);
+        assert!(whole(&from) && to.is_dir(), "not the move's own: left alone");
+        assert_eq!(finish_move(&from, &to, false, false, true).unwrap(), None);
+        assert!(whole(&from) && !to.exists());
+        // A partial copy, and the original not there (its disk not mounted yet): neither is adopted, the move waits.
+        copy_new_tree(&from, &to).unwrap();
+        mark_partial(&to).unwrap();
+        std::fs::rename(&from, t.path().join("unmounted")).unwrap();
+        assert_eq!(finish_move(&from, &to, false, false, true).unwrap_err().kind(), io::ErrorKind::NotFound);
+        assert!(is_partial(&to), "the copy is left as it is");
+        std::fs::rename(t.path().join("unmounted"), &from).unwrap();
+        assert_eq!(finish_move(&from, &to, false, false, true).unwrap(), None, "the disk is back: undone");
+        assert!(whole(&from) && !to.exists());
+
+        // Noting it fails: the same, at once.
+        assert!(move_tree_noted(&from, &to, |_| Err(io::Error::other("disk full")), true).is_err());
+        assert!(whole(&from) && !to.exists());
+
+        // Cut off after it was noted whole, the original still in place: finished (the copy is never deleted).
+        copy_new_tree(&from, &to).unwrap();
+        assert_eq!(finish_move(&from, &to, true, false, true).unwrap(), Some(None));
+        assert!(whole(&to) && !from.exists() && !aside_of(&from).exists());
+
+        // Cut off while the set-aside original was being deleted: finished.
+        tree(&from);
+        std::fs::rename(&to, t.path().join("to-old")).unwrap();
+        copy_new_tree(&from, &to).unwrap();
+        std::fs::rename(&from, aside_of(&from)).unwrap();
+        std::fs::remove_file(aside_of(&from).join("a.txt")).unwrap();
+        assert_eq!(finish_move(&from, &to, true, false, true).unwrap(), Some(None));
+        assert!(whole(&to) && !from.exists() && !aside_of(&from).exists());
+
+        // A rename on one volume, cut off before it was saved: moved.
+        assert_eq!(finish_move(&from, &to, false, false, true).unwrap(), Some(None));
+        // Noted as a rename, and something appears at the old place later (a host's root made again): the move is
+        // done, the live folder at `to` and the new thing at `from` both stay.
+        std::fs::create_dir_all(from.join("new")).unwrap();
+        assert_eq!(finish_move(&from, &to, false, true, true).unwrap(), Some(None));
+        assert!(whole(&to) && from.join("new").exists());
+        assert_eq!(finish_move(&from, &to, true, true, true).unwrap(), Some(None));
+        assert!(whole(&to) && from.join("new").exists(), "a rename noted done never sets `from` aside");
+    }
+
+    /// The original cannot be deleted all the way (here: a folder in it that cannot be written): the move stands, the
+    /// rest of the original is left set aside and named, and its place is empty, never half deleted.
+    #[cfg(unix)]
+    #[test]
+    fn a_delete_of_the_original_that_fails_halfway_leaves_its_place_empty() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = tempfile::tempdir().unwrap();
+        let (from, to) = (t.path().join("from"), t.path().join("to"));
+        tree(&from);
+        std::fs::set_permissions(from.join("sub"), std::fs::Permissions::from_mode(0o555)).unwrap();
+        let left = move_tree_noted(&from, &to, |_| Ok(()), true).unwrap();
+        let aside = aside_of(&from);
+        std::fs::set_permissions(aside.join("sub"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(left, Some(aside.clone()), "where the rest is");
+        assert!(whole(&to) && !from.exists(), "the place is empty, not half deleted");
+        assert!(aside.join("sub/b.txt").exists());
+        // The same from the journal at the next start.
+        std::fs::set_permissions(aside.join("sub"), std::fs::Permissions::from_mode(0o555)).unwrap();
+        assert_eq!(finish_move(&from, &to, true, false, true).unwrap(), Some(Some(aside.clone())));
+        std::fs::set_permissions(aside.join("sub"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(whole(&to) && !from.exists());
     }
 }

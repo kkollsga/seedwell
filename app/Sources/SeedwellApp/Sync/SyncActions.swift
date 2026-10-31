@@ -18,14 +18,25 @@ import os
     var showShareNew: (_ path: String) -> Void = { _ in }
     /// The last folder that was removed (the window drops its page).
     var onRemoved: (String) -> Void = { _ in }
+    /// On-demand folders in the Finder (the user's own app only; `nil` in tests, QA and other isolated runs).
+    var fileProvider: FileProviderHost?
 
     init(core: Core) { self.core = core }
 
     func snapshot() -> SyncSnapshot { core.syncSnapshot() }
 
-    /// Reveals the folder in Finder; a missing one shows its page instead (there is nothing to reveal).
+    /// Reveals the folder in Finder; a missing one shows its page instead (there is nothing to reveal). An on-demand
+    /// folder is where the Finder shows it (its File Provider domain).
     func reveal(_ f: SyncFolder) {
-        if FileManager.default.fileExists(atPath: f.path) {
+        if f.onDemand {
+            Task {
+                if let url = await fileProvider?.rootURL(f.id) {
+                    NSWorkspace.shared.activateFileViewerSelecting([url])
+                } else {
+                    showFolder(f.id, false)
+                }
+            }
+        } else if FileManager.default.fileExists(atPath: f.path) {
             NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: f.path)])
         } else {
             showFolder(f.id, false)
@@ -39,11 +50,13 @@ import os
 
     /// Stops syncing on this Mac; with `trash`, the core then moves the folder to the Trash (it refuses one that cannot
     /// go there, which stays synced). Errors are told in an alert (the menu, which asked, is closed by then).
+    /// (The core has an on-demand folder's domain removed first, so its place is an ordinary folder again: SPEC 7G.11.)
     func remove(_ f: SyncFolder, trash: Bool) {
         Task {
             let core = self.core
             let id = f.id
-            switch await run({ try core.syncRemove(id: id, trashFiles: trash) }) {
+            let r = await run({ try core.syncRemove(id: id, trashFiles: trash) })
+            switch r {
             case .failure(let e):
                 alert(syncRemoveFailed(name: f.name, error: SyncText.message(e)))
             case .success(let trashFailed):

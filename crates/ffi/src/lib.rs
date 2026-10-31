@@ -33,6 +33,7 @@ mod settings_text;
 mod sidebar;
 mod sources;
 mod sync;
+mod sync_host;
 mod sync_menu;
 mod sync_removal;
 mod sync_text;
@@ -59,6 +60,7 @@ pub use settings::*;
 pub use settings_text::*;
 pub use sidebar::*;
 pub use sync::*;
+pub use sync_host::{SyncHostBatch, SyncHostDomain, SyncHostFolderState, SyncHostListener, SyncHostNotice, SyncHostRemoval, SyncHostText};
 pub use sync_menu::*;
 pub use sync_text::*;
 pub use types::*;
@@ -110,6 +112,9 @@ pub struct Core {
     battery: Arc<battery::Battery>,
     /// Where the control server finds the updater (`update.*`), once the host has made one.
     builds: trs_control::BuildsSlot,
+    /// The File Provider extension's server, while the app runs it (`sync_host_start`).
+    #[cfg(unix)]
+    host: std::sync::Mutex<Option<sync_host::Server>>,
 }
 
 impl Core {
@@ -133,7 +138,16 @@ impl Core {
         };
         let battery = Arc::new(battery::Battery::new(backend.clone(), dir.clone()));
         let isolated = options.forbidden_root.is_some();
-        Ok(Arc::new(Self { backend, settings: SettingsStore::new(&dir), dir, isolated, battery, builds }))
+        Ok(Arc::new(Self {
+            backend,
+            settings: SettingsStore::new(&dir),
+            dir,
+            isolated,
+            battery,
+            builds,
+            #[cfg(unix)]
+            host: std::sync::Mutex::new(None),
+        }))
     }
 
 }

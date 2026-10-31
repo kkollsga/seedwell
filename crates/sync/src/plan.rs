@@ -79,7 +79,7 @@ pub fn plan(needs: &[(String, NeedRecord)], local: &dyn Fn(&str) -> Option<Local
         let stand_in = have_nothing
             .then(|| {
                 deletes.iter().enumerate().position(|(i, (_, l))| {
-                    !used[i] && l.as_ref().is_some_and(|l| !l.invalid && same_file(&l.file.info, wanted))
+                    !used[i] && l.as_ref().is_some_and(|l| !l.invalid && !l.dataless && same_file(&l.file.info, wanted))
                 })
             })
             .flatten();
@@ -128,7 +128,7 @@ mod tests {
     }
 
     fn rec(i: FileInfo) -> LocalRecord {
-        LocalRecord { file: SignedFile { info: i, sig: [0; 64] }, sequence: 1, invalid: false, stamp: None, tier: None }
+        LocalRecord { file: SignedFile { info: i, sig: [0; 64] }, sequence: 1, invalid: false, stamp: None, tier: None, dataless: false, want: false }
     }
 
     #[test]

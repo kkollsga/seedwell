@@ -550,6 +550,9 @@ pub struct SyncAddForm {
     pub location: String,
     /// The user picked the location: a new link does not move it any more.
     pub location_chosen: bool,
+    /// Files on demand (SPEC 7G.11): every file listed, content fetched when opened. From this computer: added, then
+    /// switched; shared with me: joined on demand.
+    pub on_demand: bool,
 }
 
 /// A fresh form: From this computer, nothing chosen.
@@ -563,6 +566,7 @@ pub fn sync_add_form_new() -> SyncAddForm {
         problem: None,
         location: String::new(),
         location_chosen: false,
+        on_demand: false,
     }
 }
 
@@ -681,10 +685,11 @@ pub fn sync_edit_share_note(role: SyncRole) -> String {
 
 // MARK: Removing, errors and alerts
 
-/// The question of removing a folder (the menu's confirmation, the folder page).
+/// The question of removing a folder (the menu's confirmation, the folder page). `only_here`: how many of its files no
+/// other device is known to hold (`Core::sync_only_here`, asked when the question opens).
 #[uniffi::export]
-pub fn sync_remove_question(name: String) -> String {
-    format!(concat!("Stop syncing “{}” on this ", computer!(), "? Other devices keep their copy."), name)
+pub fn sync_remove_question(name: String, only_here: u64) -> String {
+    format!(concat!("Stop syncing “{}” on this ", computer!(), "? {}"), name, trs_control::sync::others_after_removal(only_here))
 }
 
 /// The option of that question.
@@ -793,6 +798,158 @@ pub fn sync_remove_device_failed(device: String, name: String, error: String) ->
     SyncAlert { title: format!("Couldn't remove {device} from “{name}”"), text: error }
 }
 
+// MARK: On-demand folders in the file manager (SPEC 7G.11)
+
+/// The window that asks the user to let on-demand folders into the Finder: macOS starts Seedwell's File Provider
+/// switched off, and only the user turns it on (System Settings › General › Login Items & Extensions › File
+/// Providers). `button` opens that list; the window notices by itself when the switch is on.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct SyncOnDemandNotice {
+    /// The small caption above the title.
+    pub caption: String,
+    pub title: String,
+    pub text: String,
+    /// Opens System Settings at the list (`None` once it is on), and its tooltip.
+    pub button: Option<String>,
+    pub help: String,
+    /// Closes the window, and its tooltip.
+    pub done: String,
+    pub done_help: String,
+}
+
+/// The notice while the switch is off (`enabled` false), and what the window says once it is on.
+#[uniffi::export]
+pub fn sync_on_demand_notice(enabled: bool) -> SyncOnDemandNotice {
+    if enabled {
+        SyncOnDemandNotice {
+            caption: "Folder Sync".into(),
+            done: "Done".into(),
+            done_help: "Close".into(),
+            title: concat!("Seedwell Is in the ", file_manager!()).into(),
+            text: concat!(
+                "On-demand folders are in the ",
+                file_manager!(),
+                "’s sidebar, under Locations. Open a file to download it; Remove Download frees its space again."
+            )
+            .into(),
+            button: None,
+            help: String::new(),
+        }
+    } else {
+        SyncOnDemandNotice {
+            caption: "Folder Sync".into(),
+            done: "Done".into(),
+            done_help: "Close; the folder page has the way in too".into(),
+            title: concat!("Allow Seedwell in the ", file_manager!()).into(),
+            text: concat!(
+                "macOS asks you once before an on-demand folder shows in the ",
+                file_manager!(),
+                ". Click Open Settings, then turn on Seedwell under File Providers. This window notices by itself."
+            )
+            .into(),
+            button: Some("Open Settings".into()),
+            help: "Open the list in System Settings where Seedwell is switched on".into(),
+        }
+    }
+}
+
+/// A switch of Files on demand, for its note.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum SyncOnDemandChange {
+    /// Adding a folder of this computer on demand.
+    Add,
+    /// Joining a shared folder on demand.
+    Join,
+    /// An existing folder switched to on demand.
+    TurnOn,
+    /// An on-demand folder, unchanged.
+    Stays,
+    /// An on-demand folder switched back to full.
+    TurnOff,
+}
+
+/// The switch's label, in the add and edit modals.
+#[uniffi::export]
+pub fn sync_on_demand_label() -> String {
+    "Files on demand".into()
+}
+
+/// The switch's tooltip.
+#[uniffi::export]
+pub fn sync_on_demand_help() -> String {
+    concat!("List every file in the ", file_manager!(), ", and download each only when it is opened").into()
+}
+
+/// Under the switch: what it means, said for the change it makes. `place_shown`: where a folder switched back to full
+/// goes (its place), as the host shows a path.
+#[uniffi::export]
+pub fn sync_on_demand_note(change: SyncOnDemandChange, place_shown: String) -> String {
+    let allow = concat!("macOS asks you once to allow Seedwell in the ", file_manager!(), ".");
+    match change {
+        SyncOnDemandChange::Join => format!(
+            concat!(
+                "Every file is listed in the ",
+                file_manager!(),
+                "’s sidebar, under Locations, but its content stays on your other devices until you open it. What you open stays on this ",
+                computer!(),
+                ". {}"
+            ),
+            allow
+        ),
+        SyncOnDemandChange::Add | SyncOnDemandChange::TurnOn => format!(
+            concat!(
+                "The folder moves to the ",
+                file_manager!(),
+                "’s sidebar, under Locations, with every file still on this ",
+                computer!(),
+                ". Remove Download frees a file’s space once another device has it; opening it brings it back. {}"
+            ),
+            allow
+        ),
+        SyncOnDemandChange::Stays => concat!(
+            "Every file is listed; content is downloaded when you open it, or always for what you keep on this ",
+            computer!(),
+            "."
+        )
+        .into(),
+        SyncOnDemandChange::TurnOff => format!(
+            concat!("Every file is downloaded to this ", computer!(), " again, into {}. That needs room for the whole folder and can take a while."),
+            place_shown
+        ),
+    }
+}
+
+/// The Add modal's note for a folder of this computer made on demand (`other_volume`: the folder is on another disk
+/// than Seedwell's storage, so its files are copied first).
+pub(crate) fn on_demand_add_note(other_volume: bool) -> String {
+    let note = sync_on_demand_note(SyncOnDemandChange::Add, String::new());
+    if other_volume {
+        format!(
+            concat!(
+                "The folder is on another disk: its files are copied to this ",
+                computer!(),
+                "’s disk first (that needs room for all of them), then removed from the other disk. {}"
+            ),
+            note
+        )
+    } else {
+        note
+    }
+}
+
+/// Where the folder page says the folder is: an on-demand folder is in the file manager's sidebar (its place on disk
+/// is only where it goes if it is switched back or removed). `path_shown`: the place as the host shows a path.
+#[uniffi::export]
+pub fn sync_place_line(folder: SyncFolder, path_shown: String) -> String {
+    if folder.on_demand { concat!("In the ", file_manager!(), "’s sidebar, under Locations").into() } else { path_shown }
+}
+
+/// The folder page's line for an on-demand folder while macOS keeps it out of the file manager.
+#[uniffi::export]
+pub fn sync_on_demand_off_line() -> String {
+    concat!("Not in the ", file_manager!(), " yet: macOS shows this folder once you allow Seedwell in System Settings.").into()
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -821,6 +978,8 @@ pub(crate) mod tests {
             error: None,
             last_synced_s: None,
             channel_id: None,
+            on_demand: false,
+            unavailable: 0,
         }
     }
 
@@ -1236,7 +1395,15 @@ pub(crate) mod tests {
             core_error_message(CoreError::NotFound { id: "F".into() }),
             format!("This folder is no longer synced on this {}.", computer!())
         );
-        assert_eq!(sync_remove_question("Photos".into()), format!("Stop syncing “Photos” on this {}? Other devices keep their copy.", computer!()));
+        assert_eq!(sync_remove_question("Photos".into(), 0), format!("Stop syncing “Photos” on this {}? Other devices keep their copy.", computer!()));
+        assert_eq!(
+            sync_remove_question("Photos".into(), 1),
+            format!("Stop syncing “Photos” on this {c}? 1 file exists only on this {c}; other devices lose access to it.", c = computer!())
+        );
+        assert_eq!(
+            sync_remove_question("Photos".into(), 3),
+            format!("Stop syncing “Photos” on this {c}? 3 files exist only on this {c}; other devices lose access to them.", c = computer!())
+        );
         assert_eq!(sync_remove_trash_label(), concat!("Also move the files to the ", trash!()));
         assert_eq!(sync_remove_help(true), concat!("Stop syncing and move the folder to the ", trash!()));
         assert_eq!(sync_remove_help(false), "Stop syncing; the files stay");
@@ -1274,5 +1441,33 @@ pub(crate) mod tests {
         assert_eq!(sync_remove_help(true), "Stop syncing and move the folder to the Trash");
         let t = sync_trash_failed("Photos".into(), "~/Seedwell/Photos".into());
         assert_eq!((t.title.as_str(), t.text.as_str()), ("Couldn't move “Photos” to the Trash", "It is no longer synced on this Mac. Its files are still in ~/Seedwell/Photos."));
+    }
+
+    #[test]
+    fn files_on_demand_say_what_a_switch_does() {
+        assert_eq!(sync_on_demand_label(), "Files on demand");
+        assert!(!sync_add_form_new().on_demand, "full unless chosen");
+        let join = sync_on_demand_note(SyncOnDemandChange::Join, String::new());
+        assert!(join.contains("stays on your other devices until you open it") && join.contains("asks you once"), "{join}");
+        let on = sync_on_demand_note(SyncOnDemandChange::TurnOn, String::new());
+        assert!(on.contains("Remove Download frees") && on.contains("asks you once"), "{on}");
+        assert_eq!(sync_on_demand_note(SyncOnDemandChange::Add, String::new()), on);
+        let off = sync_on_demand_note(SyncOnDemandChange::TurnOff, "~/Seedwell/Team".into());
+        assert!(off.starts_with(concat!("Every file is downloaded to this ", computer!(), " again, into ~/Seedwell/Team.")), "{off}");
+        let mut f = folder("Team", SyncState::UpToDate);
+        assert_eq!(sync_place_line(f.clone(), "~/Seedwell/Team".into()), "~/Seedwell/Team");
+        f.on_demand = true;
+        assert_eq!(sync_place_line(f, "~/Seedwell/Team".into()), concat!("In the ", file_manager!(), "’s sidebar, under Locations"));
+        let n = sync_on_demand_notice(false);
+        assert_eq!((n.title.as_str(), n.button.as_deref()), (concat!("Allow Seedwell in the ", file_manager!()), Some("Open Settings")));
+        assert!(sync_on_demand_notice(true).button.is_none());
+    }
+
+    #[test]
+    fn a_folder_on_another_disk_says_its_files_are_copied_first() {
+        let same = on_demand_add_note(false);
+        assert_eq!(same, sync_on_demand_note(SyncOnDemandChange::Add, String::new()));
+        let other = on_demand_add_note(true);
+        assert!(other.starts_with("The folder is on another disk: its files are copied to this") && other.ends_with(&same), "{other}");
     }
 }

@@ -122,7 +122,14 @@ pub fn statuses(dir: &Path) -> Vec<Status> {
             Some(Status { computer: field("computer: ")?, state: field("state: ")?, at: field("at: ")?.parse().ok()? })
         })
         .collect();
-    out.sort_by_key(|s| s.at);
+    // Within one second (times are whole seconds) the order of what happens: sent, then receiving, then arrived; the
+    // folder lists its files in no order of its own.
+    let stage = |s: &str| match s {
+        "sent" => 0,
+        "receiving" => 1,
+        _ => 2,
+    };
+    out.sort_by(|a, b| (a.at, stage(&a.state), &a.computer).cmp(&(b.at, stage(&b.state), &b.computer)));
     out
 }
 
@@ -315,6 +322,17 @@ pub fn left(folders: &[SyncFolderDto]) -> Vec<Left> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn statuses_of_one_second_are_in_the_order_they_happen() {
+        let dir = tempfile::tempdir().unwrap();
+        // Written in an order the folder may list them in: the receiver's first.
+        for (name, computer, state) in [("Z", "Laptop", "arrived"), ("Y", "iMac", "receiving"), ("A", "Studio Mac", "sent")] {
+            std::fs::write(dir.path().join(format!(".status-{name}")), format!("computer: {computer}\nstate: {state}\nat: 1800000000\n")).unwrap();
+        }
+        let states: Vec<String> = statuses(dir.path()).into_iter().map(|s| s.state).collect();
+        assert_eq!(states, ["sent", "receiving", "arrived"]);
+    }
 
     #[test]
     fn a_pass_goes_in_whole_and_is_taken_out_whole() {

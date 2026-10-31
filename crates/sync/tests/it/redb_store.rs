@@ -98,6 +98,8 @@ fn build<S: IndexStore>(store: &S, acts: &[Act]) -> Vec<Op> {
                 invalid: *invalid,
                 stamp: stamp.map(|(size, mtime_ns)| Stamp { size, mtime_ns, ctime_ns: -mtime_ns, inode: size ^ 77 }),
                 tier: tier.then_some(TierMemo { avg: 65536, chosen_at: 12345 }),
+                dataless: false,
+                want: false,
             }),
             Act::Restamp { path, inode } => {
                 if let Some(r) = b.local(PATHS[*path]).unwrap() {
@@ -106,7 +108,7 @@ fn build<S: IndexStore>(store: &S, acts: &[Act]) -> Vec<Op> {
                 }
             }
             Act::PutRemote { dev, f, seq, invalid } => {
-                b.put_remote(DEVS[*dev], IndexEntry { sequence: *seq, invalid: *invalid, file: file(f) })
+                b.put_remote(DEVS[*dev], IndexEntry { sequence: *seq, invalid: *invalid, dataless: false, on_demand: false, file: file(f) })
             }
             Act::SetPeer { dev, index_id, max_seq } => {
                 b.set_peer(DEVS[*dev], PeerState { index_id: *index_id, max_seq: *max_seq })
@@ -318,7 +320,7 @@ fn a_reader_sees_every_commit_and_keeps_compaction_off() {
     let mut db = RedbStore::open(dir.path().join("f.redb"), 1).unwrap();
     let reader = db.reader();
     assert_eq!(reader.local("a").unwrap(), None);
-    let rec = |p: &str, seq| LocalRecord { file: signed(p, false, &[(0, 1)], &[(1, 5)], 0, 0), sequence: seq, invalid: false, stamp: None, tier: None };
+    let rec = |p: &str, seq| LocalRecord { file: signed(p, false, &[(0, 1)], &[(1, 5)], 0, 0), sequence: seq, invalid: false, stamp: None, tier: None, dataless: false, want: false };
     db.apply(vec![Op::PutLocal(rec("a", 1))]).unwrap();
     // An eventual commit is not on disk yet, but it is committed: readers see it.
     db.apply_with(vec![Op::PutLocal(rec("b", 2))], Durability::Eventual).unwrap();
@@ -342,7 +344,7 @@ fn a_failed_apply_leaves_nothing() {
     // Valid changes, then a record the wire format cannot hold (a path over MAX_PATH), then more.
     let mut ops = build(&mem, &sample_batches()[1]);
     let long = signed(&"x".repeat(5000), false, &[(0, 1)], &[(1, 5)], 0, 0);
-    ops.insert(3, Op::PutLocal(LocalRecord { file: long, sequence: 99, invalid: false, stamp: None, tier: None }));
+    ops.insert(3, Op::PutLocal(LocalRecord { file: long, sequence: 99, invalid: false, stamp: None, tier: None, dataless: false, want: false }));
     ops.push(Op::SetNeed("a".into(), Some(NeedRecord { need: Need::Take, file: signed("a", false, &[], &[], 0, 0), holders: vec![] })));
     let err = db.apply(ops).unwrap_err();
     assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{err}");
@@ -545,7 +547,7 @@ fn redb_scale() {
         let mut b = Batch::new(&db, ME).unwrap();
         for i in start..start + BATCH {
             let stamp = Some(Stamp { size: 262_150, mtime_ns: i as i64, ctime_ns: i as i64, inode: i as u64 });
-            b.put_local(LocalRecord { file: rec(i, ME), sequence: 0, invalid: false, stamp, tier: None });
+            b.put_local(LocalRecord { file: rec(i, ME), sequence: 0, invalid: false, stamp, tier: None, dataless: false, want: false });
         }
         let ops = b.finish().unwrap();
         db.apply_with(ops, bulk).unwrap();
@@ -557,7 +559,7 @@ fn redb_scale() {
         for start in (0..N).step_by(BATCH) {
             let mut b = Batch::new(&db, ME).unwrap();
             for i in start..start + BATCH {
-                b.put_remote(dev, IndexEntry { sequence: i as u64 + 1, invalid: false, file: rec(i, ME) });
+                b.put_remote(dev, IndexEntry { sequence: i as u64 + 1, invalid: false, dataless: false, on_demand: false, file: rec(i, ME) });
             }
             b.set_peer(dev, PeerState { index_id: k as u64, max_seq: (start + BATCH) as u64 });
             let ops = b.finish().unwrap();
@@ -639,4 +641,35 @@ fn redb_scale() {
     if let Some(r) = rss {
         eprintln!("  RSS after inserts  {r:.0} MiB (16 MiB page cache)");
     }
+}
+
+#[test]
+fn on_demand_flags_survive_a_reopen_and_a_dataless_record_serves_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("f.redb");
+    let rec = |p: &str, seq, dataless, want| LocalRecord {
+        file: signed(p, false, &[(0, 1)], &[(3, 5)], 0, 0),
+        sequence: seq,
+        invalid: dataless,
+        stamp: None,
+        tier: None,
+        dataless,
+        want,
+    };
+    {
+        let mut db = RedbStore::open(&path, 1).unwrap();
+        let mut mem = MemStore::new(1);
+        let ops = vec![Op::PutLocal(rec("held", 1, false, false)), Op::PutLocal(rec("online", 2, true, false)), Op::PutLocal(rec("asked", 3, true, true))];
+        mem.apply(ops.clone()).unwrap();
+        db.apply(ops).unwrap();
+        for s in [&db as &dyn IndexStore, &mem] {
+            assert_eq!(s.local_totals().unwrap(), (1, 5), "only the held file counts");
+            let sources = s.chunk_sources(&[3; 32], 10).unwrap();
+            assert_eq!(sources, vec![("held".to_string(), 0)], "a dataless record serves no chunks");
+        }
+    }
+    let db = RedbStore::open(&path, 1).unwrap();
+    assert_eq!(db.local("held").unwrap().unwrap(), rec("held", 1, false, false));
+    assert_eq!(db.local("online").unwrap().unwrap(), rec("online", 2, true, false));
+    assert_eq!(db.local("asked").unwrap().unwrap(), rec("asked", 3, true, true));
 }

@@ -357,7 +357,8 @@ private final class FlippedPanel: NSView { override var isFlipped: Bool { true }
 
     /// The trash button: the confirmation slides out under this row (another one closes), or closes again.
     func toggleConfirm(_ id: String) {
-        removal.toggle(id: id)
+        // Opening it reads how many files only this Mac has (the folder's whole index, once).
+        removal.toggle(id: id, onlyHere: removal.isOpen(id: id) ? 0 : actions.core.syncOnlyHere(id: id))
         if let ci = confirmItem, ci.menu === menu { menu.removeItem(ci) }
         confirmItem = nil
         guard let s = snapshot else { return }

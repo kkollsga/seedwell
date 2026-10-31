@@ -9,8 +9,10 @@
 //! A message counts only when its author may post when it arrives (Owner, Admin or Read & write, and the sharing
 //! has not ended): a removed or expired member's later messages are ignored, its earlier ones stay where they are.
 //!
-//! Agents: each channel says what agents on this Mac may do with it ([`AgentAccess`], off by default). While they
-//! may read it, a wake-up command can be set: the service runs it for each message from another device, with the
+//! Agents: each channel says what agents on this Mac may do with it ([`AgentAccess`]): what the user set, else the
+//! channel's default, off, or Read and post for an **agent channel** (one an agent made, marked in its owner-signed
+//! membership, [`trs_sync_proto::members::CHANNEL_AGENTS`], so every member device knows). While they may read it,
+//! a wake-up command can be set: the service runs it for each message from another device, with the
 //! message as JSON on its standard input (never in its arguments), one run at a time per channel, 30 s at most.
 //!
 //! On disk: `sync/<id>.chat`, `"SWCH" ‖ format varint (2) ‖ n × (varint length ‖ sealed record)`, appended to as
@@ -57,6 +59,8 @@ const FORMAT: u64 = 2;
 const FORMAT_CLEAR: u64 = 1;
 
 /// What agents on this Mac may do in a channel. The Mac's agent permission level still applies on top.
+///
+/// The user's choice wins; a channel the user never set is off, except an agent channel, which is Read and post.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum AgentAccess {
     /// Nothing (the default).
@@ -168,8 +172,11 @@ pub struct ChannelStatus {
     pub last_message_s: Option<u64>,
     /// No notifications.
     pub muted: bool,
-    /// What agents on this Mac may do in it.
+    /// What agents on this Mac may do in it: the user's choice, else the channel's default ([`ChannelStatus::agent_channel`]).
     pub agents: AgentAccess,
+    /// An agent channel: an agent made it, for agents to talk where the user can read (its owner marked it, so every
+    /// member device knows). Open to agents at Read and post unless this device's user closed it.
+    pub agent_channel: bool,
     /// The wake-up command, if set.
     pub wake_command: Option<String>,
     /// Problems (devices it cannot sync with, a membership that could not be saved).
@@ -180,7 +187,8 @@ pub struct ChannelStatus {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Settings {
     pub(crate) muted: bool,
-    pub(crate) agents: AgentAccess,
+    /// What the user set (`None`: never set, the channel's default counts: [`effective_agents`]).
+    pub(crate) agents: Option<AgentAccess>,
     pub(crate) wake: Option<String>,
     /// The last message read in General: its place in the order.
     pub(crate) read: Key,
@@ -218,6 +226,16 @@ impl ChannelShared {
     pub fn may_post(&self, author: &[u8; 32]) -> bool {
         self.role_of(author).is_some_and(|r| r >= Role::ReadWrite)
     }
+
+    /// An agent channel: its owner marked it so when an agent made it.
+    pub fn agent_channel(&self) -> bool {
+        self.membership.read().unwrap_or_else(|e| e.into_inner()).agent_channel()
+    }
+}
+
+/// The user's choice (`set`) wins; a channel the user never set is closed, an agent channel open at Read and post.
+pub(crate) fn effective_agents(set: Option<AgentAccess>, agent_channel: bool) -> AgentAccess {
+    set.unwrap_or(if agent_channel { AgentAccess::ReadPost } else { AgentAccess::Off })
 }
 
 // ----------------------------------------------------------------------------------------------------- store
@@ -484,7 +502,8 @@ fn settings_of(e: &ChannelEntry) -> Settings {
     Settings {
         muted: e.muted,
         agent_read,
-        agents: AgentAccess::parse(&e.agents).unwrap_or_default(),
+        // Empty: the user never set it. Anything else this version cannot read counts as off.
+        agents: (!e.agents.trim().is_empty()).then(|| AgentAccess::parse(&e.agents).unwrap_or_default()),
         wake: Some(e.wake.trim().to_string()).filter(|w| !w.is_empty()),
         read: (e.read_at, e.read_seq, id_from_hex(&e.read_id).unwrap_or([0; 16])),
         topic_read,
@@ -553,7 +572,13 @@ impl SyncHandle {
         let ch = Arc::new(ChannelShared {
             space,
             store: Mutex::new(store),
-            settings: Mutex::new(settings_of(e)),
+            settings: Mutex::new({
+                let mut s = settings_of(e);
+                if let Some(a) = self.inner.chat_agents {
+                    s.agents = Some(a);
+                }
+                s
+            }),
             wake: Mutex::new(None),
             wake_dir: self.inner.dir.clone(),
         });
@@ -606,14 +631,29 @@ impl SyncHandle {
         Ok(())
     }
 
-    /// Makes a channel; this device is its owner.
+    /// Makes a channel, the user's (the app's): this device is its owner. It is closed to agents until the user opens it.
     pub async fn chat_new(&self, name: &str) -> Result<ChannelStatus, SyncError> {
+        self.make_channel(name, false).await
+    }
+
+    /// Makes an **agent channel** for an agent (the agent interface's `chat.new`, `sync.share --chat new`): this
+    /// device is its owner, and its membership says it is an agent channel, so on every member device it is open to
+    /// agents at Read and post until that device's user closes it. Only made so; no channel becomes one later.
+    pub async fn chat_new_for_agents(&self, name: &str) -> Result<ChannelStatus, SyncError> {
+        self.make_channel(name, true).await
+    }
+
+    async fn make_channel(&self, name: &str, agent_channel: bool) -> Result<ChannelStatus, SyncError> {
         let name = clean_name(name).ok_or_else(|| invalid("a channel needs a name"))?;
         let secret = FolderSecret::generate(&mut ring::rand::SystemRandom::new()).map_err(io::Error::other)?;
         let id = FolderId::of_public_key(secret.public_key());
         let me = *self.inner.ctx.key.public_key();
         let mut m = Membership::new(*secret.public_key());
-        m.add([Statement::by_owner(&secret, Body::Grant { device: me, role: Role::Owner, serial: 1, at_s: now_s(), invite: None })]);
+        let now = now_s();
+        m.add([Statement::by_owner(&secret, Body::Grant { device: me, role: Role::Owner, serial: 1, at_s: now, invite: None })]);
+        if agent_channel {
+            m.add([Statement::by_owner(&secret, Body::Channel { flags: trs_sync_proto::members::CHANNEL_AGENTS, at_s: now })]);
+        }
         crate::roles::save(&self.members_path(&id), &m)?;
         self.inner.secrets.put(&crate::roles::secret_name(&id), secret.as_bytes())?;
         let entry = ChannelEntry { id: id.to_string(), channel_pk: hex(secret.public_key()), name, ..ChannelEntry::default() };
@@ -679,9 +719,9 @@ impl SyncHandle {
 
     fn status_of_channel(&self, c: &ChannelShared) -> ChannelStatus {
         let me = *self.inner.ctx.key.public_key();
-        let (role, share_until, members, expired) = {
+        let (role, share_until, members, expired, agent_channel) = {
             let m = c.membership.read().unwrap_or_else(|e| e.into_inner());
-            (m.role(&me), m.share_until(), m.members().count() as u32, m.expired(&me))
+            (m.role(&me), m.share_until(), m.members().count() as u32, m.expired(&me), m.agent_channel())
         };
         let joining = lock(&c.invite).is_some();
         let refused = lock(&c.notes).refused.clone();
@@ -713,7 +753,8 @@ impl SyncHandle {
             unread,
             last_message_s: last,
             muted: s.muted,
-            agents: s.agents,
+            agents: effective_agents(s.agents, agent_channel),
+            agent_channel,
             wake_command: s.wake.clone(),
             issues: c.note_issues().into_iter().map(|(_, w)| w).collect(),
         }
@@ -952,10 +993,11 @@ impl SyncHandle {
         Ok(())
     }
 
-    /// Sets what agents on this Mac may do in a channel.
+    /// Sets what agents on this Mac may do in a channel: the user's choice (the app's switch), kept, and over the
+    /// channel's default (an agent channel's Read and post too).
     pub fn chat_set_agents(&self, id: &FolderId, access: AgentAccess) -> Result<(), SyncError> {
         let c = self.channel(id)?;
-        lock(&c.settings).agents = access;
+        lock(&c.settings).agents = Some(access);
         if let Some(e) = lock(&self.inner.cfg).channel_mut(&id.to_string()) {
             e.agents = access.name().into();
         }
@@ -1112,15 +1154,16 @@ async fn announce(ctx: &Arc<Ctx>, c: &Arc<ChannelShared>, new: &[ChatMessage], f
         return;
     }
     let settings = lock(&c.settings).clone();
+    let agents = effective_agents(settings.agents, c.agent_channel());
     for m in new {
         let i = info(ctx, c, &lock(&c.store), &Stored { msg: m.clone(), received_ms: now_ms() }, names);
-        if !i.me && settings.agents >= AgentAccess::Read
+        if !i.me && agents >= AgentAccess::Read
             && let Some(cmd) = &settings.wake
             && let Ok(json) = serde_json::to_string(&i)
         {
             wake(c, cmd, json);
         }
-        let _ = ctx.chat_events.send(ChatEvent { message: i, agents: settings.agents });
+        let _ = ctx.chat_events.send(ChatEvent { message: i, agents });
     }
     for p in ctx.registry.peers() {
         if Some(p.device) == from || !p.chat() || p.access(&c.id).is_none() {

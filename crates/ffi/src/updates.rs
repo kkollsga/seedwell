@@ -814,6 +814,11 @@ impl trs_control::Builds for Hook {
         let u = self.0.upgrade().ok_or("Seedwell is quitting")?;
         u.watch_folder(folder)
     }
+
+    fn set_dev_builds(&self, on: bool) -> Result<String, String> {
+        let u = self.0.upgrade().ok_or("Seedwell is quitting")?;
+        u.set_dev_builds(on, unix_ms())
+    }
 }
 
 impl Updates {
@@ -821,7 +826,7 @@ impl Updates {
         if self.prefs().dev_builds {
             Ok(())
         } else {
-            Err("development builds are off: turn on Settings › General › Updates › Allow development builds".into())
+            Err("development builds are off: turn on Settings › General › Updates › Allow development builds (or, when the user asks, `seedwell update dev-builds on`)".into())
         }
     }
 
@@ -860,6 +865,36 @@ impl Updates {
             shown(&version),
             log_in(&self.core.dir).display()
         ))
+    }
+
+    /// "Allow development builds" on or off for `update.dev_builds`, the way the switch in Settings sets it: the
+    /// `[updates]` switch saved in `config.toml`. The app follows the saved file as it follows its own switch (the
+    /// engine reports the change, the app's updates schedule takes it up: off while a development build runs, it
+    /// checks GitHub at once and installs the latest release). The core's own part happens here at once, so the
+    /// answer and `update.status` already say it: the watched folder followed or let go, the way back noted.
+    fn set_dev_builds(&self, on: bool, now_ms: u64) -> Result<String, String> {
+        let mut s = self.core.settings_load();
+        let was = s.updates.dev_builds;
+        if was != on {
+            s.updates.dev_builds = on;
+            self.core.settings_save(s).map_err(|e| e.to_string())?;
+        }
+        self.sync_watch();
+        let back = {
+            let mut st = self.lock();
+            self.note_switch(&mut st, now_ms);
+            st.saved.back_to_release_ms.is_some()
+        };
+        Ok(match (on, was == on, back) {
+            (true, true, _) => "Development builds were already allowed".into(),
+            (true, false, _) => "Development builds are allowed now: `seedwell update install <zip>` (or a watched folder) installs one".into(),
+            (false, _, true) => format!(
+                "Development builds are off: {APP_NAME} {} goes back to the latest release, which it checks for and installs now (although it is older)",
+                shown(&self.current)
+            ),
+            (false, true, false) => "Development builds were already off".into(),
+            (false, false, false) => "Development builds are off".into(),
+        })
     }
 
     fn watch_folder(&self, folder: Option<&Path>) -> Result<String, String> {

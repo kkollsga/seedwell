@@ -212,8 +212,12 @@ configured; Sparkle, used only by a build that carries `SUPublicEDKey` and `SUFe
   `app/build/dev/Seedwell-X.Y.Z.N.zip` (the next number for Cargo.toml's version) and `seedwell update install <zip>`
   installs it; `tools/dev-build.sh --to <folder>` puts it in a folder the app watches (`seedwell update watch
   <folder>`), which installs it as it appears. The app keeps the build it replaces in `previous/` in its state folder
-  and goes back to it when a build does not start within two minutes. Turning the switch off installs the latest
+  and goes back to it when a build does not start within two minutes. Turning the switch off (in Settings, or
+  `seedwell update dev-builds off`; `on` turns it on) installs the latest
   release. A release is never `X.Y.Z.N`: the release workflow builds without `SEEDWELL_DEV_VERSION`.
+- **The developer's own app follows this cycle**: agents switch development builds on when development starts and
+  install builds there (there is no separate test copy); publishing a release ends with switching them off, which
+  puts the developer's app on the release (`/release`, step 7).
 - `build.sh` writes `SeedwellRepoURL` into Info.plist (default `https://github.com/kkollsga/seedwell`; `SEEDWELL_REPO_URL` overrides).
   For tests, launch the app with `SEEDWELL_UPDATE_REPO=http://127.0.0.1:PORT` and serve `/releases/latest/download/latest.json`
   and `/releases/download/v<version>/install.sh` (plus the installer's own files) from there.

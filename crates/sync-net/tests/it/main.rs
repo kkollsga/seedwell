@@ -5,6 +5,7 @@ mod chat;
 mod direct;
 mod isolation;
 mod lan;
+mod ondemand;
 mod relay;
 mod roles;
 mod two_devices;

@@ -71,6 +71,11 @@ pub struct FolderStatus {
     pub last_synced_s: Option<u64>,
     /// The channel that goes with it on this device (its id), while that channel is here.
     pub channel_id: Option<String>,
+    /// On demand (SPEC §7G.11): `files` and `bytes` count what is on this device, `path` is where the host shows it.
+    pub on_demand: bool,
+    /// Files no device can give right now (SPEC §7G.11): not counted as needed; "N files unavailable: no device has
+    /// them". Removed only by the user deleting such an item (on a device where the folder is on demand).
+    pub unavailable: u64,
 }
 
 /// A connected device.

@@ -55,6 +55,7 @@ fn dev_on(name: &'static str, seed: u8, key: &Key, fs: MemFs, view: Arc<dyn Fs>,
         byte_exact_names: false,
         exec_bits: true,
         archive: true,
+        on_demand: false,
     };
     let ids = Arc::new(AtomicU64::new((u64::from(seed) << 32) + (index_id << 16)));
     let new_id = Arc::new(move || {

@@ -66,9 +66,9 @@ prop_compose! {
 }
 
 prop_compose! {
-    fn index_entry()(sequence in any::<u64>(), invalid in any::<bool>(), info in file_info(), sig in bytes::<64>())
+    fn index_entry()(sequence in any::<u64>(), invalid in any::<bool>(), dataless in any::<bool>(), on_demand in any::<bool>(), info in file_info(), sig in bytes::<64>())
         -> IndexEntry {
-        IndexEntry { sequence, invalid, file: SignedFile { info, sig } }
+        IndexEntry { sequence, invalid, dataless, on_demand, file: SignedFile { info, sig } }
     }
 }
 

@@ -10,6 +10,7 @@
 //! * [`scan`], [`plan`], [`pull`]: disk → records, needs → steps, steps → disk.
 //! * [`conflict`], [`archive`]: conflict copy names, the archive and its retention.
 //! * [`folder`]: [`folder::FolderCore`], one folder with all of the above.
+//! * [`ondemand`]: on-demand folders' items for a host (File Provider, Cloud Files), and their change feed.
 //! * [`clock`]: injected time.
 //!
 //! No sockets and no async: the driver (`trs-sync-net`) runs this on blocking threads and moves
@@ -36,6 +37,7 @@ pub mod fs;
 pub mod global;
 pub mod ignore;
 pub mod index;
+pub mod ondemand;
 pub mod path;
 pub mod plan;
 pub mod pull;

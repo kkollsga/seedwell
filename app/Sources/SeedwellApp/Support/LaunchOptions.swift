@@ -57,6 +57,8 @@ struct LaunchOptions {
             return "--state-dir and --home-root must be given together."
         }
         if allowLoopbackTrackers && !isolated { return "--qa-loopback-trackers needs --state-dir and --home-root." }
+        // QA commands read the windows (chats among them): never on the user's own Seedwell, only an isolated copy.
+        if qaControl != nil && !isolated { return "--qa-control needs --state-dir and --home-root." }
         return nil
     }
 

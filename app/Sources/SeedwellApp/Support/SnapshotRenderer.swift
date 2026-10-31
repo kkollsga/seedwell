@@ -267,7 +267,7 @@ private struct SyncMenuPreview: NSViewRepresentable {
     func makeNSView(context: Context) -> NSView {
         let width: CGFloat = 330
         let removal = SyncRemoval()
-        if let c = confirm, snapshot.folders.indices.contains(c) { removal.toggle(id: snapshot.folders[c].id) }
+        if let c = confirm, snapshot.folders.indices.contains(c) { removal.toggle(id: snapshot.folders[c].id, onlyHere: 0) }
         let m = syncMenuModel(snapshot: snapshot, removal: removal)
         var views: [NSView] = []
         let top = NSView(frame: NSRect(x: 0, y: 0, width: width, height: 5))

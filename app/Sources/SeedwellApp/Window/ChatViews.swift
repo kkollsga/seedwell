@@ -1,17 +1,35 @@
 import SwiftUI
 
+/// A small quiet word in a capsule: a message's "agent" badge, an agent channel's "agents" tag (SPEC 7G.7). One look
+/// wherever it is drawn.
+struct ChatTagCapsule: View {
+    let text: String
+    let help: String
+
+    var body: some View {
+        Text(text).font(.system(size: 10.5, weight: .medium))
+            .padding(.horizontal, 5).padding(.vertical, 1)
+            .background(Capsule().fill(Color.secondary.opacity(0.16)))
+            .foregroundStyle(.secondary)
+            .fixedSize()
+            .help(help)
+    }
+}
+
 /// A conversation in the sidebar, under Chats (SPEC 7G.7): a channel, one of its topics or a private conversation,
-/// with its unread count, like a tracker row.
+/// with its unread count, like a tracker row. An agent channel carries its tag after its name.
 struct ChatSidebarRow: View {
     let icon: String
     let name: String
     let unread: UInt32
     var online: Bool?
+    var tag: SidebarTag?
 
     var body: some View {
         HStack(spacing: 8) {
             Image(systemName: icon).frame(width: 20).foregroundStyle(.secondary)
             Text(name).lineLimit(1).fontWeight(unread > 0 ? .semibold : .regular)
+            if let tag { ChatTagCapsule(text: tag.text, help: tag.help) }
             if let online {
                 Circle().fill(online ? Color.green : Color.secondary.opacity(0.4)).frame(width: 6, height: 6)
                     .accessibilityLabel(online ? "Online" : "Offline")
@@ -36,6 +54,8 @@ struct ChatToolbarControls: View {
 
     var body: some View {
         HStack(spacing: 8) {
+            // An agent channel says so by its name, as in the sidebar.
+            if let tag = ChatText.agentTag(channel) { ChatTagCapsule(text: tag.text, help: tag.help) }
             Button("Members") { model.loadChatMembers(); showMembers = true }
                 .help("Who is in this channel")
                 .popover(isPresented: $showMembers, arrowEdge: .bottom) {
@@ -216,11 +236,7 @@ struct ChatMessageRow: View {
                 HStack(spacing: 6) {
                     if let agent = message.agent {
                         Text(agent).font(.system(size: 12.5, weight: .semibold))
-                        Text("agent").font(.system(size: 10.5, weight: .medium))
-                            .padding(.horizontal, 5).padding(.vertical, 1)
-                            .background(Capsule().fill(Color.secondary.opacity(0.16)))
-                            .foregroundStyle(.secondary)
-                            .help("Sent by an agent through Seedwell on \(ChatText.computer(message))")
+                        ChatTagCapsule(text: "agent", help: "Sent by an agent through Seedwell on \(ChatText.computer(message))")
                         Label(ChatText.computer(message), systemImage: "desktopcomputer").labelStyle(.titleAndIcon)
                             .font(.system(size: 11.5)).foregroundStyle(.secondary)
                     } else if !message.isMe, !message.authorUser.isEmpty {

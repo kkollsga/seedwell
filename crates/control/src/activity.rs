@@ -155,6 +155,16 @@ pub fn describe(r: &Request) -> String {
         Request::SyncConflicts(p) => format!("list conflicts of folder {}", folder(&p.folder)),
         Request::SyncResolve(p) => format!("resolve conflict {} in folder {}, keep {}", clip(&p.copy, 200), folder(&p.folder), clip(&p.keep, 20)),
         Request::SyncAddAddress(p) => format!("add address {} to folder {}", clip(&p.address, 100), folder(&p.folder)),
+        Request::SyncSetMode(p) => format!("make folder {} {}", folder(&p.folder), if p.mode == "full" { "full" } else { "on demand" }),
+        Request::SyncFetch(p) => format!("fetch {} in folder {}", item(&p.item, &p.path), folder(&p.folder)),
+        Request::SyncCancelFetch(p) => format!("cancel the fetch of {} in folder {}", item(&p.item, &p.path), folder(&p.folder)),
+        Request::SyncPin(p) => format!("keep {} on this {} (folder {})", item(&p.item, &p.path), trs_platform::computer!(), folder(&p.folder)),
+        Request::SyncUnpin(p) => format!("stop keeping {} on this {} (folder {})", item(&p.item, &p.path), trs_platform::computer!(), folder(&p.folder)),
+        Request::SyncEvict(p) => format!("remove the download of {} (folder {})", item(&p.item, &p.path), folder(&p.folder)),
+        Request::SyncHostWrite(p) => format!("write {} in folder {}", clip(&p.path, 200), folder(&p.folder)),
+        Request::SyncHostMkdir(p) => format!("make folder {} in folder {}", item(&p.item, &p.path), folder(&p.folder)),
+        Request::SyncHostDelete(p) => format!("delete {} in folder {} (on every device)", item(&p.item, &p.path), folder(&p.folder)),
+        Request::SyncHostRename(p) => format!("rename {} to {} in folder {}", clip(&p.from, 200), clip(&p.to, 200), folder(&p.folder)),
         Request::SyncRemove(p) => format!(
             "remove folder {}{} (step 1, asks for confirmation)",
             folder(&p.folder),
@@ -178,7 +188,6 @@ pub fn describe(r: &Request) -> String {
         Request::ChatAddAddress(p) => format!("add address {} to channel {}", clip(&p.address, 100), folder(&p.channel)),
         Request::ChatRename(p) => format!("rename channel {}", folder(&p.channel)),
         Request::ChatMute(p) => format!("{} channel {}", if p.muted { "mute" } else { "unmute" }, folder(&p.channel)),
-        Request::ChatSetAgents(p) => format!("let agents {} in channel {}", clip(&p.agents, 20), folder(&p.channel)),
         Request::ChatSetWake(p) => match p.command.as_deref().filter(|c| !c.trim().is_empty()) {
             Some(c) => format!("wake-up command of channel {}: {}", folder(&p.channel), clip(c, 200)),
             None => format!("no wake-up command for channel {}", folder(&p.channel)),
@@ -186,7 +195,7 @@ pub fn describe(r: &Request) -> String {
         Request::ChatLeave(p) => format!("leave channel {}", folder(&p.channel)),
         Request::ChatNewTopic(p) => format!("make the topic {} in channel {}", clip(&p.title, 100), folder(&p.channel)),
         Request::ChatDmSend(p) => format!("write {} bytes{} privately to device {}", p.body.len(), if p.json { " of JSON" } else { "" }, clip(&p.device, 60)),
-        Request::ChatDmSetAgents(p) => format!("let agents {} with private messages", clip(&p.agents, 20)),
+        Request::UpdateDevBuilds(p) => format!("turn development builds {}", if p.on { "on" } else { "off" }),
         other => other.method().name().to_owned(),
     };
     // A key pasted into any field (a name, a path) is masked too.
@@ -200,6 +209,15 @@ fn short(id: &str) -> String {
 /// A folder as the caller named it (an id, a prefix or a name), shortened.
 fn folder(f: &str) -> String {
     clip(f, 80)
+}
+
+/// An item of an on-demand folder, by path or identifier.
+fn item(id: &Option<String>, path: &Option<String>) -> String {
+    match (path, id) {
+        (Some(p), _) => clip(p, 200),
+        (None, Some(i)) => format!("item {}", clip(i, 80)),
+        (None, None) => "the whole folder".into(),
+    }
 }
 
 #[cfg(test)]
@@ -240,7 +258,7 @@ mod tests {
         assert!(!describe(&r).contains("SECRET"));
         let r = Request::Pause(Targets { ids: vec!["a".into(), "b".into(), "c".into()], all: false });
         assert_eq!(describe(&r), "pause 3 transfers");
-        let r = Request::SyncJoin(SyncJoinParams { key_or_link: "seedwell://sync/SWW-SECRETSECRET?name=x".into(), path: Some("/tmp/x".into()) });
+        let r = Request::SyncJoin(SyncJoinParams { key_or_link: "seedwell://sync/SWW-SECRETSECRET?name=x".into(), path: Some("/tmp/x".into()), on_demand: false });
         let d = describe(&r);
         assert!(!d.contains("SECRET") && d.contains("/tmp/x"), "{d}");
         let r = Request::SyncRename(SyncRenameParams { folder: "Docs".into(), name: "SWR-SECRETSECRET".into() });

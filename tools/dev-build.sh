@@ -43,8 +43,15 @@ echo "==> Seedwell $DEV (development build of $COMMIT)"
 # Signed as the installed app is: with SEEDWELL_SIGN_IDENTITY (the release's Developer ID) the build reads that app's
 # Keychain (Folder Sync and chat keys); ad hoc it can replace only an ad-hoc app (install.sh refuses it over a signed
 # one, as it would start as a new device). Not notarized: a --zip install does not need it.
+# Unset: the release team's Developer ID when it is in the keychain (install.sh's TEAM_ID; sign.sh picks it by hash).
 if [ -z "${SEEDWELL_SIGN_IDENTITY:-}" ]; then
-  echo "note: no SEEDWELL_SIGN_IDENTITY: signed ad hoc, so it installs only over an ad-hoc Seedwell (not over a Developer ID release)"
+  team="$(sed -n 's/^TEAM_ID=\([A-Z0-9]*\)$/\1/p' "$REPO/install.sh")"
+  if security find-identity -v -p codesigning | grep -q "\"Developer ID Application: .*($team)\""; then
+    export SEEDWELL_SIGN_IDENTITY="Developer ID Application: ($team)"
+    echo "==> Signed with the team's Developer ID ($team)"
+  else
+    echo "note: no Developer ID of team $team in the keychain: signed ad hoc, so it installs only over an ad-hoc Seedwell (not over a Developer ID release)"
+  fi
 fi
 export SEEDWELL_RELEASE=1 SEEDWELL_DEV_VERSION="$DEV"
 if [ "$full" = 1 ]; then export SEEDWELL_FAST=0; else export SEEDWELL_FAST=1; fi

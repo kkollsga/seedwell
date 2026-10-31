@@ -211,6 +211,63 @@ async fn the_wake_up_command_gets_each_message_from_others_on_stdin() {
     b.h.shutdown().await;
 }
 
+/// An agent channel (SPEC §7G.7): made for an agent, its membership says so, and every member device (one that joins
+/// by link too) opens it to its agents at Read and post until that device's user closes it. The user's choice is
+/// kept over a restart and wins; the user's own channels stay closed, and an agent channel's messages reach the
+/// wake-up command with nothing switched on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_agent_channel_is_open_to_agents_on_every_member_until_its_user_closes_it() {
+    let dirs = [tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap()];
+    let a = start_at(dirs[0].path(), "Anna", |_| {}).await;
+    let b = start_at(dirs[1].path(), "Bo", |_| {}).await;
+    let ch = a.chat_new_for_agents("Bridge").await.unwrap();
+    assert_eq!((ch.role, ch.agent_channel, ch.agents), (Some(Role::Owner), true, AgentAccess::ReadPost));
+    let id: FolderId = ch.id.parse().unwrap();
+    let family = a.chat_new("Family").await.unwrap();
+    assert_eq!((family.agent_channel, family.agents), (false, AgentAccess::Off), "the user's own: closed");
+
+    // B joins by link: closed while it waits (it knows nothing of the channel yet), open once admitted.
+    let link = a.create_invite(&id, Role::ReadWrite, 1, 7).unwrap().link;
+    let c = b.chat_join(&link).await.unwrap();
+    assert_eq!((c.joining, c.agent_channel, c.agents), (true, false, AgentAccess::Off));
+    b.add_address(&id, at(&a)).unwrap();
+    until(30, "admitted", || role(&b, &id) == Some(Role::ReadWrite)).await;
+    until(10, "B knows it is an agent channel", || b.channel_status(&id).is_some_and(|c| c.agent_channel)).await;
+    assert_eq!(b.channel_status(&id).unwrap().agents, AgentAccess::ReadPost);
+
+    // Open by default: B's wake-up command runs with nothing switched on.
+    let out = dirs[1].path().join("woken");
+    #[cfg(unix)]
+    let cmd = format!("cat >> '{}'", out.display());
+    #[cfg(windows)]
+    let cmd = format!("findstr \"^\" >> \"{}\"", out.display());
+    b.chat_set_wake_command(&id, Some(&cmd)).unwrap();
+    a.chat_send(&id, None, MessageKind::Text, "hello agents", None, Some("mac-agent")).await.unwrap();
+    until(20, "woken", || std::fs::read_to_string(&out).is_ok_and(|t| t.contains("hello agents"))).await;
+
+    // B's user closes it: that wins over the default, and is kept over a restart (B's file says `off`).
+    b.chat_set_agents(&id, AgentAccess::Off).unwrap();
+    assert_eq!(b.channel_status(&id).map(|c| (c.agent_channel, c.agents)), Some((true, AgentAccess::Off)));
+    a.chat_send(&id, None, MessageKind::Text, "not for B's agents", None, None).await.unwrap();
+    until(20, "B has it", || texts(&b, &id).len() == 2).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(!std::fs::read_to_string(&out).unwrap().contains("not for B's agents"), "closed: no wake-up");
+    b.shutdown().await;
+    a.shutdown().await;
+    let toml = std::fs::read_to_string(dirs[1].path().join("sync.toml")).unwrap();
+    assert!(toml.contains("agents = \"off\""), "{toml}");
+    let (a, b) = (start_at(dirs[0].path(), "Anna", |_| {}).await, start_at(dirs[1].path(), "Bo", |_| {}).await);
+    assert_eq!(b.channel_status(&id).map(|c| (c.agent_channel, c.agents)), Some((true, AgentAccess::Off)), "B's user's choice is kept");
+    assert_eq!(a.channel_status(&id).map(|c| (c.agent_channel, c.agents)), Some((true, AgentAccess::ReadPost)), "A's default, after a restart too");
+    let family: FolderId = family.id.parse().unwrap();
+    assert_eq!(a.channel_status(&family).map(|c| (c.agent_channel, c.agents)), Some((false, AgentAccess::Off)));
+    // The user may open it again, at any level.
+    b.chat_set_agents(&id, AgentAccess::Read).unwrap();
+    assert_eq!(b.channel_status(&id).unwrap().agents, AgentAccess::Read);
+    a.shutdown().await;
+    b.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_tag_seen_receipt_or_hook_notice_is_no_unread_message() {
     let (a, b) = (device("Anna").await, device("Bo").await);

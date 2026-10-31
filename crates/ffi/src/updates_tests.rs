@@ -537,6 +537,34 @@ fn turning_development_builds_off_while_one_runs_goes_back_to_the_release() {
     assert_eq!(u.available_version(), Some(newer()));
 }
 
+/// `update.dev_builds` (an agent's `seedwell update dev-builds on|off`) is the Settings switch: it saves the same
+/// `[updates] dev_builds`, and off while a development build runs starts the same way back to the release.
+#[test]
+fn the_agents_dev_builds_switch_is_the_settings_switch() {
+    let (core, dir) = mock();
+    let u = dev_updates(&core, 3, &serve(200, latest(&current())), dir.path(), T0);
+    let hook = core.builds.get().expect("the control server finds the updater");
+    assert_eq!(hook.set_dev_builds(true).unwrap(), "Development builds are allowed now: `seedwell update install <zip>` (or a watched folder) installs one");
+    assert!(core.settings_load().updates.dev_builds && hook.status().dev_builds, "saved where the switch saves it");
+    assert_eq!(hook.set_dev_builds(true).unwrap(), "Development builds were already allowed");
+    assert!(u.lock().saved.back_to_release_ms.is_none());
+    assert_ne!(u.next_due_ms(T0), Some(0), "nothing to do while the switch is on");
+    let note = hook.set_dev_builds(false).unwrap();
+    assert!(note.contains("goes back to the latest release"), "{note}");
+    assert!(!core.settings_load().updates.dev_builds && !hook.status().dev_builds);
+    assert!(u.lock().saved.back_to_release_ms.is_some(), "the way back, as the switch starts it");
+    assert_eq!(u.next_due_ms(T0 + 1), Some(0), "checked at once");
+    u.check(true, T0 + 1);
+    assert_eq!(u.model(T0 + 1).available_version, Some(current()), "the release, older than the build");
+    assert!(u.confirmed_offer(), "installed by itself once nothing downloads");
+    // On a release, off is only off.
+    let (core, _dir) = mock();
+    let _u = updates(&core, true, "http://127.0.0.1:9", T0);
+    set_dev(&core, true, None);
+    assert_eq!(core.builds.get().unwrap().set_dev_builds(false).unwrap(), "Development builds are off");
+    assert!(!core.settings_load().updates.dev_builds);
+}
+
 #[test]
 fn started_marks_the_version_and_three_launches_without_it_go_back_to_the_kept_app() {
     let (core, dir) = mock();

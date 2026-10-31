@@ -37,4 +37,4 @@ pub mod status;
 pub mod tls;
 
 pub use relay_server::{RelayOptions, run_relay};
-pub use service::{Activity, InviteInfo, Keep, MemberInfo, Options, PublicDiscovery, SyncError, SyncHandle};
+pub use service::{Activity, DeleteSeen, InviteInfo, Keep, MemberInfo, OnDemandError, OnDemandHost, OnDemandHostCell, Options, PublicDiscovery, SyncError, SyncHandle};

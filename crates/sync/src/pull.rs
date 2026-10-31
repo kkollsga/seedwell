@@ -28,7 +28,7 @@
 //! which is not worth it now.
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io;
 
 use sha2::{Digest, Sha256};
@@ -96,6 +96,8 @@ pub struct PullReport {
     pub unsupported: Vec<Unsupported>,
     /// Conflict copies made (their paths).
     pub conflicts: Vec<String>,
+    /// Needed files no device announces held (to see whether they are unavailable).
+    pub holderless: Vec<String>,
 }
 
 /// A step this system cannot do, at the version it was tried at.
@@ -138,6 +140,14 @@ pub struct Puller<'a> {
     /// its own changes (invalid records) become its versions once it may sign, so a step over one waits instead of
     /// keeping it as a read-only device's conflict copy.
     pub awaiting_write: bool,
+    /// An on-demand folder (SPEC §7G.11): says whether a file's content is wanted on this device (below a folder kept
+    /// here). A file not wanted, not asked for and not held here is taken as its version alone, without content
+    /// (a dataless record). `None`: every file is fetched.
+    pub on_demand: Option<&'a dyn Fn(&str) -> bool>,
+    /// On demand: the online-only files by content, kept from round to round (start with `Default::default()`).
+    pub online_only: Option<&'a RefCell<OnlineOnly>>,
+    /// Devices that are no members any more: no source (a need only they hold is reported holderless).
+    pub not_members: &'a std::collections::BTreeSet<ShortId>,
     /// Records waiting for their directories to be durable (start with `Default::default()`).
     pub(crate) round: RefCell<Round>,
 }
@@ -205,11 +215,65 @@ fn is_temp(name: &str) -> bool {
     name.starts_with(".seedwell.") && name.ends_with(".tmp")
 }
 
+/// What makes two files the same content (so a rename can stand in for a fetch, as the plan matches them): a digest of
+/// it, so the lookup keeps 32 bytes per file, not its chunk list.
+type ContentKey = [u8; 32];
+
+/// An on-demand folder's online-only files by content (to find the new name of content a delete would remove), kept
+/// up to date from the index's sequence numbers: read in full once, then only the records changed since. Every
+/// dataless record is in it, asked for or not (`want` changes no sequence), so it is exact.
+#[derive(Default)]
+pub struct OnlineOnly {
+    seq: u64,
+    by_key: HashMap<ContentKey, BTreeSet<String>>,
+    key_of: HashMap<String, ContentKey>,
+}
+
+impl OnlineOnly {
+    fn forget(&mut self, path: &str) {
+        if let Some(k) = self.key_of.remove(path)
+            && let Some(set) = self.by_key.get_mut(&k)
+        {
+            set.remove(path);
+            if set.is_empty() {
+                self.by_key.remove(&k);
+            }
+        }
+    }
+
+    fn catch_up(&mut self, store: &dyn IndexStore) -> io::Result<()> {
+        loop {
+            let page = store.local_since(self.seq, 1000)?;
+            let Some(last) = page.last().map(|r| r.sequence) else { return Ok(()) };
+            for r in page {
+                let path = r.file.info.path.clone();
+                self.forget(&path);
+                if r.dataless && !r.file.info.deleted && r.file.info.kind == FileKind::File {
+                    let k = content_key(&r.file.info);
+                    self.by_key.entry(k).or_default().insert(path.clone());
+                    self.key_of.insert(path, k);
+                }
+            }
+            self.seq = last;
+        }
+    }
+}
+
+fn content_key(i: &FileInfo) -> ContentKey {
+    i.content_digest()
+}
+
 /// Says the record that something is on disk? A read-only device's own change keeps the version it
 /// had received (invalid), so there the stamp tells: none for its local delete (nothing there, like a
 /// tombstone), one for its own file, also over a received delete.
 pub(crate) fn holds(rec: &LocalRecord) -> bool {
-    if rec.invalid { rec.stamp.is_some() } else { !rec.file.info.deleted }
+    if rec.dataless {
+        false
+    } else if rec.invalid {
+        rec.stamp.is_some()
+    } else {
+        !rec.file.info.deleted
+    }
 }
 
 /// Does the disk at `rel` still hold what `rec` says (or nothing, when we have no record)?
@@ -241,9 +305,17 @@ impl Puller<'_> {
             needs.extend(page);
             after = Some(last);
         }
+        let mut report = PullReport::default();
+        if let Some(wanted) = self.on_demand {
+            needs = self.take_online_only(store, needs, wanted, &mut report)?;
+        }
+        report.holderless = needs
+            .iter()
+            .filter(|(_, n)| n.holders.iter().all(|d| self.not_members.contains(d)) && n.file.info.kind == FileKind::File && !n.file.info.deleted && n.need != Need::Nothing)
+            .map(|(p, _)| p.clone())
+            .collect();
         let steps = plan::plan(&needs, &|p| store.local(p).ok().flatten());
         let needs: BTreeMap<String, NeedRecord> = needs.into_iter().collect();
-        let mut report = PullReport::default();
         for step in steps {
             let (path, other) = match &step {
                 Step::MkDir(p) | Step::Fetch(p) | Step::Delete(p) | Step::Absorb(p) => (p.clone(), None),
@@ -269,7 +341,8 @@ impl Puller<'_> {
             }
             // Not admitted yet, with write access to come: a change of ours there waits to become our version.
             if self.awaiting_write
-                && (store.local(&path)?.is_some_and(|l| l.invalid) || other.map(|f| store.local(f)).transpose()?.flatten().is_some_and(|l| l.invalid))
+                && (store.local(&path)?.is_some_and(|l| l.own_change())
+                    || other.map(|f| store.local(f)).transpose()?.flatten().is_some_and(|l| l.own_change()))
             {
                 report.waiting += 1;
                 continue;
@@ -290,6 +363,102 @@ impl Puller<'_> {
         }
         self.commit(store)?;
         Ok(report)
+    }
+
+    /// On demand: every file needed whose content nobody wants here, and whose folder is recorded, is recorded as its
+    /// version without the content (dataless, invalid: never served). Wanted are files asked for (`want`), below a
+    /// folder kept on this device (`wanted`), and files whose content this device holds (they stay current). Returns
+    /// the needs left for the round: directories, links, deletes and the wanted files.
+    fn take_online_only(
+        &self,
+        store: &mut dyn IndexStore,
+        needs: Vec<(String, NeedRecord)>,
+        wanted: &dyn Fn(&str) -> bool,
+        report: &mut PullReport,
+    ) -> io::Result<Vec<(String, NeedRecord)>> {
+        // Content held here that this round deletes may live on under another name (a rename elsewhere): that name
+        // is taken with it (the plan moves our copy there instead of deleting it), never left online only, or the
+        // delete would remove what may be the only copy.
+        let mut moving: HashMap<ContentKey, usize> = HashMap::new();
+        for (p, n) in &needs {
+            if n.file.info.deleted
+                && let Some(l) = store.local(p)?.filter(|l| holds(l) && !l.invalid && l.file.info.kind == FileKind::File)
+            {
+                *moving.entry(content_key(&l.file.info)).or_default() += 1;
+            }
+        }
+        let mut left = Vec::with_capacity(needs.len());
+        let mut online_only = Vec::new();
+        for (p, n) in needs {
+            let f = &n.file.info;
+            let content = f.kind == FileKind::File && !f.deleted && matches!(n.need, Need::Take | Need::TakeOverConflict | Need::Repair);
+            let keep = store.local(&p)?.is_some_and(|l| l.want || holds(&l) || l.own_change());
+            let moved_here = content
+                && moving.get_mut(&content_key(f)).is_some_and(|c| {
+                    let any = *c > 0;
+                    *c = c.saturating_sub(1);
+                    any
+                });
+            if !content || keep || moved_here || wanted(&p) {
+                left.push((p, n));
+            } else if !parent(&p).is_empty() && !store.local(parent(&p))?.is_some_and(|d| d.file.info.kind == FileKind::Dir && !d.file.info.deleted) {
+                // Its folder is not recorded yet (made by this round's steps): taken in the next round, so a host never
+                // sees an item before its parent (the change feed is in this order too).
+                continue;
+            } else {
+                online_only.push(LocalRecord { file: n.file, sequence: 0, invalid: true, stamp: None, tier: None, dataless: true, want: false });
+            }
+        }
+        report.done += online_only.len() as u64;
+        for chunk in online_only.chunks(1000) {
+            let mut batch = Batch::new(&*store, self.me)?;
+            for rec in chunk {
+                batch.put_local(rec.clone());
+            }
+            let ops = batch.finish()?;
+            store.apply(ops)?;
+        }
+        // Content still deleted with no name of this round to go to: an online-only file of an earlier round can have
+        // it (the new name arrived before the old one's delete). It is asked for now, so the plan moves our copy there.
+        moving.retain(|_, c| *c > 0);
+        if !moving.is_empty() {
+            // The online-only files by content: read in full once, then only what changed since.
+            let own = RefCell::new(OnlineOnly::default());
+            let mut keys = self.online_only.unwrap_or(&own).borrow_mut();
+            keys.catch_up(&*store)?;
+            let mut found = Vec::new();
+            for (key, count) in &moving {
+                // The lookup holds every online-only file (asked for or not: a pin or a request changes no sequence),
+                // so it is exact; the ones asked for already are on their way.
+                let mut n = 0;
+                for p in keys.by_key.get(key).into_iter().flatten() {
+                    if n == *count {
+                        break;
+                    }
+                    if let Some(l) = store.local(p)?.filter(|l| l.dataless && !l.want) {
+                        found.push(LocalRecord { want: true, ..l });
+                        n += 1;
+                    }
+                }
+            }
+            drop(keys);
+            if !found.is_empty() {
+                let mut batch = Batch::new(&*store, self.me)?;
+                for rec in &found {
+                    batch.reflag_local(rec.clone());
+                }
+                let ops = batch.finish()?;
+                store.apply(ops)?;
+                for rec in found {
+                    let p = rec.file.info.path;
+                    if let Some(n) = store.need(&p)? {
+                        left.push((p, n));
+                    }
+                }
+                left.sort_by(|a, b| a.0.cmp(&b.0));
+            }
+        }
+        Ok(left)
     }
 
     /// The versions other devices announce at `p` (valid ones), for [`crate::scan::adopt`].
@@ -450,7 +619,7 @@ impl Puller<'_> {
         }
         let others = self.others(store, &file.info.path)?;
         let file = crate::scan::adopt(self.signer, self.me, store.local(&file.info.path)?.as_ref(), file, &others);
-        self.queue(store, LocalRecord { file, sequence: 0, invalid: false, stamp, tier }, true)?;
+        self.queue(store, LocalRecord { file, sequence: 0, invalid: false, stamp, tier, dataless: false, want: false }, true)?;
         Ok(())
     }
 
@@ -616,7 +785,7 @@ impl Puller<'_> {
     fn under_own_change(&self, store: &dyn IndexStore, p: &str) -> io::Result<bool> {
         let mut at = parent(p);
         while !at.is_empty() {
-            if self.fs.lstat(at)?.is_some_and(|m| m.kind != FileKind::Dir) && store.local(at)?.is_some_and(|r| r.invalid) {
+            if self.fs.lstat(at)?.is_some_and(|m| m.kind != FileKind::Dir) && store.local(at)?.is_some_and(|r| r.own_change()) {
                 return Ok(true);
             }
             at = parent(at);
@@ -627,7 +796,7 @@ impl Puller<'_> {
     /// Records `n` as not here, by the user's own change above it (invalid, no stamp, like a local
     /// delete), so the need settles until that change is undone.
     fn skip_under_own_change(&self, store: &mut dyn IndexStore, n: NeedRecord) -> Result<(), Skip> {
-        self.queue(store, LocalRecord { file: n.file, sequence: 0, invalid: true, stamp: None, tier: None }, false)?;
+        self.queue(store, LocalRecord { file: n.file, sequence: 0, invalid: true, stamp: None, tier: None, dataless: false, want: false }, false)?;
         Ok(())
     }
 
@@ -641,7 +810,7 @@ impl Puller<'_> {
             if !meta.as_ref().is_some_and(|m| m.kind == FileKind::Dir || Some(stamp_of(m)) == l.stamp) {
                 return Err(Skip::Rescan);
             }
-            self.queue(store, LocalRecord { file: n.file, sequence: 0, invalid: true, stamp: l.stamp, tier: l.tier }, false)?;
+            self.queue(store, LocalRecord { file: n.file, sequence: 0, invalid: true, stamp: l.stamp, tier: l.tier, dataless: false, want: false }, false)?;
             return Ok(());
         }
         if !matches_record(meta.as_ref(), local.as_ref()) {
@@ -665,10 +834,10 @@ impl Puller<'_> {
                         self.commit(store)?;
                         let mut own = true;
                         for name in &left {
-                            own &= store.local(&format!("{p}/{name}"))?.is_none_or(|r| r.invalid);
+                            own &= store.local(&format!("{p}/{name}"))?.is_none_or(|r| r.own_change());
                         }
                         if own {
-                            let rec = LocalRecord { file: n.file, sequence: 0, invalid: true, stamp: Some(stamp_of(&m)), tier: None };
+                            let rec = LocalRecord { file: n.file, sequence: 0, invalid: true, stamp: Some(stamp_of(&m)), tier: None, dataless: false, want: false };
                             self.queue(store, rec, false)?;
                             return Ok(());
                         }
@@ -729,7 +898,7 @@ impl Puller<'_> {
         let meta = self.lstat_at(p, local.as_ref())?;
         // A read-only device's own change (invalid record) is expected to differ: it becomes a
         // conflict copy below. Anything else that differs from our record is a change not yet scanned.
-        let ours_changed = local.as_ref().is_some_and(|l| l.invalid);
+        let ours_changed = local.as_ref().is_some_and(|l| l.own_change());
         if !ours_changed && !matches_record(meta.as_ref(), local.as_ref()) {
             return Err(Skip::Rescan);
         }
@@ -750,7 +919,7 @@ impl Puller<'_> {
             let stamp = self.fs.lstat(p)?.filter(|n| (n.inode, n.size, n.mtime_ns) == (m.inode, m.size, mtime)).as_ref().map(stamp_of);
             let others = self.others(store, p)?;
             let file = crate::scan::adopt(self.signer, self.me, Some(l), n.file, &others);
-            self.queue(store, LocalRecord { file, sequence: 0, invalid: false, stamp, tier: l.tier }, false)?;
+            self.queue(store, LocalRecord { file, sequence: 0, invalid: false, stamp, tier: l.tier, dataless: false, want: false }, false)?;
             return Ok(());
         }
         if meta.as_ref().is_some_and(|m| m.kind == FileKind::Dir) {
@@ -869,12 +1038,12 @@ impl Puller<'_> {
             self.commit(store)?;
             let mut own = true;
             for e in self.fs.read_dir(p)?.entries.iter().filter(|e| !is_temp(&e.name)) {
-                own &= store.local(&format!("{p}/{}", e.name))?.is_none_or(|r| r.invalid);
+                own &= store.local(&format!("{p}/{}", e.name))?.is_none_or(|r| r.own_change());
             }
             if !own {
                 return Err(Skip::Failed("waiting for the directory to empty".into()));
             }
-            let rec = LocalRecord { file: n.file.clone(), sequence: 0, invalid: true, stamp: Some(stamp_of(dir_meta)), tier: None };
+            let rec = LocalRecord { file: n.file.clone(), sequence: 0, invalid: true, stamp: Some(stamp_of(dir_meta)), tier: None, dataless: false, want: false };
             self.queue(store, rec, false)?;
             return Ok(());
         };
@@ -891,7 +1060,7 @@ impl Puller<'_> {
                 let meta = self.fs.lstat(&copy)?;
                 let moved = |m: &Meta| placed.as_ref().is_some_and(|q| (q.inode, q.size, q.mtime_ns) != (m.inode, m.size, m.mtime_ns));
                 let stamp = meta.as_ref().filter(|m| !moved(m)).map(stamp_of);
-                self.queue(store, LocalRecord { file, sequence: 0, invalid: false, stamp, tier: Some(tier) }, true)?;
+                self.queue(store, LocalRecord { file, sequence: 0, invalid: false, stamp, tier: Some(tier), dataless: false, want: false }, true)?;
                 report.conflicts.push(copy);
             }
         } else {
@@ -901,7 +1070,7 @@ impl Puller<'_> {
                 self.fs.symlink(&want.symlink_target, &copy)?;
                 let file = signer.sign(self.copy_info(&copy, p, want));
                 let stamp = self.fs.lstat(&copy)?.as_ref().map(stamp_of);
-                self.queue(store, LocalRecord { file, sequence: 0, invalid: false, stamp, tier: None }, true)?;
+                self.queue(store, LocalRecord { file, sequence: 0, invalid: false, stamp, tier: None, dataless: false, want: false }, true)?;
                 report.conflicts.push(copy);
             }
         }
@@ -984,7 +1153,7 @@ impl Puller<'_> {
         }
         let resumed = left.is_some_and(|m| m.kind == FileKind::File);
         if !resumed
-            && let Some(l) = local.filter(|l| !l.invalid && !l.file.info.deleted && l.file.info.kind == FileKind::File)
+            && let Some(l) = local.filter(|l| !l.invalid && !l.dataless && !l.file.info.deleted && l.file.info.kind == FileKind::File)
         {
             self.fs.copy(p, tmp)?;
             for (off, c) in offsets(&l.file.info.chunks) {
@@ -1086,7 +1255,7 @@ impl Puller<'_> {
     ) -> Result<String, Skip> {
         let loser = &ours.file.info;
         // A read-only device's own change is this device's, whoever wrote the version it was made over.
-        let by = if ours.invalid { self.me } else { loser.modified_by };
+        let by = if ours.own_change() { self.me } else { loser.modified_by };
         let (copy, fresh) = self.copy_name(store, p, loser, by, meta.mtime_ns)?;
         if !fresh {
             // The copy is here already (another device that kept the same loser made it, and it
@@ -1099,7 +1268,7 @@ impl Puller<'_> {
         // chunks known for reuse and announces it at once.
         let now = self.fs.lstat(&copy)?.ok_or_else(|| Skip::Failed("the conflict copy vanished".into()))?;
         let info = self.copy_info(&copy, p, loser);
-        let rec = match (self.signer, ours.invalid) {
+        let rec = match (self.signer, ours.own_change()) {
             // A read-only device's local change, now known only by its stamp: rescan it rather than
             // trust a record that described other content.
             (_, true) => None,
@@ -1109,6 +1278,8 @@ impl Puller<'_> {
                 invalid: false,
                 stamp: Some(stamp_of(&now)),
                 tier: ours.tier,
+                dataless: false,
+                want: false,
             }),
             (None, false) => Some(LocalRecord {
                 file: SignedFile { info: FileInfo { version: Version::new(), ..info }, sig: [0; 64] },
@@ -1116,6 +1287,8 @@ impl Puller<'_> {
                 invalid: true,
                 stamp: Some(stamp_of(&now)),
                 tier: ours.tier,
+                dataless: false,
+                want: false,
             }),
         };
         if let Some(rec) = rec {

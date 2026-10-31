@@ -58,7 +58,7 @@ struct SidebarView: View {
                         }
                     } label: {
                         // Open, the channel's row is its General; closed, it counts its topics too.
-                        ChatSidebarRow(icon: SidebarSymbols.symbol(c.item.icon), name: c.item.title, unread: c.item.unread)
+                        ChatSidebarRow(icon: SidebarSymbols.symbol(c.item.icon), name: c.item.title, unread: c.item.unread, tag: c.item.tag)
                             .tag(c.item.place)
                             .help(c.item.help)
                             .contextMenu { MenuEntriesView(entries: SidebarMenus.entries(for: c.item.place, model: model, commands: commands)) }

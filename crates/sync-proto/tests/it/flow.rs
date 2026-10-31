@@ -102,7 +102,7 @@ fn an_owner_invites_a_reader() {
         folder_id: folder.folder_id(),
         index_id: 1,
         full: true,
-        entries: vec![IndexEntry { sequence: 1, invalid: false, file: signed.clone() }],
+        entries: vec![IndexEntry { sequence: 1, invalid: false, dataless: false, on_demand: false, file: signed.clone() }],
         done: true,
     });
     let Message::Index(got) = send(&index) else { panic!() };
@@ -110,7 +110,7 @@ fn an_owner_invites_a_reader() {
 
     // A reader that changed the file locally re-announces the version as invalid: the flag is not signed, so the
     // entry still verifies.
-    let relayed = IndexEntry { sequence: 9, invalid: true, file: signed };
+    let relayed = IndexEntry { sequence: 9, invalid: true, dataless: false, on_demand: false, file: signed };
     let Message::Index(got) = send(&Message::Index(Index { entries: vec![relayed], ..got })) else { panic!() };
     assert!(got.entries[0].invalid);
     assert!(table.verify(&got.entries[0].file));

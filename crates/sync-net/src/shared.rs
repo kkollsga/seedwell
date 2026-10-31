@@ -130,10 +130,16 @@ impl Space {
         self.membership.read().unwrap_or_else(|e| e.into_inner()).role(device_pk)
     }
 
+    /// May the device (`device_pk`) write to the folder?
+    pub fn writes(&self, device_pk: &[u8; 32]) -> bool {
+        self.role_of(device_pk).is_some_and(|r| r.access() == trs_sync_proto::keys::Access::Write)
+    }
+
     /// May it be synced with a peer over this connection (`lan`: the peer is on the LAN, not relayed)? Not when it
     /// is paused, nor a LAN-only folder with a peer elsewhere.
     pub fn allowed_with(&self, lan: bool) -> bool {
-        !self.paused.load(Ordering::Relaxed) && (lan || !self.lan_only.load(Ordering::Relaxed))
+        // (SeqCst, as the closers store them: a link checks it after it is in the sessions a closer then looks at.)
+        !self.paused.load(Ordering::SeqCst) && (lan || !self.lan_only.load(Ordering::SeqCst))
     }
 
     /// Notes a problem with the membership (once).
@@ -155,8 +161,21 @@ impl Space {
 pub struct FolderShared {
     /// Who is in it.
     pub space: Arc<Space>,
-    /// Where it is on disk.
+    /// Where its files are on disk: the folder itself, or for an on-demand folder this device's content cache.
     pub root: PathBuf,
+    /// Where the user sees it: the folder itself, or for an on-demand folder where the host shows it (renamed in place).
+    pub place: Mutex<PathBuf>,
+    /// On demand (SPEC §7G.11).
+    pub on_demand: bool,
+    /// On demand: the paths kept on this device (a copy of the core's, for listing items without it).
+    pub pins: Mutex<std::collections::BTreeSet<String>>,
+    /// On demand: the items a host lists, read from `index` (never waiting for the core).
+    pub items: Mutex<trs_sync::ondemand::Items>,
+    /// On demand: files with a free in progress here, and how many frees hold each ([`Freeing`]): asked whether it
+    /// holds them, this device says no (SPEC §7G.11).
+    pub freeing: Mutex<BTreeMap<String, u32>>,
+    /// The ignore patterns the core was opened with (for answers given without it).
+    pub ignore: trs_sync::ignore::Ignore,
     /// The core. Lock only on a blocking thread.
     pub core: Mutex<FolderCore>,
     /// Reads the core's index without its lock: requests from peers are answered while a pull holds the
@@ -170,6 +189,9 @@ pub struct FolderShared {
     pub live: Mutex<Live>,
     /// Ask the runtime for a full scan now (the user's "Rescan", or a changed ignore file).
     pub rescan: Notify,
+    /// Up when the folder is being stopped (removed, moved, switched): what holds it for a peer (its index sender)
+    /// lets go, so the folder's index closes while that peer stays connected.
+    pub stopped: watch::Sender<bool>,
     /// How long archived versions are kept, and how much room they may take.
     pub retention: trs_sync::archive::Retention,
     /// Bytes fetched from peers for this folder.
@@ -226,6 +248,8 @@ pub struct Live {
     pub conflicts: BTreeMap<String, String>,
     /// Paths and bytes still needed (as of the last scan or pull).
     pub need: (u64, u64),
+    /// Files no device can give right now (not in `need`).
+    pub unavailable: u64,
     /// The first needed paths in path order, at most [`PENDING_SAMPLE`], for Finder's badges; `true` when
     /// there are more. Taken where the core is locked anyway (before and during pulls, on settling).
     pub pending: (Vec<String>, bool),
@@ -245,6 +269,7 @@ impl Default for Live {
             last_synced_s: None,
             conflicts: BTreeMap::new(),
             need: (0, 0),
+            unavailable: 0,
             pending: (Vec::new(), false),
             local: (0, 0),
             fetched: 0,
@@ -299,6 +324,28 @@ pub struct PeerHandle {
     pub direct_key: Mutex<Option<trs_sync_proto::direct::DirectKey>>,
     /// Its user's name, from its DirectJoin (empty: none given, or an older Seedwell).
     pub user_name: Mutex<String>,
+    /// The task sending our index of each folder to the peer: a folder linked again (the peer opened it again)
+    /// replaces it.
+    pub links: Mutex<BTreeMap<FolderId, tokio::task::AbortHandle>>,
+    /// Our [`HoldQuery`](trs_sync_proto::msg::HoldQuery)s waiting for their answer.
+    holds_pending: Mutex<HashMap<u32, oneshot::Sender<Vec<bool>>>>,
+    /// Folders that went out in our Join on this session (at its start, offered since, or answering the peer's
+    /// offer). A folder is linked on the session only if it is here and in the peer's ([`Self::got`]).
+    pub joined: Mutex<BTreeSet<FolderId>>,
+    /// Folders the peer's Joins on this session named (offered or answered).
+    pub got: Mutex<BTreeSet<FolderId>>,
+    /// Folders this device offered after the session began, its answer not in yet: the peer's Join for one is that
+    /// answer, not one to answer again.
+    pub offered: Mutex<BTreeSet<FolderId>>,
+    /// Folders this device answered a Join for on this session (and linked): the peer's next Join for one is its reply
+    /// to our answer, not the folder opened again.
+    pub answered: Mutex<BTreeSet<FolderId>>,
+    /// Folders that closed here while linked in this session (paused, stopped for a move, a switch, a removal): from
+    /// that moment nothing of them goes either way on this session, and once open again the session is started anew,
+    /// so the peer sends what it sent meanwhile again from what we hold ([`Self::access`] says none).
+    pub stale: Mutex<BTreeSet<FolderId>>,
+    /// Our [`RenameRequest`](trs_sync_proto::msg::RenameRequest)s waiting for their answer.
+    renames_pending: Mutex<HashMap<u32, oneshot::Sender<trs_sync_proto::msg::RenameReply>>>,
 }
 
 impl PeerHandle {
@@ -342,8 +389,21 @@ impl PeerHandle {
             closed,
             direct_key: Mutex::new(None),
             user_name: Mutex::new(String::new()),
+            links: Mutex::new(BTreeMap::new()),
+            holds_pending: Mutex::new(HashMap::new()),
+            renames_pending: Mutex::new(HashMap::new()),
+            stale: Mutex::new(BTreeSet::new()),
+            joined: Mutex::new(BTreeSet::new()),
+            got: Mutex::new(BTreeSet::new()),
+            offered: Mutex::new(BTreeSet::new()),
+            answered: Mutex::new(BTreeSet::new()),
         });
         (h, crx, drx)
+    }
+
+    /// Both sides have the feature bit `bit` ([`trs_sync_proto::msg::FEATURES`]).
+    pub fn has(&self, bit: u64) -> bool {
+        self.agreed.features & bit != 0
     }
 
     /// The session carries channels (both sides have [`trs_sync_proto::msg::FEATURE_CHAT`]).
@@ -351,9 +411,29 @@ impl PeerHandle {
         self.agreed.features & trs_sync_proto::msg::FEATURE_CHAT != 0
     }
 
-    /// The access the peer proved in `folder` (or channel), if it shares it with us.
+    /// The access the peer proved in `folder` (or channel), if it shares it with us over this session (none once the
+    /// folder is stale here).
     pub fn access(&self, folder: &FolderId) -> Option<Access> {
+        if lock(&self.stale).contains(folder) {
+            return None;
+        }
         self.folders.read().unwrap_or_else(|e| e.into_inner()).get(folder).copied()
+    }
+
+    /// The folder closed here (paused, stopped): if it is linked in this session, it is stale on it from now on
+    /// (nothing of it is taken or sent here any more), and its sender stops.
+    pub fn close_folder(&self, folder: &FolderId) {
+        if self.folders.read().unwrap_or_else(|e| e.into_inner()).contains_key(folder) {
+            lock(&self.stale).insert(*folder);
+        }
+        if let Some(link) = lock(&self.links).remove(folder) {
+            link.abort();
+        }
+    }
+
+    /// The folder is stale on this session.
+    pub fn is_stale(&self, folder: &FolderId) -> bool {
+        lock(&self.stale).contains(folder)
     }
 
     /// Sends a request; the response arrives on the returned receiver (dropped if the session ends).
@@ -376,9 +456,80 @@ impl PeerHandle {
         }
     }
 
+    /// Asks whether the peer holds these versions now (SPEC §7G.11); the answer, one flag per file, arrives on the
+    /// returned receiver (dropped if the session ends; a peer that does not know the question never answers).
+    pub async fn ask_holds(&self, folder_id: FolderId, files: Vec<trs_sync_proto::msg::HeldFile>) -> Option<(u32, oneshot::Receiver<Vec<bool>>)> {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let (tx, rx) = oneshot::channel();
+        lock(&self.holds_pending).insert(id, tx);
+        let q = trs_sync_proto::msg::HoldQuery { id, folder_id, files };
+        if self.control.send(Message::HoldQuery(q)).await.is_err() {
+            lock(&self.holds_pending).remove(&id);
+            return None;
+        }
+        Some((id, rx))
+    }
+
+    /// A hold query that will not be waited for any more (no answer in time).
+    pub fn forget_holds(&self, id: u32) {
+        lock(&self.holds_pending).remove(&id);
+    }
+
+    /// Hold queries waiting for their answer (tests).
+    pub fn holds_waiting(&self) -> usize {
+        lock(&self.holds_pending).len()
+    }
+
+    /// The answer to one of our hold queries arrived.
+    pub fn answer_holds(&self, reply: trs_sync_proto::msg::HoldReply) {
+        if let Some(tx) = lock(&self.holds_pending).remove(&reply.id) {
+            let _ = tx.send(reply.held);
+        }
+    }
+
+    /// Asks the peer to rename `from` to `to` in a folder ([`trs_sync_proto::msg::RenameRequest`]); the answer arrives
+    /// on the receiver (dropped when the session ends). With its id, to [`Self::forget_rename`] it.
+    pub async fn ask_rename(
+        &self,
+        folder_id: FolderId,
+        from: String,
+        to: String,
+        seen: [u8; 32],
+        ttl_ms: u32,
+    ) -> Option<(u32, oneshot::Receiver<trs_sync_proto::msg::RenameReply>)> {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let (tx, rx) = oneshot::channel();
+        lock(&self.renames_pending).insert(id, tx);
+        let q = trs_sync_proto::msg::RenameRequest { id, folder_id, from, to, seen, ttl_ms };
+        if self.control.send(Message::RenameRequest(q)).await.is_err() {
+            lock(&self.renames_pending).remove(&id);
+            return None;
+        }
+        Some((id, rx))
+    }
+
+    /// A rename request that will not be waited for any more.
+    pub fn forget_rename(&self, id: u32) {
+        lock(&self.renames_pending).remove(&id);
+    }
+
+    /// The answer to one of our rename requests arrived.
+    pub fn answer_rename(&self, reply: trs_sync_proto::msg::RenameReply) {
+        if let Some(tx) = lock(&self.renames_pending).remove(&reply.id) {
+            let _ = tx.send(reply);
+        }
+    }
+
+    /// Rename requests waiting for their answer (tests).
+    pub fn renames_waiting(&self) -> usize {
+        lock(&self.renames_pending).len()
+    }
+
     /// The session is over: pending requests fail (their receivers see the sender dropped).
     pub fn close(&self) {
         lock(&self.pending).clear();
+        lock(&self.holds_pending).clear();
+        lock(&self.renames_pending).clear();
         let _ = self.closed.send(true);
     }
 
@@ -550,4 +701,64 @@ pub struct Ctx {
     pub chat_events: tokio::sync::broadcast::Sender<crate::chat::ChatEvent>,
     /// Private messages.
     pub direct: crate::direct::Direct,
+    /// How long a device asked whether it holds files may take to answer (SPEC §7G.11).
+    pub hold_wait: Mutex<std::time::Duration>,
+    /// **Tests:** hold queries and rename requests go unanswered, as an earlier Seedwell leaves them.
+    pub silent_ondemand: std::sync::atomic::AtomicBool,
+    /// Bumped (SeqCst) whenever a folder opens or closes here (pause, resume, stop, reopen, LAN-only, removal,
+    /// join): a session set up while it moved checks its folders again ([`crate::peer`]'s reconcile).
+    pub folder_gen: std::sync::atomic::AtomicU64,
+    /// Every folder this device has (its configuration's, open or not: held back, failed to open, stopped for a
+    /// move): one a peer offers while it is not open here is stale on that session. (One it does not have is not.)
+    pub ours: Mutex<BTreeSet<FolderId>>,
+    /// **Tests:** sessions set up so far (to see that none started anew).
+    pub sessions: std::sync::atomic::AtomicU64,
+    /// **Tests:** how long an answering session waits between making its Join and going on.
+    pub setup_wait: Mutex<std::time::Duration>,
+    /// **Tests:** hold queries are answered yes, whatever is held (a member that lies).
+    pub yes_to_holds: std::sync::atomic::AtomicBool,
+}
+
+impl Ctx {
+    /// **Tests:** a device offering none of the on-demand feature bits plays Seedwell 0.1.11 in its sessions: it
+    /// keeps no stale folders and no session reconciling, links a folder on any Join for it it has not linked,
+    /// answers one only if it did not name it itself before, and offers a folder it opened again on the same session.
+    pub fn plays_0_1_11(&self) -> bool {
+        self.features & trs_sync_proto::msg::FEATURE_HOLDS == 0
+    }
+}
+
+/// Files of a folder with a free in progress, from the first question to the end of the free: while it lives, this
+/// device answers no for them. Ends when dropped, also when the free fails or its future is dropped; each free counts
+/// only its own files.
+pub struct Freeing {
+    f: Arc<FolderShared>,
+    paths: Vec<String>,
+}
+
+impl Freeing {
+    /// Starts one for `paths`.
+    pub fn new(f: Arc<FolderShared>, paths: Vec<String>) -> Self {
+        {
+            let mut m = lock(&f.freeing);
+            for p in &paths {
+                *m.entry(p.clone()).or_insert(0) += 1;
+            }
+        }
+        Freeing { f, paths }
+    }
+}
+
+impl Drop for Freeing {
+    fn drop(&mut self) {
+        let mut m = lock(&self.f.freeing);
+        for p in &self.paths {
+            if let Some(n) = m.get_mut(p) {
+                *n -= 1;
+                if *n == 0 {
+                    m.remove(p);
+                }
+            }
+        }
+    }
 }

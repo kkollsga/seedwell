@@ -89,6 +89,19 @@ pub struct FolderEntry {
     /// The devices met in it.
     #[serde(default, rename = "device")]
     pub devices: Vec<SpaceDevice>,
+    /// On demand (SPEC §7G.11): every file is known, but only the ones asked for, kept here or changed here have
+    /// their content, in this device's cache (`<sync state>/<id>.cache`); `path` is then where the host (File
+    /// Provider, Cloud Files) shows the folder, not where its files are.
+    #[serde(default)]
+    pub on_demand: bool,
+    /// On demand: the paths kept on this device (`""` = all of it).
+    #[serde(default)]
+    pub pins: Vec<String>,
+    /// Switched between full and on demand: when the folder next opens, the core takes the new mode (to full: the
+    /// files still online only are asked for; to on demand: what is here is announced as an on-demand device's), then
+    /// this is cleared (so a crash in between loses nothing: it happens at the next start).
+    #[serde(default)]
+    pub mode_switched: bool,
 }
 
 fn yes() -> bool {
@@ -114,6 +127,9 @@ impl FolderEntry {
             addresses: Vec::new(),
             channel: String::new(),
             devices: Vec::new(),
+            on_demand: false,
+            pins: Vec::new(),
+            mode_switched: false,
         }
     }
 }
@@ -164,7 +180,8 @@ pub struct ChannelEntry {
     pub name: String,
     /// No notifications for it (an @mention still notifies: the app's rule).
     pub muted: bool,
-    /// What agents on this Mac may do in it: `off` (the default), `read` or `post`.
+    /// What agents on this Mac may do in it, as the user set it: `off`, `read` or `post`; empty: never set, so the
+    /// channel's default (Read and post for an agent channel, else off).
     pub agents: String,
     /// The command run for each message from another device while agents may read it (empty: none).
     pub wake: String,

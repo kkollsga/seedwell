@@ -66,8 +66,12 @@ print("" if v is None else v)' "$1"
 start() {
   local name="$1" bin="$2" dir="$root/$1"
   mkdir -p "$dir/state" "$dir/dl"
+  # Channels are closed to agents until their user opens them; a daemon has no app for that, so --chat-agents opens
+  # them for the run. A release before it has `chat agents` instead (round, below).
+  local open=()
+  if "$bin" help daemon 2>/dev/null | grep -q -- --chat-agents; then open=(--chat-agents post); fi
   "$bin" daemon --state-dir "$dir/state" --download-dir "$dir/dl" --bind 127.0.0.1 --no-dht --no-trackers \
-    --permission full --socket "$root/$name.sock" >"$dir/out" 2>"$dir/err" &
+    --permission full --socket "$root/$name.sock" ${open[@]+"${open[@]}"} >"$dir/out" 2>"$dir/err" &
   local pid=$!
   pids+=($pid)
   local line=""
@@ -142,7 +146,8 @@ round() {
   clink=$(cli "$owner" chat share "$cid" | field link)
   if [ -n "$cid" ] && echo "$clink" | cli "$joiner" chat join - >/dev/null; then
     cli "$joiner" chat address "$cid" "127.0.0.1:$oport" >/dev/null
-    for side in "$owner" "$joiner"; do cli "$side" chat agents "$cid" post >/dev/null; done
+    # Only a release before --chat-agents has this (and needs it); this build refuses it.
+    for side in "$owner" "$joiner"; do cli "$side" chat agents "$cid" post >/dev/null 2>&1 || true; done
     echo "hello from $owner" | cli "$owner" chat send "$cid" - >/dev/null
     if wait_for 60 chat_has "$joiner" "$cid" "hello from $owner"; then pass "$joiner gets $owner's channel message"; else fail "$joiner gets $owner's channel message"; fi
     echo "hello from $joiner" | cli "$joiner" chat send "$cid" - >/dev/null

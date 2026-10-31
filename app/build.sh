@@ -86,6 +86,7 @@ echo "==> Swift app (${SWIFT_ARGS[*]})"
 (cd "$APP_DIR" && swift build "${SWIFT_ARGS[@]}" --product SeedwellApp)
 (cd "$APP_DIR" && swift build "${SWIFT_ARGS[@]}" --product SeedwellFinderSync)
 (cd "$APP_DIR" && swift build "${SWIFT_ARGS[@]}" --product SeedwellShare)
+(cd "$APP_DIR" && swift build "${SWIFT_ARGS[@]}" --product SeedwellFileProvider)
 BIN_DIR="$(cd "$APP_DIR" && swift build "${SWIFT_ARGS[@]}" --show-bin-path)"
 BIN="$BIN_DIR/SeedwellApp"
 
@@ -260,6 +261,53 @@ cat > "$SHARE/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
+echo "==> File Provider extension"
+# On-demand folders in the Finder (SPEC 7G.11): sandboxed, in the app group shared with the app (sign.sh), asking the
+# app for everything over a socket in the group's container. The Finder actions keep items on this Mac or stop.
+FPX="$APP/Contents/PlugIns/SeedwellFileProvider.appex"
+mkdir -p "$FPX/Contents/MacOS"
+cp "$BIN_DIR/SeedwellFileProvider" "$FPX/Contents/MacOS/SeedwellFileProvider"
+cat > "$FPX/Contents/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key><string>io.github.kkollsga.Seedwell.FileProvider</string>
+    <key>CFBundleName</key><string>SeedwellFileProvider</string>
+    <key>CFBundleDisplayName</key><string>Seedwell</string>
+    <key>CFBundleExecutable</key><string>SeedwellFileProvider</string>
+    <key>CFBundlePackageType</key><string>XPC!</string>
+    <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+    <key>CFBundleShortVersionString</key><string>$VERSION</string>
+    <key>CFBundleVersion</key><string>$BUILD_NUMBER</string>
+    <key>LSMinimumSystemVersion</key><string>15.0</string>
+    <key>NSHumanReadableDescription</key><string>Shows Seedwell's on-demand folders in Finder.</string>
+    <key>NSExtension</key>
+    <dict>
+        <key>NSExtensionPointIdentifier</key><string>com.apple.fileprovider-nonui</string>
+        <key>NSExtensionPrincipalClass</key><string>SeedwellFileProviderExtension</string>
+        <key>NSExtensionFileProviderDocumentGroup</key><string>6GND8Z2C7Z.io.github.kkollsga.Seedwell</string>
+        <key>NSExtensionFileProviderSupportsEnumeration</key><true/>
+        <key>NSExtensionFileProviderActions</key>
+        <array>
+            <dict>
+                <key>NSExtensionFileProviderActionIdentifier</key><string>io.github.kkollsga.Seedwell.keep</string>
+                <key>NSExtensionFileProviderActionName</key><string>Always Keep on This Mac</string>
+                <key>NSExtensionFileProviderActionActivationRule</key>
+                <string>SUBQUERY ( fileproviderItems, \$fileproviderItem, \$fileproviderItem.userInfo.keep == NO ).@count > 0</string>
+            </dict>
+            <dict>
+                <key>NSExtensionFileProviderActionIdentifier</key><string>io.github.kkollsga.Seedwell.unkeep</string>
+                <key>NSExtensionFileProviderActionName</key><string>Stop Keeping on This Mac</string>
+                <key>NSExtensionFileProviderActionActivationRule</key>
+                <string>SUBQUERY ( fileproviderItems, \$fileproviderItem, \$fileproviderItem.userInfo.pinned == YES ).@count > 0</string>
+            </dict>
+        </array>
+    </dict>
+</dict>
+</plist>
+PLIST
+
 # SwiftPM with Command Line Tools stamps LC_BUILD_VERSION sdk=15.0 (the deployment target), and
 # macOS then runs the app in compatibility mode: no Liquid Glass sidebar or toolbar. Stamp the
 # SDK we actually compiled against.
@@ -268,6 +316,7 @@ if [ -n "$SDK_VER" ]; then
     vtool -set-build-version macos 15.0 "$SDK_VER" -replace -output "$APP/Contents/MacOS/SeedwellApp" "$APP/Contents/MacOS/SeedwellApp"
     vtool -set-build-version macos 15.0 "$SDK_VER" -replace -output "$EXT/Contents/MacOS/SeedwellFinderSync" "$EXT/Contents/MacOS/SeedwellFinderSync"
     vtool -set-build-version macos 15.0 "$SDK_VER" -replace -output "$SHARE/Contents/MacOS/SeedwellShare" "$SHARE/Contents/MacOS/SeedwellShare"
+    vtool -set-build-version macos 15.0 "$SDK_VER" -replace -output "$FPX/Contents/MacOS/SeedwellFileProvider" "$FPX/Contents/MacOS/SeedwellFileProvider"
     echo "    LC_BUILD_VERSION: minos 15.0, sdk $SDK_VER"
 fi
 

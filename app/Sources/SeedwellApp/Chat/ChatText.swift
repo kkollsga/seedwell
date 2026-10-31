@@ -7,6 +7,9 @@ enum ChatText {
     /// What agents on this Mac may do in a channel (the core's words).
     static func agents(_ a: SyncAgentAccess) -> String { chatAgentsLabel(access: a) }
 
+    /// An agent channel's tag ("agents" and its tooltip; the core's), `nil` for any other channel.
+    static func agentTag(_ c: SyncChannel) -> SidebarTag? { chatAgentTag(channel: c) }
+
     /// A channel's unread messages under General: its total less its topics' (the core's rule).
     static func generalUnread(_ c: SyncChannel, _ topics: [SyncTopic]) -> UInt32 { chatGeneralUnread(channel: c, topics: topics) }
 

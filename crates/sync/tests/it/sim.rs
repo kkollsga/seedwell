@@ -381,6 +381,30 @@ impl IndexStore for SimStore {
         self.alive()?;
         self.s().local_since(after, limit)
     }
+    fn shown_since(&self, after: u64, limit: usize) -> io::Result<Vec<(u64, String)>> {
+        self.alive()?;
+        self.s().shown_since(after, limit)
+    }
+    fn shown_at(&self, path: &str) -> io::Result<Option<u64>> {
+        self.alive()?;
+        self.s().shown_at(path)
+    }
+    fn retired(&self, after: u64, upto: u64) -> io::Result<Vec<(u64, String, [u8; 16])>> {
+        self.alive()?;
+        self.s().retired(after, upto)
+    }
+    fn feed_floor(&self) -> io::Result<u64> {
+        self.alive()?;
+        self.s().feed_floor()
+    }
+    fn unavailable(&self) -> io::Result<Vec<(String, u64)>> {
+        self.alive()?;
+        self.s().unavailable()
+    }
+    fn unavailable_at(&self, path: &str) -> io::Result<Option<u64>> {
+        self.alive()?;
+        self.s().unavailable_at(path)
+    }
     fn local_paths(&self, prefix: &str, after: Option<&str>, limit: usize) -> io::Result<Vec<String>> {
         self.alive()?;
         self.s().local_paths(prefix, after, limit)
@@ -396,6 +420,10 @@ impl IndexStore for SimStore {
     fn peer(&self, device: ShortId) -> io::Result<Option<PeerState>> {
         self.alive()?;
         self.s().peer(device)
+    }
+    fn peer_ids(&self) -> io::Result<Vec<ShortId>> {
+        self.alive()?;
+        self.s().peer_ids()
     }
     fn writers(&self) -> io::Result<Vec<(ShortId, Writer)>> {
         self.alive()?;
@@ -499,6 +527,7 @@ fn open_core(
         byte_exact_names: false,
         exec_bits: true,
         archive: true,
+        on_demand: false,
     };
     let ids = ids.clone();
     let new_id = Arc::new(move || {

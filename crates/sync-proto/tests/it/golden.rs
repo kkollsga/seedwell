@@ -1,6 +1,6 @@
 //! The wire format as 0.1.6 writes it, frozen: every message type, statement kind, invitation link and proof, as
 //! bytes (hex), channels included (types 17 to 22: channel messages and topics, a channel link, private messages
-//! and the keys they are sealed to). Each decodes to its value and
+//! and the keys they are sealed to), and the types later versions added (23; 24 to 27, on-demand folders). Each decodes to its value and
 //! encodes back to the same bytes, so a change to the format fails here first. 0.1.6 is the baseline every later
 //! version must still read (`PROTOCOL.md`): these vectors only ever get new entries, never edits.
 //!
@@ -16,7 +16,7 @@ use trs_sync_proto::device::DeviceKey;
 use trs_sync_proto::ids::{DeviceId, FolderId, ShortId};
 use trs_sync_proto::keys::{FolderSecret, KeyError, Proof};
 use trs_sync_proto::members::{
-    Body, Invite, InviteLink, Membership, Role, Signer, Statement, check_redeem, new_invite, redeem_proof,
+    Body, CHANNEL_AGENTS, Invite, InviteLink, Membership, Role, Signer, Statement, check_redeem, new_invite, redeem_proof,
 };
 use trs_sync_proto::model::{ChunkRef, Counter, FileInfo, FileKind, IndexEntry, SignedFile, Version};
 use trs_sync_proto::msg::*;
@@ -68,6 +68,8 @@ fn statements() -> Vec<(&'static str, Statement)> {
             "statement 6 profile",
             Statement::by_device(&admin, &fid(), Body::Profile { device_name: "Kim's MacBook Air".into(), user_name: "kim".into(), serial: 1, at_s: T }),
         ),
+        // 0.1.12
+        ("statement 7 channel", Statement::by_owner(&s, Body::Channel { flags: CHANNEL_AGENTS, at_s: T })),
     ]
 }
 
@@ -87,7 +89,7 @@ fn entry(seq: u64, path: &str, kind: FileKind, deleted: bool) -> IndexEntry {
         conflict_of: path.contains("conflict").then(|| "Notes/plan.txt".into()),
         chunks: if file { vec![ChunkRef { len: 4_194_304, hash: [0xc1; 32] }, ChunkRef { len: 805_696, hash: [0xc2; 32] }] } else { vec![] },
     };
-    IndexEntry { sequence: seq, invalid: seq == 4, file: SignedFile { info, sig: [seq as u8 + 0x40; 64] } }
+    IndexEntry { sequence: seq, invalid: seq == 4, dataless: false, on_demand: false, file: SignedFile { info, sig: [seq as u8 + 0x40; 64] } }
 }
 
 /// One of each message type.
@@ -168,6 +170,21 @@ fn messages() -> Vec<(&'static str, Message)> {
         ("message 22 direct messages", Message::DirectMessages(DirectMessages { messages: direct().into_iter().map(|(_, m)| m).collect() })),
         // 0.1.9
         ("message 23 direct join", Message::DirectJoin(DirectJoin { conversation: true, user_name: "Kim".into() })),
+        // 0.1.12 (on-demand folders)
+        (
+            "message 24 hold query",
+            Message::HoldQuery(HoldQuery {
+                id: 9,
+                folder_id: fid(),
+                files: vec![HeldFile { path: "Notes/plan.txt".into(), version: version(&[(0x1122_3344_5566_7788, T)]), content: [0xd1; 32] }],
+            }),
+        ),
+        ("message 25 hold reply", Message::HoldReply(HoldReply { id: 9, held: vec![true, false] })),
+        (
+            "message 26 rename request",
+            Message::RenameRequest(RenameRequest { id: 10, folder_id: fid(), from: "Notes".into(), to: "Papers/Notes".into(), seen: [0xd2; 32], ttl_ms: 10_000 }),
+        ),
+        ("message 27 rename reply", Message::RenameReply(RenameReply { id: 10, outcome: RenameOutcome::Busy, reason: "busy".into() })),
     ]
 }
 
@@ -464,6 +481,47 @@ fn statements_of_unknown_kinds_or_values_are_kept_passed_on_and_give_no_role() {
     assert_eq!(ms.statements, vec![later, odd]);
 }
 
+/// An agent channel's mark (statement kind 7, 0.1.12) to the versions before it (0.1.6 to 0.1.11), and their channels to
+/// this one: each sees an ordinary channel, and nothing is lost on the way through an older device.
+#[test]
+fn an_agent_channel_is_an_ordinary_channel_to_a_device_before_its_mark_and_back() {
+    let s = secret();
+    let owner_grant = statements()[0].1.clone();
+    let mark = statements().into_iter().find(|(n, _)| *n == "statement 7 channel").unwrap().1;
+    let b = unhex(frozen("statement 7 channel"));
+    assert_eq!((b[0], b.len()), (7, 2 + b[1] as usize + 1 + 64), "kind 7, its body, the owner as signer, the signature");
+
+    // How those versions read it: a kind they do not know (their `read_body` knows 1 to 6), so the whole body as
+    // `Unknown`. Its signature checks, it goes into their membership (an owner's statement always does) and is
+    // stored and passed on byte for byte, and it gives no role and changes none.
+    let old = Statement { body: Body::Unknown { kind: 7, data: b[2..2 + b[1] as usize].to_vec() }, signer: Signer::Folder, sig: mark.sig, extra: Vec::new() };
+    assert_eq!(old.to_bytes(), b, "passed on unchanged");
+    assert!(old.verify(s.public_key()));
+    let mut older = Membership::new(*s.public_key());
+    older.add([owner_grant.clone()]);
+    let roles = |m: &Membership| m.members().map(|(pk, mm)| (*pk, mm.role)).collect::<Vec<_>>();
+    let before = roles(&older);
+    older.add([old.clone()]);
+    assert!(older.statements().any(|st| *st == old) && roles(&older) == before && !older.agent_channel());
+
+    // What an older device then sends (its Members message, frozen layout) is the mark again for this version.
+    let mut p = fid().0.to_vec();
+    let sent: Vec<Vec<u8>> = older.statements().map(Statement::to_bytes).collect();
+    p.extend(records(&sent));
+    let Ok(Message::Members(ms)) = Message::decode(Frame { kind: 3, flags: 0, payload: &p }) else { panic!() };
+    assert!(ms.statements.contains(&mark), "read as the channel statement it was");
+    let mut newer = Membership::new(*s.public_key());
+    newer.add(ms.statements);
+    assert!(newer.agent_channel() && newer.role(dev(3).public_key()) == Some(Role::Owner));
+
+    // A channel those versions made has no channel statement: an ordinary channel here (closed to agents until its
+    // user opens it), from their frozen Members message as from any other.
+    let Message::Members(frozen_members) = decode(&unhex(frozen("message 3 members"))) else { panic!() };
+    let mut theirs = Membership::new(*s.public_key());
+    theirs.add(frozen_members.statements);
+    assert!(theirs.role(dev(3).public_key()) == Some(Role::Owner) && !theirs.agent_channel());
+}
+
 #[test]
 fn a_bundled_channel_part_that_is_damaged_or_the_folder_itself_spoils_the_link() {
     let good = link().format_bundle(&bundled_channel());
@@ -549,6 +607,10 @@ const GOLDEN: &[(&str, &str)] = &[
     ("message 21 direct have", "0000002715000123ed4928c628d1c2c6eae90338905995612959273a5c63f93636c14614ac8737d1010102"),
     ("message 22 direct messages", "000001d5160002da01980131313131313131313131313131313131ed4928c628d1c2c6eae90338905995612959273a5c63f93636c14614ac8737d1ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c018ad09fa399347a1a4e709bf085ac494aba0469b9b1eda0ab1f78b16aabb79ffeda90623e852220d7c381f7888d09181b9a45b8b88bea9031c1ffba7d0ebc08d2f80a2afbef403961eb711b2a293e7b95baffa6d083620c9a5f439c48edaa248f25a74b66efcb7ffabdb236d49f34f3509f6dffbd9415ae4450171eca405ae599d6eff4caf5ad0cf401b20132323232323232323232323232323232ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22ced4928c628d1c2c6eae90338905995612959273a5c63f93636c14614ac8737d10194d09fa39934132c442be010fbd57e72603328aa76e71fccc1503aae219327d14d9c9993f4723ad01b8d60854b1bef3dd8b14d4977d0a7fc20ab56685ff96d74aadbffbfef77d51a5dae49064736efb21f061c44861e31c452e8f2dc70a370e671ef2812d1b179bab2849c306cc293d92cbd6d7c2a239668bc9376af70f9eb5df90e751e5deff1696d0f1d62a706115c257161c346dc47832e252a5dac34d00901"),
     ("message 23 direct join", "00000007170001034b696d"),
+    ("message 24 hold query", "000000611800099e64389090ed3bd0aecea44c8015b863a7eea036114e2aa1d76daa5ed1f14c56010e4e6f7465732f706c616e2e74787401112233445566778880829ad706d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1"),
+    ("message 25 hold reply", "00000006190009020100"),
+    ("message 26 rename request", "000000581a000a9e64389090ed3bd0aecea44c8015b863a7eea036114e2aa1d76daa5ed1f14c56054e6f7465730c5061706572732f4e6f746573d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2904e"),
+    ("message 27 rename reply", "000000091b000a020462757379"),
     ("chat link", "seedwell://chat/AGLDPMSJYBPHZDQBSHSEHOQNKW7YP5AX3UU24U27KEDS4YVPR3ATECIJBEEQSCIJBEEQSCIJBEEQSCIDAGAPPPWXA2AIFGWXAYAETOGXKKOVBZZL32EIKJZMYZ7FRB34MUHHNKPNXPZD4LTP3Q3M7VNBL5ZVVH3A2OBPLDYOARUX4KIIQF75P7LKQK77YXO74N2OQSLPAYEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSJP3?name=Middag"),
     ("folder and channel link", "seedwell://sync/AGLDPMSJYBPHZDQBSHSEHOQNKW7YP5AX3UU24U27KEDS4YVPR3ATECAIBAEAQCAIBAEAQCAIBAEAQCADAGAPPPWXA2AIFGWXAYAK33EGQCPYBFA6WPIV5ZLSW3Y4TD2JR3EYE6KVJ43RA4RIYUDNTRWTXJRF53PLOCP3DR7ZTMH2HGHAOQPBW6DD6BLKYW5ERWKUSFZUAYEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQA7S?name=Family%20Photos&chat=AHJ2NEPDOIMGW22BOYRL7KSRFX3WCEVK4ZSNTOZJEBBZ6O7LY6PZKCQKBIFAUCQKBIFAUCQKBIFAUCQDAGAPPPWXA2AIFGWXAYAL7HHNX2BNDVW7V27HC3BOBZ5U43WQO3MDHBCH4U77UTZ5ZTQ56Y2GWPHDD3KYXGLK35XGLEGTPKRUXLZW3ZKCM3FCYYWXY7GFL37YAMFAUCQKBIFAUCQKBIFAUCQKBIFAUCQKBIFAUCQKBIFAUCQKBIFAVR6D&chat_name=Family%20Photos%20chat"),
     ("chat 1 text", "4a11111111111111111111111111111111ed4928c628d1c2c6eae90338905995612959273a5c63f93636c14614ac8737d10185d09fa39934000000010e4d6964646167206b6c2e2031383fedba3f0c694cd649b510f16a07cfccda7fac2ca260f6c25e566e026b20c487e6c32c0f0473350806f96dc6574c296433eafaa70454272c219eb1e5e062737202"),
@@ -559,4 +621,6 @@ const GOLDEN: &[(&str, &str)] = &[
     ("direct 1 text", "980131313131313131313131313131313131ed4928c628d1c2c6eae90338905995612959273a5c63f93636c14614ac8737d1ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c018ad09fa399347a1a4e709bf085ac494aba0469b9b1eda0ab1f78b16aabb79ffeda90623e852220d7c381f7888d09181b9a45b8b88bea9031c1ffba7d0ebc08d2f80a2afbef403961eb711b2a293e7b95baffa6d083620c9a5f439c48edaa248f25a74b66efcb7ffabdb236d49f34f3509f6dffbd9415ae4450171eca405ae599d6eff4caf5ad0c"),
     ("direct 2 json from an agent", "b20132323232323232323232323232323232ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22ced4928c628d1c2c6eae90338905995612959273a5c63f93636c14614ac8737d10194d09fa39934132c442be010fbd57e72603328aa76e71fccc1503aae219327d14d9c9993f4723ad01b8d60854b1bef3dd8b14d4977d0a7fc20ab56685ff96d74aadbffbfef77d51a5dae49064736efb21f061c44861e31c452e8f2dc70a370e671ef2812d1b179bab2849c306cc293d92cbd6d7c2a239668bc9376af70f9eb5df90e751e5deff1696d0f1d62a706115c257161c346dc47832e252a5dac34d00901"),
     ("direct key", "ed4928c628d1c2c6eae90338905995612959273a5c63f93636c14614ac8737d1d584d8f13a009997bc3a40d9ceb3ff937883ea52b9f3df921545eb1f4fd7c74583d09fa39934ddaa4b273fd0f10fb2854e587bb52ab7f6345b25c6d006f35c53b6a9d531f52ae51063d89cc58d9622ce55dd8f5917ce83bd4ea91b428c35f8b4bde34d689a0f"),
+    // 0.1.12: what a channel is (an agent channel's mark).
+    ("statement 7 channel", "07060180829ad70600d379078c8c77bfff6e35d134bb17c1669619b660cb7b7185b6787d50bfd4a237809d1b68789016dac2b85cf4fe9f4285ea9b76b8406b095a2570631d468e5e0f"),
 ];

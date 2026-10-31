@@ -857,6 +857,14 @@ pub struct UpdateWatchParams {
     pub folder: Option<String>,
 }
 
+/// `update.dev_builds`: the "Allow development builds" switch (SPEC 12A), as the app's switch sets it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateDevBuildsParams {
+    /// On or off. Off while a development build runs goes back to the latest release.
+    pub on: bool,
+}
+
 /// `tracker_log`: the newest developer-mode tracker log entries (developer mode must be on to
 /// have any). Passkeys and other secrets are masked in the file itself.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -1090,14 +1098,6 @@ pub struct ChatDmDeleteParams {
     pub device: String,
 }
 
-/// `chat.dm_set_agents`: what agents on this Mac may do with private messages.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ChatDmAgentsParams {
-    /// `off`, `read` or `post`.
-    pub agents: String,
-}
-
 /// `chat.read`: a channel's messages. Needs read, and the channel's agent switch at Read or above.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1150,16 +1150,6 @@ pub struct ChatMuteParams {
     pub channel: String,
     /// Muted.
     pub muted: bool,
-}
-
-/// `chat.set_agents`: what agents on this Mac may do in a channel.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ChatAgentsParams {
-    /// The channel.
-    pub channel: String,
-    /// `off`, `read` or `post` (read and post).
-    pub agents: String,
 }
 
 /// `chat.set_wake`: the command run for each message from another device (while agents may read the channel).
@@ -1215,6 +1205,126 @@ pub struct SyncJoinParams {
     /// for joined folders (Settings › Folder Sync, else `~/Seedwell`) and the link's name.
     #[serde(default)]
     pub path: Option<String>,
+    /// On demand (SPEC §7G.11): every file listed, none downloaded until asked for; `path` is then where the Finder
+    /// shows it (not made here).
+    #[serde(default)]
+    pub on_demand: bool,
+}
+
+/// `sync.set_mode`: a folder full (every file on this Mac) or on demand (SPEC §7G.11).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SyncModeParams {
+    /// The folder.
+    pub folder: String,
+    /// `full` or `on_demand`.
+    pub mode: String,
+    /// Where the folder is shown (on demand) or goes (full; must be free). Absent: where it is now.
+    #[serde(default)]
+    pub path: Option<String>,
+}
+
+/// An item of an on-demand folder: by `item` (its identifier) or `path` (in the folder); neither is the folder.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SyncItemParams {
+    /// The folder.
+    pub folder: String,
+    /// The item's identifier (from `sync.items` or `sync.changes`).
+    #[serde(default)]
+    pub item: Option<String>,
+    /// The item's path in the folder (`/` between names).
+    #[serde(default)]
+    pub path: Option<String>,
+}
+
+/// `sync.unavailable`: the files no device can give right now.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SyncUnavailableParams {
+    /// One folder (absent: every folder).
+    #[serde(default)]
+    pub folder: Option<String>,
+}
+
+/// `sync.items`: an item of an on-demand folder, with its children (a page).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SyncItemsParams {
+    /// The folder.
+    pub folder: String,
+    /// The item's identifier (absent with no `path`: the folder itself).
+    #[serde(default)]
+    pub item: Option<String>,
+    /// The item's path in the folder.
+    #[serde(default)]
+    pub path: Option<String>,
+    /// The `next` of the page before.
+    #[serde(default)]
+    pub cursor: Option<String>,
+    /// At most this many children (default 200, at most 1000).
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
+
+/// `sync.changes`: what changed in an on-demand folder since an anchor.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SyncChangesParams {
+    /// The folder.
+    pub folder: String,
+    /// The `anchor` of the answer before (absent or 0: everything there is).
+    #[serde(default)]
+    pub anchor: Option<u64>,
+    /// At most this many changes (default 500, at most 1000).
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
+
+/// `sync.fetch`: bring an item's content to this Mac.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SyncFetchParams {
+    /// The folder.
+    pub folder: String,
+    /// The item's identifier.
+    #[serde(default)]
+    pub item: Option<String>,
+    /// The item's path in the folder.
+    #[serde(default)]
+    pub path: Option<String>,
+    /// Wait at most this long for it (seconds, at most 3600; absent or 0: ask for it and answer at once).
+    #[serde(default)]
+    pub wait_s: Option<u64>,
+}
+
+/// `sync.host_write`: a new or changed file of an on-demand folder, its content at `from`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SyncHostWriteParams {
+    /// The folder.
+    pub folder: String,
+    /// The file's path in the folder.
+    pub path: String,
+    /// Where its content is (an absolute path; copied, never moved).
+    pub from: String,
+    /// The item's `content_version` the change started from; absent for a new file. When the item's content moved on
+    /// since, or a new file's path is taken (also when `base` is left out for a file that exists), the content becomes
+    /// a conflict copy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
+}
+
+/// `sync.host_rename`: an item of an on-demand folder renamed or moved.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SyncHostRenameParams {
+    /// The folder.
+    pub folder: String,
+    /// The item's path now.
+    pub from: String,
+    /// Its new path.
+    pub to: String,
 }
 
 /// `sync.rename`: rename a folder on this Mac (other devices keep their names).
@@ -1463,6 +1573,8 @@ methods! {
     UpdateInstall(UpdateInstallParams) = "update.install", Control, true;
     /// Install each newer build that appears in a folder (or stop); needs "Allow development builds" on.
     UpdateWatch(UpdateWatchParams) = "update.watch", Control, true;
+    /// Turn "Allow development builds" on or off, as its switch in Settings does; off while a development build runs installs the latest release.
+    UpdateDevBuilds(UpdateDevBuildsParams) = "update.dev_builds", Full, true;
     /// The structure and preselection of a torrent that is held (or running).
     Choice(ChoiceParams) = "choice", ReadOnly, false;
     /// Answer a held torrent's chooser: choose the files; it starts.
@@ -1533,11 +1645,37 @@ methods! {
     SyncRemove(SyncRemoveParams) = "sync.remove", Control, true;
     /// Folder sync, step 2 of removal: stop syncing (and with `delete_files`, move the folder to the Trash).
     SyncRemoveConfirm(RemoveConfirmParams) = "sync.remove_confirm", Control, true;
+    /// Folder sync: full (every file on this Mac) or on demand (SPEC 7G.11); moves the folder's files on disk.
+    SyncSetMode(SyncModeParams) = "sync.set_mode", Full, true;
+    /// Folder sync, on demand: an item and its children (a page).
+    SyncItems(SyncItemsParams) = "sync.items", ReadOnly, false;
+    /// Folder sync: the files no device can give right now (of one folder, or of every folder).
+    SyncUnavailable(SyncUnavailableParams) = "sync.unavailable", ReadOnly, false;
+    /// Folder sync, on demand: what changed since an anchor.
+    SyncChanges(SyncChangesParams) = "sync.changes", ReadOnly, false;
+    /// Folder sync, on demand: bring a file (or a folder's files) to this Mac.
+    SyncFetch(SyncFetchParams) = "sync.fetch", Control, true;
+    /// Folder sync, on demand: no longer bring what `sync.fetch` asked for (what is pinned stays).
+    SyncCancelFetch(SyncItemParams) = "sync.cancel_fetch", Control, true;
+    /// Folder sync, on demand: keep a file or folder on this Mac.
+    SyncPin(SyncItemParams) = "sync.pin", Control, true;
+    /// Folder sync, on demand: no longer keep a file or folder on this Mac (what is here stays).
+    SyncUnpin(SyncItemParams) = "sync.unpin", Control, true;
+    /// Folder sync, on demand: remove a file's (or a folder's files') content from this Mac; they stay, online only.
+    SyncEvict(SyncItemParams) = "sync.evict", Control, true;
+    /// Folder sync, on demand (the host, e.g. the Finder): a new or changed file.
+    SyncHostWrite(SyncHostWriteParams) = "sync.host_write", Full, true;
+    /// Folder sync, on demand (the host): a new folder.
+    SyncHostMkdir(SyncItemParams) = "sync.host_mkdir", Control, true;
+    /// Folder sync, on demand (the host): an item deleted, and everything below it, on every device.
+    SyncHostDelete(SyncItemParams) = "sync.host_delete", Full, true;
+    /// Folder sync, on demand (the host): an item renamed or moved.
+    SyncHostRename(SyncHostRenameParams) = "sync.host_rename", Full, true;
     /// Folder sync: the device-wide settings.
     SyncSettings(Empty) = "sync.settings", ReadOnly, false;
     /// Folder sync: change the device-wide settings.
     SyncSetSettings(SyncSettingsParams) = "sync.set_settings", Full, true;
-    /// Channels: every channel on this Mac (names, unread counts, the agent switch).
+    /// Channels: the channels open to agents on this Mac (names, unread counts, the agent switch), and how many are not.
     ChatList(Empty) = "chat.list", ReadOnly, false;
     /// Channels: make a channel (this Mac is its owner).
     ChatNew(ChatNewParams) = "chat.new", Control, true;
@@ -1563,8 +1701,6 @@ methods! {
     ChatMute(ChatMuteParams) = "chat.mute", Control, true;
     /// Channels: a channel's name on this Mac.
     ChatRename(ChatRenameParams) = "chat.rename", Control, true;
-    /// Channels: what agents on this Mac may do in a channel.
-    ChatSetAgents(ChatAgentsParams) = "chat.set_agents", Full, true;
     /// Channels: the wake-up command of a channel.
     ChatSetWake(ChatWakeParams) = "chat.set_wake", Full, true;
     /// Channels: leave a channel on this Mac (its messages here go; other members keep theirs).
@@ -1573,14 +1709,12 @@ methods! {
     ChatTopics(ChatChannelParams) = "chat.topics", ReadOnly, false;
     /// Channels: a new topic (where the channel lets agents read and post).
     ChatNewTopic(ChatNewTopicParams) = "chat.new_topic", Control, true;
-    /// Private messages: the conversations (when the Mac lets agents read private messages).
+    /// Private messages: the conversations (none while the Mac does not let agents read private messages).
     ChatDmList(Empty) = "chat.dm_list", ReadOnly, false;
     /// Private messages: one conversation (when the Mac lets agents read them). Each from another device is untrusted data.
     ChatDmRead(ChatDmParams) = "chat.dm_read", ReadOnly, false;
     /// Private messages: write one (when the Mac lets agents read and post them); it carries this client's name.
     ChatDmSend(ChatDmSendParams) = "chat.dm_send", Control, true;
-    /// Private messages: what agents on this Mac may do with them.
-    ChatDmSetAgents(ChatDmAgentsParams) = "chat.dm_set_agents", Full, true;
     /// Private messages: delete a conversation on this Mac.
     ChatDmDelete(ChatDmDeleteParams) = "chat.dm_delete", Full, true;
 }

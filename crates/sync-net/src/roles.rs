@@ -11,6 +11,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use trs_sync_proto::codec::{Reader, put_bytes, put_varint};
+use trs_sync_proto::ids::{DeviceId, ShortId};
 use trs_sync_proto::keys::{Access, FolderSecret, Proof};
 use trs_sync_proto::members::{Body, INVITE_VERSION, Membership, Role, Statement, check_redeem, redeem_proof};
 use trs_sync_proto::msg::{Members, Message, OwnerKey};
@@ -147,6 +148,11 @@ pub(crate) fn publish_profile(ctx: &Ctx, f: &Space) -> bool {
 }
 
 /// The membership changed: bring a folder's core, the sessions and this device's duties in line.
+/// The short ids of every device that counts in the folder now (any role).
+pub(crate) fn member_ids(m: &Membership) -> std::collections::BTreeSet<ShortId> {
+    m.members().map(|(pk, _)| DeviceId::of_public_key(pk).short()).collect()
+}
+
 pub(crate) async fn changed(ctx: &Arc<Ctx>, f: &Arc<Space>) {
     let me = *ctx.key.public_key();
     // Admitted (or not named here yet): the others learn this device's name with the statements below.
@@ -177,9 +183,9 @@ pub(crate) async fn changed(ctx: &Arc<Ctx>, f: &Arc<Space>) {
             // The membership as it is now, read under the core's lock: calls of this function overlap, and one that
             // read it earlier must not apply an older membership after a newer one (a device just admitted would be
             // told it may only read again, and its edits kept as a reader's).
-            let (role, writers) = {
+            let (role, writers, members) = {
                 let m = space.membership.read().unwrap_or_else(|e| e.into_inner());
-                (m.role(&me), m.writers())
+                (m.role(&me), m.writers(), member_ids(&m))
             };
             let access = role.map_or(Access::Read, Role::access);
             // Joining with write access, not admitted yet: what it changes meanwhile is its own once it is.
@@ -188,6 +194,13 @@ pub(crate) async fn changed(ctx: &Arc<Ctx>, f: &Arc<Space>) {
             // With the flag as it was while it waited: admitted now, its changes made meanwhile become its versions.
             core.set_membership(&writers, access).map_err(|e| e.to_string())?;
             core.set_awaiting_write(awaiting);
+            // A device no longer a member (removed, or its access ended with the sharing) is no source or holder any
+            // more (its entries stay: which version is current never changes). Only as a member: one still waiting to
+            // be admitted may not know them all yet.
+            if role.is_some() {
+                core.set_members(&members).map_err(|e| e.to_string())?;
+                lock(&f2.items).set_not_members(core.not_members());
+            }
             Ok::<_, String>((core.index_state().map(|(_, s)| s).unwrap_or(0), !signed && core.signs()))
         })
         .await;

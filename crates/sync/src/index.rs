@@ -49,6 +49,20 @@ pub struct LocalRecord {
     pub stamp: Option<Stamp>,
     /// Chunk tier memo (files only).
     pub tier: Option<TierMemo>,
+    /// An on-demand folder (SPEC §7G.11) holds this version without its content: the file is online only here.
+    /// Never served; a missing file is not a delete. Always another device's version (a device records a version of
+    /// its own only with its bytes), announced invalid ("do not fetch from me").
+    pub dataless: bool,
+    /// Fetch the content of this dataless record (asked for, or below a folder kept on this device).
+    pub want: bool,
+}
+
+impl LocalRecord {
+    /// A read-only device's own change: the disk differs from the version recorded (and not because the content is
+    /// online only).
+    pub fn own_change(&self) -> bool {
+        self.invalid && !self.dataless
+    }
 }
 
 /// What we know of another device's index.
@@ -102,6 +116,17 @@ pub enum Op {
     DropWriter(ShortId),
     /// The need of a path (`None` = nothing needed).
     SetNeed(String, Option<NeedRecord>),
+    /// The host's feed log (SPEC §7G.11): what it shows of the path changed at this sequence without a new version
+    /// (pinned, downloading). Only the latest per path is kept.
+    Shown(String, u64),
+    /// The path's live record was replaced, at this sequence, by one with another file id: the identifier of this old
+    /// file id names nothing there any more (the host's feed reports it deleted). On-demand folders only.
+    Retired(u64, String, [u8; 16]),
+    /// Forget the retired file ids up to this sequence: a host's anchor from before it has expired (it lists again).
+    PruneRetired(u64),
+    /// The version at this path is one no device can give right now (with its size), or no longer (`None`) (SPEC
+    /// §7G.11). Decided by the folder, read by anyone (the host's items).
+    Unavailable(String, Option<u64>),
 }
 
 /// The storage behind an [`Index`]: reads, plus an atomic apply of [`Op`]s.
@@ -121,6 +146,8 @@ pub trait IndexStore: Send {
     fn remote_paths(&self, device: ShortId, after: Option<&str>, limit: usize) -> io::Result<Vec<String>>;
     /// A remote device's state.
     fn peer(&self, device: ShortId) -> io::Result<Option<PeerState>>;
+    /// Every remote device whose index is stored here.
+    fn peer_ids(&self) -> io::Result<Vec<ShortId>>;
     /// Every known writer.
     fn writers(&self) -> io::Result<Vec<(ShortId, Writer)>>;
     /// What this device needs at a path.
@@ -132,6 +159,34 @@ pub trait IndexStore: Send {
     /// How many live files this device holds, and their total size (from the records: valid,
     /// not deleted, regular files). O(1): kept as counters with the records.
     fn local_totals(&self) -> io::Result<(u64, u64)>;
+    /// The host's feed log after `after`, in sequence order, at most `limit`: (sequence, path), the latest per path.
+    fn shown_since(&self, after: u64, limit: usize) -> io::Result<Vec<(u64, String)>>;
+    /// The sequence of the path's entry in the host's feed log, if any.
+    fn shown_at(&self, path: &str) -> io::Result<Option<u64>>;
+    /// File ids retired from their paths after `after` and up to `upto`: (sequence, path, file id).
+    fn retired(&self, after: u64, upto: u64) -> io::Result<Vec<(u64, String, [u8; 16])>>;
+    /// The versions no device can give right now ([`Op::Unavailable`]), with their sizes, in path order.
+    fn unavailable(&self) -> io::Result<Vec<(String, u64)>>;
+    /// Whether the version at `path` is one no device can give right now (its size).
+    fn unavailable_at(&self, path: &str) -> io::Result<Option<u64>>;
+    /// Whether any version is one no device can give right now (without reading them all).
+    fn any_unavailable(&self) -> io::Result<bool> {
+        Ok(!self.unavailable()?.is_empty())
+    }
+    /// What this device needs at each of `paths` (in one read where the store can), and whether each is unavailable.
+    fn needs_at(&self, paths: &[String]) -> io::Result<Vec<(Option<NeedRecord>, bool)>> {
+        paths.iter().map(|p| Ok((self.need(p)?, self.unavailable_at(p)?.is_some()))).collect()
+    }
+    /// The sequence up to which retired file ids were forgotten ([`Op::PruneRetired`]): a host's anchor below it
+    /// has expired.
+    fn feed_floor(&self) -> io::Result<u64>;
+    /// This index feeds a host (an on-demand folder): [`Batch::put_local`] notes retired file ids. Set by the folder;
+    /// not stored.
+    fn feeds_host(&self) -> bool {
+        false
+    }
+    /// Sets [`Self::feeds_host`].
+    fn set_feeds_host(&mut self, _on: bool) {}
     /// Local files holding a chunk with this hash: (path, offset) pairs, at most `limit`.
     fn chunk_sources(&self, hash: &[u8; 32], limit: usize) -> io::Result<Vec<(String, u64)>>;
     /// Applies the ops in one transaction (all or nothing).
@@ -151,6 +206,8 @@ pub struct Batch<'a, S: IndexStore + ?Sized> {
     me: ShortId,
     /// This device is a writer (it is in the writer table): it can sign the versions `Absorb` needs.
     writer: bool,
+    /// [`IndexStore::feeds_host`].
+    retire: bool,
     meta: Meta,
     local: BTreeMap<String, Option<LocalRecord>>,
     remote: BTreeMap<(String, ShortId), IndexEntry>,
@@ -166,6 +223,7 @@ impl<'a, S: IndexStore + ?Sized> Batch<'a, S> {
             store,
             me,
             writer: store.writers()?.iter().any(|(d, _)| *d == me),
+            retire: store.feeds_host(),
             meta: store.meta()?,
             local: BTreeMap::new(),
             remote: BTreeMap::new(),
@@ -185,8 +243,12 @@ impl<'a, S: IndexStore + ?Sized> Batch<'a, S> {
 
     /// Stores our record; it gets the next sequence.
     pub fn put_local(&mut self, mut rec: LocalRecord) {
+        let old = if self.retire { self.local(&rec.file.info.path).ok().flatten().filter(|o| !o.file.info.deleted) } else { None };
         self.meta.sequence += 1;
         rec.sequence = self.meta.sequence;
+        if let Some(o) = old.filter(|o| o.file.info.file_id != rec.file.info.file_id) {
+            self.ops.push(Op::Retired(rec.sequence, rec.file.info.path.clone(), o.file.info.file_id));
+        }
         let path = rec.file.info.path.clone();
         self.touched.insert(path.clone());
         self.local.insert(path, Some(rec.clone()));
@@ -198,6 +260,33 @@ impl<'a, S: IndexStore + ?Sized> Batch<'a, S> {
         let path = rec.file.info.path.clone();
         self.local.insert(path, Some(rec.clone()));
         self.ops.push(Op::PutLocal(rec));
+    }
+
+    /// Updates our record's on-demand flags without a new sequence (they are this device's own: peers are not sent
+    /// the version again), computes its need again (an online-only file asked for needs its content now), and notes
+    /// the path in the host's feed log ([`Self::shown`]).
+    pub fn reflag_local(&mut self, rec: LocalRecord) {
+        let path = rec.file.info.path.clone();
+        self.shown(&path);
+        self.touched.insert(path.clone());
+        self.local.insert(path, Some(rec.clone()));
+        self.ops.push(Op::PutLocal(rec));
+    }
+
+    /// Forgets our record at `path` (a version taken without its content when the folder switches to full: the need is
+    /// then the version again, fetched like any).
+    pub fn forget_local(&mut self, path: &str) {
+        self.touched.insert(path.to_string());
+        self.local.insert(path.to_string(), None);
+        self.ops.push(Op::DelLocal(path.to_string()));
+    }
+
+    /// Notes that what the host shows of `path` changed (pinned, downloading) without a new version: the host's feed
+    /// log gets it at the next sequence, one counter with the records' so the feed merges both under one anchor.
+    /// Peers page by their records' sequences: they never see these.
+    pub fn shown(&mut self, path: &str) {
+        self.meta.sequence += 1;
+        self.ops.push(Op::Shown(path.to_string(), self.meta.sequence));
     }
 
     /// Stores a remote entry.
@@ -298,12 +387,16 @@ impl<'a, S: IndexStore + ?Sized> Batch<'a, S> {
             cands.push(Candidate { device: self.me, file: &l.file, invalid: l.invalid });
         }
         let Some(cur) = global::current(&cands) else { return Ok(None) };
-        let need = global::need(local.as_ref().map(|l| &l.file.info), Some(&cur.info));
+        // An online-only file asked for (or kept on this device) needs its content: as if we had nothing there. Not when
+        // the current version is a delete: then the record itself must go, wanted or not.
+        let fetching = local.as_ref().is_some_and(|l| l.dataless && l.want) && !cur.info.deleted;
+        let need = global::need(local.as_ref().filter(|_| !fetching).map(|l| &l.file.info), Some(&cur.info));
         if need == Need::Nothing {
             // We hold the current version and a concurrent delete lost to it: absorb the delete.
             if let Some(l) = &local
                 && self.writer
                 && !l.invalid
+                && !l.dataless
                 && !l.file.info.deleted
                 && l.file.info.version.compare(&cur.info.version) == Causality::Equal
                 && remote.iter().any(|(_, e)| {
@@ -327,7 +420,9 @@ impl<'a, S: IndexStore + ?Sized> Batch<'a, S> {
             }
             return Ok(None);
         }
-        let holders = global::holders(&cands, cur).into_iter().filter(|d| *d != self.me).collect();
+        // A device with the version online only holds no copy to fetch from.
+        let dataless = |d: &ShortId| remote.iter().any(|(r, e)| r == d && e.dataless);
+        let holders = global::holders(&cands, cur).into_iter().filter(|d| *d != self.me && !dataless(d)).collect();
         Ok(Some(NeedRecord { need, file: cur.clone(), holders }))
     }
 }
@@ -354,12 +449,18 @@ pub struct MemStore {
     chunks: BTreeMap<[u8; 32], BTreeSet<(String, u64)>>,
     /// [`IndexStore::local_totals`].
     totals: (u64, u64),
+    shown: BTreeMap<u64, String>,
+    shown_at: BTreeMap<String, u64>,
+    retired: BTreeMap<u64, (String, [u8; 16])>,
+    floor: u64,
+    feeds_host: bool,
+    unavailable: BTreeMap<String, u64>,
 }
 
 /// What a record adds to [`IndexStore::local_totals`]: its size, if it is a live file we hold.
 pub(crate) fn counted(rec: &LocalRecord) -> Option<u64> {
     let i = &rec.file.info;
-    (!rec.invalid && !i.deleted && i.kind == FileKind::File).then_some(i.size)
+    (!rec.invalid && !rec.dataless && !i.deleted && i.kind == FileKind::File).then_some(i.size)
 }
 
 impl MemStore {
@@ -386,7 +487,7 @@ impl MemStore {
     }
 
     fn chunk(&mut self, rec: &LocalRecord) {
-        if rec.invalid || rec.file.info.deleted {
+        if rec.invalid || rec.dataless || rec.file.info.deleted {
             return;
         }
         for (off, c) in offsets(&rec.file.info.chunks) {
@@ -438,6 +539,10 @@ impl IndexStore for MemStore {
 
     fn peer(&self, device: ShortId) -> io::Result<Option<PeerState>> {
         Ok(self.peers.get(&device).copied())
+    }
+
+    fn peer_ids(&self) -> io::Result<Vec<ShortId>> {
+        Ok(self.peers.keys().copied().collect())
     }
 
     fn writers(&self) -> io::Result<Vec<(ShortId, Writer)>> {
@@ -519,9 +624,65 @@ impl IndexStore for MemStore {
                         self.need.remove(&p);
                     }
                 },
+                Op::Shown(p, seq) => {
+                    if let Some(old) = self.shown_at.insert(p.clone(), seq) {
+                        self.shown.remove(&old);
+                    }
+                    self.shown.insert(seq, p);
+                }
+                Op::Retired(seq, p, fid) => {
+                    self.retired.insert(seq, (p, fid));
+                }
+                Op::PruneRetired(upto) => {
+                    self.retired.retain(|s, _| *s > upto);
+                    self.floor = self.floor.max(upto);
+                }
+                Op::Unavailable(p, size) => match size {
+                    Some(s) => {
+                        self.unavailable.insert(p, s);
+                    }
+                    None => {
+                        self.unavailable.remove(&p);
+                    }
+                },
             }
         }
         Ok(())
+    }
+
+    fn shown_since(&self, after: u64, limit: usize) -> io::Result<Vec<(u64, String)>> {
+        Ok(self.shown.range(after + 1..).take(limit).map(|(s, p)| (*s, p.clone())).collect())
+    }
+
+    fn shown_at(&self, path: &str) -> io::Result<Option<u64>> {
+        Ok(self.shown_at.get(path).copied())
+    }
+
+    fn feed_floor(&self) -> io::Result<u64> {
+        Ok(self.floor)
+    }
+
+    fn unavailable(&self) -> io::Result<Vec<(String, u64)>> {
+        Ok(self.unavailable.iter().map(|(p, s)| (p.clone(), *s)).collect())
+    }
+
+    fn unavailable_at(&self, path: &str) -> io::Result<Option<u64>> {
+        Ok(self.unavailable.get(path).copied())
+    }
+
+    fn feeds_host(&self) -> bool {
+        self.feeds_host
+    }
+
+    fn set_feeds_host(&mut self, on: bool) {
+        self.feeds_host = on;
+    }
+
+    fn retired(&self, after: u64, upto: u64) -> io::Result<Vec<(u64, String, [u8; 16])>> {
+        if upto <= after {
+            return Ok(Vec::new());
+        }
+        Ok(self.retired.range(after + 1..=upto).map(|(s, (p, f))| (*s, p.clone(), *f)).collect())
     }
 }
 

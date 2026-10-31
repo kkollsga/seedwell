@@ -21,6 +21,8 @@ import os
     private(set) var syncWindows = SyncWindows()
     /// The Finder extension's status file.
     private var finderStatus: FinderStatusWriter?
+    /// On-demand folders' File Provider domains and the extension's server (the user's own app only).
+    private var fileProvider: FileProviderHost?
     /// This build may keep folder sync's keys in the Keychain (asked once, for the app's own state only).
     private lazy var keychainUsable = KeychainVault.available()
     var qaChooserWindow: NSWindow? { chooserWindows.qaWindow }
@@ -203,6 +205,16 @@ import os
         finder.onFirstFolder = { [weak self] in self?.offerFinderBadges() }
         finder.start()
         finderStatus = finder
+        // On-demand folders in the Finder (SPEC 7G.11): only the user's own Seedwell serves the File Provider extension
+        // and keeps its domains; a mock, QA or other isolated run never registers a domain nor takes the socket.
+        if !options.mock, options.stateDir == nil, options.qaControl == nil, !QuietRun.on {
+            let fp = FileProviderHost(core: core)
+            fp.showSetup = { [weak self, weak fp] in if let fp { self?.syncWindows.showFileProviderSetup(host: fp) } }
+            fp.onNotice = { [sync] title, text in sync.alert(title, text) }
+            fp.start()
+            fileProvider = fp
+            sync.fileProvider = fp
+        }
         ChoiceStore.shared.engine = ChoiceEngine(
             load: { [core = self.core] id, reopen in try core.choice(id: id, reopen: reopen) },
             confirm: { [core = self.core] id, files in try core.confirmChoice(id: id, files: files) },
@@ -556,6 +568,7 @@ import os
         // A clean quit: this launch does not count toward a crash loop (SPEC 12A).
         UpdateCenter.shared.quitting()
         finderStatus?.stop()
+        fileProvider?.stop()
         settings.save()
         startingNotifier?.close()
         statusMenu?.hide()

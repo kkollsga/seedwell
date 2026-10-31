@@ -36,6 +36,20 @@ lowercase form, plus the few characters whose Unicode simple case folding differ
 Greek symbol forms). Full folding (`ß` → `ss`) is the documented gap; it errs towards "two files", never towards
 overwriting.
 
+## On-demand folders
+
+SPEC §7G.11. A local record can be *dataless* (`LocalRecord::dataless`): this device holds the version without its
+content, announces it dataless (entry flag bit 1; a version taken from a peer also invalid), counts and serves
+nothing of it, and a missing file there is never a delete. `want` asks for the content (the need is then computed
+as if nothing were here). In an on-demand folder the puller takes a version nobody wants here as its version alone,
+except a name whose content a held file deleted in the same round has (a rename: the plan moves the copy there);
+held content deleted with no such name asks for an online-only file that has it. The scanner turns a file gone from
+the cache into an online-only one (asked for again when pinned), and the host's changes come as calls
+(`FolderCore::host_*`, checked first by `host_check_write` and `host_check_rename`). A file is evicted only while a
+peer announces its version held (valid, not dataless). `ondemand::Items` reads the host's items (stable
+identifiers from the file id, pages of children, changes since an anchor) from any handle on the index. The two
+flags are one trailing byte of the local record, written only when set, so a full folder's records are as before.
+
 ## Index storage
 
 `index::IndexStore` is the folder's index: local records, remote entries, peers, writers, and the derived need

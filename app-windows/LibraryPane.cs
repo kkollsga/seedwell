@@ -360,6 +360,21 @@ sealed class LibraryPane
             // NEED: "Online" / "Offline" for screen readers from Rust (the Mac's are Swift).
             nameLine.Children.Add(dot);
         }
+        if (item.Tag is SidebarTag tag)
+        {
+            // An agent channel's quiet "agents" capsule after its name (the Mac's ChatTagCapsule).
+            name.MaxWidth = SidebarWidth - 140;
+            var capsule = new Border
+            {
+                CornerRadius = new CornerRadius(8),
+                Padding = new Thickness(5, 0, 5, 1),
+                VerticalAlignment = VerticalAlignment.Center,
+                Background = (Brush)Application.Current.Resources["SubtleFillColorSecondaryBrush"],
+                Child = new TextBlock { Text = tag.Text, FontSize = 11, Foreground = (Brush)Application.Current.Resources["TextFillColorSecondaryBrush"] },
+            };
+            ToolTipService.SetToolTip(capsule, tag.Help);
+            nameLine.Children.Add(capsule);
+        }
         Grid.SetColumn(nameLine, 1);
         g.Children.Add(nameLine);
         var right = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6, VerticalAlignment = VerticalAlignment.Center };

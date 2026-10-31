@@ -117,6 +117,10 @@ channel too), proof, channel message and private message, decoded and encoded ba
 | 21 | DirectHave (chat bit) | records of authors as in ChatHave: what the sender holds of the private messages to it |
 | 22 | DirectMessages (chat bit) | records of private messages (≤ 1000, about 1 MiB) |
 | 23 | DirectJoin (direct bit) | `conversation` bool ‖ `user_name` str (≤ 64 characters): sent once while a session starts, after ChatJoin (the dialer first), and again when the user renames itself |
+| 24 | HoldQuery (holds bit) | `id` varint (u32) ‖ `folder_id` (32) ‖ files (count ≤ 1000 ‖ n × (`path` str ‖ version ‖ `content` (32, a digest of kind, deleted, exec, size, link target and chunks))): does the receiver hold these versions now (an on-demand device about to free its copies) |
+| 25 | HoldReply (holds bit) | `id` varint ‖ held (count ‖ n × bool), in the query's order |
+| 26 | RenameRequest (renames bit) | `id` varint (u32) ‖ `folder_id` (32) ‖ `from` str ‖ `to` str ‖ `seen` (32, a digest of the paths and versions at and below `from` the sender has) ‖ `ttl_ms` varint (u32): rename for the sender, as the receiver's own change, only if it can start within `ttl_ms` of receiving it |
+| 27 | RenameReply (renames bit) | `id` varint ‖ `outcome` u8 (0 done, 1 refused, 2 busy: could not start in time, and never will) ‖ `reason` str (≤ 512 B) |
 | other | (unknown) | skipped |
 
 - **Version** (in entries and progress): `count ‖ n × (short device id, 8 bytes BE ‖ counter varint)`, sorted by
@@ -130,7 +134,8 @@ channel too), proof, channel message and private message, decoded and encoded ba
 An index entry, inside its record:
 
 ```text
-sequence varint ‖ entry flags u8 (bit 0: invalid, the announcer's copy differs; other bits ignored)
+sequence varint ‖ entry flags u8 (bit 0: invalid, the announcer's copy differs; bit 1: dataless, the announcer has this
+version without its content; bit 2: on demand, the announcer may let go of its copy later; other bits ignored)
 ‖ path str ‖ kind u8 (0 file, 1 directory, 2 symlink) ‖ size varint ‖ mtime_ns zigzag varint
 ‖ file flags u8 (bit 0 executable, bit 1 deleted; others refused: the record is skipped)
 ‖ version ‖ modified_by (8, BE) ‖ file_id (16) ‖ symlink_target str ‖ has_conflict_of bool [‖ conflict_of str]
@@ -168,6 +173,7 @@ signed    = "seedwell-sync/v2/statement" ‖ folder_id ‖ kind ‖ body (with i
 | 4 | revoke | invitation id (16) ‖ `at_s` varint | owners and admins |
 | 5 | share until | `until_s` varint (0 = no end) ‖ `serial` varint ‖ `at_s` varint | owners |
 | 6 | profile (0.1.9) | `device_name` str (1 to 64 characters, no control characters) ‖ `user_name` str (empty = none, else as `device_name`) ‖ `serial` varint ‖ `at_s` varint | the device it names, while a member; its latest (by `serial`, then signature bytes) replaces the older ones |
+| 7 | channel (0.1.12) | `flags` varint (bit 0: an agent channel; other bits: none yet, kept and ignored) ‖ `at_s` varint | owners; a channel's, signed once when it is made |
 
 - A kind a device does not know, or a body it cannot read (a role it does not know), is kept as it came,
   checked by its signature only, stored, passed on unchanged, and gives no role.
@@ -179,6 +185,12 @@ signed    = "seedwell-sync/v2/statement" ‖ folder_id ‖ kind ‖ body (with i
   stands in until a profile arrives. A profile lives in its folder's or channel's membership, so it goes when that
   goes. Devices before 0.1.9 keep a profile from an admin or owner as unknown and pass it on; others' they leave
   out, and newer devices pass those on themselves.
+- **Agent channels** (0.1.12). A channel made by an agent (through the agent interface, never the user's in the app)
+  carries a channel statement with flag bit 0, signed with the channel key when it is made. Any owner's channel
+  statement with that bit marks the channel for good: nothing clears it, and no version signs one later. A member
+  device whose user has not set its own agent switch for the channel opens it to its agents at Read and post; the
+  switch the user sets wins. Devices before 0.1.12 keep the statement as an unknown kind (it comes from the owner),
+  store it, pass it on, and treat the channel as an ordinary one.
 
 ## Invitations, links and proofs
 
@@ -314,7 +326,10 @@ direct     = fields (varint length ‖ bytes) ‖ signature (64)
   records in the clear) is sealed when opened; one of a later format is refused; a cut-off last record, or one
   that does not open, is dropped. Its membership is a `.members` file as
   for folders; its settings on this device (name, muted, the agent switch, the wake-up command, what was read)
-  are a `[[channel]]` entry in `sync.toml` (`topic_read` keeps what was read in each topic).
+  are a `[[channel]]` entry in `sync.toml` (`topic_read` keeps what was read in each topic). Its `agents` is the
+  switch as the user set it (`off`, `read`, `post`); empty (never set) means the channel's default: Read and post
+  for an agent channel, else off (0.1.12; before, empty meant off, so an older version reading the file keeps every
+  channel the user never opened closed).
 - **Private messages** (`sync/dm-<device id>.chat`, one per conversation): `"SWDM" ‖ format varint (2) ‖ n ×
   (varint length ‖ sealed record)`, a record being `received_ms varint ‖ has_body u8 [‖ body bytes] ‖ direct
   message` (the body only in the author's own copies; those to this device are opened again when read), sealed
@@ -345,6 +360,8 @@ What a later version may change, and how:
    |---|---|---|
    | 0 | channels, their topics and private messages: types 17 to 22 | 0.1.6 |
    | 1 | private messages only between their two devices, over a session no device relays; DirectJoin (type 23) | 0.1.9 |
+   | 2 | holds: answers HoldQuery (type 24) with HoldReply (type 25); only a device with it is asked | 0.1.12 |
+   | 3 | renames: answers RenameRequest (type 26) with RenameReply (type 27); only a device with it is asked | 0.1.12 |
 
 5. **Breaking changes** raise `PROTOCOL`, the highest version spoken. The new build keeps `MIN_PROTOCOL` one
    behind for at least one release (N-1), so devices a release apart still sync at the older version, and
@@ -357,7 +374,8 @@ What a later version may change, and how:
 
 ## Checking compatibility
 
-- `tests/it/golden.rs`: the frozen 0.1.6 vectors, and the rules above (appended fields, grown records, unknown
+- `tests/it/golden.rs`: the frozen 0.1.6 vectors (and those added since, such as the 0.1.12 channel statement), and
+  the rules above (appended fields, grown records, unknown
   kinds and values, newer links, a peer with a newer protocol and features).
 - `crates/sync-net/tests/it/versions.rs`: two services on loopback, one speaking a newer protocol range with
   unknown features (they sync), and one that only speaks a newer version (refused, with the reason shown).
