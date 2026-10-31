@@ -2840,7 +2840,7 @@ impl Journal {
 pub(crate) fn write_journal_at(path: &Path, j: &Journal) -> io::Result<()> {
     let tmp = path.with_extension("journal.tmp");
     std::fs::write(&tmp, serde_json::to_vec(j).map_err(io::Error::other)?)?;
-    std::fs::File::open(&tmp)?.sync_all()?;
+    trs_platform::fs::sync_file(&tmp)?;
     std::fs::rename(&tmp, path)?;
     if let Some(d) = path.parent() {
         trs_platform::fs::sync_dir(d)?;
@@ -3367,7 +3367,7 @@ impl Manifest {
     fn save(&self, at: &Path) -> io::Result<()> {
         let tmp = at.with_extension("manifest.tmp");
         std::fs::write(&tmp, serde_json::to_vec(self).map_err(io::Error::other)?)?;
-        std::fs::File::open(&tmp)?.sync_all()?;
+        trs_platform::fs::sync_file(&tmp)?;
         std::fs::rename(&tmp, at)?;
         if let Some(d) = at.parent() {
             trs_platform::fs::sync_dir(d)?;
@@ -3468,7 +3468,7 @@ fn sync_tree(p: &Path) -> io::Result<()> {
         if t.is_dir() {
             sync_tree(&e.path())?;
         } else if t.is_file() {
-            std::fs::File::open(e.path())?.sync_all()?;
+            trs_platform::fs::sync_file(&e.path())?;
         }
     }
     trs_platform::fs::sync_dir(p)
@@ -3992,9 +3992,11 @@ mod tests {
         };
         let m = Manifest(vec![e("Notes/a.txt"), e("Notes/A.txt"), e("caf\u{e9}.txt"), e("cafe\u{301}.txt"), e("x/y"), e("Notes2/a.txt")]);
         assert!(clashes(&m, false, false).is_empty(), "a volume that folds nothing");
-        assert_eq!(clashes(&m, true, true), [("Notes/a.txt".to_string(), "Notes/A.txt".to_string()), ("caf\u{e9}.txt".to_string(), "cafe\u{301}.txt".to_string())]);
+        // Shown as this system writes a path ("Notes\\a.txt" on Windows).
+        let shown = |p: &str| p.replace('/', std::path::MAIN_SEPARATOR_STR);
+        assert_eq!(clashes(&m, true, true), [(shown("Notes/a.txt"), shown("Notes/A.txt")), ("caf\u{e9}.txt".to_string(), "cafe\u{301}.txt".to_string())]);
         assert_eq!(clashes(&m, false, true).len(), 1, "only the forms");
-        assert_eq!(clashes(&m, true, false), [("Notes/a.txt".to_string(), "Notes/A.txt".to_string())], "case only (NTFS): the forms are two names");
+        assert_eq!(clashes(&m, true, false), [(shown("Notes/a.txt"), shown("Notes/A.txt"))], "case only (NTFS): the forms are two names");
         let t = tempfile::tempdir().unwrap();
         let (from, to) = (t.path().join("from"), t.path().join("to"));
         tree(&from);

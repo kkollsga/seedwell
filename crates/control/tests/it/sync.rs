@@ -753,6 +753,7 @@ async fn an_on_demand_folder_goes_to_the_trash_from_its_cache() {
 }
 
 /// Every path below `dir`.
+#[cfg(unix)]
 fn walk(dir: &Path) -> Vec<String> {
     let mut out = Vec::new();
     for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {

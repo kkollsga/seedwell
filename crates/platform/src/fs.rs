@@ -646,12 +646,18 @@ pub fn set_modified(path: &Path, t: std::time::SystemTime) -> io::Result<()> {
 }
 
 /// Flush the file at `path` to the drive (`File::sync_all`). Windows flushes only a handle with
-/// write access, so there the file is opened for writing (never created or truncated).
+/// write access, so there the file is opened for writing (never created or truncated); a read-only
+/// file (a copy keeps the original's attribute) cannot be opened so and is left to the system's own
+/// flush rather than failing.
 pub fn sync_file(path: &Path) -> io::Result<()> {
     #[cfg(unix)]
     let f = File::open(path)?;
     #[cfg(windows)]
-    let f = std::fs::OpenOptions::new().write(true).open(path)?;
+    let f = match std::fs::OpenOptions::new().write(true).open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == io::ErrorKind::PermissionDenied && std::fs::metadata(path)?.permissions().readonly() => return Ok(()),
+        Err(e) => return Err(e),
+    };
     f.sync_all()
 }
 

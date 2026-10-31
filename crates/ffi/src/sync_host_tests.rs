@@ -785,10 +785,22 @@ fn slow_or_greedy_clients_hold_nothing() {
     assert!(out.contains("bad_request") && t0.elapsed() < Duration::from_secs(3), "{out} after {:?}", t0.elapsed());
     // A fetch whose client never reads: its writes time out and the request is taken back.
     let mut deaf = unix::connect(d.path(), SOCKET_NAME).unwrap();
+    // A small receive buffer, so the server's writes block soon on any machine (CI's allow far more by default).
+    {
+        use std::os::fd::AsRawFd;
+        const SOL_SOCKET: i32 = 0xffff; // macOS <sys/socket.h>
+        const SO_RCVBUF: i32 = 0x1002;
+        let n: i32 = 1024;
+        unsafe extern "C" {
+            fn setsockopt(s: i32, level: i32, name: i32, value: *const std::ffi::c_void, len: u32) -> i32;
+        }
+        let set = unsafe { setsockopt(deaf.as_raw_fd(), SOL_SOCKET, SO_RCVBUF, (&n as *const i32).cast(), std::mem::size_of::<i32>() as u32) };
+        assert_eq!(set, 0, "{}", std::io::Error::last_os_error());
+    }
     deaf.write_all(b"{\"v\":1,\"op\":\"fetch\",\"folder\":\"F\",\"item\":\"a\"}\n").unwrap();
     let t0 = Instant::now();
     while fake.cancelled.lock().unwrap().is_empty() {
-        assert!(t0.elapsed() < Duration::from_secs(20), "the fetch never gave up");
+        assert!(t0.elapsed() < Duration::from_secs(60), "the fetch never gave up");
         std::thread::sleep(Duration::from_millis(50));
     }
     drop(deaf);
