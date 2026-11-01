@@ -4,7 +4,7 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -35,13 +35,35 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> io::Result<()> {
         f.write_all(data)?;
         f.sync_all()?;
         drop(f);
-        fs::rename(&tmp, path)?;
+        retry_busy(true, || fs::rename(&tmp, path))?;
         sync_dir(dir)
     })();
     if result.is_err() {
         let _ = fs::remove_file(&tmp);
     }
     result
+}
+
+/// Runs `op` again for up to half a second while Windows says another process has the file open (a sharing or lock
+/// violation; for a rename over the file also "access denied", as when a virus scanner or indexer holds it). Another
+/// program reading or replacing `config.toml` at that moment must not make a read fall back to the backup, or a save
+/// fail. Elsewhere `op` runs once.
+pub(crate) fn retry_busy<T>(rename: bool, mut op: impl FnMut() -> io::Result<T>) -> io::Result<T> {
+    let busy = |e: &io::Error| {
+        cfg!(windows)
+            && match e.raw_os_error() {
+                Some(32 | 33) => true,
+                Some(5) => rename,
+                _ => false,
+            }
+    };
+    for _ in 0..20 {
+        match op() {
+            Err(e) if busy(&e) => std::thread::sleep(Duration::from_millis(25)),
+            r => return r,
+        }
+    }
+    op()
 }
 
 /// Days since 1970-01-01 for a proleptic Gregorian date (Hinnant's algorithm).

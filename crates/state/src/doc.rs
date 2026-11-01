@@ -116,7 +116,7 @@ fn read_text(path: &Path) -> Result<String, ReadFail> {
             max: MAX_DOC_BYTES,
         }));
     }
-    let bytes = fs::read(path).map_err(|e| {
+    let bytes = crate::fsutil::retry_busy(false, || fs::read(path)).map_err(|e| {
         if e.kind() == io::ErrorKind::NotFound { ReadFail::NotFound } else { ReadFail::Other(DocError::io(path, &e)) }
     })?;
     // Re-check: the file may have grown between stat and read.

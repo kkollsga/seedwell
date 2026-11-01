@@ -272,9 +272,14 @@ fn target(form: &SyncEditForm) -> String {
     Path::new(&parent(form)).join(trim_spaces(&form.name)).display().to_string()
 }
 
+/// The folder goes somewhere else: compared as paths, so `/` and `\` on Windows (or a trailing separator) are the same.
+fn moves(form: &SyncEditForm, f: &SyncFolder) -> bool {
+    Path::new(&target(form)) != Path::new(&f.path)
+}
+
 fn changed(form: &SyncEditForm) -> bool {
     form.folder.as_ref().is_some_and(|f| {
-        target(form) != f.path
+        moves(form, f)
             || form.paused != (f.state == SyncState::Paused)
             || form.lan_only != f.lan_only
             || form.on_demand != f.on_demand
@@ -447,7 +452,7 @@ impl Core {
         if !form.on_demand && f.on_demand {
             self.sync_set_on_demand(id.clone(), false, None)?;
         }
-        if target != f.path {
+        if moves(&form, &f) {
             if form.new_parent.is_some() {
                 self.sync_move(id.clone(), target)?;
             } else {
