@@ -178,6 +178,9 @@ gh pr list --state open --json number,title,author,headRefName,statusCheckRollup
   `git show vX.Y.Z:install.sh | cmp - <scratch>/install.sh`, then `bash <scratch>/install.sh --version X.Y.Z`.
   Confirm `/Applications/Seedwell.app` reports X.Y.Z and `spctl -a -vv` says "Notarized Developer ID", and that the
   app is running again. Development builds are switched on again when development resumes.
+- **The other devices too** (the MacBook, the Windows PC "Makro"): they follow the shared builds folder with
+  development builds on, so ask each device's agent in the agent channel to run `seedwell update dev-builds off`
+  there (the same way back to the release). Report which did.
 
 ## 8. Report
 

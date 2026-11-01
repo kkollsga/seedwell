@@ -16,10 +16,11 @@ use trs_sync_proto::device::DeviceKey;
 use trs_sync_proto::ids::{DeviceId, FolderId, ShortId};
 use trs_sync_proto::keys::{FolderSecret, KeyError, Proof};
 use trs_sync_proto::members::{
-    Body, CHANNEL_AGENTS, Invite, InviteLink, Membership, Role, Signer, Statement, check_redeem, new_invite, redeem_proof,
+    Body, CHANNEL_AGENTS, FollowTarget, Invite, InviteLink, Membership, Role, Signer, Statement, check_redeem, new_invite, redeem_proof,
 };
 use trs_sync_proto::model::{ChunkRef, Counter, FileInfo, FileKind, IndexEntry, SignedFile, Version};
 use trs_sync_proto::msg::*;
+use trs_sync_proto::reach::LinkReach;
 
 const T: u64 = 1_793_491_200; // 2026-11-01
 
@@ -70,6 +71,19 @@ fn statements() -> Vec<(&'static str, Statement)> {
         ),
         // 0.1.12
         ("statement 7 channel", Statement::by_owner(&s, Body::Channel { flags: CHANNEL_AGENTS, at_s: T })),
+        // 0.1.13
+        ("statement 8 agents", Statement::by_owner(&s, Body::Agents { open: true, serial: 1, at_s: T })),
+        ("statement 8 agents by an admin", Statement::by_device(&admin, &fid(), Body::Agents { open: false, serial: 2, at_s: T + 5 })),
+        // 0.1.13: "on all my devices", in a devices group.
+        (
+            "statement 9 follow",
+            Statement::by_device(&admin, &fid(), Body::Follow { target: FollowTarget::Folder, target_pk: [0x3c; 32], name: "Seedwell Development".into(), on: true, serial: 1, at_s: T }),
+        ),
+        ("statement 10 moved", Statement::by_device(&admin, &fid(), Body::Moved { target_pk: [0x3e; 32], at_s: T + 9 })),
+        (
+            "statement 11 rendezvous",
+            Statement::by_device(&admin, &fid(), Body::Rendezvous { url: "https://seedwell-rendezvous.kim.workers.dev".into(), serial: 1, at_s: T }),
+        ),
     ]
 }
 
@@ -185,6 +199,19 @@ fn messages() -> Vec<(&'static str, Message)> {
             Message::RenameRequest(RenameRequest { id: 10, folder_id: fid(), from: "Notes".into(), to: "Papers/Notes".into(), seen: [0xd2; 32], ttl_ms: 10_000 }),
         ),
         ("message 27 rename reply", Message::RenameReply(RenameReply { id: 10, outcome: RenameOutcome::Busy, reason: "busy".into() })),
+        // 0.1.13 (your devices): a sibling's proofs, a joining device's, and one for a folder that follows.
+        (
+            "message 28 devices join",
+            Message::DevicesJoin(DevicesJoin {
+                groups: vec![JoinChannel { channel_id: fid(), proofs: vec![Proof::Grant(statements()[0].1.to_bytes()), Proof::Invite(redeem())] }],
+            }),
+        ),
+        (
+            "message 2 join with a sibling proof",
+            Message::Join(Join {
+                folders: vec![JoinFolder { folder_id: fid(), proofs: vec![Proof::Sibling(vec![0x3d; 32])], my_index_id: 5, your_index_id: 0, your_max_seq: 0 }],
+            }),
+        ),
     ]
 }
 
@@ -272,18 +299,34 @@ fn chat() -> Vec<(&'static str, ChatMessage)> {
 }
 
 fn chat_link() -> InviteLink {
-    InviteLink { invite: invite(None, Role::ReadWrite, 9), token_seed: [9; 32], name: Some("Middag".into()) }
+    InviteLink { invite: invite(None, Role::ReadWrite, 9), token_seed: [9; 32], name: Some("Middag".into()), agents: false, reach: None }
+}
+
+/// A link to a channel open to agents (0.1.13: `agents=yes`, which older versions ignore).
+fn agents_chat_link() -> InviteLink {
+    InviteLink { invite: invite(None, Role::ReadWrite, 11), token_seed: [11; 32], name: Some("Bridge".into()), agents: true, reach: None }
 }
 
 /// The channel a folder's link also invites to (`format_bundle`): another channel than [`chat_link`]'s folder key.
 fn bundled_channel() -> InviteLink {
     let ch = FolderSecret::from_bytes([2; 32]);
     let invite = new_invite(*ch.public_key(), [10; 16], [10; 32], Role::ReadWrite, 1, T + 7 * 86_400, T, Signer::Folder, &|m: &[u8]| ch.sign(m));
-    InviteLink { invite, token_seed: [10; 32], name: Some("Family Photos chat".into()) }
+    InviteLink { invite, token_seed: [10; 32], name: Some("Family Photos chat".into()), agents: false, reach: None }
 }
 
 fn link() -> InviteLink {
-    InviteLink { invite: invite(None, Role::ReadWrite, 8), token_seed: [8; 32], name: Some("Family Photos".into()) }
+    InviteLink { invite: invite(None, Role::ReadWrite, 8), token_seed: [8; 32], name: Some("Family Photos".into()), agents: false, reach: None }
+}
+
+/// Where the maker of a link is (0.1.13: `a=`, sealed; older versions ignore it).
+fn reach() -> LinkReach {
+    LinkReach {
+        device: DeviceId(*dev(5).public_key()),
+        name: "Kristian's Mac mini".into(),
+        lan: vec!["192.168.68.57:55799".parse().unwrap(), "[fd7a:115c:a1e0::5]:55799".parse().unwrap()],
+        public: Some("84.212.3.4:41000".parse().unwrap()),
+        rendezvous: None,
+    }
 }
 
 fn redeem() -> Vec<u8> {
@@ -323,7 +366,18 @@ fn written() -> Vec<(String, String)> {
     let mut key = Vec::new();
     direct_key(3).put(&mut key);
     out.push(("direct key".into(), hex(&key)));
+    out.push(("chat link for agents".into(), agents_chat_link().format_chat()));
+    out.push(("link with addresses".into(), InviteLink { reach: Some(reach()), ..link() }.format()));
+    out.push(("chat link with addresses".into(), InviteLink { reach: Some(reach()), ..agents_chat_link() }.format_chat()));
+    out.push(("folder and channel link with addresses".into(), InviteLink { reach: Some(reach()), ..link() }.format_bundle(&bundled_channel())));
+    out.push(("devices link".into(), devices_link().format_devices()));
     out
+}
+
+/// A link to pair a device (0.1.13): an invitation of the devices group made by a device, with where it is.
+fn devices_link() -> InviteLink {
+    let me = dev(5);
+    InviteLink { invite: invite(Some(&me), Role::ReadWrite, 12), token_seed: [12; 32], name: Some("Kristian's Mac mini".into()), agents: false, reach: Some(reach()) }
 }
 
 fn frozen(name: &str) -> &'static str {
@@ -353,12 +407,24 @@ fn golden_vectors_are_frozen() {
     }
     assert_eq!(InviteLink::parse(frozen("link")).unwrap(), link());
     assert_eq!(InviteLink::parse_chat(frozen("chat link")).unwrap(), chat_link());
+    assert_eq!(InviteLink::parse_chat(frozen("chat link for agents")).unwrap(), agents_chat_link());
     assert!(InviteLink::parse(frozen("chat link")).is_err() && InviteLink::parse_chat(frozen("link")).is_err(), "one kind each");
     let bundle = frozen("folder and channel link");
     assert_eq!(InviteLink::parse_bundle(bundle).unwrap(), (link(), Some(bundled_channel())));
     assert_eq!(InviteLink::parse(bundle).unwrap(), link(), "a folder link to anything that reads only that");
     assert_eq!(InviteLink::parse_chat(bundle), Err(KeyError::FolderLink));
     assert_eq!(InviteLink::parse_bundle(frozen("link")).unwrap(), (link(), None));
+    // 0.1.13's address block: read here; the invitation is the same one an older version reads (it ignores `a=`,
+    // as the frozen links without it show: the text before the block is exactly the older link).
+    let with = InviteLink { reach: Some(reach()), ..link() };
+    assert_eq!(InviteLink::parse(frozen("link with addresses")).unwrap(), with);
+    assert_eq!(frozen("link with addresses").split_once("&a=").unwrap().0, frozen("link"));
+    let chat_with = InviteLink { reach: Some(reach()), ..agents_chat_link() };
+    assert_eq!(InviteLink::parse_chat(frozen("chat link with addresses")).unwrap(), chat_with);
+    assert_eq!(frozen("chat link with addresses").split_once("&a=").unwrap().0, frozen("chat link for agents"));
+    let both = frozen("folder and channel link with addresses");
+    assert_eq!(InviteLink::parse_bundle(both).unwrap(), (with, Some(InviteLink { reach: Some(reach()), ..bundled_channel() })));
+    assert_eq!(both.split_once("&a=").unwrap().0, frozen("folder and channel link"));
     for (n, m) in chat() {
         let back = ChatMessage::from_bytes(&unhex(frozen(n))).unwrap();
         assert_eq!(back, m, "{n}");
@@ -376,6 +442,30 @@ fn golden_vectors_are_frozen() {
     assert!(key == direct_key(3) && key.verify());
     let invite = check_redeem(&unhex(frozen("proof 5 redeem")), dev(9).public_key(), &[0xee; 32]).unwrap();
     assert_eq!(invite, link().invite);
+    // 0.1.13: a pairing link reads as its own kind only.
+    assert_eq!(InviteLink::parse_devices(frozen("devices link")).unwrap(), devices_link());
+    assert_eq!(InviteLink::parse(frozen("devices link")), Err(KeyError::DevicesLink));
+    assert_eq!(InviteLink::parse_devices(frozen("link")), Err(KeyError::FolderLink));
+}
+
+/// Your devices (0.1.13) to the versions before it: a Follow is a statement kind they do not know (and they never
+/// see one: it lives in a devices group only), a Sibling proof is a proof kind they carry and never trust, and
+/// type 28 is a message type they skip. Nothing of it gives a role there.
+#[test]
+fn your_devices_is_unknown_to_the_versions_before_it() {
+    let follow = statements().into_iter().find(|(n, _)| *n == "statement 9 follow").unwrap().1;
+    let b = follow.to_bytes();
+    let old = Statement { body: Body::Unknown { kind: 9, data: b[2..2 + b[1] as usize].to_vec() }, signer: follow.signer, sig: follow.sig, extra: Vec::new() };
+    assert_eq!(old.to_bytes(), b, "passed on byte for byte");
+    assert!(old.verify(secret().public_key()));
+    // A reader without the Sibling kind keeps it as an unknown proof.
+    let Message::Join(j) = decode(&unhex(frozen("message 2 join with a sibling proof"))) else { panic!() };
+    assert_eq!(j.folders[0].proofs, vec![Proof::Sibling(vec![0x3d; 32])]);
+    let frame = unhex(frozen("message 28 devices join"));
+    let (f, _) = Frame::split(&frame).unwrap().unwrap();
+    assert_eq!(f.kind, 28);
+    assert_eq!(Message::decode(Frame { kind: 99, flags: 0, payload: f.payload }).unwrap(), Message::Unknown(99), "an unknown type is skipped");
+    assert_eq!(FEATURE_DEVICES, 1 << 4);
 }
 
 #[test]
@@ -502,7 +592,7 @@ fn an_agent_channel_is_an_ordinary_channel_to_a_device_before_its_mark_and_back(
     let roles = |m: &Membership| m.members().map(|(pk, mm)| (*pk, mm.role)).collect::<Vec<_>>();
     let before = roles(&older);
     older.add([old.clone()]);
-    assert!(older.statements().any(|st| *st == old) && roles(&older) == before && !older.agent_channel());
+    assert!(older.statements().any(|st| *st == old) && roles(&older) == before && !older.agents());
 
     // What an older device then sends (its Members message, frozen layout) is the mark again for this version.
     let mut p = fid().0.to_vec();
@@ -512,14 +602,55 @@ fn an_agent_channel_is_an_ordinary_channel_to_a_device_before_its_mark_and_back(
     assert!(ms.statements.contains(&mark), "read as the channel statement it was");
     let mut newer = Membership::new(*s.public_key());
     newer.add(ms.statements);
-    assert!(newer.agent_channel() && newer.role(dev(3).public_key()) == Some(Role::Owner));
+    assert!(newer.agents() && newer.role(dev(3).public_key()) == Some(Role::Owner));
 
     // A channel those versions made has no channel statement: an ordinary channel here (closed to agents until its
     // user opens it), from their frozen Members message as from any other.
     let Message::Members(frozen_members) = decode(&unhex(frozen("message 3 members"))) else { panic!() };
     let mut theirs = Membership::new(*s.public_key());
     theirs.add(frozen_members.statements);
-    assert!(theirs.role(dev(3).public_key()) == Some(Role::Owner) && !theirs.agent_channel());
+    assert!(theirs.role(dev(3).public_key()) == Some(Role::Owner) && !theirs.agents());
+}
+
+/// Agents: Yes/No (statement kind 8, 0.1.13) to the versions before it: a kind they do not know, kept and passed on
+/// byte for byte (an admin's too, while it is an admin there), giving no role. To 0.1.12 a channel is then open to its
+/// agents exactly while it carries the kind 7 mark, which 0.1.13 no longer writes: a channel made or switched on since
+/// stays closed to agents on a 0.1.12 device, and one 0.1.12 marked stays open there even after a No (that device goes
+/// by its mark alone; its user still closes it with its own per-Mac switch). Nothing breaks either way.
+#[test]
+fn agents_yes_or_no_is_an_unknown_kind_to_the_versions_before_it_and_passes_through() {
+    let s = secret();
+    let owner_grant = statements()[0].1.clone();
+    let admin_grant = Statement::by_owner(&s, Body::Grant { device: *dev(2).public_key(), role: Role::Admin, serial: 2, at_s: T, invite: None });
+    let named = |n: &str| statements().into_iter().find(|(name, _)| *name == n).unwrap().1;
+    let (yes, no) = (named("statement 8 agents"), named("statement 8 agents by an admin"));
+    let as_old = |st: &Statement| {
+        let b = st.to_bytes();
+        let body = b[2..2 + b[1] as usize].to_vec();
+        Statement { body: Body::Unknown { kind: 8, data: body }, signer: st.signer, sig: st.sig, extra: Vec::new() }
+    };
+    let (old_yes, old_no) = (as_old(&yes), as_old(&no));
+    assert_eq!((old_yes.to_bytes(), old_no.to_bytes()), (yes.to_bytes(), no.to_bytes()), "passed on unchanged");
+    assert!(old_yes.verify(s.public_key()) && old_no.verify(s.public_key()));
+    let mark = named("statement 7 channel");
+    let mut older = Membership::new(*s.public_key());
+    older.add([owner_grant.clone(), admin_grant.clone(), mark.clone()]);
+    let roles = |m: &Membership| m.members().map(|(pk, mm)| (*pk, mm.role)).collect::<Vec<_>>();
+    let before = roles(&older);
+    older.add([old_yes.clone(), old_no.clone()]);
+    assert!(older.statements().any(|st| *st == old_yes) && older.statements().any(|st| *st == old_no), "both kept");
+    assert_eq!(roles(&older), before, "no role from them");
+
+    // What it passes on is the Yes and the No again for this version, which goes by the latest: the admin's No.
+    let mut p = fid().0.to_vec();
+    let sent: Vec<Vec<u8>> = older.statements().map(Statement::to_bytes).collect();
+    p.extend(records(&sent));
+    let Ok(Message::Members(ms)) = Message::decode(Frame { kind: 3, flags: 0, payload: &p }) else { panic!() };
+    assert!(ms.statements.contains(&yes) && ms.statements.contains(&no));
+    let mut newer = Membership::new(*s.public_key());
+    newer.add(ms.statements);
+    assert!(!newer.agents(), "the admin's later No, over the owner's Yes and the 0.1.12 mark");
+    assert_eq!(newer.next_agents_serial(), 3);
 }
 
 #[test]
@@ -623,4 +754,19 @@ const GOLDEN: &[(&str, &str)] = &[
     ("direct key", "ed4928c628d1c2c6eae90338905995612959273a5c63f93636c14614ac8737d1d584d8f13a009997bc3a40d9ceb3ff937883ea52b9f3df921545eb1f4fd7c74583d09fa39934ddaa4b273fd0f10fb2854e587bb52ab7f6345b25c6d006f35c53b6a9d531f52ae51063d89cc58d9622ce55dd8f5917ce83bd4ea91b428c35f8b4bde34d689a0f"),
     // 0.1.12: what a channel is (an agent channel's mark).
     ("statement 7 channel", "07060180829ad70600d379078c8c77bfff6e35d134bb17c1669619b660cb7b7185b6787d50bfd4a237809d1b68789016dac2b85cf4fe9f4285ea9b76b8406b095a2570631d468e5e0f"),
+    // 0.1.13: Agents: Yes/No, and a channel's link that says Yes.
+    ("statement 8 agents", "0807010180829ad7060099d639eb924c52681174bffe5ac18ac6d4d482594f8c9ea0df349577ed5a1d04e656e29c82b2506f7a2cdd810d3b10134d8f7074c912b0c0429f7c1ce8bd0e0f"),
+    ("statement 8 agents by an admin", "0807000285829ad706018139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394fe8b1cdd576ade5fbae9c0229f951cfa16e39d906280a50fabc6c4158848b05a60823c09bccb869897c56700428c07fa4a2ee71fb6378ffdc98ae452a0746701"),
+    ("chat link for agents", "seedwell://chat/AGLDPMSJYBPHZDQBSHSEHOQNKW7YP5AX3UU24U27KEDS4YVPR3ATECYLBMFQWCYLBMFQWCYLBMFQWCYDAGAPPPWXA2AIFGWXAYAKW3BPP6PTIIM57OU724KRQVOJPQXXCVSZJG6KTAE566B3MX6INNMZMM2Y2BSQP7ETEYASKPDP3FUKBXGXUL4Z277N43BLGSUMC76WAUFQWCYLBMFQWCYLBMFQWCYLBMFQWCYLBMFQWCYLBMFQWCYLBMFQXI4X?name=Bridge&agents=yes"),
+    // 0.1.13: links that say, sealed, where their maker can be reached (`a=`, which older versions ignore).
+    ("link with addresses", "seedwell://sync/AGLDPMSJYBPHZDQBSHSEHOQNKW7YP5AX3UU24U27KEDS4YVPR3ATECAIBAEAQCAIBAEAQCAIBAEAQCADAGAPPPWXA2AIFGWXAYAK33EGQCPYBFA6WPIV5ZLSW3Y4TD2JR3EYE6KVJ43RA4RIYUDNTRWTXJRF53PLOCP3DR7ZTMH2HGHAOQPBW6DD6BLKYW5ERWKUSFZUAYEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQA7S?name=Family%20Photos&a=AHNQMMVEW4G6RVSKTHA3IZPVQNYL5JXJYMQ2AAU6AHIMOHVVAV3EXTI4LAJ2ANCU2LZDVRWUEISK3O2ZN6BZTDJLPB4VVNDHMZHKHZHYRAKVX5BVVNMF3TJ5FQIEEAJ36RRW7OSRPAXRAMNHBWE36ME77NLMKOCR3RTJ4J3MFIXZKWCTVSEQ5JC4"),
+    ("chat link with addresses", "seedwell://chat/AGLDPMSJYBPHZDQBSHSEHOQNKW7YP5AX3UU24U27KEDS4YVPR3ATECYLBMFQWCYLBMFQWCYLBMFQWCYDAGAPPPWXA2AIFGWXAYAKW3BPP6PTIIM57OU724KRQVOJPQXXCVSZJG6KTAE566B3MX6INNMZMM2Y2BSQP7ETEYASKPDP3FUKBXGXUL4Z277N43BLGSUMC76WAUFQWCYLBMFQWCYLBMFQWCYLBMFQWCYLBMFQWCYLBMFQWCYLBMFQXI4X?name=Bridge&agents=yes&a=AGGK6ZZ7I3X7BBTBA7EBLAINEACU4MO2OH6UGOLGTEJVFCY5B6U4ZVGEATVGMBLOXOFUSVQZ3AJCGCFL6LPRDRT75B2K7SM56BYUBB44PQEFPVNRQQLE4LERIXSRJR75LXI6AF345RTKSRW66CGNQD4SCRP4MZC7QXFTCUXBK67ERQYZ45M7QXSV"),
+    ("folder and channel link with addresses", "seedwell://sync/AGLDPMSJYBPHZDQBSHSEHOQNKW7YP5AX3UU24U27KEDS4YVPR3ATECAIBAEAQCAIBAEAQCAIBAEAQCADAGAPPPWXA2AIFGWXAYAK33EGQCPYBFA6WPIV5ZLSW3Y4TD2JR3EYE6KVJ43RA4RIYUDNTRWTXJRF53PLOCP3DR7ZTMH2HGHAOQPBW6DD6BLKYW5ERWKUSFZUAYEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQA7S?name=Family%20Photos&chat=AHJ2NEPDOIMGW22BOYRL7KSRFX3WCEVK4ZSNTOZJEBBZ6O7LY6PZKCQKBIFAUCQKBIFAUCQKBIFAUCQDAGAPPPWXA2AIFGWXAYAL7HHNX2BNDVW7V27HC3BOBZ5U43WQO3MDHBCH4U77UTZ5ZTQ56Y2GWPHDD3KYXGLK35XGLEGTPKRUXLZW3ZKCM3FCYYWXY7GFL37YAMFAUCQKBIFAUCQKBIFAUCQKBIFAUCQKBIFAUCQKBIFAUCQKBIFAVR6D&chat_name=Family%20Photos%20chat&a=AHNQMMVEW4G6RVSKTHA3IZPVQNYL5JXJYMQ2AAU6AHIMOHVVAV3EXTI4LAJ2ANCU2LZDVRWUEISK3O2ZN6BZTDJLPB4VVNDHMZHKHZHYRAKVX5BVVNMF3TJ5FQIEEAJ36RRW7OSRPAXRAMNHBWE36ME77NLMKOCR3RTJ4J3MFIXZKWCTVSEQ5JC4"),
+    // 0.1.13: your own devices (a Follow statement, a devices group's join with a sibling proof, a pairing link).
+    ("statement 9 follow", "093d013c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c145365656477656c6c20446576656c6f706d656e74010180829ad706018139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b3940094639d396f8697573b582b92270381a84ebfa71cbfefff32572076c72376d85d33e1f9e47996765113d2ebbec20949796881ce36b2202c7b66758c24e06c0e"),
+    ("statement 10 moved", "0a253e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e89829ad706018139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394c881c4dd5f9fa1f83aab5c85a0da344567a98953a28e3d006b492145c79dd6bf1a0adaa3aa44915778d7e6ade8d4f64680384a66e0f90b0fc7e9cc38ef6ec807"),
+    ("statement 11 rendezvous", "0b322b68747470733a2f2f7365656477656c6c2d72656e64657a766f75732e6b696d2e776f726b6572732e6465760180829ad706018139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394e622d2e58c744dad54bc23e563b7489b2c3e8985d491ae6bcddc37eb773d8482a306206f014198d77c586874e352bfedd78a1541f4924853bc4a8634ca23ff0e"),
+    ("message 28 devices join","000001741c0001ef029e64389090ed3bd0aecea44c8015b863a7eea036114e2aa1d76daa5ed1f14c5602046b0128ed4928c628d1c2c6eae90338905995612959273a5c63f93636c14614ac8737d1010180829ad70600006e0fac6bc3157adbfa575e36b997a504aca780fd63baa2cfd3e3dfe8226c53a0c4dfb9e8356fa1463e3b6f3cefb254cfb512aefbdb4c250a5e9f72e6d73c4d0905de01019637b249c05e7c8e0191e443ba0d55bf87f417dd29ae535f51072e62af8ec13208080808080808080808080808080808030180f7bed70680829ad706001398f62c6d1a457c51ba6a4b5f3dbd2f69fca93216218dc8997e416bd17d93caadec86809f80941eb3d15ee572b6f1c98f498ec98279554f37107228c506d9c6d3ba625eedeb709fb1c7f99b0fa398e0741e1b7863f056ac5ba48d9549173406b4125bfe4ef842f5d4357d82bafc144a2e88a8dda4c437dd35886b034d025778159f67f11e7416e7c51c4edb90a87d6ba66f6ee7e802b07a152accae6b14380b"),
+    ("message 2 join with a sibling proof", "0000004a020001469e64389090ed3bd0aecea44c8015b863a7eea036114e2aa1d76daa5ed1f14c560106203d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d050000"),
+    ("devices link", "seedwell://devices/AGLDPMSJYBPHZDQBSHSEHOQNKW7YP5AX3UU24U27KEDS4YVPR3ATEDAMBQGAYDAMBQGAYDAMBQGAYDADAGAPPPWXA2AIFGWXAYAW46Q43UU3BN4P2E5PJRKZR7X7J3ZKS4LG4PFG6LSPX7GNQBIFX4LAKC6RDCDFYUJDWIGLQERDHDKQ2UBILDPPXLH26BKLIJU44XOU7UEG6N46OSKWTVYFWTULSCV75MYPV65I2KDYKQSRWIZYSZNNLWBQ6DAMBQGAYDAMBQGAYDAMBQGAYDAMBQGAYDAMBQGAYDAMBQGAYDAMYGRA?name=Kristian%27s%20Mac%20mini&a=AH5VI2P6YFI5TR4MFIAMR5G5MXQ6V5KKVYTZSIFJCKRH3XTVOBMRMOWS4ODSCYR4SHJFSUVSKLYFDIYDE4HLH7AELDE7QUZTCASBRWA72PGVLOJGZ7MUURQS4I7WBSLZYZ7OBCVVRB6L5KVM7APO7BVT4GEIDQTWCH4EFRS4BV2P5JD6JGZ6FXCB"),
 ];

@@ -6,8 +6,10 @@
 #   … | bash -s -- --version 0.1.0    a specific release instead of the latest
 #   … | bash -s -- --no-launch        don't open the app afterwards
 #   … | bash -s -- --uninstall        remove the app and the command link (asks before deleting your data)
-#   install.sh --zip Seedwell-X.zip [--sha256 HEX]   install a zip you already have (a test build), checked
-#                                     against HEX when given; same quit, swap and relaunch as an update
+#   install.sh --zip Seedwell-X.zip [--sha256 HEX] [--developer-id]   install a zip you already have (a test
+#                                     build), checked against HEX when given; same quit, swap and relaunch as an
+#                                     update. --developer-id: it must be signed with Seedwell's Developer ID (team
+#                                     below) and be the installed app's bundle id (a build from a watched folder)
 #   install.sh --rollback --state-dir DIR   put back the app kept in DIR/previous (see below)
 #
 # With a state folder (--state-dir, or SEEDWELL_INSTALL_STATE_DIR from the app's updater) an install keeps the app it
@@ -19,7 +21,8 @@
 # A release from GitHub must be signed with Seedwell's Developer ID (TEAM_ID below) and notarized, or nothing is
 # installed: an update can never put an unsigned or someone else's app in place of Seedwell. (Releases before
 # FIRST_SIGNED were signed ad hoc; one of those installs only when asked for by --version. A --zip test build and a
-# release served by a local test server are not checked.)
+# release served by a local test server are not checked, unless --developer-id asks for it. A --zip build must always
+# carry the installed app's bundle id: another id is another app.)
 #
 # What it touches: /Applications/Seedwell.app (or ~/Applications if /Applications is not writable), the
 # `seedwell` link if you ask for it, and a temporary folder. Downloaded files are never touched.
@@ -28,6 +31,8 @@ set -euo pipefail
 REPO_URL="${SEEDWELL_REPO_URL:-https://github.com/kkollsga/seedwell}"
 # The Apple Developer team every release is signed by (app/release-zip.sh and release.yml read it from here).
 TEAM_ID=6GND8Z2C7Z
+# The app's bundle id (SPEC 11 decision 20); a --zip build must carry the installed app's.
+BUNDLE_ID=io.github.kkollsga.Seedwell
 # The first release signed with that Developer ID; the ones before were signed ad hoc.
 FIRST_SIGNED=0.1.11
 APP_NAME="Seedwell"
@@ -36,7 +41,7 @@ EXE_NAME="SeedwellApp"
 # SEEDWELL_INSTALL_DIR: install somewhere else (tests); default /Applications, else ~/Applications.
 INSTALL_DIR="${SEEDWELL_INSTALL_DIR:-}"
 
-version=""; cli=0; launch=1; uninstall=0; local_zip=""; want_sha=; rollback=0
+version=""; cli=0; launch=1; uninstall=0; local_zip=""; want_sha=; rollback=0; developer_id=0
 STATE_DIR="${SEEDWELL_INSTALL_STATE_DIR:-}"
 WATCHDOG_SECS="${SEEDWELL_WATCHDOG_SECS:-120}"
 relaunch_args=()
@@ -53,7 +58,8 @@ while [ $# -gt 0 ]; do
     --uninstall) uninstall=1 ;;
     --zip) local_zip="${2:?--zip needs a file}"; shift ;;
     --sha256) want_sha="${2:?--sha256 needs a value}"; shift ;;
-    -h|--help) sed -n '2,21p' "$0" 2>/dev/null || true; exit 0 ;;
+    --developer-id) developer_id=1 ;;
+    -h|--help) sed -n '2,23p' "$0" 2>/dev/null || true; exit 0 ;;
     *) echo "seedwell-install: unknown option $1" >&2; exit 2 ;;
   esac
   shift
@@ -268,12 +274,29 @@ dest="$dest_dir/$APP_NAME.app"
 # was allowed into) would be asked for again, and the next signed release would be a stranger to them once more. Such
 # a build starts fine, so the watchdog would not catch it. (Folder Sync and chat keys are in the state folder for every
 # build so far; the data protection Keychain needs an entitlement these builds do not have.)
+bundle_id_of() { /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$1/Contents/Info.plist" 2>/dev/null || true; }
 if [ -n "$local_zip" ] && [ -d "$dest" ]; then
   team_of() { codesign -dv --verbose=2 "$1" 2>&1 | sed -n 's/^TeamIdentifier=//p' | grep -v '^not set$' || true; }
   have_team=$(team_of "$dest"); new_team=$(team_of "$new")
   if [ -n "$have_team" ] && [ "$new_team" != "$have_team" ]; then
     die "this build is ${new_team:+signed by team $new_team}${new_team:-signed ad hoc}, the installed $APP_NAME by team $have_team: to macOS it would be another app (its permissions asked for again). Sign it with that team (SEEDWELL_SIGN_IDENTITY); nothing was installed"
   fi
+  have_id=$(bundle_id_of "$dest"); new_id=$(bundle_id_of "$new")
+  [ "$new_id" = "$have_id" ] || die "this build's bundle id is ${new_id:-missing}, the installed $APP_NAME's is $have_id: it would be another app; nothing was installed"
+fi
+
+# A build from a watched folder (the app's updater passes --developer-id): whoever can write to that folder must not
+# be able to put an app of theirs in place of Seedwell. The build key's signature on build.json is checked by the app
+# before it starts this; here the app itself must be Seedwell's: Developer ID (an Apple-issued certificate of team
+# TEAM_ID) and Seedwell's bundle id.
+if [ "$developer_id" = 1 ]; then
+  [ -n "$local_zip" ] || die "--developer-id goes with --zip"
+  requirement="anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = \"$TEAM_ID\""
+  codesign --verify --deep --strict -R "=$requirement" "$new" 2>/dev/null \
+    || die "this build is not signed with $APP_NAME's Developer ID (team $TEAM_ID), as a build from a watched folder must be; nothing was installed"
+  want_id=$BUNDLE_ID; [ -d "$dest" ] && want_id=$(bundle_id_of "$dest")
+  [ "$(bundle_id_of "$new")" = "$want_id" ] || die "this build's bundle id is not $want_id; nothing was installed"
+  say "Checked the Developer ID signature (team $TEAM_ID) and the bundle id ($want_id)"
 fi
 
 quit_running "$dest"

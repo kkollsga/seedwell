@@ -7,7 +7,9 @@
 //!
 //! Development builds (SPEC 12A): with "Allow development builds" on, a build handed over (`seedwell update
 //! install`, the host's Install Build…) or one that appears in a watched folder (read on file-change notifications,
-//! `trs-fswatch`, never on a timer) is installed; the core starts that installer itself. Every install keeps the app it replaces (when that one started fine) and goes back to it when the
+//! `trs-fswatch`, never on a timer) is installed; the core starts that installer itself. A watched folder may be
+//! shared with others (Folder Sync), so a build there is installed only when its `build.json` is signed with a build
+//! key this copy trusts (`trs-buildsig`) and the zip is the one signed. Every install keeps the app it replaces (when that one started fine) and goes back to it when the
 //! new one does not start (`started`, `launch_guard`, `recovery_actions`); the installer does that part.
 
 use std::path::{Path, PathBuf};
@@ -111,34 +113,15 @@ pub(crate) fn release_without_this_system(data: &[u8], section: Option<&str>) ->
 
 /// `None` when the document is not what the release writes: missing or garbage fields offer nothing.
 pub(crate) fn parse_latest(data: &[u8], section: Option<&str>, min_key: &str, zip_for: impl Fn(&str) -> String) -> Option<Latest> {
-    parse_doc(data, section, min_key, zip_for, false)
-}
-
-/// A watched folder's `latest.json`: a release's, but the version may be a development build's and the tag may be
-/// left out.
-pub(crate) fn parse_build(data: &[u8], section: Option<&str>, min_key: &str, zip_for: impl Fn(&str) -> String) -> Option<Latest> {
-    parse_doc(data, section, min_key, zip_for, true)
-}
-
-fn parse_doc(data: &[u8], section: Option<&str>, min_key: &str, zip_for: impl Fn(&str) -> String, build: bool) -> Option<Latest> {
     use serde_json::Value;
     if data.len() > MAX_LATEST_BYTES {
         return None;
     }
     let top: Value = serde_json::from_slice(data).ok()?;
     let version = top.get("version")?.as_str()?;
-    if build {
-        version_order(version)?;
-    } else {
-        parse_version(version)?;
-    }
-    match top.get("tag") {
-        None if build => {}
-        t => {
-            if t?.as_str()? != format!("v{version}") {
-                return None;
-            }
-        }
+    parse_version(version)?;
+    if top.get("tag")?.as_str()? != format!("v{version}") {
+        return None;
     }
     let entry = match section {
         None => &top,
@@ -246,6 +229,32 @@ fn write_saved(file: &Path, s: &Saved) {
             let _ = std::fs::rename(&tmp, file);
         }
     }
+}
+
+/// This system's build in a watched folder's `build.json`, once the manifest verified: the version, the zip's name
+/// and checksum as signed, and this system is one it runs on. `Err`: why it is not this system's build.
+pub(crate) fn folder_entry(b: &trs_buildsig::Build, zip_for: impl Fn(&str) -> String) -> Result<Latest, String> {
+    if version_order(&b.version).is_none() || b.zip != zip_for(&b.version) {
+        return Err(format!("its {} names {} for this system, not a build of {APP_NAME} for it", trs_buildsig::FILE, b.zip));
+    }
+    let minimum_system = match &b.minimum_system {
+        None => None,
+        Some(m) => Some(parse_system_version(m).ok_or_else(|| format!("its {} names no readable minimum system", trs_buildsig::FILE))?),
+    };
+    Ok(Latest { version: b.version.clone(), sha256: b.sha256.clone(), notes_url: None, minimum_system })
+}
+
+/// The build keys a watched folder's `build.json` must be signed with: the ones compiled in (`trs-buildsig`); an
+/// isolated (test) run also trusts the key in `SEEDWELL_TEST_BUILD_KEY` (its own test key: the user's app never
+/// reads it), and unit tests their fixed test key.
+fn build_keys(isolated: bool) -> Vec<trs_buildsig::PublicKey> {
+    let mut keys = trs_buildsig::trusted_keys();
+    if isolated && let Some(k) = std::env::var("SEEDWELL_TEST_BUILD_KEY").ok().and_then(|k| trs_buildsig::parse_key(&k)) {
+        keys.push(k);
+    }
+    #[cfg(test)]
+    keys.push(tests::test_key().public_key());
+    keys
 }
 
 /// A build found in a watched folder, ready to install.
@@ -359,6 +368,8 @@ pub struct Updates {
     st: Mutex<St>,
     /// The watched folder's watcher, while one is watched.
     watch: Mutex<Option<FolderWatch>>,
+    /// The keys a watched folder's build must be signed with (`build_keys`).
+    build_keys: Vec<trs_buildsig::PublicKey>,
     me: Weak<Updates>,
 }
 
@@ -585,13 +596,15 @@ impl Updates {
     }
 
     /// Starts the running app's installer on `zip` (already checked: `sha256` is its checksum) for `version`.
-    fn start_build(&self, st: &mut St, version: &str, zip: &Path, sha256: &str, now_ms: u64) -> Result<(), String> {
+    /// `watched`: a build from a watched folder, which on the Mac must also be signed with Seedwell's Developer ID
+    /// and carry the app's bundle id (not checked in an isolated test run, whose test builds are signed ad hoc).
+    fn start_build(&self, st: &mut St, version: &str, zip: &Path, sha256: &str, watched: bool, now_ms: u64) -> Result<(), String> {
         if self.installer.is_empty() || !Path::new(&self.installer).is_file() {
             return Err("this copy of Seedwell has no installer to install builds with".into());
         }
         let (state_dir, relaunch) = self.place();
         let i = os::Install { install_dir: &self.install_dir, state_dir: &state_dir, relaunch: &relaunch };
-        let c = os::local_installer_command(&self.installer, &zip.display().to_string(), sha256, &i);
+        let c = os::local_installer_command(&self.installer, &zip.display().to_string(), sha256, watched && !self.core.isolated, &i);
         st.saved.pending = Some(version.to_owned());
         self.save(&st.saved);
         if let Err(e) = os::spawn(&c, &log_in(&self.core.dir)) {
@@ -605,21 +618,40 @@ impl Updates {
         Ok(())
     }
 
-    /// The watched folder's build, when it is newer, not failed before and its zip is there.
+    /// The watched folder's build, when its `build.json` is signed with a trusted build key, names a build for this
+    /// system that is newer than the running one and did not fail before, and the zip there is the one signed. `Err`:
+    /// why nothing there can be installed (said in the status line).
     fn read_folder(&self, folder: &Path) -> Result<Option<FolderBuild>, String> {
-        let doc = folder.join("latest.json");
+        use trs_buildsig::FILE;
+        let doc = folder.join(FILE);
         let data = match std::fs::metadata(&doc) {
-            Ok(m) if m.len() as usize > MAX_LATEST_BYTES => return Err("its latest.json is too large".into()),
-            Ok(_) => std::fs::read(&doc).map_err(|e| format!("its latest.json cannot be read ({e})"))?,
+            Ok(m) if m.len() as usize > trs_buildsig::MAX_BYTES => return Err(format!("its {FILE} is too large")),
+            Ok(_) => std::fs::read(&doc).map_err(|e| format!("its {FILE} cannot be read ({e})"))?,
             Err(_) if !folder.is_dir() => return Err(format!("{} is missing", folder.display())),
-            Err(_) => return Err("no build there yet".into()),
+            Err(_) => return Err(format!("no build there yet (no {FILE})")),
         };
-        let l = parse_build(&data, os::RELEASE_SECTION, os::MINIMUM_SYSTEM_KEY, os::release_zip)
-            .ok_or_else(|| "its latest.json is not a build's".to_owned())?;
-        let zip = folder.join(os::release_zip(&l.version));
-        let st = self.lock();
-        if !l.offered(&self.current, &self.system) || st.saved.failed.contains(&l.version) || !zip.is_file() {
-            return Ok(None);
+        if self.build_keys.is_empty() {
+            return Err(format!("this copy of {APP_NAME} trusts no build key, so it installs no build from a folder"));
+        }
+        let (m, _) = trs_buildsig::verify(&data, &self.build_keys).map_err(|e| format!("{e}: nothing is installed from it"))?;
+        let Some(b) = m.builds.get(os::BUILD_SYSTEM) else { return Err("no build for this system there yet".into()) };
+        let l = folder_entry(b, os::release_zip)?;
+        let zip = folder.join(&b.zip);
+        {
+            let st = self.lock();
+            if !l.offered(&self.current, &self.system) || st.saved.failed.contains(&l.version) {
+                return Ok(None);
+            }
+        }
+        // The zip may still be arriving (a synced folder brings the files one by one): the next notification looks
+        // again. A zip that is not the one signed is never installed.
+        match std::fs::metadata(&zip) {
+            Ok(m) if m.is_file() && m.len() <= MAX_BUILD_BYTES => {}
+            _ => return Err(format!("waiting for {} (named in {FILE})", b.zip)),
+        }
+        let have = sha256_of(&zip).map_err(|e| format!("{} cannot be read ({e})", b.zip))?;
+        if have != l.sha256 {
+            return Err(format!("{} is not the build {FILE} signed (yet): waiting", b.zip));
         }
         Ok(Some(FolderBuild { version: l.version, zip, sha256: l.sha256 }))
     }
@@ -649,8 +681,8 @@ impl Updates {
                 st.status = Status::Available { version: b.version.clone(), notes: None };
                 st.folder_build = Some(b.clone());
                 if !busy {
-                    // A zip that changed since latest.json named it is refused by the installer's checksum.
-                    let _ = self.start_build(&mut st, &b.version, &b.zip, &b.sha256, now_ms);
+                    // A zip that changed since it was checked is refused by the installer's checksum (of its own copy).
+                    let _ = self.start_build(&mut st, &b.version, &b.zip, &b.sha256, true, now_ms);
                 }
             }
         }
@@ -852,7 +884,7 @@ impl Updates {
         if st.checking || matches!(st.status, Status::Installing { .. }) {
             return Err("an install is already running".into());
         }
-        self.start_build(&mut st, &version, zip, &have, now_ms)?;
+        self.start_build(&mut st, &version, zip, &have, false, now_ms)?;
         // The installer keeps the running app when it started fine (launch-ok names it); else the one kept before stays.
         let started = std::fs::read_to_string(self.core.dir.join(STARTED_FILE)).is_ok_and(|t| t.lines().next() == Some(self.current.as_str()));
         let back = if started { Some(self.current.clone()) } else { kept_in(&self.core.dir).map(|(v, _)| v) };
@@ -916,7 +948,11 @@ impl Updates {
         }
         self.sync_watch();
         Ok(match folder {
-            Some(f) => format!("Watching {}: each newer build put there is installed as it appears (zip first, then latest.json)", f.display()),
+            Some(f) => format!(
+                "Watching {}: each newer build signed into its {} with the build key is installed as it appears (tools/dev-build.sh --to, tools/build-sign.sh add)",
+                f.display(),
+                trs_buildsig::FILE
+            ),
             None => "Stopped watching".into(),
         })
     }
@@ -957,6 +993,7 @@ impl Updates {
         }
         let status = Self::restored(&mut saved, &current);
         let dev_on = core.settings_load().updates.dev_builds;
+        let build_keys = build_keys(core.isolated);
         let u = Arc::new_cyclic(|me| Updates {
             core,
             current,
@@ -978,6 +1015,7 @@ impl Updates {
                 folder_build: None,
             }),
             watch: Mutex::new(None),
+            build_keys,
             me: me.clone(),
         });
         {

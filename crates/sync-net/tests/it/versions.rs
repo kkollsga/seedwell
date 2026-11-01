@@ -37,10 +37,16 @@ async fn a_newer_device_syncs_at_the_version_both_speak_and_one_too_new_is_told_
     too_new.h.join_folder(&a.h.create_invite(&id, Role::ReadOnly, 1, 7).unwrap().link, dirs[2].path().join("F")).await.unwrap();
     too_new.h.add_address(&id, addr(&a)).unwrap();
     until(20, "told why", || {
-        matches!(state(&too_new, &id), Some((FolderState::Error, Some(e))) if e.contains("Owner runs an older Seedwell that cannot sync with this one: update it"))
+        matches!(state(&too_new, &id), Some((FolderState::Error, Some(e))) if e.contains("Owner runs Seedwell test, an older Seedwell that cannot sync with this one: update it"))
     })
     .await;
     assert!(read(&dirs[2].path().join("F/seed.txt")).is_none());
+    // The owner, whose link it was, notes the attempt: by name and version.
+    let tried = a.h.snapshot().folders.into_iter().find(|f| f.id == id.to_string()).unwrap().join_attempts;
+    assert!(
+        tried.iter().any(|t| t.name == "Future" && t.client == "Seedwell test" && t.device_id == too_new.h.device_id().to_string() && t.reason.contains("runs Seedwell test, a newer Seedwell")),
+        "{tried:?}"
+    );
     for d in [&a, &newer, &too_new] {
         d.h.shutdown().await;
     }
@@ -87,8 +93,8 @@ async fn a_member_that_cannot_talk_any_more_is_listed_with_the_folders_issues_un
     // B comes back as a Seedwell that only speaks a later version: both folders say so.
     let b = restart(b, dirs[1].path(), "Beta", (PROTOCOL + 1, PROTOCOL + 1), 1).await;
     b.add_address(&id, std::net::SocketAddr::new(std::net::Ipv4Addr::LOCALHOST.into(), a.port())).unwrap();
-    until(30, "B's folder lists the owner", || issues(&b, &id).iter().any(|i| i == "Owner runs an older Seedwell that cannot sync with this one: update it")).await;
-    until(30, "the owner's folder lists B", || issues(&a, &id).iter().any(|i| i == concat!("Beta runs a newer Seedwell that this one cannot sync with: update this ", trs_platform::computer!()))).await;
+    until(30, "B's folder lists the owner", || issues(&b, &id).iter().any(|i| i == "Owner runs Seedwell test, an older Seedwell that cannot sync with this one: update it")).await;
+    until(30, "the owner's folder lists B", || issues(&a, &id).iter().any(|i| i == concat!("Beta runs Seedwell test, a newer Seedwell that this one cannot sync with: update this ", trs_platform::computer!()))).await;
 
     // Back to a version both speak: the issues go.
     let b = restart(b, dirs[1].path(), "Beta", now, 1).await;

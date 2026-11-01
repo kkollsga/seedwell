@@ -119,14 +119,19 @@ struct SyncFolderPage: View {
     let actions: SyncActions
     /// The member whose removal is being asked about.
     @State private var askRemoveMember: SyncMember?
+    /// The gone device whose removal is being asked about.
+    @State private var askRemoveGone: SyncGoneDevice?
+    /// Sharing the folder again from this Mac is being asked about.
+    @State private var askReshare = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
+            if !folder.gone.isEmpty || folder.canReshare { away.padding(.top, 12) }
             if model.syncAskRemove == folder.id { removeStrip.padding(.top, 12) }
             section("Members") {
                 if model.syncMembers.isEmpty {
-                    quiet(folder.state == .waitingForAdmin ? "Waiting for the folder’s owner or an admin to let this Mac in" : "No members known yet")
+                    quiet(folder.state == .waitingForAdmin ? SyncText.joinNote(folder) : "No members known yet")
                 } else {
                     ForEach(Array(SyncText.ordered(model.syncMembers).enumerated()), id: \.element.deviceId) { n, m in
                         if n > 0 { Divider().opacity(0.6) }
@@ -214,6 +219,49 @@ struct SyncFolderPage: View {
         if folder.files > 0 { parts.append("\(Fmt.count(folder.files, "item")) · \(Fmt.bytes(folder.bytes))") }
         if folder.state == .upToDate, let t = folder.lastSyncedS { parts.append("synced \(Fmt.ago(t))") }
         return parts.joined(separator: " · ")
+    }
+
+    /// Devices gone from the folder (SPEC 7G.3): for an owner, each with *Remove…*; for a member whose owners and admins
+    /// are all gone, *Share Again from This Mac…*. Every word is the core's; each action asks first.
+    private var away: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(folder.gone, id: \.deviceId) { d in
+                let p = SyncText.gonePrompt(d, name: folder.name, channel: false)
+                HStack(spacing: 10) {
+                    Image(systemName: "moon.zzz").font(.system(size: 11)).foregroundStyle(.secondary)
+                    Text(p.line).font(.system(size: 12)).foregroundStyle(.secondary)
+                    Spacer(minLength: 8)
+                    Button(p.button) { askRemoveGone = d }.controlSize(.small).help(p.help).accessibilityLabel(p.help)
+                        .accessibilityIdentifier("sync-remove-gone")
+                }
+            }
+            if folder.canReshare {
+                let p = SyncText.resharePrompt(folder)
+                HStack(spacing: 10) {
+                    Image(systemName: "person.crop.circle.badge.questionmark").font(.system(size: 11)).foregroundStyle(.secondary)
+                    Text(p.note).font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 8)
+                    Button(p.button) { askReshare = true }.controlSize(.small).help(p.help)
+                        .accessibilityIdentifier("sync-reshare")
+                }
+                .confirmationDialog(p.title, isPresented: $askReshare) {
+                    Button(p.confirm) { askReshare = false; actions.reshare(folder) }
+                    Button("Cancel", role: .cancel) { askReshare = false }
+                } message: { Text(p.text) }
+            }
+        }
+        .padding(.horizontal, 12).padding(.vertical, 8)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.05)))
+        .confirmationDialog(askRemoveGone.map { SyncText.gonePrompt($0, name: folder.name, channel: false).title } ?? "",
+                            isPresented: Binding(get: { askRemoveGone != nil }, set: { if !$0 { askRemoveGone = nil } })) {
+            if let d = askRemoveGone {
+                let p = SyncText.gonePrompt(d, name: folder.name, channel: false)
+                Button(p.confirm, role: .destructive) { actions.removeGone(folder.id, name: folder.name, d) { [model] in model.loadMembers() }; askRemoveGone = nil }
+            }
+            Button("Cancel", role: .cancel) { askRemoveGone = nil }
+        } message: {
+            if let d = askRemoveGone { Text(SyncText.gonePrompt(d, name: folder.name, channel: false).text) }
+        }
     }
 
     private var removeStrip: some View {

@@ -289,7 +289,7 @@ fn normalize_path(path_and_query: &str) -> String {
 
 /// Map a hyper client error by walking its source chain (no brittle downcasts
 /// to private types).
-fn classify(e: &hyper_util::client::legacy::Error) -> Error {
+pub(crate) fn classify(e: &hyper_util::client::legacy::Error) -> Error {
     let mut text = String::new();
     let mut timed_out = false;
     let mut cur: Option<&(dyn std::error::Error + 'static)> = Some(e);

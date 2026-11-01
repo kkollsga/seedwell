@@ -70,6 +70,77 @@ fn fewer_syn_retries(sock: &tokio::net::TcpSocket) {
     }
 }
 
+/// This computer's addresses on its networks that another device may reach it at: the one its default route
+/// leaves from first, then the other interfaces' (Unix), IPv4 before IPv6, without loopback, link-local, multicast
+/// or duplicate ones. For a link that says where its maker is (SPEC §7G.5): best effort, an empty list when the
+/// computer is on no network.
+pub fn lan_addresses() -> Vec<std::net::IpAddr> {
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, UdpSocket};
+    let mut found: Vec<IpAddr> = Vec::new();
+    // The default route's source address: a UDP "connect" sends nothing, it only picks the route (to documentation
+    // addresses, so nothing is ever contacted).
+    let routed = |bind: IpAddr, to: IpAddr| UdpSocket::bind((bind, 0)).and_then(|s| s.connect((to, 9)).and(s.local_addr())).ok().map(|a| a.ip());
+    found.extend(routed(Ipv4Addr::UNSPECIFIED.into(), Ipv4Addr::new(192, 0, 2, 1).into()));
+    found.extend(routed(Ipv6Addr::UNSPECIFIED.into(), Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1).into()));
+    #[cfg(unix)]
+    found.extend(interface_addresses());
+    let mut out: Vec<IpAddr> = Vec::new();
+    for ip in found {
+        if reachable_ip(&ip) && !out.contains(&ip) {
+            out.push(ip);
+        }
+    }
+    // (A stable sort: the routed address stays first of its family.)
+    out.sort_by_key(IpAddr::is_ipv6);
+    out
+}
+
+/// An address another device could dial: not unspecified, loopback, multicast or link-local.
+fn reachable_ip(ip: &std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => !(v4.is_unspecified() || v4.is_loopback() || v4.is_multicast() || v4.is_link_local() || v4.is_broadcast()),
+        // fe80::/10 needs a scope (an interface) that another device cannot know.
+        std::net::IpAddr::V6(v6) => !(v6.is_unspecified() || v6.is_loopback() || v6.is_multicast() || (v6.segments()[0] & 0xffc0) == 0xfe80),
+    }
+}
+
+/// The addresses of the interfaces that are up (`getifaddrs`).
+#[cfg(unix)]
+fn interface_addresses() -> Vec<std::net::IpAddr> {
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    let mut out = Vec::new();
+    let mut head: *mut libc::ifaddrs = std::ptr::null_mut();
+    // SAFETY: getifaddrs fills `head` with a list it allocates, freed below with freeifaddrs; nothing keeps a
+    // pointer into it past that.
+    if unsafe { libc::getifaddrs(&mut head) } != 0 {
+        return out;
+    }
+    let mut p = head;
+    while !p.is_null() {
+        // SAFETY: `p` is a node of the list getifaddrs returned, not freed yet.
+        let ifa = unsafe { &*p };
+        p = ifa.ifa_next;
+        let flags = ifa.ifa_flags as libc::c_int;
+        if flags & libc::IFF_UP == 0 || flags & libc::IFF_LOOPBACK != 0 || ifa.ifa_addr.is_null() {
+            continue;
+        }
+        // SAFETY: `ifa_addr` is non-null and points at a sockaddr whose family says its real type and size.
+        let family = i32::from(unsafe { (*ifa.ifa_addr).sa_family });
+        if family == libc::AF_INET {
+            // SAFETY: an AF_INET address is a sockaddr_in.
+            let sin = unsafe { &*ifa.ifa_addr.cast::<libc::sockaddr_in>() };
+            out.push(IpAddr::V4(Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr))));
+        } else if family == libc::AF_INET6 {
+            // SAFETY: an AF_INET6 address is a sockaddr_in6.
+            let sin6 = unsafe { &*ifa.ifa_addr.cast::<libc::sockaddr_in6>() };
+            out.push(IpAddr::V6(Ipv6Addr::from(sin6.sin6_addr.s6_addr)));
+        }
+    }
+    // SAFETY: `head` came from getifaddrs and is freed once.
+    unsafe { libc::freeifaddrs(head) };
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -88,6 +159,24 @@ mod tests {
         assert_eq!(e.kind(), io::ErrorKind::ConnectionRefused, "{e:?}");
         // Windows: ~1.0 s (2.0 s with its default SYN retries); elsewhere at once.
         assert!(took < std::time::Duration::from_millis(1500), "a refused dial took {took:?}");
+    }
+
+    #[test]
+    fn lan_addresses_are_ones_another_device_can_dial() {
+        let all = lan_addresses();
+        for ip in &all {
+            assert!(reachable_ip(ip), "{ip}");
+        }
+        for (i, ip) in all.iter().enumerate() {
+            assert!(!all[i + 1..].contains(ip), "no duplicates: {all:?}");
+        }
+        assert!(all.windows(2).all(|w| !(w[0].is_ipv6() && w[1].is_ipv4())), "IPv4 first: {all:?}");
+        for no in ["127.0.0.1", "169.254.1.2", "0.0.0.0", "224.0.0.251", "fe80::1", "::1", "::", "ff02::1"] {
+            assert!(!reachable_ip(&no.parse().unwrap()), "{no}");
+        }
+        for yes in ["192.168.68.57", "10.0.0.2", "100.64.1.2", "fd00::5", "2001:db8::7"] {
+            assert!(reachable_ip(&yes.parse().unwrap()), "{yes}");
+        }
     }
 
     #[test]

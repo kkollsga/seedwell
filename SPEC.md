@@ -853,13 +853,39 @@ baseline every later version must still sync with:
     - an expiry, and a maximum number of uses (1 to 1000, or unlimited);
     - an invite ID and the issuer's device key, all signed by the issuer;
     - a one-off secret.
+  - **Where the issuer is (0.1.13):** the link also carries, sealed, where the device that made it could be reached
+    when it made it: its addresses on its local networks with the sync port (at most 4; IPv4 while the sync port
+    listens on IPv4 only), its public address and port when the port mapping knows them (not behind a carrier's
+    NAT), and its device id and name. The block is a query field, `&a=<base32>`, last in the link; it is encrypted
+    with ChaCha20-Poly1305 under a key derived with HKDF from the link's one-off secret, so only someone who has the
+    whole link can read it (`crates/sync-proto/PROTOCOL.md`). Versions before it ignore the field and join as
+    before; a block that does not open is left out and the link still joins. The addresses are never logged.
   - **Admission:**
     - The joining device finds the folder's devices from `pk` and connects. It presents the invite, and proves it
       has the secret, bound to its TLS session.
+      - It dials the addresses in the link at once (expecting the issuer's device there), alongside LAN discovery
+        and the DHT; an address that does not answer is retried with the usual backoff and holds nothing up. While
+        it joins, the issuer stays a device to dial, at those addresses, also after a restart (the stored link
+        keeps them).
     - Only an **owner or admin** device admits. It checks the issuer is still an owner or admin, the invite has not
       expired or been revoked, and uses are left. Then it signs the new device's grant and passes it on.
-    - Until an owner or admin device is online, the joining device waits ("Waiting for the folder's owner or an
-      admin").
+    - Until an owner or admin device is online, the joining device waits, and says what it does and why it still
+      waits, in sentences the core makes (the hosts show them where "joining" shows; the agent interface gives them
+      as `progress` and `problem`):
+      - what it does now: "Looking for Anna's Mac mini at the addresses in the link, on the local network and on the
+        Internet…", "Trying Anna's Mac mini at 192.168.68.57:55799…", "Found Bo's PC, which cannot admit this Mac;
+        waiting for an owner or admin of this folder" (without a name in the link: "an owner or admin of this
+        folder");
+      - what went wrong last: "Anna's Mac mini at 192.168.68.57:55799: no answer" (or "nothing answers there", "another
+        device answers there now", "not reachable from this Mac's network"), "Bo's PC answered but does not admit
+        this Mac: …", "Anna's Mac mini runs Seedwell 0.1.9, an older Seedwell that cannot sync with this one: update
+        it", "Bo's PC runs Seedwell 0.1.5, which has no channels: update it", or the owner's refusal ("this link has
+        expired", "… used up", "… revoked").
+    - **The inviting side keeps the attempts it refused** (an unknown, expired, used-up or revoked link, a link of a
+      newer version, or a device whose Seedwell cannot talk to this one while links of this device are out): when,
+      the device's id, name and version, and why, newest last, at most 20 per folder or channel, in memory (gone with
+      the folder or channel). `sync status` and `chat list` show them (`join_attempts`), so the Mac that made a link
+      can see "Kim's MacBook (Seedwell 0.1.12) tried at 21:24: this link has expired".
   - **Counting uses:** every grant names the invite it came from.
     - When devices learn of more grants from one invite than its limit (two admins admitting at the same moment),
       they all keep the same ones: the earliest by issuer time, then by signature bytes. The rest are treated as
@@ -899,7 +925,58 @@ baseline every later version must still sync with:
     the Linux daemon. The login keychain is not used: it ties an item to the exact build, so macOS would ask for
     the password after every update.
   - Either way, the keys are never written into the synced folder, never logged, and returned through the agent
-    interface only with Full permission (logged).
+    interface only with Full permission (logged). The user key of *Your devices* (below) is the exception: never
+    returned through the agent interface, not even at Full.
+- **Your devices** (0.1.13; `docs/concepts/your-devices.md`): the user's own devices trust each other.
+  - **The group.** They form a *devices group*, a third kind of container next to folders and channels: a
+    membership with no files and no messages, whose key pair is the **user key**. Every device in it is an owner and
+    holds the key (in the secret store as `folder-<group id>`). It is found like any folder (its DHT topic and LAN tag
+    come from the user key), its records stay in it (`sync/<id>.members`, the `[my_devices]` table of `sync.toml`:
+    the devices met in it, the skip list), and leaving deletes exactly those.
+  - **Pairing.** *Pair a Device…* on one device makes a one-use link valid for 15 minutes
+    (`seedwell://devices/…`, made by that device's key, with where it is). The other device pastes it under *Pair
+    with a Link…* and dials. The device that made the link does not admit at once: it shows "“Studio PC” wants to
+    join your devices", with the joining device's id, which the joining device shows too; *Pair* admits it as an owner
+    and sends it the user key, *Refuse* revokes the link. A leaked link is useless without someone at that screen.
+    Both devices need 0.1.13. A device in a group with other devices leaves it before it joins another; one alone in
+    its own group simply joins.
+  - **On all my devices.** A folder or channel the user puts on all devices (a *Follow* statement in the group, signed
+    by the device that says it; the latest per folder or channel counts) comes to each other device by itself: a
+    folder at the default location for joined folders under its name (with a number when taken: never into a folder
+    that is there), synced in full; a channel. It waits "from your devices" until admitted: each device that is
+    owner there grants the others Admin with the folder key, one that is admin admits them at Read & write with a
+    one-use invitation of its own (an admin's ordinary admission), when the group or the setting changes and when such
+    a device proves itself; an owner raises one it finds at Read & write to Admin, and never lowers a role. These are
+    ordinary statements, so every member accepts the device, also one on an older Seedwell. Matching user names never
+    grant anything. Only an owner or admin can turn it on (the others could not be admitted); turning it off only
+    stops it coming to new devices and deletes nothing. A folder or channel taken off one device (removed or left
+    there) does not come back to it by itself (the skip list). Nothing follows on its own: an agent's channel or
+    folder never does. A channel closed to agents follows and stays closed on every device.
+  - **Removal is final, and changes the key.** *Remove…* on any of the devices takes a device out for good: it never
+    joins the group again, and none of the devices admits it anywhere again. The dialog lists the folders and channels
+    where this device is owner and the removed one a member, all ticked (it is removed there too), and those where
+    this device is only admin ("ask its owner"), and the devices the removed one paired, which the user keeps or
+    removes. What the removed device has stays with it.
+  - **The key changes.** A removal moves the group to a new user key, which the removed device never gets: the
+    removing device makes the new group with the other devices in it (and what is on all of them), says in the old
+    group that it moved (a *Moved* statement), and deletes the old key. Each other device moves when it learns that,
+    at once or when it next meets one of the devices (over any session), which admits it by its device key; it then
+    receives the new key. The old key is worth nothing: a device signed in with it afterwards finds no one. Two
+    removals made apart settle on the lowest new group id, and the devices removed in either are taken out of it.
+    Leaving changes the key the same way (the others do it). Admissions in folders and channels are by device key,
+    so they stay and nothing syncs again. A device that has not moved yet still trusts the old group; a thief who
+    removed the honest devices first still leaves only *Start Over*.
+  - **Leave and Start Over.** *Leave Your Devices…* signs this device out of the group (the others change the key) and
+    deletes the group here; folders and channels stay. *Start Over…* leaves and makes a new group with this device alone, to pair the others
+    again: the way out when a thief removed the honest devices first, or the user key must count as stolen.
+  - **The rendezvous is shared** (§7G.3): a device that uses one says so in the group (a device-signed statement), and
+    another device that never had one takes it, so a device set up once finds the others after a network change.
+    Turning it off on one device turns it off there only (that device says "none" and takes none again by itself).
+    The pairing link carries the maker's rendezvous too, so a device pairing from another network finds it there.
+    Siblings are looked up there like any device a folder or channel wants, and a network change redials the group's
+    sessions like the others.
+  - **Agents** never pair, confirm, remove, follow, leave or start over, at any level, and never see the user key:
+    the group is in no answer of theirs, nor a device this Mac is connected to only for it (§9A.3).
 - **Isolated (test) runs** (`--state-dir` with `--home-root`; a forbidden root): Folder Sync starts LAN only (no
   Internet discovery, no relays, until the run turns them on), joined folders go to `Sync` in the run's state folder,
   and no synced folder or join place may lie inside the real home (a temporary folder excepted): one there is
@@ -993,9 +1070,62 @@ baseline every later version must still sync with:
      carry channel sessions as they carry folder sessions.
 
   Relays carry only end-to-end-encrypted bytes. Seedwell runs no servers.
+- **Rendezvous (0.1.13, off until the user sets it up):** an address book on the user's own Cloudflare account (a
+  Worker with a SQLite-backed Durable Object per record, the free plan; `tools/rendezvous-worker`). Each device that
+  uses it keeps one record there: its local and public addresses and the time, sealed with a key derived from its
+  device id and signed by its device key inside the seal (PROTOCOL.md, "Rendezvous records"), so any device that
+  knows it can open it and Cloudflare, which sees only a hash, cannot. Writes are signed with a random write key per
+  device and rendezvous (never the device key; the first one keeps the record). A device publishes at the start, on
+  a network change, when its addresses change (looked at every 30 s) and every 30 minutes, at most once a minute.
+  The dial loop looks up the members, channel members and conversation devices it wants and has no session with,
+  with a backoff per device (0, 30 s, 1, 2, 5, 10, then 30 minutes): in the rendezvous this device uses, and in the
+  ones a device named in its signed address record (an entry `rendezvous+https://…`, kept in that folder's or
+  channel's device record in `sync.toml`) or in a link it made (the `a=` block's rendezvous field). Addresses found
+  are dialed like any other. Only addresses and a time go there, never file data, chat content or names; when it is
+  down, nothing else changes. Status (address, last publish, last problem, devices found) in Settings and
+  `seedwell sync settings`; setting it up is the user's, in the app only (§7G.5). Paired devices (your devices)
+  will share the setting (`rendezvous_for_paired` / `adopt_rendezvous_from_paired`).
+- **Network changes (0.1.13):** the app passes the system's signal to folder sync as to the engine (the Mac's path
+  monitor, now also on a change of gateway, as when moving to another Wi-Fi network; Windows' address-change
+  notification; a wake from sleep). Folder sync then closes the sessions whose local address is gone, pings the
+  others, announces on the LAN and runs the DHT round at once, clears the dial backoffs and dials every member that
+  is not connected, and writes a new rendezvous record (the public address follows when the port mapping, refreshed
+  by the engine on the same signal, has it). Without the signal (a daemon, a late one) it looks every 15 s itself:
+  a change of this device's addresses, or a session on an address that is gone, counts as a network change.
 - **Retries:** an address that did not connect is tried again after 1, 2, 5, 10, 30, 60 and 120 s, then every 5
   minutes; the dialer wakes when the next one is due (a device that is just starting is not left waiting for a fixed
   30 s round).
+- **Devices not connected:** `sync list` lists the devices of the folders and channels here that are not connected,
+  with when each was last seen (a session with it began or ended; kept in that folder's or channel's own device
+  record in `sync.toml`) and why the last attempt to reach it failed (in memory, per folder and channel).
+- **Whom a folder waits for:** a folder or channel this device is a member of, with other members of which none is
+  connected, says whom it waits for, since when and (for one device) why it cannot reach it, in one sentence the core
+  makes: "Waiting for Kristian's Mac mini (last seen 3 days ago: nothing answers at 192.168.68.57:55799)", "Waiting
+  for Mac mini (never connected to this Mac)", or for several "Waiting for 2 devices: Mac mini (3 days ago), Makro (1
+  hour ago)" (by name, three at most, then "and N more"). It is the folder's `waiting` in `sync.list`/`sync.status`
+  and the channel's in `chat.list`; the app shows it as the row's grey line and on the folder page (§7G.5).
+- **Gone devices:** a member not connected and not seen for a day (or never seen here: a record from before 0.1.13
+  has no time) is *gone*, as far as this device can tell. Nothing happens to it on its own; the user chooses:
+  - **An owner** is offered to remove it: the folder's (or channel's) `gone` lists it, the CLI row names the
+    `remove-device` command, and the folder page has *Remove <device> from This Folder…*, which asks first ("It stops
+    syncing at once, on every device. It keeps the files it already has."). Only owners remove devices (an admin
+    cannot: the removal is signed with the folder key).
+  - **A member whose every owner and admin is gone** (nobody can admit devices or change roles any more; `can_reshare`)
+    is offered *Share Again from This Mac…*: `sync.reshare` (Full; `seedwell sync reshare <folder>`) makes the folder
+    a new folder, with a new id, owned by this device, at the same place:
+    - its files stay where they are, as they are: nothing is deleted, moved or downloaded again, and the new folder's
+      first scan reads them in as this device's versions (`.seedwell/Archive` stays too); no other device is in it,
+      so no conflict can arise;
+    - the old folder is left: its id, keys, index, membership and the devices met in it are forgotten on this
+      device (its records go with it); the other devices keep it, and this device is still listed there;
+    - this device's own settings of it (paused, local network only, archive, local ignore patterns) carry over; its
+      channel link does not;
+    - refused while an owner or admin of the folder is connected (it can admit and change roles), for an owner or
+      admin (it shares the folder itself), before admission, and for an on-demand folder (its files are online only:
+      switch it to full first);
+    - then the usual Share dialog makes a link, and the devices that want it join the new folder.
+  - A channel has no *share again*: its history is sealed with the channel's own keys, and a new channel starts
+    empty. Its owner removes gone devices as a folder's does.
 - **Limits:** LAN unlimited by default; the Internet has its own up and down limits, separate from torrent limits.
 
 ### 7G.4 Budgets
@@ -1076,6 +1206,10 @@ baseline every later version must still sync with:
   - **Members:** every device in the folder, with this Mac first, then by role. Each row shows how the device is
     reached (LAN / Internet / relay, client, bytes each way) or *Offline*, and its role. The owner has a role menu
     on every other device (Owner, Admin, Read & write, Read only, *Remove from Folder…*, which asks first).
+  - **Away:** under the status line, whom the folder waits for (§7G.3 "Whom a folder waits for"; the list's grey
+    line says the same); for an owner, a line per gone device with *Remove…*; for a member whose owners and admins
+    are all gone, a note and *Share Again from This Mac…*, which asks first, then opens the Share dialog of the new
+    folder. A channel's page shows its waiting sentence and, for an owner, *Remove…* for each gone device.
   - **Conflicts:** *Show in Finder*, and *Keep* ▸ *Current Version* / *<device>'s Version* / *Both*.
   - **Issues:** each with its reason.
 - **Settings › Folder Sync:** device name, *Your name* (for chats), sync port (picked at the first start and kept; editable: a new port
@@ -1084,6 +1218,30 @@ baseline every later version must still sync with:
   the sync port: *Opened on the router*, *Checking*, *Closed* or *Not known*, §8.4 "Reachability"), finding devices on the LAN and over the Internet, relaying,
   Internet speed limits, default location for joined folders, and *Sync status in Finder* (*Turn On…*, or *On* with
   *Manage…*).
+  - **Find your devices over the Internet (Cloudflare)** (§7G.3, the rendezvous; every text from the core): what it
+    does, that Cloudflare sees only sealed records and no files, that the free plan is enough. While off, numbered
+    steps: (1) *Open the API Tokens Page* (dash.cloudflare.com/profile/api-tokens); (2) Create Token, *Use template*
+    next to "Edit Cloudflare Workers"; (3) Account Resources: your account, Zone Resources: All zones; (4) Continue to
+    summary, Create Token, copy it; (5) paste it and **Set Up**. Seedwell then checks the token, finds the account,
+    uploads the Worker with its Durable Object binding and `new_sqlite_classes` migration, turns on its workers.dev
+    address (making the account's workers.dev subdomain when it has none, or saying what to do), reads the address
+    from the API, tests it (a record written, read back, deleted) and keeps the address; the progress line names each
+    step, and a problem says what to do. The token is used for those calls only: never written to disk or a log;
+    *Update the Worker…* asks for one again. Under the steps, "Already set up on another device? Paste its address
+    instead." with a field and **Use** (tested first; also for a Worker deployed with wrangler). While on: the
+    address with **Copy**, its status (published when, the last problem, devices found), *Update the Worker…*,
+    **Turn Off** (deletes this device's record) and **Test**. Windows shows it later (the core has it: `sync_rendezvous`).
+    Agents read the status (`seedwell sync settings`); none can set it up.
+- **Settings › Devices** (0.1.13, §7G.1 *Your devices*): "Your devices trust each other: folders and channels you
+  put on all your devices come to each of them by themselves." The list, this device first: name, user, online or
+  last seen, "paired by …" (with a warning when that device was removed since), and *Remove…* on the others. *Pair a
+  Device…* (the link with *Copy* and its countdown; when a device asks, the confirmation with its id, *Refuse* and
+  *Pair*), *Pair with a Link…* (this Mac's id under the field, to compare), and *Leave Your Devices…* or, once removed,
+  *Start Over…*. A note says why a second device as co-owner of a folder is a good backup.
+- **On all my devices** (0.1.13): a switch in the folder's Add (*From this Mac*; off by default) and Edit sheets, and
+  in the New Channel window (on by default while this Mac is paired); in the channel's ⋯ menu *On All My Devices*
+  with a checkmark. Under the switch: "Your other devices (MacBook, Studio PC) join it by themselves, as admins.", or
+  why it cannot be turned on. Shown only while this Mac is paired with other devices (or the item is on all of them).
 - **Finder:** a Finder Sync extension inside the app badges each synced folder and its items.
   - **The folder's badge:**
     - green tick: up to date, with a device online;
@@ -1111,8 +1269,8 @@ baseline every later version must still sync with:
     - Later, Settings has the way in.
 - **Agents (§9A):** the `sync.*` methods and `seedwell sync …` commands.
   - Making or listing invitation links (`sync.share`, `sync.invites`), changing roles and removing devices
-    (`sync.set_role`, `sync.remove_device`) and how long a folder is shared (`sync.set_share_until`) need Full
-    permission; `sync.members` is read-only; revoking a link is
+    (`sync.set_role`, `sync.remove_device`), sharing a folder again (`sync.reshare`) and how long a folder is shared
+    (`sync.set_share_until`) need Full permission; `sync.members` is read-only; revoking a link is
     Control.
   - Links never reach the activity log.
   - *Remove and delete files* takes two steps.
@@ -1138,41 +1296,50 @@ Chat between devices, for people and agents (0.1.6).
 - **Sharing:** a channel stands on its own, not tied to a folder. It has an owner and members with the folder roles,
   shared with one or more devices by invitation link through the same Share dialog (single use, link expiry,
   sharing period). Roles decide who may post and who may share.
-- **Agents:** each channel says whether agents on this Mac may read it, or read and post. That is off by default
-  for the user's own channels (an agent channel is open, below), and the Mac's agent permission level still
-  applies; Settings › Agents does not open up chats, on purpose. An agent told no is told where: *Chats ▸ <channel>
-  ▸ ⋯ ▸ Agents on This Mac ▸ Read* (or *Read and post*).
-  - **Only the user sets the switch, in the app** (2026-10-31). No control method or command changes it (there were
-    `chat.set_agents` and `chat.dm_set_agents`; `seedwell chat agents` and `chat dm agents` now only say where the
-    user does). The switch as the user set it is kept (in `sync.toml`) and wins over a channel's default. A headless
-    daemon, which has no app, takes `--chat-agents off|read|post` for every channel and private messages of its run
-    (in memory only).
-  - **Agent channels** (0.1.12, the user's rule of 2026-10-31: "agents use chats marked by agents"). A channel an
-    agent makes through the agent interface (`chat new`, `sync share --chat new`) is an *agent channel*: its owner
-    signs the mark into the channel's membership when it is made (statement kind 7, `PROTOCOL.md`), so every member
-    device knows it. On every device that has it (the one that made it, and one that joins it by link, whether its
-    agent or its user joins; once admitted) it is open to that device's agents at Read and post, so agents on
-    different computers (the Mac's and the Windows PC's development agents, say) talk there with nothing for the
-    user to open, where the user reads every message. The device's user can still close it, or set Read, with the
-    same switch; that choice is kept and wins. The user reads and posts in it like in any channel.
-    - The user's own channels (made in the app, or joined from a link the user pasted that is no agent channel) keep
-      the rule above: closed until the user opens them, invisible to agents while closed. Nothing turns a channel
-      into an agent channel later: no method, command or setting, and not the user's switch (which opens a channel
-      without marking it). There is no mark or unmark in the app either: the user's switch is all the user needs.
-    - While a device waits to be admitted it knows nothing of the channel, so it is closed there until then.
-    - The app shows an agent channel with a small *agents* tag (a quiet capsule, like a message's *agent* badge) after
-      its name in the sidebar and by its name in the toolbar, and its page's line starts "Agent channel"; the
-      tag's tooltip says what agents on this Mac may do in it now. The Windows app tags it in its sidebar.
-    - Agents see `"agent_channel": true` on it (`chat list`, and the channel in every reply).
-    - Older versions (before 0.1.12) keep the mark as a statement they do not know and pass it on; to them, and to
-      their agents, it is an ordinary channel.
-  - **A channel that is off does not exist for agents.** `chat.list` leaves it out and gives only how many there are
-    (`hidden`) and how the user opens one (`hint`, no names). Every method that names it (members, topics, read,
-    send, new topic, share, role, remove device, share until, mute, rename, address, wake, leave, and `sync.share
-    --chat`) answers exactly as for a channel that is not there ("no channel `X`", exit 3), never "permission denied",
-    so not even its existence is confirmed; `chat.join` with its link answers as the join of a new channel. Nothing
+- **Agents: Yes/No** (0.1.13, the user's decision of 2026-10-31: "When creating a channel you set agent enabled to
+  yes or no (can be changed later), if no an agent can never read anything from that channel. If yes agents can
+  join, agents will be marked. Other than that no limits."). One setting for the whole channel, the same on every
+  member device; it replaces 0.1.12's per-Mac switch (*Agents on This Mac*) of each channel, whose stored value is
+  ignored.
+  - **Chosen when the channel is made:** the New Channel window has *Agents: Yes / No* under the name (No unless the
+    user picks Yes; its line says what each means). A channel an agent makes (`chat new`, `sync share --chat new`)
+    is Yes; a folder's new chat made in the Share dialog is No.
+  - **Changed later** in the channel's ⋯ menu, *Agents: Yes* (or *No*) ▸ *Yes* / *No*, by its owners and admins;
+    for other members the choices are disabled, with the line "Only the channel's owners and admins can change
+    this." The Windows app's channel context menu has *Agents: Yes…* (or *No…*) for owners and admins.
+  - **Signed into the membership** (statement kind 8, `PROTOCOL.md`): `open`, a serial and a time, signed by an owner
+    (the channel key) or an admin (its device key); the latest by serial of the owners' and current admins' counts,
+    so it can be switched off and on again, and every member device applies it the same way. 0.1.12's agent-channel
+    mark (kind 7) counts as a Yes at serial 0, so a channel an agent made with 0.1.12 stays open until someone sets
+    No. No statement: No. A device of 0.1.12 keeps a kind 8 statement as one it does not know and passes it on; it
+    goes by its kind 7 mark alone, so there a channel made or switched on since stays closed to agents, and one
+    0.1.12 marked stays open even after a No (its user can still close it with that version's own switch).
+    Nothing breaks either way; versions before 0.1.12 see an ordinary channel.
+  - **Yes:** agents on every member device may join it by link, read, watch, post, make topics, share it, list and
+    manage its members (as this device's role in it allows), with nothing to switch on anywhere and no agent
+    permission level above Control (reads: read-only); only the wake-up command, which runs commands on this Mac,
+    stays at Full. The app-wide *Allow agents* switch (Settings › Agents) still turns all agent access off.
+  - **No:** agents never read anything from the channel: it does not exist for them (below). An agent cannot turn
+    No into Yes (it cannot name a No channel); `chat.set_agents` (`seedwell chat agents <channel> no`) lets an agent
+    close a channel where this device is an owner or admin.
+  - **Joining by link:** a Yes channel's link says so (`agents=yes` in its query, which older versions ignore), so
+    the channel is open to agents on the joining device at once, *joining* until an owner or admin admits it (there
+    is nothing to read before). Once admitted the membership decides: if it says No, the channel disappears for
+    agents there. A link without it (a No channel's) is joined closed: the agent learns nothing of the channel.
+  - **Agents are marked:** a message an agent posts carries its agent name (below) and shows with the *agent* badge
+    on every device; a Yes channel carries a small *agents* tag (a quiet capsule) after its name in the sidebar and
+    by its name in the toolbar (its tooltip says what Yes means), and its page's line ends "agents: yes". The
+    Windows app tags it in its sidebar. Agents see `"agents": "yes"` or `"no"` on a channel.
+  - A headless daemon, which has no app, takes `--chat-agents off|read|post` for private messages of its run (in
+    memory only); its channels need nothing.
+  - **A No channel does not exist for agents.** `chat.list` leaves it out and gives only how many there are
+    (`hidden`) and how one is opened (`hint`, no names). Every method that names it (members, topics, read,
+    send, new topic, share, role, remove device, share until, set agents, mute, rename, address, wake, leave, and
+    `sync.share --chat`) answers exactly as for a channel that is not there ("no channel `X`", exit 3), never
+    "permission denied", so not even its existence is confirmed; `chat.join` with its link answers as the join of a
+    closed channel (`"agents": "no"`, joining). Nothing
     else gives it away: its messages are no `chat.message` events (checked again when an event is handed out, so one
-    published while the channel was open is not given, live or by `events`, once it is closed), the activity log as an
+    published while the channel was open is not given, live or by `events`, once it is No), the activity log as an
     agent reads it (`activity`) leaves out what agents did in it (the user's view in Settings › Agents keeps all),
     `sync.list`/`sync.status` give no `channel_id` for a folder whose chat it is, `sync.invites` leaves out a link that
     carries it, and `sync.list` lists no device this Mac is connected to only for it (or for private messages while
@@ -1202,8 +1369,8 @@ Chat between devices, for people and agents (0.1.6).
     label; private ones carry `direct` and `peer_device`).
   - The control socket's event stream carries messages (only of channels open to agents, and private messages while
     they are).
-  - Per channel, an optional command runs when a message arrives (to wake an agent session). The message goes in as
-    data on its standard input, never as arguments.
+  - Per channel, an optional command runs when a message arrives while the channel is open to agents (to wake an
+    agent session). The message goes in as data on its standard input, never as arguments.
 - **Topics:** a channel holds named topics, like threads with a header. Anyone who may post makes one (*New
   Topic…*); a message is in General or in one topic. A message naming a topic this Mac does not have yet shows
   under General until the topic arrives. Unread is counted per topic, and the channel's count is the total.
@@ -1254,11 +1421,13 @@ Chat between devices, for people and agents (0.1.6).
   the topic inside the signed bytes) and kept by every member, up to 10 000 messages or 50 MB per channel, so a
   device that was offline gets them from any member. A removed or expired member's later messages are ignored.
   Files go through a synced folder.
-- **Permissions** (§9A): `chat.read`, `chat.topics` and the `chat.message` events need read and the channel's
-  agent switch at Read or above; `chat.send` and `chat.new_topic` need control and the switch at Read and post;
-  sharing, roles and the wake-up command need full; every channel method needs the channel open to agents (above).
-  No method changes a switch, or marks a channel; `chat.new` (and `sync.share` with `chat: "new"`) makes an agent
-  channel, and a channel's `agent_channel` says whether it is one. Private messages: `chat.dm_list` and `chat.dm_read` need read and the Mac's switch at
+- **Permissions** (§9A): every channel method needs the channel open to agents (Agents: Yes, above), and then no
+  more than Control: `chat.list`, `chat.members`, `chat.read`, `chat.topics` and the `chat.message` events need
+  read; `chat.new`, `chat.join`, `chat.send`, `chat.new_topic`, `chat.share`, `chat.set_role`,
+  `chat.remove_device`, `chat.set_share_until`, `chat.set_agents` (owners and admins; an agent sets only No in
+  practice), `chat.mute`, `chat.rename`, `chat.add_address` and `chat.leave` need control; only `chat.set_wake` (it
+  runs commands on this Mac) needs full. `chat.new` (and `sync.share` with `chat: "new"`) makes a Yes channel; a
+  channel's `agents` is `yes` or `no`. Private messages: `chat.dm_list` and `chat.dm_read` need read and the Mac's switch at
   Read, `chat.dm_send` control and the switch at Read and post, `chat.dm_delete` full. Every message in the agent interface carries `"trust"`: `this-device` for the user's
   own posts on this Mac, else `untrusted-agent` (an agent's post here) or `untrusted-peer` (another device's).
   `chat.send`, `chat.new_topic` and `chat.dm_send` take an optional `agent` name (1 to 64 characters); without it
@@ -1271,7 +1440,7 @@ heads-ups, and say what became of them. Mail is a way of using a channel, not a 
 without it reads mail as ordinary Markdown messages, and the protocol does not change.
 
 - **The mail channel:** `seedwell mail` works in `--channel C`, else `$SEEDWELL_MAIL_CHANNEL`, else the one channel
-  where agents on this Mac may post (several: it says which, and asks for `--channel`).
+  open to agents where this Mac may post (several: it says which, and asks for `--channel`).
 - **A project's inbox** is the channel's topic titled with the project's name (any case), made by the first mail to
   it. A project is an agent name (§7G.7: `--as`, else `$SEEDWELL_AGENT`, else the git project's folder name).
   Sending is posting into the recipient's thread; an agent follows only its own.
@@ -1902,7 +2071,7 @@ Agents like Claude should be able to operate Seedwell as easily as a person: "ad
 | Watch | `wait <torrent>... [--any] [--timeout S]` · `watch` · `activity` · `log trackers` |
 | Debug | `dev on\|off\|status` · `debug health\|trackers\|peers\|perf\|announce` (§9A.5) |
 | Folder sync | `sync list\|status\|add\|join\|share [--role R] [--uses N\|unlimited] [--days N\|never] [--chat <channel>\|new]\|share-until <days>\|never [--extend]\|members\|invites\|revoke-invite\|role\|remove-device\|rename\|move\|pause\|resume\|rescan\|address\|remove\|settings` (§7G.5) · `relay [--port N]`. Read-only: `list`, `status`, `members`, `settings`; full: `share`, `share-until`, `invites`, `role`, `remove-device`, `rename`, `move`, changing `settings`, `remove --delete-files`; control: the rest |
-| Channels | `chat list\|new\|join\|share [--role R] [--uses N\|unlimited] [--days N\|never]\|members\|role\|remove-device\|share-until\|topics\|topic <title>\|send [--topic T] [--reply ID] [--as-json] -\|read [--topic T] [--since ID\|--last N]\|watch [<channel>...] [--topic T]\|dm list\|send <device> -\|read <device>\|watch\|delete <device>\|address\|rename <name>\|mute\|wake <command>\|off\|leave` (§7G.7); `rename` names the channel on this Mac only, as a folder's name. Every command needs the channel open to agents (its switch, which only the user sets in the app; a closed channel is not there for agents), or the Mac's switch for private messages. `new` makes an agent channel, open to agents at read and post on every device that has it unless that device's user closes it (`join` with its link: once admitted). Read-only: `list`, `members`, `topics`, `read`, `watch`, `dm list`, `dm read`, `dm watch`; full: `share`, `role`, `remove-device`, `share-until`, `wake`, `dm delete`; control: the rest (`send`, `topic` and `dm send` also need the switch at post) |
+| Channels | `chat list\|new\|join\|share [--role R] [--uses N\|unlimited] [--days N\|never]\|members\|role\|remove-device\|share-until\|topics\|topic <title>\|send [--topic T] [--reply ID] [--as-json] -\|read [--topic T] [--since ID\|--last N]\|watch [<channel>...] [--topic T]\|dm list\|send <device> -\|read <device>\|watch\|delete <device>\|address\|rename <name>\|mute\|wake <command>\|off\|agents <channel> no\|leave` (§7G.7); `rename` names the channel on this Mac only, as a folder's name. Every command needs the channel open to agents (Agents: Yes, one setting for the whole channel; a No channel is not there for agents), or the Mac's switch for private messages (only the user sets that one, in the app). `new` makes a Yes channel; `join` with a Yes channel's link opens it to agents at once (joining until admitted); `agents <channel> no` closes a channel (owners and admins). Read-only: `list`, `members`, `topics`, `read`, `watch`, `dm list`, `dm read`, `dm watch`; full: `wake`, `dm delete`; control: the rest (`dm send` also needs the switch at post) |
 | Test | `sim ...` (§9A.6) · `daemon ...` |
 | Agents | `skill show\|install\|uninstall` · `awake --for D\|off\|status` (§9A.7) · `update [status]\|install <zip>\|watch <folder>\|watch --off\|dev-builds on\|off` (§12A) · `help [command\|agents]` |
 
@@ -1922,7 +2091,10 @@ Agents like Claude should be able to operate Seedwell as easily as a person: "ad
 - **Out of reach for every level:**
   - client identity and the compliance behaviour of §7B;
   - announce timing (manual re-announce still goes through the HostGate, §7C; `debug announce` never bypasses the gate: the answer says when the tracker may be asked again);
-  - passkeys and HTTP auth headers, which are never returned, in any command, text or JSON.
+  - passkeys and HTTP auth headers, which are never returned, in any command, text or JSON;
+  - the user's own devices (§7G.1 *Your devices*): no command pairs, confirms, removes, follows, leaves or starts
+    over, and none returns the user key or names the group (not as a folder or channel, not by its id, not as a
+    device connected only for it). The CLI has no pairing commands: pairing is the app's alone.
 - **Activity log:** every agent action is recorded with the client name, time and arguments, and shown in Settings → Agents. An optional notification can say "Claude paused 3 downloads".
 - Calls are rate-limited (default 20/s per client) to protect the UI and disk. Tracker traffic is protected separately by the HostGate.
 - **Removal is two steps** on the wire (plan and token, then confirm); the CLI asks `Proceed? [y/N]` on a terminal, `-y` confirms, and with `--json` and no `-y` it prints the plan and the token and removes nothing.
@@ -2040,31 +2212,61 @@ when the user asks.
   at a release) and a fourth number counted by `tools/dev-build.sh` from 1 for each version. So `0.1.10` <
   `0.1.10.1` < `0.1.10.2` < `0.1.11`: a build is newer than its release and older than the next. Releases stay plain
   `X.Y.Z` (a release's `latest.json` with four parts offers nothing). The Mac app carries it as `SeedwellDevVersion`
-  in Info.plist (`CFBundleShortVersionString` stays `X.Y.Z`; the Windows app: its own version file, to come), the
-  host passes it to the core, which takes it only when it builds on the core's own version. The app shows "0.1.10.3
+  in Info.plist (`CFBundleShortVersionString` stays `X.Y.Z`), the Windows app as the assembly metadata
+  `SeedwellDevVersion` (`app-windows/dev-build.ps1` builds it, through `release-zip.ps1 -DevVersion`); the host passes
+  it to the core, which takes it only when it builds on the core's own version. The app shows "0.1.10.3
   (development build)" in the Updates group. The peer id names the release (`-SW<X.Y.Z>-`).
 - **Handing over a build.** `seedwell update install <Seedwell-X.Y.Z.N.zip> [--sha256 HEX]` (control method
   `update.install`, Control permission) or **Install Build…** (a file chooser, shown while the switch is on). The
   core checks the switch, that the name is this system's zip (`Seedwell-<version>.zip`, `-windows-x64.zip` on
   Windows) of another version than the running one, and the file's SHA-256 (against `--sha256` when given); then it
   starts the running app's own installer (`install.sh` in the bundle's Resources; `install.ps1` next to the exe) on
-  it, itself, detached (`trs_platform::update::spawn`), output to `logs/update.log`. Refusals say why ("development
+  it, itself, detached (`trs_platform::update::spawn`), output to `logs/update.log`. A handed-over build may be of any
+  other version, older included: whoever may use the control socket chose it. Refusals say why ("development
   builds are off: turn on Settings › General › Updates › Allow development builds"). A build installed over a Seedwell signed with a Developer ID
   must be signed by the same team (`tools/dev-build.sh` signs with `SEEDWELL_SIGN_IDENTITY`; it needs no
   notarization): the Folder Sync and chat keys are in that team's Keychain, which an ad-hoc build cannot read, and it
   would start as a new device; the installer refuses it.
-- **A watched folder (optional, for fast iteration).** `seedwell update watch <folder>` (`update.watch`; `--off` to
-  stop; `[updates] dev_folder`, acting only while the switch is on; Settings shows the folder with **Stop
-  Watching**). The core watches it with `trs-fswatch` (FSEvents, ReadDirectoryChangesW, inotify; polling only where
-  native watching cannot start) on a thread of its own while it is set and the switch is on, and stops the watcher
-  when either goes off. No timer: the folder is read once when watching starts (at launch, when the switch or the
-  folder changes) and on file-change notifications, each a hint (a rescan too) to read `<folder>/latest.json` again
-  and believe the disk. `latest.json` is a release's format (`version`, this system's `zip` and `sha256`, `minimum_*`;
-  Windows under `"windows"`; `commit` for information, no `tag` needed), written by `tools/dev-build.sh --to <folder>`
-  after the zip and renamed into place, so a half-copied build is never seen. One folder per system: a Mac and a
-  Windows build in one folder would overwrite each other's `latest.json`. A build there is
-  installed by the core when it is newer than the running version, not marked failed, its zip is there and nothing is
-  downloading or being moved (else at the next notification or look).
+- **A watched folder: every device of the user's (2026-10-31).** `seedwell update watch <folder>` (`update.watch`;
+  `--off` to stop; `[updates] dev_folder`, acting only while the switch is on; Settings shows the folder with **Stop
+  Watching**), on the Mac and on Windows alike. The user's devices share one, `<Seedwell Sync folder>/builds/`
+  (Folder Sync carries it), so a build put there reaches each device that watches it within minutes. The core
+  watches it with `trs-fswatch` (FSEvents, ReadDirectoryChangesW, inotify; polling only where native watching cannot
+  start) on a thread of its own while it is set and the switch is on, and stops the watcher when either goes off. No
+  timer: the folder is read once when watching starts (at launch, when the switch or the folder changes) and on
+  file-change notifications, each a hint (a rescan too) to read `<folder>/build.json` again and believe the disk.
+- **Only the user's builds (trust).** Anyone who can write to a watched folder (any member of a shared folder) can
+  put files there, so a folder is a code-execution path and the core installs from it only what is provably the
+  user's (`trs-buildsig`, shared by both hosts through the core):
+  - `build.json` is `{"manifest": "<JSON text>", "key", "signature"}`: an Ed25519 signature by the **build key** over
+    `"seedwell-build-manifest/v1\n"` and the manifest's text, which names each system's build (`"builds": {"macos":
+    {...}, "windows": {...}}`, each `version`, `commit`, `zip`, `sha256`, `minimum_system`). The key must be one this
+    copy trusts: the public keys compiled into the core (`TRUSTED_KEYS`), so the trust comes with the app itself, from
+    a release (Developer ID and notarized on the Mac, checked against `SHA256SUMS` on Windows); no device is asked to
+    accept a key and nothing in a folder can add one. A key added is trusted from the release that carries it. An
+    isolated (test) run also trusts the key in `SEEDWELL_TEST_BUILD_KEY`; the user's app never reads it. With no
+    trusted key the core installs nothing from a folder.
+  - The secret key is made once on the Mac that publishes builds (`tools/build-sign.sh key new`) and kept in its login
+    Keychain; it reaches the signer (`seedwell-build-sign`, a development tool) on standard input and is never in the
+    repository, an argument or a log.
+  - This system's entry must name this system's zip of its version (`Seedwell-X.Y.Z.N.zip`,
+    `-windows-x64.zip`), newer than the running version (never the same or older from a folder: only `update install`
+    can go back), not marked failed, for a system this one meets; the zip there must have the signed SHA-256 (a zip
+    still arriving or swapped is waited for, never installed), and the installer checks its own copy again.
+  - On the Mac a watched build must also be signed with Seedwell's Developer ID (an Apple-issued Developer ID
+    certificate of team `6GND8Z2C7Z`) and carry the installed app's bundle id: the core passes `--developer-id` to
+    `install.sh`, which checks both after unpacking (an isolated test run, signed ad hoc, does not). Windows builds are
+    not code-signed yet: there the signed manifest is the check.
+  - Refusals are the status line ("build.json is signed by a key this copy of Seedwell does not trust", "no build
+    for this system there yet", "waiting for Seedwell-….zip").
+  A build that passes is installed by the core when nothing is downloading or being moved (else at the next
+  notification or look).
+- **Publishing a build to every device.** The Mac: `tools/dev-build.sh --to <folder>` copies the zip in, then signs
+  it into `build.json` (`tools/build-sign.sh add`, written aside and renamed, so a half-written manifest is never
+  read), keeping the other system's entry while its zip is there, and removes the old unsigned `latest.json`.
+  Windows: the PC builds (`app-windows/dev-build.ps1 -To <folder>`: the zip only, never a manifest) and its agent
+  posts the zip's name and SHA-256 in the agent channel; the Mac's agent signs that checksum in (`tools/build-sign.sh
+  add <folder> <zip> --sha256 HEX`), which refuses a zip there with another checksum. The key stays on one Mac.
 - **Back to the release.** Turning the switch off while a development build runs stops watching and checks GitHub at
   once, then installs the latest release by itself (neither of the other two switches is needed) although it is
   older than the build; a check that fails tries again 10 minutes later. The way back survives a relaunch; turning
@@ -2075,12 +2277,13 @@ when the user asks.
 
 1. **Started fine.** The host calls `Updates::started` once the app has run 30 s; it writes `launch-ok` in the state
    folder (the running version) and clears the count of launches without it.
-2. **Keep the last good app.** Every install from this version on is given the state folder and the arguments to
-   reopen the app with, as environment variables (`SEEDWELL_INSTALL_STATE_DIR`, `SEEDWELL_RELAUNCH_ARGS`, one
+2. **Keep the last good app.** Every install from this version on (on Windows from 0.1.13) is given the state folder
+   and the arguments to reopen the app with, as environment variables (`SEEDWELL_INSTALL_STATE_DIR`, `SEEDWELL_RELAUNCH_ARGS`, one
    argument a line; an older installer ignores them). Before replacing the app, the installer keeps it in
    `<state>/previous/` as a zip (not an app bundle, so the system never registers a second Seedwell for .torrent files
    and magnet links), with that app's own installer and its version (`previous.json`), but only when `launch-ok`
-   names it: a copy that never started fine is never kept as the good one.
+   names it: a copy that never started fine is never kept as the good one. The Windows app carries its installer
+   next to `Seedwell.exe` (`install.ps1`, in the zip) and its version is the one Apps & features records.
 3. **Watchdog.** After the swap the installer removes `launch-ok`, opens the new app (an isolated run with its own
    `--state-dir`, directly) and waits up to 120 s for `launch-ok` to name the new version. If it does not (the app
    did not start, crashed, or is stuck), the installer quits it, puts the kept app back and opens it. That app's

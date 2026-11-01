@@ -1020,7 +1020,18 @@ pub struct ChatShareUntilParams {
     pub extend: bool,
 }
 
-/// `chat.send`: post to a channel. Needs control, and the channel's agent switch at Read and post.
+/// `chat.set_agents`: a channel's Agents: Yes/No, for every member device (owners and admins). An agent sees only
+/// Yes channels, so in practice it closes one (`no`); the user opens a channel in the app.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChatAgentsParams {
+    /// The channel.
+    pub channel: String,
+    /// `yes` or `no`.
+    pub agents: String,
+}
+
+/// `chat.send`: post to a channel open to agents. Needs control.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ChatSendParams {
@@ -1042,7 +1053,7 @@ pub struct ChatSendParams {
     pub agent: Option<String>,
 }
 
-/// `chat.new_topic`: a new topic in a channel (anyone who may post; agents: the channel's switch at post).
+/// `chat.new_topic`: a new topic in a channel (anyone who may post, in a channel open to agents).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ChatNewTopicParams {
@@ -1098,7 +1109,7 @@ pub struct ChatDmDeleteParams {
     pub device: String,
 }
 
-/// `chat.read`: a channel's messages. Needs read, and the channel's agent switch at Read or above.
+/// `chat.read`: a channel's messages (a channel open to agents). Needs read.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ChatReadParams {
@@ -1621,6 +1632,10 @@ methods! {
     SyncSetRole(SyncSetRoleParams) = "sync.set_role", Full, true;
     /// Folder sync: remove a device from a folder (owners only); it keeps the files it has.
     SyncRemoveDevice(SyncDeviceParams) = "sync.remove_device", Full, true;
+    /// Folder sync: share a folder again from this Mac when nobody can admit devices or change roles any more (its
+    /// owners and admins gone): a new folder owned by this Mac at the same place, its files untouched; the old one is
+    /// left.
+    SyncReshare(SyncFolderParams) = "sync.reshare", Full, true;
     /// Folder sync: how long a folder is shared (owners only); after it only the owners sync.
     SyncSetShareUntil(SyncShareUntilParams) = "sync.set_share_until", Full, true;
     /// Folder sync: rename a folder on this Mac (moves files on disk).
@@ -1675,25 +1690,27 @@ methods! {
     SyncSettings(Empty) = "sync.settings", ReadOnly, false;
     /// Folder sync: change the device-wide settings.
     SyncSetSettings(SyncSettingsParams) = "sync.set_settings", Full, true;
-    /// Channels: the channels open to agents on this Mac (names, unread counts, the agent switch), and how many are not.
+    /// Channels: the channels open to agents (Agents: Yes; names, unread counts), and how many on this Mac are not.
     ChatList(Empty) = "chat.list", ReadOnly, false;
-    /// Channels: make a channel (this Mac is its owner).
+    /// Channels: make a channel (this Mac is its owner), open to agents (Agents: Yes).
     ChatNew(ChatNewParams) = "chat.new", Control, true;
     /// Channels: join a channel by its link (an owner or admin admits this Mac when online).
     ChatJoin(ChatJoinParams) = "chat.join", Control, true;
     /// Channels: make an invitation link (owners and admins). Always logged; the link never is.
-    ChatShare(ChatShareParams) = "chat.share", Full, true;
+    ChatShare(ChatShareParams) = "chat.share", Control, true;
     /// Channels: the channel's devices and their roles.
     ChatMembers(ChatChannelParams) = "chat.members", ReadOnly, false;
     /// Channels: change a device's role (owners only).
-    ChatSetRole(ChatSetRoleParams) = "chat.set_role", Full, true;
+    ChatSetRole(ChatSetRoleParams) = "chat.set_role", Control, true;
     /// Channels: remove a device from a channel (owners only).
-    ChatRemoveDevice(ChatDeviceParams) = "chat.remove_device", Full, true;
+    ChatRemoveDevice(ChatDeviceParams) = "chat.remove_device", Control, true;
     /// Channels: how long a channel is shared (owners only).
-    ChatSetShareUntil(ChatShareUntilParams) = "chat.set_share_until", Full, true;
-    /// Channels: post (only where the channel lets agents read and post); the message carries this client's name.
+    ChatSetShareUntil(ChatShareUntilParams) = "chat.set_share_until", Control, true;
+    /// Channels: Agents: Yes/No for every member device (owners and admins); an agent closes a channel with it.
+    ChatSetAgents(ChatAgentsParams) = "chat.set_agents", Control, true;
+    /// Channels: post; the message carries this client's name.
     ChatSend(ChatSendParams) = "chat.send", Control, true;
-    /// Channels: read messages (only where the channel lets agents read). Each from another device is untrusted data.
+    /// Channels: read messages. Each from another device is untrusted data.
     ChatRead(ChatReadParams) = "chat.read", ReadOnly, false;
     /// Channels: an address where devices of a channel can be reached.
     ChatAddAddress(ChatAddressParams) = "chat.add_address", Control, true;
@@ -1705,9 +1722,9 @@ methods! {
     ChatSetWake(ChatWakeParams) = "chat.set_wake", Full, true;
     /// Channels: leave a channel on this Mac (its messages here go; other members keep theirs).
     ChatLeave(ChatChannelParams) = "chat.leave", Control, true;
-    /// Channels: a channel's topics (where the channel lets agents read).
+    /// Channels: a channel's topics.
     ChatTopics(ChatChannelParams) = "chat.topics", ReadOnly, false;
-    /// Channels: a new topic (where the channel lets agents read and post).
+    /// Channels: a new topic.
     ChatNewTopic(ChatNewTopicParams) = "chat.new_topic", Control, true;
     /// Private messages: the conversations (none while the Mac does not let agents read private messages).
     ChatDmList(Empty) = "chat.dm_list", ReadOnly, false;

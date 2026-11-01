@@ -22,3 +22,7 @@ dev-docs/
 /app-windows/Generated
 /app-windows/bin
 /app-windows/obj
+
+# Cloudflare wrangler state (tools/rendezvous-worker)
+.wrangler/
+node_modules/

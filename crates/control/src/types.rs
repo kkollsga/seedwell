@@ -950,8 +950,8 @@ pub struct EventDto {
     /// `direct_restarted`, `watch_error`, `config_reloaded`, `config_rejected`, `lagged`,
     /// `choice_needed`, `choice_resolved`, `pending` (`data.change`: added, paused, resumed, started, chosen), `locations_changed`, `move_started`, `move_progress`,
     /// `move_finished`, `move_failed`, `chat.message` (`id`: the channel, or for a private message the other device;
-    /// `data`: the message, untrusted unless it is from this Mac; only while the agent switch allows reading, also
-    /// when it is replayed by `events`).
+    /// `data`: the message, untrusted unless it is from this Mac; only while its channel is open to agents (or for a
+    /// private message the Mac's switch allows reading), also when it is replayed by `events`).
     pub kind: String,
     /// Transfer id, when the event is about one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1462,6 +1462,74 @@ pub struct SyncFolderDto {
     /// Files no device can give right now (not counted in `need_files`).
     #[serde(default)]
     pub unavailable: u64,
+    /// Joining: what it does now to find an owner or admin, a sentence ("Looking for Anna's Mac mini on the local
+    /// network…", "Trying Anna's Mac mini at 192.168.68.57:55799…"). Absent once admitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<String>,
+    /// Joining: the last thing that went wrong ("Anna's Mac mini at 192.168.68.57:55799: no answer", "Anna's Mac
+    /// mini runs Seedwell 0.1.9, an older Seedwell that cannot sync with this one: update it").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub problem: Option<String>,
+    /// As an owner or admin: the attempts to join with a link that this Mac refused, newest last (at most 20, kept
+    /// while it runs).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub join_attempts: Vec<JoinAttemptDto>,
+    /// Admitted, with members of which none is connected: whom it waits for, since when, and why it cannot reach
+    /// one ("Waiting for Kristian's Mac mini (last seen 3 days ago: nothing answers at 192.168.68.57:55799)").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting: Option<String>,
+    /// As an owner: members not connected for a day or more (or never here), which this Mac may remove
+    /// (`sync.remove_device`). Nothing is removed on its own.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gone: Vec<GoneDeviceDto>,
+    /// Every owner and admin of the folder is gone (nobody can admit devices or change roles any more): this Mac, a
+    /// member, may share it again (`sync.reshare`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub can_reshare: bool,
+}
+
+/// A member of a folder or channel gone for a day or more (`gone`).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct GoneDeviceDto {
+    /// Its id.
+    pub device_id: String,
+    /// Its name.
+    pub name: String,
+    /// When it was last connected (Unix seconds); absent: never here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_seen_at: Option<u64>,
+}
+
+/// An attempt to join with a link that this Mac refused (`join_attempts`).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct JoinAttemptDto {
+    /// When (Unix seconds).
+    pub at: u64,
+    /// The device that tried.
+    pub device_id: String,
+    /// Its name (empty when it did not say).
+    pub name: String,
+    /// Its client (`Seedwell 0.1.9`).
+    pub client: String,
+    /// Why it was refused ("this link has expired", "this link has been used up", …).
+    pub reason: String,
+}
+
+/// A device of a folder or channel on this Mac that is not connected (`sync.list`).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct SyncOfflineDeviceDto {
+    /// Its device id.
+    pub id: String,
+    /// Its name.
+    pub name: String,
+    /// When a session with it last began or ended (Unix seconds); absent: never connected here.
+    #[serde(default)]
+    pub last_seen_at: Option<u64>,
+    /// Why the last attempt to connect to it failed.
+    #[serde(default)]
+    pub last_problem: Option<String>,
+    /// The folders and channels it is in (ids).
+    pub folders: Vec<String>,
 }
 
 /// One unresolved conflict copy (`sync.conflicts`).
@@ -1690,29 +1758,42 @@ pub struct ChatChannelDto {
     pub last_message_at: Option<u64>,
     /// Notifications muted.
     pub muted: bool,
-    /// What agents on this Mac may do in it: `off`, `read` or `post`.
+    /// Agents: `yes` (open to agents on every member device: they read and post in it) or `no` (closed; such a
+    /// channel never reaches an agent, so an agent sees `yes`, or `no` only for one it just closed or joined closed).
     pub agents: String,
-    /// An agent channel: an agent made it (`chat.new`), for agents to talk where the user can read. Its owner's mark,
-    /// so every member device knows; open to agents at `post` there unless that device's user closed it.
-    #[serde(default)]
-    pub agent_channel: bool,
     /// The wake-up command, if set.
     #[serde(default)]
     pub wake_command: Option<String>,
     /// Problems (devices it cannot sync with, ...).
     #[serde(default)]
     pub issues: Vec<String>,
+    /// Joining: what it does now to find an owner or admin (as a folder's `progress`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<String>,
+    /// Joining: the last thing that went wrong (as a folder's `problem`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub problem: Option<String>,
+    /// As an owner or admin: the attempts to join with a link that this Mac refused, newest last.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub join_attempts: Vec<JoinAttemptDto>,
+    /// A member, with other members of which none is connected: whom it waits for and since when (as a folder's).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting: Option<String>,
+    /// As an owner: members not connected for a day or more (or never here), which this Mac may remove
+    /// (`chat.remove_device`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gone: Vec<GoneDeviceDto>,
 }
 
 /// `chat.list` result.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ChatListDto {
-    /// The channels open to agents on this Mac (their switch at read or post), by name.
+    /// The channels open to agents (Agents: Yes), by name.
     pub channels: Vec<ChatChannelDto>,
-    /// How many channels on this Mac are closed to agents (their switch off). Nothing else about them is given.
+    /// How many channels on this Mac are closed to agents (Agents: No). Nothing else about them is given.
     #[serde(default)]
     pub hidden: u32,
-    /// With `hidden`: how the user opens one to agents.
+    /// With `hidden`: how one is opened to agents (by its owner or an admin, in the app).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hint: Option<String>,
 }
@@ -1860,6 +1941,10 @@ pub struct SyncListDto {
     pub folders: Vec<SyncFolderDto>,
     /// The connected devices.
     pub devices: Vec<SyncDeviceDto>,
+    /// The devices of the folders and channels here that are not connected: when each was last seen, and why the
+    /// last attempt to connect to it failed.
+    #[serde(default)]
+    pub offline_devices: Vec<SyncOfflineDeviceDto>,
 }
 
 /// One invitation of a folder (`sync.share`, `sync.invites`). The link is a secret: anyone who has it can join
@@ -1960,12 +2045,37 @@ pub struct SyncSettingsDto {
     pub down_limit: Option<u64>,
     /// Where joined folders go by default (empty = `~/Seedwell`).
     pub default_location: String,
+    /// The rendezvous on the user's Cloudflare (read only here: it is set up in the app, Settings › Folder Sync).
+    #[serde(default)]
+    pub rendezvous: SyncRendezvousDto,
     /// The settings that were changed by this call.
     #[serde(default)]
     pub changed: Vec<String>,
     /// What to know ("folder sync listens on port N now").
     #[serde(default)]
     pub note: String,
+}
+
+/// The rendezvous, in `sync.settings` (SPEC §7G.3).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SyncRendezvousDto {
+    /// Its address (empty: none set up).
+    pub url: String,
+    /// When this device's record was last written there, Unix seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_publish_at: Option<u64>,
+    /// What went wrong last (empty: nothing since the last write that worked).
+    #[serde(default)]
+    pub last_error: String,
+    /// When that was, Unix seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error_at: Option<u64>,
+    /// Devices found through a rendezvous since the start.
+    #[serde(default)]
+    pub found: u64,
+    /// When the last one was found, Unix seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_found_at: Option<u64>,
 }
 
 /// `sync.remove` result (step 1).

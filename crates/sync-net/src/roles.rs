@@ -54,7 +54,15 @@ pub(crate) fn from_test_build(path: &Path) -> bool {
 
 /// Reads a folder's membership; a missing file is an empty one.
 pub(crate) fn load(path: &Path, folder_pk: [u8; 32]) -> io::Result<Membership> {
-    let mut m = Membership::new(folder_pk);
+    load_into(path, Membership::new(folder_pk))
+}
+
+/// Reads a devices group's membership ([`Membership::new_devices`]); a missing file is an empty one.
+pub(crate) fn load_devices(path: &Path, group_pk: [u8; 32]) -> io::Result<Membership> {
+    load_into(path, Membership::new_devices(group_pk))
+}
+
+fn load_into(path: &Path, mut m: Membership) -> io::Result<Membership> {
     let bytes = match std::fs::read(path) {
         Ok(b) => b,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(m),
@@ -97,6 +105,7 @@ pub(crate) fn noun(f: &Space) -> &'static str {
     match f.kind {
         SpaceKind::Folder => "folder",
         SpaceKind::Channel => "channel",
+        SpaceKind::Devices => "group of your devices",
     }
 }
 
@@ -134,6 +143,10 @@ pub(crate) fn publish_profile(ctx: &Ctx, f: &Space) -> bool {
     let name = lock(&ctx.device_name).clone();
     let user = lock(&ctx.user_name).clone();
     if !profile_name_ok(&name, false) || !profile_name_ok(&user, true) {
+        return false;
+    }
+    // Not into a devices group the device moved on from.
+    if f.kind == SpaceKind::Devices && ctx.registry.devices().map(|g| g.id) != Some(f.id) {
         return false;
     }
     let serial = {
@@ -234,7 +247,8 @@ pub(crate) async fn changed(ctx: &Arc<Ctx>, f: &Arc<Space>) {
             None => {
                 // Told first, so it knows; then the session ends (a channel only stops being shared over it).
                 let _ = p.control.send(Message::Members(Members { folder_id: f.id, statements: statements.clone() })).await;
-                if f.kind == SpaceKind::Channel {
+                // A channel or the devices group only stops being shared over it (the session may carry folders).
+                if f.kind != SpaceKind::Folder {
                     p.folders.write().unwrap_or_else(|e| e.into_inner()).remove(&f.id);
                     continue;
                 }
@@ -253,18 +267,31 @@ pub(crate) async fn changed(ctx: &Arc<Ctx>, f: &Arc<Space>) {
             }
         }
     }
+    // The devices group, or a folder or channel that may follow in it: what follows is brought in line.
+    if f.kind == SpaceKind::Devices || ctx.registry.devices().is_some() {
+        ctx.devices_wake.notify_one();
+    }
 }
 
-/// This device's proofs for a folder (or channel) in a Join: its grant (and the admin's that signed it), or the
-/// invitation it joins with, bound to the session. `None`: nothing to prove (removed, or never a member).
-pub(crate) fn proofs(ctx: &Ctx, f: &Space, exporter: &[u8; 32]) -> Option<Vec<Proof>> {
+/// This device's proofs for a folder (or channel) in a Join, for the device `peer_pk`: its grant (and the admin's
+/// that signed it), or the invitation it joins with, bound to the session, or, following one of the user's own
+/// devices and talking to one of them, that it is one of them ([`Proof::Sibling`]). `None`: nothing to prove
+/// (removed, or never a member).
+pub(crate) fn proofs(ctx: &Ctx, f: &Space, exporter: &[u8; 32], peer_pk: &[u8; 32]) -> Option<Vec<Proof>> {
     let me = ctx.key.public_key();
     let grants = f.membership.read().unwrap_or_else(|e| e.into_inner()).proofs_for(me);
     if !grants.is_empty() {
         return Some(grants.iter().map(|st| Proof::Grant(st.to_bytes())).collect());
     }
-    let invite = lock(&f.invite).clone()?;
-    Some(vec![Proof::Invite(redeem_proof(&invite.invite, &invite.token_seed, me, exporter))])
+    if let Some(invite) = lock(&f.invite).clone() {
+        return Some(vec![Proof::Invite(redeem_proof(&invite.invite, &invite.token_seed, me, exporter))]);
+    }
+    // A devices group this device moves to (its key changed after a removal): nothing to prove; its members know
+    // this device's key from the group it moved from.
+    if f.kind == SpaceKind::Devices {
+        return f.following.load(std::sync::atomic::Ordering::SeqCst).then(Vec::new);
+    }
+    crate::devices::sibling_proof(ctx, f, peer_pk).map(|p| vec![p])
 }
 
 /// What a peer's Join proves for one folder.
@@ -273,6 +300,8 @@ pub(crate) enum Proved {
     Member(Access),
     /// It redeemed an invitation that this device refused, for this reason (told to the peer).
     Refused(String),
+    /// It redeemed a pairing link of this device's: waiting for the user here to confirm (the devices group only).
+    Pending,
     /// Nothing this device can accept (a joining device met a member that does not admit).
     Nothing,
 }
@@ -291,6 +320,15 @@ pub(crate) fn check(ctx: &Ctx, f: &Space, peer_pk: &[u8; 32], exporter: &[u8; 32
     if let Some(r) = f.role_of(peer_pk) {
         return Proved::Member(r.access());
     }
+    // One of the user's own devices, for a folder or channel that follows: admitted by an owner or admin here.
+    if f.kind != SpaceKind::Devices
+        && let Some(group) = proofs.iter().find_map(|p| match p {
+            Proof::Sibling(b) => Some(b.as_slice()),
+            _ => None,
+        })
+    {
+        return crate::devices::check_sibling(ctx, f, peer_pk, group, changed);
+    }
     let Some(invite) = proofs.iter().find_map(|p| match p {
         Proof::Invite(b) => check_redeem(b, peer_pk, exporter),
         _ => None,
@@ -307,6 +345,8 @@ pub(crate) fn check(ctx: &Ctx, f: &Space, peer_pk: &[u8; 32], exporter: &[u8; 32
     let verdict = f.membership.read().unwrap_or_else(|e| e.into_inner()).check_admit(me, &invite, peer_pk, now);
     match verdict {
         Ok(Some(r)) => Proved::Member(r.access()),
+        // A pairing link: only the device that made it admits, once the user there confirms.
+        Ok(None) if f.kind == SpaceKind::Devices => crate::devices::pair_request(ctx, peer_pk, &invite),
         Ok(None) => {
             let grant = Body::Grant { device: *peer_pk, role: invite.role, serial: 0, at_s: now, invite: Some(invite) };
             let st = match f.role_of(me) {
@@ -326,6 +366,7 @@ pub(crate) fn check(ctx: &Ctx, f: &Space, peer_pk: &[u8; 32], exporter: &[u8; 32
         }
         // A device that is not an owner or admin does not admit: the joining device keeps looking.
         Err(trs_sync_proto::members::AdmitError::NotAllowed) if !f.role_of(me).is_some_and(Role::admits) => Proved::Nothing,
+        Err(e) if f.kind == SpaceKind::Devices => Proved::Refused(crate::devices::refusal(e)),
         Err(e) => Proved::Refused(e.to_string()),
     }
 }
@@ -333,6 +374,10 @@ pub(crate) fn check(ctx: &Ctx, f: &Space, peer_pk: &[u8; 32], exporter: &[u8; 32
 /// A co-owner receives the folder (or channel) secret from an owner.
 pub(crate) async fn owner_key(ctx: &Arc<Ctx>, f: &Arc<Space>, from: &[u8; 32], secret: [u8; 32]) {
     let me = *ctx.key.public_key();
+    // A devices group this device moved on from keeps no key: its old key is worth nothing.
+    if f.kind == SpaceKind::Devices && ctx.registry.devices().map(|g| g.id) != Some(f.id) {
+        return;
+    }
     let s = FolderSecret::from_bytes(secret);
     let fits = s.public_key() == f.public.public_key();
     if !fits || f.role_of(from) != Some(Role::Owner) || f.role_of(&me) != Some(Role::Owner) {

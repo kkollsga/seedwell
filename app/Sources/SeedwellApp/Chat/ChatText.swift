@@ -4,11 +4,17 @@ import Foundation
 // with no AppKit, so they can be tested.
 
 enum ChatText {
-    /// What agents on this Mac may do in a channel (the core's words).
+    /// What agents on this Mac may do with private messages (the core's words).
     static func agents(_ a: SyncAgentAccess) -> String { chatAgentsLabel(access: a) }
 
-    /// An agent channel's tag ("agents" and its tooltip; the core's), `nil` for any other channel.
+    /// The tag of a channel open to agents ("agents" and its tooltip; the core's), `nil` for one closed to them.
     static func agentTag(_ c: SyncChannel) -> SidebarTag? { chatAgentTag(channel: c) }
+
+    /// A channel's Agents: Yes/No menu: its title, choices, and whether this Mac may change it (the core's).
+    static func agentsMenu(_ c: SyncChannel) -> ChatAgentsMenu { chatAgentsMenu(channel: c) }
+
+    /// The New Channel window's line under its Agents choice (the core's words).
+    static func newAgentsNote(_ open: Bool) -> String { chatNewAgentsNote(open: open) }
 
     /// A channel's unread messages under General: its total less its topics' (the core's rule).
     static func generalUnread(_ c: SyncChannel, _ topics: [SyncTopic]) -> UInt32 { chatGeneralUnread(channel: c, topics: topics) }

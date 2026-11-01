@@ -560,7 +560,7 @@ fn tell(ctx: &Ctx, new: &[DirectMessage]) {
         let other = if m.author == ctx.direct.me { m.recipient } else { m.author };
         let Some(c) = all.get(&other) else { continue };
         if let Some(i) = c.store.ids.get(&m.id).and_then(|k| c.store.msgs.get(k)).and_then(|s| info(ctx, s, &names)) {
-            let _ = ctx.chat_events.send(ChatEvent { message: i, agents });
+            let _ = ctx.chat_events.send(ChatEvent { message: i, agents: agents >= AgentAccess::Read });
         }
     }
 }

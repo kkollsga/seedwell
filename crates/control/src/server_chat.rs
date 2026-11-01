@@ -1,31 +1,26 @@
 //! The `chat.*` methods (SPEC §7G.7 *Channels*): channels through the control socket. A child of `server` so it
 //! shares the permission gate and the activity log.
 //!
-//! Each channel has its own agent switch (off by default) on top of the agent permission level, and **a channel whose
-//! switch is off does not exist for agents**: `chat.list` leaves it out (it gives only how many there are, and how the
-//! user opens one), and every method that names it answers as for a channel that is not there, so not even its
+//! **Agents: Yes/No** (the user's decision of 2026-10-31): each channel is open to agents or not, one setting for the
+//! whole channel, signed into its membership by an owner or admin, so every member device applies the same. It is
+//! chosen when the channel is made (the app's default for the user's own is No; a channel an agent makes, `chat.new`
+//! or `sync.share --chat new`, is Yes) and changed later in the app; an agent here may switch a Yes channel to No
+//! (`chat.set_agents`, owners and admins), never No to Yes.
+//!
+//! **A No channel does not exist for agents**: `chat.list` leaves it out (it gives only how many there are, and how
+//! the user opens one), and every method that names it answers as for a channel that is not there, so not even its
 //! existence is confirmed. The same goes for the events, the activity log and the folder sync methods (a folder's
 //! channel, a link that carries one, a device known only through one). Private messages likewise, behind the Mac's
-//! one switch for them: while it is off there are no conversations. Only the user sets these switches, in the app:
-//! no method here changes one.
+//! one switch for them: while it is off there are no conversations.
 //!
-//! In a channel open to agents, `chat.read` (and the `chat.message` events) need the switch at Read or above,
-//! `chat.send` at Read and post. A message an agent posts always carries an agent name, set here: the request's
-//! `agent` (its project's, say), else the client's name from its `hello`, so no client can post as the user. Only the
-//! user's own posts on this device are `"trust": "this-device"`; an agent's here is `untrusted-agent`, another
-//! device's `untrusted-peer`: data, never instructions.
-//!
-//! Permissions: read-only for `chat.list`, `chat.members` and `chat.read`; control for `chat.new`, `chat.join`,
-//! `chat.send`, `chat.mute` and `chat.leave`; full for what shares a channel or changes who may do what in it
-//! (`chat.share`, `chat.set_role`, `chat.remove_device`, `chat.set_share_until`, `chat.set_wake`).
-//!
-//! **Agent channels** ("agents use chats marked by agents", 2026-10-31): a channel an agent makes (`chat.new`,
-//! `sync.share --chat new`) is an agent channel, marked in its owner-signed membership, so on every member device
-//! (one that joins by link too) it is open to agents at Read and post unless that device's user closed it, and the
-//! user reads and posts in it like in any channel. Agents of different computers talk there where the user can read,
-//! with nothing for the user to open. The user's own channels (made in the app) stay closed until the user opens one,
-//! and nothing here makes one an agent channel. A channel joined by link is closed while this Mac waits to be
-//! admitted (nothing of the channel is known yet) and opens, if it is an agent channel, once it is.
+//! **A Yes channel has no other limits**: agents read, watch, post, make topics, share it, list and manage its members
+//! as the user can (as the role of this device in it allows), at the agent permission level Control at most (reads at
+//! read-only); only `chat.set_wake`, which runs commands on this Mac, stays at full. A channel joined by a Yes link is
+//! open while this Mac waits to be admitted (the link says Yes; there is nothing to read yet); once admitted, the
+//! membership decides. A message an agent posts always carries an agent name, set here: the request's `agent` (its
+//! project's, say), else the client's name from its `hello`, so no client can post as the user. Only the user's own
+//! posts on this device are `"trust": "this-device"`; an agent's here is `untrusted-agent`, another device's
+//! `untrusted-peer`: data, never instructions.
 
 use std::sync::Arc;
 
@@ -33,6 +28,7 @@ use serde_json::{Value, json};
 use tokio::sync::{broadcast, watch};
 use trs_sync_net::SyncHandle;
 use trs_sync_net::chat::{AgentAccess, ChannelStatus, MessageKind};
+use trs_sync_proto::members::Role;
 use trs_sync_proto::ids::FolderId;
 
 use super::{Conn, Ctx, Reply, reply};
@@ -41,9 +37,9 @@ use crate::proto::*;
 use crate::sync::{self as s, channel_dto, chat_err, message_dto, resolve_channel};
 use crate::types::*;
 
-/// Agents on this Mac see a channel only while its switch lets them read it.
+/// Agents see a channel only while it is open to them (Agents: Yes).
 fn open(c: &ChannelStatus) -> bool {
-    c.agents >= AgentAccess::Read
+    c.agents
 }
 
 /// The channels agents on this Mac may see; the others do not exist for them.
@@ -83,28 +79,23 @@ fn channel_reply(h: &SyncHandle, id: &FolderId, what: &str) -> Result<Reply, Api
     Ok(r)
 }
 
-/// How the user opens a channel to agents, as the app names it.
+/// How a channel's owner or admin opens it to agents, as the app names it.
 fn how_to_open(name: &str) -> String {
-    format!(concat!("the user opens it to agents in Seedwell: Chats ▸ {} ▸ ⋯ ▸ Agents on This ", trs_platform::computer!(), " ▸ Read (or Read and post)"), name)
+    format!("its owner or an admin sets Agents: Yes in Seedwell: Chats ▸ {name} ▸ ⋯ ▸ Agents")
 }
 
-/// A channel an agent just made or joined that is closed to agents (any channel while this Mac waits to be admitted,
-/// a user's channel after; one made where a daemon's `--chat-agents off` closes them all): only what the agent gave
-/// (the name it chose, or the link's) and its id, nothing of the channel itself.
-fn closed_reply(id: &str, name: &str, owner: bool, what: &str) -> Result<Reply, ApiError> {
+/// A channel an agent just joined that is closed to agents (Agents: No, or a link that does not say Yes): only what
+/// the agent gave (the link's name) and its id, nothing of the channel itself.
+fn closed_reply(id: &str, name: &str, what: &str) -> Result<Reply, ApiError> {
     let d = ChatChannelDto {
         id: id.to_owned(),
         name: clip(&crate::ops::clean_name(name), 200),
-        role: owner.then(|| "owner".to_owned()),
-        joining: !owner,
-        members: u32::from(owner),
-        online: u32::from(owner),
-        agents: AgentAccess::Off.name().into(),
+        joining: true,
+        agents: "no".into(),
         ..Default::default()
     };
     let mut r = reply(&d)?;
-    let why = if owner { "" } else { concat!(" for now (an agent channel opens once this ", trs_platform::computer!(), " is admitted)") };
-    r.note = Some(format!("{what} {} ({}), closed to agents{why}", clip(&d.name, 80), short(&d.id)));
+    r.note = Some(format!("{what} {} ({}), closed to agents (Agents: No)", clip(&d.name, 80), short(&d.id)));
     r.channel = Some(d.id);
     Ok(r)
 }
@@ -113,25 +104,6 @@ fn closed_reply(id: &str, name: &str, owner: bool, what: &str) -> Result<Reply, 
 fn link_name(l: &trs_sync_proto::members::InviteLink) -> String {
     let n: String = l.name.as_deref().unwrap_or_default().chars().filter(|c| !c.is_control()).collect::<String>().trim().chars().take(100).collect();
     if n.is_empty() { "Channel".into() } else { n }
-}
-
-/// The channel's agent switch allows `need`.
-fn agents_allow(c: &ChannelStatus, need: AgentAccess, what: &str) -> Result<(), ApiError> {
-    if c.agents >= need {
-        return Ok(());
-    }
-    let (how, choice) = if need == AgentAccess::ReadPost { ("read and post", "Read and post") } else { ("read", "Read (or Read and post)") };
-    let name = clip(&c.name, 60);
-    Err(ApiError::new(
-        ErrorCode::PermissionDenied,
-        format!(
-            concat!("agents on this ", trs_platform::computer!(), " may not {how} in the channel `{name}` yet; the user can allow it in Seedwell: Chats ▸ {name} ▸ ⋯ ▸ Agents on This ", trs_platform::computer!(), " ▸ {choice}. Settings › Agents does not open up chats: each channel has its own switch"),
-            how = how,
-            name = name,
-            choice = choice
-        ),
-    )
-    .with_data(json!({ "channel": c.id, "agents": c.agents.name(), "method": what })))
 }
 
 /// The label of what this connection posts when the call names none: its client name from `hello`.
@@ -207,25 +179,25 @@ pub(super) async fn call<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &Conn, req: Reques
             reply(&ChatListDto { channels: all.iter().filter(|c| open(c)).map(channel_dto).collect(), hidden, hint })
         }
         Request::ChatNew(p) => {
-            // An agent's channel is an agent channel: open to agents, here and on every device that joins it.
-            let c = h.chat_new_for_agents(&p.name).await.map_err(chat_err)?;
+            // An agent's channel is Agents: Yes: open to agents, here and on every device that joins it.
+            let c = h.chat_new(&p.name, true).await.map_err(chat_err)?;
             let id = c.id.parse().map_err(|_| ApiError::internal("bad channel id"))?;
-            if open(&c) { channel_reply(&h, &id, "made the channel") } else { closed_reply(&c.id, &c.name, true, "made the channel") }
+            channel_reply(&h, &id, "made the channel")
         }
         Request::ChatJoin(p) => {
             let link = trs_sync_proto::members::InviteLink::parse_chat(&p.link).ok();
             let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-            // A channel already here but closed to agents: answered as the join of a new one (which starts closed),
-            // so a link does not tell an agent that this Mac has the channel.
+            // A channel already here but closed to agents: answered as the join of a closed one, so a link does not
+            // tell an agent what the channel holds.
             if let Some(l) = link.as_ref().filter(|l| !l.invite.expired(now))
                 && h.channel_status(&l.invite.folder_id()).is_some_and(|c| !open(&c))
             {
-                return closed_reply(&l.invite.folder_id().to_string(), &link_name(l), false, "joined the channel");
+                return closed_reply(&l.invite.folder_id().to_string(), &link_name(l), "joined the channel");
             }
             let c = h.chat_join(&p.link).await.map_err(chat_err)?;
             let id = c.id.parse().map_err(|_| ApiError::internal("bad channel id"))?;
             match link.as_ref() {
-                Some(l) if !open(&c) => closed_reply(&c.id, &link_name(l), false, "joined the channel"),
+                Some(l) if !open(&c) => closed_reply(&c.id, &link_name(l), "joined the channel"),
                 _ => channel_reply(&h, &id, "joined the channel"),
             }
         }
@@ -276,9 +248,29 @@ pub(super) async fn call<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &Conn, req: Reques
             h.set_share_until(&id, until).map_err(chat_err)?;
             channel_reply(&h, &id, "sharing changed for")
         }
+        Request::ChatSetAgents(p) => {
+            let (c, id) = pick(&h, &p.channel)?;
+            let open = match p.agents.as_str() {
+                "yes" => true,
+                "no" => false,
+                _ => return Err(ApiError::params("`agents` is `yes` or `no`")),
+            };
+            if !c.role.is_some_and(Role::admits) {
+                return Err(ApiError::new(ErrorCode::PermissionDenied, "only the channel's owners and admins can change whether agents may use it"));
+            }
+            h.chat_set_agents(&id, open).map_err(chat_err)?;
+            if open {
+                return channel_reply(&h, &id, "agents may use");
+            }
+            // Closed now: it does not exist for agents any more, so only what the agent named.
+            let d = ChatChannelDto { id: c.id.clone(), name: c.name.clone(), agents: "no".into(), ..Default::default() };
+            let mut r = reply(&d)?;
+            r.note = Some(format!("closed channel {} ({}) to agents on every device (Agents: No)", clip(&c.name, 80), short(&c.id)));
+            r.channel = Some(c.id);
+            Ok(r)
+        }
         Request::ChatSend(p) => {
             let (c, id) = pick(&h, &p.channel)?;
-            agents_allow(&c, AgentAccess::ReadPost, "chat.send")?;
             let agent = agent_for(conn, p.agent.as_deref())?;
             let kind = if p.json { MessageKind::Json } else { MessageKind::Text };
             let m = h.chat_send(&id, p.topic.as_deref(), kind, &p.body, p.reply_to.as_deref(), Some(&agent)).await.map_err(chat_err)?;
@@ -289,7 +281,6 @@ pub(super) async fn call<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &Conn, req: Reques
         }
         Request::ChatRead(p) => {
             let (c, id) = pick(&h, &p.channel)?;
-            agents_allow(&c, AgentAccess::Read, "chat.read")?;
             let msgs = match &p.unread_for {
                 Some(a) => {
                     if p.since.is_some() {
@@ -307,13 +298,11 @@ pub(super) async fn call<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &Conn, req: Reques
         }
         Request::ChatTopics(p) => {
             let (c, id) = pick(&h, &p.channel)?;
-            agents_allow(&c, AgentAccess::Read, "chat.topics")?;
             let topics = h.chat_topics(&id).map_err(chat_err)?;
             reply(&ChatTopicsDto { id: c.id, name: c.name, topics: topics.iter().map(s::topic_dto).collect() })
         }
         Request::ChatNewTopic(p) => {
             let (c, id) = pick(&h, &p.channel)?;
-            agents_allow(&c, AgentAccess::ReadPost, "chat.new_topic")?;
             let t = h.chat_new_topic(&id, &p.title, Some(&agent_for(conn, p.agent.as_deref())?)).await.map_err(chat_err)?;
             let mut r = reply(&s::topic_dto(&t))?;
             r.note = Some(format!("made topic {} in channel {} ({})", clip(&t.title, 80), clip(&c.name, 80), short(&c.id)));
@@ -411,27 +400,54 @@ pub(super) async fn call<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &Conn, req: Reques
     }
 }
 
-/// Pumps new channel messages into the event stream as `chat.message` events: only those of channels whose agent
-/// switch is at Read or above (private messages: the Mac's switch for them); the server checks again whenever it hands
-/// one out (`event_visible`). Waits for the sync service, and follows it when it starts again.
-pub(super) async fn pump<B: Backend>(ctx: Arc<Ctx<B>>, mut stop: watch::Receiver<bool>) {
-    let mut rx: Option<broadcast::Receiver<trs_sync_net::chat::ChatEvent>> = None;
+type ChatRx = broadcast::Receiver<trs_sync_net::chat::ChatEvent>;
+
+/// Hands the pump a receiver of the running sync service's messages, made now: what the service sends from here on
+/// reaches the event stream, though the pump looks for the service on its own only now and then. `events_subscribe`
+/// and `events` call it before they answer, so an agent misses no message posted after (one posted right after the
+/// service started, or started again, was lost until the pump's next look).
+pub(super) fn tap<B: Backend>(ctx: &Ctx<B>) {
+    if let Some(h) = ctx.backend.sync() {
+        let _ = ctx.chat_taps.send(h.chat_subscribe());
+    }
+}
+
+/// How often the pump looks for the sync service: often while there is none, seldom while one runs (one started again
+/// in its place is followed then, or at the next [`tap`]).
+const LOOK_IDLE: std::time::Duration = std::time::Duration::from_millis(100);
+const LOOK_RUNNING: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Keeps `new` as the pump's receiver unless the one it has listens to the same service (it then has every message
+/// `new` would give, and maybe some before).
+fn adopt(rx: &mut Option<ChatRx>, new: Option<ChatRx>) {
+    match (rx.as_ref(), new) {
+        (Some(old), Some(new)) if old.same_channel(&new) => {}
+        (_, new) => *rx = new,
+    }
+}
+
+/// Pumps new channel messages into the event stream as `chat.message` events: only those of channels open to agents
+/// (private messages: the Mac's switch for them); the server checks again whenever it hands
+/// one out (`event_visible`). Follows the sync service as it starts, stops and starts again: through the receivers
+/// [`tap`] hands it, and by looking for the service now and then.
+pub(super) async fn pump<B: Backend>(ctx: Arc<Ctx<B>>, mut taps: tokio::sync::mpsc::UnboundedReceiver<ChatRx>, mut stop: watch::Receiver<bool>) {
+    let mut rx: Option<ChatRx> = None;
+    let mut look = tokio::time::Instant::now();
     loop {
-        let Some(r) = rx.as_mut() else {
-            rx = ctx.backend.sync().map(|h| h.chat_subscribe());
-            if rx.is_none() {
-                // Not running yet (or again): a cheap look, often, so the first messages are not missed.
-                tokio::select! {
-                    _ = stop.changed() => return,
-                    _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {}
-                }
-            }
-            continue;
-        };
         tokio::select! {
             _ = stop.changed() => return,
-            e = r.recv() => match e {
-                Ok(e) if e.agents >= AgentAccess::Read => ctx.hub.publish_with(
+            Some(new) = taps.recv() => {
+                // One of a service that stopped since (the pump may have found the next one already) is of no use.
+                if ctx.backend.sync().is_some_and(|h| h.chat_subscribe().same_channel(&new)) {
+                    adopt(&mut rx, Some(new));
+                }
+            }
+            _ = tokio::time::sleep_until(look) => {
+                adopt(&mut rx, ctx.backend.sync().map(|h| h.chat_subscribe()));
+                look = tokio::time::Instant::now() + if rx.is_some() { LOOK_RUNNING } else { LOOK_IDLE };
+            }
+            Some(e) = async { Some(rx.as_mut()?.recv().await) } => match e {
+                Ok(e) if e.agents => ctx.hub.publish_with(
                     EventDto {
                         kind: "chat.message".into(),
                         // A private message: the other device, so a stream can be filtered by conversation.
@@ -449,7 +465,11 @@ pub(super) async fn pump<B: Backend>(ctx: Arc<Ctx<B>>, mut stop: watch::Receiver
                     data: json!({ "what": "chat messages" }),
                     ..Default::default()
                 }),
-                Err(broadcast::error::RecvError::Closed) => rx = None,
+                // The service stopped: look for the next one, often.
+                Err(broadcast::error::RecvError::Closed) => {
+                    rx = None;
+                    look = tokio::time::Instant::now() + LOOK_IDLE;
+                }
             },
         }
     }

@@ -179,6 +179,10 @@ struct Ctx<B> {
     connections: AtomicUsize,
     calls: AtomicU64,
     stop: watch::Receiver<bool>,
+    /// Receivers of the sync service's channel messages for the chat pump, each made before the request that made it
+    /// answers ([`chat_methods::tap`]), so an agent that subscribed misses no message posted after.
+    #[cfg(feature = "sync")]
+    chat_taps: tokio::sync::mpsc::UnboundedSender<broadcast::Receiver<trs_sync_net::chat::ChatEvent>>,
 }
 
 /// A running server. Dropping it stops accepting, closes connections and removes the socket.
@@ -259,6 +263,8 @@ pub async fn serve_backend<B: Backend>(
     let (stop_tx, stop_rx) = watch::channel(false);
     let activity = ActivityLog::new();
     let awake = Awake::new();
+    #[cfg(feature = "sync")]
+    let (chat_taps, chat_taps_rx) = tokio::sync::mpsc::unbounded_channel();
     let ctx = Arc::new(Ctx {
         backend,
         state,
@@ -271,6 +277,8 @@ pub async fn serve_backend<B: Backend>(
         connections: AtomicUsize::new(0),
         calls: AtomicU64::new(0),
         stop: stop_rx.clone(),
+        #[cfg(feature = "sync")]
+        chat_taps,
         opts,
     });
     // One pump from the engine's event stream into the hub.
@@ -295,7 +303,7 @@ pub async fn serve_backend<B: Backend>(
     });
     // Channel messages, for agents whose channels allow it.
     #[cfg(feature = "sync")]
-    tokio::spawn(chat_methods::pump(ctx.clone(), stop_rx.clone()));
+    tokio::spawn(chat_methods::pump(ctx.clone(), chat_taps_rx, stop_rx.clone()));
     let c1 = ctx.clone();
     let c2 = ctx.clone();
     let task = tokio::spawn(accept_loop(ctx, bound.listener));
@@ -757,6 +765,8 @@ async fn dispatch<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &mut Conn, req: Request) 
         }
         Request::EventsSubscribe(p) => {
             let kinds = p.kinds.map(|k| k.into_iter().take(32).collect::<HashSet<_>>());
+            #[cfg(feature = "sync")]
+            chat_methods::tap(ctx);
             conn.sub = Some(Sub { rx: ctx.hub.tx.subscribe(), kinds });
             reply(&json!({ "subscribed": true, "cursor": ctx.hub.cursor() }))
         }
@@ -765,6 +775,8 @@ async fn dispatch<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &mut Conn, req: Request) 
             reply(&json!({ "subscribed": false }))
         }
         Request::Events(p) => {
+            #[cfg(feature = "sync")]
+            chat_methods::tap(ctx);
             let kinds = p.kinds.map(|k| k.into_iter().take(32).collect::<HashSet<_>>());
             let mut out = ctx.hub.since(p.since, p.limit.unwrap_or(100).min(500) as usize, kinds.as_ref());
             out.events.retain(|e| event_visible(ctx, e));
@@ -1122,6 +1134,7 @@ async fn dispatch<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &mut Conn, req: Request) 
         | Request::SyncRevokeInvite(_)
         | Request::SyncSetRole(_)
         | Request::SyncRemoveDevice(_)
+        | Request::SyncReshare(_)
         | Request::SyncSetShareUntil(_)
         | Request::SyncRename(_)
         | Request::SyncMove(_)
@@ -1163,6 +1176,7 @@ async fn dispatch<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &mut Conn, req: Request) 
         | Request::ChatRename(_)
         | Request::ChatAddAddress(_)
         | Request::ChatSetWake(_)
+        | Request::ChatSetAgents(_)
         | Request::ChatLeave(_)
         | Request::ChatTopics(_)
         | Request::ChatNewTopic(_)

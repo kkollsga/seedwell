@@ -167,6 +167,14 @@ impl PublicDiscovery for DhtDiscovery {
     fn lookup(&self, topic: [u8; 20]) -> BoxFuture<'_, Vec<SocketAddr>> {
         Box::pin(async move { lookup(self.engine.public_dht().await, topic, None).await })
     }
+
+    fn public_address(&self) -> Option<SocketAddr> {
+        // What the router said it opened for sync's port, at its public address (not one behind a carrier's NAT).
+        let pm = self.engine.reachability().portmap?;
+        let ip = pm.external_ip.filter(|_| !pm.behind_cgnat)?;
+        let port = pm.extra_external_tcp_port.filter(|&p| p != 0)?;
+        Some(SocketAddr::new(ip.into(), port))
+    }
 }
 
 /// Announce `port` under `topic` (or only look it up) and collect the peers found, for at most
@@ -387,6 +395,28 @@ pub fn folder_dto(f: &FolderStatus) -> SyncFolderDto {
         channel_id: f.channel_id.clone(),
         on_demand: f.on_demand,
         unavailable: f.unavailable,
+        progress: f.progress.as_deref().map(|t| clip(t, 300)),
+        problem: f.problem.as_deref().map(|t| clip(&scrub_keys(t), 300)),
+        join_attempts: f.join_attempts.iter().map(attempt_dto).collect(),
+        waiting: f.waiting.as_deref().map(|t| clip(t, 400)),
+        gone: f.gone.iter().map(gone_dto).collect(),
+        can_reshare: f.reshare,
+    }
+}
+
+/// A gone member in protocol form.
+pub fn gone_dto(d: &trs_sync_net::status::GoneDevice) -> GoneDeviceDto {
+    GoneDeviceDto { device_id: d.id.clone(), name: clip(&ops::clean_name(&d.name), 100), last_seen_at: d.last_seen_s }
+}
+
+/// A refused join attempt in protocol form.
+pub fn attempt_dto(a: &trs_sync_net::status::JoinAttemptStatus) -> JoinAttemptDto {
+    JoinAttemptDto {
+        at: a.at_s,
+        device_id: a.device_id.clone(),
+        name: clip(&ops::clean_name(&a.name), 100),
+        client: clip(&ops::clean_name(&a.client), 60),
+        reason: clip(&scrub_keys(&a.reason), 300),
     }
 }
 
@@ -416,6 +446,17 @@ pub fn list_dto(s: &Snapshot, external_port: Option<u16>) -> SyncListDto {
                 folders: d.folders.clone(),
                 rx_bytes: d.rx_bytes,
                 tx_bytes: d.tx_bytes,
+            })
+            .collect(),
+        offline_devices: s
+            .offline
+            .iter()
+            .map(|d| SyncOfflineDeviceDto {
+                id: d.id.clone(),
+                name: clip(&ops::clean_name(&d.name), 100),
+                last_seen_at: d.last_seen_s,
+                last_problem: d.problem.as_deref().map(|p| clip(p, 300)),
+                folders: d.folders.clone(),
             })
             .collect(),
     }
@@ -618,10 +659,14 @@ pub fn channel_dto(c: &trs_sync_net::chat::ChannelStatus) -> ChatChannelDto {
         unread: c.unread,
         last_message_at: c.last_message_s,
         muted: c.muted,
-        agents: c.agents.name().into(),
-        agent_channel: c.agent_channel,
+        agents: if c.agents { "yes" } else { "no" }.into(),
         wake_command: c.wake_command.clone(),
         issues: c.issues.iter().take(50).map(|i| clip(i, 300)).collect(),
+        progress: c.progress.as_deref().map(|t| clip(t, 300)),
+        problem: c.problem.as_deref().map(|t| clip(&scrub_keys(t), 300)),
+        join_attempts: c.join_attempts.iter().map(attempt_dto).collect(),
+        waiting: c.waiting.as_deref().map(|t| clip(t, 400)),
+        gone: c.gone.iter().map(gone_dto).collect(),
     }
 }
 
@@ -742,7 +787,28 @@ mod tests {
             channel_id: None,
             on_demand: false,
             unavailable: 0,
+            progress: None,
+            problem: None,
+            join_attempts: Vec::new(),
+            waiting: None,
+            gone: Vec::new(),
+            reshare: false,
         }
+    }
+
+    #[test]
+    fn a_folder_says_whom_it_waits_for_which_devices_are_gone_and_whether_it_may_be_shared_again() {
+        let mut f = folder("MFZWI3D-BONSGYC-YLTMRWG", "Docs");
+        let d = folder_dto(&f);
+        let json = serde_json::to_value(&d).unwrap();
+        assert!(json.get("waiting").is_none() && json.get("gone").is_none() && json.get("can_reshare").is_none(), "nothing to say: nothing given");
+        f.waiting = Some("Waiting for Mac mini (last seen 3 days ago: nothing answers at 192.168.68.57:55799)".into());
+        f.gone = vec![trs_sync_net::status::GoneDevice { id: "BONSGYC-X".into(), name: "Mac mini".into(), last_seen_s: Some(7) }];
+        f.reshare = true;
+        let json = serde_json::to_value(folder_dto(&f)).unwrap();
+        assert_eq!(json["waiting"], "Waiting for Mac mini (last seen 3 days ago: nothing answers at 192.168.68.57:55799)");
+        assert_eq!(json["gone"], serde_json::json!([{"device_id": "BONSGYC-X", "name": "Mac mini", "last_seen_at": 7}]));
+        assert_eq!(json["can_reshare"], true);
     }
 
     #[test]
@@ -792,7 +858,7 @@ mod tests {
             trs_sync_proto::members::Signer::Folder,
             &|m| s.sign(m),
         );
-        InviteLink { invite, token_seed: [2; 32], name: name.map(str::to_owned) }.format()
+        InviteLink { invite, token_seed: [2; 32], name: name.map(str::to_owned), agents: false, reach: None }.format()
     }
 
     #[test]

@@ -35,6 +35,9 @@ pub struct Settings {
     pub down_kib: u32,
     /// Where joined folders go by default (empty = `~/Seedwell`, given by the app).
     pub default_location: String,
+    /// The user's rendezvous (SPEC §7G.3): this device publishes its sealed address record there and looks devices up
+    /// in it (`https://…`; empty: off). Set up in the app (Settings › Folder Sync), not through the agent interface.
+    pub rendezvous: String,
 }
 
 impl Default for Settings {
@@ -50,6 +53,7 @@ impl Default for Settings {
             up_kib: 0,
             down_kib: 0,
             default_location: String::new(),
+            rendezvous: String::new(),
         }
     }
 }
@@ -180,9 +184,6 @@ pub struct ChannelEntry {
     pub name: String,
     /// No notifications for it (an @mention still notifies: the app's rule).
     pub muted: bool,
-    /// What agents on this Mac may do in it, as the user set it: `off`, `read` or `post`; empty: never set, so the
-    /// channel's default (Read and post for an agent channel, else off).
-    pub agents: String,
     /// The command run for each message from another device while agents may read it (empty: none).
     pub wake: String,
     /// The last message read here: its time and id (hex).
@@ -204,6 +205,47 @@ pub struct ChannelEntry {
     pub devices: Vec<SpaceDevice>,
 }
 
+/// This device's group of the user's own devices (`[my_devices]`, 0.1.13): the group, the devices met in it, and what
+/// this device does not take of what they put on all of them. Its key (the user key) is a secret, kept with the other
+/// secrets; leaving the group deletes this table, the group's membership file and those secrets, nothing else. (Not
+/// the key `device`: that is 0.1.8's read-only device list, [`SyncConfig::devices`].)
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MyDevicesEntry {
+    /// The group id, as text.
+    pub id: String,
+    /// The group's public key (the user key's), hex.
+    pub group_pk: String,
+    /// The devices met in it.
+    #[serde(rename = "device")]
+    pub devices: Vec<SpaceDevice>,
+    /// Folders and channels (ids, as text) the user took off this device although they are on all the others: not
+    /// joined again by themselves.
+    pub skip: Vec<String>,
+    /// How a folder that follows is joined here: `full` (the only one in this version).
+    pub mode: String,
+    /// The groups this one moved on from (its key changed after a removal), oldest first, at most
+    /// [`MAX_PREVIOUS_GROUPS`]: their memberships stay (without their keys) to tell a device that was away where the
+    /// group went.
+    pub previous: Vec<PreviousGroup>,
+    /// Devices (keys, hex) removed in an earlier group that this device still takes out of the current one once it
+    /// holds its key (two removals at once settled on the other's group).
+    pub pending_remove: Vec<String>,
+}
+
+/// A group the devices group moved on from.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PreviousGroup {
+    /// Its id, as text.
+    pub id: String,
+    /// Its public key, hex.
+    pub group_pk: String,
+}
+
+/// The earlier groups a devices group keeps.
+pub const MAX_PREVIOUS_GROUPS: usize = 8;
+
 /// A device met in a folder or channel, so it can be dialed again and named while offline. It is kept in that
 /// folder's or channel's entry only: removing the folder or leaving the channel forgets it there, and nothing about
 /// a device outlives every folder and channel it was met in.
@@ -216,6 +258,11 @@ pub struct SpaceDevice {
     pub name: String,
     /// Where it was last reached or said it can be reached (`ip:port`), newest first, at most 8.
     pub addresses: Vec<String>,
+    /// When a session with it last began or ended, Unix seconds (0: never; 0.1.13).
+    pub last_seen: u64,
+    /// The rendezvous it publishes its address record to, from its signed address record (empty: none; 0.1.13).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub rendezvous: String,
 }
 
 /// A device as 0.1.8 and earlier kept it, in one list for every folder and channel: read once, moved into the
@@ -257,6 +304,9 @@ pub struct SyncConfig {
     /// The private conversations.
     #[serde(rename = "conversation")]
     pub conversations: Vec<ConversationEntry>,
+    /// The user's own devices (0.1.13), once this device is in such a group.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub my_devices: Option<MyDevicesEntry>,
     /// The device list of 0.1.8 and earlier (read only; see [`DeviceEntry`]).
     #[serde(rename = "device", skip_serializing)]
     pub devices: Vec<DeviceEntry>,
@@ -275,6 +325,7 @@ impl Default for SyncConfig {
             folders: Vec::new(),
             channels: Vec::new(),
             conversations: Vec::new(),
+            my_devices: None,
             devices: Vec::new(),
             upgraded: false,
         }
@@ -301,7 +352,7 @@ impl SyncConfig {
                 if let Some(list) = c.devices_of_mut(f)
                     && !list.iter().any(|x| x.id == d.id)
                 {
-                    list.push(SpaceDevice { id: d.id.clone(), name: d.name.clone(), addresses: d.addresses.clone() });
+                    list.push(SpaceDevice { id: d.id.clone(), name: d.name.clone(), addresses: d.addresses.clone(), last_seen: 0, rendezvous: String::new() });
                 }
             }
         }
@@ -333,20 +384,27 @@ impl SyncConfig {
 
     /// The devices met in a folder or channel (`id`), to change.
     pub fn devices_of_mut(&mut self, id: &str) -> Option<&mut Vec<SpaceDevice>> {
-        match self.folders.iter_mut().find(|f| f.id == id) {
-            Some(f) => Some(&mut f.devices),
-            None => self.channels.iter_mut().find(|c| c.id == id).map(|c| &mut c.devices),
+        if let Some(f) = self.folders.iter_mut().find(|f| f.id == id) {
+            return Some(&mut f.devices);
         }
+        if let Some(c) = self.channels.iter_mut().find(|c| c.id == id) {
+            return Some(&mut c.devices);
+        }
+        self.my_devices.as_mut().filter(|g| g.id == id).map(|g| &mut g.devices)
     }
 
-    /// Every folder's and channel's devices.
+    /// Every folder's and channel's devices (and the devices group's).
     pub fn all_devices(&self) -> impl Iterator<Item = &SpaceDevice> {
-        self.folders.iter().flat_map(|f| &f.devices).chain(self.channels.iter().flat_map(|c| &c.devices))
+        self.folders.iter().flat_map(|f| &f.devices).chain(self.channels.iter().flat_map(|c| &c.devices)).chain(self.my_devices.iter().flat_map(|g| &g.devices))
     }
 
-    /// Every folder's and channel's devices, to change.
+    /// Every folder's and channel's devices (and the devices group's), to change.
     pub fn all_devices_mut(&mut self) -> impl Iterator<Item = &mut SpaceDevice> {
-        self.folders.iter_mut().flat_map(|f| &mut f.devices).chain(self.channels.iter_mut().flat_map(|c| &mut c.devices))
+        self.folders
+            .iter_mut()
+            .flat_map(|f| &mut f.devices)
+            .chain(self.channels.iter_mut().flat_map(|c| &mut c.devices))
+            .chain(self.my_devices.iter_mut().flat_map(|g| &mut g.devices))
     }
 }
 
@@ -390,7 +448,7 @@ mod tests {
         .unwrap();
         let mut c = SyncConfig::load(&p).unwrap();
         assert!(c.upgraded && c.devices.is_empty());
-        let bo = SpaceDevice { id: "BO".into(), name: "Bo".into(), addresses: vec!["10.0.0.2:22000".into()] };
+        let bo = SpaceDevice { id: "BO".into(), name: "Bo".into(), addresses: vec!["10.0.0.2:22000".into()], last_seen: 0, rendezvous: String::new() };
         assert_eq!((c.folders[0].devices.as_slice(), c.channels[0].devices.as_slice()), (std::slice::from_ref(&bo), std::slice::from_ref(&bo)));
         c.save(&p).unwrap();
         let text = std::fs::read_to_string(&p).unwrap();
@@ -402,5 +460,31 @@ mod tests {
         // Removing the folder forgets Bo there; the channel keeps its own record.
         c.folders.clear();
         assert_eq!(c.all_devices().count(), 1);
+    }
+
+    #[test]
+    fn the_devices_group_has_its_own_table_and_an_older_reader_drops_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("sync.toml");
+        let mut c = SyncConfig::default();
+        c.save(&p).unwrap();
+        assert!(!std::fs::read_to_string(&p).unwrap().contains("my_devices"), "none: no table");
+        let bo = SpaceDevice { id: "BO".into(), name: "Bo's PC".into(), addresses: vec!["10.0.0.2:22000".into()], last_seen: 5, ..SpaceDevice::default() };
+        c.my_devices = Some(MyDevicesEntry { id: "G".into(), group_pk: "ab".repeat(32), devices: vec![bo.clone()], skip: vec!["F".into()], mode: "full".into(), ..MyDevicesEntry::default() });
+        c.save(&p).unwrap();
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert!(text.contains("[my_devices]") && text.contains("[[my_devices.device]]"), "{text}");
+        let back = SyncConfig::load(&p).unwrap();
+        assert_eq!(back.my_devices, c.my_devices);
+        assert!(back.devices.is_empty(), "never the read-only list of 0.1.8");
+        assert_eq!(back.all_devices().count(), 1);
+        // A reader without the table (0.1.12) drops it when it writes the file: that device forgets the group.
+        #[derive(Serialize, Deserialize)]
+        struct Older {
+            #[serde(default)]
+            format: u32,
+        }
+        let older: Older = toml::from_str(&text).unwrap();
+        assert_eq!(older.format, CONFIG_FORMAT);
     }
 }

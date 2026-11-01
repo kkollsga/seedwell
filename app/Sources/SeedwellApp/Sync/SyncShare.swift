@@ -158,7 +158,7 @@ struct ShareTarget: Equatable {
                     if let path { added = try core.syncAddFolder(path: path).id }
                     let fid = added ?? id
                     var channel = existing
-                    if let newName { channel = try core.chatNew(name: newName).id }
+                    if let newName { channel = try core.chatNew(name: newName, agents: false).id }
                     if let channel, channel != current { try core.syncSetChannel(id: fid, channelId: channel) }
                     return try core.syncCreateInvite(id: fid, role: role, maxUses: s.uses, validDays: s.linkDays, channelId: channel)
                 }

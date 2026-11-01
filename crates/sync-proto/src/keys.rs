@@ -187,6 +187,8 @@ pub enum KeyError {
     ChannelLink,
     /// A folder's link (`seedwell://sync/`) where a channel's was expected.
     FolderLink,
+    /// A link to pair a device (`seedwell://devices/`, 0.1.13) where a folder's or a channel's was expected.
+    DevicesLink,
 }
 
 impl fmt::Display for KeyError {
@@ -199,6 +201,7 @@ impl fmt::Display for KeyError {
             KeyError::Newer => f.write_str("this link was made by a newer Seedwell: update Seedwell to use it"),
             KeyError::ChannelLink => f.write_str("this is a channel link: open it under Chats"),
             KeyError::FolderLink => f.write_str("this is a folder link: add it under Folder Sync"),
+            KeyError::DevicesLink => f.write_str("this is a link to pair a device: use it in Settings › Devices"),
         }
     }
 }
@@ -249,6 +252,11 @@ pub enum Proof {
     /// An invitation being redeemed: [`crate::members::Invite`] in wire form ‖ the token's 64-byte signature of
     /// the session ([`crate::members::redeem_payload`]).
     Invite(Vec<u8>),
+    /// Kind 6 (feature [`crate::msg::FEATURE_DEVICES`], 0.1.13): the sender joins a folder or channel that one of its
+    /// own devices put on all of them; the bytes are the id of its devices group (32 bytes). Its identity is the
+    /// session's TLS key, so nothing is bound to the session: the receiver admits it only when that key is a member of
+    /// its own devices group with this id, and the folder or channel follows there.
+    Sibling(Vec<u8>),
     /// A kind this version does not know (from a newer peer): carried, never trusted.
     Unknown {
         /// Its wire kind.
@@ -264,6 +272,7 @@ impl fmt::Debug for Proof {
         match self {
             Proof::Grant(_) => f.write_str("Proof::Grant"),
             Proof::Invite(_) => f.write_str("Proof::Invite"),
+            Proof::Sibling(_) => f.write_str("Proof::Sibling"),
             Proof::Unknown { kind, data } => write!(f, "Proof::Unknown({kind}, {} bytes)", data.len()),
         }
     }

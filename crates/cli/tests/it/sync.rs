@@ -187,14 +187,15 @@ fn cli_stdin(d: &Daemon, args: &[&str], input: &str) -> Out {
 #[test]
 fn chat_watch_streams_another_devices_messages_as_untrusted_data() {
     let root = tempfile::tempdir().unwrap();
-    // A daemon has no app in which its user opens chats to agents: --chat-agents does it for the run (agents on A
-    // may read, on B read and post). Closed channels are the control tests' (crates/control/tests/it/sync.rs).
+    // A channel an agent makes is open to agents (Agents: Yes) on every device that joins it, with nothing to switch
+    // on. A daemon has no app in which its user opens private messages to agents: --chat-agents does that for the run
+    // (on A read, on B read and post). Closed channels are the control tests' (crates/control/tests/it/sync.rs).
     let a = Daemon::start_with(root.path(), "a", "full", &["--chat-agents", "read"]);
     let b = Daemon::start_with(root.path(), "b", "full", &["--chat-agents", "post"]);
     let ch = a.json(&["chat", "new", "Plans"]);
-    assert_eq!((ch["role"].as_str(), ch["agents"].as_str()), (Some("owner"), Some("read")), "{ch}");
+    assert_eq!((ch["role"].as_str(), ch["agents"].as_str()), (Some("owner"), Some("yes")), "{ch}");
     let link = a.json(&["chat", "share", "Plans"])["link"].as_str().unwrap().to_owned();
-    assert!(link.starts_with("seedwell://chat/"), "{link}");
+    assert!(link.starts_with("seedwell://chat/") && link.contains("&agents=yes"), "{link}");
     let j = cli_stdin(&b, &["chat", "join", "-"], &link);
     assert_eq!(j.code, 0, "{}", j.stderr);
     let port = a.json(&["sync", "list"])["port"].as_u64().unwrap();
@@ -227,8 +228,8 @@ fn chat_watch_streams_another_devices_messages_as_untrusted_data() {
     assert_eq!(m["agent"].as_str(), Some("b"), "the label says an agent posted it");
     let read = a.json(&["chat", "read", "Plans", "--last", "5"]);
     assert_eq!(read["messages"].as_array().unwrap().len(), 1, "{read}");
-    // A may read but not post.
-    let o = cli_stdin(&a, &["chat", "send", "Plans", "-"], "hi");
+    // B is a writer there: its agent may not close the channel to agents.
+    let o = b.cli(&["chat", "agents", "Plans", "no"]);
     assert_eq!(o.code, 4, "{}", o.stderr);
 
     // A topic: B makes one and posts in it, naming it by its title; A finds it by an id prefix.
@@ -252,7 +253,7 @@ fn chat_watch_streams_another_devices_messages_as_untrusted_data() {
     let a_dev = a.json(&["sync", "list"])["device_id"].as_str().unwrap().to_owned();
     let b_dev = b.json(&["sync", "list"])["device_id"].as_str().unwrap().to_owned();
     let o = b.cli(&["chat", "dm", "agents", "post"]);
-    assert!(o.code == 2 && o.stderr.contains("only the user opens chats to agents"), "{}", o.stderr);
+    assert!(o.code == 2 && o.stderr.contains("only the user opens private messages to agents"), "{}", o.stderr);
     let pm = wait_until(30, "A's key at B", || {
         let o = cli_stdin(&b, &["chat", "dm", "send", &a_dev[..7], "-"], "just us");
         (o.code == 0).then(|| serde_json::from_str::<serde_json::Value>(&o.stdout).unwrap())
@@ -268,6 +269,13 @@ fn chat_watch_streams_another_devices_messages_as_untrusted_data() {
     assert_eq!((m["body"].as_str(), m["trust"].as_str(), m["direct"].as_bool(), m["agent"].as_str()), (Some("just us"), Some("untrusted-peer"), Some(true), Some("b")), "{r}");
     // A may read private messages but not write them.
     assert_eq!(cli_stdin(&a, &["chat", "dm", "send", &b_dev, "-"], "x").code, 4);
+
+    // A's agent (the owner) closes the channel to agents: gone for the agents on both devices.
+    let closed = a.json(&["chat", "agents", "Plans", "no"]);
+    assert_eq!(closed["agents"].as_str(), Some("no"), "{closed}");
+    assert_eq!(a.json(&["chat", "list"])["hidden"].as_u64(), Some(1));
+    wait_until(30, "B's agents lose it too", || (b.json(&["chat", "list"])["hidden"].as_u64() == Some(1)).then_some(()));
+    assert!(b.cli(&["chat", "read", "Plans"]).code != 0);
 }
 
 #[test]

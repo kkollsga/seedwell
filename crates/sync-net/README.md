@@ -58,7 +58,22 @@ Disk work runs on blocking threads, with the folder's `FolderCore` locked only t
   passing them on cannot forge them);
 - the DHT: each folder's daily topic is announced and looked up every 15 minutes (not for LAN-only or
   paused folders);
-- LAN discovery (`lan.rs`, below).
+- LAN discovery (`lan.rs`, below);
+- while joining, the addresses in the link (0.1.13: the issuer's local and public addresses, sealed in `a=`;
+  `SyncHandle::own_reach` fills them in when a link is made, `learn_from_link` makes the issuer a device to dial
+  there, expecting its key).
+
+A joining folder or channel keeps a trail of what it tried (`shared::JoinTrail`: the address being dialed, a device
+that answered without admitting, the last problem); `joining.rs` turns it into the `progress` and `problem`
+sentences of its status. An owner or admin keeps the join attempts it refused (`Notes::attempts`, 20 at most), and
+every folder and channel why the last attempt to reach each of its devices failed (`Notes::unreachable`), shown with
+the devices not connected (`Snapshot::offline`).
+
+`absence.rs` turns a folder's or channel's members that are not connected into its `waiting` sentence ("Waiting for
+Mac mini (last seen 3 days ago: nothing answers at 192.168.68.57:55799)") and finds the ones *gone* (away a day, or
+never seen here): an owner's status lists them (`gone`) for removal, and a member whose every owner and admin is gone
+may share the folder again (`reshare`, `SyncHandle::reshare`: a new folder owned here at the same place, its files
+untouched, the old folder forgotten here). Nothing is removed on its own.
 
 Dial attempts back off per address (5 s doubling to about 5 min).
 
@@ -129,12 +144,22 @@ relay sees only ciphertext.
 made live in a `SecretStore`: the Keychain in an app build that may use it, else a 0600 file. Never in
 `sync.toml`, the synced folder or a log.
 
+## Network changes and the rendezvous
+
+`netchange.rs`: the app passes the system's network signal (`SyncHandle::network_changed`); without it the service
+looks every 15 s itself. A change closes the sessions whose local address is gone, pings the others, announces on
+the LAN and in the DHT at once, clears the dial backoffs, dials every member not connected and writes a new
+rendezvous record. `rendezvous.rs`: this device's sealed record in the user's rendezvous (written at the start, on a
+change, every 30 minutes) and lookups of wanted devices from the dial loop (SPEC §7G.3; the record format is
+`trs_sync_proto::rendezvous`, the HTTP side `trs-rendezvous`).
+
 ## Dependencies
 
 | Crate | Why |
 |---|---|
 | `trs-sync`, `trs-sync-proto`, `trs-fswatch` | the core, the wire format, the watcher |
 | `trs-utp` | uTP on the sync port's UDP twin (Internet sessions, hole punching); Seedwell's own, already used by the engine |
+| `trs-rendezvous` | The rendezvous client (the user's address book Worker, SPEC §7G.3) over the app's one HTTP stack; Seedwell's own. Its `testkit` (loopback fakes) in the tests only |
 | `tokio` | the driver (minimal features, as elsewhere) |
 | `rustls`, `tokio-rustls` (ring) | TLS 1.3 with raw public keys; already in Seedwell for HTTPS trackers |
 | `ring` | random ids, SHA-256 when serving; already linked through rustls |
@@ -149,7 +174,12 @@ made live in a `SecretStore`: the Keychain in an app build that may use it, else
 over TLS, a read-only device whose edits stay local, two devices pulling from each other at once. Roles
 (`roles.rs`): a one-use link admits one device and tells the next why not; an admin invites but cannot change
 roles or invite admins; a removed device is cut off and its changes ignored; a co-owner receives the folder key
-and changes roles; joining waits while no owner or admin is online. LAN discovery
+and changes roles; joining waits while no owner or admin is online. Links with addresses (`reach.rs`): a folder
+and a channel joined from the link's addresses alone, a dead address that holds nothing up, the progress sentences
+from looking to a device that cannot admit to admitted, the owner's record of a refused attempt, and a device not
+connected with when it was last seen and why. Gone devices (`gone.rs`): a folder and a channel whose other member
+stopped say whom they wait for and since when, and the owner removes it; a member whose owner is gone shares the
+folder again, its files untouched, and a third device joins the new folder and gets them. LAN discovery
 (`lan.rs`): two services that find each other only through announcements (unicast on loopback, own
 ports) and sync; badly signed announcements, other folders' tags and stale hours lead to no dial. uTP
 (`utp.rs`): two services with TCP dialing off sync both ways over uTP. Relays (`relay.rs`, with a test switch

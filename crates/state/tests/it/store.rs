@@ -124,6 +124,27 @@ fn a_write_group_commits_as_one_when_it_ends() {
     assert_eq!(s.get_counters(id(1)).unwrap().uploaded, 2);
 }
 
+/// A flush that the commit already running answers is over: it must not stay asked for and later commit half of a
+/// group opened after it (the crash test caught counters committed without their statistics that way).
+#[test]
+fn a_flush_answered_by_the_commit_in_flight_does_not_split_a_later_group() {
+    let dir = TempDir::new("group-after-flush");
+    let o = Store::open_with(dir.path(), &OpenOptions { debounce: Duration::from_millis(1), ..Default::default() }).unwrap();
+    let s = o.store;
+    let c = Counters { downloaded: 2, uploaded: 1, seed_secs: 1 };
+    for i in 0..200u64 {
+        s.add_counters(id(1), c).unwrap();
+        // The flush lands before, during or after the debounced commit of that write.
+        std::thread::sleep(Duration::from_micros((i % 8) * 250));
+        s.flush_now().unwrap();
+        let g = s.group();
+        s.add_counters(id(1), c).unwrap();
+        std::thread::sleep(Duration::from_millis(4));
+        assert_eq!(s.pending_calls(), 1, "iter {i}: a commit took half of an open group");
+        drop(g);
+    }
+}
+
 #[test]
 fn many_calls_coalesce_into_one_row_per_key() {
     let dir = TempDir::new("coalesce");

@@ -72,6 +72,8 @@ pub async fn run(ctx: Arc<Ctx>, conn: Connected, candidates: Vec<FolderId>) -> i
         }
     }
 
+    // The other device's Hello, once it came: who it is, for what a failed setup notes.
+    let met: std::sync::Mutex<Option<Hello>> = std::sync::Mutex::new(None);
     let setup = async {
         let name = lock(&ctx.device_name).clone();
         let (min_protocol, protocol) = ctx.protocol;
@@ -81,16 +83,19 @@ pub async fn run(ctx: Arc<Ctx>, conn: Connected, candidates: Vec<FolderId>) -> i
             Some(Message::Hello(h)) => h,
             _ => return Err(bad("expected Hello")),
         };
+        *lock(&met) = Some(hello.clone());
         // Both sides work this out from the two Hellos, so each can say why.
         let agreed = match agree(&mine, &hello) {
             Ok(a) => a,
             Err(e) => {
-                let reason = version_reason(e, &hello.device_name);
+                let reason = version_reason(e, &hello.device_name, &hello.client);
                 let _ = writer.send(&Message::Close(Close { reason: reason.clone() })).await;
                 return Err(bad(format!("{VERSION_REFUSED}{reason}")));
             }
         };
         let chat = agreed.features & trs_sync_proto::msg::FEATURE_CHAT != 0;
+        // The user's own devices (0.1.13): a DevicesJoin follows the DirectJoin both ways.
+        let devices = agreed.features & trs_sync_proto::msg::FEATURE_DEVICES != 0;
         // A conversation may stand for a session only when no other device relays it.
         let direct = agreed.features & trs_sync_proto::msg::FEATURE_DIRECT != 0;
         let conversation = direct && via != crate::session::Via::Relay && ctx.direct.has(&est.peer_pk);
@@ -98,16 +103,21 @@ pub async fn run(ctx: Arc<Ctx>, conn: Connected, candidates: Vec<FolderId>) -> i
         let mut sent: BTreeSet<FolderId> = BTreeSet::new();
         let mut checked;
         if dialed {
-            let join = own_join(&ctx, &candidates, &est.exporter, device, lan).await;
+            let join = own_join(&ctx, &candidates, &est.exporter, &est.peer_pk, lan).await;
             sent.extend(join.folders.iter().map(|f| f.folder_id));
             writer.send(&Message::Join(join)).await?;
             if chat {
-                let cj = own_chat_join(&ctx, &candidates, &est.exporter);
+                let cj = own_chat_join(&ctx, &candidates, &est.exporter, &est.peer_pk);
                 sent.extend(cj.channels.iter().map(|c| c.channel_id));
                 writer.send(&Message::ChatJoin(cj)).await?;
             }
             if direct {
                 writer.send(&Message::DirectJoin(DirectJoin { conversation, user_name: user_name.clone() })).await?;
+            }
+            if devices {
+                let dj = crate::devices::own_devices_join(&ctx, &candidates, &est.peer_pk, &est.exporter, true);
+                sent.extend(dj.groups.iter().map(|g| g.channel_id));
+                writer.send(&Message::DevicesJoin(dj)).await?;
             }
             match reader.next().await? {
                 Some(Message::Join(j)) => checked = check_join(&ctx, &j, &est, &sent, lan),
@@ -131,6 +141,14 @@ pub async fn run(ctx: Arc<Ctx>, conn: Connected, candidates: Vec<FolderId>) -> i
                     _ => return Err(bad("expected DirectJoin")),
                 }
             }
+            if devices {
+                match reader.next().await? {
+                    Some(Message::DevicesJoin(j)) => checked.add_devices(crate::devices::check_devices_join(&ctx, &j, &est.peer_pk, &est.exporter, &sent, &hello.device_name)),
+                    Some(Message::Close(c)) => return Err(io::Error::new(io::ErrorKind::ConnectionAborted, c.reason)),
+                    _ => return Err(bad("expected DevicesJoin")),
+                }
+            }
+            note_attempts(&ctx, device, &hello, &checked.refused);
         } else {
             let proved = match reader.next().await? {
                 Some(Message::Join(j)) => check_join(&ctx, &j, &est, &BTreeSet::new(), lan),
@@ -153,6 +171,13 @@ pub async fn run(ctx: Arc<Ctx>, conn: Connected, candidates: Vec<FolderId>) -> i
                     _ => return Err(bad("expected DirectJoin")),
                 }
             }
+            if devices {
+                match reader.next().await? {
+                    Some(Message::DevicesJoin(j)) => checked.add_devices(crate::devices::check_devices_join(&ctx, &j, &est.peer_pk, &est.exporter, &BTreeSet::new(), &hello.device_name)),
+                    _ => return Err(bad("expected DevicesJoin")),
+                }
+            }
+            note_attempts(&ctx, device, &hello, &checked.refused);
             if checked.is_empty() {
                 // Nothing to share: say why instead of answering (a refused invitation is shown there).
                 let reason = close_reason(&checked);
@@ -160,7 +185,7 @@ pub async fn run(ctx: Arc<Ctx>, conn: Connected, candidates: Vec<FolderId>) -> i
                 return Err(bad(reason));
             }
             let ids: Vec<FolderId> = checked.shared.iter().map(|(f, _, _)| *f).collect();
-            let join = own_join(&ctx, &ids, &est.exporter, device, lan).await;
+            let join = own_join(&ctx, &ids, &est.exporter, &est.peer_pk, lan).await;
             // (Tests: the answer is made, the session not up yet.)
             let wait = *lock(&ctx.setup_wait);
             tokio::time::sleep(wait).await;
@@ -168,22 +193,34 @@ pub async fn run(ctx: Arc<Ctx>, conn: Connected, candidates: Vec<FolderId>) -> i
             writer.send(&Message::Join(join)).await?;
             if chat {
                 let ids: Vec<FolderId> = checked.channels.iter().map(|(c, _)| *c).collect();
-                let cj = own_chat_join(&ctx, &ids, &est.exporter);
+                let cj = own_chat_join(&ctx, &ids, &est.exporter, &est.peer_pk);
                 sent.extend(cj.channels.iter().map(|c| c.channel_id));
                 writer.send(&Message::ChatJoin(cj)).await?;
             }
             if direct {
                 writer.send(&Message::DirectJoin(DirectJoin { conversation: checked.conversation, user_name })).await?;
             }
+            if devices {
+                // Only for the group the dialer proved (one of ours, or one asking to pair with our link), and the
+                // groups this device moved on from that it named.
+                let ids: Vec<FolderId> = checked.devices.iter().map(|(g, _)| *g).chain(checked.pairing).chain(checked.helping.iter().copied()).collect();
+                let dj = crate::devices::own_devices_join(&ctx, &ids, &est.peer_pk, &est.exporter, false);
+                sent.extend(dj.groups.iter().map(|g| g.channel_id));
+                writer.send(&Message::DevicesJoin(dj)).await?;
+            }
         }
         Ok::<_, io::Error>((hello, agreed, checked, sent))
     };
-    let setup = tokio::time::timeout(SETUP_TIMEOUT, setup).await.map_err(|_| bad("setup timed out"))?;
-    let (hello, agreed, checked, sent) = setup.inspect_err(|e| note_refusal(&ctx, &asked, device, e))?;
-    // The two Seedwells talk: a version problem with this device is over.
+    let setup = tokio::time::timeout(SETUP_TIMEOUT, setup).await.unwrap_or_else(|_| Err(bad("setup timed out")));
+    let setup = setup.inspect_err(|e| note_refusal(&ctx, &asked, device, lock(&met).as_ref(), remote, e));
+    let (hello, agreed, checked, sent) = setup?;
+    // The two Seedwells talk: a version problem with this device is over, and so is not reaching it.
     for f in ctx.registry.spaces() {
-        lock(&f.notes).incompatible.remove(&device);
+        let mut n = lock(&f.notes);
+        n.incompatible.remove(&device);
+        n.unreachable.remove(&device);
     }
+    note_unadmitted(&ctx, &hello, &sent, &checked, agreed.features & trs_sync_proto::msg::FEATURE_CHAT != 0, &asked);
     for id in &checked.changed {
         if let Some(f) = ctx.registry.space(id) {
             let ctx = ctx.clone();
@@ -198,6 +235,7 @@ pub async fn run(ctx: Arc<Ctx>, conn: Connected, candidates: Vec<FolderId>) -> i
     }
     let shared = checked.shared;
     let channels = checked.channels;
+    let group = checked.devices;
 
     let (peer, crx, drx) = PeerHandle::new(est.peer_pk, hello.device_name, hello.client, agreed, remote, local, est.exporter, dialed, via);
     *lock(&peer.user_name) = checked.user_name;
@@ -233,6 +271,9 @@ pub async fn run(ctx: Arc<Ctx>, conn: Connected, candidates: Vec<FolderId>) -> i
     for (channel, access) in channels {
         links.push(start_chat_link(&ctx, &peer, channel, access));
     }
+    if let Some((id, access)) = group {
+        links.push(crate::devices::start_devices_link(&ctx, &peer, id, access));
+    }
     // Private messages, over a direct session only: our key, and what we hold.
     links.push({
         let (ctx, peer) = (ctx.clone(), peer.clone());
@@ -241,7 +282,7 @@ pub async fn run(ctx: Arc<Ctx>, conn: Connected, candidates: Vec<FolderId>) -> i
     offer_joining(&ctx, &peer, &sent).await;
     let result = read_loop(&ctx, &peer, &mut reader, &serve, &est, sent, &mut links).await;
     if let Err(e) = &result {
-        note_refusal(&ctx, &asked, device, e);
+        note_refusal(&ctx, &asked, device, None, remote, e);
     }
 
     peer.close();
@@ -258,12 +299,12 @@ pub async fn run(ctx: Arc<Ctx>, conn: Connected, candidates: Vec<FolderId>) -> i
 /// another one, as when a link for a folder and its channel is used), as when one is opened while connected.
 async fn offer_joining(ctx: &Ctx, peer: &PeerHandle, sent: &BTreeSet<FolderId>) {
     for f in ctx.registry.spaces() {
-        if sent.contains(&f.id) || lock(&peer.joined).contains(&f.id) || lock(&f.invite).is_none() || f.role_of(ctx.key.public_key()).is_some() {
+        if sent.contains(&f.id) || lock(&peer.joined).contains(&f.id) || !f.joining(ctx.key.public_key()) {
             continue;
         }
         match f.kind {
             SpaceKind::Folder => {
-                let join = own_join(ctx, &[f.id], &peer.exporter, peer.device, peer.lan).await;
+                let join = own_join(ctx, &[f.id], &peer.exporter, &peer.device_pk, peer.lan).await;
                 if !join.folders.is_empty() {
                     lock(&peer.joined).insert(f.id);
                     lock(&peer.offered).insert(f.id);
@@ -271,41 +312,60 @@ async fn offer_joining(ctx: &Ctx, peer: &PeerHandle, sent: &BTreeSet<FolderId>) 
                 }
             }
             SpaceKind::Channel if peer.chat() => {
-                let join = own_chat_join(ctx, &[f.id], &peer.exporter);
+                let join = own_chat_join(ctx, &[f.id], &peer.exporter, &peer.device_pk);
                 if !join.channels.is_empty() {
                     let _ = peer.control.send(Message::ChatJoin(join)).await;
                 }
             }
-            SpaceKind::Channel => {}
+            SpaceKind::Devices if peer.has(trs_sync_proto::msg::FEATURE_DEVICES) && peer.access(&f.id).is_none() => {
+                let join = crate::devices::own_devices_join(ctx, &[f.id], &peer.device_pk, &peer.exporter, false);
+                if !join.groups.is_empty() {
+                    let _ = peer.control.send(Message::DevicesJoin(join)).await;
+                }
+            }
+            SpaceKind::Channel | SpaceKind::Devices => {}
         }
     }
 }
 
 /// The start of a Close reason that tells a joining device its invitation was refused.
 const LINK_REFUSED: &str = "link: ";
+/// The Close reason of a session with nothing in common (a joining device met a device that does not admit it).
+const NOTHING_IN_COMMON: &str = "no folders in common";
 /// The start of the error of a session refused because the two Seedwells cannot talk.
 const VERSION_REFUSED: &str = "version: ";
 
-/// Why two devices whose protocol versions do not overlap cannot sync, for the person at this one.
-fn version_reason(e: Incompatible, peer_name: &str) -> String {
+/// Why two devices whose protocol versions do not overlap cannot sync, for the person at this one: by the other's
+/// name and version (`client`, `Seedwell 0.1.9`) when it gave them.
+fn version_reason(e: Incompatible, peer_name: &str, client: &str) -> String {
     let who = if peer_name.is_empty() { "The other device" } else { peer_name };
+    let runs = |what: &str| if client.is_empty() { format!("{who} runs {what}") } else { format!("{who} runs {client}, {what}") };
     match e {
-        Incompatible::PeerTooOld => format!("{who} runs an older Seedwell that cannot sync with this one: update it"),
-        Incompatible::PeerTooNew => format!(concat!("{who} runs a newer Seedwell that this one cannot sync with: update this ", trs_platform::computer!()), who = who),
+        Incompatible::PeerTooOld => format!("{} that cannot sync with this one: update it", runs("an older Seedwell")),
+        Incompatible::PeerTooNew => format!(concat!("{} that this one cannot sync with: update this ", trs_platform::computer!()), runs("a newer Seedwell")),
     }
 }
 
 /// Why a session with nothing in common ends: an invitation's refusal, told to the joining device.
 fn close_reason(c: &Checked) -> String {
     // (A channel's refusal has the same form.)
-    c.refused.first().map_or_else(|| "no folders in common".to_string(), |r| format!("{LINK_REFUSED}{r}"))
+    c.refused.first().map_or_else(|| NOTHING_IN_COMMON.to_string(), |(_, r)| format!("{LINK_REFUSED}{r}"))
 }
 
 /// A session ended with an owner's or admin's refusal of our invitation, or because the two Seedwells cannot
-/// talk: the joining folders show why, and a folder the device is a member of lists it with its issues.
-fn note_refusal(ctx: &Ctx, candidates: &[FolderId], device: DeviceId, e: &io::Error) {
+/// talk: the joining folders show why, and a folder the device is a member of lists it with its issues. `hello`: the
+/// other device's, when it came. A joining folder the session was dialed for notes any other end as its latest
+/// problem (the device answered but admits nobody, or the setup broke off); an owner or admin notes a device that
+/// could not talk to it as a refused attempt where links of its are out.
+fn note_refusal(ctx: &Ctx, candidates: &[FolderId], device: DeviceId, hello: Option<&Hello>, remote: std::net::SocketAddr, e: &io::Error) {
     let text = e.to_string();
+    let me = ctx.key.public_key();
     if let Some(reason) = text.strip_prefix(VERSION_REFUSED) {
+        // A device met or a member anywhere here came for that (a member of another folder): no join attempt.
+        let known = ctx.registry.spaces().iter().any(|f| {
+            f.members.read().unwrap_or_else(|e| e.into_inner()).contains(&device)
+                || f.membership.read().unwrap_or_else(|e| e.into_inner()).members().any(|(pk, _)| DeviceId::of_public_key(pk) == device)
+        });
         // The folders and channels we dialed it for, and those it was seen in (it may have dialed us).
         for f in ctx.registry.spaces() {
             let seen = f.members.read().unwrap_or_else(|e| e.into_inner()).contains(&device);
@@ -313,24 +373,85 @@ fn note_refusal(ctx: &Ctx, candidates: &[FolderId], device: DeviceId, e: &io::Er
             if (seen || candidates.contains(&f.id)) && lock(&f.invite).is_none() {
                 lock(&f.notes).incompatible.insert(device, reason.to_string());
             }
+            // A device unknown here that could not even say what it wanted, where links of ours are out: likely
+            // someone joining with one (its own side says the same).
+            if candidates.is_empty() && !known && !lock(&f.links).is_empty() && f.role_of(me).is_some_and(trs_sync_proto::members::Role::admits) {
+                f.note_attempt(attempt(device, hello, reason.to_string()));
+            }
         }
     }
     // A version refusal only for the folders we dialed for (any device may connect to us).
     let version = text.strip_prefix(VERSION_REFUSED).filter(|_| !candidates.is_empty());
-    let Some(reason) = text.strip_prefix(LINK_REFUSED).or(version) else { return };
     let spaces: Vec<Arc<Space>> = if candidates.is_empty() {
         ctx.registry.spaces()
     } else {
         candidates.iter().filter_map(|id| ctx.registry.space(id)).collect()
+    };
+    let Some(reason) = text.strip_prefix(LINK_REFUSED).or(version) else {
+        // Any other end, for the joining folders this session was dialed for.
+        if candidates.is_empty() {
+            return;
+        }
+        let who = hello.map(|h| h.device_name.clone()).filter(|n| !n.is_empty()).unwrap_or_else(|| remote.to_string());
+        for f in spaces.iter().filter(|f| f.joining(me)) {
+            let why = if text == NOTHING_IN_COMMON {
+                lock(&f.notes).join.reached = Some(who.clone());
+                crate::joining::not_admitted(&who, crate::roles::noun(f))
+            } else {
+                format!("{who}: the connection ended while it was set up ({text})")
+            };
+            f.join_problem(why);
+        }
+        return;
     };
     for f in spaces.iter().filter(|f| lock(&f.invite).is_some()) {
         lock(&f.notes).refused = Some(reason.to_string());
     }
 }
 
+/// A refused attempt by `device`, now.
+fn attempt(device: DeviceId, hello: Option<&Hello>, reason: String) -> crate::shared::JoinAttempt {
+    crate::shared::JoinAttempt {
+        at_s: crate::roles::now_s(),
+        device,
+        name: hello.map(|h| h.device_name.clone()).unwrap_or_default(),
+        client: hello.map(|h| h.client.clone()).unwrap_or_default(),
+        reason,
+    }
+}
+
+/// Notes each invitation this device refused in a peer's Join, in its folder or channel.
+fn note_attempts(ctx: &Ctx, device: DeviceId, hello: &Hello, refused: &[(FolderId, String)]) {
+    for (id, why) in refused {
+        if let Some(f) = ctx.registry.space(id) {
+            f.note_attempt(attempt(device, Some(hello), why.clone()));
+        }
+    }
+}
+
+/// The session is up, but not for every joining folder or channel it was meant for: the device answered without
+/// admitting this one (it is no owner or admin), or it has no channels at all.
+fn note_unadmitted(ctx: &Ctx, hello: &Hello, sent: &BTreeSet<FolderId>, checked: &Checked, chat: bool, asked: &[FolderId]) {
+    let me = ctx.key.public_key();
+    let name = if hello.device_name.is_empty() { "The other device" } else { hello.device_name.as_str() };
+    for f in ctx.registry.spaces() {
+        if !f.joining(me) {
+            continue;
+        }
+        let admitted = checked.shared.iter().any(|(id, _, _)| *id == f.id) || checked.channels.iter().any(|(id, _)| *id == f.id) || checked.devices.is_some_and(|(id, _)| id == f.id);
+        if f.kind == SpaceKind::Channel && !chat && asked.contains(&f.id) {
+            f.join_problem(crate::joining::no_channels(name, &hello.client));
+        } else if sent.contains(&f.id) && !admitted {
+            lock(&f.notes).join.reached = Some(name.to_string());
+            f.join_problem(crate::joining::not_admitted(name, crate::roles::noun(&f)));
+        }
+    }
+}
+
 /// Our Join for these folders (those we are a member of, or join with an invitation), with our proofs bound to
 /// the session with this exporter value.
-pub(crate) async fn own_join(ctx: &Ctx, folders: &[FolderId], exporter: &[u8; 32], peer: DeviceId, lan: bool) -> Join {
+pub(crate) async fn own_join(ctx: &Ctx, folders: &[FolderId], exporter: &[u8; 32], peer_pk: &[u8; 32], lan: bool) -> Join {
+    let peer = DeviceId::of_public_key(peer_pk);
     let mut out = Vec::new();
     for id in folders {
         let Some(f) = ctx.registry.folder(id) else { continue };
@@ -345,7 +466,7 @@ pub(crate) async fn own_join(ctx: &Ctx, folders: &[FolderId], exporter: &[u8; 32
         .await
         .ok();
         let Some((Some((my_index_id, _)), Some(theirs))) = state else { continue };
-        let Some(proofs) = crate::roles::proofs(ctx, &f, exporter) else { continue };
+        let Some(proofs) = crate::roles::proofs(ctx, &f, exporter, peer_pk) else { continue };
         out.push(JoinFolder {
             folder_id: f.id,
             proofs,
@@ -363,8 +484,8 @@ struct Checked {
     shared: Vec<(FolderId, Access, JoinFolder)>,
     /// (channel, its access).
     channels: Vec<(FolderId, Access)>,
-    /// Invitations this device refused, and why.
-    refused: Vec<String>,
+    /// Invitations this device refused (for which folder or channel), and why.
+    refused: Vec<(FolderId, String)>,
     /// Folders and channels whose membership changed (its grants were new to us, or we admitted it).
     changed: Vec<FolderId>,
     /// Both sides keep a private conversation with each other (and no device relays the session).
@@ -376,6 +497,12 @@ struct Checked {
     closed: Vec<FolderId>,
     /// Every folder the peer's Join named (that this check looked at).
     named: Vec<FolderId>,
+    /// The user's devices group and the peer's access, when it is one of this device's own.
+    devices: Option<(FolderId, Access)>,
+    /// It asks to pair with one of this device's links (the group): the session waits for the user here.
+    pairing: Option<FolderId>,
+    /// One of this device's own named groups this device moved on from: the answer says where they went.
+    helping: Vec<FolderId>,
 }
 
 impl Checked {
@@ -385,9 +512,21 @@ impl Checked {
         self.changed.extend(c.changed);
     }
 
+    fn add_devices(&mut self, c: crate::devices::CheckedDevices) {
+        self.devices = c.shared;
+        self.pairing = c.pending;
+        self.helping = c.helping;
+        self.refused.extend(c.refused);
+        if c.changed
+            && let Some(id) = c.shared.map(|(id, _)| id).or(c.pending)
+        {
+            self.changed.push(id);
+        }
+    }
+
     /// Nothing in common.
     fn is_empty(&self) -> bool {
-        self.shared.is_empty() && self.channels.is_empty() && !self.conversation
+        self.shared.is_empty() && self.channels.is_empty() && !self.conversation && self.devices.is_none() && self.pairing.is_none() && self.helping.is_empty()
     }
 }
 
@@ -404,6 +543,9 @@ fn check_join(ctx: &Ctx, j: &Join, est: &crate::tls::Established, answered_only:
         user_name: String::new(),
         closed: Vec::new(),
         named: Vec::new(),
+        devices: None,
+        pairing: None,
+        helping: Vec::new(),
     };
     for jf in &j.folders {
         if !answered_only.is_empty() && !answered_only.contains(&jf.folder_id) {
@@ -421,8 +563,8 @@ fn check_join(ctx: &Ctx, j: &Join, est: &crate::tls::Established, answered_only:
         let mut changed = false;
         match crate::roles::check(ctx, &f, &est.peer_pk, &est.exporter, &jf.proofs, &mut changed) {
             crate::roles::Proved::Member(a) => out.shared.push((jf.folder_id, a, jf.clone())),
-            crate::roles::Proved::Refused(why) => out.refused.push(why),
-            crate::roles::Proved::Nothing => {}
+            crate::roles::Proved::Refused(why) => out.refused.push((jf.folder_id, why)),
+            crate::roles::Proved::Nothing | crate::roles::Proved::Pending => {}
         }
         if changed {
             out.changed.push(jf.folder_id);
@@ -639,11 +781,33 @@ async fn read_loop(
                         continue;
                     }
                     if !sent.contains(&channel) {
-                        let cj = own_chat_join(ctx, &[channel], &est.exporter);
+                        let cj = own_chat_join(ctx, &[channel], &est.exporter, &est.peer_pk);
                         sent.extend(cj.channels.iter().map(|c| c.channel_id));
                         let _ = peer.control.send(Message::ChatJoin(cj)).await;
                     }
                     links.push(start_chat_link(ctx, peer, channel, access));
+                }
+            }
+            Message::DevicesJoin(j) if peer.has(trs_sync_proto::msg::FEATURE_DEVICES) => {
+                // The devices group, made or joined (or a pairing confirmed) while connected.
+                let c = crate::devices::check_devices_join(ctx, &j, &est.peer_pk, &est.exporter, &BTreeSet::new(), &peer.name);
+                if c.changed
+                    && let Some(g) = ctx.registry.devices()
+                {
+                    crate::roles::changed(ctx, &g).await;
+                }
+                // A group linked anew is answered also when it went out before on this session (the peer moved to it since).
+                let fresh = c.shared.iter().map(|(g, _)| *g).filter(|g| peer.access(g).is_none());
+                let answer: Vec<FolderId> = c.pending.into_iter().chain(c.helping.iter().copied()).filter(|g| !sent.contains(g)).chain(fresh).collect();
+                if !answer.is_empty() {
+                    let dj = crate::devices::own_devices_join(ctx, &answer, &est.peer_pk, &est.exporter, false);
+                    sent.extend(dj.groups.iter().map(|g| g.channel_id));
+                    let _ = peer.control.send(Message::DevicesJoin(dj)).await;
+                }
+                if let Some((id, access)) = c.shared
+                    && peer.access(&id).is_none()
+                {
+                    links.push(crate::devices::start_devices_link(ctx, peer, id, access));
                 }
             }
             Message::Index(idx) => {
@@ -762,7 +926,7 @@ async fn read_loop(
                             continue;
                         }
                         if !sent.contains(&folder) {
-                            let join = own_join(ctx, &[folder], &est.exporter, peer.device, peer.lan).await;
+                            let join = own_join(ctx, &[folder], &est.exporter, &peer.device_pk, peer.lan).await;
                             sent.extend(join.folders.iter().map(|f| f.folder_id));
                             let _ = peer.control.send(Message::Join(join)).await;
                         }
@@ -792,7 +956,7 @@ async fn read_loop(
                     let earlier = !peer.has(trs_sync_proto::msg::FEATURE_HOLDS);
                     let ours_first = lock(&peer.offered).remove(&folder) && earlier;
                     if !ours_first {
-                        let join = own_join(ctx, &[folder], &est.exporter, peer.device, peer.lan).await;
+                        let join = own_join(ctx, &[folder], &est.exporter, &peer.device_pk, peer.lan).await;
                         if join.folders.iter().any(|f| f.folder_id == folder) {
                             lock(&peer.joined).insert(folder);
                             lock(&peer.answered).insert(folder);
@@ -825,7 +989,8 @@ async fn read_loop(
             | Message::ChatMessages(_)
             | Message::DirectKeys(_)
             | Message::DirectHave(_)
-            | Message::DirectMessages(_) => {}
+            | Message::DirectMessages(_)
+            | Message::DevicesJoin(_) => {}
             Message::Rendezvous(_) | Message::Introduce(_) | Message::RelayOpen(_) | Message::RelayData(_) | Message::RelayClose(_) => {
                 let _ = ctx.hub.send(HubMsg::Relay(peer.device, Box::new(msg)));
             }
@@ -975,7 +1140,7 @@ pub(crate) async fn reconcile(ctx: &Arc<Ctx>, peer: &Arc<PeerHandle>) {
         } else if stale {
             restart |= lock(&peer.got).contains(&f.id);
         } else if !linked && !lock(&peer.joined).contains(&f.id) {
-            let join = own_join(ctx, &[f.id], &peer.exporter, peer.device, peer.lan).await;
+            let join = own_join(ctx, &[f.id], &peer.exporter, &peer.device_pk, peer.lan).await;
             if join.folders.iter().any(|x| x.folder_id == f.id) {
                 lock(&peer.joined).insert(f.id);
                 lock(&peer.offered).insert(f.id);

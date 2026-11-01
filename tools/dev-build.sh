@@ -4,15 +4,16 @@
 # app/build/dev/counter from 1 for each version. The zip lands in app/build/dev/.
 #
 #   tools/sysguard/heavy.sh tools/dev-build.sh               build Seedwell-X.Y.Z.N.zip, print its path and SHA-256
-#   tools/sysguard/heavy.sh tools/dev-build.sh --to <folder>  …and put it in a folder the app watches
+#   tools/sysguard/heavy.sh tools/dev-build.sh --to <folder>  …and publish it in a folder the app watches
 #                                                             (`seedwell update watch <folder>`)
 #   … --full                                                  full LTO, as a release (slower; default: thin)
 #
 # Installing it needs "Allow development builds" on in the app's Settings › General › Updates (the user's switch):
 #   seedwell update install app/build/dev/Seedwell-X.Y.Z.N.zip
-# A folder gets the zip first and latest.json last (written aside and renamed), so a half-copied build is never seen.
-# One folder per system: the Windows builds (app-windows/dev-build.ps1) need a folder of their own, or each
-# system's latest.json would replace the other's.
+# A folder gets the zip first, then build.json signed with the build key (tools/build-sign.sh add: this Mac's
+# Keychain), written aside and renamed, so a half-copied build is never seen; a device installs a build from a
+# watched folder only with that signature (and, on a Mac, the team's Developer ID). One folder holds every system's
+# build: build.json names each (a Windows build from app-windows/dev-build.ps1 is signed in with build-sign.sh add).
 # Uncommitted changes are allowed; the commit is noted as <sha>-dirty. Over a Developer ID release, set
 # SEEDWELL_SIGN_IDENTITY to that identity (see the note it prints).
 set -euo pipefail
@@ -27,7 +28,13 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
-if [ -n "$to" ]; then [ -d "$to" ] || { echo "no such folder: $to" >&2; exit 1; }; to="$(cd "$to" && pwd)"; fi
+if [ -n "$to" ]; then
+  [ -d "$to" ] || { echo "no such folder: $to" >&2; exit 1; }
+  to="$(cd "$to" && pwd)"
+  # Before the build, not after it: a build no device would take is not worth making.
+  security find-generic-password -s "Seedwell build key" -a build-key >/dev/null 2>&1 \
+    || { echo "no build key in this Mac's Keychain: tools/build-sign.sh key new (once), or leave out --to" >&2; exit 1; }
+fi
 
 VERSION="$(sed -n '/^\[workspace.package\]/,/^\[/{s/^version *= *"\(.*\)"/\1/p;}' "$REPO/Cargo.toml" | head -1)"
 OUT="$REPO/app/build/dev"
@@ -70,11 +77,12 @@ MIN_MACOS="$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$APP/Co
 
 if [ -n "$to" ]; then
   cp "$OUT/$ZIP" "$to/.$ZIP.part" && mv "$to/.$ZIP.part" "$to/$ZIP"
-  printf '{"version":"%s","commit":"%s","minimum_macos":"%s","zip":"%s","sha256":"%s"}\n' "$DEV" "$COMMIT" "$MIN_MACOS" "$ZIP" "$SHA" > "$to/.latest.json.part"
-  mv "$to/.latest.json.part" "$to/latest.json"
-  # Older builds go: the newest is the one latest.json names.
+  "$REPO/tools/build-sign.sh" add "$to" "$ZIP" --sha256 "$SHA" --commit "$COMMIT" --minimum "$MIN_MACOS"
+  # Older Mac builds go: the newest is the one build.json names. The unsigned latest.json of earlier builds goes too
+  # (no app installs from it any more; an older one would, unchecked).
   find "$to" -maxdepth 1 -name 'Seedwell-*.zip' ! -name "$ZIP" ! -name '*-windows-x64.zip' -delete
-  echo "==> In $to (an app watching it installs it now)"
+  rm -f "$to/latest.json"
+  echo "==> In $to, signed (a device watching it installs it now)"
 fi
 echo "$OUT/$ZIP"
 echo "sha256 $SHA"

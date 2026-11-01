@@ -20,7 +20,7 @@ async fn owner(dir: &std::path::Path) -> (Device, FolderId, FolderId) {
     let docs = dir.join("Docs");
     std::fs::create_dir_all(&docs).unwrap();
     let folder: FolderId = a.h.add_folder(docs).await.unwrap().id.parse().unwrap();
-    let channel: FolderId = a.h.chat_new("Docs chat").await.unwrap().id.parse().unwrap();
+    let channel: FolderId = a.h.chat_new("Docs chat", false).await.unwrap().id.parse().unwrap();
     (a, folder, channel)
 }
 
@@ -78,7 +78,7 @@ async fn an_expired_channel_half_refuses_the_whole_join() {
     let s = FolderSecret::from_bytes([4; 32]);
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
     let old = new_invite(*s.public_key(), [5; 16], [6; 32], Role::ReadWrite, 1, now - 86_400, now - 8 * 86_400, Signer::Folder, &|m: &[u8]| s.sign(m));
-    let link = good.format_bundle(&InviteLink { invite: old, token_seed: [6; 32], name: Some("Old".into()) });
+    let link = good.format_bundle(&InviteLink { invite: old, token_seed: [6; 32], name: Some("Old".into()), agents: false, reach: None });
     let b = device("Bo").await;
     let e = b.h.join_folder(&link, dir.path().join("B")).await.unwrap_err().to_string();
     assert!(e.contains("expired"), "{e}");

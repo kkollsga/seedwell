@@ -66,10 +66,10 @@ pub fn redact_source(src: &str) -> String {
     }
 }
 
-/// Replace every folder-sync key (`SWW-…`, `SWR-…`, `SWE-…`, any case) and every `seedwell://sync/…`
-/// link inside free text by a mask. A link is an invitation to a folder (SPEC 7G.1): links are returned by
-/// `sync.share` and `sync.invites` only and never reach the activity log or any other text. (Bare keys are from
-/// the test builds before roles, and masked too.)
+/// Replace every folder-sync key (`SWW-…`, `SWR-…`, `SWE-…`, any case) and every `seedwell://sync/…` and
+/// `seedwell://chat/…` link inside free text by a mask. A link is an invitation to a folder or a channel (SPEC 7G.1):
+/// links are returned by `sync.share`, `chat.share` and `sync.invites` only and never reach the activity log or any
+/// other text. (Bare keys are from the test builds before roles, and masked too.)
 pub fn scrub_keys(text: &str) -> String {
     let lower = text.to_ascii_lowercase();
     let b = text.as_bytes();
@@ -80,9 +80,10 @@ pub fn scrub_keys(text: &str) -> String {
     while i < b.len() {
         let rest = &lower[i..];
         let boundary = i == 0 || !(b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'-');
-        let (mask, end) = if boundary && rest.starts_with("seedwell://sync/") {
+        let link = ["seedwell://sync/", "seedwell://chat/"].into_iter().find(|p| boundary && rest.starts_with(p));
+        let (mask, end) = if let Some(prefix) = link {
             let end = text[i..].find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '<' | '>' | ')' | ']' | '`')).map_or(text.len(), |e| i + e);
-            ("seedwell://sync/***", end)
+            (if prefix.ends_with("sync/") { "seedwell://sync/***" } else { "seedwell://chat/***" }, end)
         } else if boundary && (rest.starts_with("sww-") || rest.starts_with("swr-") || rest.starts_with("swe-")) && b.get(i + 4).is_some_and(|c| c.is_ascii_alphanumeric()) {
             let mut end = i + 4;
             while end < b.len() && key_char(b[end]) {
@@ -116,6 +117,10 @@ mod tests {
         assert_eq!(t, "join SWW-*** now, or swr-*** (or <seedwell://sync/***>).");
         assert_eq!(scrub_keys("nothing secret: sww- and answer-sww-x"), "nothing secret: sww- and answer-sww-x");
         assert_eq!(scrub_keys("åäö SWE-AAAA"), "åäö SWE-***");
+        // A channel's link is as secret as a folder's, its query (agents, the sealed addresses) included.
+        let t = scrub_keys("joining SEEDWELL://CHAT/AGLDPMSJ?name=Bridge&agents=yes&a=AHNQMMVE failed: expired");
+        assert_eq!(t, "joining seedwell://chat/*** failed: expired");
+        assert_eq!(scrub_keys("see seedwell://sync/AGLD?name=X&a=AHNQ."), "see seedwell://sync/***");
     }
 
     #[test]

@@ -22,7 +22,27 @@ sealed class Updater
     readonly App app;
     readonly Microsoft.UI.Dispatching.DispatcherQueue ui;
     readonly Microsoft.UI.Dispatching.DispatcherQueueTimer timer;
+    /// <summary>Fires once, 30 s after launch: this version started fine (the core's <c>Started</c>).</summary>
+    readonly Microsoft.UI.Dispatching.DispatcherQueueTimer startedMark;
     bool checking;
+
+    /// <summary>
+    /// A development build's version (<c>X.Y.Z.N</c>, compiled in by dev-build.ps1 as the assembly metadata
+    /// SeedwellDevVersion, the Mac's Info.plist key); null for a release.
+    /// </summary>
+    internal static string? DevVersion { get; } = typeof(Updater).Assembly
+        .GetCustomAttributes(typeof(System.Reflection.AssemblyMetadataAttribute), false)
+        .OfType<System.Reflection.AssemblyMetadataAttribute>()
+        .FirstOrDefault(a => a.Key == "SeedwellDevVersion" && !string.IsNullOrEmpty(a.Value))?.Value;
+
+    /// <summary>The folder that holds the app (an installer replaces it).</summary>
+    internal static string InstallDir => AppContext.BaseDirectory.TrimEnd('\\', '/');
+
+    /// <summary>
+    /// The arguments an installer reopens the app with: an isolated run's own state folder (and its --qa-control), else
+    /// none (the installer then reopens it as it found it started).
+    /// </summary>
+    internal static string[] RelaunchArgs => Program.StateDir is not { } s ? [] : Program.QaControl ? ["--state-dir", s, "--qa-control"] : ["--state-dir", s];
 
     public Updates Updates { get; }
 
@@ -35,15 +55,43 @@ sealed class Updater
         ui = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread();
         var repo = Environment.GetEnvironmentVariable("SEEDWELL_UPDATE_REPO") is { Length: > 0 } r ? r : RepoUrl;
         var v = Environment.OSVersion.Version;
-        // Development builds (SPEC 12A) wait for install.ps1's keep-and-go-back and the build's own version: until then this
-        // copy names no installer of its own (the core refuses to install builds) and is reopened as it was started.
-        var dir = AppContext.BaseDirectory.TrimEnd('\\', '/');
-        string[] relaunch = Program.StateDir is null ? [] : ["--state-dir", Program.StateDir];
-        Updates = new Updates(core, ReleaseBuild, repo, $"{v.Major}.{v.Minor}.{v.Build}", null, dir, "", relaunch, App.Now());
+        // Development builds (SPEC 12A): the core installs them with the installer next to the exe (install.ps1 keeps
+        // this app to go back to and waits for the new one to start fine); a copy without one installs no builds.
+        var installer = Path.Combine(InstallDir, "install.ps1");
+        Updates = new Updates(core, ReleaseBuild, repo, $"{v.Major}.{v.Minor}.{v.Build}", DevVersion, InstallDir,
+            File.Exists(installer) ? installer : "", RelaunchArgs, App.Now());
         timer = ui.CreateTimer();
         timer.IsRepeating = false;
         timer.Tick += (_, _) => Check(true);
+        // Up for 30 s: this version started fine (an installer waits for that, and keeps this app to go back to). Not
+        // in the visual QA run, which draws a simulated library and ends.
+        startedMark = ui.CreateTimer();
+        startedMark.IsRepeating = false;
+        startedMark.Interval = TimeSpan.FromSeconds(30);
+        startedMark.Tick += (_, _) =>
+        {
+            try
+            {
+                Updates.Started();
+                AppLog.Write($"update: {Updates.CurrentVersion()} started fine");
+            }
+            catch (Exception e)
+            {
+                AppLog.Write($"update: the start was not noted ({e.Message})");
+            }
+        };
+        if (Program.Render is null)
+        {
+            startedMark.Start();
+        }
         Schedule();
+    }
+
+    /// <summary>The app quits the proper way: the core stops counting this launch toward a crash loop.</summary>
+    public void Quitting()
+    {
+        startedMark.Stop();
+        try { Updates.Quitting(); } catch (Exception e) { AppLog.Write($"update: the quit was not noted ({e.Message})"); }
     }
 
     /// <summary>The next automatic check, when the core has one (none for a development build or with checks off).</summary>
@@ -97,7 +145,7 @@ sealed class Updater
     /// <summary>Starts the core's installer command into the folder that holds this app; it quits and reopens the app.</summary>
     public void Install()
     {
-        var dir = AppContext.BaseDirectory.TrimEnd('\\', '/');
+        var dir = InstallDir;
         if (Updates.Install(dir, App.Now()) is not InstallCommand cmd)
         {
             return;
@@ -126,7 +174,7 @@ sealed class Updater
     /// that is never shown; not DETACHED_PROCESS (no console at all): Windows PowerShell 5.1 started that way runs
     /// nothing, writes nothing and exits 0.
     /// </summary>
-    static bool Start(InstallCommand cmd)
+    internal static bool Start(InstallCommand cmd)
     {
         try
         {

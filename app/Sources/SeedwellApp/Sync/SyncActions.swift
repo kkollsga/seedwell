@@ -113,13 +113,38 @@ import os
     /// Removes a device from a folder or channel `id` (named `name`) for everyone (owners only). It is cut off at
     /// once and keeps what it has.
     func removeDevice(_ id: String, name: String, _ m: SyncMember, done: @escaping () -> Void) {
+        removeDevice(id, name: name, device: m.deviceId, deviceName: m.name, done: done)
+    }
+
+    /// Removes a device gone from a folder or channel `id` (named `name`): as `removeDevice`.
+    func removeGone(_ id: String, name: String, _ d: SyncGoneDevice, done: @escaping () -> Void) {
+        removeDevice(id, name: name, device: d.deviceId, deviceName: d.name, done: done)
+    }
+
+    private func removeDevice(_ id: String, name: String, device: String, deviceName: String, done: @escaping () -> Void) {
         Task {
             let core = self.core
-            let device = m.deviceId
             if case .failure(let e) = await run({ try core.syncRemoveDevice(id: id, deviceId: device) }) {
-                alert(syncRemoveDeviceFailed(device: m.name, name: name, error: SyncText.message(e)))
+                alert(syncRemoveDeviceFailed(device: deviceName, name: name, error: SyncText.message(e)))
             }
             done()
+        }
+    }
+
+    /// Shares a folder again from this Mac when every owner and admin of it is gone (`canReshare`): the core makes it a
+    /// new folder owned here, at the same place, its files untouched. Then the new folder's page and Share dialog open.
+    /// Errors are told in an alert.
+    func reshare(_ f: SyncFolder) {
+        Task {
+            let core = self.core
+            let id = f.id
+            switch await run({ try core.syncReshare(id: id) }) {
+            case .failure(let e):
+                alert(syncReshareFailed(name: f.name, error: SyncText.message(e)))
+            case .success(let new):
+                showFolder(new.id, false)
+                showShare(new.id)
+            }
         }
     }
 

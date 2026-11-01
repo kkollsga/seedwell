@@ -4,6 +4,8 @@
 //! * [`ids`]: device and folder identities and their checked text form.
 //! * [`keys`]: the folder secret and public key, and what discovery derives from them.
 //! * [`members`]: roles, signed membership statements, invitations and their links.
+//! * [`reach`]: where the device that made a link can be reached, sealed inside the link.
+//! * [`rendezvous`]: a device's sealed, signed address record in its user's rendezvous.
 //! * [`chat`]: channel messages and the summaries devices compare.
 //! * [`direct`]: private messages, end-to-end encrypted to their recipient.
 //! * [`device`]: a device's Ed25519 key.
@@ -26,6 +28,8 @@ pub mod members;
 pub mod model;
 pub mod msg;
 pub mod random;
+pub mod reach;
+pub mod rendezvous;
 pub mod sign;
 
 pub use crate::device::DeviceKey;

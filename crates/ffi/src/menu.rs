@@ -1061,6 +1061,11 @@ mod tests {
             channel_id: None,
             on_demand: false,
             unavailable: 0,
+            progress: None,
+            problem: None,
+            waiting: None,
+            gone: Vec::new(),
+            can_reshare: false,
         }
     }
 

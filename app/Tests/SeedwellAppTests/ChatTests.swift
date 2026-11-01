@@ -5,9 +5,9 @@ import Testing
 /// Channels (SPEC 7G.7): the words of the Chats page, its runs of messages, and its notifications.
 @Suite struct ChatTests {
     static func channel(_ name: String = "Team", unread: UInt32 = 0, members: UInt32 = 3, online: UInt32 = 2, muted: Bool = false,
-                        agentChannel: Bool = false, agents: SyncAgentAccess = .off) -> SyncChannel {
-        SyncChannel(id: "C-\(name)", name: name, role: .owner, shareUntilS: nil, members: members, online: online, unread: unread,
-                    lastMessageS: nil, muted: muted, agents: agents, agentChannel: agentChannel, wakeCommand: nil)
+                        agents: Bool = false, role: SyncRole = .owner) -> SyncChannel {
+        SyncChannel(id: "C-\(name)", name: name, role: role, shareUntilS: nil, members: members, online: online, unread: unread,
+                    lastMessageS: nil, muted: muted, agents: agents, wakeCommand: nil, progress: nil, problem: nil, waiting: nil, gone: [])
     }
 
     static func message(_ body: String, by device: String = "D1", name: String = "Studio iMac", user: String = "", at: UInt64 = 1_800_000_000,
@@ -22,18 +22,28 @@ import Testing
     }
 
     @Test func agentsAccessIsSaidInWords() {
-        // The sidebar's and the title bar's lines are the core's (crates/ffi/src/chat_text.rs).
+        // The sidebar's and the title bar's lines are the core's (crates/ffi/src/chat_text.rs); private messages keep
+        // their levels.
         #expect(ChatText.agents(.readPost) == "Read and post")
     }
 
-    @Test func anAgentChannelIsTaggedAndTheUsersOwnIsNot() {
+    @Test func aChannelOpenToAgentsIsTaggedAndAClosedOneIsNot() {
         // The tag the sidebar row and the channel's toolbar draw (the core's words and rule).
         #expect(ChatText.agentTag(Self.channel("Family")) == nil)
-        let tag = ChatText.agentTag(Self.channel("Bridge", agentChannel: true, agents: .readPost))
+        let tag = ChatText.agentTag(Self.channel("Bridge", agents: true))
         #expect(tag?.text == "agents")
-        #expect(tag?.help.contains("Read and post") == true)
-        // Closed by the user: still tagged, and the tooltip says agents may do nothing now.
-        #expect(ChatText.agentTag(Self.channel("Bridge", agentChannel: true, agents: .off))?.help.contains(": Off") == true)
+        #expect(tag?.help.contains("read and post") == true)
+    }
+
+    @Test func theAgentsMenuIsYesOrNoAndOnlyOwnersAndAdminsChangeIt() {
+        // The channel's ⋯ ▸ Agents submenu draws the core's menu.
+        let open = ChatText.agentsMenu(Self.channel("Bridge", agents: true))
+        #expect(open.title == "Agents: Yes" && open.canChange)
+        #expect(open.choices.map(\.title) == ["Yes", "No"] && open.choices.map(\.checked) == [true, false])
+        let reader = ChatText.agentsMenu(Self.channel("Family", role: .readWrite))
+        #expect(reader.title == "Agents: No" && !reader.canChange)
+        #expect(reader.note == "Only the channel's owners and admins can change this.")
+        #expect(ChatText.newAgentsNote(false).hasPrefix("Agents can never read"))
     }
 
     @Test func authorsAndAgentsAreNamed() {

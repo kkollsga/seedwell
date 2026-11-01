@@ -243,7 +243,10 @@ struct State {
     /// Highest `seq` known to be in the database.
     committed: u64,
     first_dirty: Option<Instant>,
-    flush_requested: bool,
+    /// The highest `seq` an explicit flush ([`Store::flush_now`]) waits for: a flush is pending while `committed` is
+    /// below it. A flag instead outlived its flush when the commit already running satisfied it, and the next debounce
+    /// then committed half of an open [`WriteGroup`] (counters without their statistics).
+    flush_upto: u64,
     shutdown: bool,
     writer_alive: bool,
     fail_count: u64,
@@ -654,7 +657,7 @@ impl Store {
                 seq: 0,
                 committed: 0,
                 first_dirty: None,
-                flush_requested: false,
+                flush_upto: 0,
                 shutdown: false,
                 writer_alive: true,
                 fail_count: 0,
@@ -729,7 +732,7 @@ impl Store {
             return Ok(());
         }
         let fails = st.fail_count;
-        st.flush_requested = true;
+        st.flush_upto = st.flush_upto.max(target);
         self.shared.wake.notify_one();
         loop {
             if st.committed >= target {
@@ -1276,11 +1279,10 @@ fn writer_loop(shared: &Shared) {
                     }
                     return;
                 }
-                if st.flush_requested {
+                if st.flush_upto > st.committed {
                     if have {
                         break;
                     }
-                    st.flush_requested = false;
                     st.committed = st.seq;
                     shared.done.notify_all();
                     continue;
@@ -1302,7 +1304,6 @@ fn writer_loop(shared: &Shared) {
                     None => st = shared.wake.wait(st).unwrap_or_else(|p| p.into_inner()),
                 }
             }
-            st.flush_requested = false;
             st.first_dirty = None;
             st.rewritten.clear();
             (std::mem::take(&mut st.batch), st.seq)
@@ -1339,6 +1340,8 @@ fn writer_loop(shared: &Shared) {
                 st.batch = batch.merge(newer);
                 st.fail_count += 1;
                 st.last_error = Some(e.to_string());
+                // The waiting flush has its answer (the failure); the batch is retried after the debounce, not at once.
+                st.flush_upto = st.committed;
                 st.first_dirty = Some(Instant::now());
                 let stop = st.shutdown;
                 shared.done.notify_all();

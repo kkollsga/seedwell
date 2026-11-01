@@ -40,18 +40,18 @@ fn json(d: &Daemon, args: &[&str], input: &str) -> Value {
 #[test]
 fn mail_goes_to_a_projects_inbox_and_its_status_comes_back() {
     let root = tempfile::tempdir().unwrap();
-    // No channel open to agents: told where the user switches one on. A daemon's channels are as --chat-agents
-    // says (it has no app where its user would): off closes even the agent channel an agent makes.
-    let closed = Daemon::start_with(root.path(), "closed", "full", &["--chat-agents", "off"]);
+    // No channel open to agents (the one there closed, Agents: No): told how one opens.
+    let closed = Daemon::start(root.path(), "closed", "full");
     closed.json(&["chat", "new", "Koding"]);
+    closed.json(&["chat", "agents", "Koding", "no"]);
     let o = run(&closed, None, &["mail", "inbox", "--as", "api"], "");
     assert_eq!(o.code, 4, "{}", o.stderr);
-    assert!(o.stderr.contains(concat!("Agents on This ", trs_platform::computer!())), "{}", o.stderr);
+    assert!(o.stderr.contains("Agents: Yes") && o.stderr.contains("seedwell chat new"), "{}", o.stderr);
     drop(closed);
-    // Without --chat-agents, as in the app: the channel an agent makes is an agent channel, open to agents.
+    // The channel an agent makes is open to agents (Agents: Yes), with nothing to switch on.
     let plain = Daemon::start(root.path(), "plain", "full");
     let made = plain.json(&["chat", "new", "Koding"]);
-    assert_eq!((made["agents"].as_str(), made["agent_channel"].as_bool()), (Some("post"), Some(true)), "{made}");
+    assert_eq!(made["agents"].as_str(), Some("yes"), "{made}");
     let o = run(&plain, None, &["mail", "inbox", "--as", "api"], "");
     assert_eq!(o.code, 0, "{}", o.stderr);
     drop(plain);

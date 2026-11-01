@@ -44,9 +44,12 @@ pub const FEATURE_DIRECT: u64 = 1 << 1;
 pub const FEATURE_HOLDS: u64 = 1 << 2;
 /// Feature bit 3: answers [`RenameRequest`] (type 26) with a [`RenameReply`] (type 27). Only a device with it is asked.
 pub const FEATURE_RENAMES: u64 = 1 << 3;
+/// Feature bit 4 (0.1.13): a device's own devices trust each other. Sessions that both have it carry [`DevicesJoin`]
+/// (type 28) and the [`Proof::Sibling`] proof (kind 6); a device without it is never sent either.
+pub const FEATURE_DEVICES: u64 = 1 << 4;
 /// The optional behaviours this build supports, one bit each; a session uses those both sides have (the AND). A new
 /// one takes the next free bit, documented here and in `PROTOCOL.md`; bits are never reused.
-pub const FEATURES: u64 = FEATURE_CHAT | FEATURE_DIRECT | FEATURE_HOLDS | FEATURE_RENAMES;
+pub const FEATURES: u64 = FEATURE_CHAT | FEATURE_DIRECT | FEATURE_HOLDS | FEATURE_RENAMES | FEATURE_DEVICES;
 /// Channels in one [`ChatJoin`].
 pub const MAX_JOIN_CHANNELS: usize = 1024;
 /// Messages in one [`ChatMessages`] (and [`DirectMessages`]).
@@ -516,6 +519,17 @@ pub struct ChatJoin {
     pub channels: Vec<JoinChannel>,
 }
 
+/// Type 28 (feature [`FEATURE_DEVICES`], 0.1.13): the sender's devices group (the group of the user's own devices that
+/// trust each other) and its proof, in the same records as a [`ChatJoin`]. Sent while a session starts, after the
+/// [`DirectJoin`] (or later, for a group made or joined meanwhile), only to a device the sender believes is one of its
+/// own (or, joining, to the one that made the pairing link): the other side answers only for a group the sender proved.
+/// Empty when there is nothing to prove.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DevicesJoin {
+    /// The group (at most one in this version), as a channel's record: its id and the proofs.
+    pub groups: Vec<JoinChannel>,
+}
+
 /// Type 18 (feature [`FEATURE_CHAT`]): which messages of a channel the sender holds, so the receiver sends what it
 /// lacks.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -630,6 +644,8 @@ pub enum Message {
     RenameRequest(RenameRequest),
     /// 27.
     RenameReply(RenameReply),
+    /// 28.
+    DevicesJoin(DevicesJoin),
     /// A type this version does not know: skipped, not an error. Encodes as an empty frame of that type.
     Unknown(u8),
 }
@@ -665,6 +681,7 @@ impl Message {
             Message::HoldReply(_) => 25,
             Message::RenameRequest(_) => 26,
             Message::RenameReply(_) => 27,
+            Message::DevicesJoin(_) => 28,
             Message::Unknown(k) => *k,
         }
     }
@@ -768,13 +785,8 @@ impl Message {
                 out.extend_from_slice(&m.folder_id.0);
                 out.extend_from_slice(&m.secret);
             }
-            Message::ChatJoin(m) => {
-                put_records(out, &m.channels, |out, c| {
-                    out.extend_from_slice(&c.channel_id.0);
-                    put_len(out, c.proofs.len());
-                    c.proofs.iter().for_each(|p| put_proof(out, p));
-                });
-            }
+            Message::ChatJoin(m) => put_join_channels(out, &m.channels),
+            Message::DevicesJoin(m) => put_join_channels(out, &m.groups),
             Message::ChatHave(m) => {
                 out.extend_from_slice(&m.channel_id.0);
                 put_varint(out, m.floor_at_ms);
@@ -897,11 +909,8 @@ impl Message {
             }),
             15 => Message::RelayClose(RelayClose { session: r.varint("session")? }),
             16 => Message::OwnerKey(OwnerKey { folder_id: FolderId(r.array("folder id")?), secret: r.array("folder secret")? }),
-            17 => Message::ChatJoin(ChatJoin {
-                channels: records(r, MAX_JOIN_CHANNELS, "channels", |r| {
-                    Ok(JoinChannel { channel_id: FolderId(r.array("channel id")?), proofs: r.list(MAX_PROOFS, 2, "proofs", proof)? })
-                })?,
-            }),
+            17 => Message::ChatJoin(ChatJoin { channels: join_channels(r)? }),
+            28 => Message::DevicesJoin(DevicesJoin { groups: join_channels(r)? }),
             18 => Message::ChatHave(ChatHave {
                 channel_id: FolderId(r.array("channel id")?),
                 floor_at_ms: r.varint("floor")?,
@@ -1003,12 +1012,26 @@ fn strs(r: &mut Reader<'_>, what: &'static str) -> Result<Vec<String>, DecodeErr
 
 const PROOF_GRANT: u8 = 4;
 const PROOF_INVITE: u8 = 5;
+const PROOF_SIBLING: u8 = 6;
+
+fn put_join_channels(out: &mut Vec<u8>, list: &[JoinChannel]) {
+    put_records(out, list, |out, c| {
+        out.extend_from_slice(&c.channel_id.0);
+        put_len(out, c.proofs.len());
+        c.proofs.iter().for_each(|p| put_proof(out, p));
+    });
+}
+
+fn join_channels(r: &mut Reader<'_>) -> Result<Vec<JoinChannel>, DecodeError> {
+    records(r, MAX_JOIN_CHANNELS, "channels", |r| Ok(JoinChannel { channel_id: FolderId(r.array("channel id")?), proofs: r.list(MAX_PROOFS, 2, "proofs", proof)? }))
+}
 
 /// A proof is `u8 kind ‖ bytes`, so a device can carry past a kind from a newer version.
 fn put_proof(out: &mut Vec<u8>, p: &Proof) {
     let (kind, data): (u8, &[u8]) = match p {
         Proof::Grant(b) => (PROOF_GRANT, b),
         Proof::Invite(b) => (PROOF_INVITE, b),
+        Proof::Sibling(b) => (PROOF_SIBLING, b),
         Proof::Unknown { kind, data } => (*kind, data),
     };
     out.push(kind);
@@ -1021,6 +1044,7 @@ fn proof(r: &mut Reader<'_>) -> Result<Proof, DecodeError> {
     Ok(match kind {
         PROOF_GRANT => Proof::Grant(data.to_vec()),
         PROOF_INVITE => Proof::Invite(data.to_vec()),
+        PROOF_SIBLING => Proof::Sibling(data.to_vec()),
         kind => Proof::Unknown { kind, data: data.to_vec() },
     })
 }

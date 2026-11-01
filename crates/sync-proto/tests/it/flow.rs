@@ -41,7 +41,7 @@ fn an_owner_invites_a_reader() {
     let mut owner_view = Membership::new(*folder.public_key());
     owner_view.add([Statement::by_owner(&secret, Body::Grant { device: *laptop.public_key(), role: Role::Owner, serial: 1, at_s: now, invite: None })]);
     let invite = new_invite(*folder.public_key(), [5; 16], [6; 32], Role::ReadOnly, 1, now + 7 * 86_400, now, Signer::Folder, &|m| secret.sign(m));
-    let link = InviteLink { invite, token_seed: [6; 32], name: Some("Photos".into()) };
+    let link = InviteLink { invite, token_seed: [6; 32], name: Some("Photos".into()), agents: false, reach: None };
     let pasted = InviteLink::parse(&format!("<{}>\r\n", link.format())).unwrap();
     assert_eq!(pasted.invite.folder_id(), folder.folder_id());
     assert_eq!(pasted.name.as_deref(), Some("Photos"));

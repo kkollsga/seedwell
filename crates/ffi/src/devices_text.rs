@@ -1,0 +1,595 @@
+//! Settings › Devices and the "On all my devices" toggles (SPEC §7G.1 "Your devices", §7G.5): every word, state and
+//! choice the hosts show for the user's own devices, built here from the service's facts; the hosts only draw them.
+//!
+//! These calls are the app's own: no method of the agent interface reaches them (an agent never pairs, confirms,
+//! removes, follows, leaves or starts over, at any level), and nothing here shows the user key.
+
+use trs_platform::computer;
+use trs_sync_net::SyncHandle;
+use trs_sync_net::devices::{DevicesState, DevicesStatus, FollowState, RemovePlan};
+use trs_sync_proto::ids::{DeviceId, FolderId};
+use trs_sync_proto::members::{InviteLink, Role};
+
+use crate::Core;
+use trs_control::display as d;
+use crate::sync::readable;
+use crate::types::CoreError;
+
+/// Where this device stands with its own devices.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum DevicesKind {
+    /// In no group.
+    Unpaired,
+    /// In a group of its own; no other device paired yet.
+    Alone,
+    /// Paired with other devices.
+    Paired,
+    /// Joining with a pairing link; the other device's user confirms.
+    Joining,
+    /// Removed from its group: only Start Over helps.
+    Removed,
+}
+
+/// One device in Settings › Devices.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct DeviceRow {
+    pub id: String,
+    /// "Studio PC" ("This Mac" when it has no name).
+    pub title: String,
+    /// "Kim · Online · paired by Anna's Mac", "Last seen 3 days ago".
+    pub detail: String,
+    pub is_me: bool,
+    /// Remove… is offered (every device but this one).
+    pub removable: bool,
+    /// "Paired by “Old Laptop”, which was removed: keep it only if you paired it yourself."
+    pub warning: Option<String>,
+}
+
+/// A device asking to pair with this one's link: the confirmation.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct PairRequestRow {
+    pub id: String,
+    /// "“Studio PC” wants to join your devices."
+    pub question: String,
+    /// The id the other device shows, in groups: "MFZWI3D-BONSGYC-YLTMRWG-QOEKXSA".
+    pub id_line: String,
+    /// "Pair only if “Studio PC” shows this id. It can then reach every folder and channel you put on all your devices."
+    pub hint: String,
+    pub pair_title: String,
+    pub refuse_title: String,
+}
+
+/// Settings › Devices.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct DevicesView {
+    pub kind: DevicesKind,
+    /// "Your devices trust each other: …"
+    pub intro: String,
+    pub rows: Vec<DeviceRow>,
+    pub requests: Vec<PairRequestRow>,
+    /// "Pair a Device…": offered unless this device is joining or was removed.
+    pub pair_title: String,
+    pub pair_enabled: bool,
+    /// "Pair with a Link…": offered unless this device is paired with others or joining.
+    pub link_title: String,
+    pub link_enabled: bool,
+    /// "Leave Your Devices…" while paired (or alone), "Start Over…" once removed; `None`: neither.
+    pub leave_title: Option<String>,
+    /// The leave (or start over) confirmation's question.
+    pub leave_question: String,
+    /// The confirmation's button: "Leave" or "Start Over".
+    pub leave_action: String,
+    /// Joining: what it does now ("Confirm on “Anna's Mac”: …"), the last problem, and this device's id to compare.
+    pub joining_line: Option<String>,
+    pub joining_problem: Option<String>,
+    pub my_id_line: String,
+    /// Under the list: why a second device as co-owner is a good backup.
+    pub note: String,
+}
+
+/// A pairing link this device made, for Pair a Device….
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct PairLinkView {
+    pub link: String,
+    pub expires_s: u64,
+    pub title: String,
+    /// "Paste this link on your other device (Settings › Devices › Pair with a Link…). …"
+    pub text: String,
+    pub copy_title: String,
+}
+
+/// One folder or channel the removal also removes the device from.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct RemovePlaceRow {
+    pub id: String,
+    /// "Dev (folder)", "Seedwell Development (channel)".
+    pub title: String,
+    pub ticked: bool,
+}
+
+/// Remove… of a device.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct RemoveDeviceView {
+    pub device_id: String,
+    /// "Remove “Old Laptop” from your devices?"
+    pub title: String,
+    pub text: String,
+    /// "Also remove it from:" and the places where this device is owner, ticked.
+    pub places_title: String,
+    pub places: Vec<RemovePlaceRow>,
+    /// "Ask the owner of “Team” to remove it there."
+    pub ask_owner: Option<String>,
+    /// "It paired “Phone”: remove that one too if you did not pair it yourself."
+    pub paired: Option<String>,
+    pub remove_title: String,
+}
+
+/// The "On all my devices" toggle of a folder or channel.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct FollowLine {
+    /// Shown at all (this device is paired with others, or the item is on all devices already).
+    pub shown: bool,
+    /// "On all my devices" (a toggle's), and "On All My Devices" (a menu item's).
+    pub title: String,
+    pub menu_title: String,
+    pub on: bool,
+    /// The toggle can be switched (on needs Owner or Admin here; off is always allowed).
+    pub enabled: bool,
+    /// "Your other devices (MacBook, Studio PC) join it by themselves, as admins." or why it cannot be switched on.
+    pub line: String,
+}
+
+// ------------------------------------------------------------------------------------------------- texts
+
+/// The channel menu's item.
+const MENU_TITLE: &str = "On All My Devices";
+
+/// The intro line of Settings › Devices.
+const INTRO: &str = "Your devices trust each other: folders and channels you put on all your devices come to each of them by themselves.";
+
+/// The first four groups of a device id: what the two screens compare.
+fn id_line(id: &DeviceId) -> String {
+    id.to_string().split('-').take(4).collect::<Vec<_>>().join("-")
+}
+
+fn quoted_list(names: &[String]) -> String {
+    match names {
+        [] => String::new(),
+        [one] => one.clone(),
+        [first @ .., last] => format!("{} and {last}", first.join(", ")),
+    }
+}
+
+/// Settings › Devices for `s`, at `now_s`.
+pub(crate) fn devices_view_of(s: &DevicesStatus, now_s: u64) -> DevicesView {
+    let kind = match s.state {
+        DevicesState::None => DevicesKind::Unpaired,
+        DevicesState::Alone => DevicesKind::Alone,
+        DevicesState::Paired => DevicesKind::Paired,
+        DevicesState::Joining => DevicesKind::Joining,
+        DevicesState::Removed => DevicesKind::Removed,
+    };
+    let rows = s
+        .devices
+        .iter()
+        .map(|dv| {
+            let title = if dv.name.is_empty() { concat!("This ", computer!()).to_string() } else { dv.name.clone() };
+            let mut parts: Vec<String> = Vec::new();
+            if dv.is_me {
+                parts.push(concat!("This ", computer!()).into());
+            }
+            if !dv.user.is_empty() {
+                parts.push(dv.user.clone());
+            }
+            if !dv.is_me {
+                parts.push(match (dv.online, dv.last_seen_s) {
+                    (true, _) => "Online".into(),
+                    (false, Some(t)) => format!("Last seen {}", d::ago(t, now_s, false).to_lowercase()),
+                    (false, None) => "Offline".into(),
+                });
+            }
+            if !dv.paired_by_name.is_empty() && dv.paired_by != Some(s.me) {
+                parts.push(format!("paired by {}", dv.paired_by_name));
+            }
+            let warning = dv.paired_by_removed.then(|| {
+                let by = if dv.paired_by_name.is_empty() { "a device".to_string() } else { format!("“{}”", dv.paired_by_name) };
+                format!("Paired by {by}, which was removed: keep it only if you paired it yourself.")
+            });
+            DeviceRow { id: dv.id.to_string(), title, detail: parts.join(" · "), is_me: dv.is_me, removable: !dv.is_me, warning }
+        })
+        .collect();
+    let requests = s
+        .requests
+        .iter()
+        .map(|r| {
+            let name = if r.name.is_empty() { "A device".to_string() } else { format!("“{}”", r.name) };
+            let them = if r.name.is_empty() { "the other device".to_string() } else { format!("“{}”", r.name) };
+            PairRequestRow {
+                id: r.id.to_string(),
+                question: format!("{name} wants to join your devices."),
+                id_line: id_line(&r.id),
+                hint: format!("Pair only if {them} shows this id. It can then reach every folder and channel you put on all your devices."),
+                pair_title: "Pair".into(),
+                refuse_title: "Refuse".into(),
+            }
+        })
+        .collect();
+    let joining = s.state == DevicesState::Joining;
+    let (leave_title, leave_question) = match s.state {
+        DevicesState::Removed => (
+            Some("Start Over…".to_string()),
+            concat!(
+                "Start over with new keys? This ",
+                computer!(),
+                " leaves its old group of devices; pair your other devices with it again. Folders and channels stay."
+            )
+            .to_string(),
+        ),
+        DevicesState::Paired | DevicesState::Alone | DevicesState::Joining => (
+            Some("Leave Your Devices…".to_string()),
+            concat!(
+                "Leave your devices? This ",
+                computer!(),
+                " stops being one of them, and nothing comes to it by itself any more. Folders and channels stay."
+            )
+            .to_string(),
+        ),
+        DevicesState::None => (None, String::new()),
+    };
+    DevicesView {
+        kind,
+        intro: INTRO.into(),
+        rows,
+        requests,
+        pair_title: "Pair a Device…".into(),
+        pair_enabled: matches!(s.state, DevicesState::None | DevicesState::Alone | DevicesState::Paired),
+        link_title: "Pair with a Link…".into(),
+        link_enabled: matches!(s.state, DevicesState::None | DevicesState::Alone | DevicesState::Removed),
+        leave_title,
+        leave_question,
+        leave_action: if s.state == DevicesState::Removed { "Start Over" } else { "Leave" }.into(),
+        joining_line: if joining { s.progress.clone() } else { None },
+        joining_problem: if joining { s.problem.as_deref().map(readable) } else { None },
+        my_id_line: format!(concat!("This ", computer!(), "'s id: {}"), id_line(&s.me)),
+        note: "Folders and channels you put on all your devices come to the others with them as admins. Make a second device \
+               co-owner in a folder's sharing too: then the folder can still be managed if this one is lost."
+            .into(),
+    }
+}
+
+/// The text of Pair a Device….
+pub(crate) fn pair_link_view(link: String, expires_s: u64) -> PairLinkView {
+    PairLinkView {
+        link,
+        expires_s,
+        title: "Pair a Device".into(),
+        text: "Paste this link on your other device, in Settings › Devices › Pair with a Link…. It works once, for 15 minutes. \
+               Then confirm here: this window shows the other device's id."
+            .into(),
+        copy_title: "Copy".into(),
+    }
+}
+
+/// "Expires in 14:32" (or "Expired").
+#[uniffi::export]
+pub fn devices_countdown(expires_s: u64, now_s: u64) -> String {
+    if now_s >= expires_s {
+        return "Expired: make a new link".into();
+    }
+    let left = expires_s - now_s;
+    format!("Expires in {}:{:02}", left / 60, left % 60)
+}
+
+/// Remove… for `plan`.
+pub(crate) fn remove_view_of(p: &RemovePlan) -> RemoveDeviceView {
+    let name = if p.name.is_empty() { "this device".to_string() } else { format!("“{}”", p.name) };
+    let place = |name: &str, channel: bool| format!("{name} ({})", if channel { "channel" } else { "folder" });
+    let ask_owner = (!p.admin.is_empty()).then(|| {
+        let names: Vec<String> = p.admin.iter().map(|a| format!("“{}”", a.name)).collect();
+        format!("Ask the owner of {} to remove it there.", quoted_list(&names))
+    });
+    let paired = (!p.paired.is_empty()).then(|| {
+        let names: Vec<String> = p.paired.iter().map(|(_, n)| format!("“{n}”")).collect();
+        format!("It paired {}: remove {} too if you did not pair {} yourself.", quoted_list(&names), if names.len() == 1 { "that one" } else { "those" }, if names.len() == 1 { "it" } else { "them" })
+    });
+    RemoveDeviceView {
+        device_id: p.id.to_string(),
+        title: format!("Remove {name} from your devices?"),
+        text: "It can never join them again, and none of them admits it anywhere again: your devices change their key, so \
+               the one it holds is worth nothing. What it already has stays with it."
+            .into(),
+        places_title: "Also remove it from:".into(),
+        places: p.owner.iter().map(|x| RemovePlaceRow { id: x.id.to_string(), title: place(&x.name, x.channel), ticked: true }).collect(),
+        ask_owner,
+        paired,
+        remove_title: "Remove".into(),
+    }
+}
+
+/// The toggle of a folder or channel for `f` (`channel`: its noun).
+pub(crate) fn follow_line_of(f: &FollowState, channel: bool) -> FollowLine {
+    let noun = if channel { "channel" } else { "folder" };
+    let others = quoted_list(&f.others);
+    let line = if !f.paired {
+        concat!("Pair this ", computer!(), " with your other devices first (Settings › Devices).").to_string()
+    } else if !f.role.is_some_and(Role::admits) && !f.on {
+        format!("Only an owner or admin of this {noun} can put it on all your devices: your other devices could not be admitted.")
+    } else if f.on {
+        format!("Your other devices ({others}) have it or join it by themselves, as admins. Turning it off deletes nothing.")
+    } else {
+        format!("Your other devices ({others}) join it by themselves, as admins.")
+    };
+    FollowLine { shown: f.paired || f.on, title: "On all my devices".into(), menu_title: MENU_TITLE.into(), on: f.on, enabled: f.on || f.may, line }
+}
+
+/// The toggle in Add Folder and New Channel, before the item exists: on by default for a channel, off for a folder.
+pub(crate) fn follow_line_new(others: &[String], channel: bool) -> FollowLine {
+    let shown = !others.is_empty();
+    FollowLine {
+        shown,
+        title: "On all my devices".into(),
+        menu_title: MENU_TITLE.into(),
+        on: shown && channel,
+        enabled: shown,
+        line: if shown { format!("Your other devices ({}) join it by themselves, as admins.", quoted_list(others)) } else { String::new() },
+    }
+}
+
+fn devices_err(e: trs_sync_net::SyncError) -> CoreError {
+    match e {
+        trs_sync_net::SyncError::NotFound => CoreError::Failed { message: "That device is no longer one of your devices.".into() },
+        other => CoreError::Failed { message: readable(&trs_control::redact::scrub_keys(&other.to_string())) },
+    }
+}
+
+fn not_running() -> CoreError {
+    CoreError::Failed { message: "Folder sync is still starting. Try again in a moment.".into() }
+}
+
+fn device_id(id: &str) -> Result<DeviceId, CoreError> {
+    id.parse().map_err(|_| CoreError::Failed { message: "That device is no longer one of your devices.".into() })
+}
+
+fn now_s() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |t| t.as_secs())
+}
+
+impl Core {
+    fn devices_service(&self) -> Result<(SyncHandle, tokio::runtime::Handle), CoreError> {
+        self.backend.sync().service().ok_or_else(not_running)
+    }
+}
+
+/// The app's own calls for the user's devices (never reachable by agents).
+#[uniffi::export]
+impl Core {
+    /// Settings › Devices. Cheap; called once a second while the tab is open.
+    pub fn devices_view(&self) -> DevicesView {
+        let status = self.backend.sync().service().map(|(h, _)| h.devices_status());
+        match status {
+            Some(s) => devices_view_of(&s, now_s()),
+            None => devices_view_of(
+                &DevicesStatus { state: DevicesState::None, me: DeviceId([0; 32]), devices: Vec::new(), requests: Vec::new(), link: None, progress: None, problem: None, maker: None },
+                now_s(),
+            ),
+        }
+    }
+
+    /// Pair a Device…: a one-use link for 15 minutes (the group is made now if there is none). The link is shown to the
+    /// user only.
+    pub fn devices_pair_link(&self) -> Result<PairLinkView, CoreError> {
+        let (h, rt) = self.devices_service()?;
+        let (link, expires) = rt.block_on(h.devices_pair_link()).map_err(devices_err)?;
+        Ok(pair_link_view(link, expires))
+    }
+
+    /// The pairing link this Mac made that still admits, to show again (`None`: make a new one).
+    pub fn devices_current_link(&self) -> Option<PairLinkView> {
+        let (h, _) = self.backend.sync().service()?;
+        h.devices_status().link.map(|(l, e)| pair_link_view(l, e))
+    }
+
+    /// Why a pasted text is not a pairing link, as a sentence (`None`: it is one, or the field is empty).
+    pub fn devices_link_problem(&self, text: String) -> Option<String> {
+        if text.trim().is_empty() {
+            return None;
+        }
+        match InviteLink::parse_devices(&text) {
+            Ok(l) if l.invite.expired(now_s()) => Some("This link has expired: make a new one on the other device.".into()),
+            Ok(_) => None,
+            Err(e) => Some(readable(&e.to_string())),
+        }
+    }
+
+    /// Pair with a Link…: joins the devices of the device that made `link`; its user confirms there.
+    pub fn devices_join(&self, link: String) -> Result<DevicesView, CoreError> {
+        let (h, rt) = self.devices_service()?;
+        let s = rt.block_on(h.devices_join(&link)).map_err(devices_err)?;
+        Ok(devices_view_of(&s, now_s()))
+    }
+
+    /// Pair: admits the device asking with this Mac's link.
+    pub fn devices_confirm(&self, device_id: String) -> Result<(), CoreError> {
+        let (h, rt) = self.devices_service()?;
+        rt.block_on(h.devices_confirm(&self::device_id(&device_id)?)).map_err(devices_err)
+    }
+
+    /// Refuse: the device asking is not admitted, and the link admits nobody any more.
+    pub fn devices_refuse(&self, device_id: String) -> Result<(), CoreError> {
+        let (h, rt) = self.devices_service()?;
+        rt.block_on(h.devices_refuse(&self::device_id(&device_id)?)).map_err(devices_err)
+    }
+
+    /// Remove… of a device: what it does.
+    pub fn devices_remove_view(&self, device_id: String) -> Result<RemoveDeviceView, CoreError> {
+        let (h, _) = self.devices_service()?;
+        let p = h.devices_remove_plan(&self::device_id(&device_id)?).map_err(devices_err)?;
+        Ok(remove_view_of(&p))
+    }
+
+    /// Removes a device from the user's devices for good, and from the ticked places (`places`: their ids).
+    pub fn devices_remove(&self, device_id: String, places: Vec<String>) -> Result<(), CoreError> {
+        let (h, rt) = self.devices_service()?;
+        let places: Vec<FolderId> = places.iter().filter_map(|p| p.parse().ok()).collect();
+        rt.block_on(h.devices_remove(&self::device_id(&device_id)?, &places)).map_err(devices_err)
+    }
+
+    /// Leave Your Devices….
+    pub fn devices_leave(&self) -> Result<(), CoreError> {
+        let (h, rt) = self.devices_service()?;
+        rt.block_on(h.devices_leave()).map_err(devices_err)
+    }
+
+    /// Start Over…: leaves and makes a new group with this Mac alone.
+    pub fn devices_start_over(&self) -> Result<DevicesView, CoreError> {
+        let (h, rt) = self.devices_service()?;
+        let s = rt.block_on(h.devices_start_over()).map_err(devices_err)?;
+        Ok(devices_view_of(&s, now_s()))
+    }
+
+    /// The "On all my devices" toggle of folder or channel `id` (hidden while this Mac is not paired).
+    pub fn sync_follow_line(&self, id: String) -> FollowLine {
+        let hidden = FollowLine { shown: false, title: "On all my devices".into(), menu_title: MENU_TITLE.into(), on: false, enabled: false, line: String::new() };
+        let Some((h, _)) = self.backend.sync().service() else { return hidden };
+        let Ok(fid) = id.parse::<FolderId>() else { return hidden };
+        let channel = h.channel_status(&fid).is_some();
+        h.follow_state(&fid).map(|f| follow_line_of(&f, channel)).unwrap_or(hidden)
+    }
+
+    /// The toggle in Add Folder (`channel` false) and New Channel, before the item exists.
+    pub fn sync_follow_line_new(&self, channel: bool) -> FollowLine {
+        let others: Vec<String> = self
+            .backend
+            .sync()
+            .service()
+            .map(|(h, _)| h.devices_status())
+            .filter(|s| s.state == DevicesState::Paired)
+            .map(|s| s.devices.into_iter().filter(|d| !d.is_me).map(|d| d.name).filter(|n| !n.is_empty()).collect())
+            .unwrap_or_default();
+        follow_line_new(&others, channel)
+    }
+
+    /// Turns "On all my devices" on or off for folder or channel `id`.
+    pub fn sync_set_follow(&self, id: String, on: bool) -> Result<(), CoreError> {
+        let (h, rt) = self.devices_service()?;
+        let fid: FolderId = id.parse().map_err(|_| CoreError::Failed { message: concat!("This folder is no longer synced on this ", computer!(), ".").into() })?;
+        rt.block_on(h.set_follow(&fid, on)).map_err(devices_err)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use trs_sync_net::devices::{OwnDevice, PairRequestInfo, Place};
+
+    use super::*;
+
+    fn dev(n: u8, name: &str, me: bool) -> OwnDevice {
+        OwnDevice {
+            id: DeviceId([n; 32]),
+            name: name.into(),
+            user: if me { "Kim".into() } else { String::new() },
+            is_me: me,
+            online: false,
+            last_seen_s: None,
+            paired_by: None,
+            paired_by_name: String::new(),
+            paired_by_removed: false,
+        }
+    }
+
+    fn status(state: DevicesState, devices: Vec<OwnDevice>) -> DevicesStatus {
+        DevicesStatus { state, me: DeviceId([1; 32]), devices, requests: Vec::new(), link: None, progress: None, problem: None, maker: None }
+    }
+
+    #[test]
+    fn the_list_says_who_is_online_and_who_paired_whom() {
+        let mut studio = dev(2, "Studio PC", false);
+        studio.online = true;
+        studio.paired_by = Some(DeviceId([1; 32]));
+        studio.paired_by_name = "Anna's Mac".into();
+        let mut phone = dev(3, "Phone", false);
+        phone.last_seen_s = Some(1_000);
+        phone.paired_by = Some(DeviceId([9; 32]));
+        phone.paired_by_name = "Old Laptop".into();
+        phone.paired_by_removed = true;
+        let v = devices_view_of(&status(DevicesState::Paired, vec![dev(1, "Anna's Mac", true), studio, phone]), 1_000 + 3 * 86_400);
+        assert_eq!(v.kind, DevicesKind::Paired);
+        assert_eq!(v.intro, INTRO);
+        assert_eq!(v.rows[0].detail, concat!("This ", computer!(), " · Kim"));
+        assert!(!v.rows[0].removable && v.rows[1].removable);
+        assert_eq!(v.rows[1].detail, "Online", "paired by this device: not said");
+        assert!(v.rows[2].detail.starts_with("Last seen ") && v.rows[2].detail.ends_with("paired by Old Laptop"), "{}", v.rows[2].detail);
+        assert_eq!(v.rows[2].warning.as_deref(), Some("Paired by “Old Laptop”, which was removed: keep it only if you paired it yourself."));
+        assert!(v.pair_enabled && !v.link_enabled);
+        assert_eq!(v.leave_title.as_deref(), Some("Leave Your Devices…"));
+    }
+
+    #[test]
+    fn a_request_shows_the_id_to_compare_and_the_buttons_follow_the_state() {
+        let mut s = status(DevicesState::Alone, vec![dev(1, "Anna's Mac", true)]);
+        s.requests.push(PairRequestInfo { id: DeviceId([7; 32]), name: "Studio PC".into(), at_s: 5, expires_s: 900 });
+        let v = devices_view_of(&s, 10);
+        let r = &v.requests[0];
+        assert_eq!(r.question, "“Studio PC” wants to join your devices.");
+        assert_eq!(r.id_line, id_line(&DeviceId([7; 32])));
+        assert_eq!(r.id_line.split('-').count(), 4);
+        assert!(r.hint.starts_with("Pair only if “Studio PC” shows this id."));
+        assert_eq!((r.pair_title.as_str(), r.refuse_title.as_str()), ("Pair", "Refuse"));
+        assert!(v.pair_enabled && v.link_enabled, "alone: either way");
+        let mut joining = status(DevicesState::Joining, Vec::new());
+        joining.progress = Some("Confirm on “Anna's Mac”: it shows this Mac's id".into());
+        joining.problem = Some("this link has been used up: make a new one on the other device".into());
+        let v = devices_view_of(&joining, 10);
+        assert!(!v.pair_enabled && !v.link_enabled);
+        assert_eq!(v.joining_problem.as_deref(), Some("This link has been used up: make a new one on the other device."));
+        assert!(v.my_id_line.ends_with(&id_line(&DeviceId([1; 32]))));
+        let v = devices_view_of(&status(DevicesState::Removed, Vec::new()), 10);
+        assert_eq!(v.leave_title.as_deref(), Some("Start Over…"));
+        assert!(v.leave_question.starts_with("Start over with new keys?"));
+        assert!(!v.pair_enabled && v.link_enabled);
+        assert_eq!(devices_view_of(&status(DevicesState::None, Vec::new()), 10).leave_title, None);
+    }
+
+    #[test]
+    fn the_countdown_counts_minutes_and_seconds() {
+        assert_eq!(devices_countdown(1_000 + 872, 1_000), "Expires in 14:32");
+        assert_eq!(devices_countdown(1_000, 1_000), "Expired: make a new link");
+        assert!(pair_link_view("seedwell://devices/x".into(), 5).text.contains("15 minutes"));
+    }
+
+    #[test]
+    fn the_removal_lists_the_owners_places_ticked_and_asks_for_the_rest() {
+        let place = |n: u8, name: &str, channel: bool| Place { id: FolderId([n; 32]), name: name.into(), channel };
+        let p = RemovePlan {
+            id: DeviceId([4; 32]),
+            name: "Old Laptop".into(),
+            owner: vec![place(1, "Dev", false), place(2, "Seedwell Development", true)],
+            admin: vec![place(3, "Team", false)],
+            paired: vec![(DeviceId([5; 32]), "Phone".into())],
+        };
+        let v = remove_view_of(&p);
+        assert_eq!(v.title, "Remove “Old Laptop” from your devices?");
+        assert_eq!(v.places.iter().map(|x| (x.title.as_str(), x.ticked)).collect::<Vec<_>>(), [("Dev (folder)", true), ("Seedwell Development (channel)", true)]);
+        assert_eq!(v.ask_owner.as_deref(), Some("Ask the owner of “Team” to remove it there."));
+        assert_eq!(v.paired.as_deref(), Some("It paired “Phone”: remove that one too if you did not pair it yourself."));
+        assert!(v.text.contains("change their key") && !v.text.contains("Start Over"), "{}", v.text);
+    }
+
+    #[test]
+    fn the_toggle_says_who_joins_or_why_it_cannot() {
+        let f = |on, may, paired, role| FollowState { on, may, paired, role, others: vec!["MacBook".into(), "Studio PC".into()] };
+        let l = follow_line_of(&f(false, true, true, Some(Role::Owner)), false);
+        assert!(l.shown && l.enabled && !l.on);
+        assert_eq!(l.line, "Your other devices (MacBook and Studio PC) join it by themselves, as admins.");
+        let l = follow_line_of(&f(false, false, true, Some(Role::ReadWrite)), true);
+        assert!(l.shown && !l.enabled && l.line.starts_with("Only an owner or admin of this channel"));
+        let l = follow_line_of(&f(true, false, true, Some(Role::ReadWrite)), false);
+        assert!(l.enabled && l.on, "off is always allowed");
+        let l = follow_line_of(&f(false, false, false, Some(Role::Owner)), false);
+        assert!(!l.shown && !l.enabled);
+        let n = follow_line_new(&["MacBook".into()], true);
+        assert!(n.shown && n.on && n.enabled, "a new channel: on by default when paired");
+        assert!(!follow_line_new(&["MacBook".into()], false).on, "a new folder: off");
+        assert!(!follow_line_new(&[], true).shown, "not paired: not shown");
+    }
+}

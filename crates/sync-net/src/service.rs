@@ -7,7 +7,7 @@ use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -25,13 +25,14 @@ use trs_sync_proto::ids::{DeviceId, FolderId};
 use trs_sync_proto::keys::{Access, FolderKey, FolderSecret};
 use trs_sync_proto::members::{Body, InviteLink, Membership, Role, Signer, Statement, hex, new_invite};
 use trs_sync_proto::model::STATE_DIR;
+use trs_sync_proto::reach::LinkReach;
 use trs_sync_proto::msg::{AddressRecord, Addresses, Message};
 
 use crate::config::{FolderEntry, Settings, SyncConfig};
 use crate::secrets::SecretStore;
 use crate::session::{self, Accepted, Via};
 use crate::shared::{Ctx, FolderShared, HubMsg, Live, Names, Registry, Space, SpaceKind, lock};
-use crate::status::{DeviceStatus, FolderState, FolderStatus, Snapshot};
+use crate::status::{DeviceStatus, FolderState, FolderStatus, JoinAttemptStatus, OfflineDevice, Snapshot};
 use crate::tls::Tls;
 
 /// A boxed future (the DHT adapter's answers).
@@ -44,6 +45,11 @@ pub trait PublicDiscovery: Send + Sync {
     fn announce(&self, topic: [u8; 20], port: u16) -> BoxFuture<'_, Vec<SocketAddr>>;
     /// Looks up `topic` without announcing.
     fn lookup(&self, topic: [u8; 20]) -> BoxFuture<'_, Vec<SocketAddr>>;
+    /// This device's public address and the port the router opened for sync, when the port mapping knows them
+    /// (not behind a carrier-grade NAT): put in the links this device makes.
+    fn public_address(&self) -> Option<SocketAddr> {
+        None
+    }
 }
 
 /// How to start the service.
@@ -86,9 +92,9 @@ pub struct Options {
     /// temporary folder excepted); a first start finds no device over the Internet and relays nothing (LAN only),
     /// and joined folders go to `Sync` in the state folder unless another place is set.
     pub forbidden_root: Option<PathBuf>,
-    /// A headless daemon's agent switch (`seedwell daemon --chat-agents`), which has no app for the user to set
-    /// it in: every channel (those it has, makes or joins) and private messages are at this level for the run, in
-    /// memory only (never written to `sync.toml`). The app leaves it `None`: there only the user sets each switch.
+    /// A headless daemon's switch for private messages (`seedwell daemon --chat-agents`), which has no app for the
+    /// user to set it in: private messages are at this level for agents for the run, in memory only (never written
+    /// to `sync.toml`). Channels need none: each says itself whether it is open to agents. The app leaves it `None`.
     pub chat_agents: Option<crate::chat::AgentAccess>,
     /// The host that shows on-demand folders in the file manager, once there is one (the app sets it when it serves
     /// the Mac's File Provider; a headless daemon has none). Shared, so it outlives a restart of the service.
@@ -311,6 +317,10 @@ pub(crate) struct Inner {
     pub(crate) cfg: Mutex<SyncConfig>,
     pub(crate) secrets: Arc<dyn SecretStore>,
     pub(crate) port: u16,
+    /// The address the sync port is bound to ([`Options::bind`]).
+    pub(crate) bind: IpAddr,
+    /// LAN discovery runs (the option and the setting, at the start).
+    pub(crate) lan_runs: bool,
     pub(crate) discovery: Option<Arc<dyn PublicDiscovery>>,
     pub(crate) runners: Mutex<HashMap<FolderId, Runner>>,
     pub(crate) book: Mutex<AddressBook>,
@@ -331,6 +341,9 @@ pub(crate) struct Inner {
     pub(crate) reopen_wait: Mutex<Duration>,
     /// **Tests:** how many more direct dials this device makes (`None`: no limit).
     pub(crate) dials_left: Mutex<Option<u32>>,
+    /// How long a member that is not connected stays away before it counts as gone ([`crate::absence::GONE_AFTER_S`];
+    /// shorter in tests).
+    pub(crate) gone_after_s: AtomicU64,
     /// Folders held back by a move cut off that cannot be finished yet (the original's disk not there), with why: shown
     /// as missing, tried again when volumes change and on [`Options::held_retry`].
     pub(crate) held: Mutex<BTreeMap<FolderId, Held>>,
@@ -340,10 +353,12 @@ pub(crate) struct Inner {
     pub(crate) rt: tokio::runtime::Handle,
     /// An isolated (test) run's forbidden root ([`Options::forbidden_root`]).
     pub(crate) forbidden_root: Option<PathBuf>,
-    /// A daemon's agent switch for every channel ([`Options::chat_agents`]).
-    pub(crate) chat_agents: Option<crate::chat::AgentAccess>,
     /// The file manager's host of on-demand folders ([`Options::on_demand_host`]).
     pub(crate) on_demand_host: OnDemandHostCell,
+    /// Network changes ([`crate::netchange`]).
+    pub(crate) netwatch: crate::netchange::NetWatch,
+    /// The rendezvous ([`crate::rendezvous`]).
+    pub(crate) rendezvous: crate::rendezvous::State,
 }
 
 /// The running service. Cheap to clone.
@@ -457,11 +472,15 @@ impl SyncHandle {
             ours: Mutex::new(cfg.folders.iter().filter_map(|f| f.id.parse().ok()).collect()),
             setup_wait: Mutex::new(Duration::ZERO),
             yes_to_holds: AtomicBool::new(false),
+            pairing: Mutex::new(Vec::new()),
+            devices_wake: Notify::new(),
+            devices_lock: tokio::sync::Mutex::new(()),
         });
         ctx.limits.set_kib(cfg.settings.up_kib, cfg.settings.down_kib);
         if let Some(a) = opts.chat_agents {
             lock(&ctx.direct.settings).agents = a;
         }
+        let lan_runs = opts.lan_discovery && cfg.settings.lan_discovery;
         let lan = crate::lan::Lan::new(ctx.clone(), opts.bind, opts.lan_port, opts.lan_targets);
         let inner = Arc::new(Inner {
             ctx,
@@ -470,6 +489,8 @@ impl SyncHandle {
             cfg: Mutex::new(cfg),
             secrets: opts.secrets,
             port,
+            bind: opts.bind,
+            lan_runs,
             discovery: opts.discovery,
             runners: Mutex::new(HashMap::new()),
             book: Mutex::new(AddressBook::default()),
@@ -483,12 +504,14 @@ impl SyncHandle {
             stop_wait: Mutex::new(STOP_WAIT),
             reopen_wait: Mutex::new(Duration::ZERO),
             dials_left: Mutex::new(opts.dials),
+            gone_after_s: AtomicU64::new(crate::absence::GONE_AFTER_S),
             held: Mutex::new(BTreeMap::new()),
             held_retrying: tokio::sync::Mutex::new(()),
             rt: tokio::runtime::Handle::current(),
             forbidden_root: opts.forbidden_root,
-            chat_agents: opts.chat_agents,
             on_demand_host: opts.on_demand_host,
+            netwatch: crate::netchange::NetWatch::default(),
+            rendezvous: crate::rendezvous::State::default(),
         });
         let h = SyncHandle { inner };
 
@@ -539,6 +562,13 @@ impl SyncHandle {
                 eprintln!("seedwell sync: channel {}: {err}", e.id);
             }
         }
+        // The user's own devices (after the folders and channels: what follows is then marked).
+        let group = lock(&h.inner.cfg).my_devices.clone();
+        if let Some(e) = group
+            && let Err(err) = h.open_devices(&e).await
+        {
+            eprintln!("seedwell sync: your devices: {err}");
+        }
 
         let mut tasks = vec![
             tokio::spawn(accept_loop(h.clone(), listener)),
@@ -546,11 +576,14 @@ impl SyncHandle {
             tokio::spawn(dial_loop(h.clone())),
             tokio::spawn(access_clock(h.clone())),
             tokio::spawn(held_loop(h.clone(), opts.held_retry)),
+            tokio::spawn(crate::netchange::run(h.clone())),
+            tokio::spawn(crate::rendezvous::run(h.clone())),
+            tokio::spawn(crate::devices::run(h.clone())),
         ];
         if h.inner.discovery.is_some() {
             tasks.push(tokio::spawn(dht_loop(h.clone())));
         }
-        if opts.lan_discovery && lock(&h.inner.cfg).settings.lan_discovery {
+        if h.inner.lan_runs {
             tasks.push(tokio::spawn(crate::lan::run(h.clone())));
         }
         if let Some(u) = h.inner.utp.clone() {
@@ -773,6 +806,7 @@ impl SyncHandle {
         let space = Space::new(id, SpaceKind::Folder, FolderKey::Member(pk), secret, membership, members_path, invite, links, name);
         space.paused.store(e.paused, Ordering::Relaxed);
         space.lan_only.store(e.lan_only, Ordering::Relaxed);
+        crate::devices::mark_following(&self.inner.ctx, &space);
         let mut items = trs_sync::ondemand::Items::default();
         items.set_not_members(core.not_members());
         let shared = Arc::new(FolderShared {
@@ -815,6 +849,7 @@ impl SyncHandle {
                 }
             }
         }
+        self.learn_from_link(&shared);
         self.inner.ctx.registry.add_folder(shared.clone());
         self.folders_moved();
         let (stop, rx) = watch::channel(false);
@@ -847,7 +882,7 @@ impl SyncHandle {
             if p.access(&folder).is_some() || (!self.plays_0_1_11() && lock(&p.joined).contains(&folder)) {
                 continue;
             }
-            let join = crate::peer::own_join(&self.inner.ctx, &[folder], &p.exporter, p.device, p.lan).await;
+            let join = crate::peer::own_join(&self.inner.ctx, &[folder], &p.exporter, &p.device_pk, p.lan).await;
             if !join.folders.is_empty() {
                 lock(&p.joined).insert(folder);
                 lock(&p.offered).insert(folder);
@@ -1012,6 +1047,21 @@ impl SyncHandle {
         self.install(link.invite.folder_pk, path, channel, on_demand).await
     }
 
+    /// Joins a folder that one of the user's own devices put on all of them ([`crate::devices`]), at `path` (made
+    /// here, never one that is there): no invitation, it proves it is one of that device's own.
+    pub(crate) async fn join_following_at(&self, folder_pk: [u8; 32], path: PathBuf) -> Result<(), SyncError> {
+        let path = absolute(&path)?;
+        refuse_cloud_root(&path)?;
+        self.refuse_forbidden(&path)?;
+        self.refuse_overlap(&path)?;
+        let id = FolderId::of_public_key(&folder_pk);
+        if self.inner.ctx.registry.folder(&id).is_some() || lock(&self.inner.cfg).folder(&id.to_string()).is_some() {
+            return Ok(());
+        }
+        std::fs::create_dir(&path)?;
+        self.install(folder_pk, path, None, false).await.map(|_| ())
+    }
+
     async fn install(&self, folder_pk: [u8; 32], path: PathBuf, channel: Option<FolderId>, on_demand: bool) -> Result<FolderStatus, SyncError> {
         let id = FolderId::of_public_key(&folder_pk);
         if on_demand {
@@ -1116,6 +1166,8 @@ impl SyncHandle {
     }
 
     async fn remove(&self, id: &FolderId, for_trash: bool) -> Result<PathBuf, SyncError> {
+        // On all the user's devices: taken off this one, it does not come back by itself.
+        self.skip_if_followed(id);
         let entry = lock(&self.inner.cfg).folder(&id.to_string()).cloned();
         // The file manager's host lets go of an on-demand folder first (told when it is over).
         let _settle = match entry.as_ref().filter(|e| e.on_demand) {
@@ -1654,7 +1706,7 @@ impl SyncHandle {
 
     /// The devices of a folder (or channel) and their roles. Never waits for the folder's core.
     pub fn members(&self, id: &FolderId) -> Result<Vec<MemberInfo>, SyncError> {
-        let f = self.inner.ctx.registry.space(id).ok_or(SyncError::NotFound)?;
+        let f = self.inner.ctx.registry.user_space(id).ok_or(SyncError::NotFound)?;
         let me = self.inner.ctx.me;
         let online: BTreeMap<DeviceId, String> = self
             .inner
@@ -1773,7 +1825,7 @@ impl SyncHandle {
     /// Makes an invitation (see [`SyncHandle::create_invite`]) made at `now` (Unix seconds); with `bundle`, the
     /// folder's link also carries that channel's invitation.
     fn make_invite(&self, id: &FolderId, role: Role, max_uses: u32, valid_days: u32, now: u64, bundle: Option<&InviteLink>) -> Result<InviteInfo, SyncError> {
-        let f = self.inner.ctx.registry.space(id).ok_or(SyncError::NotFound)?;
+        let f = self.inner.ctx.registry.user_space(id).ok_or(SyncError::NotFound)?;
         self.may_invite(&f, role, max_uses)?;
         let me = *self.inner.ctx.key.public_key();
         let mine = f.role_of(&me);
@@ -1791,7 +1843,10 @@ impl SyncHandle {
         let invite = new_invite(*f.public.public_key(), random_id(), seed, role, max_uses, expires_s, now, issuer, &sign);
         let name = lock(&f.name).clone();
         let kind = if f.kind == SpaceKind::Channel { trs_sync_proto::members::LinkKind::Channel } else { trs_sync_proto::members::LinkKind::Folder };
-        let l = InviteLink { invite, token_seed: seed, name: Some(name) };
+        // A channel open to agents says so in its link, so agents on the joining device may use it before admission.
+        let agents = f.kind == SpaceKind::Channel && f.membership.read().unwrap_or_else(|e| e.into_inner()).agents();
+        // Where this device is now, so the joining device can dial it without discovery (sealed in the link).
+        let l = InviteLink { invite, token_seed: seed, name: Some(name), agents, reach: Some(self.own_reach()) };
         let link = match bundle {
             Some(c) if kind == trs_sync_proto::members::LinkKind::Folder => l.format_bundle(c),
             _ => l.format_as(kind),
@@ -1816,7 +1871,7 @@ impl SyncHandle {
     /// The folder's invitations (with their links, for those this device made), newest first. Never waits for
     /// the folder's core.
     pub fn invites(&self, id: &FolderId) -> Result<Vec<InviteInfo>, SyncError> {
-        let f = self.inner.ctx.registry.space(id).ok_or(SyncError::NotFound)?;
+        let f = self.inner.ctx.registry.user_space(id).ok_or(SyncError::NotFound)?;
         let links = lock(&f.links).clone();
         // A link for a folder and its channel: the channel's id and name (as it is called here, if it is here).
         let bundle = |iid: &[u8; 16]| -> (Option<String>, Option<String>) {
@@ -1873,7 +1928,7 @@ impl SyncHandle {
     /// invites to a channel revokes that channel's invitation too.
     pub fn revoke_invite(&self, id: &FolderId, invite_id: &str) -> Result<(), SyncError> {
         let bundled = {
-            let f = self.inner.ctx.registry.space(id).ok_or(SyncError::NotFound)?;
+            let f = self.inner.ctx.registry.user_space(id).ok_or(SyncError::NotFound)?;
             let iid = trs_sync_proto::members::invite_id_from_hex(invite_id).ok_or_else(|| invalid("no such link"))?;
             lock(&f.links).get(&iid).and_then(|l| InviteLink::parse_bundle(l).ok()).and_then(|(_, c)| c)
         };
@@ -1887,7 +1942,7 @@ impl SyncHandle {
     }
 
     fn revoke_one(&self, id: &FolderId, invite_id: &str) -> Result<(), SyncError> {
-        let f = self.inner.ctx.registry.space(id).ok_or(SyncError::NotFound)?;
+        let f = self.inner.ctx.registry.user_space(id).ok_or(SyncError::NotFound)?;
         let iid = trs_sync_proto::members::invite_id_from_hex(invite_id).ok_or_else(|| invalid("no such link"))?;
         let me = *self.inner.ctx.key.public_key();
         let body = Body::Revoke { id: iid, at_s: crate::roles::now_s() };
@@ -1905,7 +1960,7 @@ impl SyncHandle {
 
     /// Changes a device's role (owners only). A folder keeps at least one owner.
     pub fn set_role(&self, id: &FolderId, device: &DeviceId, role: Role) -> Result<(), SyncError> {
-        let f = self.inner.ctx.registry.space(id).ok_or(SyncError::NotFound)?;
+        let f = self.inner.ctx.registry.user_space(id).ok_or(SyncError::NotFound)?;
         let pk = self.owner_change(&f, device, role != Role::Owner)?;
         let serial = f.membership.read().unwrap_or_else(|e| e.into_inner()).next_serial();
         let st = crate::roles::by_owner(&f, Body::Grant { device: pk, role, serial, at_s: crate::roles::now_s(), invite: None });
@@ -1918,11 +1973,11 @@ impl SyncHandle {
     /// Removes a device from the folder (owners only): it is cut off at once and its later changes are ignored. It
     /// keeps the files it has. This device leaves a folder with [`SyncHandle::remove_folder`] instead.
     pub fn remove_device(&self, id: &FolderId, device: &DeviceId) -> Result<(), SyncError> {
-        let f = self.inner.ctx.registry.space(id).ok_or(SyncError::NotFound)?;
+        let f = self.inner.ctx.registry.user_space(id).ok_or(SyncError::NotFound)?;
         if *device == self.inner.ctx.me {
             return Err(invalid(match f.kind {
                 SpaceKind::Folder => concat!("to stop syncing on this ", trs_platform::computer!(), ", remove the folder instead"),
-                SpaceKind::Channel => concat!("to leave the channel on this ", trs_platform::computer!(), ", leave it instead"),
+                SpaceKind::Channel | SpaceKind::Devices => concat!("to leave the channel on this ", trs_platform::computer!(), ", leave it instead"),
             }));
         }
         let pk = self.owner_change(&f, device, true)?;
@@ -1932,6 +1987,94 @@ impl SyncHandle {
             self.spawn_changed(&f);
         }
         Ok(())
+    }
+
+    /// Shares a folder again from this device when nobody can admit devices to it or change roles any more (SPEC
+    /// §7G.5): this device is a read-write or read-only member and none of the folder's owners and admins is
+    /// connected. The folder becomes a new folder, with a new id, owned by this device, at the same place: its files
+    /// stay where they are, as they are (nothing is deleted, moved or downloaded again; the first scan reads them in
+    /// as this device's), and so does `.seedwell/Archive`. The old folder is left: its id, keys, index, membership and
+    /// the devices met in it are forgotten here (the others keep it). Its settings on this device (paused, local
+    /// network only, archive, local ignore patterns) carry over; its channel link does not. Then the usual Share
+    /// makes a link. Not for an on-demand folder (its files are online only, in this device's cache).
+    pub async fn reshare(&self, id: &FolderId) -> Result<FolderStatus, SyncError> {
+        self.refuse_held(id)?;
+        let entry = lock(&self.inner.cfg).folder(&id.to_string()).cloned().ok_or(SyncError::NotFound)?;
+        let f = self.inner.ctx.registry.folder(id).ok_or_else(|| invalid("the folder is not running here: start Seedwell again, or remove it"))?;
+        if entry.on_demand {
+            return Err(invalid(concat!(
+                "an on-demand folder's files are online only: switch it to keep every file on this ",
+                trs_platform::computer!(),
+                " (mode full) first, then share it again"
+            )));
+        }
+        let me = *self.inner.ctx.key.public_key();
+        match f.role_of(&me) {
+            Some(Role::Owner | Role::Admin) => return Err(invalid(concat!("this ", trs_platform::computer!(), " can share the folder itself: make a link with Share"))),
+            None if f.joining(&me) => return Err(invalid(concat!("this ", trs_platform::computer!(), " is not admitted to the folder yet: there is nothing to share again"))),
+            None => return Err(invalid(concat!("this ", trs_platform::computer!(), " is no longer a member of the folder: add the folder as a new one instead"))),
+            Some(_) => {}
+        }
+        // An owner or admin connected now can admit devices and change roles: nothing is stuck.
+        let names: BTreeMap<DeviceId, Names> = f.profile_names().into_iter().collect();
+        if let Some(p) = self.inner.ctx.registry.peers().into_iter().find(|p| p.access(id).is_some() && f.role_of(&p.device_pk).is_some_and(Role::admits)) {
+            let name = names.get(&p.device).map(|n| n.device.clone()).filter(|n| !n.is_empty()).unwrap_or_else(|| p.name.clone());
+            let role = if f.role_of(&p.device_pk) == Some(Role::Owner) { "an owner" } else { "an admin" };
+            return Err(invalid(format!(
+                concat!("{name}, {role} of this folder, is connected: ask it to share the folder, or to make this ", trs_platform::computer!(), " an admin"),
+                name = name,
+                role = role
+            )));
+        }
+        drop(f);
+        let (_, closed) = self.stop_folder(id).await?;
+        if !closed.load(Ordering::SeqCst) {
+            // Its core still runs somewhere (a scan on a loaded Mac): nothing changes, and the folder goes on.
+            self.reopen_when_closed(closed, entry);
+            return Err(invalid("the folder is still busy (a scan or a transfer); it stays as it is, try again in a moment"));
+        }
+        // The new folder's key and membership first: until the configuration names it, nothing refers to them.
+        let new = match self.new_owned_entry(&entry) {
+            Ok(e) => e,
+            Err(err) => {
+                // Nothing changed: the old folder goes on.
+                let _ = self.open_folder(&entry).await;
+                return Err(invalid(format!("the folder could not be shared again ({err}); nothing changed")));
+            }
+        };
+        let new_id: FolderId = new.id.parse().map_err(|_| invalid("bad folder id"))?;
+        // One write of the configuration swaps the entries; then the old folder's keys, index and membership go.
+        {
+            let mut cfg = lock(&self.inner.cfg);
+            if let Some(slot) = cfg.folders.iter_mut().find(|e| e.id == entry.id) {
+                *slot = new.clone();
+            }
+        }
+        lock(&self.inner.ctx.ours).insert(new_id);
+        self.forget_folder(id)?;
+        self.open_folder(&new).await?;
+        self.folder_status(&new_id).ok_or(SyncError::NotFound)
+    }
+
+    /// A new folder owned by this device at `old`'s place, with `old`'s settings on this device: its key (in the
+    /// secret store) and membership (this device its owner) are made; its entry is returned, not configured yet.
+    fn new_owned_entry(&self, old: &FolderEntry) -> Result<FolderEntry, SyncError> {
+        let me = *self.inner.ctx.key.public_key();
+        let secret = FolderSecret::generate(&mut ring::rand::SystemRandom::new()).map_err(io::Error::other)?;
+        let id = FolderId::of_public_key(secret.public_key());
+        let grant = Statement::by_owner(&secret, Body::Grant { device: me, role: Role::Owner, serial: 1, at_s: crate::roles::now_s(), invite: None });
+        let mut m = Membership::new(*secret.public_key());
+        m.add([grant]);
+        crate::roles::save(&self.members_path(&id), &m)?;
+        self.inner.secrets.put(&crate::roles::secret_name(&id), secret.as_bytes())?;
+        let mut e = FolderEntry::new(id.to_string(), old.path.clone());
+        e.folder_pk = hex(secret.public_key());
+        e.paused = old.paused;
+        e.lan_only = old.lan_only;
+        e.archive = old.archive;
+        e.archive_days = old.archive_days;
+        e.ignore = old.ignore.clone();
+        Ok(e)
     }
 
     /// Checks an owner's change of `device` (`demotes`: it may stop being an owner) and returns its key.
@@ -1968,7 +2111,7 @@ impl SyncHandle {
     }
 
     fn share_until_at(&self, id: &FolderId, until_s: u64, now: u64) -> Result<(), SyncError> {
-        let f = self.inner.ctx.registry.space(id).ok_or(SyncError::NotFound)?;
+        let f = self.inner.ctx.registry.user_space(id).ok_or(SyncError::NotFound)?;
         let me = *self.inner.ctx.key.public_key();
         if f.role_of(&me) != Some(Role::Owner) || f.secret.read().unwrap_or_else(|e| e.into_inner()).is_none() {
             return Err(invalid(format!("Only the {}'s owner can change how long it is shared.", crate::roles::noun(&f))));
@@ -1981,14 +2124,14 @@ impl SyncHandle {
         Ok(())
     }
 
-    fn spawn_changed(&self, f: &Arc<Space>) {
+    pub(crate) fn spawn_changed(&self, f: &Arc<Space>) {
         let (ctx, f) = (self.inner.ctx.clone(), f.clone());
         self.inner.rt.spawn(async move { crate::roles::changed(&ctx, &f).await });
     }
 
     /// Adds an address (`host:port`) where devices of this folder (or channel) can be reached.
     pub fn add_address(&self, id: &FolderId, addr: SocketAddr) -> Result<(), SyncError> {
-        self.inner.ctx.registry.space(id).ok_or(SyncError::NotFound)?;
+        self.inner.ctx.registry.user_space(id).ok_or(SyncError::NotFound)?;
         lock(&self.inner.book).hints.entry(*id).or_default().insert(addr);
         {
             let mut cfg = lock(&self.inner.cfg);
@@ -2092,7 +2235,8 @@ impl SyncHandle {
         live.issues.extend(f.note_issues());
         let refused = lock(&f.notes).refused.clone();
         let role = f.role_of(self.inner.ctx.key.public_key());
-        let joining = lock(&f.invite).is_some();
+        // (Also one following the user's own devices, which joins with no invitation.)
+        let joining = lock(&f.invite).is_some() || f.following.load(Ordering::SeqCst);
         let state = if f.paused.load(Ordering::Relaxed) {
             FolderState::Paused
         } else if role.is_some() {
@@ -2111,6 +2255,10 @@ impl SyncHandle {
         let (need_files, need_bytes) = live.need;
         let connected = self.inner.ctx.registry.peers().iter().filter(|p| p.access(&f.id).is_some()).count() as u32;
         let members = f.members.read().unwrap_or_else(|e| e.into_inner()).len() as u32;
+        let (progress, problem, join_attempts) = self.join_status(f);
+        let away = self.away(f);
+        let shows = role.is_some() && !matches!(state, FolderState::Paused | FolderState::Missing | FolderState::Error);
+        let reshare = shows && !f.on_demand && away.stuck(role);
         FolderStatus {
             id: f.id.to_string(),
             name: lock(&f.name).clone(),
@@ -2135,7 +2283,37 @@ impl SyncHandle {
             channel_id,
             on_demand: f.on_demand,
             unavailable: live.unavailable,
+            progress,
+            problem,
+            join_attempts,
+            waiting: away.waiting().filter(|_| shows),
+            gone: away.removable(),
+            reshare,
         }
+    }
+
+    /// A folder's or channel's join, for its status: what it does now and its last problem while joining (a refusal
+    /// is its problem), and the join attempts this device refused in it.
+    pub(crate) fn join_status(&self, f: &Space) -> (Option<String>, Option<String>, Vec<JoinAttemptStatus>) {
+        let attempts = lock(&f.notes).attempts.iter().map(JoinAttemptStatus::from).collect();
+        if !f.joining(self.inner.ctx.key.public_key()) {
+            return (None, None, attempts);
+        }
+        let reach = lock(&f.invite).as_ref().and_then(|l| l.reach.clone());
+        let n = lock(&f.notes).clone();
+        if let Some(why) = n.refused {
+            return (None, Some(why), attempts);
+        }
+        // From the user's own devices: waiting for one of them that can admit this device.
+        if f.following.load(Ordering::SeqCst) {
+            let by = crate::devices::followed_by(&self.inner.ctx, f);
+            return (Some(crate::joining::from_your_devices(&lock(&f.name), by.as_deref())), n.join.problem, attempts);
+        }
+        let addrs: Vec<SocketAddr> = reach.iter().flat_map(|r| r.addresses()).collect();
+        let dht = self.inner.discovery.is_some() && lock(&self.inner.cfg).settings.dht_discovery;
+        let ways = crate::joining::Ways { link: !addrs.is_empty(), lan: self.inner.lan_runs, internet: dht && !f.lan_only.load(Ordering::Relaxed) };
+        let progress = crate::joining::progress(crate::roles::noun(f), reach.as_ref().map(|r| r.name.as_str()), &addrs, &n.join, ways);
+        (Some(progress), n.join.problem, attempts)
     }
 
     /// A disk was mounted or unmounted (the app says so; a daemon tries again on [`Options::held_retry`]): a folder held
@@ -2207,6 +2385,12 @@ impl SyncHandle {
             channel_id: None,
             on_demand: e.on_demand,
             unavailable: 0,
+            progress: None,
+            problem: None,
+            join_attempts: Vec::new(),
+            waiting: None,
+            gone: Vec::new(),
+            reshare: false,
         })
     }
 
@@ -2258,6 +2442,99 @@ impl SyncHandle {
             port: self.inner.port,
             folders,
             devices,
+            offline: self.offline_devices(),
+        }
+    }
+
+    /// A folder's or channel's members other than this device: which are connected for it, and for the others when
+    /// each was last seen and why the last attempt to reach it failed (from its own records).
+    pub(crate) fn away(&self, f: &Space) -> crate::absence::Away {
+        let me = self.inner.ctx.me;
+        let my_pk = *self.inner.ctx.key.public_key();
+        let connected: BTreeSet<DeviceId> = self.inner.ctx.registry.peers().iter().filter(|p| p.access(&f.id).is_some()).map(|p| p.device).collect();
+        let (others, may_remove): (Vec<(DeviceId, Role)>, bool) = {
+            let m = f.membership.read().unwrap_or_else(|e| e.into_inner());
+            let others = m.members().map(|(pk, mem)| (DeviceId::of_public_key(pk), mem.role)).filter(|(d, _)| *d != me).collect();
+            (others, m.role(&my_pk) == Some(Role::Owner))
+        };
+        let may_remove = may_remove && f.secret.read().unwrap_or_else(|e| e.into_inner()).is_some();
+        let kept: Vec<crate::config::SpaceDevice> = {
+            let cfg = lock(&self.inner.cfg);
+            let id = f.id.to_string();
+            cfg.folders.iter().filter(|e| e.id == id).flat_map(|e| e.devices.clone()).chain(cfg.channels.iter().filter(|e| e.id == id).flat_map(|e| e.devices.clone())).collect()
+        };
+        let names: BTreeMap<DeviceId, Names> = f.profile_names().into_iter().collect();
+        let unreachable = lock(&f.notes).unreachable.clone();
+        let mut away = crate::absence::Away {
+            now: crate::roles::now_s(),
+            gone_after_s: self.inner.gone_after_s.load(Ordering::Relaxed),
+            may_remove,
+            ..Default::default()
+        };
+        for (d, role) in others {
+            if connected.contains(&d) {
+                away.connected += 1;
+                away.admitter_connected |= role.admits();
+                continue;
+            }
+            let entry = kept.iter().find(|e| e.id == d.to_string());
+            let name = names.get(&d).map(|n| n.device.clone()).filter(|n| !n.is_empty()).or_else(|| entry.map(|e| e.name.clone())).unwrap_or_default();
+            let last_seen_s = entry.map(|e| e.last_seen).filter(|s| *s > 0);
+            let problem = unreachable.get(&d).map(|(_, why)| why.clone());
+            away.absent.push((crate::absence::Absent { id: d, name, last_seen_s, problem }, role));
+        }
+        away
+    }
+
+    /// The devices of the folders and channels here (members, and devices met in them) that are not connected: when
+    /// each was last seen and why the last attempt to reach it failed, from each folder's and channel's own records.
+    fn offline_devices(&self) -> Vec<OfflineDevice> {
+        let me = self.inner.ctx.me;
+        let connected: BTreeSet<DeviceId> = self.inner.ctx.registry.peers().iter().map(|p| p.device).collect();
+        let mut out: BTreeMap<DeviceId, OfflineDevice> = BTreeMap::new();
+        // Each folder's and channel's own device records (its entry in `sync.toml`).
+        let kept: BTreeMap<String, Vec<crate::config::SpaceDevice>> = {
+            let cfg = lock(&self.inner.cfg);
+            cfg.folders.iter().map(|e| (e.id.clone(), e.devices.clone())).chain(cfg.channels.iter().map(|e| (e.id.clone(), e.devices.clone()))).collect()
+        };
+        // (Not the devices group's: its devices are on Settings › Devices, and agents never see them.)
+        for f in self.inner.ctx.registry.spaces().into_iter().filter(|f| f.kind != SpaceKind::Devices) {
+            let mut devices: BTreeSet<DeviceId> = f.members.read().unwrap_or_else(|e| e.into_inner()).iter().copied().collect();
+            devices.extend(f.membership.read().unwrap_or_else(|e| e.into_inner()).members().map(|(pk, _)| DeviceId::of_public_key(pk)));
+            let names: BTreeMap<DeviceId, Names> = f.profile_names().into_iter().collect();
+            let kept = kept.get(&f.id.to_string());
+            let unreachable = lock(&f.notes).unreachable.clone();
+            for d in devices.into_iter().filter(|d| *d != me && !connected.contains(d)) {
+                let entry = kept.and_then(|k| k.iter().find(|e| e.id == d.to_string()));
+                let o = out.entry(d).or_insert_with(|| OfflineDevice { id: d.to_string(), name: String::new(), last_seen_s: None, problem: None, folders: Vec::new() });
+                if o.name.is_empty() {
+                    o.name = names.get(&d).map(|n| n.device.clone()).filter(|n| !n.is_empty()).or_else(|| entry.map(|e| e.name.clone())).unwrap_or_default();
+                }
+                if let Some(seen) = entry.map(|e| e.last_seen).filter(|s| *s > 0) {
+                    o.last_seen_s = Some(o.last_seen_s.map_or(seen, |s| s.max(seen)));
+                }
+                if let Some((_, why)) = unreachable.get(&d) {
+                    o.problem = Some(why.clone());
+                }
+                o.folders.push(f.id.to_string());
+            }
+        }
+        out.into_values().collect()
+    }
+
+    /// A session with `device` began or ended now: each folder's and channel's record of it says so.
+    fn seen_now(&self, device: DeviceId) {
+        let id = device.to_string();
+        let now = crate::roles::now_s();
+        let mut cfg = lock(&self.inner.cfg);
+        let mut changed = false;
+        for d in cfg.all_devices_mut().filter(|d| d.id == id) {
+            d.last_seen = now;
+            changed = true;
+        }
+        drop(cfg);
+        if changed {
+            let _ = self.save_config();
         }
     }
 
@@ -2364,7 +2641,7 @@ impl SyncHandle {
 
     /// The addresses `device`'s signed record lists.
     pub(crate) fn record_addrs(&self, device: DeviceId) -> Vec<String> {
-        lock(&self.inner.book).records.get(&device).map(|r| r.addrs.clone()).unwrap_or_default()
+        lock(&self.inner.book).records.get(&device).map(|r| r.addrs.iter().filter(|a| !crate::rendezvous::is_entry(a)).cloned().collect()).unwrap_or_default()
     }
 
     /// Every relay server (`relay://…`) in some folder's or channel's addresses.
@@ -2414,7 +2691,7 @@ impl SyncHandle {
     /// Adds a relay server (`relay://host:port#<relay device id>`) to a folder's (or channel's) addresses: this
     /// device keeps a registration there, and the members are also tried through it.
     pub fn add_relay(&self, id: &FolderId, url: &str) -> Result<(), SyncError> {
-        self.inner.ctx.registry.space(id).ok_or(SyncError::NotFound)?;
+        self.inner.ctx.registry.user_space(id).ok_or(SyncError::NotFound)?;
         let url = url.trim();
         if !crate::relay_server::is_relay_url(url) {
             return Err(invalid("not a relay address (relay://host:port#<relay device id>)"));
@@ -2530,6 +2807,12 @@ impl SyncHandle {
         *lock(&self.inner.stop_wait) = wait;
     }
 
+    /// **Tests only:** a member not connected counts as gone after this long (a day otherwise).
+    #[doc(hidden)]
+    pub fn test_gone_after(&self, after: Duration) {
+        self.inner.gone_after_s.store(after.as_secs(), Ordering::Relaxed);
+    }
+
     /// **Tests only:** a moved folder stays closed this long before it opens again, and a resumed one waits this long
     /// before its stale sessions start anew (what peers send meanwhile is not taken, and comes again).
     #[doc(hidden)]
@@ -2550,9 +2833,45 @@ impl SyncHandle {
         }
     }
 
+    /// Where this device can be reached now, for a link it makes: its addresses on its networks (those the sync port
+    /// listens on: IPv4 for the usual all-interfaces IPv4 socket; only that address for one bound to a single address),
+    /// and its public address when the port mapping knows it.
+    pub(crate) fn own_reach(&self) -> LinkReach {
+        let bind = self.inner.bind;
+        let ips: Vec<IpAddr> = if bind.is_unspecified() {
+            trs_platform::net::lan_addresses().into_iter().filter(|ip| ip.is_ipv4() || bind.is_ipv6()).collect()
+        } else {
+            vec![bind]
+        };
+        let lan = ips.into_iter().take(trs_sync_proto::reach::MAX_LAN).map(|ip| SocketAddr::new(ip, self.inner.port)).collect();
+        let public = if bind.is_unspecified() { self.inner.discovery.as_ref().and_then(|d| d.public_address()) } else { None };
+        let rendezvous = Some(self.rendezvous_url()).filter(|u| !u.is_empty());
+        LinkReach { device: self.inner.ctx.me, name: lock(&self.inner.ctx.device_name).clone(), lan, public, rendezvous }
+    }
+
+    /// A joining folder's or channel's link says where the device that made it was: that device is one to dial, at
+    /// those addresses (besides LAN discovery and the DHT), expecting that device there.
+    pub(crate) fn learn_from_link(&self, space: &Space) {
+        let Some(r) = lock(&space.invite).as_ref().and_then(|l| l.reach.clone()) else { return };
+        if let Some(url) = r.rendezvous.as_deref().filter(|_| r.device != self.inner.ctx.me) {
+            // Where the maker publishes its addresses: it is looked up there when the ones below do not answer.
+            space.members.write().unwrap_or_else(|e| e.into_inner()).insert(r.device);
+            crate::rendezvous::learn_url(self, r.device, url);
+            self.inner.wake_dialer.notify_one();
+        }
+        if r.device == self.inner.ctx.me || r.addresses().next().is_none() {
+            return;
+        }
+        space.members.write().unwrap_or_else(|e| e.into_inner()).insert(r.device);
+        lock(&self.inner.book).by_device.entry(r.device).or_default().extend(r.addresses());
+        self.inner.wake_dialer.notify_one();
+    }
+
     /// Our own signed address record: our port at the address a peer reached us on (`local`).
     fn own_record(&self, local: SocketAddr) -> AddressRecord {
-        let addrs = vec![SocketAddr::new(local.ip(), self.inner.port).to_string()];
+        let mut addrs = vec![SocketAddr::new(local.ip(), self.inner.port).to_string()];
+        // Where this device publishes its addresses (older versions skip the entry: it is not an address).
+        addrs.extend(crate::rendezvous::record_entry(self));
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
         // Where we keep a registration: others reach us through it.
         let relay = self.relay_urls().into_iter().next().unwrap_or_default();
@@ -2572,7 +2891,7 @@ impl SyncHandle {
             let name = self.inner.ctx.registry.peer(&device).map(|p| p.name.clone()).unwrap_or_default();
             let mut addresses: Vec<String> = lock(&self.inner.book).by_device.get(&device).into_iter().flatten().map(|a| a.to_string()).collect();
             addresses.truncate(8);
-            list.push(crate::config::SpaceDevice { id: id.clone(), name, addresses });
+            list.push(crate::config::SpaceDevice { id: id.clone(), name, addresses, last_seen: crate::roles::now_s(), rendezvous: String::new() });
             changed = true;
         }
         for d in cfg.all_devices_mut().filter(|d| d.id == id) {
@@ -2648,19 +2967,58 @@ impl SyncHandle {
             if device.is_some_and(|d| h.is_blocked(d)) {
                 return;
             }
+            // The folders and channels this dial is for that are joining show it while it runs.
+            let joining = h.joining_spaces(&candidates);
+            for f in &joining {
+                lock(&f.notes).join.trying = Some(addr);
+            }
             let plan = session::DialPlan { utp: h.inner.utp.as_ref(), tcp: h.inner.dial_tcp };
-            if let Ok(conn) = session::dial(&h.inner.ctx.tls, plan, addr, device).await {
-                if h.is_blocked(conn.device()) {
-                    return;
+            let dialed = session::dial(&h.inner.ctx.tls, plan, addr, device).await;
+            for f in &joining {
+                let mut n = lock(&f.notes);
+                if n.join.trying == Some(addr) {
+                    n.join.trying = None;
                 }
-                lock(&h.inner.book).tried.remove(&addr);
-                let dev = conn.device();
-                h.learn_address(Some(dev), None, addr);
-                h.remember_device(dev, None, None, Some(addr));
-                h.run_session(conn, candidates).await;
+            }
+            match dialed {
+                Ok(conn) => {
+                    if h.is_blocked(conn.device()) {
+                        return;
+                    }
+                    lock(&h.inner.book).tried.remove(&addr);
+                    let dev = conn.device();
+                    h.learn_address(Some(dev), None, addr);
+                    h.remember_device(dev, None, None, Some(addr));
+                    h.run_session(conn, candidates).await;
+                }
+                Err(e) => h.note_dial_failed(addr, device, &joining, &e),
             }
         });
         None
+    }
+
+    /// The spaces among `ids` that this device is joining.
+    fn joining_spaces(&self, ids: &[FolderId]) -> Vec<Arc<Space>> {
+        let me = self.inner.ctx.key.public_key();
+        ids.iter().filter_map(|id| self.inner.ctx.registry.space(id)).filter(|f| f.joining(me)).collect()
+    }
+
+    /// A dial of `addr` (expecting `device`) failed: the joining spaces it was for say so, and the spaces `device`
+    /// is in keep it as the last reason it could not be reached.
+    fn note_dial_failed(&self, addr: SocketAddr, device: Option<DeviceId>, joining: &[Arc<Space>], e: &io::Error) {
+        for f in joining {
+            let maker = lock(&f.invite).as_ref().and_then(|l| l.reach.clone()).filter(|r| r.addresses().any(|a| a == addr)).map(|r| r.name);
+            f.join_problem(crate::joining::dial_problem(maker.as_deref(), addr, e));
+        }
+        if let Some(d) = device {
+            let why = crate::absence::reach_problem(addr, e);
+            let now = crate::roles::now_s();
+            for f in self.inner.ctx.registry.spaces() {
+                if f.members.read().unwrap_or_else(|e| e.into_inner()).contains(&d) {
+                    lock(&f.notes).unreachable.insert(d, (now, why.clone()));
+                }
+            }
+        }
     }
 }
 
@@ -3636,6 +3994,7 @@ async fn hub_loop(h: SyncHandle, mut rx: mpsc::UnboundedReceiver<HubMsg>) {
                 // on cannot forge them). Devices of other folders and channels stay out of it.
                 if let Some(p) = h.inner.ctx.registry.peer(&d) {
                     h.remember_device(d, Some(&p.name), None, None);
+                    h.seen_now(d);
                     let shared: Vec<Arc<Space>> = h.inner.ctx.registry.spaces().into_iter().filter(|f| f.role_of(&p.device_pk).is_some()).collect();
                     let fellow = |pk: &[u8; 32]| shared.iter().any(|f| f.role_of(pk).is_some());
                     let mut records = vec![h.own_record(p.local)];
@@ -3643,7 +4002,10 @@ async fn hub_loop(h: SyncHandle, mut rx: mpsc::UnboundedReceiver<HubMsg>) {
                     let _ = p.control.send(Message::Addresses(Addresses { records })).await;
                 }
             }
-            HubMsg::PeerDown(_) => h.inner.wake_dialer.notify_one(),
+            HubMsg::PeerDown(d) => {
+                h.seen_now(d);
+                h.inner.wake_dialer.notify_one();
+            }
             HubMsg::MemberSeen { folder, device } => h.remember_device(device, None, Some(folder), None),
             HubMsg::Conversations => {
                 let _ = h.save_conversations();
@@ -3662,6 +4024,7 @@ async fn hub_loop(h: SyncHandle, mut rx: mpsc::UnboundedReceiver<HubMsg>) {
                         }
                         book.records.insert(dev, r.clone());
                     }
+                    crate::rendezvous::learn_from_record(&h, dev, &r.addrs);
                     let mut noted = false;
                     for a in &r.addrs {
                         if let Ok(sa) = a.parse::<SocketAddr>() {
@@ -3774,14 +4137,16 @@ async fn dial_loop(h: SyncHandle) {
                 next = next.min(due);
             }
         }
-        // Members that direct dials do not reach: relay servers, hole punching, member relays.
+        // Members that direct dials do not reach: their records in a rendezvous, relay servers, hole punching, member
+        // relays.
         for d in wanted.keys() {
+            crate::rendezvous::look_up(&h, *d);
             crate::relay::reach(&h, *d);
         }
     }
 }
 
-/// Announces and looks up each folder's daily DHT topic every 15 minutes.
+/// Announces and looks up each folder's daily DHT topic every 15 minutes, and at once after a network change.
 async fn dht_loop(h: SyncHandle) {
     let Some(dht) = h.inner.discovery.clone() else { return };
     loop {
@@ -3799,7 +4164,10 @@ async fn dht_loop(h: SyncHandle) {
                 }
             }
         }
-        tokio::time::sleep(Duration::from_secs(15 * 60)).await;
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(15 * 60)) => {}
+            _ = h.inner.netwatch.dht_wake.notified() => {}
+        }
     }
 }
 

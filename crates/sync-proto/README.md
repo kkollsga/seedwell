@@ -13,6 +13,7 @@ index and puller in `trs-sync`.
 | `ids` | `DeviceId`, `FolderId`, `ShortId`; Syncthing's checked text form |
 | `keys` | `FolderSecret`, `FolderKey` (owner or member), `Access`, `Proof`, DHT topics and LAN tags |
 | `members` | `Role`, signed `Statement`s, `Membership` (the roles they give), `Invite`, `InviteLink`, redeem proofs |
+| `reach` | `LinkReach`: where a link's maker can be reached, sealed in the link (`a=`) |
 | `device` | `DeviceKey` (Ed25519), `verify` |
 | `sign` | `file_payload`, `chunks_hash`, `sign_file`, `verify_file`, `WriterTable` |
 | `codec`, `msg` | frames, magics, the primitive encodings, every message |
@@ -33,7 +34,11 @@ knows the public half `pk`; the folder id is `SHA-256(pk)`. No key is shared: de
 **Invitation link:** `seedwell://sync/<base32(invite without its token key ‖ token seed 32 ‖ check 2)>?name=<name>`,
 `check = SHA-256("seedwell-sync/v2/link" ‖ payload)[..2]` (so a typo is caught; the name is only a hint, ≤ 255
 bytes). Parsing takes surrounding whitespace, `<…>` quotes from mail and `+` for a space, ignores other query fields,
-and refuses the bare `SWW-`/`SWR-` keys of the test builds (`KeyError::OldKey`).
+and refuses the bare `SWW-`/`SWR-` keys of the test builds (`KeyError::OldKey`). Since 0.1.13 a link may end in
+`&a=<base32>`: where its maker can be reached (local and public addresses, its device id and name), sealed with
+ChaCha20-Poly1305 under a key derived from the token seed (`reach`, `PROTOCOL.md`); versions before it ignore the field.
+A link to pair one of the user's own devices (0.1.13) is the same with `seedwell://devices/`; each reader
+(`parse`, `parse_chat`, `parse_devices`) takes only its own kind.
 
 Links, invitations and secrets have hand-written `Debug` that prints the invite id or folder id, never secret material.
 The link text comes only from `format()`, never from `Display`, so a link cannot end up in a log line by accident.
@@ -169,7 +174,7 @@ the file payload).
 
 * `ring` 0.17 (default features off, `std`): Ed25519 (device and folder keys), HKDF-SHA256 (the derivation),
   HMAC-SHA256 (proofs, LAN tags, constant-time compare), SHA-256 (ids, key checks, chunk lists) and SHA-1 (DHT
-  topics, which must be 20 bytes like an info hash), and ChaCha20-Poly1305 (private messages). It is already
+  topics, which must be 20 bytes like an info hash), and ChaCha20-Poly1305 (private messages, the addresses in a link). It is already
   linked through rustls.
 * `x25519-dalek` 3 (default features off, `static_secrets`, `zeroize`): X25519 for private messages (`direct`).
   ring has X25519 only for ephemeral keys, and a recipient needs a long-lived one; this is the maintained,

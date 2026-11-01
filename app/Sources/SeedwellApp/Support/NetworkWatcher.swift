@@ -4,7 +4,8 @@ import Network
 
 /// Settles the OS path monitor's chatter (SPEC 7C.4c): a value is delivered once it has stood still
 /// for `delay`. Delivered: a change of "usable path or not", and, while a path exists, a change of the
-/// interfaces it runs over (Wi-Fi to Ethernet: the engine refreshes its port mapping). A launch that
+/// interfaces it runs over or their gateways (Wi-Fi to Ethernet, another Wi-Fi network: the engine refreshes its port
+/// mapping, folder sync finds its devices again). A launch that
 /// starts online delivers nothing. Pure, with an injectable scheduler so it can be tested.
 @MainActor final class PathDebounce {
     struct Path: Equatable { var satisfied: Bool; var interfaces: String }
@@ -61,7 +62,10 @@ import Network
         self.core = core
         debounce = PathDebounce { [core] satisfied in core.networkPathChanged(satisfied: satisfied) }
         monitor.pathUpdateHandler = { [weak self] path in
-            let ifaces = path.availableInterfaces.map(\.name).sorted().joined(separator: ",")
+            // The interfaces and their gateways: moving to another Wi-Fi network keeps the interface (en0) but
+            // changes the gateway, and folder sync must hear of it (SPEC 7G.3).
+            let ifaces = path.availableInterfaces.map(\.name).sorted().joined(separator: ",") + "|"
+                + path.gateways.map { "\($0)" }.sorted().joined(separator: ",")
             let p = PathDebounce.Path(satisfied: path.status == .satisfied, interfaces: ifaces)
             DispatchQueue.main.async { MainActor.assumeIsolated { self?.debounce.report(p) } }
         }

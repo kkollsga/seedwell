@@ -1,0 +1,23 @@
+[package]
+name = "trs-rendezvous"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Seedwell rendezvous: the client of the user's own address book Worker, and its deployment through the Cloudflare API (SPEC 7G.3)"
+
+[features]
+# A loopback fake of the rendezvous Worker and of the Cloudflare API, for tests (never in the app).
+testkit = ["tokio/net", "tokio/io-util"]
+
+[dependencies]
+# Each dependency is justified in README.md.
+trs-http = { path = "../http" }
+ring = { version = "0.17", default-features = false, features = ["std"] }
+serde_json = { version = "1", default-features = false, features = ["std"] }
+tokio = { version = "1", default-features = false, features = ["rt", "time", "sync", "macros"] }
+
+[dev-dependencies]
+trs-rendezvous = { path = ".", features = ["testkit"] }
+tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-thread", "net", "time", "sync", "io-util", "macros"] }

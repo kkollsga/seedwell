@@ -1470,6 +1470,10 @@ impl Backend for RealBackend {
 
     fn network_path_changed(&self, satisfied: bool) {
         self.engine.network_path_changed(satisfied);
+        // Folder sync too (SPEC 7G.3): sessions on a gone address close, devices are found again at once.
+        if satisfied {
+            self.sync.network_changed();
+        }
     }
 
     fn system_will_sleep(&self) {
@@ -1478,6 +1482,8 @@ impl Backend for RealBackend {
 
     fn system_did_wake(&self) {
         self.engine.system_did_wake();
+        // A sleep may have outlasted the sessions, or the network may be another one now.
+        self.sync.network_changed();
     }
 
     fn volumes_changed(&self) {

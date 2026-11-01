@@ -44,7 +44,7 @@ pub struct SidebarFlag {
 }
 
 /// A small word after an item's title, drawn as a quiet capsule like a message's "agent" badge, with its tooltip:
-/// "agents" on an agent channel.
+/// "agents" on a channel open to agents (Agents: Yes).
 #[derive(Clone, Debug, PartialEq, Eq, Hash, uniffi::Record)]
 pub struct SidebarTag {
     pub text: String,
@@ -68,7 +68,7 @@ pub struct SidebarItem {
     pub count: Option<u32>,
     pub help: String,
     pub flag: Option<SidebarFlag>,
-    /// A tag after the title (an agent channel's "agents").
+    /// A tag after the title (a channel open to agents: "agents").
     pub tag: Option<SidebarTag>,
 }
 
@@ -169,6 +169,8 @@ pub enum SidebarCommand {
     Unmute,
     RenameChannel,
     LeaveChannel,
+    /// The channel's Agents: Yes/No (`chat_agents_menu`: its choices; owners and admins).
+    ChannelAgents,
 }
 
 /// One line of a sidebar item's context menu.
@@ -449,7 +451,7 @@ pub(crate) fn tracker_menu(t: &TrackerSummary) -> Vec<SidebarMenuEntry> {
 }
 
 /// The context menu of a channel: Share… (when this computer may share it), New Topic… (unless it may only read),
-/// Mute or Unmute, Rename…, and Leave Channel….
+/// Mute or Unmute, Agents: Yes/No… (owners and admins), Rename…, and Leave Channel….
 pub(crate) fn channel_menu(c: &SyncChannel) -> Vec<SidebarMenuEntry> {
     let mut v = Vec::new();
     if sync_can_share(c.role) {
@@ -459,6 +461,10 @@ pub(crate) fn channel_menu(c: &SyncChannel) -> Vec<SidebarMenuEntry> {
         v.push(entry("New Topic…", SidebarCommand::NewTopic));
     }
     v.push(if c.muted { entry("Unmute", SidebarCommand::Unmute) } else { entry("Mute", SidebarCommand::Mute) });
+    let agents = crate::chat_text::agents_menu(c);
+    if agents.can_change {
+        v.push(entry(&format!("{}…", agents.title), SidebarCommand::ChannelAgents));
+    }
     v.push(entry("Rename…", SidebarCommand::RenameChannel));
     v.push(SidebarMenuEntry::Separator);
     v.push(entry("Leave Channel…", SidebarCommand::LeaveChannel));

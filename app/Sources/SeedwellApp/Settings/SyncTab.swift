@@ -33,6 +33,9 @@ struct SyncTab: View {
                     SettingsRow(label: "On the local network", hint: "Turning it on applies at the next start") { sw(b.lanDiscovery) }
                     SettingsRow(label: "Over the Internet", hint: "Through the DHT, on a topic only members can work out") { sw(b.dhtDiscovery) }
                 }
+                if let r = model.syncRendezvous {
+                    RendezvousSection(view: r) { model.rendezvous($0) }
+                }
                 SettingsGroup(title: "Relaying") {
                     SettingsRow(label: "For my own devices", hint: "When two of your devices cannot reach each other, this Mac passes their encrypted data on") {
                         sw(b.relayOwnDevices)

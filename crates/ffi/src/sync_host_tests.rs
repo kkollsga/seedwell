@@ -598,7 +598,7 @@ fn the_app_serves_the_extension_from_the_real_core() {
     let full = c.sync_add_folder(docs2.display().to_string()).unwrap();
     assert_eq!(ask(json!({"v":1,"op":"children","folder":full.id,"item":"root"}))["err"]["kind"], "unreachable");
     // Chats are not reachable: a channel is no on-demand folder, and no op reads or sends messages.
-    let ch = c.chat_new("Team".into()).unwrap();
+    let ch = c.chat_new("Team".into(), false).unwrap();
     for op in ["item", "children", "changes", "anchor", "fetch", "create", "modify", "delete", "pin"] {
         let r = ask(json!({"v":1,"op":op,"folder":ch.id,"item":"root","name":"x","kind":"dir"}));
         assert!(r.get("ok").is_none(), "{op}: {r}");

@@ -731,12 +731,12 @@ pub fn pick_channel(channels: &[ChatChannelDto], given: Option<&str>) -> Result<
             .cloned()
             .ok_or_else(|| CliError::plain(3, format!("no channel `{q}` (see `seedwell chat list`)")));
     }
-    let open: Vec<&ChatChannelDto> = channels.iter().filter(|c| c.agents == "post" && !c.joining && c.role.as_deref() != Some("read_only")).collect();
+    let open: Vec<&ChatChannelDto> = channels.iter().filter(|c| c.agents == "yes" && !c.joining && c.role.as_deref() != Some("read_only")).collect();
     match open.as_slice() {
         [c] => Ok((*c).clone()),
         [] => Err(CliError::plain(
             4,
-            concat!("no channel where agents on this ", trs_platform::computer!(), " may post: the user can allow it in Seedwell (Chats ▸ <channel> ▸ ⋯ ▸ Agents on This ", trs_platform::computer!(), " ▸ Read and post), or give --channel"),
+            "no channel where agents may post: make one with `seedwell chat new <name>` (open to agents), or its owner or an admin sets Agents: Yes in Seedwell (Chats ▸ <channel> ▸ ⋯ ▸ Agents), or give --channel",
         )),
         many => Err(CliError::plain(
             3,
@@ -2646,15 +2646,15 @@ mod tests {
     #[test]
     fn the_mail_channel_is_given_or_the_one_open_to_agents() {
         let ch = |id: &str, name: &str, agents: &str| ChatChannelDto { id: id.into(), name: name.into(), agents: agents.into(), role: Some("read_write".into()), ..Default::default() };
-        let one = [ch("AAAA-1", "Koding", "post"), ch("BBBB-1", "Family", "off")];
+        let one = [ch("AAAA-1", "Koding", "yes"), ch("BBBB-1", "Family", "no")];
         assert_eq!(pick_channel(&one, None).unwrap().name, "Koding");
         assert_eq!(pick_channel(&one, Some("family")).unwrap().id, "BBBB-1", "by name, any case");
         assert_eq!(pick_channel(&one, Some("BBBB")).unwrap().name, "Family", "by id prefix");
         assert_eq!(pick_channel(&one, Some("nope")).unwrap_err().code, 3);
-        let two = [ch("AAAA-1", "Koding", "post"), ch("BBBB-1", "Team", "post")];
+        let two = [ch("AAAA-1", "Koding", "yes"), ch("BBBB-1", "Team", "yes")];
         let e = pick_channel(&two, None).unwrap_err();
         assert!(e.code == 3 && e.message.contains("Koding, Team"), "{}", e.message);
-        assert_eq!(pick_channel(&[ch("AAAA-1", "Koding", "read")], None).unwrap_err().code, 4);
+        assert_eq!(pick_channel(&[ch("AAAA-1", "Koding", "no")], None).unwrap_err().code, 4);
     }
 
     fn check_line_t(me: &str, n: &Counts, new_only: bool) -> Option<String> {

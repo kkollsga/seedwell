@@ -2,11 +2,15 @@
 
 mod bundle;
 mod chat;
+mod devices;
 mod direct;
+mod gone;
 mod isolation;
 mod lan;
 mod ondemand;
+mod reach;
 mod relay;
+mod rendezvous;
 mod roles;
 mod two_devices;
 mod utp;

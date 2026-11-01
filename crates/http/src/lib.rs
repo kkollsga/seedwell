@@ -27,7 +27,7 @@ pub use error::Error;
 pub use gate::{BoxFuture, RateGate, TokenBucket, Unlimited};
 pub use ranges::RangeSet;
 pub use sidecar::Sidecar;
-pub use small::{SmallResponse, get_small};
+pub use small::{SmallRequest, SmallResponse, get_small, request_small};
 pub use task::{DownloadTask, Downloader, discard_staged, list_staged};
 pub use types::{
     DownloadRequest, DownloaderConfig, Event, ProbeInfo, Progress, RestartReason, StagedInfo, State,

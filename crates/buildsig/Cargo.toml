@@ -1,0 +1,23 @@
+[package]
+name = "trs-buildsig"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Signed development-build manifests (SPEC 12A): build.json, the Ed25519 build key, signing and verification"
+
+[[bin]]
+# The signer tools/build-sign.sh runs (the secret key comes on standard input, from the Keychain); not shipped.
+name = "seedwell-build-sign"
+path = "src/bin/seedwell-build-sign.rs"
+
+[dependencies]
+# Each dependency is justified in README.md.
+ring = { version = "0.17", default-features = false, features = ["std"] }
+serde = { version = "1", default-features = false, features = ["derive", "std"] }
+serde_json = { version = "1", default-features = false, features = ["std"] }
+sha2 = { version = "0.11", default-features = false }
+
+[dev-dependencies]
+tempfile = "3"

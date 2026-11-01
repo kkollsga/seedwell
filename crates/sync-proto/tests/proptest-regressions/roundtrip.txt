@@ -5,3 +5,6 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc 7044c35d3b2881668ce33bef07e014275581597ff0b1f141111a9d8c04e93b24 # shrinks to m = ChatMessages(ChatMessages { channel_id: FolderId(AAAAAAA), messages: [ChatMessage(00000000000000000000000000000000, seq 0, Topic, 0 bytes)] })
+cc 0eac2012aaf450907b2ba9364cb081398a336b7ec829bc6ec3e34679944e8e51 # shrinks to m = ChatJoin(ChatJoin { channels: [JoinChannel { channel_id: FolderId(AAAAAAA), proofs: [Proof::Unknown(6, 0 bytes)] }] })
+cc 5087ba7f532b34f7d5665a056c1d0de78b86de110869d515671e67f557be9440 # shrinks to ms = [Join(Join { folders: [JoinFolder { folder_id: FolderId(AAAAAAA), proofs: [Proof::Unknown(6, 0 bytes)], my_index_id: 0, your_index_id: 0, your_max_seq: 0 }] })]
+cc 5e80f7d85088e562bc4c04fb560a902a4b01e36c4312b0078c668416f793dc79 # shrinks to m = Join(Join { folders: [JoinFolder { folder_id: FolderId(AAAAAAA), proofs: [Proof::Unknown(6, 0 bytes)], my_index_id: 0, your_index_id: 0, your_max_seq: 0 }] })

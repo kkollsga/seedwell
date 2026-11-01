@@ -43,7 +43,8 @@ fn proof() -> impl Strategy<Value = Proof> {
     prop_oneof![
         vec(any::<u8>(), 0..300).prop_map(Proof::Grant),
         vec(any::<u8>(), 0..300).prop_map(Proof::Invite),
-        (6..=255u8, vec(any::<u8>(), 0..40)).prop_map(|(kind, data)| Proof::Unknown { kind, data }),
+        vec(any::<u8>(), 0..40).prop_map(Proof::Sibling),
+        (7..=255u8, vec(any::<u8>(), 0..40)).prop_map(|(kind, data)| Proof::Unknown { kind, data }),
     ]
 }
 
@@ -173,6 +174,8 @@ fn chat() -> impl Strategy<Value = Message> {
     prop_oneof![
         vec((folder_id(), vec(proof(), 0..=MAX_PROOFS)), 0..4)
             .prop_map(|c| Message::ChatJoin(ChatJoin { channels: c.into_iter().map(|(channel_id, proofs)| JoinChannel { channel_id, proofs }).collect() })),
+        vec((folder_id(), vec(proof(), 0..=MAX_PROOFS)), 0..2)
+            .prop_map(|c| Message::DevicesJoin(DevicesJoin { groups: c.into_iter().map(|(channel_id, proofs)| JoinChannel { channel_id, proofs }).collect() })),
         (folder_id(), any::<u64>(), vec(author, 0..4)).prop_map(|(channel_id, floor_at_ms, authors)| Message::ChatHave(ChatHave { channel_id, floor_at_ms, authors })),
         (folder_id(), vec(msg, 0..4)).prop_map(|(channel_id, messages)| Message::ChatMessages(ChatMessages { channel_id, messages })),
     ]

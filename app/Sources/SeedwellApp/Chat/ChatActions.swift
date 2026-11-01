@@ -57,7 +57,24 @@ import SwiftUI
 
     func setMuted(_ c: SyncChannel, _ muted: Bool) { core.chatSetMuted(id: c.id, muted: muted) }
 
-    func setAgents(_ c: SyncChannel, _ access: SyncAgentAccess) { core.chatSetAgents(id: c.id, access: access) }
+    /// The channel's "On all my devices" (the core's line; hidden while this Mac is not paired).
+    func followLine(_ c: SyncChannel) -> FollowLine { core.syncFollowLine(id: c.id) }
+
+    /// Puts the channel on all the user's devices, or stops that (nothing is deleted anywhere).
+    func setFollow(_ c: SyncChannel, _ on: Bool) {
+        do { try core.syncSetFollow(id: c.id, on: on) } catch {
+            let a = NSAlert()
+            a.messageText = SyncText.message(error)
+            a.runModal()
+        }
+    }
+
+    /// The channel's Agents: Yes/No, for every member device (owners and admins).
+    func setAgents(_ c: SyncChannel, _ open: Bool) {
+        do { try core.chatSetAgents(id: c.id, open: open) } catch {
+            sync.alert("Couldn't change whether agents may use “\(c.name)”", SyncText.message(error))
+        }
+    }
 
     /// What agents on this Mac may do with private messages (one setting for all of them).
     var directAgents: SyncAgentAccess { core.chatDirectAgents() }
@@ -104,7 +121,7 @@ import SwiftUI
     func askWakeCommand(_ c: SyncChannel) {
         let a = NSAlert()
         a.messageText = "Wake an agent for “\(c.name)”"
-        a.informativeText = "This command runs when a message from another device arrives, with the message as JSON on its standard input. Agents must be allowed to read the channel. Leave it empty for none."
+        a.informativeText = "This command runs when a message from another device arrives, with the message as JSON on its standard input. It runs only while the channel is open to agents (Agents: Yes). Leave it empty for none."
         let field = NSTextField(string: c.wakeCommand ?? "")
         field.placeholderString = "~/bin/wake-agent"
         field.frame = NSRect(x: 0, y: 0, width: 320, height: 24)
@@ -203,6 +220,11 @@ import SwiftUI
     @ObservationIgnored let core: Core
     var mode: Mode = .new
     var name = ""
+    /// Agents: Yes or No for the new channel; No unless the user picks Yes.
+    var agents = false
+    /// "On all my devices" for the new channel: on by default while this Mac is paired with others.
+    let follow: FollowLine
+    var allDevices: Bool
     var link = ""
     private(set) var info: SyncLinkInfo?
     private(set) var problem: String?
@@ -211,6 +233,8 @@ import SwiftUI
 
     init(core: Core, prefill: String?) {
         self.core = core
+        follow = core.syncFollowLineNew(channel: true)
+        allDevices = follow.on
         if let prefill { mode = .join; setLink(prefill) }
     }
 
@@ -235,10 +259,16 @@ import SwiftUI
         guard canStart, !busy else { return }
         busy = true
         error = nil
-        let (core, mode, name, link) = (core, mode, ChatText.channelName(name) ?? "", link.trimmingCharacters(in: .whitespacesAndNewlines))
+        let (core, mode, name, agents, link) = (core, mode, ChatText.channelName(name) ?? "", agents, link.trimmingCharacters(in: .whitespacesAndNewlines))
+        let everywhere = mode == .new && follow.shown && allDevices
         Task {
             let r: Result<SyncChannel, Error> = await Task.detached(priority: .userInitiated) {
-                Result { mode == .new ? try core.chatNew(name: name) : try core.chatJoin(link: link) }
+                Result {
+                    let c = mode == .new ? try core.chatNew(name: name, agents: agents) : try core.chatJoin(link: link)
+                    // On all my devices: the others join it by themselves (made either way).
+                    if everywhere { try? core.syncSetFollow(id: c.id, on: true) }
+                    return c
+                }
             }.value
             busy = false
             switch r {
@@ -276,6 +306,22 @@ struct ChatNewView: View {
                         Text("You become its owner. After Start, Share… makes a link for each Mac that should join.")
                             .font(.system(size: 12)).foregroundStyle(.secondary).padding(.leading, 70)
                             .fixedSize(horizontal: false, vertical: true)
+                        HStack(spacing: 10) {
+                            Text("Agents").frame(width: 60, alignment: .leading)
+                            Picker("", selection: $model.agents) {
+                                Text("Yes").tag(true)
+                                Text("No").tag(false)
+                            }
+                            .pickerStyle(.segmented).labelsHidden().fixedSize()
+                            .accessibilityIdentifier("chat-new-agents")
+                        }
+                        .padding(.top, 6)
+                        Text(ChatText.newAgentsNote(model.agents))
+                            .font(.system(size: 12)).foregroundStyle(.secondary).padding(.leading, 70)
+                            .fixedSize(horizontal: false, vertical: true)
+                        if model.follow.shown {
+                            FollowToggle(line: model.follow, isOn: $model.allDevices).padding(.top, 6).padding(.leading, 70)
+                        }
                     }
                 case .join:
                     HStack(alignment: .firstTextBaseline, spacing: 10) {

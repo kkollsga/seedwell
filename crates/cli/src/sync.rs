@@ -54,6 +54,8 @@ pub enum Cmd {
     Role { folder: String, device: String, role: String },
     /// `sync remove-device <folder> <device>`
     RemoveDevice { folder: String, device: String },
+    /// `sync reshare <folder>`
+    Reshare { folder: String },
     /// `sync rename <folder> <name>`
     Rename { folder: String, name: String },
     /// `sync move <folder> <path>`
@@ -83,7 +85,7 @@ pub enum Cmd {
 }
 
 /// The one-line usage.
-pub const USAGE: &str = "usage: seedwell sync list | status <folder> | add <path> | join <link> [--to <path>] [--on-demand] | mode <folder> full|on-demand [--to <path>] | items <folder> [<path>] | fetch <folder> <path> [--wait S|--no-wait] | pin <folder> <path> | unpin <folder> <path> | evict <folder> <path> | unavailable [<folder>] | share <folder> [--role read_write|read_only|admin|owner] [--uses N|unlimited] [--days N|never] [--chat <channel>|new] | share-until <folder> <days>|never [--extend] | members <folder> | invites <folder> | revoke-invite <folder> <invite-id> | role <folder> <device> owner|admin|read_write|read_only | remove-device <folder> <device> | rename <folder> <name> | move <folder> <path> | pause <folder> | resume <folder> | rescan <folder> | lan-only <folder> on|off | conflicts <folder> | resolve <folder> <copy> --keep original|copy|both | address <folder> <host:port> | remove <folder> [--delete-files] [-y] | remove-confirm <token> | settings [--device-name N] [--user-name N] [--port N] [--lan on|off] [--dht on|off] [--relay-own on|off] [--relay-everyone on|off] [--up R] [--down R] [--default-location PATH]";
+pub const USAGE: &str = "usage: seedwell sync list | status <folder> | add <path> | join <link> [--to <path>] [--on-demand] | mode <folder> full|on-demand [--to <path>] | items <folder> [<path>] | fetch <folder> <path> [--wait S|--no-wait] | pin <folder> <path> | unpin <folder> <path> | evict <folder> <path> | unavailable [<folder>] | share <folder> [--role read_write|read_only|admin|owner] [--uses N|unlimited] [--days N|never] [--chat <channel>|new] | share-until <folder> <days>|never [--extend] | members <folder> | invites <folder> | revoke-invite <folder> <invite-id> | role <folder> <device> owner|admin|read_write|read_only | remove-device <folder> <device> | reshare <folder> | rename <folder> <name> | move <folder> <path> | pause <folder> | resume <folder> | rescan <folder> | lan-only <folder> on|off | conflicts <folder> | resolve <folder> <copy> --keep original|copy|both | address <folder> <host:port> | remove <folder> [--delete-files] [-y] | remove-confirm <token> | settings [--device-name N] [--user-name N] [--port N] [--lan on|off] [--dht on|off] [--relay-own on|off] [--relay-everyone on|off] [--up R] [--down R] [--default-location PATH]";
 
 fn on_off(v: Option<String>, name: &str) -> Result<Option<bool>, Usage> {
     match v.as_deref() {
@@ -211,6 +213,7 @@ pub fn parse(args_in: Vec<String>) -> Result<Cmd, Usage> {
             let mut p = args(o, 2, "remove-device <folder> <device>")?;
             Cmd::RemoveDevice { device: p.remove(1), folder: p.remove(0) }
         }
+        "reshare" | "share-again" => Cmd::Reshare { folder: one(o, "reshare <folder>")? },
         "rename" => {
             let mut p = args(o, 2, "rename <folder> <name>")?;
             Cmd::Rename { name: p.remove(1), folder: p.remove(0) }
@@ -397,6 +400,9 @@ pub async fn run(cmd: Cmd, g: &Global) -> R {
                     Some(r) => format!("Joined {} at {} ({}).", d.name, d.path, role(r)),
                     None => format!("Joining {} at {}: it starts once one of the folder's owners or admins is online.", d.name, d.path),
                 };
+                if let Some(p) = &d.progress {
+                    t.push_str(&format!("\n{p} (seedwell sync status {} shows how it goes)", first_group(&d.id)));
+                }
                 if let Some(ch) = &d.channel_id {
                     t.push_str(&format!("\nIts channel ({}) is in `seedwell chat list`.", first_group(ch)));
                 }
@@ -433,6 +439,22 @@ pub async fn run(cmd: Cmd, g: &Global) -> R {
         Cmd::RemoveDevice { folder: f, device } => {
             let (raw, d): (_, SyncFolderDto) = ask(&mut c, Request::SyncRemoveDevice(SyncDeviceParams { folder: f, device: device.clone() })).await?;
             show(g, &raw, || format!("{device} is out of {}; it keeps the files it has.", d.name));
+        }
+        Cmd::Reshare { folder: f } => {
+            let (raw, d): (_, SyncFolderDto) = ask(&mut c, Request::SyncReshare(folder(f))).await?;
+            show(g, &raw, || {
+                format!(
+                    concat!(
+                        "{} is a new folder now ({}), owned by this ",
+                        trs_platform::computer!(),
+                        ", its files where they were: {}. The old folder is left. Make a link for it with `seedwell sync share {}`."
+                    ),
+                    d.name,
+                    first_group(&d.id),
+                    d.path,
+                    first_group(&d.id)
+                )
+            });
         }
         Cmd::Rename { folder: f, name } => {
             let (raw, d): (_, SyncFolderDto) = ask(&mut c, Request::SyncRename(SyncRenameParams { folder: f, name })).await?;
@@ -680,6 +702,11 @@ pub fn list(l: &SyncListDto) -> String {
         if let Some(t) = f.share_until {
             let _ = writeln!(o, "{:<8} {}", "", shared_until(t));
         }
+        join_lines(&mut o, &format!("{:<9}", ""), f.progress.as_deref(), f.problem.as_deref(), &[]);
+        away_lines(&mut o, &format!("{:<9}", ""), "sync", &f.id, f.waiting.as_deref(), &f.gone, f.can_reshare);
+        if !f.join_attempts.is_empty() {
+            let _ = writeln!(o, "{:<8} {} refused join attempt(s): seedwell sync status {}", "", f.join_attempts.len(), first_group(&f.id));
+        }
     }
     if !l.devices.is_empty() {
         let _ = writeln!(o, "\nCONNECTED DEVICES");
@@ -687,7 +714,64 @@ pub fn list(l: &SyncListDto) -> String {
             let _ = writeln!(o, "  {:<7}  {}  ({}, {} via {}, {} folders)", first_group(&d.id), d.name, d.client, d.address, d.via, d.folders.len());
         }
     }
+    if !l.offline_devices.is_empty() {
+        let _ = writeln!(o, "\nNOT CONNECTED");
+        for d in &l.offline_devices {
+            let seen = d.last_seen_at.map_or_else(|| "never connected here".to_owned(), |t| format!("last seen {}", ago(Some(t))));
+            let why = d.last_problem.as_deref().map(|p| format!("; {p}")).unwrap_or_default();
+            let name = if d.name.is_empty() { "(name not known)" } else { d.name.as_str() };
+            let _ = writeln!(o, "  {:<7}  {}  ({seen}{why})", first_group(&d.id), name);
+        }
+    }
     o.trim_end().to_owned()
+}
+
+/// A folder's or channel's devices that are away (`indent` before each line): whom it waits for, the gone devices an
+/// owner may remove (with the command), and whether a folder may be shared again from this computer. `cmd`: `sync`
+/// or `chat`.
+pub(crate) fn away_lines(o: &mut String, indent: &str, cmd: &str, id: &str, waiting: Option<&str>, gone: &[GoneDeviceDto], reshare: bool) {
+    if let Some(w) = waiting {
+        let _ = writeln!(o, "{indent}{w}");
+    }
+    for d in gone {
+        let seen = d.last_seen_at.map_or_else(|| "never connected here".to_owned(), |t| format!("last seen {}", ago(Some(t))));
+        let _ = writeln!(o, "{indent}gone: {} ({seen}); remove it with `seedwell {cmd} remove-device {} {}`", d.name, first_group(id), first_group(&d.device_id));
+    }
+    if reshare {
+        let _ = writeln!(
+            o,
+            concat!(
+                "{indent}nobody can admit devices or change roles any more (every owner and admin is gone): `seedwell sync reshare {id}` makes it a new folder owned by this ",
+                trs_platform::computer!(),
+                ", its files kept where they are"
+            ),
+            indent = indent,
+            id = first_group(id)
+        );
+    }
+}
+
+/// A joining folder's or channel's lines: what it does now and its last problem (`indent` before each), and the
+/// join attempts refused here, newest first.
+pub(crate) fn join_lines(o: &mut String, indent: &str, progress: Option<&str>, problem: Option<&str>, attempts: &[JoinAttemptDto]) {
+    if let Some(p) = progress {
+        let _ = writeln!(o, "{indent}{p}");
+    }
+    if let Some(p) = problem {
+        let _ = writeln!(o, "{indent}last problem: {p}");
+    }
+    if !attempts.is_empty() {
+        let _ = writeln!(o, "{indent}refused join attempts (newest first):");
+        for a in attempts.iter().rev() {
+            let who = match (a.name.as_str(), a.client.as_str()) {
+                ("", "") => first_group(&a.device_id).to_owned(),
+                (n, "") => format!("{n} ({})", first_group(&a.device_id)),
+                ("", c) => format!("{} ({c})", first_group(&a.device_id)),
+                (n, c) => format!("{n} ({c}, {})", first_group(&a.device_id)),
+            };
+            let _ = writeln!(o, "{indent}  {}  {who}: {}", crate::chat::time(a.at), a.reason);
+        }
+    }
 }
 
 /// `sync status`.
@@ -726,6 +810,17 @@ pub fn status(f: &SyncFolderDto) -> String {
         for i in f.issues.iter().take(20) {
             let _ = writeln!(o, "    {}: {}", i.path, i.reason);
         }
+    }
+    if f.progress.is_some() || f.problem.is_some() {
+        let _ = writeln!(o, "  joining");
+    }
+    join_lines(&mut o, "    ", f.progress.as_deref(), f.problem.as_deref(), &[]);
+    if f.waiting.is_some() || !f.gone.is_empty() || f.can_reshare {
+        let _ = writeln!(o, "  away");
+    }
+    away_lines(&mut o, "    ", "sync", &f.id, f.waiting.as_deref(), &f.gone, f.can_reshare);
+    if !f.join_attempts.is_empty() {
+        join_lines(&mut o, "  ", None, None, &f.join_attempts);
     }
     o.trim_end().to_owned()
 }
@@ -855,7 +950,20 @@ pub fn settings(s: &SyncSettingsDto) -> String {
     let _ = writeln!(o, "find on Internet  {}", yn(s.dht_discovery));
     let _ = writeln!(o, "relay own devices {}   relay everyone {}", yn(s.relay_own_devices), yn(s.relay_everyone));
     let _ = writeln!(o, "Internet limits   down {}, up {} (the LAN is never limited)", lim(s.down_limit), lim(s.up_limit));
-    let _ = write!(o, "joined folders go {}", if s.default_location.is_empty() { "~/Seedwell" } else { &s.default_location });
+    let _ = writeln!(o, "joined folders go {}", if s.default_location.is_empty() { "~/Seedwell" } else { &s.default_location });
+    let r = &s.rendezvous;
+    if r.url.is_empty() {
+        let _ = write!(o, "rendezvous        off (set up in the app: Settings › Folder Sync)");
+    } else {
+        let _ = writeln!(o, "rendezvous        {}", r.url);
+        let _ = write!(o, "  last publish    {}", ago(r.last_publish_at));
+        if !r.last_error.is_empty() {
+            let _ = write!(o, "\n  last error      {} ({})", r.last_error, ago(r.last_error_at));
+        }
+        if r.found > 0 {
+            let _ = write!(o, "\n  devices found   {} (last {})", r.found, ago(r.last_found_at));
+        }
+    }
     o
 }
 
@@ -911,6 +1019,8 @@ mod tests {
         assert_eq!(parse(w("revoke-invite Docs ab12")).unwrap(), Cmd::RevokeInvite { folder: "Docs".into(), invite: "ab12".into() });
         assert_eq!(parse(w("role Docs MFZWI3D admin")).unwrap(), Cmd::Role { folder: "Docs".into(), device: "MFZWI3D".into(), role: "admin".into() });
         assert_eq!(parse(w("remove-device Docs MFZWI3D")).unwrap(), Cmd::RemoveDevice { folder: "Docs".into(), device: "MFZWI3D".into() });
+        assert_eq!(parse(w("reshare Docs")).unwrap(), Cmd::Reshare { folder: "Docs".into() });
+        assert!(parse(w("reshare")).is_err() && parse(w("reshare Docs extra")).is_err());
         assert_eq!(parse(w("rename Docs 'Work Docs'")).unwrap(), Cmd::Rename { folder: "Docs".into(), name: "Work Docs".into() });
         assert_eq!(parse(w("move Docs /tmp/y")).unwrap(), Cmd::Move { folder: "Docs".into(), path: "/tmp/y".into() });
         assert_eq!(parse(w("pause Docs")).unwrap(), Cmd::Pause { folder: "Docs".into() });
@@ -954,5 +1064,22 @@ mod tests {
         assert!(invites(&used).contains("used"), "{}", invites(&used));
         let l = SyncListDto { device_name: "Mac".into(), device_id: "AAAAAAA-B".into(), port: 22000, ..Default::default() };
         assert!(list(&l).contains("No synced folders"));
+    }
+
+    #[test]
+    fn a_folder_says_whom_it_waits_for_what_is_gone_and_how_to_share_it_again() {
+        let waiting = "Waiting for Mac mini (last seen 3 days ago: nothing answers at 192.168.68.57:55799)";
+        let mut f = SyncFolderDto { id: "MFZWI3D-X".into(), name: "Docs".into(), path: "/d".into(), state: "up-to-date".into(), role: Some("owner".into()), ..Default::default() };
+        f.waiting = Some(waiting.into());
+        f.gone = vec![GoneDeviceDto { device_id: "BONSGYC-Y".into(), name: "Mac mini".into(), last_seen_at: None }];
+        let l = SyncListDto { device_name: "Mac".into(), device_id: "AAAAAAA-B".into(), folders: vec![f.clone()], ..Default::default() };
+        let t = list(&l);
+        assert!(t.contains(waiting), "{t}");
+        assert!(t.contains("gone: Mac mini (never connected here); remove it with `seedwell sync remove-device MFZWI3D BONSGYC`"), "{t}");
+        assert!(!t.contains("reshare"), "{t}");
+        f.gone.clear();
+        f.can_reshare = true;
+        let s = status(&f);
+        assert!(s.contains("  away\n    Waiting for Mac mini") && s.contains("`seedwell sync reshare MFZWI3D`"), "{s}");
     }
 }

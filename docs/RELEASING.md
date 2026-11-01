@@ -210,11 +210,30 @@ configured; Sparkle, used only by a build that carries `SUPublicEDKey` and `SUFe
 - **Development builds** (SPEC 12A) are how the installed app runs work in progress without a release: with
   Settings › General › Updates › Allow development builds on, `tools/sysguard/heavy.sh tools/dev-build.sh` makes
   `app/build/dev/Seedwell-X.Y.Z.N.zip` (the next number for Cargo.toml's version) and `seedwell update install <zip>`
-  installs it; `tools/dev-build.sh --to <folder>` puts it in a folder the app watches (`seedwell update watch
+  installs it; `tools/dev-build.sh --to <folder>` publishes it in a folder the app watches (`seedwell update watch
   <folder>`), which installs it as it appears. The app keeps the build it replaces in `previous/` in its state folder
   and goes back to it when a build does not start within two minutes. Turning the switch off (in Settings, or
   `seedwell update dev-builds off`; `on` turns it on) installs the latest
-  release. A release is never `X.Y.Z.N`: the release workflow builds without `SEEDWELL_DEV_VERSION`.
+  release. A release is never `X.Y.Z.N`: the release workflow builds without `SEEDWELL_DEV_VERSION` (and without
+  `-DevVersion` on Windows).
+- **Every device: the shared builds folder.** The user's devices (the Mac mini, the MacBook, the Windows PC) each
+  watch `<Seedwell Sync folder>/builds/` (`seedwell update watch`, once per device, by its agent), which Folder Sync
+  shares. A device installs a build from it only when the folder's `build.json` is signed with the **build key** and
+  names that zip's SHA-256 (SPEC 12A; `trs-buildsig`); a Mac also requires the team's Developer ID and the app's
+  bundle id. The cycle:
+  1. Mac: `tools/sysguard/heavy.sh tools/dev-build.sh --to "<Seedwell Sync>/builds"`: the zip, then `build.json`
+     signed with the key in this Mac's Keychain. Every Mac watching the folder installs it.
+  2. Windows (the PC's agent): `app-windows\dev-build.ps1 -To "<Seedwell Sync>\builds"`: the zip only. It posts
+     `Seedwell-X.Y.Z.N-windows-x64.zip sha256 HEX` in the agent channel.
+  3. Mac (its agent), once the zip has arrived: `tools/sysguard/heavy.sh tools/build-sign.sh add "<Seedwell
+     Sync>/builds" Seedwell-X.Y.Z.N-windows-x64.zip --sha256 HEX`. It refuses a zip with another checksum, and keeps
+     the Mac's entry. Windows devices install it. `tools/build-sign.sh verify <folder>` shows what is signed.
+- **The build key.** Made once on the publishing Mac (`tools/sysguard/heavy.sh tools/build-sign.sh key new`), kept in
+  its login Keychain (service "Seedwell build key"), never in the repository, an argument or a log. Its public key
+  goes in `TRUSTED_KEYS` (`crates/buildsig/src/lib.rs`); devices trust it from the first release that carries it
+  (before then they install nothing from a folder; `seedwell update install <zip>` still works). Replacing the key: add
+  the new public key, release, sign with the new key, then drop the old one in a later release. The secret never
+  leaves that Mac: the Windows build is signed there, by checksum.
 - **The developer's own app follows this cycle**: agents switch development builds on when development starts and
   install builds there (there is no separate test copy); publishing a release ends with switching them off, which
   puts the developer's app on the release (`/release`, step 7).

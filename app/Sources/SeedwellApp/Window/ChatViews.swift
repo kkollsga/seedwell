@@ -1,7 +1,7 @@
 import SwiftUI
 
-/// A small quiet word in a capsule: a message's "agent" badge, an agent channel's "agents" tag (SPEC 7G.7). One look
-/// wherever it is drawn.
+/// A small quiet word in a capsule: a message's "agent" badge, the "agents" tag of a channel open to agents (SPEC 7G.7).
+/// One look wherever it is drawn.
 struct ChatTagCapsule: View {
     let text: String
     let help: String
@@ -17,7 +17,7 @@ struct ChatTagCapsule: View {
 }
 
 /// A conversation in the sidebar, under Chats (SPEC 7G.7): a channel, one of its topics or a private conversation,
-/// with its unread count, like a tracker row. An agent channel carries its tag after its name.
+/// with its unread count, like a tracker row. A channel open to agents carries its tag after its name.
 struct ChatSidebarRow: View {
     let icon: String
     let name: String
@@ -54,7 +54,7 @@ struct ChatToolbarControls: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            // An agent channel says so by its name, as in the sidebar.
+            // A channel open to agents says so by its name, as in the sidebar.
             if let tag = ChatText.agentTag(channel) { ChatTagCapsule(text: tag.text, help: tag.help) }
             Button("Members") { model.loadChatMembers(); showMembers = true }
                 .help("Who is in this channel")
@@ -69,14 +69,13 @@ struct ChatToolbarControls: View {
             }
             Menu {
                 Button(channel.muted ? "Unmute" : "Mute") { actions.setMuted(channel, !channel.muted) }
-                Menu("Agents on This Mac") {
-                    ForEach([SyncAgentAccess.off, .read, .readPost], id: \.self) { a in
-                        Button { actions.setAgents(channel, a) } label: {
-                            if a == channel.agents { Label(ChatText.agents(a), systemImage: "checkmark") } else { Text(ChatText.agents(a)) }
-                        }
-                    }
+                ChatAgentsMenuView(menu: ChatText.agentsMenu(channel)) { actions.setAgents(channel, $0) }
+                let follow = actions.followLine(channel)
+                if follow.shown {
+                    Toggle(follow.menuTitle, isOn: Binding(get: { follow.on }, set: { actions.setFollow(channel, $0) }))
+                        .disabled(!follow.enabled).help(follow.line)
                 }
-                Button("Wake Command…") { actions.askWakeCommand(channel) }.disabled(channel.agents == .off)
+                Button("Wake Command…") { actions.askWakeCommand(channel) }.disabled(!channel.agents)
                 Divider()
                 Button("New Topic…") { actions.newTopic(channel) }.disabled(channel.role == .readOnly)
                 Button("Rename…") { actions.rename(channel) }
@@ -84,8 +83,28 @@ struct ChatToolbarControls: View {
                 Button("Leave Channel…") { actions.leave(channel) }
             } label: { Image(systemName: "ellipsis.circle") }
                 .menuIndicator(.hidden).fixedSize()
-                .help("Mute, what agents on this Mac may do, the wake command, a new topic, rename, leave")
+                .help("Mute, whether agents may use this channel, the wake command, a new topic, rename, leave")
                 .accessibilityIdentifier("chat-channel-menu")
+        }
+    }
+}
+
+/// A channel's Agents: Yes/No submenu (the core's title, choices and note): one setting for the whole channel, which
+/// its owners and admins change; for anyone else the choices are shown disabled, with the reason.
+struct ChatAgentsMenuView: View {
+    let menu: ChatAgentsMenu
+    let set: (Bool) -> Void
+
+    var body: some View {
+        Menu(menu.title) {
+            ForEach(menu.choices, id: \.open) { c in
+                Button { set(c.open) } label: {
+                    if c.checked { Label(c.title, systemImage: "checkmark") } else { Text(c.title) }
+                }
+                .disabled(!menu.canChange || c.checked)
+            }
+            Divider()
+            Text(menu.note)
         }
     }
 }
@@ -331,6 +350,8 @@ struct ChatMembersView: View {
     let actions: ChatActions
     /// Opens the private conversation with a member (and closes the popover).
     let message: (SyncMember) -> Void
+    /// The gone device whose removal is being asked about.
+    @State private var askRemoveGone: SyncGoneDevice?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -362,8 +383,31 @@ struct ChatMembersView: View {
                     }
                 }
             }
+            // An owner's: the devices gone from the channel (SPEC 7G.3), each with *Remove…*, which asks first.
+            if !channel.gone.isEmpty { Divider().padding(.vertical, 2) }
+            ForEach(channel.gone, id: \.deviceId) { d in
+                let p = SyncText.gonePrompt(d, name: channel.name, channel: true)
+                HStack(spacing: 10) {
+                    Text(p.line).font(.system(size: 12)).foregroundStyle(.secondary)
+                    Spacer(minLength: 12)
+                    Button(p.button) { askRemoveGone = d }.controlSize(.small).help(p.help).accessibilityLabel(p.help)
+                }
+            }
         }
         .padding(14)
         .frame(minWidth: 300)
+        .confirmationDialog(askRemoveGone.map { SyncText.gonePrompt($0, name: channel.name, channel: true).title } ?? "",
+                            isPresented: Binding(get: { askRemoveGone != nil }, set: { if !$0 { askRemoveGone = nil } })) {
+            if let d = askRemoveGone {
+                let p = SyncText.gonePrompt(d, name: channel.name, channel: true)
+                Button(p.confirm, role: .destructive) {
+                    actions.sync.removeGone(channel.id, name: channel.name, d) { [model] in model.loadChatMembers() }
+                    askRemoveGone = nil
+                }
+            }
+            Button("Cancel", role: .cancel) { askRemoveGone = nil }
+        } message: {
+            if let d = askRemoveGone { Text(SyncText.gonePrompt(d, name: channel.name, channel: true).text) }
+        }
     }
 }

@@ -15,10 +15,9 @@
 //! sync port mapped by its port mapper, bound to `--bind` (LAN discovery is off on a loopback bind). It
 //! stops before the engine.
 //!
-//! `--chat-agents` is the agent switch of every channel and of private messages for the run (in memory, never written
-//! to `sync.toml`): a daemon has no app in which its user opens chats to agents. Without it a channel is as in the app
-//! (SPEC §7G.7): an agent channel (one an agent made) open at Read and post, any other closed; `off` closes even an
-//! agent channel. No control method changes a switch.
+//! `--chat-agents` is the agent switch of private messages for the run (in memory, never written to `sync.toml`): a
+//! daemon has no app in which its user opens them to agents. Channels need none: each says itself whether it is open
+//! to agents (SPEC §7G.7, Agents: Yes/No; a channel an agent makes is Yes). No control method changes the switch.
 //!
 //! `--dev-mode` switches developer mode on for the run (whatever `config.toml` says): every tracker
 //! exchange is written, secrets masked, to `<state-dir>/logs/trackers.log` (`seedwell log trackers`).

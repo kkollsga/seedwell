@@ -112,6 +112,7 @@ async fn permission_levels() {
         ("sync.rename", json!({"folder": "Docs", "name": "Papers"})),
         ("sync.move", json!({"folder": "Docs", "path": text(&s.root.path().join("Moved"))})),
         ("sync.set_settings", json!({"device_name": "Studio"})),
+        ("sync.reshare", json!({"folder": "Docs"})),
     ] {
         assert_eq!(call(&mut c, m, p).await.unwrap_err().code, ErrorCode::PermissionDenied, "{m}");
     }
@@ -236,6 +237,10 @@ async fn links_are_made_at_full_and_never_logged() {
     assert!(e.message.contains("needs an owner"), "{}", e.message);
     let e = call(&mut c, "sync.remove_device", json!({"folder": "Docs", "device": me})).await.unwrap_err();
     assert!(e.message.contains("remove the folder"), "{}", e.message);
+    // Shared again only by a member whose owners and admins are gone: the owner shares it itself.
+    let e = call(&mut c, "sync.reshare", json!({"folder": "Docs"})).await.unwrap_err();
+    assert!(e.message.contains("can share the folder itself"), "{}", e.message);
+    assert!(f.waiting.is_none() && f.gone.is_empty() && !f.can_reshare, "alone in it: nothing to wait for");
     call(&mut c, "sync.revoke_invite", json!({"folder": "Docs", "invite": inv.id})).await.unwrap();
     let list: SyncInvitesDto = serde_json::from_value(call(&mut c, "sync.invites", json!({"folder": "Docs"})).await.unwrap()).unwrap();
     assert!(list.invites[0].revoked);
@@ -255,11 +260,13 @@ async fn links_are_made_at_full_and_never_logged() {
         trs_sync_proto::members::Signer::Folder,
         &|m| other.sign(m),
     );
-    let link = trs_sync_proto::members::InviteLink { invite, token_seed: [4; 32], name: Some("Shared".into()) }.format();
+    let link = trs_sync_proto::members::InviteLink { invite, token_seed: [4; 32], name: Some("Shared".into()), agents: false, reach: None }.format();
     let f: SyncFolderDto = serde_json::from_value(call(&mut c, "sync.join", json!({"key_or_link": link})).await.unwrap()).unwrap();
     assert_eq!(f.path, text(&joined.join("Shared")));
     assert_eq!(f.id, trs_sync_proto::ids::FolderId::of_public_key(other.public_key()).to_string());
     assert_eq!((f.state.as_str(), f.role.as_deref()), ("waiting-for-admin", None));
+    let e = call(&mut c, "sync.reshare", json!({"folder": "Shared"})).await.unwrap_err();
+    assert!(e.message.contains("not admitted"), "{}", e.message);
     // A bare key is refused without being quoted back.
     let e = call(&mut c, "sync.join", json!({"key_or_link": "SWW-NOTAKEYATALL", "path": text(&s.folder("x"))})).await.unwrap_err();
     assert!(!e.message.contains("NOTAKEYATALL"), "{}", e.message);
@@ -343,28 +350,23 @@ async fn wait_until(secs: u64, what: &str, mut ok: impl FnMut() -> bool) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn channels_need_their_agent_switch_mark_others_untrusted_and_stream_as_events() {
+async fn a_channel_is_for_agents_only_with_agents_yes_others_posts_are_untrusted_and_stream_as_events() {
     let s = SyncRig::new(Permission::Full).await;
     let mut c = s.rig.client("claude").await;
-    // The user's channel (made in the app): closed to agents until the user opens it.
-    let ch = s.h.chat_new("Plans").await.unwrap();
-    assert_eq!((ch.role.is_some(), ch.agents, ch.members, ch.agent_channel), (true, AgentAccess::Off, 1, false));
+    // The user's channel (made in the app with Agents: No): closed to agents.
+    let ch = s.h.chat_new("Plans", false).await.unwrap();
+    assert_eq!((ch.role.is_some(), ch.agents, ch.members), (true, false, 1));
     let id: FolderId = ch.id.parse().unwrap();
 
-    // Off by default: the channel is not there for agents, whatever the agent level.
+    // No: the channel is not there for agents, whatever the agent level.
     for (m, p) in [("chat.read", json!({"channel": "Plans"})), ("chat.send", json!({"channel": "Plans", "body": "hi"}))] {
         let e = call(&mut c, m, p).await.unwrap_err();
         assert_eq!((e.code, e.message.as_str()), (ErrorCode::NotFound, "no channel `Plans` (see `seedwell chat list`)"), "{m}");
     }
-    // The user opens it in the app (the switch is the app's alone).
-    s.h.chat_set_agents(&id, AgentAccess::Read).unwrap();
+    // The user sets Agents: Yes in the app: agents read and post, nothing else to open.
+    s.h.chat_set_agents(&id, true).unwrap();
     let read: ChatMessagesDto = serde_json::from_value(call(&mut c, "chat.read", json!({"channel": "Plans"})).await.unwrap()).unwrap();
     assert!(read.messages.is_empty());
-    let e = call(&mut c, "chat.send", json!({"channel": "Plans", "body": "hi"})).await.unwrap_err();
-    assert_eq!(e.code, ErrorCode::PermissionDenied, "read is not post");
-    // Where to click, exactly as the app names it.
-    assert!(e.message.contains(concat!("Chats ▸ Plans ▸ ⋯ ▸ Agents on This ", trs_platform::computer!(), " ▸ Read and post")), "{}", e.message);
-    s.h.chat_set_agents(&id, AgentAccess::ReadPost).unwrap();
     let mine: ChatMessageDto =
         serde_json::from_value(call(&mut c, "chat.send", json!({"channel": "Plans", "body": "the secret plan, step 1"})).await.unwrap()).unwrap();
     // An agent's post on this Mac is not the user's: data for the other agents, like another device's.
@@ -391,10 +393,10 @@ async fn channels_need_their_agent_switch_mark_others_untrusted_and_stream_as_ev
     let members: SyncMembersDto = serde_json::from_value(call(&mut c, "chat.members", json!({"channel": "Plans"})).await.unwrap()).unwrap();
     assert_eq!(members.members.len(), 2);
     let l: ChatListDto = serde_json::from_value(call(&mut c, "chat.list", json!({})).await.unwrap()).unwrap();
-    assert_eq!((l.channels.len(), l.channels[0].unread, l.channels[0].agents.as_str()), (1, 1, "post"));
+    assert_eq!((l.channels.len(), l.channels[0].unread, l.channels[0].agents.as_str()), (1, 1, "yes"));
 
-    // Agents off again: no more events, and the channel is gone for them.
-    s.h.chat_set_agents(&id, AgentAccess::Off).unwrap();
+    // Agents: No again: no more events, and the channel is gone for them.
+    s.h.chat_set_agents(&id, false).unwrap();
     other.chat_send(&id, None, trs_sync_net::chat::MessageKind::Text, "second", None, None).await.unwrap();
     wait_until(20, "the second message", || s.h.chat_read(&id, None, None, None).unwrap().len() == 3).await;
     assert!(c.next_event(std::time::Duration::from_millis(500)).await.unwrap().is_none(), "nothing for a channel agents may not read");
@@ -402,7 +404,7 @@ async fn channels_need_their_agent_switch_mark_others_untrusted_and_stream_as_ev
     // What was said never reaches the activity log.
     let log = activity(&s.rig).await;
     assert!(!log.contains("secret plan") && log.contains("post 23 bytes"), "{log}");
-    s.h.chat_set_agents(&id, AgentAccess::Read).unwrap();
+    s.h.chat_set_agents(&id, true).unwrap();
     call(&mut c, "chat.leave", json!({"channel": "Plans"})).await.unwrap();
     assert!(s.h.chat_channels().is_empty());
     other.shutdown().await;
@@ -413,9 +415,9 @@ async fn channels_need_their_agent_switch_mark_others_untrusted_and_stream_as_ev
 async fn an_agent_posts_under_the_name_it_gives_and_only_the_user_is_this_device() {
     let s = SyncRig::new(Permission::Full).await;
     let mut c = s.rig.client("claude").await;
-    // An agent's channel: an agent channel, open to it at read and post with nothing for the user to open.
+    // An agent's channel is Agents: Yes: open to it with nothing for the user to open.
     let ch: ChatChannelDto = serde_json::from_value(call(&mut c, "chat.new", json!({"name": "Bridge"})).await.unwrap()).unwrap();
-    assert_eq!((ch.agents.as_str(), ch.agent_channel), ("post", true));
+    assert_eq!(ch.agents.as_str(), "yes");
     let id: FolderId = ch.id.parse().unwrap();
 
     // The project's name, and the computer's, on the message.
@@ -444,19 +446,43 @@ async fn an_agent_posts_under_the_name_it_gives_and_only_the_user_is_this_device
     s.h.shutdown().await;
 }
 
-/// A channel whose agent switch is off does not exist for agents (SPEC §7G.7): no method lists it, names it, reads,
-/// changes or shares it, its messages are no events (live or replayed), what agents did in it leaves `activity`,
-/// and folder sync shows no trace of it (a folder's channel, a link carrying it, a device known only through it).
-/// Private messages likewise while their switch is off. And no method changes a switch.
+/// An agent that subscribed gets every message of an open channel from then on: also one posted right after the sync
+/// service started, and after it started again (a new service while the old one is still around), before the server
+/// had looked for it on its own.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_subscribed_agent_gets_every_message_also_right_after_the_service_starts() {
+    let s = SyncRig::new(Permission::Full).await;
+    let mut c = s.rig.client("claude").await;
+    let open: FolderId = s.h.chat_new("Open", true).await.unwrap().id.parse().unwrap();
+    call(&mut c, "events_subscribe", json!({"kinds": ["chat.message"]})).await.unwrap();
+    s.h.chat_send(&open, None, MessageKind::Text, "first", None, None).await.unwrap();
+    let ev = c.next_event(std::time::Duration::from_secs(5)).await.unwrap().expect("the first message");
+    assert_eq!(ev.data["body"].as_str(), Some("first"));
+
+    // The service starts again: a new one in its place, the old one not yet gone.
+    let again = other_device(s.root.path(), "Again").await;
+    let other: FolderId = again.chat_new("Other", true).await.unwrap().id.parse().unwrap();
+    *s.rig.mock.sync.lock().unwrap() = Some(again.clone());
+    call(&mut c, "events_subscribe", json!({"kinds": ["chat.message"]})).await.unwrap();
+    again.chat_send(&other, None, MessageKind::Text, "second", None, None).await.unwrap();
+    let ev = c.next_event(std::time::Duration::from_secs(5)).await.unwrap().expect("the message of the new service");
+    assert_eq!(ev.data["body"].as_str(), Some("second"));
+    again.shutdown().await;
+    s.h.shutdown().await;
+}
+
+/// A channel with Agents: No does not exist for agents (SPEC §7G.7): no method lists it, names it, reads, changes,
+/// opens or shares it, its messages are no events (live or replayed), what agents did in it leaves `activity`, and
+/// folder sync shows no trace of it (a folder's channel, a link carrying it, a device known only through it).
+/// Private messages likewise while their switch is off, and no method changes that switch.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_channel_closed_to_agents_does_not_exist_for_them() {
     use trs_sync_proto::members::Role;
     let s = SyncRig::new(Permission::Full).await;
     let mut c = s.rig.client("claude").await;
     // The user's channels: Secret stays closed, Open is open to agents.
-    let secret: FolderId = s.h.chat_new("Secret").await.unwrap().id.parse().unwrap();
-    let open: FolderId = s.h.chat_new("Open").await.unwrap().id.parse().unwrap();
-    s.h.chat_set_agents(&open, AgentAccess::ReadPost).unwrap();
+    let secret: FolderId = s.h.chat_new("Secret", false).await.unwrap().id.parse().unwrap();
+    let open: FolderId = s.h.chat_new("Open", true).await.unwrap().id.parse().unwrap();
     s.h.chat_send(&secret, None, MessageKind::Text, "the family secret", None, None).await.unwrap();
     s.h.chat_new_topic(&secret, "Birthday", None).await.unwrap();
     let sid = secret.to_string();
@@ -466,7 +492,7 @@ async fn a_channel_closed_to_agents_does_not_exist_for_them() {
     let names: Vec<&str> = l.channels.iter().map(|c| c.name.as_str()).collect();
     assert_eq!((names, l.hidden), (vec!["Open"], 1));
     let hint = l.hint.as_deref().unwrap();
-    assert!(hint.starts_with("1 channel on this") && hint.contains("▸ Agents on This") && !hint.contains("Secret"), "{hint}");
+    assert!(hint.starts_with("1 channel on this") && hint.contains("Agents: Yes") && hint.contains("▸ ⋯ ▸ Agents") && !hint.contains("Secret"), "{hint}");
 
     // Every method that names it answers as for a channel that is not there: by name, by id, by the id's first group.
     let ask = |m: &str, ch: &str| -> Value {
@@ -481,6 +507,7 @@ async fn a_channel_closed_to_agents_does_not_exist_for_them() {
             "chat.rename" => json!({"channel": ch, "name": "Mine now"}),
             "chat.add_address" => json!({"channel": ch, "address": "127.0.0.1:9"}),
             "chat.set_wake" => json!({"channel": ch, "command": "cat >> /tmp/stolen"}),
+            "chat.set_agents" => json!({"channel": ch, "agents": "yes"}),
             "sync.share" => json!({"folder": "Docs", "chat": ch}),
             _ => json!({"channel": ch}),
         }
@@ -499,6 +526,7 @@ async fn a_channel_closed_to_agents_does_not_exist_for_them() {
         "chat.rename",
         "chat.add_address",
         "chat.set_wake",
+        "chat.set_agents",
         "chat.leave",
         "sync.share",
     ];
@@ -516,12 +544,12 @@ async fn a_channel_closed_to_agents_does_not_exist_for_them() {
         }
     }
     let st = s.h.channel_status(&secret).expect("still there");
-    assert_eq!((st.name.as_str(), st.muted, st.wake_command.as_deref(), st.agents), ("Secret", false, None, AgentAccess::Off), "untouched");
+    assert_eq!((st.name.as_str(), st.muted, st.wake_command.as_deref(), st.agents), ("Secret", false, None, false), "untouched");
     assert_eq!(s.h.chat_read(&secret, None, None, None).unwrap().len(), 2, "nothing posted to it");
 
-    // Joining it again with its link reads as joining any new channel (which starts closed): nothing confirms it is here.
+    // Joining it again with its link reads as joining any closed channel: nothing confirms it is here.
     let other = other_device(s.root.path(), "Other").await;
-    let fresh = other.chat_new("Fresh").await.unwrap().id.parse::<FolderId>().unwrap();
+    let fresh = other.chat_new("Fresh", false).await.unwrap().id.parse::<FolderId>().unwrap();
     let fresh_link = other.create_invite(&fresh, Role::ReadWrite, 1, 7).unwrap().link;
     let secret_link = s.h.create_invite(&secret, Role::ReadWrite, 2, 7).unwrap().link;
     let shape = |mut v: Value| {
@@ -532,7 +560,7 @@ async fn a_channel_closed_to_agents_does_not_exist_for_them() {
     let b = call(&mut c, "chat.join", json!({"link": fresh_link})).await.unwrap();
     assert_eq!((a["name"].as_str(), a["id"].as_str(), b["name"].as_str()), (Some("Secret"), Some(sid.as_str()), Some("Fresh")));
     assert_eq!(shape(a.clone()), shape(b), "{a}");
-    assert_eq!((a["agents"].as_str(), a["joining"].as_bool()), (Some("off"), Some(true)));
+    assert_eq!((a["agents"].as_str(), a["joining"].as_bool()), (Some("no"), Some(true)));
     assert_eq!(s.h.channel_status(&secret).unwrap().role, Some(Role::Owner), "the channel itself is as it was");
 
     // Events: its messages never come, live or from the buffer; an open channel's stop once it is closed.
@@ -548,13 +576,13 @@ async fn a_channel_closed_to_agents_does_not_exist_for_them() {
     call(&mut c, "chat.send", json!({"channel": "Open", "body": "hello"})).await.unwrap();
     let seen = call(&mut c, "activity", json!({"limit": 1000})).await.unwrap().to_string();
     assert!(seen.contains("to channel Open"), "{seen}");
-    s.h.chat_set_agents(&open, AgentAccess::Off).unwrap();
+    s.h.chat_set_agents(&open, false).unwrap();
     let replay = call(&mut c, "events", json!({"since": 0, "kinds": ["chat.message"]})).await.unwrap();
     assert_eq!(replay["events"].as_array().map(Vec::len), Some(0), "closed since: not replayed either: {replay}");
     let seen = call(&mut c, "activity", json!({"limit": 1000})).await.unwrap().to_string();
     assert!(!seen.contains("to channel Open"), "{seen}");
     assert!(activity(&s.rig).await.contains("to channel Open"), "the user's view keeps it");
-    s.h.chat_set_agents(&open, AgentAccess::ReadPost).unwrap();
+    s.h.chat_set_agents(&open, true).unwrap();
 
     // Folder sync: the folder's channel, and the link that carries it, are not shown while the channel is closed.
     let docs_id: FolderId = s.h.snapshot().folders[0].id.parse().unwrap();
@@ -576,8 +604,8 @@ async fn a_channel_closed_to_agents_does_not_exist_for_them() {
     wait_until(30, "connected", || s.h.snapshot().devices.iter().any(|d| d.id == other_dev)).await;
     let list = call(&mut c, "sync.list", json!({})).await.unwrap().to_string();
     assert!(!list.contains(&other_dev) && !list.contains("Other"), "{list}");
-    // Opened by the user, all of it shows.
-    s.h.chat_set_agents(&secret, AgentAccess::Read).unwrap();
+    // Set to Yes by the user, all of it shows.
+    s.h.chat_set_agents(&secret, true).unwrap();
     let status = call(&mut c, "sync.status", json!({"folder": "Docs"})).await.unwrap();
     assert_eq!(status["channel_id"].as_str(), Some(sid.as_str()));
     let invites = call(&mut c, "sync.invites", json!({"folder": "Docs"})).await.unwrap();
@@ -585,7 +613,7 @@ async fn a_channel_closed_to_agents_does_not_exist_for_them() {
     assert!(call(&mut c, "sync.list", json!({})).await.unwrap().to_string().contains(&other_dev));
     let m: SyncMembersDto = serde_json::from_value(call(&mut c, "chat.members", json!({"channel": "Secret"})).await.unwrap()).unwrap();
     assert_eq!(m.members.len(), 2);
-    s.h.chat_set_agents(&secret, AgentAccess::Off).unwrap();
+    s.h.chat_set_agents(&secret, false).unwrap();
 
     // Private messages closed (the default): there are none, and their devices are not found through them.
     let dm: ChatDirectsDto = serde_json::from_value(call(&mut c, "chat.dm_list", json!({})).await.unwrap()).unwrap();
@@ -596,14 +624,17 @@ async fn a_channel_closed_to_agents_does_not_exist_for_them() {
         assert_eq!((e.code, e.message.replace("Other", "?")), (n.code, n.message.replace("Nobody", "?")), "{m}");
     }
 
-    // No method changes a switch: the two that did are gone from the socket.
-    for (name, params) in [("chat.set_agents", r#"{"channel":"Secret","agents":"post"}"#), ("chat.dm_set_agents", r#"{"agents":"post"}"#)] {
-        assert!(Method::from_name(name).is_none(), "{name}");
-        let line = format!(r#"{{"v":1,"id":1,"method":"{name}","params":{params}}}"#);
-        assert_eq!(decode_envelope(line.as_bytes()).unwrap_err().error.code, ErrorCode::UnknownMethod, "{name}");
-    }
-    assert!(Method::ALL.iter().all(|m| !m.name().contains("agents")), "no other method names a switch");
-    assert_eq!((s.h.channel_status(&secret).unwrap().agents, s.h.chat_direct_agents()), (AgentAccess::Off, AgentAccess::Off));
+    // No method changes the switch of private messages; `chat.set_agents` opens no hidden channel (above), and on an
+    // open one an agent can only close it.
+    let line = r#"{"v":1,"id":1,"method":"chat.dm_set_agents","params":{"agents":"post"}}"#;
+    assert!(Method::from_name("chat.dm_set_agents").is_none());
+    assert_eq!(decode_envelope(line.as_bytes()).unwrap_err().error.code, ErrorCode::UnknownMethod);
+    assert!(Method::ALL.iter().all(|m| !m.name().contains("agents") || m.name() == "chat.set_agents"), "no other method names a switch");
+    let closed: ChatChannelDto = serde_json::from_value(call(&mut c, "chat.set_agents", json!({"channel": "Open", "agents": "no"})).await.unwrap()).unwrap();
+    assert_eq!((closed.name.as_str(), closed.agents.as_str()), ("Open", "no"));
+    assert_eq!(call(&mut c, "chat.set_agents", json!({"channel": "Open", "agents": "yes"})).await.unwrap_err().code, ErrorCode::NotFound, "gone for agents");
+    assert_eq!((s.h.channel_status(&open).unwrap().agents, s.h.channel_status(&secret).unwrap().agents), (false, false));
+    assert_eq!(s.h.chat_direct_agents(), AgentAccess::Off);
     other.shutdown().await;
     s.h.shutdown().await;
 }
@@ -765,39 +796,41 @@ fn walk(dir: &Path) -> Vec<String> {
     out
 }
 
-/// Agent channels (SPEC §7G.7, "agents use chats marked by agents"): a channel an agent makes is open to agents at
-/// Read and post on its own device and on a second device whose agent joins it by link, with nothing for either user
-/// to open, and the agents talk there both ways while the users read along. The user's own channel stays invisible,
-/// and nothing (no method, not the user's switch) makes it an agent channel. A device user's "off" wins over the
-/// default, and is kept.
+/// Agents: Yes/No across devices (SPEC §7G.7): a channel an agent makes is Yes, open to agents on its own device and,
+/// at once, on a second device whose agent joins it by link (no switch there; it is "joining" until admitted), at
+/// the agent level Control (sharing included); the agents talk there both ways while the users read along. The user's
+/// own (No) channel stays invisible, joined by link too. A No set by the owner hides the channel on both devices, a
+/// Yes shows it again; an agent may close a channel it owns, never open one, and a writer's agent may not close it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn agents_talk_across_devices_in_an_agent_channel_and_a_users_off_wins() {
-    let mac = SyncRig::new(Permission::Full).await;
-    let pc = SyncRig::new(Permission::Full).await;
+async fn agents_talk_across_devices_in_a_yes_channel_and_a_no_hides_it_on_both() {
+    let mac = SyncRig::new(Permission::Control).await;
+    let pc = SyncRig::new(Permission::Control).await;
     let mut a = mac.rig.client("mac-agent").await;
     let mut b = pc.rig.client("pc-agent").await;
     let list = |v: Value| serde_json::from_value::<ChatListDto>(v).unwrap();
 
     // The user's own channel on the Mac.
-    let family: FolderId = mac.h.chat_new("Family").await.unwrap().id.parse().unwrap();
+    let family: FolderId = mac.h.chat_new("Family", false).await.unwrap().id.parse().unwrap();
 
-    // The Mac's agent makes a channel: an agent channel, open to agents there at once.
+    // The Mac's agent makes a channel: Agents: Yes, open to agents there at once.
     let ch: ChatChannelDto = serde_json::from_value(call(&mut a, "chat.new", json!({"name": "Bridge"})).await.unwrap()).unwrap();
-    assert_eq!((ch.role.as_deref(), ch.agents.as_str(), ch.agent_channel), (Some("owner"), "post", true));
+    assert_eq!((ch.role.as_deref(), ch.agents.as_str()), (Some("owner"), "yes"));
     let id: FolderId = ch.id.parse().unwrap();
     let l = list(call(&mut a, "chat.list", json!({})).await.unwrap());
     assert_eq!((l.channels.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), l.hidden), (vec!["Bridge"], 1), "the user's channel stays invisible");
-    assert!(l.channels[0].agent_channel);
 
-    // The PC's agent joins it by link. While the PC waits to be admitted it knows nothing of the channel: closed.
+    // The PC's agent joins it by a link the Mac's agent made (at Control). Open to the PC's agents at once: joining.
     let inv: SyncInviteDto = serde_json::from_value(call(&mut a, "chat.share", json!({"channel": "Bridge"})).await.unwrap()).unwrap();
+    assert!(inv.link.contains("&agents=yes"), "{}", inv.link);
     let j: ChatChannelDto = serde_json::from_value(call(&mut b, "chat.join", json!({"link": inv.link})).await.unwrap()).unwrap();
-    assert_eq!((j.agents.as_str(), j.joining, j.agent_channel), ("off", true, false));
-    pc.h.add_address(&id, std::net::SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), mac.h.port())).unwrap();
-    wait_until(30, "the PC is admitted and knows the channel's mark", || pc.h.channel_status(&id).is_some_and(|c| c.role.is_some() && c.agent_channel)).await;
-    // Admitted: open to the PC's agents at read and post, with nothing for the PC's user to open.
+    assert_eq!((j.agents.as_str(), j.joining, j.name.as_str()), ("yes", true, "Bridge"));
     let l = list(call(&mut b, "chat.list", json!({})).await.unwrap());
-    assert_eq!(l.channels.iter().map(|c| (c.name.as_str(), c.agents.as_str(), c.agent_channel)).collect::<Vec<_>>(), [("Bridge", "post", true)]);
+    assert_eq!(l.channels.iter().map(|c| (c.name.as_str(), c.joining)).collect::<Vec<_>>(), [("Bridge", true)]);
+    pc.h.add_address(&id, std::net::SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), mac.h.port())).unwrap();
+    wait_until(30, "the PC is admitted", || pc.h.channel_status(&id).is_some_and(|c| c.role.is_some())).await;
+    // Admitted: still open to the PC's agents, as its membership says, with nothing for the PC's user to open.
+    let l = list(call(&mut b, "chat.list", json!({})).await.unwrap());
+    assert_eq!(l.channels.iter().map(|c| (c.name.as_str(), c.agents.as_str(), c.joining)).collect::<Vec<_>>(), [("Bridge", "yes", false)]);
     call(&mut b, "events_subscribe", json!({"kinds": ["chat.message"]})).await.unwrap();
 
     // They talk both ways; each other's posts are data from another device.
@@ -813,45 +846,151 @@ async fn agents_talk_across_devices_in_an_agent_channel_and_a_users_off_wins() {
     mac.h.chat_send(&id, None, MessageKind::Text, "the user, reading along", None, None).await.unwrap();
     wait_until(20, "the user's post reaches the PC", || pc.h.chat_read(&id, None, None, None).unwrap().len() == 3).await;
 
-    // Nothing makes the user's channel an agent channel: no method names a mark or a switch, `chat.new` takes no
-    // such field, an agent cannot share it with a new chat, and the user's own switch opens it without marking it.
-    assert!(Method::ALL.iter().all(|m| !m.name().contains("agents") && !m.name().contains("mark")), "no method marks or opens a channel");
-    assert!(Request::decode("chat.new", json!({"name": "X", "agent_channel": true})).is_err(), "unknown fields are refused");
+    // The user's own channel stays invisible: `chat.new` takes no Agents field (an agent's channel is Yes), and a
+    // No channel cannot be named, so not opened either.
+    assert!(Request::decode("chat.new", json!({"name": "X", "agents": "no"})).is_err(), "unknown fields are refused");
     for q in ["Family", family.to_string().as_str()] {
         assert_eq!(call(&mut a, "chat.read", json!({"channel": q})).await.unwrap_err().code, ErrorCode::NotFound, "{q}");
+        let e = call(&mut a, "chat.set_agents", json!({"channel": q, "agents": "yes"})).await.unwrap_err();
+        assert_eq!(e.code, ErrorCode::NotFound, "{q}");
     }
-    mac.h.chat_set_agents(&family, AgentAccess::Read).unwrap();
-    let l = list(call(&mut a, "chat.list", json!({})).await.unwrap());
-    assert_eq!(l.channels.iter().map(|c| (c.name.as_str(), c.agent_channel)).collect::<Vec<_>>(), [("Bridge", true), ("Family", false)], "opened by its user, still the user's");
-    mac.h.chat_set_agents(&family, AgentAccess::Off).unwrap();
-    assert_eq!(mac.h.channel_status(&family).map(|c| (c.agent_channel, c.agents)), Some((false, AgentAccess::Off)));
-    // Joined on the PC (by its user, or by its agent): an ordinary channel there too, closed.
+    assert!(!mac.h.channel_status(&family).unwrap().agents);
+    // Joined on the PC by its agent with a No link: closed there too, also once admitted.
     let family_link = mac.h.create_invite(&family, trs_sync_proto::members::Role::ReadWrite, 2, 7).unwrap().link;
-    call(&mut b, "chat.join", json!({"link": family_link})).await.unwrap();
+    let j = call(&mut b, "chat.join", json!({"link": family_link})).await.unwrap();
+    assert_eq!((j["agents"].as_str(), j["name"].as_str()), (Some("no"), Some("Family")));
     pc.h.add_address(&family, std::net::SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), mac.h.port())).unwrap();
     wait_until(30, "the PC is admitted to Family", || pc.h.channel_status(&family).is_some_and(|c| c.role.is_some())).await;
-    assert_eq!(pc.h.channel_status(&family).map(|c| (c.agent_channel, c.agents)), Some((false, AgentAccess::Off)));
+    assert!(!pc.h.channel_status(&family).unwrap().agents);
     let l = list(call(&mut b, "chat.list", json!({})).await.unwrap());
     assert_eq!((l.channels.len(), l.hidden), (1, 1));
 
-    // The PC's user closes the agent channel: that wins over the default. It is gone for the PC's agents (and its
-    // messages are no events there), while the Mac's agents still talk in it.
-    pc.h.chat_set_agents(&id, AgentAccess::Off).unwrap();
-    let l = list(call(&mut b, "chat.list", json!({})).await.unwrap());
-    assert_eq!((l.channels.len(), l.hidden), (0, 2));
-    assert_eq!(call(&mut b, "chat.read", json!({"channel": "Bridge"})).await.unwrap_err().code, ErrorCode::NotFound);
+    // The Mac's user sets Bridge to No: gone for the agents on both devices (its messages are no events either).
+    mac.h.chat_set_agents(&id, false).unwrap();
+    wait_until(20, "the PC knows Bridge is No", || pc.h.channel_status(&id).is_some_and(|c| !c.agents)).await;
+    for (cl, hidden) in [(&mut a, 2), (&mut b, 2)] {
+        let l = list(call(cl, "chat.list", json!({})).await.unwrap());
+        assert_eq!((l.channels.len(), l.hidden), (0, hidden));
+        assert_eq!(call(cl, "chat.read", json!({"channel": "Bridge"})).await.unwrap_err().code, ErrorCode::NotFound);
+    }
     while b.next_event(std::time::Duration::from_millis(300)).await.unwrap().is_some() {}
-    call(&mut a, "chat.send", json!({"channel": "Bridge", "body": "anyone there?"})).await.unwrap();
+    mac.h.chat_send(&id, None, MessageKind::Text, "anyone there?", None, None).await.unwrap();
     wait_until(20, "the PC has it", || pc.h.chat_read(&id, None, None, None).unwrap().len() == 4).await;
-    assert!(b.next_event(std::time::Duration::from_millis(500)).await.unwrap().is_none(), "nothing for a channel closed here");
-    // Joining it again by link reads as joining any new channel: closed.
-    let again = call(&mut b, "chat.join", json!({"link": mac.h.create_invite(&id, trs_sync_proto::members::Role::ReadWrite, 1, 7).unwrap().link})).await.unwrap();
-    assert_eq!((again["agents"].as_str(), again["joining"].as_bool()), (Some("off"), Some(true)));
-    assert_eq!(pc.h.channel_status(&id).map(|c| c.agents), Some(AgentAccess::Off), "the user's choice is kept");
-    // The user may open it again at any level: read is not post.
-    pc.h.chat_set_agents(&id, AgentAccess::Read).unwrap();
+    assert!(b.next_event(std::time::Duration::from_millis(500)).await.unwrap().is_none(), "nothing for a channel closed to agents");
+    // Yes again: back for both, with what was said meanwhile.
+    mac.h.chat_set_agents(&id, true).unwrap();
+    wait_until(20, "the PC knows Bridge is Yes", || pc.h.channel_status(&id).is_some_and(|c| c.agents)).await;
     assert_eq!(call(&mut b, "chat.read", json!({"channel": "Bridge", "last": 1})).await.map(|v| v["messages"][0]["body"].clone()).unwrap(), json!("anyone there?"));
-    assert_eq!(call(&mut b, "chat.send", json!({"channel": "Bridge", "body": "hi"})).await.unwrap_err().code, ErrorCode::PermissionDenied);
+
+    // The PC is a writer there: its agent may not close it. The Mac's agent (an owner) may: closed on both devices.
+    let e = call(&mut b, "chat.set_agents", json!({"channel": "Bridge", "agents": "no"})).await.unwrap_err();
+    assert_eq!(e.code, ErrorCode::PermissionDenied, "{e}");
+    call(&mut a, "chat.set_agents", json!({"channel": "Bridge", "agents": "no"})).await.unwrap();
+    wait_until(20, "the PC knows Bridge is No again", || pc.h.channel_status(&id).is_some_and(|c| !c.agents)).await;
+    assert_eq!(call(&mut a, "chat.set_agents", json!({"channel": "Bridge", "agents": "yes"})).await.unwrap_err().code, ErrorCode::NotFound, "never reopened by an agent");
+    pc.h.shutdown().await;
+    mac.h.shutdown().await;
+}
+
+/// Your own devices (SPEC §7G.1, §9A): no method of the agent interface pairs, confirms, removes, follows or leaves,
+/// at any level; the group is in no answer (not as a folder or channel, not by its id, not as a device this Mac is
+/// connected to only for it); and the user key never leaves through any method.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn your_devices_are_invisible_to_agents_and_the_user_key_never_leaves() {
+    use trs_sync_net::devices::DevicesState;
+    use trs_sync_net::secrets::SecretStore;
+    for m in Method::ALL {
+        let n = m.name();
+        assert!(!["pair", "follow", "devices", "user_key", "my_devices"].iter().any(|w| n.contains(w)), "{n}");
+    }
+    for n in ["devices.pair", "devices.list", "devices.confirm", "devices.remove", "devices.leave", "devices.start_over", "sync.follow", "chat.follow"] {
+        assert!(Request::decode(n, json!({})).is_err(), "{n} is no method");
+    }
+    let mac = SyncRig::new(Permission::Full).await;
+    let pc = SyncRig::new(Permission::Full).await;
+    let mut a = mac.rig.client("mac-agent").await;
+    let mut b = pc.rig.client("pc-agent").await;
+    // Folders that come by themselves go to the run's own folder, never under the home folder.
+    for r in [&mac, &pc] {
+        let mut s = r.h.settings();
+        s.default_location = r.root.path().join("Joined").display().to_string();
+        r.h.set_settings(s).unwrap();
+    }
+    // Paired in the app (the service calls its UI makes).
+    let (link, _) = mac.h.devices_pair_link().await.unwrap();
+    pc.h.devices_join(&link).await.unwrap();
+    wait_until(30, "the request", || mac.h.devices_status().requests.iter().any(|r| r.id == pc.h.device_id())).await;
+    mac.h.devices_confirm(&pc.h.device_id()).await.unwrap();
+    wait_until(30, "paired", || pc.h.devices_status().state == DevicesState::Paired && pc.h.test_has_user_key()).await;
+    let cfg = trs_sync_net::config::SyncConfig::load(&mac.root.path().join("state/sync.toml")).unwrap();
+    let group = cfg.my_devices.expect("the group's table").id;
+    let key = FileSecrets::new(mac.root.path().join("state/secrets")).get(&format!("folder-{group}")).unwrap().expect("the user key, in the secret store");
+    let key_hex: String = key.iter().map(|b| format!("{b:02x}")).collect();
+    let key_b32 = trs_sync_proto::base32::encode(&key);
+    let secrets: [&str; 3] = [&group, &key_hex, &key_b32];
+    let leaks = |what: &str, v: &Value| {
+        let s = v.to_string().to_lowercase();
+        for x in secrets {
+            assert!(!s.contains(&x.to_lowercase()), "{what} names the group or its key: {s}");
+        }
+    };
+
+    // Connected only for the group: in no list.
+    let pc_id = pc.h.device_id().to_string();
+    wait_until(20, "connected", || mac.h.devices_status().devices.iter().any(|d| d.id == pc.h.device_id() && d.online)).await;
+    let l = call(&mut a, "sync.list", json!({})).await.unwrap();
+    leaks("sync.list", &l);
+    assert!(!l.to_string().contains(&pc_id), "the other device is in no list: {l}");
+    let l = call(&mut b, "sync.list", json!({})).await.unwrap();
+    assert!(!l.to_string().contains(&mac.h.device_id().to_string()), "{l}");
+
+    // A folder and two channels on all devices (in the app): the No channel stays closed on both.
+    let f = mac.folder("Dev");
+    std::fs::write(f.join("seed.txt"), b"x").unwrap();
+    let fid: FolderId = mac.h.add_folder(f).await.unwrap().id.parse().unwrap();
+    let no: FolderId = mac.h.chat_new("Private", false).await.unwrap().id.parse().unwrap();
+    let yes: FolderId = mac.h.chat_new("Bridge", true).await.unwrap().id.parse().unwrap();
+    for id in [&fid, &no, &yes] {
+        mac.h.set_follow(id, true).await.unwrap();
+    }
+    wait_until(40, "the PC joined all three", || {
+        pc.h.channel_status(&no).is_some_and(|c| c.role.is_some())
+            && pc.h.channel_status(&yes).is_some_and(|c| c.role.is_some())
+            && pc.h.snapshot().folders.iter().any(|x| x.id == fid.to_string() && x.role.is_some())
+    })
+    .await;
+    let l: ChatListDto = serde_json::from_value(call(&mut b, "chat.list", json!({})).await.unwrap()).unwrap();
+    assert_eq!((l.channels.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), l.hidden), (vec!["Bridge"], 1), "the No channel is hidden on the PC too");
+
+    // Every answer a full agent gets, on both devices: nothing of the group or its key.
+    for c in [&mut a, &mut b] {
+        for (m, p) in [
+            ("sync.list", json!({})),
+            ("sync.settings", json!({})),
+            ("sync.status", json!({"folder": "Dev"})),
+            ("sync.members", json!({"folder": "Dev"})),
+            ("sync.invites", json!({"folder": "Dev"})),
+            ("chat.list", json!({})),
+            ("chat.members", json!({"channel": "Bridge"})),
+            ("chat.read", json!({"channel": "Bridge"})),
+        ] {
+            let v = call(c, m, p).await.unwrap_or_else(|e| panic!("{m}: {e:?}"));
+            leaks(m, &v);
+        }
+        // The group by its id is nothing: not a folder, not a channel.
+        for (m, p) in [
+            ("sync.status", json!({"folder": group})),
+            ("sync.members", json!({"folder": group})),
+            ("sync.share", json!({"folder": group})),
+            ("sync.remove_device", json!({"folder": group, "device": pc_id})),
+            ("chat.members", json!({"channel": group})),
+            ("chat.read", json!({"channel": group})),
+        ] {
+            assert_eq!(call(c, m, p).await.unwrap_err().code, ErrorCode::NotFound, "{m}");
+        }
+    }
+    let log = activity(&mac.rig).await.to_lowercase();
+    assert!(!log.contains(&key_hex) && !log.contains(&key_b32.to_lowercase()));
     pc.h.shutdown().await;
     mac.h.shutdown().await;
 }

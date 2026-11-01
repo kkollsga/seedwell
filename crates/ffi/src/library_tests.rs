@@ -4,7 +4,7 @@ use crate::library_rows::tests::{download, seed};
 use crate::library_rows::{GroupMore, ListCommand, ListGroup, RowControlKind};
 use crate::row_text::TextTone;
 use crate::sidebar::{tracker_order, SidebarCommand, SidebarIcon};
-use crate::sync::{SyncAgentAccess, SyncRole};
+use crate::sync::SyncRole;
 use crate::types::{PendingStart, SharingCounts, TrackerSummary, TransferRow, TransferState};
 use crate::CoreOptions;
 
@@ -546,10 +546,9 @@ fn the_sidebar_lists_channels_with_their_unread_messages() {
 }
 
 #[test]
-fn an_agent_channel_is_tagged_in_the_sidebar_and_named_on_its_page() {
+fn a_channel_open_to_agents_is_tagged_in_the_sidebar_and_on_its_page() {
     let mut bridge = channel("Bridge", 2, 2, 0, false);
-    bridge.agent_channel = true;
-    bridge.agents = SyncAgentAccess::ReadPost;
+    bridge.agents = true;
     let mut i = inputs(snap());
     i.channels = vec![bridge.clone(), channel("Family", 3, 1, 0, false)];
     i.topics = vec![vec![topic("Mac", "Bridge", 0)], vec![]];
@@ -559,17 +558,16 @@ fn an_agent_channel_is_tagged_in_the_sidebar_and_named_on_its_page() {
     let chats = &m.sidebar.chats;
     let tag = chats.channels[0].item.tag.as_ref().expect("an agent channel is tagged");
     assert_eq!(tag.text, "agents");
-    assert!(tag.help.contains("Read and post"), "{}", tag.help);
-    assert!(chats.channels[0].topics[0].tag.is_none() && chats.channels[1].item.tag.is_none(), "its topics and the user's channel: none");
-    assert_eq!(m.summary, "Agent channel · Owner · 2 of 2 online · agents: read and post");
-    // Closed by this computer's user: the tag stays (what it is), its tooltip says what agents may do now, and the
-    // sidebar is drawn again.
+    assert!(tag.help.contains("read and post"), "{}", tag.help);
+    assert!(chats.channels[0].topics[0].tag.is_none() && chats.channels[1].item.tag.is_none(), "its topics and a No channel: none");
+    assert_eq!(m.summary, "Owner · 2 of 2 online · agents: yes");
+    // Set to No (on any member device): the tag goes, and the sidebar is drawn again.
     let before = m.sidebar.signature.clone();
-    i.channels[0].agents = SyncAgentAccess::Off;
+    i.channels[0].agents = false;
     let m = model(&i, &st);
-    assert!(m.sidebar.chats.channels[0].item.tag.as_ref().unwrap().help.contains(": Off"));
+    assert!(m.sidebar.chats.channels[0].item.tag.is_none());
     assert_ne!(m.sidebar.signature, before);
-    assert_eq!(m.summary, "Agent channel · Owner · 2 of 2 online");
+    assert_eq!(m.summary, "Owner · 2 of 2 online");
 }
 
 #[test]
@@ -679,7 +677,7 @@ fn the_sidebar_menus_offer_what_each_item_can_do() {
     assert_eq!(titles(tracker_menu(&tracker("fav", 1, true))), ["Info", "Rename", "-", "Remove from Favorites!"]);
     assert_eq!(titles(tracker_menu(&tracker("auto.org", 1, false))), ["Info", "Save as Favorite"]);
     assert!(tracker_menu(&tracker("public", 1, false)).is_empty() && tracker_menu(&tracker("other-private", 1, false)).is_empty());
-    assert_eq!(titles(channel_menu(&channel("Team", 2, 1, 0, false))), ["Share…", "New Topic…", "Mute", "Rename…", "-", "Leave Channel…"]);
+    assert_eq!(titles(channel_menu(&channel("Team", 2, 1, 0, false))), ["Share…", "New Topic…", "Mute", "Agents: No…", "Rename…", "-", "Leave Channel…"]);
     let mut c = channel("News", 2, 1, 0, true);
     c.role = SyncRole::ReadWrite;
     assert_eq!(titles(channel_menu(&c)), ["New Topic…", "Unmute", "Rename…", "-", "Leave Channel…"]);

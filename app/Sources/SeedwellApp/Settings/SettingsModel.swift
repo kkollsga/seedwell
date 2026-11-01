@@ -2,7 +2,7 @@ import Foundation
 import Observation
 
 enum SettingsTab: String, CaseIterable, Identifiable {
-    case general, transfers, folders, rules, network, folderSync, agents, advanced
+    case general, transfers, folders, rules, network, folderSync, devices, agents, advanced
     var id: String { rawValue }
     var title: String { self == .folderSync ? "Folder Sync" : rawValue.capitalized }
     var symbol: String {
@@ -13,6 +13,7 @@ enum SettingsTab: String, CaseIterable, Identifiable {
         case .rules: "list.bullet"
         case .network: "network"
         case .folderSync: "arrow.triangle.2.circlepath"
+        case .devices: "laptopcomputer.and.iphone"
         case .agents: "sparkle"
         case .advanced: "command"
         }
@@ -200,6 +201,8 @@ enum SettingsTab: String, CaseIterable, Identifiable {
     private(set) var syncReachability: ReachabilityInfo?
     /// A new sync port was set and sync is starting again on it.
     private(set) var syncPortMovingTo: UInt16?
+    /// Settings › Folder Sync's rendezvous section, as the core has it (refreshed with the rest while the tab is open).
+    private(set) var syncRendezvous: RendezvousView?
     @ObservationIgnored private var syncSaveTask: Task<Void, Never>?
 
     func reloadSync() {
@@ -225,6 +228,7 @@ enum SettingsTab: String, CaseIterable, Identifiable {
     func watchSync() async {
         while !Task.isCancelled {
             syncReachability = core.syncReachability()
+            syncRendezvous = core.syncRendezvous()
             let port = core.syncSettings().port
             if port != 0, port != sync?.port {
                 loading = true
@@ -233,6 +237,23 @@ enum SettingsTab: String, CaseIterable, Identifiable {
             }
             if let want = syncPortMovingTo, port == want || core.syncSnapshot().problem != nil { syncPortMovingTo = nil }
             try? await Task.sleep(for: .seconds(1))
+        }
+    }
+
+    /// Starts a rendezvous action (it runs in the background; `syncRendezvous` shows how it goes). Returns why it was
+    /// refused at once.
+    func rendezvous(_ action: RendezvousAction) -> String? {
+        do {
+            switch action {
+            case .setUp(let token): try core.syncRendezvousSetUp(token: token)
+            case .use(let address): try core.syncRendezvousUse(url: address)
+            case .test: try core.syncRendezvousTest()
+            case .turnOff: try core.syncRendezvousTurnOff()
+            }
+            syncRendezvous = core.syncRendezvous()
+            return nil
+        } catch {
+            return SyncText.message(error)
         }
     }
 

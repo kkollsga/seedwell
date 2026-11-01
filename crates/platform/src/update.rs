@@ -27,6 +27,13 @@ pub const MINIMUM_SYSTEM_KEY: &str = "minimum_macos";
 #[cfg(windows)]
 pub const MINIMUM_SYSTEM_KEY: &str = "minimum_windows";
 
+/// This system's name among the builds of a watched folder's signed `build.json` (`trs-buildsig`).
+#[cfg(not(windows))]
+pub const BUILD_SYSTEM: &str = "macos";
+/// This system's name among the builds of a watched folder's signed `build.json` (`trs-buildsig`).
+#[cfg(windows)]
+pub const BUILD_SYSTEM: &str = "windows";
+
 /// The release zip for this system, as the release scripts name it.
 #[cfg(not(windows))]
 pub fn release_zip(version: &str) -> String {
@@ -85,10 +92,15 @@ pub fn installer_command(installer_url: &str, version: Option<&str>, repo: &str,
 }
 
 /// The command that runs the installer `script` (a local file) on `zip`, checked against `sha256`: a build handed
-/// over with `seedwell update install`.
+/// over with `seedwell update install`, or one from a watched folder. `developer_id`: the build must also be signed
+/// with Seedwell's Developer ID and carry the installed app's bundle id (`install.sh --developer-id`), as a build
+/// from a watched folder must on the Mac (Windows has no code signature to check: there the signed manifest is all).
 #[cfg(not(windows))]
-pub fn local_installer_command(script: &str, zip: &str, sha256: &str, i: &Install) -> Command {
-    let argv = ["/bin/bash", script, "--zip", zip, "--sha256", sha256].map(str::to_owned).to_vec();
+pub fn local_installer_command(script: &str, zip: &str, sha256: &str, developer_id: bool, i: &Install) -> Command {
+    let mut argv: Vec<String> = ["/bin/bash", script, "--zip", zip, "--sha256", sha256].map(str::to_owned).to_vec();
+    if developer_id {
+        argv.push("--developer-id".to_owned());
+    }
     Command { argv, env: i.env() }
 }
 
@@ -117,9 +129,10 @@ pub fn installer_command(installer_url: &str, version: Option<&str>, repo: &str,
 }
 
 /// The command that runs the installer `script` (a local file) on `zip`, checked against `sha256`: a build handed
-/// over with `seedwell update install`.
+/// over with `seedwell update install`, or one from a watched folder. `developer_id` asks for a code signature
+/// check, which a Windows build does not have yet (the signed manifest is what makes a watched build the user's).
 #[cfg(windows)]
-pub fn local_installer_command(script: &str, zip: &str, sha256: &str, i: &Install) -> Command {
+pub fn local_installer_command(script: &str, zip: &str, sha256: &str, _developer_id: bool, i: &Install) -> Command {
     powershell(&["-File", script, "-Zip", zip, "-Sha256", sha256], i)
 }
 
@@ -185,7 +198,7 @@ mod tests {
         let c = installer_command("https://h/i", Some("1.2.3"), "https://h", &i);
         let script_at = c.argv.iter().position(|a| a.contains("SEEDWELL") || a.contains("curl")).unwrap_or(2);
         assert!(!c.argv[script_at].contains(tricky));
-        for c in [c, local_installer_command(tricky, tricky, "ab", &i), rollback_command(tricky, &i)] {
+        for c in [c, local_installer_command(tricky, tricky, "ab", true, &i), rollback_command(tricky, &i)] {
             // A script file is an argument, never script text; the places come in the environment.
             assert!(c.argv.iter().all(|a| a == tricky || !a.contains("rm -rf")), "{c:?}");
             let var = |k: &str| c.env.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());

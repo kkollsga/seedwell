@@ -6,7 +6,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use trs_sync_net::chat::{AgentAccess, MessageInfo, MessageKind};
+use trs_sync_net::chat::{MessageInfo, MessageKind};
 use trs_sync_net::secrets::FileSecrets;
 use trs_sync_net::{Options, SyncHandle};
 use trs_sync_proto::chat::Draft;
@@ -55,9 +55,9 @@ pub(crate) async fn join(who: &SyncHandle, owner: &SyncHandle, id: &FolderId, ro
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn two_devices_chat_both_ways_and_a_read_only_member_reads() {
     let (a, b, c) = (device("Anna").await, device("Bo").await, device("Cy").await);
-    let ch = a.h.chat_new("Plans").await.unwrap();
+    let ch = a.h.chat_new("Plans", false).await.unwrap();
     let id: FolderId = ch.id.parse().unwrap();
-    assert_eq!((ch.role, ch.members, ch.agents), (Some(Role::Owner), 1, AgentAccess::Off));
+    assert_eq!((ch.role, ch.members, ch.agents), (Some(Role::Owner), 1, false));
     join(&b.h, &a.h, &id, Role::ReadWrite, addr(&a)).await;
     assert_eq!(b.h.channel_status(&id).unwrap().name, "Plans", "the link's name");
 
@@ -104,7 +104,7 @@ async fn two_devices_chat_both_ways_and_a_read_only_member_reads() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_device_that_was_away_catches_up_from_another_member() {
     let (a, b, c) = (device("Anna").await, device("Bo").await, device("Cy").await);
-    let id: FolderId = a.h.chat_new("Team").await.unwrap().id.parse().unwrap();
+    let id: FolderId = a.h.chat_new("Team", false).await.unwrap().id.parse().unwrap();
     join(&b.h, &a.h, &id, Role::ReadWrite, addr(&a)).await;
     join(&c.h, &a.h, &id, Role::ReadWrite, addr(&a)).await;
     // B is away from A: it only reaches C, later.
@@ -128,7 +128,7 @@ async fn a_device_that_was_away_catches_up_from_another_member() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_removed_members_later_messages_are_ignored_and_its_earlier_ones_stay() {
     let (a, b) = (device("Anna").await, device("Bo").await);
-    let id: FolderId = a.h.chat_new("Team").await.unwrap().id.parse().unwrap();
+    let id: FolderId = a.h.chat_new("Team", false).await.unwrap().id.parse().unwrap();
     join(&b.h, &a.h, &id, Role::ReadWrite, addr(&a)).await;
     b.h.chat_send(&id, None, MessageKind::Text, "while a member", None, None).await.unwrap();
     until(20, "A has it", || texts(&a.h, &id).len() == 1).await;
@@ -156,7 +156,7 @@ async fn a_device_without_channels_gets_no_messages_but_still_syncs_folders() {
     let folder: FolderId = a.add_folder(docs.clone()).await.unwrap().id.parse().unwrap();
     b.join_folder(&a.create_invite(&folder, Role::ReadWrite, 1, 7).unwrap().link, dirs[2].path().join("B")).await.unwrap();
     b.add_address(&folder, at(&a)).unwrap();
-    let id: FolderId = a.chat_new("Team").await.unwrap().id.parse().unwrap();
+    let id: FolderId = a.chat_new("Team", false).await.unwrap().id.parse().unwrap();
     b.chat_join(&a.create_invite(&id, Role::ReadWrite, 1, 7).unwrap().link).await.unwrap();
     until(30, "B is in both", || role(&b, &id).is_some() && read(&dirs[2].path().join("B/seed.txt")).is_some()).await;
 
@@ -178,7 +178,7 @@ async fn a_device_without_channels_gets_no_messages_but_still_syncs_folders() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_wake_up_command_gets_each_message_from_others_on_stdin() {
     let (a, b) = (device("Anna").await, device("Bo").await);
-    let id: FolderId = a.h.chat_new("Agents").await.unwrap().id.parse().unwrap();
+    let id: FolderId = a.h.chat_new("Agents", false).await.unwrap().id.parse().unwrap();
     join(&b.h, &a.h, &id, Role::ReadWrite, addr(&a)).await;
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("woken");
@@ -188,12 +188,13 @@ async fn the_wake_up_command_gets_each_message_from_others_on_stdin() {
     #[cfg(windows)]
     let cmd = format!("findstr \"^\" >> \"{}\" & >> \"{}\" echo args=0", out.display(), out.display());
     b.h.chat_set_wake_command(&id, Some(&cmd)).unwrap();
-    // Agents off: nothing runs.
+    // Agents: No: nothing runs.
     a.h.chat_send(&id, None, MessageKind::Text, "first", None, None).await.unwrap();
     until(20, "B has it", || texts(&b.h, &id).len() == 1).await;
     tokio::time::sleep(Duration::from_secs(1)).await;
     assert!(!out.exists(), "agents may not read it: no wake-up");
-    b.h.chat_set_agents(&id, AgentAccess::Read).unwrap();
+    a.h.chat_set_agents(&id, true).unwrap();
+    until(20, "B knows the channel is open to agents", || b.h.channel_status(&id).is_some_and(|c| c.agents)).await;
     a.h.chat_send(&id, None, MessageKind::Text, "wake up", None, None).await.unwrap();
     until(20, "woken", || std::fs::read_to_string(&out).is_ok_and(|t| t.contains("args=0"))).await;
     let text = std::fs::read_to_string(&out).unwrap();
@@ -204,38 +205,38 @@ async fn the_wake_up_command_gets_each_message_from_others_on_stdin() {
     tokio::time::sleep(Duration::from_secs(1)).await;
     assert_eq!(std::fs::read_to_string(&out).unwrap().lines().count(), 2);
     let st = b.h.channel_status(&id).unwrap();
-    assert_eq!((st.agents, st.wake_command.as_deref()), (AgentAccess::Read, Some(cmd.as_str())));
+    assert_eq!((st.agents, st.wake_command.as_deref()), (true, Some(cmd.as_str())));
     b.h.chat_leave(&id).unwrap();
     assert!(b.h.channel_status(&id).is_none() && b.h.chat_channels().is_empty());
     a.h.shutdown().await;
     b.h.shutdown().await;
 }
 
-/// An agent channel (SPEC §7G.7): made for an agent, its membership says so, and every member device (one that joins
-/// by link too) opens it to its agents at Read and post until that device's user closes it. The user's choice is
-/// kept over a restart and wins; the user's own channels stay closed, and an agent channel's messages reach the
-/// wake-up command with nothing switched on.
+/// Agents: Yes/No (SPEC §7G.7): one setting for the whole channel, in its membership. A Yes channel joined by link is
+/// open to agents on the joining device at once (the link says so while it waits; nothing to switch on there), and
+/// its messages reach the wake-up command. An owner's No closes it on every member device, a Yes opens it again; an
+/// admin may change it, a writer may not; it is kept over a restart, and a No channel's link says nothing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_agent_channel_is_open_to_agents_on_every_member_until_its_user_closes_it() {
+async fn agents_yes_or_no_is_one_setting_for_every_member_device() {
     let dirs = [tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap()];
     let a = start_at(dirs[0].path(), "Anna", |_| {}).await;
     let b = start_at(dirs[1].path(), "Bo", |_| {}).await;
-    let ch = a.chat_new_for_agents("Bridge").await.unwrap();
-    assert_eq!((ch.role, ch.agent_channel, ch.agents), (Some(Role::Owner), true, AgentAccess::ReadPost));
+    let ch = a.chat_new("Bridge", true).await.unwrap();
+    assert_eq!((ch.role, ch.agents), (Some(Role::Owner), true));
     let id: FolderId = ch.id.parse().unwrap();
-    let family = a.chat_new("Family").await.unwrap();
-    assert_eq!((family.agent_channel, family.agents), (false, AgentAccess::Off), "the user's own: closed");
+    let family = a.chat_new("Family", false).await.unwrap();
+    assert!(!family.agents, "No: closed");
 
-    // B joins by link: closed while it waits (it knows nothing of the channel yet), open once admitted.
+    // B joins by link: open to agents while it waits (the link says Yes), and once admitted (the membership does).
     let link = a.create_invite(&id, Role::ReadWrite, 1, 7).unwrap().link;
+    assert!(link.contains("&agents=yes&a="), "Yes, then where Anna is: {link}");
     let c = b.chat_join(&link).await.unwrap();
-    assert_eq!((c.joining, c.agent_channel, c.agents), (true, false, AgentAccess::Off));
+    assert_eq!((c.joining, c.agents), (true, true));
     b.add_address(&id, at(&a)).unwrap();
     until(30, "admitted", || role(&b, &id) == Some(Role::ReadWrite)).await;
-    until(10, "B knows it is an agent channel", || b.channel_status(&id).is_some_and(|c| c.agent_channel)).await;
-    assert_eq!(b.channel_status(&id).unwrap().agents, AgentAccess::ReadPost);
+    assert!(b.channel_status(&id).unwrap().agents);
 
-    // Open by default: B's wake-up command runs with nothing switched on.
+    // B's wake-up command runs with nothing switched on.
     let out = dirs[1].path().join("woken");
     #[cfg(unix)]
     let cmd = format!("cat >> '{}'", out.display());
@@ -245,25 +246,33 @@ async fn an_agent_channel_is_open_to_agents_on_every_member_until_its_user_close
     a.chat_send(&id, None, MessageKind::Text, "hello agents", None, Some("mac-agent")).await.unwrap();
     until(20, "woken", || std::fs::read_to_string(&out).is_ok_and(|t| t.contains("hello agents"))).await;
 
-    // B's user closes it: that wins over the default, and is kept over a restart (B's file says `off`).
-    b.chat_set_agents(&id, AgentAccess::Off).unwrap();
-    assert_eq!(b.channel_status(&id).map(|c| (c.agent_channel, c.agents)), Some((true, AgentAccess::Off)));
-    a.chat_send(&id, None, MessageKind::Text, "not for B's agents", None, None).await.unwrap();
+    // A writer cannot change it; the owner's No closes it on both devices.
+    assert!(b.chat_set_agents(&id, false).unwrap_err().to_string().contains("owners and admins"));
+    a.chat_set_agents(&id, false).unwrap();
+    assert!(!a.channel_status(&id).unwrap().agents);
+    until(20, "B knows it is closed", || b.channel_status(&id).is_some_and(|c| !c.agents)).await;
+    a.chat_send(&id, None, MessageKind::Text, "not for agents", None, None).await.unwrap();
     until(20, "B has it", || texts(&b, &id).len() == 2).await;
     tokio::time::sleep(Duration::from_secs(1)).await;
-    assert!(!std::fs::read_to_string(&out).unwrap().contains("not for B's agents"), "closed: no wake-up");
+    assert!(!std::fs::read_to_string(&out).unwrap().contains("not for agents"), "closed: no wake-up");
+    let closed_link = a.create_invite(&id, Role::ReadWrite, 1, 7).unwrap().link;
+    assert!(!closed_link.contains("agents"), "{closed_link}");
+
+    // Kept over a restart, on both devices.
     b.shutdown().await;
     a.shutdown().await;
-    let toml = std::fs::read_to_string(dirs[1].path().join("sync.toml")).unwrap();
-    assert!(toml.contains("agents = \"off\""), "{toml}");
     let (a, b) = (start_at(dirs[0].path(), "Anna", |_| {}).await, start_at(dirs[1].path(), "Bo", |_| {}).await);
-    assert_eq!(b.channel_status(&id).map(|c| (c.agent_channel, c.agents)), Some((true, AgentAccess::Off)), "B's user's choice is kept");
-    assert_eq!(a.channel_status(&id).map(|c| (c.agent_channel, c.agents)), Some((true, AgentAccess::ReadPost)), "A's default, after a restart too");
+    assert_eq!((a.channel_status(&id).map(|c| c.agents), b.channel_status(&id).map(|c| c.agents)), (Some(false), Some(false)));
     let family: FolderId = family.id.parse().unwrap();
-    assert_eq!(a.channel_status(&family).map(|c| (c.agent_channel, c.agents)), Some((false, AgentAccess::Off)));
-    // The user may open it again, at any level.
-    b.chat_set_agents(&id, AgentAccess::Read).unwrap();
-    assert_eq!(b.channel_status(&id).unwrap().agents, AgentAccess::Read);
+    assert_eq!(a.channel_status(&family).map(|c| c.agents), Some(false));
+
+    // B made an admin switches it back on: open on both devices again.
+    b.add_address(&id, at(&a)).unwrap();
+    a.set_role(&id, &b.device_id(), Role::Admin).unwrap();
+    until(30, "B is an admin", || role(&b, &id) == Some(Role::Admin)).await;
+    b.chat_set_agents(&id, true).unwrap();
+    assert!(b.channel_status(&id).unwrap().agents);
+    until(20, "A knows it is open", || a.channel_status(&id).is_some_and(|c| c.agents)).await;
     a.shutdown().await;
     b.shutdown().await;
 }
@@ -271,7 +280,7 @@ async fn an_agent_channel_is_open_to_agents_on_every_member_until_its_user_close
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_tag_seen_receipt_or_hook_notice_is_no_unread_message() {
     let (a, b) = (device("Anna").await, device("Bo").await);
-    let id: FolderId = a.h.chat_new("Koding").await.unwrap().id.parse().unwrap();
+    let id: FolderId = a.h.chat_new("Koding", false).await.unwrap().id.parse().unwrap();
     join(&b.h, &a.h, &id, Role::ReadWrite, addr(&a)).await;
     let t = b.h.chat_new_topic(&id, "kglite", None).await.unwrap();
     for body in ["---\nmail: 1\ntype: seen\nre: 0392ba7c\n---\n", "---\nmail: 1\ntype: hook\nstate: on\n---\nhook on", "---\nmail: 1\ntype: tag\nre: 0392ba7c\ntags: backlog\n---\n", "---\nmail: 1\ntype: bug\n---\nreal work"] {
@@ -287,7 +296,7 @@ async fn a_tag_seen_receipt_or_hook_notice_is_no_unread_message() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn topics_hold_their_own_messages_and_unread_counts() {
     let (a, b, c) = (device("Anna").await, device("Bo").await, device("Cy").await);
-    let id: FolderId = a.h.chat_new("Family").await.unwrap().id.parse().unwrap();
+    let id: FolderId = a.h.chat_new("Family", false).await.unwrap().id.parse().unwrap();
     join(&b.h, &a.h, &id, Role::ReadWrite, addr(&a)).await;
     let t = b.h.chat_new_topic(&id, "  Dinner on Saturday ", None).await.unwrap();
     assert_eq!((t.title.as_str(), t.messages, t.unread, t.author_name.as_str()), ("Dinner on Saturday", 0, 0, "Bo"));
@@ -331,7 +340,7 @@ async fn topics_hold_their_own_messages_and_unread_counts() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_message_in_an_unknown_topic_shows_under_general_until_the_topic_arrives() {
     let (a, b) = (device("Anna").await, device("Bo").await);
-    let id: FolderId = a.h.chat_new("Team").await.unwrap().id.parse().unwrap();
+    let id: FolderId = a.h.chat_new("Team", false).await.unwrap().id.parse().unwrap();
     join(&b.h, &a.h, &id, Role::ReadWrite, addr(&a)).await;
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
     let tid = [7u8; 16];
@@ -355,7 +364,7 @@ async fn a_message_in_an_unknown_topic_shows_under_general_until_the_topic_arriv
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_watcher_gets_a_new_topic_and_its_messages_from_another_device() {
     let (a, b) = (device("Anna").await, device("Bo").await);
-    let id: FolderId = a.h.chat_new("Dev").await.unwrap().id.parse().unwrap();
+    let id: FolderId = a.h.chat_new("Dev", false).await.unwrap().id.parse().unwrap();
     join(&b.h, &a.h, &id, Role::ReadWrite, addr(&a)).await;
     let mut events = a.h.chat_subscribe();
     let t = b.h.chat_new_topic(&id, "Seedwell", Some("Seedwell")).await.unwrap();
@@ -386,7 +395,7 @@ async fn a_watcher_gets_a_new_topic_and_its_messages_from_another_device() {
 async fn each_agent_reads_only_what_it_has_not_been_given() {
     let state = tempfile::tempdir().unwrap();
     let a = start_at(state.path(), "Anna", |_| {}).await;
-    let id: FolderId = a.chat_new("Dev").await.unwrap().id.parse().unwrap();
+    let id: FolderId = a.chat_new("Dev", false).await.unwrap().id.parse().unwrap();
     let body = |v: Vec<MessageInfo>| v.into_iter().map(|m| m.body).collect::<Vec<_>>();
     for n in 1..=3 {
         a.chat_send(&id, None, MessageKind::Text, &format!("old {n}"), None, Some("Docs")).await.unwrap();
@@ -434,7 +443,7 @@ async fn each_agent_reads_only_what_it_has_not_been_given() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_late_message_written_earlier_is_still_given_to_an_agent() {
     let (a, b) = (device("Anna").await, device("Bo").await);
-    let id: FolderId = a.h.chat_new("Team").await.unwrap().id.parse().unwrap();
+    let id: FolderId = a.h.chat_new("Team", false).await.unwrap().id.parse().unwrap();
     join(&b.h, &a.h, &id, Role::ReadWrite, addr(&a)).await;
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
     let body = |v: Vec<MessageInfo>| v.into_iter().map(|m| m.body).collect::<Vec<_>>();
@@ -458,7 +467,7 @@ async fn leaving_the_last_shared_channel_forgets_the_other_device() {
     let b = start_at(dirs[1].path(), "Bo", |_| {}).await;
     let mut ids = Vec::new();
     for name in ["Team", "Other"] {
-        let id: FolderId = a.chat_new(name).await.unwrap().id.parse().unwrap();
+        let id: FolderId = a.chat_new(name, false).await.unwrap().id.parse().unwrap();
         join(&b, &a, &id, Role::ReadWrite, at(&a)).await;
         ids.push(id);
     }

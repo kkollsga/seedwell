@@ -1,6 +1,6 @@
 //! `seedwell update`: what this Seedwell runs, and installing development builds (SPEC 12A). A build is handed over
-//! as its zip (`update install`), or the app follows a folder and installs each newer build put there (`update
-//! watch`). Both need "Allow development builds" on (Settings › General › Updates, or `update dev-builds on`, which
+//! as its zip (`update install`), or the app follows a folder and installs each newer build signed into the folder's
+//! `build.json` with a trusted build key (`update watch`). Both need "Allow development builds" on (Settings › General › Updates, or `update dev-builds on`, which
 //! sets that switch; off while a development build runs goes back to the latest release); the app decides, this only
 //! asks.
 #![allow(missing_docs)] // variant fields are named after the options they hold

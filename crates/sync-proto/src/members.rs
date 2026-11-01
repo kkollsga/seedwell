@@ -18,13 +18,28 @@
 //!   6 profile : device name str ‖ user name str (empty = none) ‖ serial varint ‖ at_s varint
 //!               (signed by the device it names, a member)
 //!   7 channel : flags varint ‖ at_s varint     (owners only; a channel's own facts, 0.1.12)
-//!               flags bit 0: an agent channel (made by an agent, open to every member device's agents by default)
+//!               flags bit 0: open to agents (0.1.12 read it as set for good; since 0.1.13 an Agents: Yes at serial 0)
+//!   8 agents  : open u8 (0 = No, 1 = Yes) ‖ serial varint ‖ at_s varint     (owners and admins, 0.1.13)
+//!               a channel's "Agents: Yes/No": the owners' and current admins' latest (by serial) counts
+//!   9 follow  : target u8 (1 folder, 2 channel) ‖ target pk(32) ‖ name str ‖ on u8 ‖ serial varint ‖ at_s varint
+//!               (0.1.13, only in a devices group, signed by the device that says it, a member): "on all my devices";
+//!               per target the latest (by serial, then time, then signature) of a current member counts
+//!  10 moved   : target pk(32) ‖ at_s varint     (0.1.13, only in a devices group, signed by a member's device key):
+//!               the group moved to the group with this key (its key changed after a removal); of a current
+//!               member's, the lowest target group id counts
+//!  11 rendezvous : url str (≤ 200 bytes; empty: none) ‖ serial varint ‖ at_s varint     (0.1.13, only in a devices group,
+//!               signed by the device it is about): the rendezvous this device uses, so the others without one take
+//!               it; its latest (by serial) counts
 //! invite = version u8 (1) ‖ folder pk(32) ‖ id(16) ‖ role u8 ‖ max_uses varint (0 = unlimited)
 //!          ‖ expires_s varint (0 = never) ‖ at_s varint ‖ issuer (signer) ‖ token pk(32) ‖ signature(64)
 //!   signed  = "seedwell-sync/v2/invite" ‖ everything before the signature
 //! link = seedwell://sync/<base32(invite without token pk ‖ token seed(32) ‖ check(2))>?name=<name>
-//!        (a channel's: seedwell://chat/<the same>?name=<name>; a folder's with its channel, one link for both:
-//!        seedwell://sync/<the folder's>?name=<name>&chat=<the channel's base32>&chat_name=<its name>)
+//!        (a channel's: seedwell://chat/<the same>?name=<name>[&agents=yes]; a folder's with its channel, one link
+//!        for both: seedwell://sync/<the folder's>?name=<name>&chat=<the channel's base32>&chat_name=<its name>
+//!        [&chat_agents=yes]; `agents=yes`: the channel was open to agents when the link was made, 0.1.13)
+//!        [&a=<base32(sealed block)>]: where the device that made the link can be reached, sealed with a key from the
+//!        token seed (`crate::reach`, 0.1.13); last, after the channel's fields; one for a folder and its channel
+//!        (a link to pair a device, 0.1.13: seedwell://devices/<the same>?name=<the device's name>[&a=…])
 //! redeem proof = invite ‖ token_sign("seedwell-sync/v2/redeem" ‖ folder_id ‖ device pk ‖ TLS exporter)
 //! ```
 //!
@@ -44,6 +59,7 @@ use crate::device::{self, DeviceKey};
 use crate::ids::FolderId;
 use crate::keys::{Access, FolderSecret, KeyError, MAX_LINK_NAME, percent_decode, percent_encode};
 use crate::msg::MAX_DEVICE_NAME;
+use crate::reach::LinkReach;
 
 const STATEMENT: &str = "seedwell-sync/v2/statement";
 const INVITE: &str = "seedwell-sync/v2/invite";
@@ -51,6 +67,7 @@ const REDEEM: &str = "seedwell-sync/v2/redeem";
 const LINK_CHECK: &str = "seedwell-sync/v2/link";
 const LINK_PREFIX: &str = "seedwell://sync/";
 const CHAT_PREFIX: &str = "seedwell://chat/";
+const DEVICES_PREFIX: &str = "seedwell://devices/";
 
 /// What a link invites to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -59,6 +76,8 @@ pub enum LinkKind {
     Folder,
     /// A channel (`seedwell://chat/`).
     Channel,
+    /// A devices group: pairing a device (`seedwell://devices/`, 0.1.13).
+    Devices,
 }
 
 /// Most uses a limited invitation may have; 0 means unlimited.
@@ -331,12 +350,64 @@ pub enum Body {
         /// When it was made.
         at_s: u64,
     },
-    /// What a channel is (owners only, 0.1.12): [`CHANNEL_AGENTS`] marks an agent channel. Signed once, when the
-    /// channel is made; any owner's statement with a flag sets it for good (nothing clears one). A device before
-    /// 0.1.12 keeps it as [`Body::Unknown`] and passes it on: to it the channel is an ordinary one.
+    /// What a channel is (owners only, 0.1.12): [`CHANNEL_AGENTS`] opens it to agents. 0.1.12 signed it when an
+    /// agent made the channel and read it as set for good; since 0.1.13 it counts as an [`Body::Agents`] Yes at
+    /// serial 0 (so any later Agents statement decides) and is no longer written. A device before 0.1.12 keeps it as
+    /// [`Body::Unknown`] and passes it on: to it the channel is an ordinary one.
     Channel {
         /// [`CHANNEL_AGENTS`]; bits this version does not know are kept and mean nothing here.
         flags: u64,
+        /// When it was made.
+        at_s: u64,
+    },
+    /// A channel's "Agents: Yes/No" (0.1.13): `open` lets agents on every member device read and post in it, `false`
+    /// keeps it from them. Signed by an owner or an admin; the latest (by serial, then time, then signature) of the
+    /// owners' and current admins' counts, so it can be switched off and on again. A device before 0.1.13 keeps it as
+    /// [`Body::Unknown`] and passes it on (one of 0.1.12 goes by its kind 7 mark alone).
+    Agents {
+        /// Yes: open to agents.
+        open: bool,
+        /// Orders the channel's Agents statements (higher wins).
+        serial: u64,
+        /// When it was made.
+        at_s: u64,
+    },
+    /// "On all my devices" (0.1.13): in a devices group only, a sibling says a folder or channel follows (`on`) or
+    /// no longer does. Signed by the device that says it, while it is a member; per target the latest (by serial,
+    /// then time, then signature) of a current member counts ([`Membership::follows`]). Anywhere else it means
+    /// nothing; a device before 0.1.13 keeps it as [`Body::Unknown`].
+    Follow {
+        /// A folder or a channel.
+        target: FollowTarget,
+        /// Its public key.
+        target_pk: [u8; 32],
+        /// Its name where it was put on all devices (a hint for the others: the name they give it).
+        name: String,
+        /// It follows (on) or no longer does (off).
+        on: bool,
+        /// Orders the target's Follow statements (higher wins).
+        serial: u64,
+        /// When it was made.
+        at_s: u64,
+    },
+    /// "This group moved" (0.1.13): in a devices group only, a member says the group now goes on under a new key
+    /// (made after a removal, so the removed device's copy of the old key is worth nothing). Signed by the device that
+    /// says it, while it is a member; of the current members' statements, the one with the lowest target group id
+    /// counts ([`Membership::moved_to`]), so devices that moved at once settle on one group.
+    Moved {
+        /// The new group's public key.
+        target_pk: [u8; 32],
+        /// When it was made.
+        at_s: u64,
+    },
+    /// "The rendezvous I use" (0.1.13): in a devices group only, a device says which rendezvous (SPEC §7G.3) it
+    /// publishes its addresses to (empty: none, it turned it off), so a sibling with none takes the same. Signed by
+    /// that device while it is a member; its latest (by serial, then signature) counts.
+    Rendezvous {
+        /// The rendezvous's `https` URL, at most [`MAX_RENDEZVOUS_URL`] bytes; empty: none.
+        url: String,
+        /// Orders the device's statements (higher wins).
+        serial: u64,
         /// When it was made.
         at_s: u64,
     },
@@ -353,8 +424,39 @@ pub enum Body {
 /// Longest statement body.
 const MAX_BODY: usize = 1024;
 
-/// [`Body::Channel`]'s flag of an agent channel: an agent made it (through the agent interface), for agents to talk
-/// where the user can read; every member device's agents may read and post in it unless that device's user closes it.
+/// What a [`Body::Follow`] is about.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum FollowTarget {
+    /// A synced folder.
+    Folder,
+    /// A channel.
+    Channel,
+}
+
+impl FollowTarget {
+    fn byte(self) -> u8 {
+        match self {
+            FollowTarget::Folder => 1,
+            FollowTarget::Channel => 2,
+        }
+    }
+
+    fn from_byte(b: u8) -> Option<FollowTarget> {
+        match b {
+            1 => Some(FollowTarget::Folder),
+            2 => Some(FollowTarget::Channel),
+            _ => None,
+        }
+    }
+}
+
+/// Longest URL a [`Body::Rendezvous`] carries, in bytes.
+pub const MAX_RENDEZVOUS_URL: usize = 200;
+
+/// Longest name a [`Body::Follow`] carries, in bytes.
+pub const MAX_FOLLOW_NAME: usize = 255;
+
+/// [`Body::Channel`]'s flag of a channel open to agents (0.1.12's agent channel): read as an Agents: Yes at serial 0.
 pub const CHANNEL_AGENTS: u64 = 1;
 
 /// A name in a [`Body::Profile`]: at most [`MAX_DEVICE_NAME`] characters, no control characters, not blank (a user
@@ -433,6 +535,32 @@ impl Statement {
                 put_varint(&mut out, *flags);
                 put_varint(&mut out, *at_s);
                 7
+            }
+            Body::Agents { open, serial, at_s } => {
+                out.push(u8::from(*open));
+                put_varint(&mut out, *serial);
+                put_varint(&mut out, *at_s);
+                8
+            }
+            Body::Follow { target, target_pk, name, on, serial, at_s } => {
+                out.push(target.byte());
+                out.extend_from_slice(target_pk);
+                put_str(&mut out, name);
+                out.push(u8::from(*on));
+                put_varint(&mut out, *serial);
+                put_varint(&mut out, *at_s);
+                9
+            }
+            Body::Moved { target_pk, at_s } => {
+                out.extend_from_slice(target_pk);
+                put_varint(&mut out, *at_s);
+                10
+            }
+            Body::Rendezvous { url, serial, at_s } => {
+                put_str(&mut out, url);
+                put_varint(&mut out, *serial);
+                put_varint(&mut out, *at_s);
+                11
             }
             Body::Unknown { kind, data } => {
                 out.extend_from_slice(data);
@@ -521,6 +649,36 @@ impl Statement {
                 Body::Profile { device_name, user_name, serial: r.varint("serial").ok()?, at_s: r.varint("time").ok()? }
             }
             7 => Body::Channel { flags: r.varint("channel flags").ok()?, at_s: r.varint("time").ok()? },
+            8 => {
+                let open = match r.u8("agents").ok()? {
+                    0 => false,
+                    1 => true,
+                    _ => return None,
+                };
+                Body::Agents { open, serial: r.varint("serial").ok()?, at_s: r.varint("time").ok()? }
+            }
+            9 => {
+                let target = FollowTarget::from_byte(r.u8("target").ok()?)?;
+                let target_pk = r.array("target key").ok()?;
+                let name = r.str(MAX_FOLLOW_NAME, "name").ok()?;
+                if name.chars().any(char::is_control) {
+                    return None;
+                }
+                let on = match r.u8("on").ok()? {
+                    0 => false,
+                    1 => true,
+                    _ => return None,
+                };
+                Body::Follow { target, target_pk, name, on, serial: r.varint("serial").ok()?, at_s: r.varint("time").ok()? }
+            }
+            10 => Body::Moved { target_pk: r.array("target key").ok()?, at_s: r.varint("time").ok()? },
+            11 => {
+                let url = r.str(MAX_RENDEZVOUS_URL, "url").ok()?;
+                if url.chars().any(|c| c.is_control() || c.is_whitespace()) {
+                    return None;
+                }
+                Body::Rendezvous { url, serial: r.varint("serial").ok()?, at_s: r.varint("time").ok()? }
+            }
             _ => return None,
         };
         let used = data.len() - r.remaining();
@@ -545,9 +703,10 @@ impl Statement {
             // invitation it admits with.
             Body::Remove { .. } | Body::ShareUntil { .. } | Body::Channel { .. } => self.signer == Signer::Folder,
             Body::Grant { invite: None, .. } => self.signer == Signer::Folder,
-            Body::Revoke { .. } => true,
-            // A device names only itself.
-            Body::Profile { .. } => matches!(self.signer, Signer::Device(_)),
+            // An owner or an admin (the membership counts only a current admin's).
+            Body::Revoke { .. } | Body::Agents { .. } => true,
+            // A device names only itself, and says itself what it put on all devices.
+            Body::Profile { .. } | Body::Follow { .. } | Body::Moved { .. } | Body::Rendezvous { .. } => matches!(self.signer, Signer::Device(_)),
             // Only the signature can be checked; it gives no role.
             Body::Unknown { .. } => true,
         };
@@ -649,6 +808,25 @@ impl InviteState {
     }
 }
 
+/// A folder or channel that follows ("on all my devices"), as a devices group's [`Body::Follow`] statements say.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Follow {
+    /// A folder or a channel.
+    pub target: FollowTarget,
+    /// Its public key.
+    pub target_pk: [u8; 32],
+    /// Its name where it was put on all devices.
+    pub name: String,
+    /// It follows.
+    pub on: bool,
+    /// The device that said it.
+    pub by: [u8; 32],
+    /// The statement's serial.
+    pub serial: u64,
+    /// When it was said.
+    pub at_s: u64,
+}
+
 /// A folder's membership: every statement this device knows, and the roles they give. Every device that knows
 /// the same statements gets the same roles.
 #[derive(Clone, Debug)]
@@ -668,11 +846,113 @@ pub struct Membership {
     share_by: Option<[u8; 32]>,
     /// The time [`Membership::set_now`] gave (Unix seconds): after the share end only the owners count.
     now_s: u64,
-    /// An owner marked the channel an agent channel ([`CHANNEL_AGENTS`]).
-    agent_channel: bool,
+    /// The channel is open to agents: the latest [`Body::Agents`] of an owner or current admin (an owner's
+    /// [`CHANNEL_AGENTS`] mark counts as one at serial 0).
+    agents: bool,
+    /// The highest [`Body::Agents`] serial known.
+    agents_serial: u64,
+    /// A devices group (0.1.13): an owner's removal is final (no later grant lets the device in again), and
+    /// [`Body::Follow`] statements count.
+    devices: bool,
+    /// Per target, the latest Follow of a current member (devices group only).
+    follows: BTreeMap<[u8; 32], Follow>,
+    /// Per target, the highest Follow serial known (of any signer).
+    follow_serial: BTreeMap<[u8; 32], u64>,
 }
 
 impl Membership {
+    /// An empty membership of a devices group (0.1.13) whose key is `group_pk` (the user key): removals are final,
+    /// and Follow statements count.
+    pub fn new_devices(group_pk: [u8; 32]) -> Self {
+        Membership { devices: true, ..Membership::new(group_pk) }
+    }
+
+    /// A devices group's membership ([`Membership::new_devices`]).
+    pub fn is_devices(&self) -> bool {
+        self.devices
+    }
+
+    /// In a devices group, `device_pk` was removed by an owner, for good.
+    pub fn removed_for_good(&self, device_pk: &[u8; 32]) -> bool {
+        self.devices && self.removed.contains(device_pk)
+    }
+
+    /// What follows in a devices group: per target, the latest Follow of a current member (on or off).
+    pub fn follows(&self) -> impl Iterator<Item = &Follow> {
+        self.follows.values()
+    }
+
+    /// The latest Follow of a current member for one target.
+    pub fn follow(&self, target_pk: &[u8; 32]) -> Option<&Follow> {
+        self.follows.get(target_pk)
+    }
+
+    /// The serial the next Follow for `target_pk` gets (above every one known for it).
+    pub fn next_follow_serial(&self, target_pk: &[u8; 32]) -> u64 {
+        self.follow_serial.get(target_pk).copied().unwrap_or(0) + 1
+    }
+
+    /// Where a devices group moved: every member's (signer, target key) of a [`Body::Moved`] of a current member.
+    pub fn moves(&self) -> Vec<([u8; 32], [u8; 32])> {
+        if !self.devices {
+            return Vec::new();
+        }
+        let mut out: Vec<([u8; 32], [u8; 32])> = self
+            .statements
+            .values()
+            .filter_map(|st| match (&st.body, st.signer) {
+                (Body::Moved { target_pk, .. }, Signer::Device(by)) if self.members.contains_key(&by) => Some((by, *target_pk)),
+                _ => None,
+            })
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// The group a devices group moved to: of the current members' Moved statements whose signer `trusted` accepts,
+    /// the one with the lowest target group id (the same everywhere, in any order).
+    pub fn moved_to(&self, trusted: impl Fn(&[u8; 32]) -> bool) -> Option<[u8; 32]> {
+        self.moves().into_iter().filter(|(by, _)| trusted(by)).map(|(_, t)| t).min_by_key(FolderId::of_public_key)
+    }
+
+    /// The rendezvous each current member of a devices group says it uses: (device, url, when), its latest statement
+    /// (by serial, then signature) each; an empty url: it uses none.
+    pub fn rendezvous(&self) -> Vec<([u8; 32], String, u64)> {
+        let mut latest: BTreeMap<[u8; 32], (u64, [u8; 64], String, u64)> = BTreeMap::new();
+        if !self.devices {
+            return Vec::new();
+        }
+        for st in self.statements.values() {
+            let (Body::Rendezvous { url, serial, at_s }, Signer::Device(by)) = (&st.body, st.signer) else { continue };
+            if !self.members.contains_key(&by) {
+                continue;
+            }
+            if latest.get(&by).is_none_or(|(s, sig, _, _)| (*serial, &st.sig) > (*s, sig)) {
+                latest.insert(by, (*serial, st.sig, url.clone(), *at_s));
+            }
+        }
+        latest.into_iter().map(|(by, (_, _, url, at))| (by, url, at)).collect()
+    }
+
+    /// The serial `device`'s next rendezvous statement gets.
+    pub fn next_rendezvous_serial(&self, device: &[u8; 32]) -> u64 {
+        self.statements
+            .values()
+            .filter_map(|st| match (&st.body, st.signer) {
+                (Body::Rendezvous { serial, .. }, Signer::Device(by)) if by == *device => Some(*serial),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0)
+            + 1
+    }
+
+    /// The devices an owner removed from a devices group (for good).
+    pub fn removed_devices(&self) -> Vec<[u8; 32]> {
+        if self.devices { self.removed.iter().copied().collect() } else { Vec::new() }
+    }
+
     /// An empty membership for the folder with this public key.
     pub fn new(folder_pk: [u8; 32]) -> Self {
         Membership {
@@ -687,7 +967,11 @@ impl Membership {
             share_until: None,
             share_by: None,
             now_s: 0,
-            agent_channel: false,
+            agents: false,
+            agents_serial: 0,
+            devices: false,
+            follows: BTreeMap::new(),
+            follow_serial: BTreeMap::new(),
         }
     }
 
@@ -713,9 +997,9 @@ impl Membership {
     pub fn add(&mut self, statements: impl IntoIterator<Item = Statement>) -> bool {
         let (mut by_owner, mut by_device): (Vec<Statement>, Vec<Statement>) =
             statements.into_iter().filter(|st| st.verify(&self.folder_pk)).partition(|st| st.signer == Signer::Folder);
-        // Profiles last: a grant in the same batch may make their signer a member.
-        by_device.sort_by_key(|st| matches!(st.body, Body::Profile { .. }));
-        let before = (self.members.clone(), self.invites.clone(), self.share_until, self.profile_hashes(), self.agent_channel);
+        // Profiles and follows last: a grant in the same batch may make their signer a member.
+        by_device.sort_by_key(|st| matches!(st.body, Body::Profile { .. } | Body::Follow { .. } | Body::Moved { .. } | Body::Rendezvous { .. }));
+        let before = (self.members.clone(), self.invites.clone(), self.share_until, self.profile_hashes(), self.agents, self.follows.clone(), self.moves(), self.rendezvous());
         let mut new = false;
         for st in by_owner.drain(..) {
             new |= self.statements.insert(st.hash(), st).is_none();
@@ -742,6 +1026,14 @@ impl Membership {
                 more |= self.statements.insert(st.hash(), st).is_none();
                 continue;
             }
+            // A Follow: in a devices group, from a member (elsewhere as any other device statement: kept from an admin,
+            // meaning nothing).
+            if matches!(st.body, Body::Follow { .. } | Body::Moved { .. } | Body::Rendezvous { .. }) && self.devices {
+                if self.statements.len() < MAX_STATEMENTS && self.role(&pk).is_some() {
+                    more |= self.statements.insert(st.hash(), st).is_none();
+                }
+                continue;
+            }
             if self.statements.len() >= MAX_STATEMENTS || !self.role(&pk).is_some_and(Role::admits) {
                 continue;
             }
@@ -750,7 +1042,7 @@ impl Membership {
         if more {
             self.resolve();
         }
-        (new || more) && before != (self.members.clone(), self.invites.clone(), self.share_until, self.profile_hashes(), self.agent_channel)
+        (new || more) && before != (self.members.clone(), self.invites.clone(), self.share_until, self.profile_hashes(), self.agents, self.follows.clone(), self.moves(), self.rendezvous())
     }
 
     /// The latest profile statement of a device, and its hash.
@@ -810,9 +1102,15 @@ impl Membership {
         self.share_until
     }
 
-    /// An owner marked this channel an agent channel ([`Body::Channel`] with [`CHANNEL_AGENTS`]).
-    pub fn agent_channel(&self) -> bool {
-        self.agent_channel
+    /// The channel is open to agents ("Agents: Yes"): the owners' and current admins' latest [`Body::Agents`], or an
+    /// owner's [`CHANNEL_AGENTS`] mark when there is none. No statement: closed.
+    pub fn agents(&self) -> bool {
+        self.agents
+    }
+
+    /// The serial the next [`Body::Agents`] gets (above every one known).
+    pub fn next_agents_serial(&self) -> u64 {
+        self.agents_serial + 1
     }
 
     /// The device is a member whose access ended with the folder's sharing.
@@ -900,6 +1198,10 @@ impl Membership {
         if let Some(r) = self.role(device_pk) {
             return Ok(Some(r));
         }
+        // Removed from a devices group: for good, whoever admits.
+        if self.removed_for_good(device_pk) {
+            return Err(AdmitError::Removed);
+        }
         if self.share_ended(now_s) {
             return Err(AdmitError::NotShared);
         }
@@ -966,11 +1268,27 @@ impl Membership {
             }
         }
 
-        // Owners' decisions; Admin (and Owner) roles come only from them.
+        // Owners' decisions; Admin (and Owner) roles come only from them. In a devices group an owner's removal is
+        // final: no grant, earlier or later, lets that device in again.
         let mut members: BTreeMap<[u8; 32], Member> = BTreeMap::new();
         let mut removed = BTreeSet::new();
         let mut by_invite: Admissions = BTreeMap::new();
+        let for_good: BTreeSet<[u8; 32]> = if self.devices {
+            self.statements
+                .values()
+                .filter_map(|st| match (&st.body, st.signer) {
+                    (Body::Remove { device, .. }, Signer::Folder) => Some(*device),
+                    _ => None,
+                })
+                .collect()
+        } else {
+            BTreeSet::new()
+        };
         for (device, (st, h)) in &owner {
+            if for_good.contains(device) {
+                removed.insert(*device);
+                continue;
+            }
             match &st.body {
                 Body::Grant { role, at_s, invite, .. } => {
                     members.insert(*device, Member { role: *role, invite: invite.map(|i| i.id), by_admin: false, since_s: *at_s, decided_by: *h });
@@ -1055,12 +1373,57 @@ impl Membership {
         self.max_serial = max_serial;
         self.share_until = share.map(|(_, _, u, _)| u).filter(|u| *u != 0);
         self.share_by = share.map(|(_, _, _, h)| h);
-        self.agent_channel = self
-            .statements
-            .values()
-            .any(|st| st.signer == Signer::Folder && matches!(st.body, Body::Channel { flags, .. } if flags & CHANNEL_AGENTS != 0));
+        // Agents: Yes/No: the latest of the owners' and current admins' (0.1.12's mark at serial 0, so after any other).
+        let mut agents: Option<(AgentsKey, bool)> = None;
+        let mut agents_serial = 0;
+        for st in self.statements.values() {
+            let by_ok = match st.signer {
+                Signer::Folder => true,
+                Signer::Device(pk) => admins.contains(&pk),
+            };
+            let said = match st.body {
+                Body::Agents { open, serial, at_s } if by_ok => Some(((serial, at_s, st.sig), open)),
+                Body::Channel { flags, at_s } if st.signer == Signer::Folder && flags & CHANNEL_AGENTS != 0 => Some(((0, at_s, st.sig), true)),
+                _ => None,
+            };
+            // Every Agents statement kept counts for the next serial (one of an admin demoted since too: it would count
+            // again if that device were made an admin again).
+            if let Body::Agents { serial, .. } = st.body {
+                agents_serial = agents_serial.max(serial);
+            }
+            if let Some((key, open)) = said
+                && agents.as_ref().is_none_or(|(k, _)| key > *k)
+            {
+                agents = Some((key, open));
+            }
+        }
+        self.agents = agents.is_some_and(|(_, open)| open);
+        self.agents_serial = agents_serial;
+        // What follows (a devices group): per target, the latest of a current member's.
+        let mut follows: BTreeMap<[u8; 32], (FollowKey, Follow)> = BTreeMap::new();
+        let mut follow_serial: BTreeMap<[u8; 32], u64> = BTreeMap::new();
+        if self.devices {
+            for st in self.statements.values() {
+                let (Body::Follow { target, target_pk, name, on, serial, at_s }, Signer::Device(by)) = (&st.body, st.signer) else { continue };
+                let top = follow_serial.entry(*target_pk).or_insert(0);
+                *top = (*top).max(*serial);
+                if !self.members.contains_key(&by) {
+                    continue;
+                }
+                let key = (*serial, *at_s, st.sig);
+                if follows.get(target_pk).is_none_or(|(k, _)| key > *k) {
+                    let f = Follow { target: *target, target_pk: *target_pk, name: name.clone(), on: *on, by, serial: *serial, at_s: *at_s };
+                    follows.insert(*target_pk, (key, f));
+                }
+            }
+        }
+        self.follows = follows.into_iter().map(|(k, (_, f))| (k, f)).collect();
+        self.follow_serial = follow_serial;
     }
 }
+
+/// What orders a target's Follow statements: serial, time, signature.
+type FollowKey = (u64, u64, [u8; 64]);
 
 /// The device and serial of an owner's grant or removal.
 fn profile_serial(st: &Statement) -> u64 {
@@ -1076,6 +1439,9 @@ fn owner_target(st: &Statement) -> Option<([u8; 32], u64)> {
         _ => None,
     }
 }
+
+/// What orders a channel's Agents statements: serial, time, signature.
+type AgentsKey = (u64, u64, [u8; 64]);
 
 /// Admissions by invitation: the deciding statement's (time, signature) and the device.
 type Admissions = BTreeMap<[u8; 16], Vec<((u64, [u8; 64]), [u8; 32])>>;
@@ -1121,11 +1487,17 @@ pub struct InviteLink {
     pub token_seed: [u8; 32],
     /// The folder's name, a hint for the joining device.
     pub name: Option<String>,
+    /// A channel's link: the channel was open to agents when it was made (`agents=yes`), so agents on the joining
+    /// device may use it while it waits to be admitted. A hint only: once admitted, the membership decides.
+    pub agents: bool,
+    /// Where the device that made the link can be reached (`a=`, sealed; 0.1.13). The joining device dials these
+    /// besides discovery. A folder's link for both gives its channel the same.
+    pub reach: Option<LinkReach>,
 }
 
 impl fmt::Debug for InviteLink {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("InviteLink").field("invite", &self.invite).field("name", &self.name).finish()
+        f.debug_struct("InviteLink").field("invite", &self.invite).field("name", &self.name).field("agents", &self.agents).field("reach", &self.reach).finish()
     }
 }
 
@@ -1140,13 +1512,33 @@ impl InviteLink {
         self.format_as(LinkKind::Channel)
     }
 
-    /// The link's text for a folder or a channel.
+    /// The link's text to pair a device (0.1.13).
+    pub fn format_devices(&self) -> String {
+        self.format_as(LinkKind::Devices)
+    }
+
+    /// The link's text for a folder, a channel or a devices group.
     pub fn format_as(&self, kind: LinkKind) -> String {
-        let prefix = if kind == LinkKind::Channel { CHAT_PREFIX } else { LINK_PREFIX };
+        let mut out = self.format_fields(kind);
+        self.push_reach(&mut out);
+        out
+    }
+
+    /// The link without its address block.
+    fn format_fields(&self, kind: LinkKind) -> String {
+        let prefix = match kind {
+            LinkKind::Folder => LINK_PREFIX,
+            LinkKind::Channel => CHAT_PREFIX,
+            LinkKind::Devices => DEVICES_PREFIX,
+        };
         let mut out = format!("{prefix}{}", self.payload());
         if let Some(name) = self.name.as_deref().filter(|n| !n.is_empty()) {
             out.push_str("?name=");
             out.push_str(&percent_encode(name));
+        }
+        if kind == LinkKind::Channel && self.agents {
+            out.push(if out.contains('?') { '&' } else { '?' });
+            out.push_str("agents=yes");
         }
         out
     }
@@ -1155,7 +1547,7 @@ impl InviteLink {
     /// query, `chat=<its payload>` and `chat_name=<its name>`, which a folder link's reader that does not know them
     /// ignores.
     pub fn format_bundle(&self, channel: &InviteLink) -> String {
-        let mut out = self.format_as(LinkKind::Folder);
+        let mut out = self.format_fields(LinkKind::Folder);
         out.push(if out.contains('?') { '&' } else { '?' });
         out.push_str("chat=");
         out.push_str(&channel.payload());
@@ -1163,7 +1555,23 @@ impl InviteLink {
             out.push_str("&chat_name=");
             out.push_str(&percent_encode(name));
         }
+        if channel.agents {
+            out.push_str("&chat_agents=yes");
+        }
+        self.push_reach(&mut out);
         out
+    }
+
+    /// Appends `a=<the sealed address block>` when the link has one.
+    fn push_reach(&self, out: &mut String) {
+        let Some(r) = &self.reach else { return };
+        let sealed = r.seal(&self.token_seed, &self.invite.id);
+        if sealed.is_empty() {
+            return;
+        }
+        out.push(if out.contains('?') { '&' } else { '?' });
+        out.push_str("a=");
+        out.push_str(&base32::encode(&sealed));
     }
 
     /// The invitation, its signature and the token's seed, with a 2-byte check, in base32.
@@ -1202,16 +1610,18 @@ impl InviteLink {
         if r.remaining() != 0 || !invite.verify() {
             return Err(KeyError::Damaged);
         }
-        Ok(InviteLink { invite, token_seed, name: None })
+        Ok(InviteLink { invite, token_seed, name: None, agents: false, reach: None })
     }
 
     /// Parses a link. Surrounding whitespace and the `<` `>` quotes mail clients put around links are allowed;
-    /// query fields other than `name` are ignored (later versions may add some). A bare key of the earlier test
+    /// query fields other than `name` (and `agents`, `chat`, `chat_name`, `chat_agents`, `a`) are ignored (later
+    /// versions may add some). An address block (`a`) that does not open is left out: the link still joins. A bare key of the earlier test
     /// builds is refused with [`KeyError::OldKey`], a channel's link with [`KeyError::ChannelLink`].
     pub fn parse(text: &str) -> Result<Self, KeyError> {
         match Self::parse_any(text)? {
             (l, LinkKind::Folder) => Ok(l),
             (_, LinkKind::Channel) => Err(KeyError::ChannelLink),
+            (_, LinkKind::Devices) => Err(KeyError::DevicesLink),
         }
     }
 
@@ -1220,10 +1630,21 @@ impl InviteLink {
         match Self::parse_any(text)? {
             (l, LinkKind::Channel) => Ok(l),
             (_, LinkKind::Folder) => Err(KeyError::FolderLink),
+            (_, LinkKind::Devices) => Err(KeyError::DevicesLink),
         }
     }
 
-    /// Parses a folder's or a channel's link.
+    /// Parses a link to pair a device (0.1.13; a folder's or a channel's is refused with [`KeyError::FolderLink`] or
+    /// [`KeyError::ChannelLink`]).
+    pub fn parse_devices(text: &str) -> Result<Self, KeyError> {
+        match Self::parse_any(text)? {
+            (l, LinkKind::Devices) => Ok(l),
+            (_, LinkKind::Folder) => Err(KeyError::FolderLink),
+            (_, LinkKind::Channel) => Err(KeyError::ChannelLink),
+        }
+    }
+
+    /// Parses a folder's, a channel's or a devices group's link.
     pub fn parse_any(text: &str) -> Result<(Self, LinkKind), KeyError> {
         Self::parse_full(text).map(|(l, kind, _)| (l, kind))
     }
@@ -1234,6 +1655,7 @@ impl InviteLink {
         match Self::parse_full(text)? {
             (l, LinkKind::Folder, chat) => Ok((l, chat)),
             (_, LinkKind::Channel, _) => Err(KeyError::ChannelLink),
+            (_, LinkKind::Devices, _) => Err(KeyError::DevicesLink),
         }
     }
 
@@ -1246,18 +1668,22 @@ impl InviteLink {
             return Err(KeyError::OldKey);
         }
         let has = |prefix: &str| text.len() >= prefix.len() && text.is_char_boundary(prefix.len()) && text[..prefix.len()].eq_ignore_ascii_case(prefix);
-        let kind = if has(LINK_PREFIX) {
-            LinkKind::Folder
+        let (kind, prefix) = if has(LINK_PREFIX) {
+            (LinkKind::Folder, LINK_PREFIX)
         } else if has(CHAT_PREFIX) {
-            LinkKind::Channel
+            (LinkKind::Channel, CHAT_PREFIX)
+        } else if has(DEVICES_PREFIX) {
+            (LinkKind::Devices, DEVICES_PREFIX)
         } else {
             return Err(KeyError::Link);
         };
-        let rest = &text[if kind == LinkKind::Channel { CHAT_PREFIX.len() } else { LINK_PREFIX.len() }..];
+        let rest = &text[prefix.len()..];
         let (body, query) = rest.split_once('?').unwrap_or((rest, ""));
         let mut link = Self::from_payload(body)?;
         let mut chat: Option<InviteLink> = None;
         let mut chat_name = None;
+        let mut chat_agents = false;
+        let mut reach = None;
         for field in query.split('&') {
             if let Some(v) = field.strip_prefix("name=") {
                 link.name = Some(percent_decode(v)?).filter(|n| !n.is_empty() && n.len() <= MAX_LINK_NAME);
@@ -1272,10 +1698,21 @@ impl InviteLink {
                 chat = Some(c);
             } else if let Some(v) = field.strip_prefix("chat_name=") {
                 chat_name = Some(percent_decode(v)?).filter(|n| !n.is_empty() && n.len() <= MAX_LINK_NAME);
+            } else if let Some(v) = field.strip_prefix("agents=")
+                && kind == LinkKind::Channel
+            {
+                link.agents = v == "yes";
+            } else if let Some(v) = field.strip_prefix("chat_agents=") {
+                chat_agents = v == "yes";
+            } else if let Some(v) = field.strip_prefix("a=") {
+                reach = Some(v);
             }
         }
+        link.reach = reach.and_then(|v| base32::decode(v).ok()).and_then(|b| LinkReach::open(&b, &link.token_seed, &link.invite.id));
         if let Some(c) = chat.as_mut() {
             c.name = chat_name;
+            c.agents = chat_agents;
+            c.reach = link.reach.clone();
         }
         Ok((link, kind, chat))
     }
@@ -1347,33 +1784,63 @@ mod tests {
         Statement::by_device(d, fid, Body::Profile { device_name: name.into(), user_name: user.into(), serial, at_s: NOW })
     }
 
+    fn agents(open: bool, serial: u64) -> Body {
+        Body::Agents { open, serial, at_s: NOW + serial }
+    }
+
     #[test]
-    fn only_an_owner_marks_an_agent_channel_and_nothing_unmarks_it() {
+    fn agents_yes_or_no_is_the_latest_owners_or_admins_and_can_change() {
         let (s, mut m, me) = base();
+        let fid = m.folder_id();
+        let (admin, writer) = (dev(2), dev(3));
+        assert!(m.add([grant(&s, &admin, Role::Admin, 2), grant(&s, &writer, Role::ReadWrite, 3)]));
+        assert!(!m.agents(), "no statement: No");
+        assert_eq!(m.next_agents_serial(), 1);
+        // The owner's Yes: a change, which round-trips and gives the same from every order.
+        let yes = Statement::by_owner(&s, agents(true, 1));
+        assert_eq!(Statement::from_bytes(&yes.to_bytes()).unwrap(), yes);
+        assert!(m.add([yes.clone()]) && m.agents());
+        let mut other = Membership::new(*s.public_key());
+        other.add(m.statements().cloned().collect::<Vec<_>>().into_iter().rev());
+        assert!(other.agents() && other.role(me.public_key()) == Some(Role::Owner));
+        // An admin switches it off (a later serial), and the owner on again.
+        assert!(m.add([Statement::by_device(&admin, &fid, agents(false, m.next_agents_serial()))]) && !m.agents());
+        assert!(m.add([Statement::by_owner(&s, agents(true, m.next_agents_serial()))]) && m.agents());
+        // An older statement arriving late changes nothing.
+        assert!(!m.add([Statement::by_device(&admin, &fid, agents(false, 1))]) && m.agents());
+        // A writer (no admin) cannot say it: left out.
+        assert!(!m.add([Statement::by_device(&writer, &fid, agents(false, 9))]) && m.agents());
+        // An admin's statement counts only while it is an admin.
+        assert!(m.add([Statement::by_device(&admin, &fid, agents(false, 10))]) && !m.agents());
+        assert!(m.add([grant(&s, &admin, Role::ReadWrite, 4)]) && m.agents(), "demoted: the owner's Yes counts again");
+        assert_eq!(m.next_agents_serial(), 11, "above the demoted admin's too, so the next one wins if it is promoted again");
+        // A body this version cannot read (an open value it does not know) is kept as Unknown and counts for nothing.
+        let mut odd = Statement::by_owner(&s, agents(true, 20)).to_bytes();
+        odd[2] = 2;
+        assert!(matches!(Statement::from_bytes(&odd).unwrap().body, Body::Unknown { kind: 8, .. }));
+    }
+
+    #[test]
+    fn the_0_1_12_mark_is_a_yes_that_a_later_agents_statement_overrides() {
+        let (s, mut m, _) = base();
         let fid = m.folder_id();
         let admin = dev(2);
         assert!(m.add([grant(&s, &admin, Role::Admin, 2)]));
-        assert!(!m.agent_channel(), "an ordinary channel");
-        // An admin (or any device) cannot say what the channel is: refused at the signature check.
+        // Only an owner signs the mark: an admin's is refused at the signature check, as 0.1.12 refuses it.
         let by_admin = Statement::by_device(&admin, &fid, Body::Channel { flags: CHANNEL_AGENTS, at_s: NOW });
         assert!(!by_admin.verify(s.public_key()));
-        assert!(!m.add([by_admin]) && !m.agent_channel());
+        assert!(!m.add([by_admin]) && !m.agents());
         // Flags this version does not know mean nothing, and are kept as they came.
         let odd = Statement::by_owner(&s, Body::Channel { flags: 0b110, at_s: NOW });
         assert_eq!(Statement::from_bytes(&odd.to_bytes()).unwrap(), odd);
-        assert!(!m.add([odd]) && !m.agent_channel(), "kept, and no change");
-        // The owner's mark: a change (so it is saved and passed on), and the same from every order.
-        let mark = Statement::by_owner(&s, Body::Channel { flags: CHANNEL_AGENTS, at_s: NOW });
-        let back = Statement::from_bytes(&mark.to_bytes()).unwrap();
-        assert_eq!((&back, back.verify(s.public_key())), (&mark, true));
-        assert!(m.add([back]), "marked: a change");
-        assert!(m.agent_channel());
-        let mut other = Membership::new(*s.public_key());
-        other.add(m.statements().cloned().collect::<Vec<_>>().into_iter().rev());
-        assert!(other.agent_channel() && other.role(me.public_key()) == Some(Role::Owner));
-        // Later statements (even an owner's flags of 0) leave it marked: there is no unmarking.
-        assert!(!m.add([Statement::by_owner(&s, Body::Channel { flags: 0, at_s: NOW + 9 })]));
-        assert!(m.agent_channel());
+        assert!(!m.add([odd]) && !m.agents(), "kept, and no change");
+        // The owner's mark (a 0.1.12 agent channel): Yes.
+        assert!(m.add([Statement::by_owner(&s, Body::Channel { flags: CHANNEL_AGENTS, at_s: NOW + 50 })]) && m.agents());
+        assert_eq!(m.next_agents_serial(), 1);
+        // Any Agents statement comes after it, whatever its time: an admin's No closes the channel.
+        assert!(m.add([Statement::by_device(&admin, &fid, Body::Agents { open: false, serial: 1, at_s: NOW })]) && !m.agents());
+        // A later mark does not open it again: only an Agents statement does.
+        assert!(!m.add([Statement::by_owner(&s, Body::Channel { flags: CHANNEL_AGENTS, at_s: NOW + 99 })]) && !m.agents());
     }
 
     #[test]
@@ -1649,7 +2116,7 @@ mod tests {
     fn links_roundtrip_and_tolerate_mail() {
         let s = owner();
         let i = invite_by(&s, None, Role::ReadWrite, 1, 12);
-        let link = InviteLink { invite: i, token_seed: [12; 32], name: Some("Bilder & ting/2026 ✓".into()) };
+        let link = InviteLink { invite: i, token_seed: [12; 32], name: Some("Bilder & ting/2026 ✓".into()), agents: false, reach: None };
         let text = link.format();
         assert!(text.starts_with("seedwell://sync/"), "{text}");
         assert!(!text[16..].contains(' ') && !text[16..].contains('&') && !text[16..].contains('/'));
@@ -1660,9 +2127,139 @@ mod tests {
     }
 
     #[test]
+    fn a_channel_link_says_whether_the_channel_is_open_to_agents() {
+        let s = owner();
+        let ch = InviteLink { invite: invite_by(&s, None, Role::ReadWrite, 1, 15), token_seed: [15; 32], name: Some("Bridge".into()), agents: true, reach: None };
+        let text = ch.format_chat();
+        assert!(text.ends_with("?name=Bridge&agents=yes"), "{text}");
+        assert_eq!(InviteLink::parse_chat(&text).unwrap(), ch);
+        let unnamed = InviteLink { name: None, ..ch.clone() };
+        assert!(unnamed.format_chat().ends_with("?agents=yes"));
+        assert_eq!(InviteLink::parse_chat(&unnamed.format_chat()).unwrap(), unnamed);
+        // A No channel's link has no field; anything but `yes` is No.
+        let closed = InviteLink { agents: false, ..ch.clone() };
+        assert!(!closed.format_chat().contains("agents"));
+        assert!(!InviteLink::parse_chat(&text.replace("agents=yes", "agents=1")).unwrap().agents);
+        // A folder's link never carries it for itself, only for the channel it bundles.
+        let folder = InviteLink { invite: invite_by(&FolderSecret::from_bytes([3; 32]), None, Role::ReadWrite, 1, 16), token_seed: [16; 32], name: None, agents: true, reach: None };
+        assert!(!folder.format().contains("agents"));
+        let bundle = InviteLink { agents: false, ..folder.clone() }.format_bundle(&ch);
+        assert!(bundle.ends_with("&chat_agents=yes"), "{bundle}");
+        let (f, c) = InviteLink::parse_bundle(&bundle).unwrap();
+        assert_eq!((f.agents, c.map(|c| c.agents)), (false, Some(true)));
+    }
+
+    fn reach() -> LinkReach {
+        LinkReach {
+            device: crate::ids::DeviceId([5; 32]),
+            name: "Kristian's Mac mini".into(),
+            lan: vec!["192.168.68.57:55799".parse().unwrap(), "[fd00::5]:55799".parse().unwrap()],
+            public: Some("84.212.3.4:41000".parse().unwrap()),
+            rendezvous: None,
+        }
+    }
+
+    /// 0.1.12's `parse_full`, as it was released (v0.1.12, members.rs), on today's payload reader (unchanged since):
+    /// what an older Seedwell does with a link.
+    fn parse_0_1_12(text: &str) -> Result<(InviteLink, LinkKind, Option<InviteLink>), KeyError> {
+        let mut text = text.trim();
+        if let Some(inner) = text.strip_prefix('<').and_then(|t| t.strip_suffix('>')) {
+            text = inner.trim();
+        }
+        if crate::keys::is_old_key(text) {
+            return Err(KeyError::OldKey);
+        }
+        let has = |prefix: &str| text.len() >= prefix.len() && text.is_char_boundary(prefix.len()) && text[..prefix.len()].eq_ignore_ascii_case(prefix);
+        let kind = if has(LINK_PREFIX) {
+            LinkKind::Folder
+        } else if has(CHAT_PREFIX) {
+            LinkKind::Channel
+        } else {
+            return Err(KeyError::Link);
+        };
+        let rest = &text[if kind == LinkKind::Channel { CHAT_PREFIX.len() } else { LINK_PREFIX.len() }..];
+        let (body, query) = rest.split_once('?').unwrap_or((rest, ""));
+        let mut link = InviteLink::from_payload(body)?;
+        let mut chat: Option<InviteLink> = None;
+        let mut chat_name = None;
+        for field in query.split('&') {
+            if let Some(v) = field.strip_prefix("name=") {
+                link.name = Some(percent_decode(v)?).filter(|n| !n.is_empty() && n.len() <= MAX_LINK_NAME);
+            } else if let Some(v) = field.strip_prefix("chat=")
+                && kind == LinkKind::Folder
+            {
+                let c = InviteLink::from_payload(v)?;
+                if c.invite.folder_pk == link.invite.folder_pk {
+                    return Err(KeyError::Damaged);
+                }
+                chat = Some(c);
+            } else if let Some(v) = field.strip_prefix("chat_name=") {
+                chat_name = Some(percent_decode(v)?).filter(|n| !n.is_empty() && n.len() <= MAX_LINK_NAME);
+            }
+        }
+        if let Some(c) = chat.as_mut() {
+            c.name = chat_name;
+        }
+        Ok((link, kind, chat))
+    }
+
+    #[test]
+    fn a_link_carries_where_its_maker_is_sealed_and_older_versions_still_join_with_it() {
+        let s = owner();
+        let plain = InviteLink { invite: invite_by(&s, None, Role::ReadWrite, 1, 17), token_seed: [17; 32], name: Some("Bilder".into()), agents: false, reach: None };
+        let with = InviteLink { reach: Some(reach()), ..plain.clone() };
+        let text = with.format();
+        assert!(text.starts_with(&plain.format()) && text.contains("&a="), "{text}");
+        assert!(!text.contains("192") && !text.contains("55799") && !text.contains("Kristian"), "sealed, not readable: {text}");
+        assert_eq!(text, with.format(), "the same text each time");
+        assert_eq!(InviteLink::parse(&text).unwrap(), with);
+        assert!(text.len() < 500, "{} characters", text.len());
+        // An old link still parses, with nothing to dial.
+        assert_eq!(InviteLink::parse(&plain.format()).unwrap().reach, None);
+        // 0.1.12 reads the new link as the same invitation and ignores the block.
+        let (old, kind, chat) = parse_0_1_12(&text).unwrap();
+        assert_eq!((old, kind, chat), (plain.clone(), LinkKind::Folder, None));
+        // A channel's link, with Agents: Yes.
+        let ch = InviteLink { invite: invite_by(&FolderSecret::from_bytes([4; 32]), None, Role::ReadWrite, 1, 18), token_seed: [18; 32], name: Some("Bridge".into()), agents: true, reach: Some(reach()) };
+        let ct = ch.format_chat();
+        assert!(ct.contains("?name=Bridge&agents=yes&a="), "{ct}");
+        assert_eq!(InviteLink::parse_chat(&ct).unwrap(), ch);
+        let (old, kind, _) = parse_0_1_12(&ct).unwrap();
+        assert_eq!((old, kind), (InviteLink { agents: false, reach: None, ..ch.clone() }, LinkKind::Channel));
+        // One block for a folder and its channel: both get it, and 0.1.12 reads both invitations.
+        let bundle = with.format_bundle(&InviteLink { reach: None, ..ch.clone() });
+        assert_eq!(bundle.matches("a=").count(), 1, "{bundle}");
+        assert!(bundle.rsplit('&').next().unwrap().starts_with("a="), "the block comes last: {bundle}");
+        let (f, c) = InviteLink::parse_bundle(&bundle).unwrap();
+        assert_eq!((f, c), (with.clone(), Some(ch.clone())));
+        let (old, _, chat) = parse_0_1_12(&bundle).unwrap();
+        assert_eq!((old, chat), (plain.clone(), Some(InviteLink { agents: false, reach: None, ..ch.clone() })));
+    }
+
+    #[test]
+    fn a_damaged_or_foreign_address_block_is_left_out_and_the_link_still_joins() {
+        let s = owner();
+        let a = InviteLink { invite: invite_by(&s, None, Role::ReadWrite, 1, 19), token_seed: [19; 32], name: None, agents: false, reach: Some(reach()) };
+        let b = InviteLink { invite: invite_by(&s, None, Role::ReadWrite, 1, 20), token_seed: [20; 32], name: None, agents: false, reach: Some(reach()) };
+        let (at, bt) = (a.format(), b.format());
+        let block = |t: &str| t.split_once("?a=").unwrap().1.to_string();
+        // Another link's block (another token seed) does not open under this one.
+        let swapped = format!("{}?a={}", at.split_once("?a=").unwrap().0, block(&bt));
+        assert_eq!(InviteLink::parse(&swapped).unwrap(), InviteLink { reach: None, ..a.clone() });
+        // A changed character, a cut block, garbage: the same.
+        let mut bad = block(&at).into_bytes();
+        bad[10] = if bad[10] == b'A' { b'B' } else { b'A' };
+        let bad = String::from_utf8(bad).unwrap();
+        for v in [bad.as_str(), &block(&at)[..20], "", "!!", "AAAA"] {
+            let t = format!("{}?a={v}", at.split_once("?a=").unwrap().0);
+            assert_eq!(InviteLink::parse(&t).unwrap().reach, None, "{v}");
+        }
+    }
+
+    #[test]
     fn bad_links_and_old_keys_are_refused() {
         let s = owner();
-        let text = InviteLink { invite: invite_by(&s, None, Role::ReadOnly, 0, 13), token_seed: [13; 32], name: None }.format();
+        let text = InviteLink { invite: invite_by(&s, None, Role::ReadOnly, 0, 13), token_seed: [13; 32], name: None, agents: false, reach: None }.format();
         assert_eq!(InviteLink::parse("SWW-ABCDEF"), Err(KeyError::OldKey));
         assert_eq!(InviteLink::parse("seedwell://sync/SWR-ABCDEF?name=x"), Err(KeyError::OldKey));
         assert_eq!(InviteLink::parse("https://example.com"), Err(KeyError::Link));
@@ -1685,5 +2282,185 @@ mod tests {
         assert_eq!(check_redeem(&proof, d.public_key(), &[8; 32]), None, "another session");
         let wrong_token = redeem_proof(&i, &[15; 32], d.public_key(), &[7; 32]);
         assert_eq!(check_redeem(&wrong_token, d.public_key(), &[7; 32]), None, "a token the invitation does not name");
+    }
+
+    // ------------------------------------------------------------------------------------------ devices groups
+
+    fn follow(d: &DeviceKey, fid: &FolderId, target: [u8; 32], on: bool, serial: u64, at_s: u64) -> Statement {
+        let body = Body::Follow { target: FollowTarget::Folder, target_pk: target, name: "Dev".into(), on, serial, at_s };
+        Statement::by_device(d, fid, body)
+    }
+
+    /// A devices group of the user key `s` with siblings `me` (and `others`), all owners.
+    fn group(s: &FolderSecret, me: &DeviceKey, others: &[&DeviceKey]) -> Membership {
+        let mut m = Membership::new_devices(*s.public_key());
+        let mut sts = vec![grant(s, me, Role::Owner, 1)];
+        sts.extend(others.iter().enumerate().map(|(i, d)| grant(s, d, Role::Owner, 2 + i as u64)));
+        assert!(m.add(sts));
+        m
+    }
+
+    #[test]
+    fn a_follow_round_trips_and_a_bad_body_is_unknown() {
+        let s = owner();
+        let fid = FolderId::of_public_key(s.public_key());
+        let st = Statement::by_device(&dev(2), &fid, Body::Follow { target: FollowTarget::Channel, target_pk: [5; 32], name: "Seedwell Development".into(), on: true, serial: 3, at_s: NOW });
+        let back = Statement::from_bytes(&st.to_bytes()).unwrap();
+        assert_eq!(back, st);
+        assert!(back.verify(s.public_key()));
+        // Only a device says what it follows: the group key cannot.
+        let by_key = Statement::by_owner(&s, Body::Follow { target: FollowTarget::Folder, target_pk: [5; 32], name: String::new(), on: true, serial: 1, at_s: NOW });
+        assert!(!by_key.verify(s.public_key()));
+        // A target or an on value this version does not know: kept as Unknown, passed on byte for byte.
+        let mut odd = st.to_bytes();
+        odd[2] = 3;
+        let unknown = Statement::from_bytes(&odd).unwrap();
+        assert!(matches!(unknown.body, Body::Unknown { kind: 9, .. }));
+        assert_eq!(unknown.to_bytes(), odd);
+    }
+
+    #[test]
+    fn a_removal_in_a_devices_group_is_final_and_in_a_folder_it_is_not() {
+        let s = owner();
+        let (me, lost) = (dev(10), dev(11));
+        let removal = Statement::by_owner(&s, Body::Remove { device: *lost.public_key(), serial: 5, at_s: NOW });
+        let again = grant(&s, &lost, Role::Owner, 6);
+        // A folder: the owner's later grant lets it back in.
+        let mut folder = Membership::new(*s.public_key());
+        folder.add([grant(&s, &me, Role::Owner, 1), grant(&s, &lost, Role::Owner, 2), removal.clone(), again.clone()]);
+        assert_eq!(folder.role(lost.public_key()), Some(Role::Owner));
+        // A devices group: removed for good, whatever comes later and in any order.
+        let mut g = group(&s, &me, &[&lost]);
+        assert!(g.add([removal.clone()]));
+        assert!(g.is_removed(lost.public_key()) && g.removed_for_good(lost.public_key()));
+        assert!(!g.add([again.clone()]), "its own grant (it still holds the key) changes nothing");
+        assert_eq!(g.role(lost.public_key()), None);
+        let mut other = Membership::new_devices(*s.public_key());
+        other.add([again, removal, grant(&s, &me, Role::Owner, 1)]);
+        assert_eq!((other.role(lost.public_key()), other.role(me.public_key())), (None, Some(Role::Owner)));
+        // Nobody admits it with a link either.
+        let i = invite_by(&s, Some(&me), Role::ReadWrite, 1, 20);
+        assert_eq!(g.check_admit(me.public_key(), &i, lost.public_key(), NOW), Err(AdmitError::Removed));
+    }
+
+    #[test]
+    fn the_latest_follow_of_a_current_member_counts() {
+        let s = owner();
+        let (a, b) = (dev(10), dev(11));
+        let mut g = group(&s, &a, &[&b]);
+        let gid = g.folder_id();
+        let t = [7; 32];
+        assert!(g.follow(&t).is_none() && g.next_follow_serial(&t) == 1);
+        assert!(g.add([follow(&a, &gid, t, true, 1, NOW)]));
+        assert!(g.follow(&t).is_some_and(|f| f.on && f.by == *a.public_key() && f.name == "Dev"));
+        // B turns it off (a higher serial): off, whatever the times say.
+        assert!(g.add([follow(&b, &gid, t, false, 2, NOW - 100)]));
+        assert!(g.follow(&t).is_some_and(|f| !f.on));
+        // An older statement arriving late changes nothing; the same serial goes by time.
+        assert!(!g.add([follow(&a, &gid, t, true, 1, NOW + 50)]));
+        assert!(g.add([follow(&a, &gid, t, true, 2, NOW + 1)]) && g.follow(&t).is_some_and(|f| f.on));
+        assert_eq!(g.next_follow_serial(&t), 3);
+        // Every order gives the same.
+        let mut other = Membership::new_devices(*s.public_key());
+        other.add(g.statements().cloned().collect::<Vec<_>>().into_iter().rev());
+        assert_eq!(other.follow(&t), g.follow(&t));
+        // A stranger's is left out.
+        assert!(!g.add([follow(&dev(12), &gid, t, false, 9, NOW)]));
+        // In a folder a follow means nothing.
+        let mut folder = Membership::new(*s.public_key());
+        folder.add([grant(&s, &a, Role::Owner, 1)]);
+        folder.add([follow(&a, &gid, t, true, 1, NOW)]);
+        assert_eq!(folder.follows().count(), 0);
+    }
+
+    #[test]
+    fn a_follow_from_a_removed_member_is_ignored() {
+        let s = owner();
+        let (a, thief) = (dev(10), dev(11));
+        let mut g = group(&s, &a, &[&thief]);
+        let gid = g.folder_id();
+        let t = [8; 32];
+        g.add([follow(&a, &gid, t, true, 1, NOW), follow(&thief, &gid, t, false, 9, NOW)]);
+        assert!(g.follow(&t).is_some_and(|f| !f.on), "while it is a member, its later No counts");
+        assert!(g.add([Statement::by_owner(&s, Body::Remove { device: *thief.public_key(), serial: 9, at_s: NOW })]));
+        assert!(g.follow(&t).is_some_and(|f| f.on && f.by == *a.public_key()), "removed: the honest device's Yes again");
+        assert_eq!(g.next_follow_serial(&t), 10, "above its statement too");
+        assert!(!g.add([follow(&thief, &gid, t, false, 20, NOW)]), "and nothing new of it goes in");
+    }
+
+    #[test]
+    fn a_group_moves_to_the_lowest_target_of_its_current_members() {
+        let s = owner();
+        let (a, b, thief) = (dev(10), dev(11), dev(12));
+        let mut g = group(&s, &a, &[&b, &thief]);
+        let gid = g.folder_id();
+        let moved = |d: &DeviceKey, t: u8| Statement::by_device(d, &gid, Body::Moved { target_pk: [t; 32], at_s: NOW });
+        let st = moved(&a, 1);
+        assert_eq!(Statement::from_bytes(&st.to_bytes()).unwrap(), st, "it round-trips");
+        assert!(!Statement::by_owner(&s, Body::Moved { target_pk: [1; 32], at_s: NOW }).verify(s.public_key()), "a device says it, not the key");
+        assert_eq!(g.moved_to(|_| true), None);
+        assert!(g.add([moved(&a, 1), moved(&b, 2)]));
+        let lowest = [[1u8; 32], [2u8; 32]].into_iter().min_by_key(FolderId::of_public_key);
+        assert_eq!(g.moved_to(|_| true), lowest, "two moves at once: the lowest group id, everywhere");
+        let mut other = Membership::new_devices(*s.public_key());
+        other.add(g.statements().cloned().collect::<Vec<_>>().into_iter().rev());
+        assert_eq!(other.moved_to(|_| true), lowest, "in any order");
+        assert_eq!(g.moved_to(|by| *by == *b.public_key()), Some([2; 32]), "only signers the caller trusts");
+        // A removed member's move counts for nothing, also one it made before its removal.
+        assert!(g.add([moved(&thief, 0)]));
+        assert!(g.moves().iter().any(|(by, _)| by == thief.public_key()));
+        assert!(g.add([Statement::by_owner(&s, Body::Remove { device: *thief.public_key(), serial: 9, at_s: NOW })]));
+        assert!(g.moves().iter().all(|(by, _)| by != thief.public_key()));
+        assert_eq!(g.removed_devices(), vec![*thief.public_key()]);
+        assert!(!g.add([moved(&thief, 3)]), "and a later one does not go in");
+        // In a folder a move means nothing.
+        let mut folder = Membership::new(*s.public_key());
+        folder.add([grant(&s, &a, Role::Owner, 1), moved(&a, 1)]);
+        assert!(folder.moves().is_empty());
+    }
+
+    #[test]
+    fn each_member_says_its_rendezvous_and_its_latest_counts() {
+        let s = owner();
+        let (a, b, gone) = (dev(10), dev(11), dev(12));
+        let mut g = group(&s, &a, &[&b, &gone]);
+        let gid = g.folder_id();
+        let rv = |d: &DeviceKey, url: &str, serial: u64| Statement::by_device(d, &gid, Body::Rendezvous { url: url.into(), serial, at_s: NOW + serial });
+        let st = rv(&a, "https://seedwell-rendezvous.kim.workers.dev", 1);
+        assert_eq!(Statement::from_bytes(&st.to_bytes()).unwrap(), st, "it round-trips");
+        assert!(g.add([st, rv(&gone, "https://thief.example", 1)]));
+        assert_eq!(g.next_rendezvous_serial(a.public_key()), 2);
+        // A turns it off (an empty URL, later): that counts for A; the others' stay theirs.
+        assert!(g.add([rv(&a, "", 2), rv(&a, "https://old.example", 1)]));
+        let said = g.rendezvous();
+        assert!(said.contains(&(*a.public_key(), String::new(), NOW + 2)), "{said:?}");
+        assert!(!said.iter().any(|(by, _, _)| by == b.public_key()), "B said nothing");
+        // A removed member's counts for nothing.
+        g.add([Statement::by_owner(&s, Body::Remove { device: *gone.public_key(), serial: 9, at_s: NOW })]);
+        assert!(!g.rendezvous().iter().any(|(by, _, _)| by == gone.public_key()));
+        // A URL with spaces, or too long, is a body this version cannot read.
+        let bad = rv(&b, "https://a b", 1).to_bytes();
+        assert!(matches!(Statement::from_bytes(&bad).unwrap().body, Body::Unknown { kind: 11, .. }));
+    }
+
+    #[test]
+    fn a_pairing_link_is_its_own_kind() {
+        let s = owner();
+        let me = dev(10);
+        let i = invite_by(&s, Some(&me), Role::ReadWrite, 1, 21);
+        let link = InviteLink { invite: i, token_seed: [21; 32], name: Some("Kim's MacBook".into()), agents: true, reach: Some(reach()) };
+        let text = link.format_devices();
+        assert!(text.starts_with("seedwell://devices/") && !text.contains("agents="), "{text}");
+        let back = InviteLink::parse_devices(&text).unwrap();
+        assert_eq!((back.invite, back.name.as_deref(), back.reach), (i, Some("Kim's MacBook"), Some(reach())));
+        assert_eq!(InviteLink::parse_any(&text).map(|(_, k)| k), Ok(LinkKind::Devices));
+        // Each reader takes only its own kind.
+        assert_eq!(InviteLink::parse(&text), Err(KeyError::DevicesLink));
+        assert_eq!(InviteLink::parse_chat(&text), Err(KeyError::DevicesLink));
+        assert_eq!(InviteLink::parse_bundle(&text), Err(KeyError::DevicesLink));
+        assert_eq!(InviteLink::parse_devices(&link.format()), Err(KeyError::FolderLink));
+        assert_eq!(InviteLink::parse_devices(&link.format_chat()), Err(KeyError::ChannelLink));
+        // A version before 0.1.13 does not know the prefix: not a Seedwell link to it.
+        assert_eq!(parse_0_1_12(&text).map(|_| ()), Err(KeyError::Link));
     }
 }

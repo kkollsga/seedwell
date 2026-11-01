@@ -15,10 +15,15 @@ import SwiftUI
     /// A folder of that name already in the default place (left over from an earlier join, say) and not synced:
     /// offered next to the new one, which gets a number (`~/Seedwell/Team 2`).
     private(set) var existingFolder: String?
+    /// "On all my devices" for a folder of this Mac (shown while this Mac is paired with others; off by default).
+    let follow: FollowLine
+    var allDevices: Bool
 
     /// `prefill`: a pasted link (Shared with me).
     init(core: Core, prefill: String? = nil) {
         self.core = core
+        follow = core.syncFollowLineNew(channel: false)
+        allDevices = follow.on
         if let prefill { form.mode = .shared; setKey(prefill) }
     }
 
@@ -72,17 +77,23 @@ import SwiftUI
         busy = true
         error = nil
         let (core, form) = (core, form)
+        let everywhere = form.mode == .local && follow.shown && allDevices
         Task {
             let r: Result<SyncFolder, Error> = await Task.detached(priority: .userInitiated) {
                 Result { () throws -> SyncFolder in
                     let key = form.key.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let f: SyncFolder
                     switch (form.mode, form.onDemand) {
-                    case (.local, false): return try core.syncAddFolder(path: form.folder)
+                    case (.local, false): f = try core.syncAddFolder(path: form.folder)
                     // Its files go into this Mac's storage before it ever opens: added whole or not at all.
-                    case (.local, true): return try core.syncAddFolderOnDemand(path: form.folder)
-                    case (.shared, false): return try core.syncJoin(keyOrLink: key, path: form.location)
-                    case (.shared, true): return try core.syncJoinOnDemand(link: key, place: form.location)
+                    case (.local, true): f = try core.syncAddFolderOnDemand(path: form.folder)
+                    case (.shared, false): f = try core.syncJoin(keyOrLink: key, path: form.location)
+                    case (.shared, true): f = try core.syncJoinOnDemand(link: key, place: form.location)
                     }
+                    // On all my devices: the others join it by themselves (this Mac is its owner).
+                    // (Added either way: the Edit sheet shows the toggle as it is.)
+                    if everywhere { try? core.syncSetFollow(id: f.id, on: true) }
+                    return f
                 }
             }.value
             busy = false
@@ -156,6 +167,9 @@ struct SyncAddView: View {
             }
             .padding(.top, 18)
             onDemand.padding(.top, 14)
+            if model.form.mode == .local, model.follow.shown {
+                FollowToggle(line: model.follow, isOn: $model.allDevices).padding(.top, 10).padding(.leading, 92)
+            }
             if let e = model.error { ModalError(text: e).padding(.top, 14) }
             ModalButtons(primary: "Start", enabled: model.form.canStart, busy: model.busy,
                          primaryHelp: model.form.mode == .local ? "Start syncing this folder" : "Join the shared folder",
@@ -266,6 +280,9 @@ struct SyncAddView: View {
     var lanOnly = false
     /// Files on demand (SPEC 7G.11).
     var onDemand = false
+    /// "On all my devices" (the core's line; hidden while this Mac is not paired).
+    private(set) var follow = FollowLine(shown: false, title: "", menuTitle: "", on: false, enabled: false, line: "")
+    var allDevices = false
     var optionsOpen = false
     /// The Finder's side of on-demand folders (its domain goes first when switching back to full).
     @ObservationIgnored var fileProvider: FileProviderHost?
@@ -286,12 +303,14 @@ struct SyncAddView: View {
             lanOnly = f.lanOnly
             onDemand = f.onDemand
         }
+        follow = core.syncFollowLine(id: id)
+        allDevices = follow.on
     }
 
     var parent: String { newParent ?? ((folder?.path ?? "") as NSString).deletingLastPathComponent }
     var target: String { (parent as NSString).appendingPathComponent(name.trimmingCharacters(in: .whitespaces)) }
     var changed: Bool {
-        folder.map { target != $0.path || paused != ($0.state == .paused) || lanOnly != $0.lanOnly || onDemand != $0.onDemand } ?? false
+        folder.map { target != $0.path || paused != ($0.state == .paused) || lanOnly != $0.lanOnly || onDemand != $0.onDemand || allDevices != follow.on } ?? false
     }
 
     /// What Files on demand means as it is set now (`nil` for a full folder that stays full).
@@ -325,6 +344,7 @@ struct SyncAddView: View {
         let pause = paused != (f.state == .paused) ? Optional(paused) : nil
         let lan = lanOnly != f.lanOnly ? Optional(lanOnly) : nil
         let mode = onDemand != f.onDemand ? Optional(onDemand) : nil
+        let everywhere = allDevices != follow.on ? Optional(allDevices) : nil
         let place = target != f.path
         let fp = fileProvider
         busy = true
@@ -339,6 +359,7 @@ struct SyncAddView: View {
                     if let pause { try core.syncPause(id: id, paused: pause) }
                     if let lan { try core.syncSetLanOnly(id: id, lanOnly: lan) }
                     if mode == true { _ = try core.syncSetOnDemand(id: id, onDemand: true, path: nil) }
+                    if let everywhere { try core.syncSetFollow(id: id, on: everywhere) }
                 }
             }.value
             if mode == true, let now = core.syncSnapshot().folders.first(where: { $0.id == id }), now.onDemand {
@@ -411,6 +432,10 @@ struct SyncEditView: View {
                     Text(note).font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
             }
+            if model.follow.shown {
+                Divider().padding(.vertical, 2)
+                FollowToggle(line: model.follow, isOn: $model.allDevices)
+            }
             Divider().padding(.vertical, 2)
             VStack(alignment: .leading, spacing: 8) {
                 ModalCaption(text: "Share")
@@ -445,6 +470,26 @@ struct SyncEditView: View {
     }
 
     private var shareNote: String { model.folder.map { syncEditShareNote(role: $0.role) } ?? "" }
+}
+
+/// "On all my devices" (SPEC §7G.1 "Your devices"): the core's title, its line under it, and whether it may be switched.
+struct FollowToggle: View {
+    let line: FollowLine
+    @Binding var isOn: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Toggle(line.title, isOn: $isOn)
+                .toggleStyle(.switch).controlSize(.small)
+                .disabled(!line.enabled)
+                .help("Put it on every device paired with this Mac: they join it by themselves")
+                .accessibilityIdentifier("sync-all-devices")
+            if !line.line.isEmpty {
+                Text(line.line).font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .font(.system(size: 13))
+    }
 }
 
 /// The add and edit windows: one add window, one edit window per folder. The menu closes before they open.

@@ -136,7 +136,7 @@ fn texts(d: &Device, id: &FolderId) -> Vec<String> {
 /// A channel only (no folder): C makes it, A and B join, all meet, then A and B cannot reach each other directly.
 async fn three_in_a_channel() -> (Device, Device, Device, FolderId) {
     let (a, b, c) = (device("Alpha").await, device("Beta").await, device("Hub").await);
-    let id: FolderId = c.h.chat_new("Plans").await.unwrap().id.parse().unwrap();
+    let id: FolderId = c.h.chat_new("Plans", false).await.unwrap().id.parse().unwrap();
     for d in [&a, &b] {
         d.h.chat_join(&c.h.create_invite(&id, Role::ReadWrite, 1, 1).unwrap().link).await.unwrap();
         d.h.add_address(&id, addr(&c)).unwrap();
@@ -182,7 +182,7 @@ async fn devices_registered_at_a_relay_server_chat_through_it() {
     let server = tokio::spawn(run_relay(listener, opts));
 
     let (a, b) = (device("Alpha").await, device("Beta").await);
-    let id: FolderId = a.h.chat_new("Plans").await.unwrap().id.parse().unwrap();
+    let id: FolderId = a.h.chat_new("Plans", false).await.unwrap().id.parse().unwrap();
     b.h.chat_join(&a.h.create_invite(&id, Role::ReadWrite, 1, 1).unwrap().link).await.unwrap();
     b.h.add_address(&id, addr(&a)).unwrap();
     until(30, "B is admitted", || b.h.channel_status(&id).is_some_and(|c| c.role.is_some())).await;

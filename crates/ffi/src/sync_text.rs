@@ -14,7 +14,7 @@ use trs_platform::fs::TrashError;
 use trs_platform::{computer, file_manager, trash};
 
 use crate::files::standard_order;
-use crate::sync::{SyncAccess, SyncDevice, SyncFolder, SyncInvite, SyncLinkInfo, SyncMember, SyncRole, SyncState};
+use crate::sync::{SyncAccess, SyncDevice, SyncFolder, SyncGoneDevice, SyncInvite, SyncLinkInfo, SyncMember, SyncRole, SyncState};
 use crate::types::CoreError;
 
 /// Longest folder name the menu shows before the middle is cut.
@@ -48,8 +48,10 @@ pub(crate) fn subtitle(f: &SyncFolder) -> String {
         SyncState::Error => f.error.as_ref().map_or_else(|| "Can't sync".into(), |e| format!("Can't sync · {e}")),
         SyncState::Starting => "Starting…".into(),
         SyncState::Scanning => after_conflicts(vec!["Scanning…".into()]),
-        SyncState::WaitingForDevices => after_conflicts(vec!["Waiting for devices".into()]),
-        SyncState::WaitingForAdmin => "Waiting for the owner or an admin".into(),
+        // Whom it waits for, from the core ("Waiting for Mac mini (last seen 3 days ago: …)").
+        SyncState::WaitingForDevices => after_conflicts(vec![f.waiting.clone().unwrap_or_else(|| "Waiting for devices".into())]),
+        // What the join does now, from the core ("Looking for Anna's Mac mini on the local network…").
+        SyncState::WaitingForAdmin => f.progress.clone().unwrap_or_else(|| "Waiting for the owner or an admin".into()),
         SyncState::Syncing => {
             let mut parts = vec!["Syncing".to_string()];
             if let Some(p) = fraction(f) {
@@ -63,6 +65,7 @@ pub(crate) fn subtitle(f: &SyncFolder) -> String {
             }
             after_conflicts(parts)
         }
+        SyncState::UpToDate if f.connected == 0 && f.waiting.is_some() => after_conflicts(f.waiting.iter().cloned().collect()),
         SyncState::UpToDate => match (conflicts, f.connected) {
             (Some(c), 0) => c,
             (Some(c), n) => format!("{c} · {}", devices(n)),
@@ -73,10 +76,26 @@ pub(crate) fn subtitle(f: &SyncFolder) -> String {
 }
 
 /// The grey line under a folder's name: "Up to date · 3 devices", "Syncing · 42% · 12 MB/s", "Waiting for devices",
-/// "Folder missing", "1 conflict · 2 devices".
+/// "Folder missing", "1 conflict · 2 devices"; while it joins, what it does ("Trying Anna's Mac mini at …").
 #[uniffi::export]
 pub fn sync_folder_subtitle(folder: SyncFolder) -> String {
     subtitle(&folder)
+}
+
+/// What a joining folder's page says where its members will be: what it does now and, on a line of its own, what
+/// went wrong last; the plain sentence when the core said nothing more.
+pub(crate) fn join_note(f: &SyncFolder) -> String {
+    let mut out = f.progress.clone().unwrap_or_else(|| concat!("Waiting for the folder’s owner or an admin to let this ", trs_platform::computer!(), " in").into());
+    if let Some(p) = &f.problem {
+        out.push_str(&format!("\nLast problem: {p}"));
+    }
+    out
+}
+
+/// A joining folder's note on its page ([`join_note`]).
+#[uniffi::export]
+pub fn sync_folder_join_note(folder: SyncFolder) -> String {
+    join_note(&folder)
 }
 
 /// The image at the left of a folder (the menu's rows, the window's list and page).
@@ -792,6 +811,85 @@ pub fn sync_set_role_failed(device: String, error: String) -> SyncAlert {
     SyncAlert { title: format!("Couldn't change {device}’s role"), text: error }
 }
 
+/// What a folder or channel page shows for a member that is gone, and how its owner removes it.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct SyncGonePrompt {
+    /// "Mac mini was last seen 3 days ago".
+    pub line: String,
+    /// "Remove from Folder…" (the same words as the member's menu), and its tooltip ("Remove Mac mini from this folder").
+    pub button: String,
+    pub help: String,
+    /// The question: "Remove Mac mini from “Photos”?", what it does, and the button that does it.
+    pub title: String,
+    pub text: String,
+    pub confirm: String,
+}
+
+/// The prompt for `device`, gone from the folder (or, with `channel`, the channel) `name`. `now_s`: the clock.
+#[uniffi::export]
+pub fn sync_gone_prompt(device: SyncGoneDevice, name: String, channel: bool, now_s: u64) -> SyncGonePrompt {
+    let who = if device.name.trim().is_empty() { "A device".to_string() } else { device.name.trim().to_string() };
+    let line = match device.last_seen_s {
+        Some(t) => format!("{who} was last seen {}", d::ago(t, now_s, false).to_lowercase()),
+        None => format!(concat!("{} has never connected to this ", computer!()), who),
+    };
+    let noun = if channel { "channel" } else { "folder" };
+    SyncGonePrompt {
+        line,
+        button: if channel { "Remove from Channel…" } else { "Remove from Folder…" }.into(),
+        help: format!("Remove {who} from this {noun}"),
+        title: format!("Remove {who} from “{name}”?"),
+        text: if channel {
+            "It is cut off at once, on every device. It keeps the messages it already has.".into()
+        } else {
+            "It stops syncing at once, on every device. It keeps the files it already has.".into()
+        },
+        confirm: "Remove".into(),
+    }
+}
+
+/// What a folder page shows when every owner and admin of the folder is gone, and the question before sharing it again.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct SyncResharePrompt {
+    /// Why: "Nobody can let devices in or change roles any more: …".
+    pub note: String,
+    /// "Share Again from This Mac…", and its tooltip.
+    pub button: String,
+    pub help: String,
+    pub title: String,
+    pub text: String,
+    pub confirm: String,
+}
+
+/// The prompt of a folder whose owners and admins are all gone (`SyncFolder::can_reshare`).
+#[uniffi::export]
+pub fn sync_reshare_prompt(folder: SyncFolder) -> SyncResharePrompt {
+    let name = &folder.name;
+    SyncResharePrompt {
+        note: "Nobody can let devices in or change roles any more: every owner and admin of this folder is gone.".into(),
+        button: concat!("Share Again from This ", computer!(), "…").into(),
+        help: concat!("Make it a new folder owned by this ", computer!(), ", with its files where they are").into(),
+        title: format!(concat!("Share “{}” again from this ", computer!(), "?"), name),
+        text: format!(
+            concat!(
+                "“{}” becomes a new folder owned by this ",
+                computer!(),
+                ", in the same place. Nothing is deleted, moved or downloaded again. This ",
+                computer!(),
+                " leaves the old folder; the other devices keep it. Then make a link for the devices that should join."
+            ),
+            name
+        ),
+        confirm: "Share Again".into(),
+    }
+}
+
+/// Sharing the folder `name` again failed.
+#[uniffi::export]
+pub fn sync_reshare_failed(name: String, error: String) -> SyncAlert {
+    SyncAlert { title: format!("Couldn't share “{name}” again"), text: error }
+}
+
 /// Removing the device `device` from the folder or channel `name` failed.
 #[uniffi::export]
 pub fn sync_remove_device_failed(device: String, name: String, error: String) -> SyncAlert {
@@ -980,6 +1078,11 @@ pub(crate) mod tests {
             channel_id: None,
             on_demand: false,
             unavailable: 0,
+            progress: None,
+            problem: None,
+            waiting: None,
+            gone: Vec::new(),
+            can_reshare: false,
         }
     }
 
@@ -1016,13 +1119,47 @@ pub(crate) mod tests {
         assert_eq!(subtitle(&syncing(1, 0)), "Syncing · 99%", "never 100 % while syncing");
         assert_eq!(subtitle(&with(SyncState::Syncing, |f| f.conflicts = 1)), "1 conflict · Syncing · 99%");
         assert_eq!(subtitle(&folder("A", SyncState::WaitingForDevices)), "Waiting for devices");
+        let mini = "Waiting for Mac mini (last seen 3 days ago: nothing answers at 192.168.68.57:55799)";
+        assert_eq!(subtitle(&with(SyncState::WaitingForDevices, |f| f.waiting = Some(mini.into()))), mini, "whom it waits for, from the core");
+        assert_eq!(subtitle(&with(SyncState::UpToDate, |f| f.waiting = Some(mini.into()))), mini, "up to date as far as it knows, but alone");
+        assert_eq!(subtitle(&with(SyncState::UpToDate, |f| { f.waiting = Some(mini.into()); f.conflicts = 1 })), format!("1 conflict · {mini}"));
+        assert_eq!(subtitle(&with(SyncState::Paused, |f| f.waiting = Some(mini.into()))), "Paused");
         assert_eq!(subtitle(&with(SyncState::Scanning, |f| f.conflicts = 1)), "1 conflict · Scanning…");
         assert_eq!(subtitle(&folder("A", SyncState::WaitingForAdmin)), "Waiting for the owner or an admin");
+        let joining = SyncFolder {
+            progress: Some("Trying Anna's Mac mini at 192.168.68.57:55799…".into()),
+            problem: Some("Anna's Mac mini at 192.168.68.57:55799: no answer".into()),
+            ..folder("A", SyncState::WaitingForAdmin)
+        };
+        assert_eq!(subtitle(&joining), "Trying Anna's Mac mini at 192.168.68.57:55799…", "the core's sentence");
+        assert_eq!(join_note(&joining), "Trying Anna's Mac mini at 192.168.68.57:55799…\nLast problem: Anna's Mac mini at 192.168.68.57:55799: no answer");
+        assert!(join_note(&folder("A", SyncState::WaitingForAdmin)).starts_with("Waiting for the folder’s owner or an admin"));
         assert_eq!(subtitle(&folder("A", SyncState::Missing)), "Folder missing");
         assert_eq!(subtitle(&with(SyncState::Paused, |f| f.connected = 2)), "Paused");
         assert_eq!(subtitle(&folder("A", SyncState::Starting)), "Starting…");
         assert_eq!(subtitle(&folder("A", SyncState::Error)), "Can't sync");
         assert_eq!(subtitle(&with(SyncState::Error, |f| f.error = Some("disk full".into()))), "Can't sync · disk full");
+    }
+
+    #[test]
+    fn a_gone_device_and_a_folder_without_owners_are_offered_what_the_user_can_do() {
+        let now = 1_800_000_000;
+        let mini = SyncGoneDevice { device_id: "MFZWI3D-X".into(), name: "Mac mini".into(), last_seen_s: Some(now - 3 * 86_400) };
+        let p = sync_gone_prompt(mini.clone(), "Photos".into(), false, now);
+        assert_eq!(p.line, "Mac mini was last seen 3 days ago");
+        assert_eq!((p.button.as_str(), p.help.as_str()), ("Remove from Folder…", "Remove Mac mini from this folder"));
+        assert_eq!((p.title.as_str(), p.confirm.as_str()), ("Remove Mac mini from “Photos”?", "Remove"));
+        assert!(p.text.contains("keeps the files"));
+        let c = sync_gone_prompt(SyncGoneDevice { last_seen_s: None, name: String::new(), ..mini }, "Plans".into(), true, now);
+        assert_eq!(c.line, concat!("A device has never connected to this ", computer!()));
+        assert_eq!((c.button.as_str(), c.help.as_str()), ("Remove from Channel…", "Remove A device from this channel"));
+        assert!(c.text.contains("messages"));
+        let r = sync_reshare_prompt(folder("Photos", SyncState::UpToDate));
+        assert!(r.note.starts_with("Nobody can let devices in"));
+        assert_eq!(r.button, concat!("Share Again from This ", computer!(), "…"));
+        assert_eq!(r.title, concat!("Share “Photos” again from this ", computer!(), "?"));
+        assert!(r.text.contains("Nothing is deleted, moved or downloaded again"), "{}", r.text);
+        assert_eq!(sync_reshare_failed("Photos".into(), "x".into()).title, "Couldn't share “Photos” again");
     }
 
     #[test]

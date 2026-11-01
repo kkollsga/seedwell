@@ -84,6 +84,10 @@ public partial class App : Application
         var dir = Program.StateDir ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Seedwell");
         AppLog.Open(dir);
         AppLog.Write($"launch: state {dir}, {Program.Sources.Length} to add");
+        if (GoBackAfterFailedLaunches(dir))
+        {
+            return;
+        }
         // A --state-dir run (QA, tests) is isolated: the core refuses it when a configured folder lies in the user's
         // profile outside the temp folder, and it trashes into <state>\Trash, never the Recycle Bin.
         var forbidden = Program.StateDir is null ? null : Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
@@ -98,6 +102,7 @@ public partial class App : Application
         }
         Core.SetListener(new Listener(this));
         PowerWatch.Start(Core);
+        NetWatch.Start(Core);
         CreateLibrary(dir);
         Updater = new Updater(this, Core);
         Updater.Changed += () => flyout?.UpdateChanged();
@@ -120,6 +125,37 @@ public partial class App : Application
         {
             Add(Program.Sources);
         }
+    }
+
+    /// <summary>
+    /// A development build launched three times in a row without starting fine goes back to the app kept before it
+    /// (SPEC 12A, Recovery): the core says so before it starts, since it may be what fails. The command it returns is
+    /// started detached (it quits nothing: this launch ends instead of starting) and puts the kept app back. A release
+    /// passes no version of its own: the guard acts only for a development build.
+    /// </summary>
+    static bool GoBackAfterFailedLaunches(string dir)
+    {
+        InstallCommand? c;
+        try
+        {
+            c = TrsFfiMethods.LaunchGuard(dir, Updater.DevVersion ?? "", Updater.InstallDir, Updater.RelaunchArgs);
+        }
+        catch (Exception e)
+        {
+            AppLog.Write($"launch guard failed: {e.Message}");
+            return false;
+        }
+        if (c is null)
+        {
+            return false;
+        }
+        AppLog.Write("launch: three launches without starting fine; going back to the kept app");
+        if (!Updater.Start(c))
+        {
+            return false;
+        }
+        Environment.Exit(0);
+        return true;
     }
 
     /// <summary>
@@ -460,6 +496,8 @@ public partial class App : Application
         }
         quitting = true;
         AppLog.Write("quit: begins");
+        // A clean quit: this launch does not count toward a crash loop (SPEC 12A, Recovery).
+        Updater?.Quitting();
         var clock = System.Diagnostics.Stopwatch.StartNew();
         iconTimer?.Stop();
         flyout?.Close();

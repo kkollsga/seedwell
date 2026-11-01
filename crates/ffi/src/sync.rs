@@ -121,6 +121,28 @@ pub struct SyncFolder {
     /// Files no device can give right now (SPEC 7G.11): not counted in `need_files`; "N files unavailable: no device
     /// has them".
     pub unavailable: u64,
+    /// Joining: what it does now to find an owner or admin ("Looking for Anna's Mac mini on the local network…").
+    pub progress: Option<String>,
+    /// Joining: the last thing that went wrong ("Anna's Mac mini at 192.168.68.57:55799: no answer").
+    pub problem: Option<String>,
+    /// Admitted, with members of which none is connected: whom it waits for, since when, and why it cannot reach one
+    /// ("Waiting for Kristian's Mac mini (last seen 3 days ago: nothing answers at 192.168.68.57:55799)"). The core's
+    /// sentence: the row's grey line and the folder page show it.
+    pub waiting: Option<String>,
+    /// As an owner: members away for a day or more (or never here), each with *Remove…* (`sync_gone_prompt`).
+    pub gone: Vec<SyncGoneDevice>,
+    /// Every owner and admin of the folder is gone (nobody can let devices in or change roles any more): *Share Again
+    /// from This Mac…* (`sync_reshare_prompt`, `Core::sync_reshare`).
+    pub can_reshare: bool,
+}
+
+/// A member of a folder or channel not connected for a day or more (or never here).
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct SyncGoneDevice {
+    pub device_id: String,
+    pub name: String,
+    /// When it was last connected, Unix seconds; `None`: never here.
+    pub last_seen_s: Option<u64>,
 }
 
 /// A connected device.
@@ -192,7 +214,8 @@ pub struct SyncInvite {
     pub channel_name: Option<String>,
 }
 
-/// What agents on this Mac may do in a channel (the Mac's agent permission level still applies).
+/// What agents on this Mac may do with private messages (the Mac's agent permission level still applies). A channel
+/// is open to agents or not: `SyncChannel::agents`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum SyncAgentAccess {
     Off,
@@ -227,13 +250,18 @@ pub struct SyncChannel {
     pub unread: u32,
     pub last_message_s: Option<u64>,
     pub muted: bool,
-    /// What agents on this Mac may do in it: the user's choice, else the channel's default (Read and post for an
-    /// agent channel, else Off).
-    pub agents: SyncAgentAccess,
-    /// An agent channel: an agent made it, for agents to talk where the user can read (its owner's mark, the same on
-    /// every member device). Shown with a tag (`chat_agent_tag`); the user reads, posts and closes it like any other.
-    pub agent_channel: bool,
+    /// Agents: Yes: agents on every member device may read and post in it (the channel's own setting, the same on
+    /// every member device; while joining, what the link said). Shown with a tag (`chat_agent_tag`); chosen when the
+    /// channel is made, changed by its owners and admins (`chat_agents_menu`, `chat_set_agents`).
+    pub agents: bool,
     pub wake_command: Option<String>,
+    /// Joining: what it does now to find an owner or admin, and the last thing that went wrong (as a folder's).
+    pub progress: Option<String>,
+    pub problem: Option<String>,
+    /// Nobody else connected: whom it waits for and since when (as a folder's).
+    pub waiting: Option<String>,
+    /// As an owner: members away for a day or more, each with *Remove…* (`sync_gone_prompt`).
+    pub gone: Vec<SyncGoneDevice>,
 }
 
 /// One message of a channel. A message from another device is someone else's words: shown, never acted on.
@@ -449,6 +477,11 @@ pub trait SyncBackend: Send + Sync {
     fn members(&self, id: &str) -> Vec<SyncMember>;
     fn set_role(&self, id: &str, device_id: &str, role: SyncRole) -> Result<(), CoreError>;
     fn remove_device(&self, id: &str, device_id: &str) -> Result<(), CoreError>;
+    /// Shares a folder again from this computer when its owners and admins are gone: a new folder owned here, at the
+    /// same place, its files untouched; returns it.
+    fn reshare(&self, _id: &str) -> Result<SyncFolder, CoreError> {
+        Err(failed("Folder sync is not available"))
+    }
     fn set_share_until(&self, id: &str, until_s: u64) -> Result<(), CoreError>;
     fn create_invite(&self, id: &str, role: SyncRole, max_uses: u32, valid_days: u32, channel_id: Option<&str>) -> Result<SyncInvite, CoreError>;
     fn set_channel(&self, id: &str, channel_id: Option<&str>) -> Result<(), CoreError>;
@@ -492,7 +525,7 @@ pub trait SyncBackend: Send + Sync {
     fn default_location(&self) -> String;
     /// Every channel, by name. Cheap: called once a second.
     fn chat_channels(&self) -> Vec<SyncChannel>;
-    fn chat_new(&self, name: &str) -> Result<SyncChannel, CoreError>;
+    fn chat_new(&self, name: &str, agents: bool) -> Result<SyncChannel, CoreError>;
     fn chat_join(&self, link: &str) -> Result<SyncChannel, CoreError>;
     /// `limit` messages before `before` (or the newest), oldest first. Cheap: called on scroll.
     fn chat_messages(&self, id: &str, topic: Option<&str>, before: Option<&str>, limit: u32) -> Vec<SyncMessage>;
@@ -500,6 +533,18 @@ pub trait SyncBackend: Send + Sync {
     fn chat_mark_read(&self, id: &str, topic: Option<&str>);
     /// Newest activity first. Cheap.
     fn chat_topics(&self, id: &str) -> Vec<SyncTopic>;
+    /// The rendezvous (SPEC 7G.3): its status while sync runs.
+    fn rendezvous_status(&self) -> Option<trs_sync_net::RendezvousStatus> {
+        None
+    }
+    /// The rendezvous section's last action.
+    fn rendezvous_job(&self) -> crate::sync_rendezvous::Job {
+        crate::sync_rendezvous::Job::default()
+    }
+    /// Starts a rendezvous action in the background.
+    fn rendezvous_start(&self, _task: crate::sync_rendezvous::Task) -> Result<(), CoreError> {
+        Err(failed("Folder sync is not running."))
+    }
     /// On demand (SPEC 7G.11, [`ondemand`]): a folder full or on demand.
     fn set_on_demand(&self, _id: &str, _on: bool, _path: Option<&str>) -> Result<SyncFolder, CoreError> {
         Err(ondemand::not_on_demand().error)
@@ -566,10 +611,15 @@ pub trait SyncBackend: Send + Sync {
     fn chat_direct_agents(&self) -> SyncAgentAccess;
     fn chat_set_direct_agents(&self, access: SyncAgentAccess);
     fn chat_set_muted(&self, id: &str, muted: bool);
-    fn chat_set_agents(&self, id: &str, access: SyncAgentAccess);
+    fn chat_set_agents(&self, id: &str, open: bool) -> Result<(), CoreError>;
     fn chat_set_wake_command(&self, id: &str, command: Option<&str>) -> Result<(), CoreError>;
     fn chat_leave(&self, id: &str) -> Result<(), CoreError>;
     fn chat_rename(&self, id: &str, name: &str) -> Result<(), CoreError>;
+    /// The running service and its runtime, for the user's own devices (`devices_text`): `None` in the mock and while the
+    /// service is not up.
+    fn service(&self) -> Option<(SyncHandle, tokio::runtime::Handle)> {
+        None
+    }
 }
 
 /// Why a private message cannot be written now (`SyncDirect::online` is false).
@@ -689,7 +739,16 @@ fn folder_of(f: &FolderStatus) -> SyncFolder {
         channel_id: f.channel_id.clone(),
         on_demand: f.on_demand,
         unavailable: f.unavailable,
+        progress: f.progress.clone(),
+        problem: f.problem.as_deref().map(|e| readable(&trs_control::redact::scrub_keys(e))),
+        waiting: f.waiting.clone(),
+        gone: f.gone.iter().map(gone_of).collect(),
+        can_reshare: f.reshare,
     }
+}
+
+fn gone_of(d: &trs_sync_net::status::GoneDevice) -> SyncGoneDevice {
+    SyncGoneDevice { device_id: d.id.clone(), name: d.name.clone(), last_seen_s: d.last_seen_s }
 }
 
 /// A pasted invitation link, decoded (nothing is joined). Bare keys of the test builds are not links.
@@ -744,9 +803,12 @@ fn channel_of(c: &ChannelStatus) -> SyncChannel {
         unread: c.unread,
         last_message_s: c.last_message_s,
         muted: c.muted,
-        agents: agents_of(c.agents),
-        agent_channel: c.agent_channel,
+        agents: c.agents,
         wake_command: c.wake_command.clone(),
+        progress: c.progress.clone(),
+        problem: c.problem.as_deref().map(|e| readable(&trs_control::redact::scrub_keys(e))),
+        waiting: c.waiting.clone(),
+        gone: c.gone.iter().map(gone_of).collect(),
     }
 }
 
@@ -836,6 +898,8 @@ pub struct RealSync {
     default_name: String,
     /// The file manager's host of on-demand folders, kept across restarts of the service (`set_on_demand_host`).
     od_host: trs_sync_net::OnDemandHostCell,
+    /// The rendezvous section's last action ([`crate::sync_rendezvous`]).
+    rendezvous: crate::sync_rendezvous::Jobs,
 }
 
 fn is_test_run() -> bool {
@@ -865,6 +929,7 @@ impl RealSync {
             problem: problem.clone(),
             default_name: default_name.clone(),
             od_host: od_host.clone(),
+            rendezvous: Default::default(),
         });
         let secrets = secret_store(vault, dir);
         let (engine, dir) = (engine.clone(), dir.to_path_buf());
@@ -915,6 +980,13 @@ impl RealSync {
         }
     }
 
+    /// The network changed (the host's path monitor, a wake from sleep): folder sync finds its devices again at once.
+    pub fn network_changed(&self) {
+        if let Some(h) = self.slot.get() {
+            h.network_changed();
+        }
+    }
+
     /// A disk was mounted or unmounted: a folder waiting for the disk with its original files is tried again (in the
     /// background).
     pub fn volumes_changed(&self) {
@@ -935,6 +1007,9 @@ impl RealSync {
 }
 
 impl SyncBackend for RealSync {
+    fn service(&self) -> Option<(SyncHandle, tokio::runtime::Handle)> {
+        self.slot.get().map(|h| (h, self.rt.clone()))
+    }
     fn set_on_demand(&self, id: &str, on: bool, path: Option<&str>) -> Result<SyncFolder, CoreError> {
         self.od_set_mode(id, on, path)
     }
@@ -993,9 +1068,9 @@ impl SyncBackend for RealSync {
         self.slot.get().map(|h| h.chat_channels().iter().map(channel_of).collect()).unwrap_or_default()
     }
 
-    fn chat_new(&self, name: &str) -> Result<SyncChannel, CoreError> {
+    fn chat_new(&self, name: &str, agents: bool) -> Result<SyncChannel, CoreError> {
         let h = self.handle()?;
-        let c = self.rt.block_on(h.chat_new(name)).map_err(sync_err)?;
+        let c = self.rt.block_on(h.chat_new(name, agents)).map_err(sync_err)?;
         Ok(channel_of(&c))
     }
 
@@ -1080,10 +1155,9 @@ impl SyncBackend for RealSync {
         }
     }
 
-    fn chat_set_agents(&self, id: &str, access: SyncAgentAccess) {
-        if let (Some(h), Ok(id)) = (self.slot.get(), folder_id(id)) {
-            let _ = h.chat_set_agents(&id, agents_from(access));
-        }
+    fn chat_set_agents(&self, id: &str, open: bool) -> Result<(), CoreError> {
+        let h = self.handle()?;
+        h.chat_set_agents(&folder_id(id)?, open).map_err(sync_err)
     }
 
     fn chat_set_wake_command(&self, id: &str, command: Option<&str>) -> Result<(), CoreError> {
@@ -1192,6 +1266,12 @@ impl SyncBackend for RealSync {
         let h = self.handle()?;
         let device = device_id.parse().map_err(|_| failed("Not a device of this folder"))?;
         h.remove_device(&folder_id(id)?, &device).map_err(sync_err)
+    }
+
+    fn reshare(&self, id: &str) -> Result<SyncFolder, CoreError> {
+        let h = self.handle()?;
+        let f = self.rt.block_on(h.reshare(&folder_id(id)?)).map_err(sync_err)?;
+        Ok(folder_of(&f))
     }
 
     fn set_share_until(&self, id: &str, until_s: u64) -> Result<(), CoreError> {
@@ -1371,6 +1451,18 @@ impl SyncBackend for RealSync {
         Ok(())
     }
 
+    fn rendezvous_status(&self) -> Option<trs_sync_net::RendezvousStatus> {
+        self.slot.get().map(|h| h.rendezvous_status())
+    }
+
+    fn rendezvous_job(&self) -> crate::sync_rendezvous::Job {
+        lock(&self.rendezvous).clone()
+    }
+
+    fn rendezvous_start(&self, task: crate::sync_rendezvous::Task) -> Result<(), CoreError> {
+        crate::sync_rendezvous::start(&self.rt, self.handle()?, &self.rendezvous, task)
+    }
+
     fn port_reachability(&self) -> Option<crate::types::ReachabilityInfo> {
         let h = self.slot.get()?;
         let r = trs_control::sync_reachability_dto(&self.engine.reachability(), h.port());
@@ -1399,7 +1491,7 @@ impl SyncBackend for NoSync {
     fn chat_channels(&self) -> Vec<SyncChannel> {
         Vec::new()
     }
-    fn chat_new(&self, _: &str) -> Result<SyncChannel, CoreError> {
+    fn chat_new(&self, _: &str, _: bool) -> Result<SyncChannel, CoreError> {
         Err(failed("Channels are not available"))
     }
     fn chat_join(&self, _: &str) -> Result<SyncChannel, CoreError> {
@@ -1436,7 +1528,9 @@ impl SyncBackend for NoSync {
     }
     fn chat_set_direct_agents(&self, _: SyncAgentAccess) {}
     fn chat_set_muted(&self, _: &str, _: bool) {}
-    fn chat_set_agents(&self, _: &str, _: SyncAgentAccess) {}
+    fn chat_set_agents(&self, _: &str, _: bool) -> Result<(), CoreError> {
+        Err(failed("Channels are not available"))
+    }
     fn chat_set_wake_command(&self, _: &str, _: Option<&str>) -> Result<(), CoreError> {
         Err(failed("Channels are not available"))
     }
@@ -1555,9 +1649,8 @@ struct MockChat {
     /// Its topics (their counts are worked out from the messages).
     topics: Vec<SyncTopic>,
     muted: bool,
-    agents: SyncAgentAccess,
-    /// Made by an agent.
-    agent_channel: bool,
+    /// Agents: Yes.
+    agents: bool,
     wake: Option<String>,
 }
 
@@ -1616,7 +1709,7 @@ fn mock_invite(n: u32, k: u32, name: &str, role: SyncRole, max_uses: u32, valid_
         trs_sync_proto::members::Signer::Folder,
         &|m| secret.sign(m),
     );
-    let l = InviteLink { invite, token_seed: seed, name: Some(name.to_owned()) };
+    let l = InviteLink { invite, token_seed: seed, name: Some(name.to_owned()), agents: false, reach: None };
     let link = if chat { l.format_chat() } else { l.format() };
     SyncInvite {
         id: trs_sync_proto::members::hex(&id),
@@ -1684,6 +1777,11 @@ impl MockSync {
             channel_id: None,
             on_demand: false,
             unavailable: 0,
+            progress: None,
+            problem: None,
+            waiting: None,
+            gone: Vec::new(),
+            can_reshare: false,
         };
         let mut photos = mk(1, "Photos", SyncAccess::ReadWrite, SyncState::UpToDate, 3, 3);
         photos.role = SyncRole::Owner;
@@ -1700,7 +1798,10 @@ impl MockSync {
         projects.conflicts = 1;
         projects.role = SyncRole::Admin;
         projects.issues = vec![SyncIssue { path: "Build/Icon\r".into(), reason: "The name cannot be used on every device".into() }];
-        let camera = mk(4, "Camera Uploads from the Family iPhone and iPad", SyncAccess::ReadOnly, SyncState::WaitingForDevices, 1, 0);
+        let mut camera = mk(4, "Camera Uploads from the Family iPhone and iPad", SyncAccess::ReadOnly, SyncState::WaitingForDevices, 1, 0);
+        // Its only owner has been away for days: this Mac may share it again.
+        camera.waiting = Some("Waiting for Family iPad (last seen 3 days ago: nothing answers at 192.168.68.57:55799)".into());
+        camera.can_reshare = true;
         let mut archive = mk(5, "Archive", SyncAccess::ReadWrite, SyncState::Missing, 2, 0);
         archive.path = "/Volumes/Backup/Archive".into();
         archive.role = SyncRole::ReadWrite;
@@ -1822,7 +1923,7 @@ impl MockSync {
             f: family,
             members,
             invites: vec![mock_invite(11, 1, "Family", SyncRole::ReadWrite, 1, 7, true)],
-            chat: Some(MockChat { read: first_read(&messages, 3), messages, topics, muted: false, agents: SyncAgentAccess::Off, agent_channel: false, wake: None }),
+            chat: Some(MockChat { read: first_read(&messages, 3), messages, topics, muted: false, agents: false, wake: None }),
         });
         let mut build = mk(12, "Release notes", SyncAccess::ReadWrite, SyncState::UpToDate, 2, 2);
         build.role = SyncRole::Admin;
@@ -1852,8 +1953,7 @@ impl MockSync {
                 messages,
                 topics: Vec::new(),
                 muted: false,
-                agents: SyncAgentAccess::ReadPost,
-                agent_channel: true,
+                agents: true,
                 wake: Some("~/bin/wake-claude".into()),
             }),
         });
@@ -1867,7 +1967,7 @@ impl MockSync {
             f: ola,
             members: mock_members(SyncRole::ReadWrite, &[("Ola's MacBook Air", SyncRole::Owner, false)], Some(now + 5 * 86_400)),
             invites: Vec::new(),
-            chat: Some(MockChat { read: first_read(&messages, 0), messages, topics: Vec::new(), muted: true, agents: SyncAgentAccess::Off, agent_channel: false, wake: None }),
+            chat: Some(MockChat { read: first_read(&messages, 0), messages, topics: Vec::new(), muted: true, agents: false, wake: None }),
         });
         out
     }
@@ -1907,8 +2007,11 @@ impl MockSync {
             last_message_s: c.messages.last().map(|x| x.at_s),
             muted: c.muted,
             agents: c.agents,
-            agent_channel: c.agent_channel,
             wake_command: c.wake.clone(),
+            progress: None,
+            problem: None,
+            waiting: None,
+            gone: Vec::new(),
         })
     }
 
@@ -1946,6 +2049,11 @@ impl MockSync {
             channel_id: None,
             on_demand: false,
             unavailable: 0,
+            progress: None,
+            problem: None,
+            waiting: None,
+            gone: Vec::new(),
+            can_reshare: false,
         };
         let members = mock_members(if joining { SyncRole::ReadOnly } else { role }, &[], None);
         s.folders.push(MockFolder { n, f: f.clone(), members, invites: Vec::new(), chat: None });
@@ -2009,7 +2117,7 @@ impl SyncBackend for MockSync {
         out
     }
 
-    fn chat_new(&self, name: &str) -> Result<SyncChannel, CoreError> {
+    fn chat_new(&self, name: &str, agents: bool) -> Result<SyncChannel, CoreError> {
         let name = name.trim();
         if name.is_empty() {
             return Err(failed("A channel needs a name"));
@@ -2027,7 +2135,7 @@ impl SyncBackend for MockSync {
             f,
             members: mock_members(SyncRole::Owner, &[], None),
             invites: Vec::new(),
-            chat: Some(MockChat { messages: Vec::new(), read: Default::default(), topics: Vec::new(), muted: false, agents: SyncAgentAccess::Off, agent_channel: false, wake: None }),
+            chat: Some(MockChat { messages: Vec::new(), read: Default::default(), topics: Vec::new(), muted: false, agents, wake: None }),
         };
         let c = Self::channel_of(&m).ok_or_else(gone)?;
         s.channels.push(m);
@@ -2040,7 +2148,9 @@ impl SyncBackend for MockSync {
         if lock(&self.state).channels.iter().any(|m| m.f.id == info.folder_id) {
             return Err(failed(concat!("This channel is already on this ", trs_platform::computer!())));
         }
-        let mut c = self.chat_new(info.name.as_deref().unwrap_or("Channel"))?;
+        // The link says whether the channel is open to agents.
+        let agents = InviteLink::parse_chat(link).is_ok_and(|l| l.agents);
+        let mut c = self.chat_new(info.name.as_deref().unwrap_or("Channel"), agents)?;
         self.with_chat(&c.id, |m| m.f.role = SyncRole::ReadOnly)?;
         c.role = SyncRole::ReadOnly;
         Ok(c)
@@ -2233,12 +2343,16 @@ impl SyncBackend for MockSync {
         });
     }
 
-    fn chat_set_agents(&self, id: &str, access: SyncAgentAccess) {
-        let _ = self.with_chat(id, |m| {
-            if let Some(c) = m.chat.as_mut() {
-                c.agents = access;
+    fn chat_set_agents(&self, id: &str, open: bool) -> Result<(), CoreError> {
+        self.with_chat(id, |m| {
+            if !matches!(m.f.role, SyncRole::Owner | SyncRole::Admin) {
+                return Err(failed("Only the channel's owners and admins can change whether agents may use it."));
             }
-        });
+            if let Some(c) = m.chat.as_mut() {
+                c.agents = open;
+            }
+            Ok(())
+        })?
     }
 
     fn chat_rename(&self, id: &str, name: &str) -> Result<(), CoreError> {
@@ -2405,7 +2519,25 @@ impl SyncBackend for MockSync {
                 return Err(failed(concat!("To stop syncing on this ", trs_platform::computer!(), ", remove the folder instead")));
             }
             m.members.retain(|d| d.device_id != device_id);
+            m.f.gone.retain(|d| d.device_id != device_id);
             Ok(())
+        })?
+    }
+
+    fn reshare(&self, id: &str) -> Result<SyncFolder, CoreError> {
+        self.with(id, |m| {
+            if !m.f.can_reshare {
+                return Err(failed(concat!("An owner or admin of this folder can still let devices in: ask it to share the folder, or to make this ", trs_platform::computer!(), " an admin")));
+            }
+            m.f.id = mock_id(m.n + 100);
+            m.f.role = SyncRole::Owner;
+            m.f.access = SyncAccess::ReadWrite;
+            m.f.state = SyncState::UpToDate;
+            (m.f.waiting, m.f.can_reshare, m.f.members, m.f.connected) = (None, false, 0, 0);
+            m.f.gone.clear();
+            m.members = mock_members(SyncRole::Owner, &[], None);
+            m.invites.clear();
+            Ok(m.f.clone())
         })?
     }
 
@@ -2623,9 +2755,10 @@ impl Core {
         self.backend.sync().chat_channels()
     }
 
-    /// Makes a channel (this Mac is its owner). Share it with `sync_create_invite` on its id.
-    pub fn chat_new(&self, name: String) -> Result<SyncChannel, CoreError> {
-        self.backend.sync().chat_new(&name)
+    /// Makes a channel (this Mac is its owner). `agents`: Agents: Yes (open to agents on every member device), else
+    /// No. Share it with `sync_create_invite` on its id.
+    pub fn chat_new(&self, name: String, agents: bool) -> Result<SyncChannel, CoreError> {
+        self.backend.sync().chat_new(&name, agents)
     }
 
     /// Joins a channel by its `seedwell://chat/` link. It waits until one of its owners or admins admits this Mac.
@@ -2716,9 +2849,10 @@ impl Core {
         self.backend.sync().chat_set_muted(&id, muted)
     }
 
-    /// What agents on this Mac may do in the channel.
-    pub fn chat_set_agents(&self, id: String, access: SyncAgentAccess) {
-        self.backend.sync().chat_set_agents(&id, access)
+    /// The channel's Agents: Yes/No, for every member device (owners and admins: `chat_agents_menu` says whether
+    /// this Mac may).
+    pub fn chat_set_agents(&self, id: String, open: bool) -> Result<(), CoreError> {
+        self.backend.sync().chat_set_agents(&id, open)
     }
 
     /// The command run for each message from another device while agents may read the channel (the message as
@@ -2755,6 +2889,14 @@ impl Core {
     /// Removes a device from the folder (owners only). It is cut off at once and keeps the files it has.
     pub fn sync_remove_device(&self, id: String, device_id: String) -> Result<(), CoreError> {
         self.backend.sync().remove_device(&id, &device_id)
+    }
+
+    /// Shares a folder again from this computer when every owner and admin of it is gone (`SyncFolder::can_reshare`):
+    /// it becomes a new folder owned here, at the same place, its files untouched (nothing is deleted, moved or
+    /// downloaded again); the old folder is left. Returns the new folder (its Share dialog makes a link). Blocks while
+    /// the folder stops: call it off the main thread.
+    pub fn sync_reshare(&self, id: String) -> Result<SyncFolder, CoreError> {
+        self.backend.sync().reshare(&id)
     }
 
     /// Sets how long the folder is shared (owners only): `until_s` Unix seconds, 0 = no end. After it every
@@ -3013,7 +3155,7 @@ mod tests {
         let chans = core.chat_channels();
         assert_eq!(chans.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["Family", "Ola & Kristian", "Release notes"]);
         let fam = &chans[0];
-        assert_eq!((fam.role, fam.unread, fam.agents), (SyncRole::Owner, 3, SyncAgentAccess::Off), "General's 1 and the topic's 2");
+        assert_eq!((fam.role, fam.unread, fam.agents), (SyncRole::Owner, 3, false), "General's 1 and the topic's 2");
         let general = core.chat_messages(fam.id.clone(), None, None, 50);
         assert!(general.iter().all(|m| m.topic.is_none()) && general.len() == 3);
         let topics = core.chat_topics(fam.id.clone());
@@ -3044,7 +3186,7 @@ mod tests {
         assert_eq!(core.chat_direct_agents(), SyncAgentAccess::Off);
         core.chat_set_direct_agents(SyncAgentAccess::Read);
         assert_eq!(core.chat_direct_agents(), SyncAgentAccess::Read);
-        core.chat_set_agents(fam.id.clone(), SyncAgentAccess::Read);
+        core.chat_set_agents(fam.id.clone(), true).unwrap();
         core.chat_set_muted(fam.id.clone(), true);
         core.chat_rename(fam.id.clone(), " Family dinners ".into()).unwrap();
         assert!(core.chat_rename(fam.id.clone(), "  ".into()).is_err());
@@ -3053,7 +3195,7 @@ mod tests {
         core.chat_rename(fam.id.clone(), "Family".into()).unwrap();
         core.chat_set_wake_command(fam.id.clone(), Some("~/bin/wake".into())).unwrap();
         let fam2 = core.chat_channels().into_iter().find(|c| c.id == fam.id).unwrap();
-        assert_eq!((fam2.unread, fam2.agents, fam2.muted, fam2.wake_command.as_deref()), (0, SyncAgentAccess::Read, true, Some("~/bin/wake")));
+        assert_eq!((fam2.unread, fam2.agents, fam2.muted, fam2.wake_command.as_deref()), (0, true, true, Some("~/bin/wake")));
         assert_eq!(core.sync_members(fam.id.clone()).len(), 3, "membership calls take a channel's id");
         let chat_link = core.sync_create_invite(fam.id.clone(), SyncRole::ReadWrite, 1, 7, None).unwrap().link;
         assert!(chat_link.starts_with("seedwell://chat/"), "{chat_link}");
@@ -3081,8 +3223,8 @@ mod tests {
         core.sync_set_channel(photos.id.clone(), None).unwrap();
         assert_eq!(core.sync_snapshot().folders.into_iter().find(|f| f.id == photos.id).unwrap().channel_id, None);
         assert!(core.sync_create_invite(photos.id.clone(), SyncRole::ReadWrite, 1, 7, Some("nope".into())).is_err());
-        let new = core.chat_new("Plans".into()).unwrap();
-        assert_eq!((new.role, new.members), (SyncRole::Owner, 1));
+        let new = core.chat_new("Plans".into(), false).unwrap();
+        assert_eq!((new.role, new.members, new.agents), (SyncRole::Owner, 1, false));
         core.chat_leave(new.id).unwrap();
         let reader = s_folder(&core, SyncRole::ReadOnly);
         assert!(core.sync_create_invite(reader, SyncRole::ReadOnly, 1, 7, None).is_err(), "a reader cannot share");
@@ -3155,8 +3297,8 @@ mod tests {
         assert!(members[0].is_me && members[0].role == SyncRole::Owner && members[0].online);
         assert!(core.sync_set_role(f.id.clone(), members[0].device_id.clone(), SyncRole::ReadOnly).is_err(), "the only owner stays one");
         // A channel, through the same calls.
-        let ch = core.chat_new("Plans".into()).unwrap();
-        assert_eq!((ch.role, ch.agents, ch.members, ch.online), (SyncRole::Owner, SyncAgentAccess::Off, 1, 1));
+        let ch = core.chat_new("Plans".into(), false).unwrap();
+        assert_eq!((ch.role, ch.agents, ch.members, ch.online), (SyncRole::Owner, false, 1, 1));
         let m = core.chat_send(ch.id.clone(), None, "hello".into(), None).unwrap();
         assert_eq!((m.is_me, m.kind, m.agent.clone()), (true, SyncMessageKind::Text, None));
         assert_eq!(core.chat_messages(ch.id.clone(), None, None, 10), vec![m.clone()]);
@@ -3186,9 +3328,11 @@ mod tests {
         core.sync_set_channel(f.id.clone(), None).unwrap();
         assert_eq!(core.sync_snapshot().folders[0].channel_id, None);
         assert_eq!(core.sync_members(ch.id.clone()).len(), 1);
-        core.chat_set_agents(ch.id.clone(), SyncAgentAccess::ReadPost);
+        core.chat_set_agents(ch.id.clone(), true).unwrap();
         assert!(core.chat_set_wake_command(ch.id.clone(), Some("cat\nrm".into())).is_err(), "one line");
-        assert_eq!(core.chat_channels()[0].agents, SyncAgentAccess::ReadPost);
+        assert!(core.chat_channels()[0].agents);
+        let yes_link = core.sync_create_invite(ch.id.clone(), SyncRole::ReadWrite, 1, 7, None).unwrap().link;
+        assert!(yes_link.contains("&agents=yes"), "a Yes channel's link says so: {yes_link}");
         core.chat_leave(ch.id).unwrap();
         assert!(core.chat_channels().is_empty());
         let e = core.sync_set_share_until(f.id.clone(), 1).unwrap_err();

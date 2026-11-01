@@ -13,7 +13,7 @@ use crate::utp::{addr, device_with, until};
 async fn a_private_message_goes_only_to_its_recipient_and_no_other_member_gets_it() {
     let (a, b, c) = (device_with("Anna", |_| {}).await, device_with("Bo", |_| {}).await, device_with("Cy", |_| {}).await);
     let (ad, bd) = (a.h.device_id(), b.h.device_id());
-    let id: FolderId = a.h.chat_new("Team").await.unwrap().id.parse().unwrap();
+    let id: FolderId = a.h.chat_new("Team", false).await.unwrap().id.parse().unwrap();
     join(&b.h, &a.h, &id, Role::ReadWrite, addr(&a)).await;
     join(&c.h, &a.h, &id, Role::ReadOnly, addr(&a)).await;
     b.h.add_address(&id, addr(&c)).unwrap();
@@ -70,7 +70,7 @@ async fn a_tampered_or_forwarded_private_message_is_dropped_and_kept_ones_surviv
     let a = start_at(dirs[0].path(), "Anna", |_| {}).await;
     let b = start_at(dirs[1].path(), "Bo", |_| {}).await;
     let (ad, bd) = (a.device_id(), b.device_id());
-    let id: FolderId = a.chat_new("Team").await.unwrap().id.parse().unwrap();
+    let id: FolderId = a.chat_new("Team", false).await.unwrap().id.parse().unwrap();
     b.chat_join(&a.create_invite(&id, Role::ReadWrite, 1, 7).unwrap().link).await.unwrap();
     b.add_address(&id, at(&a)).unwrap();
     until(30, "B is in", || role(&b, &id).is_some() && a.test_direct_knows(&bd)).await;
@@ -116,7 +116,7 @@ async fn a_conversation_outlives_its_channel_until_it_is_deleted() {
     let a = start_at(dirs[0].path(), "Anna", |_| {}).await;
     let b = start_at(dirs[1].path(), "Bo", |_| {}).await;
     let (ad, bd) = (a.device_id(), b.device_id());
-    let id: FolderId = a.chat_new("Team").await.unwrap().id.parse().unwrap();
+    let id: FolderId = a.chat_new("Team", false).await.unwrap().id.parse().unwrap();
     join(&b, &a, &id, Role::ReadWrite, at(&a)).await;
     until(20, "B has A's key", || b.test_direct_knows(&ad)).await;
     b.chat_send_direct(&ad, MessageKind::Text, "hi Anna", None, None).await.unwrap();

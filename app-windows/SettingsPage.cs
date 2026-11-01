@@ -8,7 +8,8 @@ namespace Seedwell;
 /// The library window's Settings page. For now its Updates group only, drawn from the core's <c>UpdatesModel</c>
 /// (the Mac's Settings › General › Updates): the two switches with their hints (saved as settings), the status line,
 /// Check Now, "Update to X", Release Notes and Show Log. Asked again after the model's refresh_ms and when the updater
-/// says something changed. NEED: the group's title ("Updates") and the rest of Settings (stage D).
+/// says something changed; under it Settings › Devices (<see cref="DevicesSection"/>). NEED: the group's title ("Updates")
+/// and the rest of Settings (stage D).
 /// </summary>
 sealed class SettingsPage
 {
@@ -22,7 +23,11 @@ sealed class SettingsPage
     public SettingsPage(App app)
     {
         this.app = app;
-        Root = new ScrollViewer { Content = panel };
+        // Settings › Devices below the updates (SPEC §7G.5): its own section, read every second.
+        var all = new StackPanel { HorizontalAlignment = HorizontalAlignment.Left, MaxWidth = 720 };
+        all.Children.Add(panel);
+        all.Children.Add(new Border { Padding = new Thickness(28, 0, 28, 28), Child = new DevicesSection(app).Root });
+        Root = new ScrollViewer { Content = all };
         timer = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread().CreateTimer();
         timer.IsRepeating = false;
         timer.Tick += (_, _) => Update();

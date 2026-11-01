@@ -2,7 +2,8 @@
 //!
 //! Folders and channels are both [`Space`]s: a key pair, a membership, invitations and the devices met in it. A
 //! folder adds its files ([`FolderShared`]), a channel its messages ([`crate::chat::ChannelShared`]); both
-//! dereference to their space, so membership, admission and discovery are written once.
+//! dereference to their space, so membership, admission and discovery are written once. The user's own devices are a
+//! third kind, a space with nothing more ([`crate::devices`]): its key is the user key.
 //!
 //! Locks are short: a `FolderCore` is only ever locked inside `spawn_blocking` (its methods do disk I/O),
 //! and the registries are locked to clone an `Arc` out, never across an `.await`.
@@ -34,6 +35,8 @@ pub enum SpaceKind {
     Folder,
     /// A channel.
     Channel,
+    /// The user's own devices (0.1.13): a group whose key is the user key, never shown to agents.
+    Devices,
 }
 
 /// A device's names: its own (Settings › Folder Sync) and its user's in chats (empty: none given).
@@ -73,6 +76,10 @@ pub struct Space {
     pub lan_only: AtomicBool,
     /// What went wrong with its membership and its peers, for the status.
     pub notes: Mutex<Notes>,
+    /// A folder or channel that one of the user's own devices put on all of them, which this device joins by itself
+    /// (0.1.13): no invitation, it proves it is one of that device's own instead ([`crate::devices`]). Set while it
+    /// is not admitted yet.
+    pub following: AtomicBool,
 }
 
 /// What a space's membership and sessions tell the status.
@@ -85,6 +92,43 @@ pub struct Notes {
     pub incompatible: BTreeMap<DeviceId, String>,
     /// The membership could not be saved or applied (shown with the issues).
     pub problems: Vec<String>,
+    /// Joining: what was tried to find an owner or admin, for the progress sentence (`crate::joining`).
+    pub join: JoinTrail,
+    /// An owner's or admin's record of the attempts to join with a link that it refused, newest last (at most
+    /// [`MAX_ATTEMPTS`]; in memory, gone with the folder or channel).
+    pub attempts: std::collections::VecDeque<JoinAttempt>,
+    /// Why the last connection with each device of this folder or channel failed (Unix seconds, the sentence); a
+    /// device's entry goes when a session with it starts.
+    pub unreachable: BTreeMap<DeviceId, (u64, String)>,
+}
+
+/// Refused join attempts a folder or channel keeps.
+pub const MAX_ATTEMPTS: usize = 20;
+
+/// What a joining folder or channel has done to find one of its owners or admins.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct JoinTrail {
+    /// The address being dialed now.
+    pub trying: Option<SocketAddr>,
+    /// A device that answered but did not admit this one (its name).
+    pub reached: Option<String>,
+    /// What went wrong last, as a sentence.
+    pub problem: Option<String>,
+}
+
+/// An attempt to join with a link that this device (an owner or admin) refused.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JoinAttempt {
+    /// When, Unix seconds.
+    pub at_s: u64,
+    /// The device that tried.
+    pub device: DeviceId,
+    /// Its name, from its Hello.
+    pub name: String,
+    /// Its client (`Seedwell 0.1.9`).
+    pub client: String,
+    /// Why it was refused.
+    pub reason: String,
 }
 
 impl Space {
@@ -115,6 +159,7 @@ impl Space {
             paused: AtomicBool::new(false),
             lan_only: AtomicBool::new(false),
             notes: Mutex::new(Notes::default()),
+            following: AtomicBool::new(false),
         }
     }
 
@@ -148,6 +193,25 @@ impl Space {
         if !n.problems.contains(&why) {
             n.problems.push(why);
         }
+    }
+
+    /// Notes a refused attempt to join with a link (the oldest goes past [`MAX_ATTEMPTS`]).
+    pub fn note_attempt(&self, a: JoinAttempt) {
+        let mut n = lock(&self.notes);
+        if n.attempts.len() >= MAX_ATTEMPTS {
+            n.attempts.pop_front();
+        }
+        n.attempts.push_back(a);
+    }
+
+    /// Joining: notes what the search for an owner or admin ran into.
+    pub fn join_problem(&self, why: String) {
+        lock(&self.notes).join.problem = Some(why);
+    }
+
+    /// Joining here (an invitation, or following one of the user's own devices, not admitted yet).
+    pub fn joining(&self, me: &[u8; 32]) -> bool {
+        (lock(&self.invite).is_some() || self.following.load(Ordering::SeqCst)) && self.role_of(me).is_none()
     }
 
     /// The issues its notes add to the status: problems, then devices it cannot sync with.
@@ -544,6 +608,11 @@ impl PeerHandle {
 pub struct Registry {
     folders: RwLock<BTreeMap<FolderId, Arc<FolderShared>>>,
     channels: RwLock<BTreeMap<FolderId, Arc<crate::chat::ChannelShared>>>,
+    /// The user's own devices, once this device is in such a group.
+    devices: RwLock<Option<Arc<Space>>>,
+    /// The groups this device's group moved on from (its key changed after a removal), oldest first: kept without
+    /// their key, only to tell one of its own devices that was away where the group went.
+    ancestors: RwLock<Vec<Arc<Space>>>,
     peers: RwLock<BTreeMap<DeviceId, Arc<PeerHandle>>>,
     /// Test switch: devices with which direct (not relayed) sessions are refused.
     refused: RwLock<BTreeSet<DeviceId>>,
@@ -580,16 +649,47 @@ impl Registry {
         self.channels.write().unwrap_or_else(|e| e.into_inner()).remove(id)
     }
 
-    /// A folder's or a channel's space.
+    /// A folder's or a channel's space, or the devices group's (the network side only: what the user and agents ask
+    /// for goes through [`Self::user_space`]).
     pub fn space(&self, id: &FolderId) -> Option<Arc<Space>> {
+        self.folder(id)
+            .map(|f| f.space.clone())
+            .or_else(|| self.channel(id).map(|c| c.space.clone()))
+            .or_else(|| self.devices().filter(|g| g.id == *id))
+            .or_else(|| self.ancestors().into_iter().find(|g| g.id == *id))
+    }
+
+    /// A folder's or a channel's space, never the devices group's: what a caller of the service may name.
+    pub fn user_space(&self, id: &FolderId) -> Option<Arc<Space>> {
         self.folder(id).map(|f| f.space.clone()).or_else(|| self.channel(id).map(|c| c.space.clone()))
     }
 
-    /// Every folder's and channel's space.
+    /// Every folder's and channel's space, and the devices group's (it is found, dialed and announced like them).
     pub fn spaces(&self) -> Vec<Arc<Space>> {
         let mut out: Vec<Arc<Space>> = self.folders().iter().map(|f| f.space.clone()).collect();
         out.extend(self.channels().iter().map(|c| c.space.clone()));
+        out.extend(self.devices());
         out
+    }
+
+    /// The user's own devices group, if this device is in one.
+    pub fn devices(&self) -> Option<Arc<Space>> {
+        self.devices.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Sets (or clears) the devices group.
+    pub fn set_devices(&self, g: Option<Arc<Space>>) {
+        *self.devices.write().unwrap_or_else(|e| e.into_inner()) = g;
+    }
+
+    /// The groups the devices group moved on from, oldest first.
+    pub fn ancestors(&self) -> Vec<Arc<Space>> {
+        self.ancestors.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Sets them.
+    pub fn set_ancestors(&self, a: Vec<Arc<Space>>) {
+        *self.ancestors.write().unwrap_or_else(|e| e.into_inner()) = a;
     }
 
     /// A folder.
@@ -717,6 +817,13 @@ pub struct Ctx {
     pub setup_wait: Mutex<std::time::Duration>,
     /// **Tests:** hold queries are answered yes, whatever is held (a member that lies).
     pub yes_to_holds: std::sync::atomic::AtomicBool,
+    /// Devices that asked to join this device's devices group with a pairing link it made, waiting for the user to
+    /// confirm or refuse (in memory only; each lapses with its link).
+    pub pairing: Mutex<Vec<crate::devices::PairRequest>>,
+    /// The devices group, or a folder or channel, changed: what follows is brought in line ([`crate::devices`]).
+    pub devices_wake: Notify,
+    /// One change of the devices group at a time (a removal and its key change, a move, leaving).
+    pub devices_lock: tokio::sync::Mutex<()>,
 }
 
 impl Ctx {

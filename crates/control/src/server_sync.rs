@@ -3,7 +3,7 @@
 //!
 //! Permissions (SPEC 9A.3): read-only for `sync.list`, `sync.status`, `sync.members`, `sync.conflicts` and
 //! `sync.settings`; full for `sync.share` and `sync.invites` (they return invitation links), for changing roles
-//! and removing devices (`sync.set_role`, `sync.remove_device`), for what moves files on disk (`sync.rename`,
+//! and removing devices (`sync.set_role`, `sync.remove_device`), for sharing a folder again (`sync.reshare`), for what moves files on disk (`sync.rename`,
 //! `sync.move`, removal with `delete_files`) and for changing settings (`sync.set_settings`); control for the
 //! rest (`sync.resolve` moves a file too, but only into the folder's archive). Links are never written to the
 //! activity log: [`crate::activity::describe`] leaves them out and every entry is scrubbed again.
@@ -133,8 +133,8 @@ pub(super) async fn call<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &Conn, req: Reques
                 None | Some("") => h.create_invite(&folder_id(&f)?, role, uses, days).map_err(s::err)?,
                 Some(q) => {
                     let channel = if q.eq_ignore_ascii_case("new") {
-                        // An agent's channel: an agent channel, open to agents on every member device.
-                        let c = h.chat_new_for_agents(&f.name).await.map_err(s::chat_err)?;
+                        // An agent's channel is Agents: Yes: open to agents on every member device.
+                        let c = h.chat_new(&f.name, true).await.map_err(s::chat_err)?;
                         c.id.parse().map_err(|_| ApiError::internal("the service returned a malformed channel id"))?
                     } else {
                         super::chat_methods::pick(&h, q)?.1
@@ -191,6 +191,13 @@ pub(super) async fn call<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &Conn, req: Reques
             h.remove_device(&id, &m.device).map_err(s::err)?;
             let mut r = folder_reply(&h, &status_of(&h, &f.id)?, "device removed from")?;
             r.note = Some(format!("{} removed from {}", clip(&m.name, 60), clip(&f.name, 80)));
+            Ok(r)
+        }
+        Request::SyncReshare(p) => {
+            let f = pick(&h, &p.folder)?;
+            let new = h.reshare(&folder_id(&f)?).await.map_err(s::err)?;
+            let mut r = folder_reply(&h, &new, "shared again from this computer:")?;
+            r.note = Some(format!("{} shared again from this {} as a new folder ({}; was {})", clip(&f.name, 80), trs_platform::computer!(), short(&new.id), short(&f.id)));
             Ok(r)
         }
         Request::SyncSetShareUntil(p) => {
@@ -304,7 +311,7 @@ pub(super) async fn call<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &Conn, req: Reques
         }
         Request::SyncRemove(p) => remove_plan(ctx, conn, &h, p).await,
         Request::SyncRemoveConfirm(p) => remove_confirm(ctx, conn, &h, p).await,
-        Request::SyncSettings(_) => reply(&settings_dto(&h.settings(), Vec::new(), String::new())),
+        Request::SyncSettings(_) => reply(&settings_dto(&h, Vec::new(), String::new())),
         Request::SyncSetSettings(p) => {
             // The port first: sync starts again on it, and the rest goes to the new service.
             let h = match p.port {
@@ -463,8 +470,11 @@ async fn remove_confirm<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &Conn, h: &SyncHand
     Ok(r)
 }
 
-fn settings_dto(st: &trs_sync_net::config::Settings, changed: Vec<String>, note: String) -> SyncSettingsDto {
+fn settings_dto(h: &SyncHandle, changed: Vec<String>, note: String) -> SyncSettingsDto {
+    let st = &h.settings();
     let lim = |kib: u32| (kib != 0).then(|| u64::from(kib) * 1024);
+    let rv = h.rendezvous_status();
+    let at = |t: u64| (t != 0).then_some(t);
     SyncSettingsDto {
         device_name: st.device_name.clone(),
         user_name: st.user_name.clone(),
@@ -476,6 +486,14 @@ fn settings_dto(st: &trs_sync_net::config::Settings, changed: Vec<String>, note:
         up_limit: lim(st.up_kib),
         down_limit: lim(st.down_kib),
         default_location: st.default_location.clone(),
+        rendezvous: SyncRendezvousDto {
+            url: rv.url,
+            last_publish_at: at(rv.last_publish_s),
+            last_error: rv.last_error,
+            last_error_at: at(rv.last_error_s),
+            found: rv.found,
+            last_found_at: at(rv.last_found_s),
+        },
         changed,
         note,
     }
@@ -544,7 +562,7 @@ fn set_settings(h: &SyncHandle, p: SyncSettingsParams) -> Result<Reply, ApiError
     }
     h.set_settings(st).map_err(s::err)?;
     let changed: Vec<String> = changed.into_iter().map(str::to_owned).collect();
-    let mut r = reply(&settings_dto(&h.settings(), changed.clone(), note.join("; ")))?;
+    let mut r = reply(&settings_dto(h, changed.clone(), note.join("; ")))?;
     r.note = Some(changed.join(", "));
     Ok(r)
 }

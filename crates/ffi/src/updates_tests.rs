@@ -66,6 +66,22 @@ fn dev_updates(core: &Arc<Core>, n: u32, repo: &str, installer: &Path, now: u64)
     )
 }
 
+/// The build key unit tests sign watched folders' builds with (trusted by `build_keys` in tests only).
+pub(crate) fn test_key() -> trs_buildsig::SigningKey {
+    trs_buildsig::SigningKey::from_seed_hex(&"07".repeat(32)).unwrap()
+}
+
+/// Puts `body` in `folder` as this system's zip of `version` and signs it into the folder's build.json with `key`.
+fn publish(folder: &Path, version: &str, body: &str, key: &trs_buildsig::SigningKey) -> std::path::PathBuf {
+    let zip = folder.join(os::release_zip(version));
+    std::fs::write(&zip, body).unwrap();
+    let sha = sha256_of(&zip).unwrap();
+    let name = os::release_zip(version);
+    let a = trs_buildsig::Adding { zip: &name, sha256: &sha, commit: Some("abc1234"), minimum: None };
+    trs_buildsig::add(folder, &a, key, &[], T0).unwrap();
+    zip
+}
+
 /// A system version new enough for the test releases on either system.
 fn os_version() -> &'static str {
     if os::RELEASE_SECTION.is_some() { "10.0.22631" } else { "26.0" }
@@ -396,12 +412,25 @@ fn a_release_never_offers_a_development_version_and_a_folder_may() {
     assert!(release.is_none(), "four parts, no tag: not a release");
     let tagged = doc.replacen(&format!(r#""version":"{v}""#), &format!(r#""version":"{v}","tag":"v{v}""#), 1);
     assert!(parse_latest(tagged.as_bytes(), os::RELEASE_SECTION, os::MINIMUM_SYSTEM_KEY, os::release_zip).is_none());
-    let build = parse_build(doc.as_bytes(), os::RELEASE_SECTION, os::MINIMUM_SYSTEM_KEY, os::release_zip).unwrap();
+    // A watched folder's signed build.json names this system's build.
+    let entry = |version: &str, zip: String, minimum: Option<&str>| trs_buildsig::Build {
+        version: version.into(),
+        commit: None,
+        zip,
+        sha256: sha.clone(),
+        minimum_system: minimum.map(str::to_owned),
+    };
+    let build = folder_entry(&entry(&v, os::release_zip(&v), Some("10.0")), os::release_zip).unwrap();
     assert_eq!((build.version.as_str(), build.sha256.as_str()), (v.as_str(), sha.as_str()));
     assert!(build.offered(&current(), os_version()), "newer than the release it builds on");
     assert!(!build.offered(&format!("{}.4", current()), os_version()), "not the running build itself");
-    let wrong_tag = doc.replacen(&format!(r#""version":"{v}""#), &format!(r#""version":"{v}","tag":"v9.9.9""#), 1);
-    assert!(parse_build(wrong_tag.as_bytes(), os::RELEASE_SECTION, os::MINIMUM_SYSTEM_KEY, os::release_zip).is_none());
+    assert!(!build.offered(&format!("{}.5", current()), os_version()), "nor an older one");
+    // Another system's zip, another version's zip, a minimum that is not one: not this system's build.
+    let other = if os::RELEASE_SECTION.is_some() { format!("Seedwell-{v}.zip") } else { format!("Seedwell-{v}-windows-x64.zip") };
+    assert!(folder_entry(&entry(&v, other, None), os::release_zip).is_err());
+    assert!(folder_entry(&entry(&v, os::release_zip("9.9.9.1"), None), os::release_zip).is_err());
+    assert!(folder_entry(&entry(&v, os::release_zip(&v), Some("new")), os::release_zip).is_err());
+    assert!(folder_entry(&entry("1.2", os::release_zip("1.2"), None), os::release_zip).is_err());
 }
 
 #[test]
@@ -446,6 +475,7 @@ fn a_handed_over_build_runs_the_apps_installer_with_its_checksum_and_the_state_f
     assert!(note.contains(&format!("{}.1 comes back", current())), "{note}");
     let args = wait_for(&ran);
     let sha = sha256_of(&zip).unwrap();
+    // Handed over by whoever may use the control socket: no build key and no Developer ID asked for.
     assert_eq!(args, format!("--zip\n{}\n--sha256\n{sha}\n{}\n", zip.display(), dir.path().display()));
     assert_eq!(u.model(T0).status, format!("Installing {v} (development build)…"));
     assert!(u.install_build_at(&zip, None, T0).unwrap_err().contains("already running"));
@@ -470,16 +500,7 @@ fn a_watched_folder_installs_a_newer_build_as_it_appears_and_not_a_failed_one() 
     assert_eq!(u.model(T0).watching, Some(builds.display().to_string()));
     let put = |n: u32| {
         let v = format!("{}.{n}", current());
-        let zip = builds.join(os::release_zip(&v));
-        std::fs::write(&zip, format!("build {n}")).unwrap();
-        let sha = sha256_of(&zip).unwrap();
-        let doc = format!(
-            r#"{{"version":"{v}","zip":"{}","sha256":"{sha}","minimum_macos":"15.0","windows":{{"zip":"{}","sha256":"{sha}","minimum_windows":"10.0"}}}}"#,
-            os::release_zip(&v),
-            os::release_zip(&v)
-        );
-        std::fs::write(builds.join("latest.json.tmp"), doc).unwrap();
-        std::fs::rename(builds.join("latest.json.tmp"), builds.join("latest.json")).unwrap();
+        let zip = publish(&builds, &v, &format!("build {n}"), &test_key());
         (v, zip)
     };
     // An older build is not taken.
@@ -488,7 +509,10 @@ fn a_watched_folder_installs_a_newer_build_as_it_appears_and_not_a_failed_one() 
     assert!(!ran.exists(), "the running build itself is not installed again");
     let (v, zip) = put(2);
     let args = wait_for(&ran);
-    assert!(args.starts_with(&format!("--zip\n{}\n", zip.display())), "{args}");
+    let sha = sha256_of(&zip).unwrap();
+    // On the Mac a watched build must also be Seedwell's Developer ID (the installer checks, after unpacking).
+    let developer_id = if os::RELEASE_SECTION.is_none() { "--developer-id\n" } else { "" };
+    assert_eq!(args, format!("--zip\n{}\n--sha256\n{sha}\n{developer_id}{}\n", zip.display(), dir.path().display()));
     // The watcher runs on the real clock.
     assert_eq!(u.model(unix_ms()).status, format!("Installing {v} (development build)…"));
     // It did not start: the next launch remembers it, and the folder does not offer it again.
@@ -504,6 +528,74 @@ fn a_watched_folder_installs_a_newer_build_as_it_appears_and_not_a_failed_one() 
     put(3);
     std::thread::sleep(std::time::Duration::from_millis(1500));
     assert!(!ran.exists(), "no longer watched");
+}
+
+/// Anyone who can write to a shared folder can put files there: only a build signed with a trusted build key, whose
+/// zip is the one signed, is installed from it.
+#[cfg(unix)]
+#[test]
+fn a_watched_folder_installs_only_a_build_signed_with_a_trusted_key() {
+    let (core, dir) = mock();
+    idle(&core);
+    let (script, ran) = fake_installer(dir.path());
+    let builds = dir.path().join("builds");
+    std::fs::create_dir(&builds).unwrap();
+    set_dev(&core, true, Some(&builds));
+    let u = dev_updates(&core, 1, "http://127.0.0.1:9", &script, T0);
+    let status = |want: &str| {
+        for _ in 0..150 {
+            if u.model(unix_ms()).status.contains(want) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        panic!("the status never said {want:?}: {}", u.model(unix_ms()).status);
+    };
+    status("no build there yet");
+    let v = format!("{}.2", current());
+
+    // The old unsigned latest.json is not a build any more.
+    let zip = builds.join(os::release_zip(&v));
+    std::fs::write(&zip, "a build").unwrap();
+    let sha = sha256_of(&zip).unwrap();
+    std::fs::write(builds.join("latest.json"), format!(r#"{{"version":"{v}","zip":"{}","sha256":"{sha}"}}"#, os::release_zip(&v))).unwrap();
+    std::fs::write(builds.join(trs_buildsig::FILE), "{}").unwrap();
+    status("is not a signed build manifest");
+
+    // Signed by a key nobody trusts.
+    let stranger = trs_buildsig::SigningKey::from_seed_hex(&"09".repeat(32)).unwrap();
+    std::fs::remove_file(builds.join(trs_buildsig::FILE)).unwrap();
+    publish(&builds, &v, "a stranger's build", &stranger);
+    status("does not trust");
+
+    // The user's manifest (signed aside), with another zip under the signed name: waits, never installs that zip.
+    let stage = dir.path().join("stage");
+    std::fs::create_dir(&stage).unwrap();
+    publish(&stage, &v, "the user's build", &test_key());
+    let signed = std::fs::read(stage.join(trs_buildsig::FILE)).unwrap();
+    std::fs::write(&zip, "someone else's build").unwrap();
+    std::fs::write(builds.join(trs_buildsig::FILE), &signed).unwrap();
+    status("is not the build build.json signed");
+
+    // The manifest changed after signing (another checksum put in).
+    let text = String::from_utf8(signed.clone()).unwrap();
+    let theirs = sha256_of(&zip).unwrap();
+    let tampered = text.replace(&sha256_of_text("the user's build"), &theirs);
+    assert_ne!(tampered, text);
+    std::fs::write(builds.join(trs_buildsig::FILE), tampered).unwrap();
+    status("does not match it");
+    assert!(!ran.exists(), "nothing was installed");
+
+    // The signed zip arrives after all: that one is installed.
+    std::fs::write(&zip, "the user's build").unwrap();
+    std::fs::write(builds.join(trs_buildsig::FILE), &signed).unwrap();
+    let args = wait_for(&ran);
+    assert!(args.starts_with(&format!("--zip\n{}\n--sha256\n{}\n", zip.display(), sha256_of_text("the user's build"))), "{args}");
+}
+
+fn sha256_of_text(t: &str) -> String {
+    use sha2::Digest as _;
+    sha2::Sha256::digest(t.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
 }
 
 #[test]

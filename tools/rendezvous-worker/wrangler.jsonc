@@ -1,0 +1,13 @@
+// The developer's way to deploy the Seedwell rendezvous (README.md). Seedwell's own setup (Settings > Folder Sync)
+// uploads the same worker.js with the same binding and migration through the Cloudflare API.
+{
+  "name": "seedwell-rendezvous",
+  "main": "worker.js",
+  "compatibility_date": "2026-10-01",
+  "workers_dev": true,
+  "durable_objects": {
+    "bindings": [{ "name": "RENDEZVOUS", "class_name": "Rendezvous" }]
+  },
+  // SQLite-backed Durable Objects: the ones the free plan includes.
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Rendezvous"] }]
+}

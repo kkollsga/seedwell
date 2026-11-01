@@ -9,7 +9,8 @@
 #
 # Affected = the crates whose files changed plus every workspace crate that depends on them. Clippy
 # and the tests (cargo nextest, every test binary in parallel) run for those only; the app build and
-# the Swift tests only when app/ or trs-ffi is affected. A change to Cargo.toml, Cargo.lock, the
+# the Swift tests only when app/ or trs-ffi is affected (the rendezvous Worker's node tests with trs-rendezvous, when
+# Node is installed). A change to Cargo.toml, Cargo.lock, the
 # toolchain or the nextest config means everything. Documentation-only changes run nothing.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -53,6 +54,8 @@ app = False
 if not full and not wanted:
     for f in files:
         if f.startswith("app/"): app = True
+        # The rendezvous Worker is embedded in trs-rendezvous (include_str!).
+        if f.startswith("tools/rendezvous-worker/") and not f.endswith(".md"): wanted.add("trs-rendezvous")
         for name, (d, _) in crates.items():
             if f.startswith(d + "/") and not f.endswith(".md"): wanted.add(name)
 if full: wanted = set(crates)
@@ -97,6 +100,14 @@ fi
 if [ ${#args[@]} -gt 0 ]; then
   cargo clippy "${args[@]}" --all-targets --locked -q -- -D warnings
   cargo nextest run "${args[@]}" --locked --status-level fail --final-status-level slow ${extra[@]+"${extra[@]}"}
+fi
+# The rendezvous Worker's own tests (worker.js against a local fake of the Workers runtime), when Node is here.
+if [[ " $affected " == *" trs-rendezvous "* ]] && [ ${#extra[@]} -eq 0 ]; then
+  if command -v node >/dev/null; then
+    (cd tools/rendezvous-worker && node --test --test-reporter=dot test.mjs)
+  else
+    echo "check: skipped the rendezvous Worker's tests (no node)"
+  fi
 fi
 if [ "$CHECK_APP" = 1 ]; then
   SEEDWELL_PROFILE=dev bash app/build.sh >/dev/null

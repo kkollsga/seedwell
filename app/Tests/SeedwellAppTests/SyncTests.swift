@@ -12,7 +12,7 @@ import Testing
         SyncFolder(id: id ?? "ID-\(name)", name: name, path: "/Users/me/Seedwell/\(name)", access: access, role: role, shareUntilS: nil, state: state,
                    files: 10, bytes: bytes, needFiles: need > 0 ? 3 : 0, needBytes: need, rateIn: rate, rateOut: 0,
                    connected: connected, members: connected, conflicts: conflicts, lanOnly: false, issues: [], error: nil, lastSyncedS: nil,
-                   channelId: nil, onDemand: false, unavailable: 0)
+                   channelId: nil, onDemand: false, unavailable: 0, progress: nil, problem: nil, waiting: nil, gone: [], canReshare: false)
     }
 
     static func folder(_ state: SyncState, bytes: UInt64 = 1_000_000_000, need: UInt64 = 0, rate: UInt64 = 0,
@@ -34,6 +34,18 @@ import Testing
         let guest = SyncMember(deviceId: "G", name: "G", user: "", role: .readWrite, online: false, isMe: false, expiresS: 1_800_000_000)
         #expect(SyncText.memberLine(guest, device: nil) == "Offline · until \(Fmt.day(1_800_000_000))", "the day in the user's style")
         #expect(SyncText.linkLine("hello", info: nil) == "Not a Seedwell folder link")
+    }
+
+    @Test func aFolderSaysWhomItWaitsForAndOffersWhatTheUserCanDo() {
+        var f = Self.folder()
+        f.waiting = "Waiting for Mac mini (last seen 3 days ago: nothing answers at 192.168.68.57:55799)"
+        #expect(SyncText.subtitle(f) == f.waiting, "the row and the page show the core's sentence")
+        let gone = SyncGoneDevice(deviceId: "G", name: "Mac mini", lastSeenS: UInt64(Date().timeIntervalSince1970) - 3 * 86_400)
+        let p = SyncText.gonePrompt(gone, name: f.name, channel: false)
+        #expect(p.line == "Mac mini was last seen 3 days ago" && p.button == "Remove from Folder…" && p.title == "Remove Mac mini from “Photos”?")
+        #expect(SyncText.gonePrompt(gone, name: "Plans", channel: true).button == "Remove from Channel…")
+        let r = SyncText.resharePrompt(f)
+        #expect(r.button == "Share Again from This Mac…" && r.title == "Share “Photos” again from this Mac?" && r.confirm == "Share Again")
     }
 
     @Test func aDayCarriesItsYearOnlyWhenItIsNotThisYear() {

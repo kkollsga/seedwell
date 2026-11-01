@@ -141,6 +141,7 @@ pub fn describe(r: &Request) -> String {
         Request::SyncRevokeInvite(p) => format!("revoke link {} of folder {}", clip(&p.invite, 40), folder(&p.folder)),
         Request::SyncSetRole(p) => format!("make device {} {} in folder {}", clip(&p.device, 60), clip(&p.role, 20), folder(&p.folder)),
         Request::SyncRemoveDevice(p) => format!("remove device {} from folder {}", clip(&p.device, 60), folder(&p.folder)),
+        Request::SyncReshare(p) => format!("share folder {} again from this {}", folder(&p.folder), trs_platform::computer!()),
         Request::SyncSetShareUntil(p) => match (p.days, p.extend) {
             (0, _) => format!("share folder {} with no end", folder(&p.folder)),
             (d, true) => format!("share folder {} {d} days longer", folder(&p.folder)),
@@ -192,6 +193,7 @@ pub fn describe(r: &Request) -> String {
             Some(c) => format!("wake-up command of channel {}: {}", folder(&p.channel), clip(c, 200)),
             None => format!("no wake-up command for channel {}", folder(&p.channel)),
         },
+        Request::ChatSetAgents(p) => format!("set Agents: {} for channel {}", clip(&p.agents, 10), folder(&p.channel)),
         Request::ChatLeave(p) => format!("leave channel {}", folder(&p.channel)),
         Request::ChatNewTopic(p) => format!("make the topic {} in channel {}", clip(&p.title, 100), folder(&p.channel)),
         Request::ChatDmSend(p) => format!("write {} bytes{} privately to device {}", p.body.len(), if p.json { " of JSON" } else { "" }, clip(&p.device, 60)),

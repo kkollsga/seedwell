@@ -76,6 +76,70 @@ pub struct FolderStatus {
     /// Files no device can give right now (SPEC §7G.11): not counted as needed; "N files unavailable: no device has
     /// them". Removed only by the user deleting such an item (on a device where the folder is on demand).
     pub unavailable: u64,
+    /// Joining: what it does now to find an owner or admin, as a sentence ("Looking for Anna's Mac mini on the
+    /// local network…"); `None` once admitted.
+    pub progress: Option<String>,
+    /// Joining: the last thing that went wrong ("Anna's Mac mini at 192.168.68.57:55799: no answer").
+    pub problem: Option<String>,
+    /// As an owner or admin: the attempts to join with a link that this device refused, newest last.
+    pub join_attempts: Vec<JoinAttemptStatus>,
+    /// Admitted, with members of which none is connected: whom it waits for, since when, and why it cannot reach
+    /// one ("Waiting for Kristian's Mac mini (last seen 3 days ago: nothing answers at 192.168.68.57:55799)",
+    /// "Waiting for 2 devices: Mac mini (3 days ago), Makro (1 hour ago)"). `None` otherwise.
+    pub waiting: Option<String>,
+    /// As an owner: the members not connected and not seen for a day or more (or never here), which this device may
+    /// remove (SPEC §7G.5). Nothing is removed unless the user says so.
+    pub gone: Vec<GoneDevice>,
+    /// As a read-write or read-only member of a full folder whose every owner and admin is gone (nobody can admit
+    /// devices or change roles any more): it may be shared again from this device ([`crate::SyncHandle::reshare`]).
+    pub reshare: bool,
+}
+
+/// A member of a folder or channel that has not been connected for a day or more (or never here).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GoneDevice {
+    /// Its id, as text.
+    pub id: String,
+    /// Its name ("device MFZWI3D" when it never gave one).
+    pub name: String,
+    /// When it was last connected, Unix seconds; `None`: never here.
+    pub last_seen_s: Option<u64>,
+}
+
+/// An attempt to join with a link that this device refused.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JoinAttemptStatus {
+    /// When, Unix seconds.
+    pub at_s: u64,
+    /// The device that tried, as text.
+    pub device_id: String,
+    /// Its name (empty when it did not say).
+    pub name: String,
+    /// Its client (`Seedwell 0.1.9`).
+    pub client: String,
+    /// Why it was refused.
+    pub reason: String,
+}
+
+impl From<&crate::shared::JoinAttempt> for JoinAttemptStatus {
+    fn from(a: &crate::shared::JoinAttempt) -> Self {
+        JoinAttemptStatus { at_s: a.at_s, device_id: a.device.to_string(), name: a.name.clone(), client: a.client.clone(), reason: a.reason.clone() }
+    }
+}
+
+/// A device of a folder or channel here that is not connected now.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OfflineDevice {
+    /// Its id, as text.
+    pub id: String,
+    /// Its name.
+    pub name: String,
+    /// When a session with it last ended (or began), Unix seconds; `None`: never connected here.
+    pub last_seen_s: Option<u64>,
+    /// Why the last attempt to connect to it failed.
+    pub problem: Option<String>,
+    /// The folders and channels it is in (ids, as text).
+    pub folders: Vec<String>,
 }
 
 /// A connected device.
@@ -112,4 +176,6 @@ pub struct Snapshot {
     pub folders: Vec<FolderStatus>,
     /// The connected devices.
     pub devices: Vec<DeviceStatus>,
+    /// The devices of the folders and channels here that are not connected.
+    pub offline: Vec<OfflineDevice>,
 }

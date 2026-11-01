@@ -159,6 +159,12 @@ pub struct RelayStats {
 }
 
 impl Net {
+    /// Forgets the backoffs of relayed and punched attempts (the network changed: try again at once).
+    pub(crate) fn clear_backoffs(&self) {
+        lock(&self.attempts).clear();
+        lock(&self.joins).clear();
+    }
+
     /// The counters.
     pub fn stats(&self) -> RelayStats {
         RelayStats {
@@ -213,7 +219,8 @@ pub(crate) fn may_relay(h: &SyncHandle, a: &PeerHandle, b: &PeerHandle) -> bool 
     if !s.relay_own_devices && !s.relay_everyone {
         return false;
     }
-    h.ctx().registry.spaces().iter().any(|f| {
+    // (Not the devices group: counting siblings as own devices is for later.)
+    h.ctx().registry.spaces().iter().filter(|f| f.kind != crate::shared::SpaceKind::Devices).any(|f| {
         let (Some(fa), Some(fb)) = (a.access(&f.id), b.access(&f.id)) else { return false };
         s.relay_everyone
             || (s.relay_own_devices

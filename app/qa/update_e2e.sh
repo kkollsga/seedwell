@@ -8,8 +8,10 @@
 # Then development builds (SPEC 12A), on the same isolated copy with "Allow development builds" on: a build handed
 # over with `seedwell update install` (kept app, watchdog, reopened with its own --state-dir); a broken build (its
 # executable exits at once) put back by the watchdog and remembered as failed; a build that appears in a watched
-# folder; and the switch turned off, which installs the (loopback) release although it is older than the build.
-# Needs a built app (bash app/build.sh).
+# folder (only once its build.json is signed: with a throwaway test key, which this isolated copy is told to trust by
+# SEEDWELL_TEST_BUILD_KEY; the user's app never reads that variable); and the switch turned off, which installs the
+# (loopback) release although it is older than the build.
+# Needs a built app (bash app/build.sh); builds the signer (trs-buildsig) itself.
 set -euo pipefail
 export QA_ROOT=/private/tmp/claude-501/seedwell-qa-update
 source "$(dirname "$0")/env.sh"
@@ -135,10 +137,17 @@ build_zip() {
   echo "$QA_ROOT/builds/Seedwell-$1.zip"
 }
 cli() { "$CLI" --socket "$STATE/control.sock" "$@"; }
+status_says() { cli update | grep -q "$1"; }
+# A throwaway build key for the watched folder (never the user's: that one is in the Keychain and not used here).
+(cd "$REPO" && cargo build --release --locked --quiet -p trs-buildsig --bin seedwell-build-sign)
+SIGNER="$REPO/target/release/seedwell-build-sign"
+TEST_SEED=$("$SIGNER" keygen 2>/dev/null)
+TEST_KEY=$(printf '%s' "$TEST_SEED" | "$SIGNER" public)
 
 echo "==> Development build $CUR.2 handed over with seedwell update install"
 copy_app "$APP" "$INST_APP" "$CUR" "$CUR.1"
-SEEDWELL_UPDATE_REPO="$BASE" SEEDWELL_WATCHDOG_SECS=75 detach "$INST_APP/Contents/MacOS/SeedwellApp" \
+# The installer reopens the app with its environment: every build of this run trusts the test key.
+SEEDWELL_TEST_BUILD_KEY="$TEST_KEY" SEEDWELL_UPDATE_REPO="$BASE" SEEDWELL_WATCHDOG_SECS=75 detach "$INST_APP/Contents/MacOS/SeedwellApp" \
   --state-dir "$STATE" --home-root "$HOMEROOT" --qa-control "$CTL" --background > "$QA_ROOT/app.log" 2>&1 &
 wait_started "$CUR.1" 60 "the first build starts and marks itself"
 cli update | grep -q "Development builds: on" || { echo "FAIL: update status"; cli update; exit 1; }
@@ -155,16 +164,22 @@ cli update | grep -q "$CUR.3 didn't start; back on $CUR.2" || { echo "FAIL: it d
 grep -q "\"$CUR.3\"" "$STATE/updates.json" || { echo "FAIL: $CUR.3 not remembered as failed"; cat "$STATE/updates.json"; exit 1; }
 echo "PASS (a build that does not start is replaced by the one before and not retried)"
 
-echo "==> A watched folder: $CUR.4 appears and is installed"
+echo "==> A watched folder: $CUR.4 appears, and is installed only once build.json is signed with a trusted key"
 mkdir -p "$QA_ROOT/watch"
 cli update watch "$QA_ROOT/watch"
 zip4=$(build_zip "$CUR.4")
 SHA4=$(shasum -a 256 "$zip4" | cut -d' ' -f1)
 cp "$zip4" "$QA_ROOT/watch/"
-printf '{"version":"%s","minimum_macos":"15.0","zip":"Seedwell-%s.zip","sha256":"%s"}\n' "$CUR.4" "$CUR.4" "$SHA4" > "$QA_ROOT/watch/.latest.json.part"
-mv "$QA_ROOT/watch/.latest.json.part" "$QA_ROOT/watch/latest.json"
+# The unsigned latest.json of earlier builds, and a build.json signed by a key nobody trusts: nothing is installed.
+printf '{"version":"%s","minimum_macos":"15.0","zip":"Seedwell-%s.zip","sha256":"%s"}\n' "$CUR.4" "$CUR.4" "$SHA4" > "$QA_ROOT/watch/latest.json"
+qa_until 30 status_says 'no build.json' || { echo "FAIL: an unsigned folder"; cli update; exit 1; }
+"$SIGNER" keygen 2>/dev/null | "$SIGNER" add "$QA_ROOT/watch" "Seedwell-$CUR.4.zip" --sha256 "$SHA4" >/dev/null 2>&1
+qa_until 30 status_says 'does not trust' || { echo "FAIL: a stranger's key"; cli update; exit 1; }
+sleep 5
+[ "$(installed_version)" = "$CUR.2" ] || { echo "FAIL: installed $(installed_version) from an unsigned or untrusted folder"; exit 1; }
+printf '%s' "$TEST_SEED" | "$SIGNER" add "$QA_ROOT/watch" "Seedwell-$CUR.4.zip" --sha256 "$SHA4" --minimum 15.0 >/dev/null 2>&1
 wait_started "$CUR.4" 150 "the watched folder's build"
-echo "PASS (a build put in the watched folder is installed)"
+echo "PASS (a build in the watched folder is installed only when signed with a trusted build key)"
 
 echo "==> Allow development builds off: back to the release $CUR (older than $CUR.4)"
 copy_app "$APP" "$QA_ROOT/rel-app/Seedwell.app" "$CUR"

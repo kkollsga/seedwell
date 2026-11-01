@@ -31,6 +31,12 @@
     <DefineConstants Condition="'$(SeedwellRelease)' == 'true'">$(DefineConstants);SEEDWELL_RELEASE</DefineConstants>
   </PropertyGroup>
 
+  <!-- dev-build.ps1 (through release-zip.ps1 -DevVersion) builds with -p:SeedwellDevVersion=X.Y.Z.N: a development build
+       (SPEC 12A), which says its version in the assembly metadata SeedwellDevVersion (the Mac's Info.plist key). -->
+  <ItemGroup Condition="'$(SeedwellDevVersion)' != ''">
+    <AssemblyMetadata Include="SeedwellDevVersion" Value="$(SeedwellDevVersion)" />
+  </ItemGroup>
+
   <ItemGroup>
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.6.4" />
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.28000.2957" />

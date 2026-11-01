@@ -107,7 +107,8 @@ async fn permission_matrix_every_method_every_level() {
             | Method::SyncRemove
             | Method::SyncConflicts
             | Method::SyncMembers
-            | Method::SyncInvites => json!({"folder": "Docs"}),
+            | Method::SyncInvites
+            | Method::SyncReshare => json!({"folder": "Docs"}),
             Method::SyncRevokeInvite => json!({"folder": "Docs", "invite": "00"}),
             Method::SyncSetRole => json!({"folder": "Docs", "device": "NOPE", "role": "admin"}),
             Method::SyncRemoveDevice => json!({"folder": "Docs", "device": "NOPE"}),
@@ -149,6 +150,7 @@ async fn permission_matrix_every_method_every_level() {
             Method::ChatDmSend => json!({"device": "NOPE", "body": "hi"}),
             Method::ChatDmDelete => json!({"device": "NOPE"}),
             Method::ChatSetWake => json!({"channel": "Plans", "command": "true"}),
+            Method::ChatSetAgents => json!({"channel": "Plans", "agents": "no"}),
             _ => json!({}),
         }
     };
@@ -170,6 +172,26 @@ async fn permission_matrix_every_method_every_level() {
                 (Ok(_), true) => {}
             }
         }
+    }
+}
+
+/// Agents: Yes means no other limits (SPEC §7G.7): no channel method needs more than Control (reads: read-only),
+/// sharing and managing members included. Only what runs commands on this Mac (the wake-up command) and deleting a
+/// private conversation stay at Full.
+#[test]
+fn no_channel_method_needs_more_than_control_but_the_wake_command() {
+    for m in Method::ALL.iter().filter(|m| m.name().starts_with("chat.")) {
+        let most = match *m {
+            Method::ChatSetWake | Method::ChatDmDelete => Permission::Full,
+            _ => Permission::Control,
+        };
+        assert!(m.required() <= most, "{} needs {:?}", m.name(), m.required());
+    }
+    for m in [Method::ChatShare, Method::ChatSetRole, Method::ChatRemoveDevice, Method::ChatSetShareUntil, Method::ChatSetAgents] {
+        assert_eq!(m.required(), Permission::Control, "{}", m.name());
+    }
+    for m in [Method::ChatList, Method::ChatRead, Method::ChatMembers, Method::ChatTopics] {
+        assert_eq!(m.required(), Permission::ReadOnly, "{}", m.name());
     }
 }
 

@@ -22,6 +22,7 @@ channel too), proof, channel message and private message, decoded and encoded ba
 - [Invitations, links and proofs](#invitations-links-and-proofs)
 - [Channels](#channels)
 - [Private messages](#private-messages)
+- [Your devices](#your-devices)
 - [Other formats](#other-formats)
 - [Stored formats](#stored-formats)
 - [Evolution](#evolution)
@@ -78,7 +79,8 @@ channel too), proof, channel message and private message, decoded and encoded ba
    a folder the other device is a member of lists it with its issues until a session with it succeeds.
 
 2. **Join**, then, when both have the chat feature bit, **ChatJoin**, then, when both have the direct bit,
-   **DirectJoin** (a private conversation the session may stand for, see [Private messages](#private-messages)).
+   **DirectJoin** (a private conversation the session may stand for, see [Private messages](#private-messages)),
+   then, when both have the devices bit, **DevicesJoin** (the user's own devices, see [Your devices](#your-devices)).
    The dialing side proves first, for the folders and channels it believes the other device shares. The other side answers only for those the dialer
    proved, so a stranger who connects learns nothing about which folders or channels a device has. A listener
    with nothing to share sends a Close instead (with an invitation's refusal, `link: <reason>`).
@@ -121,6 +123,7 @@ channel too), proof, channel message and private message, decoded and encoded ba
 | 25 | HoldReply (holds bit) | `id` varint ‖ held (count ‖ n × bool), in the query's order |
 | 26 | RenameRequest (renames bit) | `id` varint (u32) ‖ `folder_id` (32) ‖ `from` str ‖ `to` str ‖ `seen` (32, a digest of the paths and versions at and below `from` the sender has) ‖ `ttl_ms` varint (u32): rename for the sender, as the receiver's own change, only if it can start within `ttl_ms` of receiving it |
 | 27 | RenameReply (renames bit) | `id` varint ‖ `outcome` u8 (0 done, 1 refused, 2 busy: could not start in time, and never will) ‖ `reason` str (≤ 512 B) |
+| 28 | DevicesJoin (devices bit, 0.1.13) | records of devices groups, each: `group_id` (32) ‖ proofs (as in Join): the sender's group, and, to a device of its current group, each group it moved on from (its grant there and the Moved statements, as grant proofs); sent once while a session starts, after DirectJoin (the dialer first, only to a device it believes is one of its own or, joining, to whoever it dialed for the group; the other side answers only for a group the dialer proved), and later for a group made, joined, confirmed or moved to meanwhile; a device moving to a new group proves nothing there (no proofs: its members know its key); empty when there is nothing to prove |
 | other | (unknown) | skipped |
 
 - **Version** (in entries and progress): `count ‖ n × (short device id, 8 bytes BE ‖ counter varint)`, sorted by
@@ -173,7 +176,11 @@ signed    = "seedwell-sync/v2/statement" ‖ folder_id ‖ kind ‖ body (with i
 | 4 | revoke | invitation id (16) ‖ `at_s` varint | owners and admins |
 | 5 | share until | `until_s` varint (0 = no end) ‖ `serial` varint ‖ `at_s` varint | owners |
 | 6 | profile (0.1.9) | `device_name` str (1 to 64 characters, no control characters) ‖ `user_name` str (empty = none, else as `device_name`) ‖ `serial` varint ‖ `at_s` varint | the device it names, while a member; its latest (by `serial`, then signature bytes) replaces the older ones |
-| 7 | channel (0.1.12) | `flags` varint (bit 0: an agent channel; other bits: none yet, kept and ignored) ‖ `at_s` varint | owners; a channel's, signed once when it is made |
+| 7 | channel (0.1.12) | `flags` varint (bit 0: open to agents, 0.1.12's agent channel; other bits: none yet, kept and ignored) ‖ `at_s` varint | owners; no longer written since 0.1.13 |
+| 8 | agents (0.1.13) | `open` u8 (0 = No, 1 = Yes; another value: the body is unknown) ‖ `serial` varint ‖ `at_s` varint | owners (channel key) and admins (device key); the latest of the owners' and current admins' (by `serial`, then `at_s`, then signature bytes) counts |
+| 9 | follow (0.1.13) | `target` u8 (1 folder, 2 channel; another value: unknown) ‖ `target_pk` (32) ‖ `name` str (≤ 255 B, no control characters) ‖ `on` u8 (0 or 1; another value: unknown) ‖ `serial` varint ‖ `at_s` varint | in a devices group only: a member, with its device key; per target the latest of a current member's (by `serial`, then `at_s`, then signature bytes) counts. Anywhere else it means nothing |
+| 10 | moved (0.1.13) | `target_pk` (32) ‖ `at_s` varint | in a devices group only: a member, with its device key: the group moved to the group with this key (its key changed after a removal). Of the current members' moved statements the lowest target group id counts |
+| 11 | rendezvous (0.1.13) | `url` str (≤ 200 B, no spaces or control characters; empty: none) ‖ `serial` varint ‖ `at_s` varint | in a devices group only: the device it is about, with its device key, while a member: the rendezvous (§7G.3) it publishes to; its latest (by `serial`, then signature bytes) counts. A device that never said one takes the newest non-empty one of another member; one that turned it off says empty and takes none |
 
 - A kind a device does not know, or a body it cannot read (a role it does not know), is kept as it came,
   checked by its signature only, stored, passed on unchanged, and gives no role.
@@ -185,12 +192,16 @@ signed    = "seedwell-sync/v2/statement" ‖ folder_id ‖ kind ‖ body (with i
   stands in until a profile arrives. A profile lives in its folder's or channel's membership, so it goes when that
   goes. Devices before 0.1.9 keep a profile from an admin or owner as unknown and pass it on; others' they leave
   out, and newer devices pass those on themselves.
-- **Agent channels** (0.1.12). A channel made by an agent (through the agent interface, never the user's in the app)
-  carries a channel statement with flag bit 0, signed with the channel key when it is made. Any owner's channel
-  statement with that bit marks the channel for good: nothing clears it, and no version signs one later. A member
-  device whose user has not set its own agent switch for the channel opens it to its agents at Read and post; the
-  switch the user sets wins. Devices before 0.1.12 keep the statement as an unknown kind (it comes from the owner),
-  store it, pass it on, and treat the channel as an ordinary one.
+- **Agents: Yes/No** (0.1.13). Whether a channel is open to agents on every member device is the latest agents
+  statement (kind 8) of an owner or a current admin; the next one takes a `serial` above every one known. An
+  owner's channel statement with flag bit 0 (0.1.12's agent channel, signed with the channel key when an agent made
+  it) counts as a Yes at serial 0, so any agents statement comes after it. No statement: No. A channel made with
+  Yes gets an owner's agents statement (serial 1); one made with No gets none.
+  - 0.1.12 read flag bit 0 as set for good and opened such a channel to its agents unless its user closed it; it
+    keeps an agents statement as an unknown kind and passes it on (an admin's too, while that admin is one there),
+    so to it a channel is open exactly while it carries the kind 7 mark: closed to its agents for a channel made or
+    switched on since, open even after a later No for one it marked. Nothing breaks either way.
+  - Devices before 0.1.12 keep both as unknown kinds, store them, pass them on, and see an ordinary channel.
 
 ## Invitations, links and proofs
 
@@ -206,12 +217,41 @@ check      = SHA-256("seedwell-sync/v2/link" ‖ what comes before it)[..2]
   does not know ("this link was made by a newer Seedwell: update Seedwell to use it"), a statement holding
   one is kept as unknown, and an owner or admin that cannot read a redeemed one tells the joining device that
   it runs an older Seedwell.
-- Query fields other than `name` (and, in a folder's link, `chat` and `chat_name`) are ignored.
+- Query fields other than `name` (and, in a folder's link, `chat`, `chat_name` and `chat_agents`; in a channel's,
+  `agents`; in all, `a`) are ignored.
+- **A link to pair a device** (0.1.13): `seedwell://devices/<the same>?name=<the device's name>[&a=…]`, an invitation
+  of the devices group made by a device (issuer: its device key, role Read & write, one use, 15 minutes). A folder's
+  or a channel's reader refuses it, and its reader refuses theirs; older versions do not know the prefix ("not a
+  Seedwell link").
+- **`agents=yes`** (0.1.13) in a channel's link (`chat_agents=yes` for the channel of a folder's link) says the
+  channel was open to agents when the link was made, so the joining device lets its agents use the channel while
+  it waits to be admitted. Only a hint: once admitted, the membership decides. Older versions ignore it.
 - **A link for a folder and its channel** is one folder link that also carries the channel's invitation:
   `seedwell://sync/<the folder's>?name=<name>&chat=<the channel's base32, as in its own link>&chat_name=<its name>`.
   The two invitations are separate (each in its own membership, with the same role, uses and expiry); the joining
   device checks both and joins both, or only the folder when the channel is there already. A damaged `chat` part,
   or one naming the folder itself, makes the whole link damaged. A channel's link ignores a `chat` field.
+- **`a=<base32>`** (0.1.13, last in the link): where the device that made the link can be reached, sealed so that
+  only someone with the whole link can read it (`src/reach.rs`):
+
+  ```text
+  sealed  = version u8 (1) ‖ nonce (12) ‖ ChaCha20-Poly1305(key, nonce, aad = invite id, plain)
+  prk     = HKDF-SHA256-Extract(salt = "seedwell-sync/v2/addresses", ikm = token seed (32))
+  key     = HKDF-Expand(prk, "key" ‖ invite id, 32)
+  nonce   = HMAC-SHA256(HKDF-Expand(prk, "nonce" ‖ invite id, 32), plain)[..12]   (deterministic, per plaintext)
+  plain   = device id (32) ‖ name str (≤ 40 bytes) ‖ count u8 ‖ count × address ‖ field*
+  address = kind u8 ‖ ip (4 | 16) ‖ port u16 BE    kind 4 / 6: IPv4 / IPv6 on a local network, 0x84 / 0x86: public
+  field   = tag u8 ‖ str                           tag 1: the maker's rendezvous URL (≤ 200 bytes)
+  ```
+
+  At most 4 local addresses and 1 public one are read; an unknown address kind ends the list, and with it the
+  fields. After a whole list, the fields are read: a known tag is kept, an unknown one skipped by its length, a
+  damaged one ends them (0.1.12 reads no field: it ignores everything after the list). The rendezvous URL says where
+  the maker publishes its address record (below, "Rendezvous records"): the joining device looks it up there when the
+  addresses do not answer. A link for a folder and its channel has one block, sealed under the folder's token, for both. A block
+  that does not open (damaged, another link's, another version) is left out and the link joins as one without it;
+  older versions ignore the field. The joining device dials these addresses, expecting that device, alongside LAN
+  discovery and the DHT.
 
 **Proofs** (in a Join, per folder): `kind u8 ‖ bytes`.
 
@@ -219,6 +259,7 @@ check      = SHA-256("seedwell-sync/v2/link" ‖ what comes before it)[..2]
 |---|---|---|
 | 4 | grant | a statement (the sender's grant, or the grant of the admin that signed it) |
 | 5 | redeem | invitation ‖ the token key's signature of `"seedwell-sync/v2/redeem" ‖ folder_id ‖ the joining device's pk ‖ TLS exporter` |
+| 6 | sibling (devices bit, 0.1.13) | the sender's devices group id (32): it joins a folder or channel that one of its own devices put on all of them. Its identity is the session's TLS key; an owner or admin admits it only when that key is a member of its own devices group with this id and the folder or channel follows there |
 | other | (unknown) | carried, never trusted |
 
 A member also sends the owners' latest share-until statement as a grant proof, so a device that was cut off
@@ -298,6 +339,39 @@ direct     = fields (varint length ‖ bytes) ‖ signature (64)
 - `seq` counts the author's private messages, to anyone (1, 2, …). Order and the cap are as for a channel (10 000
   messages or 50 MB per conversation, the oldest dropped first).
 
+## Your devices
+
+0.1.13, feature bit 4 (`devices`). The user's own devices form a **devices group**: a membership like a channel's
+with no messages, whose key pair is the **user key** (every member is an owner and holds its secret, received with
+OwnerKey). Its id, discovery topic and LAN tag come from its public key as for any folder.
+
+- **Pairing.** The joining device redeems a pairing link in a DevicesJoin. Only the device that issued the
+  invitation admits, and only once its user confirms (the two screens show the joining device's id): then it signs an
+  owner grant carrying the invitation (one use) and sends the secret. Until then the session stays up with the group
+  not shared over it. Refusing revokes the invitation.
+- **Removal is final** in a devices group: a device an owner removed is never a member again, whatever grant comes
+  later. Leaving signs the leaving device's own removal.
+- **The key changes after a removal.** The removing device makes a new group (a new key): owner grants for the
+  current members but the removed ones, the Follow statements signed again, and a **moved** statement (kind 10) in the
+  old group naming the new key; it deletes the old key. A member that sees a current member's moved statement moves
+  too (saying so in the old group), deletes the old key, and joins the new group with no proofs: the new group's
+  members admit it by its TLS key, which their grants name, and send the new key with OwnerKey. A device that was
+  away names the old group in its DevicesJoin; a device of the new group whose current group lists it answers with
+  its grant there and the moved statements, and the away device moves. Groups a device moved on from are kept without
+  their key (at most 8), never announced or looked up, and answered for only to devices of its current group. Two
+  moves at once settle on the lowest target group id; a device that moved to another one moves to the winner (saying
+  so in the group it leaves) and, holding the winner's key, removes there the devices removed in the group where they
+  split, which changes the key again. Of a group a device moved on from, only moves made by devices of its current
+  group count. A device that sees a removal in its group and no move changes the key itself (the others after a
+  device left).
+- **Follow** statements (kind 9) say which folders and channels are on all the user's devices. A member that does
+  not have one joins it with no invitation and proves `sibling` (proof 6) to the members that are its siblings. An
+  owner sibling signs `grant{device, admin}` with the folder key; an admin sibling makes a one-use invitation of its
+  own (Read & write, one hour) and signs `grant{device, read & write, invitation}`, exactly an admin's admission. They
+  do so when the group or the Follow changes (push) and when a sibling proves itself (pull); an owner raises a sibling
+  it finds at Read & write to Admin. These are ordinary kind 1 statements: every member accepts them, also one without
+  the devices bit, which never sees the group, proof 6 or type 28.
+
 ## Other formats
 
 - **LAN announcements** (`crates/sync-net/src/lan.rs`): a fixed-size signed UDP packet that starts with the magic
@@ -307,6 +381,37 @@ direct     = fields (varint length ‖ bytes) ‖ signature (64)
   `HMAC-SHA256(lan key, "seedwell-sync/v1/lan-tag" ‖ hour u32 BE ‖ nonce)[..8]`.
 - **The relay protocol** (`crates/sync-net/src/relay_server.rs`): its own magic `SWRELAY1`, versioned the same
   way.
+
+## Rendezvous records
+
+A device that uses a rendezvous (SPEC §7G.3: the user's own Worker on Cloudflare, `tools/rendezvous-worker`) keeps
+one record there of where it can be reached (`src/rendezvous.rs`). Any device that knows its device id can find
+and open it; the rendezvous, which sees only the record id, cannot.
+
+```text
+id        = SHA-256("seedwell-sync/v2/rendezvous/id" ‖ device id)          URL: /v1/r/<64 lower-case hex digits>
+prk       = HKDF-SHA256-Extract(salt = "seedwell-sync/v2/rendezvous", ikm = device id)
+key       = HKDF-Expand(prk, "key", 32)
+record    = version u8 (1) ‖ nonce (12, random) ‖ ChaCha20-Poly1305(key, nonce, aad = version ‖ id, plain)
+plain     = body ‖ signature (64)
+body      = device pk (32) ‖ issued u64 BE (Unix ms) ‖ count u8 ‖ count × address (as in the link block) ‖ field*
+signature = Ed25519 by the device key over "seedwell-sync/v2/rendezvous/record" ‖ id ‖ body
+```
+
+A reader checks that the key in the body is the device's (its SHA-256 is the device id) and that the signature
+verifies, keeps the newest record it has seen of each device (an older one served again changes nothing) and uses
+none older than 7 days. At most 8 local addresses and 1 public one; a record is at most 1024 bytes; fields of a later
+version (`tag u8 ‖ str`, none yet) are skipped.
+
+The Worker's API (v1; `tools/rendezvous-worker/README.md`): `GET /v1`, `GET /v1/r/<id>` (anyone; the records are
+sealed), and `PUT` / `DELETE /v1/r/<id>` with `Seedwell-Key` (the device's **write key** for that rendezvous: a random
+Ed25519 key in its secret store, never the device key), `Seedwell-Time` (Unix ms) and `Seedwell-Signature` (by the
+write key over `"seedwell-rendezvous/v1\n" ‖ method ‖ "\n" ‖ id ‖ "\n" ‖ time ‖ "\n" ‖ hex(SHA-256(body))`). The
+first write registers the write key (trust on first use); a write with another key is refused, and so is one whose
+time is more than 5 minutes off or not later than the last write's. Records live 7 days after their last write.
+
+Members learn where a device publishes from its signed address record (`Addresses`): an entry
+`rendezvous+https://…` among its addresses, which versions before 0.1.13 skip (it does not parse as an address).
 
 ## Stored formats
 
@@ -325,11 +430,10 @@ direct     = fields (varint length ‖ bytes) ‖ signature (64)
   Appended to as messages arrive and written anew when old ones are dropped. A file of format 1 (0.1.8: the
   records in the clear) is sealed when opened; one of a later format is refused; a cut-off last record, or one
   that does not open, is dropped. Its membership is a `.members` file as
-  for folders; its settings on this device (name, muted, the agent switch, the wake-up command, what was read)
-  are a `[[channel]]` entry in `sync.toml` (`topic_read` keeps what was read in each topic). Its `agents` is the
-  switch as the user set it (`off`, `read`, `post`); empty (never set) means the channel's default: Read and post
-  for an agent channel, else off (0.1.12; before, empty meant off, so an older version reading the file keeps every
-  channel the user never opened closed).
+  for folders; its settings on this device (name, muted, the wake-up command, what was read) are a `[[channel]]`
+  entry in `sync.toml` (`topic_read` keeps what was read in each topic). 0.1.12 kept a per-device agent switch there
+  (`agents`: `off`, `read`, `post`); since 0.1.13 the channel's membership decides (kind 8), and the key is ignored
+  when read and dropped when the file is next written.
 - **Private messages** (`sync/dm-<device id>.chat`, one per conversation): `"SWDM" ‖ format varint (2) ‖ n ×
   (varint length ‖ sealed record)`, a record being `received_ms varint ‖ has_body u8 [‖ body bytes] ‖ direct
   message` (the body only in the author's own copies; those to this device are opened again when read), sealed
@@ -338,6 +442,13 @@ direct     = fields (varint length ‖ bytes) ‖ signature (64)
   read); the agent switch and the next `seq` are its `[direct]` table. 0.1.8's single `sync/direct.chat` (format 1,
   in the clear, with messages carried for others) and `sync/direct.keys` are split into conversations when read,
   the carried messages dropped, and both deleted.
+- **Your devices** (0.1.13): the group's membership is `sync/<group id>.members` (as a folder's); the group is the
+  `[my_devices]` table of `sync.toml` (`id`, `group_pk`, its devices as `[[my_devices.device]]`, `skip`: what the user
+  took off this device, `mode`: `full`, `previous`: the groups it moved on from, `pending_remove`: devices removed in
+  one of those that it still takes out of the current group). The user key is the secret store's `folder-<group id>`,
+  never in `sync.toml`; the groups moved on from keep their `.members` files, not their keys.
+  A version before 0.1.13 drops the table when it writes the file: that device forgets the group (pair it again after
+  updating); its folders keep syncing.
 
 ## Evolution
 
@@ -362,6 +473,7 @@ What a later version may change, and how:
    | 1 | private messages only between their two devices, over a session no device relays; DirectJoin (type 23) | 0.1.9 |
    | 2 | holds: answers HoldQuery (type 24) with HoldReply (type 25); only a device with it is asked | 0.1.12 |
    | 3 | renames: answers RenameRequest (type 26) with RenameReply (type 27); only a device with it is asked | 0.1.12 |
+   | 4 | devices: the user's own devices (DevicesJoin, type 28; the sibling proof, kind 6); only a device with it is sent either | 0.1.13 |
 
 5. **Breaking changes** raise `PROTOCOL`, the highest version spoken. The new build keeps `MIN_PROTOCOL` one
    behind for at least one release (N-1), so devices a release apart still sync at the older version, and
@@ -382,8 +494,11 @@ What a later version may change, and how:
 - `crates/sync-net/tests/it/chat.rs`: channels and topics on loopback, including a device without the chat bit,
   which gets no channel messages while its folders still sync; `direct.rs`: private messages (sealed to the
   recipient, carried by a third member, delivered later through it, tampered with).
+- `crates/sync-net/tests/it/devices.rs`: the user's own devices on loopback: pairing confirmed (or refused) on the
+  device that made the link, folders and channels on all devices, the admin path and the owner raising it, a member
+  without the devices bit accepting a sibling from the pushed grant, final removal, the skip list, Start Over.
 - `tools/sync-compat.sh OTHER`: this build's daemon against another `seedwell` binary, on loopback with
   temporary state: share both ways (each side the owner in turn), sync files, change a role, chat in a channel,
-  remove a device.
+  remove a device; and that the CLI has no pairing command (pairing is the app's alone).
   The CLI tests run it with this build on both sides. From 0.1.7 on, CI should also run it against the latest
   release's CLI (`Seedwell.app/Contents/MacOS/seedwell`).

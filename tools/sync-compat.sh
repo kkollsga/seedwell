@@ -11,6 +11,11 @@
 # the joiner from the folder (it is cut off). Prints
 # PASS or FAIL per step and exits 1 if any failed.
 #
+# Your own devices (0.1.13): pairing is the app's alone (no CLI or agent method pairs, by design), so this script
+# checks only that this build's CLI has no pairing command. That an older member syncs with a device admitted from
+# the user's own devices (the grant a sibling pushes, a plain kind 1 statement) is checked on loopback by
+# crates/sync-net/tests/it/devices.rs, with a member that speaks the protocol without the devices bit.
+#
 # The CLI tests run it with this build on both sides (crates/cli/tests/it/sync.rs). 0.1.6 is the first release
 # with sync, so there is no older one to run against yet: from 0.1.7 on, CI should run it against the latest
 # release's CLI as well.
@@ -66,8 +71,9 @@ print("" if v is None else v)' "$1"
 start() {
   local name="$1" bin="$2" dir="$root/$1"
   mkdir -p "$dir/state" "$dir/dl"
-  # Channels are closed to agents until their user opens them; a daemon has no app for that, so --chat-agents opens
-  # them for the run. A release before it has `chat agents` instead (round, below).
+  # 0.1.9 to 0.1.12: channels are closed to agents until their user opens them; a daemon has no app for that, so
+  # --chat-agents opens them for the run (since 0.1.13 a channel an agent makes is open to agents anyway, and the
+  # option is for private messages). A release before it has `chat agents` instead (round, below).
   local open=()
   if "$bin" help daemon 2>/dev/null | grep -q -- --chat-agents; then open=(--chat-agents post); fi
   "$bin" daemon --state-dir "$dir/state" --download-dir "$dir/dl" --bind 127.0.0.1 --no-dht --no-trackers \
@@ -146,7 +152,8 @@ round() {
   clink=$(cli "$owner" chat share "$cid" | field link)
   if [ -n "$cid" ] && echo "$clink" | cli "$joiner" chat join - >/dev/null; then
     cli "$joiner" chat address "$cid" "127.0.0.1:$oport" >/dev/null
-    # Only a release before --chat-agents has this (and needs it); this build refuses it.
+    # Only a release before --chat-agents has this (and needs it); later builds refuse it (since 0.1.13 `chat agents`
+    # takes yes or no).
     for side in "$owner" "$joiner"; do cli "$side" chat agents "$cid" post >/dev/null 2>&1 || true; done
     echo "hello from $owner" | cli "$owner" chat send "$cid" - >/dev/null
     if wait_for 60 chat_has "$joiner" "$cid" "hello from $owner"; then pass "$joiner gets $owner's channel message"; else fail "$joiner gets $owner's channel message"; fi
@@ -168,5 +175,7 @@ start this "$this"
 start other "$other"
 round other this
 round this other
+# The user's own devices are paired in the app only: the CLI (the agent interface) has no command for it.
+if "$this" help 2>&1 | grep -qiw 'pair'; then fail "this build's CLI has no pairing command"; else pass "this build's CLI has no pairing command"; fi
 for p in "${pids[@]}"; do kill -0 "$p" 2>/dev/null || fail "a daemon stopped (see its log above)"; done
 if [ $failed -eq 0 ]; then echo "sync-compat: PASS"; else echo "sync-compat: FAIL"; for n in this other; do echo "--- $n stderr"; tail -20 "$root/$n/err"; done; exit 1; fi

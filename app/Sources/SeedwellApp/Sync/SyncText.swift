@@ -8,6 +8,8 @@ enum SyncText {
     /// The grey line under a folder's name: "Up to date · 3 devices", "Syncing · 42% · 12 MB/s", "Folder missing".
     static func subtitle(_ f: SyncFolder) -> String { syncFolderSubtitle(folder: f) }
     static func badge(_ f: SyncFolder) -> SyncBadge { syncFolderBadge(folder: f) }
+    /// A joining folder's note where its members will be: what the join does now, and what went wrong last.
+    static func joinNote(_ f: SyncFolder) -> String { syncFolderJoinNote(folder: f) }
     /// "Owner", "Admin", "Read & write", "Read only".
     static func role(_ r: SyncRole) -> String { syncRoleLabel(role: r) }
     /// The device may share the folder or channel (make invitation links).
@@ -22,6 +24,12 @@ enum SyncText {
     static func linkLine(_ text: String, info: SyncLinkInfo?, problem: String? = nil) -> String {
         syncLinkLine(text: text, info: info, problem: problem)
     }
+    /// A device gone from a folder or channel: its line, and its owner's *Remove…* with the question it asks.
+    static func gonePrompt(_ d: SyncGoneDevice, name: String, channel: Bool) -> SyncGonePrompt {
+        syncGonePrompt(device: d, name: name, channel: channel, nowS: UInt64(max(0, Date().timeIntervalSince1970)))
+    }
+    /// A folder whose owners and admins are all gone: the note, *Share Again from This Mac…* and its question.
+    static func resharePrompt(_ f: SyncFolder) -> SyncResharePrompt { syncResharePrompt(folder: f) }
     /// The plain sentence of an error ("This folder is no longer synced on this Mac.").
     static func message(_ error: Error) -> String {
         (error as? CoreError).map { coreErrorMessage(error: $0) } ?? "\(error)"
