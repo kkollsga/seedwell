@@ -72,6 +72,7 @@ pub(crate) fn test_key() -> trs_buildsig::SigningKey {
 }
 
 /// Puts `body` in `folder` as this system's zip of `version` and signs it into the folder's build.json with `key`.
+#[cfg(unix)]
 fn publish(folder: &Path, version: &str, body: &str, key: &trs_buildsig::SigningKey) -> std::path::PathBuf {
     let zip = folder.join(os::release_zip(version));
     std::fs::write(&zip, body).unwrap();
@@ -593,6 +594,7 @@ fn a_watched_folder_installs_only_a_build_signed_with_a_trusted_key() {
     assert!(args.starts_with(&format!("--zip\n{}\n--sha256\n{}\n", zip.display(), sha256_of_text("the user's build"))), "{args}");
 }
 
+#[cfg(unix)]
 fn sha256_of_text(t: &str) -> String {
     use sha2::Digest as _;
     sha2::Sha256::digest(t.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
