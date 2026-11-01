@@ -47,9 +47,66 @@ pub const FEATURE_RENAMES: u64 = 1 << 3;
 /// Feature bit 4 (0.1.13): a device's own devices trust each other. Sessions that both have it carry [`DevicesJoin`]
 /// (type 28) and the [`Proof::Sibling`] proof (kind 6); a device without it is never sent either.
 pub const FEATURE_DEVICES: u64 = 1 << 4;
+/// Feature bit 5 (0.1.15): images and files in chat messages. Sessions that both have it carry [`BlobWant`] (type 29)
+/// and [`BlobData`] (type 30); only a device with it is asked for an attachment's bytes.
+pub const FEATURE_BLOBS: u64 = 1 << 5;
 /// The optional behaviours this build supports, one bit each; a session uses those both sides have (the AND). A new
 /// one takes the next free bit, documented here and in `PROTOCOL.md`; bits are never reused.
-pub const FEATURES: u64 = FEATURE_CHAT | FEATURE_DIRECT | FEATURE_HOLDS | FEATURE_RENAMES | FEATURE_DEVICES;
+pub const FEATURES: u64 = FEATURE_CHAT | FEATURE_DIRECT | FEATURE_HOLDS | FEATURE_RENAMES | FEATURE_DEVICES | FEATURE_BLOBS;
+/// Most bytes of a blob in one [`BlobData`].
+pub const MAX_BLOB_CHUNK: usize = 1 << 20;
+
+/// Where an attachment asked for belongs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BlobScope {
+    /// A channel's message names it.
+    Channel(FolderId),
+    /// A private message between the two devices of this session names it (asked only over a direct session).
+    Direct,
+}
+
+/// Type 29 (feature [`FEATURE_BLOBS`]): asks for part of an attachment by its hash: an image, a file's piece table or a
+/// piece of a file a message names ([`crate::attach`]). Answered with a [`BlobData`] of the same id.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BlobWant {
+    /// Matches the [`BlobData`].
+    pub id: u32,
+    /// The channel, or the private conversation of the two devices.
+    pub scope: BlobScope,
+    /// SHA-256 of the blob (an image, a piece table, or a whole file whose piece is asked for).
+    pub hash: [u8; 32],
+    /// Where the part starts.
+    pub offset: u64,
+    /// Its length, at most [`MAX_BLOB_CHUNK`].
+    pub len: u32,
+}
+
+/// Whether a [`BlobData`] carries the part asked for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BlobCode {
+    /// Here it is.
+    Ok,
+    /// The sender does not hold the blob (yet).
+    Missing,
+    /// Not for the asker (the channel is not shared with it, the request is bad).
+    Refused,
+    /// The sender had it and has it no more: the file was changed, moved or deleted, or its sender stopped sharing
+    /// it. Asking again will not help.
+    Gone,
+}
+
+/// Type 30 (feature [`FEATURE_BLOBS`]): the answer to a [`BlobWant`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BlobData {
+    /// The request's id.
+    pub id: u32,
+    /// Whether the part is here.
+    pub code: BlobCode,
+    /// The whole blob's size.
+    pub total: u64,
+    /// The part (empty unless [`BlobCode::Ok`]).
+    pub data: Vec<u8>,
+}
 /// Channels in one [`ChatJoin`].
 pub const MAX_JOIN_CHANNELS: usize = 1024;
 /// Messages in one [`ChatMessages`] (and [`DirectMessages`]).
@@ -646,6 +703,10 @@ pub enum Message {
     RenameReply(RenameReply),
     /// 28.
     DevicesJoin(DevicesJoin),
+    /// 29.
+    BlobWant(BlobWant),
+    /// 30.
+    BlobData(BlobData),
     /// A type this version does not know: skipped, not an error. Encodes as an empty frame of that type.
     Unknown(u8),
 }
@@ -682,6 +743,8 @@ impl Message {
             Message::RenameRequest(_) => 26,
             Message::RenameReply(_) => 27,
             Message::DevicesJoin(_) => 28,
+            Message::BlobWant(_) => 29,
+            Message::BlobData(_) => 30,
             Message::Unknown(k) => *k,
         }
     }
@@ -835,6 +898,30 @@ impl Message {
                 });
                 put_str(out, &m.reason);
             }
+            Message::BlobWant(m) => {
+                put_varint(out, u64::from(m.id));
+                match m.scope {
+                    BlobScope::Channel(id) => {
+                        out.push(0);
+                        out.extend_from_slice(&id.0);
+                    }
+                    BlobScope::Direct => out.push(1),
+                }
+                out.extend_from_slice(&m.hash);
+                put_varint(out, m.offset);
+                put_varint(out, u64::from(m.len));
+            }
+            Message::BlobData(m) => {
+                put_varint(out, u64::from(m.id));
+                out.push(match m.code {
+                    BlobCode::Ok => 0,
+                    BlobCode::Missing => 1,
+                    BlobCode::Refused => 2,
+                    BlobCode::Gone => 3,
+                });
+                put_varint(out, m.total);
+                put_bytes(out, &m.data);
+            }
         }
     }
 
@@ -952,6 +1039,29 @@ impl Message {
                     _ => return Err(DecodeError::Invalid("outcome")),
                 },
                 reason: r.str(MAX_RENAME_REASON, "reason")?,
+            }),
+            29 => Message::BlobWant(BlobWant {
+                id: u32::try_from(r.varint("request id")?).map_err(|_| DecodeError::Invalid("request id"))?,
+                scope: match r.u8("scope")? {
+                    0 => BlobScope::Channel(FolderId(r.array("channel id")?)),
+                    1 => BlobScope::Direct,
+                    _ => return Err(DecodeError::Invalid("scope")),
+                },
+                hash: r.array("hash")?,
+                offset: r.varint("offset")?,
+                len: r.u32("length")?,
+            }),
+            30 => Message::BlobData(BlobData {
+                id: u32::try_from(r.varint("request id")?).map_err(|_| DecodeError::Invalid("request id"))?,
+                code: match r.u8("code")? {
+                    0 => BlobCode::Ok,
+                    1 => BlobCode::Missing,
+                    2 => BlobCode::Refused,
+                    3 => BlobCode::Gone,
+                    _ => return Err(DecodeError::Invalid("code")),
+                },
+                total: r.varint("total")?,
+                data: r.bytes(MAX_BLOB_CHUNK, "data")?.to_vec(),
             }),
             k => Message::Unknown(k),
         })
@@ -1303,6 +1413,28 @@ mod tests {
         Message::RenameReply(RenameReply { id: 3, outcome: RenameOutcome::Refused, reason: "x".repeat(MAX_RENAME_REASON + 1) }).encode(&mut out);
         let (frame, _) = Frame::split(&out).unwrap().unwrap();
         assert!(Message::decode(frame).is_err(), "a reason longer than the limit");
+    }
+
+    #[test]
+    fn blob_wants_and_data_roundtrip() {
+        let w = Message::BlobWant(BlobWant { id: 7, scope: BlobScope::Channel(FolderId([4; 32])), hash: [5; 32], offset: 1 << 20, len: MAX_BLOB_CHUNK as u32 });
+        assert_eq!(roundtrip(&w), w);
+        let dm = Message::BlobWant(BlobWant { id: 8, scope: BlobScope::Direct, hash: [6; 32], offset: 0, len: 32 });
+        assert_eq!(roundtrip(&dm), dm);
+        for code in [BlobCode::Ok, BlobCode::Missing, BlobCode::Refused, BlobCode::Gone] {
+            let d = Message::BlobData(BlobData { id: 7, code, total: 3_000_000, data: vec![1, 2, 3] });
+            assert_eq!(roundtrip(&d), d);
+        }
+        // A build before them (0.1.14) reads them as unknown types and skips them; it is never asked anyway.
+        let mut out = Vec::new();
+        w.encode(&mut out);
+        out[4] = 200;
+        let (frame, _) = Frame::split(&out).unwrap().unwrap();
+        assert_eq!(Message::decode(frame), Ok(Message::Unknown(200)));
+        let mut out = Vec::new();
+        Message::BlobData(BlobData { id: 1, code: BlobCode::Ok, total: 1, data: vec![0; MAX_BLOB_CHUNK + 1] }).encode(&mut out);
+        let (frame, _) = Frame::split(&out).unwrap().unwrap();
+        assert!(Message::decode(frame).is_err(), "a part larger than the limit");
     }
 
     #[test]

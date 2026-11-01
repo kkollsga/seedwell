@@ -69,22 +69,35 @@ function Ask($question) {
 # A proper quit (the trackers are told 'stopped'), only of a Seedwell that runs from the install folder: each one through
 # its own instance (the same --state-dir, so a test instance is asked, never another Seedwell). Returns how each was
 # started, to reopen it the same way. -Force (an app that did not start fine, going back): one that does not quit within
-# 30 s is ended instead.
+# 30 s is ended instead. The app is Seedwell.exe in the folder itself, never the CLI (cli\seedwell.exe: Windows matches
+# names without case). Anything else running from the folder (the CLI: a command, an agent's watch) would keep the
+# folder from being replaced: it is ended once the apps have quit, and whoever ran it starts it again.
 function Stop-Running($dir, [switch]$Force) {
-    $running = @(Get-CimInstance Win32_Process -Filter "Name = 'Seedwell.exe'" -ErrorAction SilentlyContinue | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($dir, [StringComparison]::OrdinalIgnoreCase) })
-    if ($running.Count -eq 0) { return @() }
-    Say "Quitting the running $AppName (trackers are told 'stopped', up to two minutes)"
+    $app = Join-Path $dir 'Seedwell.exe'
+    $inside = $dir.TrimEnd('\') + '\'
+    $all = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($inside, [StringComparison]::OrdinalIgnoreCase) })
+    $running = @($all | Where-Object { $_.ExecutablePath -ieq $app })
+    $others = @($all | Where-Object { $_.ExecutablePath -ine $app })
     $started = @()
+    if ($running.Count -gt 0) { Say "Quitting the running $AppName (trackers are told 'stopped', up to two minutes)" }
     foreach ($r in $running) {
         $state = if ($r.CommandLine -match '--state-dir\s+("([^"]+)"|(\S+))') { if ($Matches[2]) { $Matches[2] } else { $Matches[3] } } else { $null }
         $quitArgs = @(if ($state) { '--state-dir', "`"$state`"" }) + '--quit'
-        Start-Process (Join-Path $dir 'Seedwell.exe') -ArgumentList $quitArgs -Wait
+        # An older Seedwell.exe started an app in its place when nothing was left to quit: never wait on that for ever.
+        $q = Start-Process $app -ArgumentList $quitArgs -PassThru
+        if (-not $q.WaitForExit(30000)) { Say "$AppName --quit did not end within 30 s: ending it"; Stop-Process -Id $q.Id -Force -ErrorAction SilentlyContinue }
         $p = Get-Process -Id $r.ProcessId -ErrorAction SilentlyContinue
         if ($Force) {
             if ($p -and -not $p.WaitForExit(30000)) { Say "$AppName did not quit within 30 s: ending it"; Stop-Process -Id $r.ProcessId -Force -ErrorAction SilentlyContinue; $null = $p.WaitForExit(10000) }
         } elseif ($p -and -not $p.WaitForExit(130000)) { Die "$AppName did not quit within 130 s; quit it from its tray menu and run this again" }
-        # Its arguments after the program, to start it again as it was.
-        $started += ($r.CommandLine -replace '^\s*("[^"]*"|\S+)\s*', '')
+        # Its arguments after the program, to start it again as it was (a --quit among them is not how it was meant to run).
+        $started += (($r.CommandLine -replace '^\s*("[^"]*"|\S+)\s*', '') -replace '(^|\s)--quit(?=\s|$)', '').Trim()
+    }
+    foreach ($o in $others) {
+        Say "Ending $($o.ExecutablePath.Substring($inside.Length)) (process $($o.ProcessId)): it runs from the install folder"
+        $p = Get-Process -Id $o.ProcessId -ErrorAction SilentlyContinue
+        Stop-Process -Id $o.ProcessId -Force -ErrorAction SilentlyContinue
+        if ($p) { $null = $p.WaitForExit(10000) }
     }
     $started
 }

@@ -136,9 +136,48 @@ import SwiftUI
                 ChatNewView(model: ChatNewModel(core: core, prefill: nil))
             }
         }
+        await renderFiles()
         await render("settings-folderSync-light", size: NSSize(width: 860, height: 900), dark: false, settings: true) {
             SettingsView(model: settings, nav: nav(.folderSync))
         }
+    }
+
+    /// Files in chat (SPEC 7G.7 Files): a card in each state, the pending sends, the question before opening a script,
+    /// and a private message with a file. Fixtures made by the core (`chatFileSamples`, the mock's conversation), never
+    /// chat state.
+    private func renderFiles() async {
+        let samples = chatFileSamples()
+        for dark in [true, false] {
+            let suffix = dark ? "dark" : "light"
+            for s in samples.cards {
+                await render("chat-file-\(s.label)-\(suffix)", size: NSSize(width: 420, height: 130), dark: dark, settings: true) {
+                    ChatFileCardView(core: core, place: "", card: s.card).padding(16)
+                        .frame(width: 420, height: 130, alignment: .topLeading).background(.background)
+                }
+            }
+            await render("chat-file-pending-\(suffix)", size: NSSize(width: 620, height: 140), dark: dark, settings: true) {
+                ChatPendingSendsView(core: core, place: "", pending: samples.pending) {}.padding(16)
+                    .frame(width: 620, height: 140, alignment: .topLeading).background(.background)
+            }
+            await renderAlert("chat-file-open-script-\(suffix)", dark: dark, ChatFileCardView.alert(samples.confirm))
+            await render("chat-file-direct-\(suffix)", size: NSSize(width: 1180, height: 760), dark: dark) {
+                let m = model(.direct(deviceId: core.chatDirects().first?.deviceId ?? ""), select: nil)
+                return MainWindowView(model: m, commands: commands, settings: settings, nav: SettingsNavigation())
+            }
+        }
+    }
+
+    /// An alert's window, drawn as it is laid out (never run: nothing waits for an answer).
+    private func renderAlert(_ name: String, dark: Bool, _ alert: NSAlert) async {
+        alert.window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+        alert.layout()
+        alert.window.setFrameOrigin(SnapshotWindow.offscreen)
+        alert.window.orderFront(nil)
+        defer { alert.window.close() }
+        guard let frame = alert.window.contentView?.superview, let rep = await SnapshotWindow.settledImage(of: frame),
+              let png = rep.representation(using: .png, properties: [:]) else { return }
+        try? png.write(to: URL(fileURLWithPath: dir).appendingPathComponent("\(name).png"))
+        print("wrote \(name).png (\(rep.pixelsWide)x\(rep.pixelsHigh))")
     }
 
     private func nav(_ tab: SettingsTab) -> SettingsNavigation {
@@ -268,7 +307,7 @@ private struct SyncMenuPreview: NSViewRepresentable {
         let width: CGFloat = 330
         let removal = SyncRemoval()
         if let c = confirm, snapshot.folders.indices.contains(c) { removal.toggle(id: snapshot.folders[c].id, onlyHere: 0) }
-        let m = syncMenuModel(snapshot: snapshot, removal: removal)
+        let m = syncMenuModel(snapshot: snapshot, removal: removal, host: hostWindowsAll())
         var views: [NSView] = []
         let top = NSView(frame: NSRect(x: 0, y: 0, width: width, height: 5))
         views.append(top)
@@ -279,13 +318,15 @@ private struct SyncMenuPreview: NSViewRepresentable {
             views.append(row)
             if let c = m.confirm, c.folderId == r.id { views.append(SyncConfirmPanel(confirm: c, width: width)) }
         }
-        let sep = NSBox(frame: NSRect(x: 14, y: 0, width: width - 28, height: 11))
-        sep.boxType = .separator
-        let sepWrap = NSView(frame: NSRect(x: 0, y: 0, width: width, height: 11))
-        sep.frame = NSRect(x: 14, y: 5, width: width - 28, height: 1)
-        sepWrap.addSubview(sep)
-        views.append(sepWrap)
-        views.append(MenuCheckRow(content: .init(title: m.add.title), width: width) {})
+        if let add = m.add {
+            let sep = NSBox(frame: NSRect(x: 14, y: 0, width: width - 28, height: 11))
+            sep.boxType = .separator
+            let sepWrap = NSView(frame: NSRect(x: 0, y: 0, width: width, height: 11))
+            sep.frame = NSRect(x: 14, y: 5, width: width - 28, height: 1)
+            sepWrap.addSubview(sep)
+            views.append(sepWrap)
+            views.append(MenuCheckRow(content: .init(title: add.title), width: width) {})
+        }
         let total = views.reduce(0) { $0 + $1.frame.height } + 5
         let root = NSVisualEffectView(frame: NSRect(x: 0, y: 0, width: width, height: total))
         root.material = .menu

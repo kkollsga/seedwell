@@ -124,6 +124,8 @@ channel too), proof, channel message and private message, decoded and encoded ba
 | 26 | RenameRequest (renames bit) | `id` varint (u32) ‖ `folder_id` (32) ‖ `from` str ‖ `to` str ‖ `seen` (32, a digest of the paths and versions at and below `from` the sender has) ‖ `ttl_ms` varint (u32): rename for the sender, as the receiver's own change, only if it can start within `ttl_ms` of receiving it |
 | 27 | RenameReply (renames bit) | `id` varint ‖ `outcome` u8 (0 done, 1 refused, 2 busy: could not start in time, and never will) ‖ `reason` str (≤ 512 B) |
 | 28 | DevicesJoin (devices bit, 0.1.13) | records of devices groups, each: `group_id` (32) ‖ proofs (as in Join): the sender's group, and, to a device of its current group, each group it moved on from (its grant there and the Moved statements, as grant proofs); sent once while a session starts, after DirectJoin (the dialer first, only to a device it believes is one of its own or, joining, to whoever it dialed for the group; the other side answers only for a group the dialer proved), and later for a group made, joined, confirmed or moved to meanwhile; a device moving to a new group proves nothing there (no proofs: its members know its key); empty when there is nothing to prove |
+| 29 | BlobWant (blobs bit, 0.1.15) | `id` varint (u32) ‖ `scope` u8 (0: ‖ `channel_id` (32), a channel's message names it; 1: a private message between the two devices of this session names it, asked only over a direct session) ‖ `hash` (32: an image's SHA-256, a file's piece table's SHA-256, or a file's SHA-256 for one of its pieces) ‖ `offset` varint ‖ `len` varint (u32, ≤ 1 MiB): a part of an image or piece table, or one piece of a file (`offset` a multiple of 1 MiB, `len` the piece's length) |
+| 30 | BlobData (blobs bit, 0.1.15) | `id` varint ‖ `code` u8 (0 ok, 1 not held, 2 refused, 3 gone: the sender's file changed, moved or is no longer shared, for good) ‖ `total` varint (the blob's or file's size) ‖ `data` bytes (≤ 1 MiB; empty unless ok) |
 | other | (unknown) | skipped |
 
 - **Version** (in entries and progress): `count ‖ n × (short device id, 8 bytes BE ‖ counter varint)`, sorted by
@@ -295,6 +297,60 @@ message = fields (varint length ‖ bytes) ‖ signature (64)
 - Every member keeps every message up to its cap (10 000 messages or 50 MB per channel, the oldest dropped
   first), and sends any member what it lacks: a device that was away catches up from whoever is online.
 - A text message or JSON body that is too long or not UTF-8 makes its record unreadable: it is skipped.
+- **Images** (0.1.15). A text message names its images in its later fields, signed with the rest; the bytes are
+  blobs fetched by hash (BlobWant, BlobData; the blobs bit, 5):
+
+  ```text
+  later fields = n × (tag varint ‖ varint length ‖ bytes)             (a tag a version does not know is skipped)
+  tag 1        = caption_len varint ‖ count varint (1..=10) ‖ count × (varint length ‖ image)
+  image        = sha256 (32) ‖ kind u8 ‖ size varint ‖ width varint ‖ height varint ‖ name str (≤ 120 characters)
+                 ‖ preview bytes ‖ (later fields)
+    kind       = 1 PNG | 2 JPEG | 3 GIF | 4 WebP | 5 SVG | other: shown as an image this version cannot show
+    preview    = a JPEG of at most 160 px a side and 12 KiB, or empty
+  ```
+
+  The body is the caption (its first `caption_len` bytes), then one line per image for versions without images
+  (`[image: shot.png, 240 KB]`): a device of 0.1.14 or earlier shows that text and keeps and passes on the message
+  as it came. The later fields are at most 48 KiB, so a message with a full text still fits every version's limit
+  on a message's fields. Caps, on sending and on receiving: a raster image (PNG, JPEG, GIF, WebP) ≤ 10 MiB and 64
+  megapixels, an SVG ≤ 1 MiB; the format is found from the bytes, never the name. Before sending, metadata (EXIF and
+  GPS, XMP, IPTC, comments, text chunks, trailing data) is stripped by keeping only the parts of the file that draw
+  the picture; a photo turned by its EXIF is turned and encoded again. An image that arrives must hash to its
+  `sha256`, be the kind its message says, and decode; a peer that sends other bytes is passed over, an image that
+  does not decode is not shown. A member serves an image only to a member of the channel, and only one that a
+  message it keeps names. Members fetch by themselves the images of the newest messages, up to 512 MiB a channel;
+  older ones when the user asks. An SVG is drawn on the device in Rust (no scripts, `foreignObject`, files, URLs,
+  entities or nested SVG; bounded size, elements and time): hosts draw only the PNG it makes.
+- **Files** (0.1.15). Any other file, of any size, is an attachment of kind 16 in the same record:
+  `sha256` is the whole file's, `width` and `height` are 0, there is no preview, and after the preview comes
+  `pieces` (32), the SHA-256 of its piece table. The fallback line is `[file: report.pdf, 1.2 GB]`. Private
+  messages carry the same record in the later fields of their sealed body (after the text; a version without them
+  stops reading at the text), so its names and hashes are seen only by the two devices.
+
+  ```text
+  piece i     = bytes [i × 1 MiB, min((i + 1) × 1 MiB, size)) of the file      (an empty file has no pieces)
+  piece table = SHA-256(piece 0) ‖ SHA-256(piece 1) ‖ …                         (32 × ceil(size / 1 MiB) bytes)
+  pieces      = SHA-256(piece table)
+  ```
+
+  - **Sending.** The sender reads the file once (whole hash and piece table), keeps its path, size and modification
+    time, and posts the message after that. It never copies the file.
+  - **Serving.** A BlobWant for `pieces` is answered with the piece table; one for `sha256` must ask for exactly one
+    piece (offset a multiple of 1 MiB, length the piece's), and is answered from the file where it is, only while the
+    file has its recorded size and modification time and the piece read hashes to its entry in the table. If not,
+    the sender answers 3 (gone) from then on, and so it does once its user stops sharing the file. A device that
+    downloaded the file serves its copy the same way while it is unchanged, answering 1 (not held) once it is not.
+  - **Downloading** (only when the user asks): the piece table first, from any device that has it, checked against
+    `pieces` (and at most 256 MiB, a file of 8 TiB); then the missing pieces, four at a time from one device (the
+    sender first), each checked against its entry and written at its offset in a partial file beside the
+    destination. A piece that does not match is asked for again alone; a device that sends three is passed over.
+    The verified pieces are recorded (*On disk*), so a download that stopped (the service quit, the devices parted)
+    resumes from them. With nobody that has the file connected the download pauses until one connects; when the
+    sender answered gone and nobody else sent the rest, the file is gone. A finished file is renamed into place
+    (never over another file unless the user chose that file with Save As) and marked as downloaded for the system.
+  - **Names.** The name is the sender's; a receiver uses its last part only, without control characters, `..`,
+    leading dots or trailing dots and spaces, at most 120 characters (the extension kept), `file` when nothing is
+    left; never a path.
 - **Topics.** A topic message (kind 3) makes a topic: its id is the topic's id, its body the title; anyone who
   may post makes one. A message whose `topic` names it belongs to it; one without, or naming a topic this device
   does not have (yet), is shown under General, and moves into the topic when the topic message arrives. A topic
@@ -442,6 +498,17 @@ Members learn where a device publishes from its signed address record (`Addresse
   entry in `sync.toml` (`topic_read` keeps what was read in each topic). 0.1.12 kept a per-device agent switch there
   (`agents`: `off`, `read`, `post`); since 0.1.13 the channel's membership decides (kind 8), and the key is ignored
   when read and dropped when the file is next written.
+- **Files of a channel or conversation** (0.1.15, `sync/<channel id>.files/`, `sync/dm-<device>.files/`): `state`,
+  sealed JSON (`shares`: each file served from here, its path, size, modification time, whole-file and piece-table
+  hashes, whether it was sent from here and why it is no longer served; `downloads`: each download, its destination,
+  its partial file, the bitmap of verified pieces in hex, its state), and one file per piece table named by the
+  table's hash, sealed. Both with the conversation's key and `SWFL` as associated data, written to a temporary name
+  and renamed into place; the bitmap is saved at most every half second while a download runs, after the partial
+  file is flushed, and when the download stops. The folder goes with the conversation.
+- **A channel's images** (0.1.15, `sync/<channel id>.blobs/<sha256 hex>`): each file is the image sealed whole with
+  the channel's own key (ChaCha20-Poly1305, a random nonce first, `SWBL` as associated data), written to a
+  temporary name and renamed into place. The folder goes with the channel. Images neither within the channel's
+  budget (the newest 512 MiB) nor asked for since the service started are deleted.
 - **Private messages** (`sync/dm-<device id>.chat`, one per conversation): `"SWDM" ‖ format varint (2) ‖ n ×
   (varint length ‖ sealed record)`, a record being `received_ms varint ‖ has_body u8 [‖ body bytes] ‖ direct
   message` (the body only in the author's own copies; those to this device are opened again when read), sealed
@@ -482,6 +549,7 @@ What a later version may change, and how:
    | 2 | holds: answers HoldQuery (type 24) with HoldReply (type 25); only a device with it is asked | 0.1.12 |
    | 3 | renames: answers RenameRequest (type 26) with RenameReply (type 27); only a device with it is asked | 0.1.12 |
    | 4 | devices: the user's own devices (DevicesJoin, type 28; the sibling proof, kind 6); only a device with it is sent either | 0.1.13 |
+   | 5 | blobs: images and files of channels and private messages by hash (BlobWant, type 29; BlobData, type 30); only a device with it is asked | 0.1.15 |
 
 5. **Breaking changes** raise `PROTOCOL`, the highest version spoken. The new build keeps `MIN_PROTOCOL` one
    behind for at least one release (N-1), so devices a release apart still sync at the older version, and

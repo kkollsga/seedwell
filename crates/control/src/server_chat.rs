@@ -62,6 +62,72 @@ pub(super) fn message_visible(h: &SyncHandle, m: &Value) -> bool {
     if m["direct"].as_bool() == Some(true) { directs_visible(h) } else { m["channel_id"].as_str().is_some_and(|id| channel_visible(h, id)) }
 }
 
+/// What `chat.send` and `chat.dm_send` attach: images given as bytes, and files on this computer by their full paths.
+fn attachments_of(uploads: &[crate::proto::ChatAttachmentUpload], files: &[String], json: bool) -> Result<Vec<trs_sync_net::chat::NewAttachment>, ApiError> {
+    use trs_sync_net::chat::{NewAttachment, NewImage};
+    if uploads.is_empty() && files.is_empty() {
+        return Ok(Vec::new());
+    }
+    if json {
+        return Err(ApiError::params("attachments go with a text message, not `json`"));
+    }
+    let mut out = Vec::with_capacity(uploads.len() + files.len());
+    for a in uploads {
+        let bytes = crate::b64::decode(&a.base64, trs_media::MAX_IMAGE)
+            .ok_or_else(|| ApiError::params(format!("`{}`: not valid base64, or larger than {}", clip(&a.name, 100), trs_media::size_text(trs_media::MAX_IMAGE as u64))))?;
+        out.push(NewAttachment::Image(NewImage { name: a.name.clone(), bytes }));
+    }
+    for f in files {
+        if !std::path::Path::new(f).is_absolute() {
+            return Err(ApiError::params(format!("`{}`: give the file's full path", clip(f, 200))));
+        }
+        out.push(NewAttachment::Path(f.into()));
+    }
+    Ok(out)
+}
+
+/// Where a call about a message's attachment goes: a channel open to agents, or (`device`) the private conversation
+/// with a device while the Mac lets agents read private messages. Its place, the channel's id, and its name.
+fn place_for(h: &SyncHandle, channel: &str, device: Option<&str>, what: &str) -> Result<(trs_sync_net::room::Place, Option<String>, String), ApiError> {
+    match device {
+        Some(d) => {
+            direct_allow(h, AgentAccess::Read, what)?;
+            let dev = pick_device(h, d)?;
+            let name = h.chat_directs().into_iter().find(|x| x.device == dev).map(|x| x.name).filter(|n| !n.is_empty()).unwrap_or_else(|| short(&dev.to_string()).to_string());
+            Ok((trs_sync_net::room::Place::Direct(dev), None, format!("the private conversation with {name}")))
+        }
+        None => {
+            let (c, id) = pick(h, channel)?;
+            Ok((trs_sync_net::room::Place::Channel(id), Some(c.id), format!("channel {}", c.name)))
+        }
+    }
+}
+
+/// What a file's state says, for people.
+fn file_note(a: &crate::types::ChatAttachmentDto, place: &str) -> String {
+    let size = trs_media::size_text(a.size);
+    // Not its name, nor where it is: the note goes into the activity log.
+    let what = format!("file {} ({size}) of {}", short(&a.hash), clip(place, 80));
+    match a.state.as_str() {
+        "downloading" => format!("{what}: downloading, {} of {size}", trs_media::size_text(a.done)),
+        "paused" => format!("{what}: paused, {} of {size}; it resumes when a device that has it is connected", trs_media::size_text(a.done)),
+        "downloaded" => format!("{what}: downloaded (`path` says where)"),
+        "shared" => format!("{what}: shared from this computer (`path` says where)"),
+        "available" => format!("{what}: not downloaded (chat.download gets it)"),
+        s => format!("{what}: {}{}", s.replace('_', " "), a.problem.as_deref().map(|p| format!(" ({})", clip(p, 200))).unwrap_or_default()),
+    }
+}
+
+/// The answer to a file call: where the file stands.
+fn file_reply(place: trs_sync_net::room::Place, cid: Option<String>, name: &str, info: &trs_sync_net::chat::AttachmentInfo, direct: bool) -> Result<Reply, ApiError> {
+    let d = ChatAttachmentDataDto { channel_id: place.to_string(), attachment: s::attachment_dto(info), ..Default::default() };
+    let mut r = reply(&d)?;
+    r.note = Some(file_note(&d.attachment, name));
+    r.channel = cid;
+    r.direct = direct;
+    Ok(r)
+}
+
 /// The channel `q` names, among those open to agents: a closed one is answered as one that is not there.
 pub(super) fn pick(h: &SyncHandle, q: &str) -> Result<(ChannelStatus, FolderId), ApiError> {
     let all = visible_channels(h);
@@ -273,7 +339,12 @@ pub(super) async fn call<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &Conn, req: Reques
             let (c, id) = pick(&h, &p.channel)?;
             let agent = agent_for(conn, p.agent.as_deref())?;
             let kind = if p.json { MessageKind::Json } else { MessageKind::Text };
-            let m = h.chat_send(&id, p.topic.as_deref(), kind, &p.body, p.reply_to.as_deref(), Some(&agent)).await.map_err(chat_err)?;
+            let items = attachments_of(&p.attachments, &p.files, p.json)?;
+            let m = if items.is_empty() {
+                h.chat_send(&id, p.topic.as_deref(), kind, &p.body, p.reply_to.as_deref(), Some(&agent)).await.map_err(chat_err)?
+            } else {
+                h.chat_send_attachments(id, p.topic.as_deref(), &p.body, p.reply_to.as_deref(), Some(&agent), items).await.map_err(chat_err)?
+            };
             let mut r = reply(&message_dto(&m))?;
             r.note = Some(format!("posted {} to channel {} ({})", short(&m.id), clip(&c.name, 80), short(&c.id)));
             r.channel = Some(c.id);
@@ -295,6 +366,57 @@ pub(super) async fn call<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &Conn, req: Reques
                 }
             };
             reply(&ChatMessagesDto { id: c.id, name: c.name, messages: msgs.iter().take(1000).map(message_dto).collect() })
+        }
+        Request::ChatAttachment(p) => {
+            let (place, cid, name) = place_for(&h, &p.channel, p.device.as_deref(), "chat.attachment")?;
+            let (info, bytes) = h.chat_attachment(place, &p.hash).map_err(chat_err)?;
+            let mut d = ChatAttachmentDataDto { channel_id: place.to_string(), attachment: s::attachment_dto(&info), ..Default::default() };
+            if info.is_file() {
+                let mut r = reply(&d)?;
+                r.note = Some(file_note(&d.attachment, &name));
+                r.channel = cid;
+                r.direct = p.device.is_some();
+                return Ok(r);
+            }
+            if let Some(bytes) = bytes {
+                let kind = info.media_kind().ok_or_else(|| ApiError::invalid("an image of a kind this version cannot read"))?;
+                if p.png && kind == trs_media::Kind::Svg {
+                    let v = tokio::task::spawn_blocking(move || trs_media::render(kind, &bytes, 0)).await.map_err(|_| ApiError::internal("the drawing stopped"))?;
+                    let v = v.map_err(|e| ApiError::invalid(e.to_string()))?;
+                    (d.mime, d.base64, d.rendered) = (Some(v.mime.into()), Some(crate::b64::encode(&v.bytes)), true);
+                } else {
+                    (d.mime, d.base64) = (Some(kind.mime().into()), Some(crate::b64::encode(&bytes)));
+                }
+            }
+            let mut r = reply(&d)?;
+            r.note = Some(match d.base64 {
+                Some(_) => format!("image {} ({}) of {}", clip(&d.attachment.name, 80), short(&d.attachment.hash), clip(&name, 80)),
+                None => format!("image {} is {}: ask again in a moment", short(&d.attachment.hash), d.attachment.state.replace('_', " ")),
+            });
+            r.channel = cid;
+            r.direct = p.device.is_some();
+            Ok(r)
+        }
+        Request::ChatDownload(p) => {
+            let (place, cid, name) = place_for(&h, &p.channel, p.device.as_deref(), "chat.download")?;
+            let to = match p.out.as_deref() {
+                None => None,
+                Some(o) if !std::path::Path::new(o).is_absolute() => return Err(ApiError::params("`out` must be a full path")),
+                Some(o) if std::path::Path::new(o).is_dir() => Some(trs_sync_net::files::DownloadTo::Folder(o.into())),
+                Some(o) => Some(trs_sync_net::files::DownloadTo::File(o.into())),
+            };
+            let info = h.chat_file_download(place, &p.hash, to).map_err(chat_err)?;
+            file_reply(place, cid, &name, &info, p.device.is_some())
+        }
+        Request::ChatCancelDownload(p) => {
+            let (place, cid, name) = place_for(&h, &p.channel, p.device.as_deref(), "chat.cancel_download")?;
+            let info = h.chat_file_cancel(place, &p.hash).map_err(chat_err)?;
+            file_reply(place, cid, &name, &info, p.device.is_some())
+        }
+        Request::ChatStopSharing(p) => {
+            let (place, cid, name) = place_for(&h, &p.channel, p.device.as_deref(), "chat.stop_sharing")?;
+            let info = h.chat_file_stop_sharing(place, &p.hash).map_err(chat_err)?;
+            file_reply(place, cid, &name, &info, p.device.is_some())
         }
         Request::ChatTopics(p) => {
             let (c, id) = pick(&h, &p.channel)?;
@@ -344,7 +466,12 @@ pub(super) async fn call<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &Conn, req: Reques
             let dev = pick_device(&h, &p.device)?;
             let agent = agent_for(conn, p.agent.as_deref())?;
             let kind = if p.json { MessageKind::Json } else { MessageKind::Text };
-            let m = h.chat_send_direct(&dev, kind, &p.body, p.reply_to.as_deref(), Some(&agent)).await.map_err(chat_err)?;
+            let items = attachments_of(&[], &p.files, p.json)?;
+            let m = if items.is_empty() {
+                h.chat_send_direct(&dev, kind, &p.body, p.reply_to.as_deref(), Some(&agent)).await.map_err(chat_err)?
+            } else {
+                h.chat_send_attachments(trs_sync_net::room::Place::Direct(dev), None, &p.body, p.reply_to.as_deref(), Some(&agent), items).await.map_err(chat_err)?
+            };
             let mut r = reply(&message_dto(&m))?;
             r.note = Some(format!("wrote {} privately to {}", short(&m.id), short(&dev.to_string())));
             r.direct = true;

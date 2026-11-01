@@ -13,6 +13,7 @@ use trs_control::display as d;
 use trs_platform::fs::TrashError;
 use trs_platform::{computer, file_manager, trash};
 
+use crate::devices_text::FollowLine;
 use crate::files::standard_order;
 use crate::sync::{SyncAccess, SyncDevice, SyncFolder, SyncGoneDevice, SyncInvite, SyncLinkInfo, SyncMember, SyncRole, SyncState};
 use crate::types::CoreError;
@@ -24,7 +25,7 @@ const LINKS_SHOWN: usize = 6;
 const DAY_S: u64 = 86_400;
 
 /// Swift's `.whitespaces`, which the app trimmed with: spaces and tabs, not line breaks.
-fn trim_spaces(s: &str) -> &str {
+pub(crate) fn trim_spaces(s: &str) -> &str {
     s.trim_matches(|c: char| c.is_whitespace() && !matches!(c, '\n' | '\r' | '\u{0B}' | '\u{0C}' | '\u{85}' | '\u{2028}' | '\u{2029}'))
 }
 
@@ -554,8 +555,8 @@ pub fn sync_add_mode_label(mode: SyncAddMode) -> String {
     .into()
 }
 
-/// The add modal's choices (SPEC 7G.5). The host keeps it as a value, edits the plain fields itself and asks the
-/// `sync_add_*` functions for the rest.
+/// The add modal's choices (SPEC 7G.5). The host keeps it as a value, edits `mode`, `on_demand` and `all_devices`
+/// itself and asks the `sync_add_*` functions (and `Core::sync_add_*`) for the rest; `sync_add_window` draws it.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct SyncAddForm {
     pub mode: SyncAddMode,
@@ -572,6 +573,15 @@ pub struct SyncAddForm {
     /// Files on demand (SPEC 7G.11): every file listed, content fetched when opened. From this computer: added, then
     /// switched; shared with me: joined on demand.
     pub on_demand: bool,
+    /// The place the core picks for the pasted link (`~/Seedwell/<name>`), offered first in the Location popup.
+    pub default_location: Option<String>,
+    /// A folder of that name already in that place and not synced (left over from an earlier join, say): offered
+    /// next to the new one, which gets a number (`~/Seedwell/Team 2`).
+    pub existing_folder: Option<String>,
+    /// "On all my devices" for a folder of this computer as it was when the dialog opened (shown only while this
+    /// computer is paired with others), and the choice: off by default.
+    pub follow: FollowLine,
+    pub all_devices: bool,
 }
 
 /// A fresh form: From this computer, nothing chosen.
@@ -586,6 +596,10 @@ pub fn sync_add_form_new() -> SyncAddForm {
         location: String::new(),
         location_chosen: false,
         on_demand: false,
+        default_location: None,
+        existing_folder: None,
+        follow: crate::devices_text::follow_line_new(&[], false),
+        all_devices: false,
     }
 }
 
@@ -629,10 +643,10 @@ pub fn sync_add_set_key(
     } else if info.is_none() {
         String::new()
     } else {
-        default_location.unwrap_or_default()
+        default_location.clone().unwrap_or_default()
     };
     let problem = if info.is_none() { problem } else { None };
-    SyncAddForm { key: text, info, problem, location, ..form }
+    SyncAddForm { key: text, info, problem, location, default_location, ..form }
 }
 
 /// The user chose where the folder goes: `parent`; the folder itself is named after the link.

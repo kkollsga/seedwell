@@ -202,7 +202,7 @@ import os
     private func model(_ s: Snapshot, _ sync: SyncSnapshot) -> MenuModel {
         commands.arrivals.note(s)
         return menuModel(snapshot: s, sync: sync, arrivals: commands.arrivals.arrivals, nowUnixMs: Date().unixMs,
-                         updateVersion: UpdateCenter.shared.availableVersion)
+                         updateVersion: UpdateCenter.shared.availableVersion, host: hostWindowsAll())
     }
 
     /// QA: the titles of the open menu, headers first ("Downloading|name|name||Recent|…").

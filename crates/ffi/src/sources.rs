@@ -46,15 +46,18 @@ pub(crate) fn has_torrent_extension(s: &str) -> bool {
 /// manager's "open with" passes paths): a magnet link or a web address (`add_source`'s own prefixes, in any case), or
 /// a path ending in `.torrent` (any case; a missing one is kept, so that adding it says it is missing). Everything
 /// else (options, other files, other URL schemes, empty arguments) is not.
+/// `seedwell://` links are `command_line_routes`'.
 #[uniffi::export]
 pub fn command_line_sources(args: Vec<String>) -> Vec<String> {
-    args.into_iter()
-        .map(|a| a.trim().to_owned())
-        .filter(|a| match source_kind(a) {
-            SourceKind::Magnet | SourceKind::Web => true,
-            SourceKind::File => has_torrent_extension(a) && !a.starts_with('-') && !a.contains("://"),
-        })
-        .collect()
+    args.into_iter().map(|a| a.trim().to_owned()).filter(|a| is_command_line_source(a)).collect()
+}
+
+/// A command-line argument (trimmed) is something to add: [`command_line_sources`]' rule.
+pub(crate) fn is_command_line_source(a: &str) -> bool {
+    match source_kind(a) {
+        SourceKind::Magnet | SourceKind::Web => true,
+        SourceKind::File => has_torrent_extension(a) && !a.starts_with('-') && !a.contains("://"),
+    }
 }
 
 /// Why the file `source` names cannot be added, when that is the reason: it is not there, or it cannot be read. A

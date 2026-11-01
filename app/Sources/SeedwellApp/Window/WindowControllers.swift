@@ -38,14 +38,16 @@ import os
     /// Opens the window, on `settings` (a tab of Settings) when given: Settings is a section of this window. `torrent`:
     /// a click on its title in the notifier (the core decides where the window goes).
     func show(section: LibraryModel.Section? = nil, info id: String? = nil, torrent: String? = nil,
-              settings tab: SettingsTab? = nil, editTracker: String? = nil, newTrackerHost: String? = nil, openSettings: Bool = false) {
+              settings tab: SettingsTab? = nil, editTracker: String? = nil, newTrackerHost: String? = nil, pairLink: String? = nil,
+              openSettings: Bool = false) {
         let opening = self.model == nil
         let model = self.model ?? makeWindow()
-        if openSettings || tab != nil || editTracker != nil || newTrackerHost != nil {
+        if openSettings || tab != nil || editTracker != nil || newTrackerHost != nil || pairLink != nil {
             // A plain open starts on General; a deep link (a tab, a tracker to edit) names its own tab.
             if let tab { nav.tab = tab } else if editTracker == nil, newTrackerHost == nil, model.section != .settings { nav.tab = .general }
             if let editTracker { nav.trackerToEdit = editTracker }
             if let newTrackerHost { nav.newTrackerHost = newTrackerHost }
+            if let pairLink { nav.pairLink = pairLink }
             self.settings.reload()
             model.select(.settings)
         } else if let torrent {

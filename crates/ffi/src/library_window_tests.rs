@@ -1,5 +1,6 @@
 use super::*;
 use crate::library::tests::{inputs, library, mock, named, on, seeding, sharing, snap, state, t1, tracker, Clock, NOW_MS};
+use crate::host::HostWindow;
 use crate::library::{build, Inputs};
 use crate::library_rows::tests::{download, seed};
 use crate::library_rows::SharingRows;
@@ -362,6 +363,33 @@ fn the_arrows_open_and_close_file_lists_and_folders() {
     assert!(!left(&mut st, &two).handled);
     st.click("active", "a", false, false);
     assert!(!right(&mut st, &two).handled, "its list is open");
+}
+
+#[test]
+fn a_host_without_the_file_list_or_get_info_gets_no_key_for_them() {
+    let mut i = downloads();
+    i.snapshot.downloading[0].file_count = 3;
+    let mut st = state(LibraryPlace::Downloads);
+    st.host = vec![HostWindow::MoveTo];
+    shown(&i, &mut st);
+    st.click("active", "a", false, false);
+    let key = |st: &mut LibraryState, key, mods, scope, c: &WindowContext| press(st, &i, key, mods, scope, c).0;
+    assert_eq!(key(&mut st, LibraryKey::Right, NONE, KeyScope::List, &ctx()), KeyOutcome::IGNORED, "no list to open");
+    // Whatever the host says about lists and file rows, it has none.
+    let files = WindowContext { open_lists: vec!["a".into()], file_torrent: Some("a".into()), file_rows: 1, ..ctx() };
+    assert_eq!(key(&mut st, LibraryKey::Left, NONE, KeyScope::List, &files), KeyOutcome::IGNORED);
+    assert!(!key(&mut st, LibraryKey::Space, NONE, KeyScope::List, &files).handled, "no Get Info either");
+    assert!(!key(&mut st, LibraryKey::I, COMMAND, KeyScope::Window, &ctx()).handled);
+    assert_eq!(st.info, None);
+    // Escape and ⌘A still clear and select, without a file list action.
+    assert_eq!(key(&mut st, LibraryKey::A, COMMAND, KeyScope::Window, &files), KeyOutcome::HANDLED);
+    assert_eq!(key(&mut st, LibraryKey::Escape, NONE, KeyScope::List, &ctx()), KeyOutcome::HANDLED);
+    assert!(st.selection.is_empty());
+    // With Get Info, Space opens it.
+    st.host = vec![HostWindow::GetInfo];
+    st.click("active", "a", false, false);
+    assert_eq!(key(&mut st, LibraryKey::Space, NONE, KeyScope::List, &files), KeyOutcome::HANDLED);
+    assert_eq!(st.info.as_deref(), Some("a"));
 }
 
 #[test]

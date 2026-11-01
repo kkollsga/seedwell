@@ -150,7 +150,14 @@ Each step is its own commit with tests; `tools/check.sh` passes after each.
       `library_rows.rs` (the Downloads, Sharing and tracker-tab groups, every row's lines in colour, rate slot,
       controls, category pill and filter chip, the empty notes), `sidebar.rs` (places, chats, private conversations,
       the trackers' order, the footer, the items' context menus) and `chat_text.rs`; the Mac draws them.
-- [ ] Get Info sections; a tracker's header and Info page; the Folder Sync and conversation pages.
+- [ ] Get Info sections; a tracker's header and Info page; the conversation page.
+- [x] The Folder Sync page and its dialogs: `trs-ffi`'s `sync_page.rs` (`sync_page_model`: the folder list with its
+      context menus, the header's buttons, place and status, the gone and Share Again prompts, the Stop Syncing
+      question, the Members, Conflicts and Issues sections with the role and Keep menus, and the questions items ask
+      first, as `SyncPageCommand`s), `sync_dialogs.rs` (Add Folder: `Core::sync_add_form`, `sync_add_set_link`,
+      `sync_add_window`, `sync_add_start`; Edit: `Core::sync_edit_form`, `sync_edit_window`, `sync_edit_save`) and
+      `sync_share.rs` (the Share dialog: `Core::sync_share_form`, `sync_share_window`, `sync_share_copy_link`); the Mac
+      draws them.
 - [x] Row commands (a row's right-click menu in the window and the menu bar, the selection's menu): `trs-ffi`'s
       `row_commands.rs` (`row_commands`, `play_commands`: titles, order, checks, the red Remove, the shortcut, the
       Seeding Goal, Priority, Category and Rule submenus, Play and Play With with the episode labels and the capable
@@ -165,8 +172,17 @@ Each step is its own commit with tests; `tools/check.sh` passes after each.
 - [x] Sync view model: `trs-ffi`'s `sync_text.rs` (folder lines and badges, roles and members, links, invitations and
       the sharing period, the add form and rename check, the Share dialog's choices, the file-manager badge, error and
       alert texts) and `sync_menu.rs` (`sync_menu_model`, the `SyncRemoval` confirmation); the Mac only draws them.
+- [x] App commands and windows a host has: `trs-ffi`'s `app_commands.rs` (`Core::app_commands`: File's Add Torrent File…
+      and Add Magnet Link or URL…, Transfers' Pause All, Resume All and Limit Speed with their shortcuts, enabled state
+      and check mark) and `host.rs` (`HostWindow`, `host_windows_all`: `row_commands`, `Library::set_host_windows`,
+      `menu_model`, `sync_menu_model`, `sync_page_model` and `GetInfoCard` leave out what needs a window the host
+      lacks, never a placeholder; the window's keys and disclosure triangles too); the Mac's menu bar draws them.
+- [x] Chat dialogs: `trs-ffi`'s `chat_dialogs.rs` (New Channel / Join with a Link as `ChatNewForm` with
+      `chat_new_window` and `Core::chat_new_start`; New Topic, Rename, Wake Command, Leave, Delete Conversation and the
+      sidebar's Agents question as `ChatDialog` with `chat_dialog_check`); the Mac draws them.
 - [ ] Chat view model (text, mail, tags, markdown).
-- [ ] Notices (which events notify, texts, bursts, click routing), `seedwell://` link routing, launch options.
+- [x] `seedwell://` link routing: `trs-ffi`'s `links.rs` (`link_route`, `Core::route_link`, `command_line_routes`).
+- [ ] Notices (which events notify, texts, bursts, click routing), launch options.
 - [ ] Settings parsing and save policy (ports, rates, times, goals, rules, folders, sync settings).
 - [ ] Update checker; Play's player choice (the setting, Automatic, "needs update"; the episode labels and Play With
       are done with the row commands); the other context-menu models (a file's in the file list); the QA control

@@ -37,6 +37,7 @@ import AppKit
 ///                                     a checklist click on the shared chooser model (chooser window, popover, main window): a box
 ///                                     or a row's title, a group's chevron, the "Select all / none" box, a quick pick
 ///     open-file <path>                a .torrent opened as from Finder (QA roots only)
+///     open-url <url>                  a link opened as from another app (`seedwell://…`, magnet:): the core's route
 ///     devlog open | close | filter <text> | errors on|off | event <name> | expand all|none|first|last | state
 ///                                     the tracker log viewer of Settings > Advanced > Developer (state: counts into <file>.bench)
 ///     play-players                    detection result (installed players, slices, can run) into <file>.bench
@@ -59,6 +60,8 @@ import AppKit
 ///     ui dump | ui state | ui ping [win=main|chooser|popover|info]   read the window (info: Get Info's popover): its accessibility tree, the selection and
 ///                                     chooser state, how fast the main run loop answers (see QAInspect)
 ///     alert <n>                       presses the n-th button of the open alert
+///     chatfile download|retry|cancel|stop-sharing <place> <hash>   a file card's button (place: a channel id or
+///                                     dm:<device>), as the card calls it; reports the card's state and line
 ///     net offline | net online        the OS path monitor said so (engine holds everything / probes once); no debounce
 ///     power battery | power ac        the power source as PowerWatcher tells the core (the "On battery" setting acts);
 ///                                     a real change of the power source still reports as well
@@ -423,6 +426,16 @@ import AppKit
             benchSnapshot()
         case "bench-scroll":
             benchScroll()
+        case "chatfile":
+            let p = arg.split(separator: " ").map(String.init)
+            let kinds: [String: ChatFileActionKind] = ["download": .download, "retry": .retry, "cancel": .cancel, "stop-sharing": .stopSharing]
+            guard p.count == 3, let kind = kinds[p[0]] else { return report("chatfile: download|retry|cancel|stop-sharing <place> <hash>") }
+            do {
+                let card = try ChatFileCardView.press(kind, core: commands.core, place: p[1], hash: p[2])
+                report("chatfile: \(card.map { "\($0.state) · \($0.status)" } ?? "done")")
+            } catch {
+                report("chatfile: \(SyncText.message(error))")
+            }
         case "alert":
             // `alert 1` presses the first button of the alert that is open (1000 = first button).
             NSApp.stopModal(withCode: NSApplication.ModalResponse(rawValue: 999 + (Int(arg) ?? 1)))
@@ -430,6 +443,10 @@ import AppKit
             // A .torrent opened from Finder (SPEC 7A.6): the same path as double-clicking one. QA roots only.
             guard ["/private/tmp/", "/tmp/"].contains(where: arg.hasPrefix) else { return report("open-file: only under /private/tmp") }
             app.application(NSApp, open: [URL(fileURLWithPath: arg)])
+        case "open-url":
+            // A link opened from another app or the Finder extension: the same path as clicking one.
+            guard let url = URL(string: arg), !url.isFileURL else { return report("open-url: not a link") }
+            app.application(NSApp, open: [url])
         case "quit":
             app.quitForReal()
         case "quit-menu":

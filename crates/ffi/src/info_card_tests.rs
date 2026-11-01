@@ -1,4 +1,5 @@
 use super::*;
+use crate::host::{host_windows_all, HostWindow};
 use crate::library::tests::Clock;
 use crate::row_commands::{PlayerOption, RowCommand};
 use crate::row_text::tests::row;
@@ -70,7 +71,7 @@ fn card(row: &TransferRow, info: Option<&TorrentInfo>) -> InfoCardModel {
 }
 
 fn card_with(row: &TransferRow, info: Option<&TorrentInfo>, play: &[CommandEntry], chooser: bool, now_s: u64) -> InfoCardModel {
-    build(&CardInputs { row, info, play, chooser_available: chooser, now_s, clock: &Clock })
+    build(&CardInputs { row, info, play, chooser_available: chooser, host: &host_windows_all(), now_s, clock: &Clock })
 }
 
 fn section<'a>(m: &'a InfoCardModel, title: &str) -> &'a InfoCardSection {
@@ -432,6 +433,28 @@ fn the_goal_menu_is_the_row_menus_and_names_the_goal_in_force() {
 }
 
 #[test]
+fn a_host_without_the_chooser_or_the_custom_goal_dialog_gets_neither() {
+    let mut r = sharing();
+    r.ratio_goal = Some(3.0);
+    let i = TorrentInfo { files_total: 4, files_wanted: 4, ..info() };
+    let host = [HostWindow::GetInfo, HostWindow::MoveTo, HostWindow::NewChannel, HostWindow::ChatDialogs];
+    let m = build(&CardInputs { row: &r, info: Some(&i), play: &[], chooser_available: true, host: &host, now_s: NOW_S, clock: &Clock });
+    assert!(find(section(&m, "General"), "Files").button.is_none(), "no Choose… without the chooser");
+    let entries = find(section(&m, "Rule and goal"), "Then").menu.clone().unwrap().entries;
+    let commands: Vec<RowCommand> = entries.iter().filter_map(|e| match e {
+        CommandEntry::Item { command, .. } => Some(command.clone()),
+        _ => None,
+    }).collect();
+    assert!(!commands.contains(&RowCommand::CustomGoal), "{commands:?}");
+    assert!(commands.contains(&RowCommand::SetSeedingGoal { goal: SeedingGoal::Forever }));
+    assert!(!matches!(entries.last(), Some(CommandEntry::Separator)), "no separator left over");
+    // The Mac's set keeps both.
+    let full = card(&r, Some(&i));
+    assert!(find(section(&full, "General"), "Files").button.is_some());
+    assert!(find(section(&full, "Rule and goal"), "Then").menu.as_ref().unwrap().entries.iter().any(|e| matches!(e, CommandEntry::Item { command: RowCommand::CustomGoal, .. })));
+}
+
+#[test]
 fn play_is_a_button_and_pop_ups_with_their_help() {
     let mut r = row("a", TransferState::Downloading);
     r.has_video = true;
@@ -485,7 +508,7 @@ fn the_card_reads_the_torrent_when_it_opens_and_when_asked_then_ticks_every_seco
     let core = Core::new(CoreOptions { config_dir: dir.path().display().to_string(), mock: true, allow_loopback_trackers: false, forbidden_root: None }).unwrap();
     let s = core.snapshot();
     let r = s.downloading.first().unwrap().clone();
-    let c = GetInfoCard::new(core.clone(), r.clone(), Arc::new(Clock), true, None);
+    let c = GetInfoCard::new(core.clone(), r.clone(), Arc::new(Clock), true, None, host_windows_all());
     let m = c.model(r.clone(), NOW_S * 1000);
     assert_eq!((m.row_id.as_str(), m.refresh_ms, m.refresh_leeway_ms), (r.id.as_str(), 1_000, 200));
     assert_eq!(section(&m, "General").rows[0].value[0].text, r.display_name);
@@ -507,7 +530,7 @@ fn an_open_card_reads_the_torrent_again_two_seconds_after_it_showed_it() {
     let dir = tempfile::tempdir().unwrap();
     let core = Core::new(CoreOptions { config_dir: dir.path().display().to_string(), mock: true, allow_loopback_trackers: false, forbidden_root: None }).unwrap();
     let r = core.snapshot().downloading.first().unwrap().clone();
-    let c = GetInfoCard::new(core.clone(), r.clone(), Arc::new(Clock), true, None);
+    let c = GetInfoCard::new(core.clone(), r.clone(), Arc::new(Clock), true, None, host_windows_all());
     let t0 = NOW_S * 1000;
     assert_eq!(c.model(r.clone(), t0).reload_due_ms, 2_000, "the read made at the opening counts from the first model");
     assert_eq!(c.model(r.clone(), t0 + 1_500).reload_due_ms, 500);

@@ -16,6 +16,7 @@ use trs_platform::file_manager;
 
 use crate::backend::Backend;
 use crate::library::{clock_at, LocalClock};
+use crate::host::{has, offered_commands, HostWindow};
 use crate::row_commands::{play_commands, seeding_goal_commands, CommandEntry, PlayOffer};
 use crate::row_text::{can_ask_again, category_label};
 use crate::types::{TorrentInfo, TrackerLine, TrackerProblem, TransferKind, TransferRow, TransferState};
@@ -374,7 +375,7 @@ fn general(c: &CardInputs, i: &TorrentInfo) -> InfoCardSection {
     rows.push(location);
     let skipped = if i.skipped_note.is_empty() { String::new() } else { format!(" · {}", i.skipped_note) };
     let mut files = runs("Files", vec![run(format!("{} of {}", i.files_wanted, i.files_total), InfoTone::Primary), run(skipped, InfoTone::Secondary)]);
-    if c.chooser_available && i.files_total > 1 {
+    if c.chooser_available && i.files_total > 1 && has(c.host, Some(HostWindow::Chooser)) {
         files.button = Some(button("Choose…", "Choose which files to download", InfoCommand::ChooseFiles));
     }
     rows.push(files);
@@ -467,8 +468,8 @@ fn goal(c: &CardInputs, i: &TorrentInfo) -> InfoCardSection {
     then.menu = Some(InfoMenu {
         title: i.seeding_goal.clone(),
         help: "Choose what happens when this torrent is done downloading".into(),
-        // The row menu's "Seeding Goal ▸", entry for entry.
-        entries: seeding_goal_commands(c.row.clone(), Some(i.clone())),
+        // The row menu's "Seeding Goal ▸", entry for entry (Custom… only with its dialog).
+        entries: offered_commands(seeding_goal_commands(c.row.clone(), Some(i.clone())), c.host),
     });
     let mut rows = vec![line("Rule", &i.rule_name), then];
     if let Some(idle) = &i.idle_text {
@@ -487,6 +488,8 @@ pub(crate) struct CardInputs<'a> {
     pub play: &'a [CommandEntry],
     /// The engine can hold a torrent for a choice and reopen it ("Choose…").
     pub chooser_available: bool,
+    /// The windows the host has: Choose… needs the chooser, Then › Custom… its dialog.
+    pub host: &'a [HostWindow],
     pub now_s: u64,
     pub clock: &'a dyn LocalClock,
 }
@@ -553,6 +556,7 @@ pub struct GetInfoCard {
     row_id: String,
     chooser_available: bool,
     play: Vec<CommandEntry>,
+    host: Vec<HostWindow>,
     read: Mutex<Read>,
 }
 
@@ -563,10 +567,12 @@ impl GetInfoCard {
         clock: Arc<dyn LocalClock>,
         chooser_available: bool,
         play: Option<PlayOffer>,
+        host: Vec<HostWindow>,
     ) -> Arc<Self> {
-        let play = play.map(|offer| play_commands(row.clone(), offer)).unwrap_or_default();
+        // No Play line without a player.
+        let play = play.filter(|_| has(&host, Some(HostWindow::Player))).map(|offer| play_commands(row.clone(), offer)).unwrap_or_default();
         let read = Mutex::new(Read { info: backend.info(&row.id).ok(), shown_ms: None });
-        Arc::new(Self { backend, clock, row_id: row.id.clone(), chooser_available, play, read })
+        Arc::new(Self { backend, clock, row_id: row.id.clone(), chooser_available, play, host, read })
     }
 
     /// The torrent as last read, and how long until it is read again (a read counts from the first model that shows it).
@@ -581,10 +587,19 @@ impl GetInfoCard {
 #[uniffi::export]
 impl GetInfoCard {
     /// The card of `row` as it opens: reads the torrent. `chooser_available`: the engine can hold a torrent for a
-    /// choice and reopen it; `play`: what the row's Play entries are made of (`None` or no videos: no Play line).
+    /// choice and reopen it; `play`: what the row's Play entries are made of (`None` or no videos: no Play line);
+    /// `host`: the windows the host has (`host_windows_all()` on the Mac): Files' Choose… needs `Chooser`, Then ›
+    /// Custom… `CustomGoal`, the Play line `Player`.
     #[uniffi::constructor]
-    pub fn new(core: Arc<Core>, row: TransferRow, clock: Arc<dyn LocalClock>, chooser_available: bool, play: Option<PlayOffer>) -> Arc<Self> {
-        Self::with_backend(core.backend.clone(), &row, clock, chooser_available, play)
+    pub fn new(
+        core: Arc<Core>,
+        row: TransferRow,
+        clock: Arc<dyn LocalClock>,
+        chooser_available: bool,
+        play: Option<PlayOffer>,
+        host: Vec<HostWindow>,
+    ) -> Arc<Self> {
+        Self::with_backend(core.backend.clone(), &row, clock, chooser_available, play, host)
     }
 
     /// The card now, for `row` as the list has it now (it must be the card's row). Cheap: nothing is read; the host asks
@@ -597,6 +612,7 @@ impl GetInfoCard {
             info: info.as_ref(),
             play: &self.play,
             chooser_available: self.chooser_available,
+            host: &self.host,
             now_s: now_unix_ms / 1000,
             clock: self.clock.as_ref(),
         });

@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use trs_control::display as d;
 use trs_platform::computer;
 
+use crate::host::{has, HostWindow};
 use crate::sync::SyncSnapshot;
 use crate::sync_text::{badge, subtitle, sync_remove_folder_question, sync_remove_trash_label, SyncBadge, TITLE_LIMIT};
 
@@ -23,7 +24,7 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 // MARK: The delete confirmation
 
 #[derive(Default)]
-struct RemovalState {
+pub(crate) struct RemovalState {
     /// The folder whose confirmation is open.
     open: Option<String>,
     /// How many of its files no other device is known to hold (given when it opened).
@@ -49,7 +50,7 @@ impl RemovalState {
         self.only_here = 0;
     }
 
-    fn keep_only(&mut self, ids: &HashSet<&str>) {
+    pub(crate) fn keep_only(&mut self, ids: &HashSet<&str>) {
         if self.open.as_deref().is_some_and(|o| !ids.contains(o)) {
             self.close();
         }
@@ -99,6 +100,27 @@ impl SyncRemoval {
     pub fn set_trash(&self, on: bool) {
         lock(&self.state).trash = on;
     }
+
+    /// Opens the question of `id` (Stop Syncing… on the Folder Sync page): without the Trash option, and closing
+    /// another one; one open for `id` already stays as it is.
+    pub fn open(&self, id: String, only_here: u64) {
+        let mut r = lock(&self.state);
+        if r.open.as_deref() != Some(id.as_str()) {
+            r.toggle(&id, only_here);
+        }
+    }
+}
+
+impl SyncRemoval {
+    pub(crate) fn with<T>(&self, f: impl FnOnce(&mut RemovalState) -> T) -> T {
+        f(&mut lock(&self.state))
+    }
+
+    /// The folder whose question is open, how many of its files only this computer has, and the Trash option.
+    pub(crate) fn state_now(&self) -> (Option<String>, u64, bool) {
+        let r = lock(&self.state);
+        (r.open.clone(), r.only_here, r.trash)
+    }
 }
 
 // MARK: The submenu
@@ -116,8 +138,9 @@ pub struct SyncMenuRow {
     pub badge: SyncBadge,
     /// What a screen reader says for the row: "Photos, Up to date".
     pub accessibility_label: String,
-    /// The Edit and Remove buttons' names: "Edit Photos", "Remove Photos".
-    pub edit_label: String,
+    /// The Edit and Remove buttons' names: "Edit Photos", "Remove Photos". No Edit (`None`) on a host without the
+    /// folder editor.
+    pub edit_label: Option<String>,
     pub remove_label: String,
     /// Its confirmation is open under it: the trash button stays visible and lit.
     pub confirming: bool,
@@ -152,27 +175,35 @@ pub struct SyncMenuItem {
 pub struct SyncMenuModel {
     pub rows: Vec<SyncMenuRow>,
     pub confirm: Option<SyncMenuConfirm>,
-    /// "Add Folder…": the add modal.
-    pub add: SyncMenuItem,
-    /// "Edit Folder…" (shortcut E) and "Remove Folder…" (shortcut Delete), hidden: a key equivalent closes the menu, so
-    /// Remove asks on the folder's page in the window instead.
-    pub edit_title: String,
+    /// "Add Folder…": the add modal (`None` on a host without it: no item, and no separator above it).
+    pub add: Option<SyncMenuItem>,
+    /// "Edit Folder…" (shortcut E; `None` on a host without the folder editor) and "Remove Folder…" (shortcut
+    /// Delete), hidden: a key equivalent closes the menu, so Remove asks on the folder's page in the window instead.
+    pub edit_title: Option<String>,
     pub remove_title: String,
     /// When it differs from the last one the submenu is rebuilt (a folder added, removed or renamed, a confirmation
     /// opened or closed); otherwise the rows' texts and images are updated in place (the highlight stays put).
     pub signature: String,
 }
 
-/// The submenu for `snapshot`, with the confirmation `removal` has open. A confirmation whose folder is gone closes.
-#[uniffi::export]
-pub fn sync_menu_model(snapshot: SyncSnapshot, removal: Arc<SyncRemoval>) -> SyncMenuModel {
-    let mut r = lock(&removal.state);
-    r.keep_only(&snapshot.folders.iter().map(|f| f.id.as_str()).collect());
-    build(&snapshot, &r)
+/// "Add Folder…" and its tooltip (the submenu, the Folder Sync page).
+pub(crate) fn add_folder_item() -> SyncMenuItem {
+    SyncMenuItem { title: "Add Folder…".into(), help: concat!("Sync a folder of this ", computer!(), ", or one shared with you").into() }
 }
 
-fn build(s: &SyncSnapshot, r: &RemovalState) -> SyncMenuModel {
+/// The submenu for `snapshot`, with the confirmation `removal` has open. A confirmation whose folder is gone closes.
+/// `host`: the windows the host has (`host_windows_all()` on the Mac): Edit needs `FolderEditor`, Add Folder…
+/// `AddFolder`.
+#[uniffi::export]
+pub fn sync_menu_model(snapshot: SyncSnapshot, removal: Arc<SyncRemoval>, host: Vec<HostWindow>) -> SyncMenuModel {
+    let mut r = lock(&removal.state);
+    r.keep_only(&snapshot.folders.iter().map(|f| f.id.as_str()).collect());
+    build(&snapshot, &r, &host)
+}
+
+fn build(s: &SyncSnapshot, r: &RemovalState, host: &[HostWindow]) -> SyncMenuModel {
     let open = r.open.as_deref();
+    let edit = has(host, Some(HostWindow::FolderEditor));
     let rows = s
         .folders
         .iter()
@@ -184,7 +215,7 @@ fn build(s: &SyncSnapshot, r: &RemovalState) -> SyncMenuModel {
                 accessibility_label: format!("{}, {sub}", f.name),
                 subtitle: sub,
                 badge: badge(f),
-                edit_label: format!("Edit {}", f.name),
+                edit_label: edit.then(|| format!("Edit {}", f.name)),
                 remove_label: format!("Remove {}", f.name),
                 confirming: open == Some(f.id.as_str()),
             }
@@ -204,11 +235,8 @@ fn build(s: &SyncSnapshot, r: &RemovalState) -> SyncMenuModel {
     SyncMenuModel {
         rows,
         confirm,
-        add: SyncMenuItem {
-            title: "Add Folder…".into(),
-            help: concat!("Sync a folder of this ", computer!(), ", or one shared with you").into(),
-        },
-        edit_title: "Edit Folder…".into(),
+        add: has(host, Some(HostWindow::AddFolder)).then(add_folder_item),
+        edit_title: edit.then(|| "Edit Folder…".into()),
         remove_title: "Remove Folder…".into(),
         signature: format!("{}|{}", structure.join(","), open.unwrap_or_default()),
     }
@@ -217,6 +245,7 @@ fn build(s: &SyncSnapshot, r: &RemovalState) -> SyncMenuModel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::host::host_windows_all;
     use crate::sync::SyncState;
     use crate::sync_text::tests::folder;
 
@@ -258,13 +287,13 @@ mod tests {
         let mut long = folder("Holiday photos from the summer house 2026 (all)", SyncState::Syncing);
         long.need_bytes = 580_000_000;
         long.rate_in = 12_000_000;
-        let m = sync_menu_model(snap(vec![folder("Photos", SyncState::UpToDate), long]), SyncRemoval::new());
+        let m = sync_menu_model(snap(vec![folder("Photos", SyncState::UpToDate), long]), SyncRemoval::new(), host_windows_all());
         assert_eq!(m.rows.len(), 2);
         let r = &m.rows[0];
         assert_eq!((r.id.as_str(), r.title.as_str(), r.subtitle.as_str()), ("ID-Photos", "Photos", "Up to date"));
         assert_eq!(r.badge, SyncBadge::UpToDate);
         assert_eq!(r.accessibility_label, "Photos, Up to date");
-        assert_eq!((r.edit_label.as_str(), r.remove_label.as_str()), ("Edit Photos", "Remove Photos"));
+        assert_eq!((r.edit_label.as_deref(), r.remove_label.as_str()), (Some("Edit Photos"), "Remove Photos"));
         assert!(!r.confirming);
         let l = &m.rows[1];
         assert_eq!(l.title.chars().count(), TITLE_LIMIT, "a long name is cut in the middle");
@@ -273,9 +302,10 @@ mod tests {
         assert_eq!(l.badge, SyncBadge::Progress { fraction: 0.42 });
         assert_eq!(crate::sync_text::sync_badge_label(l.badge), "syncing");
         assert_eq!(m.confirm, None);
-        assert_eq!(m.add.title, "Add Folder…");
-        assert_eq!(m.add.help, format!("Sync a folder of this {}, or one shared with you", computer!()));
-        assert_eq!((m.edit_title.as_str(), m.remove_title.as_str()), ("Edit Folder…", "Remove Folder…"));
+        let add = m.add.unwrap();
+        assert_eq!(add.title, "Add Folder…");
+        assert_eq!(add.help, format!("Sync a folder of this {}, or one shared with you", computer!()));
+        assert_eq!((m.edit_title.as_deref(), m.remove_title.as_str()), (Some("Edit Folder…"), "Remove Folder…"));
     }
 
     #[test]
@@ -283,7 +313,7 @@ mod tests {
         let removal = SyncRemoval::new();
         removal.toggle("ID-B".into(), 0);
         removal.set_trash(true);
-        let m = sync_menu_model(snap(vec![folder("A", SyncState::UpToDate), folder("B", SyncState::UpToDate)]), removal.clone());
+        let m = sync_menu_model(snap(vec![folder("A", SyncState::UpToDate), folder("B", SyncState::UpToDate)]), removal.clone(), host_windows_all());
         assert_eq!(m.rows.iter().map(|r| r.confirming).collect::<Vec<_>>(), [false, true]);
         let c = m.confirm.unwrap();
         assert_eq!(c.folder_id, "ID-B");
@@ -292,14 +322,14 @@ mod tests {
         assert_eq!((c.cancel_title.as_str(), c.cancel_help.as_str()), ("Cancel", "Keep syncing this folder"));
         assert_eq!((c.remove_title.as_str(), c.remove_help), ("Remove", format!("Stop syncing this folder on this {}", computer!())));
         // B is removed elsewhere: its question goes with it.
-        let m = sync_menu_model(snap(vec![folder("A", SyncState::UpToDate)]), removal.clone());
+        let m = sync_menu_model(snap(vec![folder("A", SyncState::UpToDate)]), removal.clone(), host_windows_all());
         assert_eq!(m.confirm, None);
         assert_eq!(removal.open_folder(), None);
     }
 
     #[test]
     fn the_submenu_rebuilds_for_its_folders_and_its_confirmation_only() {
-        let sig = |folders, removal: &Arc<SyncRemoval>| sync_menu_model(snap(folders), removal.clone()).signature;
+        let sig = |folders, removal: &Arc<SyncRemoval>| sync_menu_model(snap(folders), removal.clone(), host_windows_all()).signature;
         let r = SyncRemoval::new();
         let one = sig(vec![folder("A", SyncState::UpToDate)], &r);
         let mut busy = folder("A", SyncState::Syncing);
@@ -312,6 +342,20 @@ mod tests {
         assert_ne!(sig(vec![folder("A", SyncState::UpToDate)], &r), one, "a confirmation opened");
         r.close();
         assert_eq!(sig(vec![folder("A", SyncState::UpToDate)], &r), one);
-        assert!(sync_menu_model(snap(Vec::new()), r).rows.is_empty());
+        assert!(sync_menu_model(snap(Vec::new()), r, host_windows_all()).rows.is_empty());
+    }
+
+    #[test]
+    fn a_host_without_the_folder_dialogs_gets_no_edit_and_no_add_folder() {
+        let folders = || snap(vec![folder("A", SyncState::UpToDate)]);
+        let full = sync_menu_model(folders(), SyncRemoval::new(), host_windows_all());
+        assert!(full.add.is_some() && full.edit_title.is_some() && full.rows[0].edit_label.is_some(), "the Mac keeps both");
+        let windows = vec![HostWindow::GetInfo, HostWindow::MoveTo, HostWindow::NewChannel, HostWindow::ChatDialogs];
+        let m = sync_menu_model(folders(), SyncRemoval::new(), windows);
+        assert_eq!((m.add, m.edit_title, m.rows[0].edit_label.clone()), (None, None, None));
+        assert_eq!(m.rows[0].remove_label, "Remove A", "Remove needs no window");
+        let only_add = sync_menu_model(folders(), SyncRemoval::new(), vec![HostWindow::AddFolder]);
+        assert!(only_add.add.is_some() && only_add.edit_title.is_none());
+        assert_eq!(only_add.signature, full.signature, "the rows are the same");
     }
 }

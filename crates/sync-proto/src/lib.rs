@@ -7,6 +7,7 @@
 //! * [`reach`]: where the device that made a link can be reached, sealed inside the link.
 //! * [`rendezvous`]: a device's sealed, signed address record in its user's rendezvous.
 //! * [`chat`]: channel messages and the summaries devices compare.
+//! * [`attach`]: the images a channel message names (the bytes are fetched by hash).
 //! * [`direct`]: private messages, end-to-end encrypted to their recipient.
 //! * [`device`]: a device's Ed25519 key.
 //! * [`sign`]: signed file versions and the writer table.
@@ -17,6 +18,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod attach;
 pub mod base32;
 pub mod chat;
 pub mod codec;

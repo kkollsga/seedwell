@@ -60,18 +60,18 @@ import Testing
         // The rules are the core's (menu.rs); this checks the app reaches them.
         let ok = Self.snap([Self.folder("A"), Self.folder("B"), Self.folder("C")])
         #expect(syncSummary(snapshot: ok) == "3 folders · Up to date")
-        let m = menuModel(snapshot: Snapshot.empty, sync: ok, arrivals: Arrivals(), nowUnixMs: 0, updateVersion: nil)
+        let m = menuModel(snapshot: Snapshot.empty, sync: ok, arrivals: Arrivals(), nowUnixMs: 0, updateVersion: nil, host: hostWindowsAll())
         #expect(m.folderSync?.title == "Folder Sync" && m.folderSync?.subtitle == "3 folders · Up to date")
-        #expect(menuModel(snapshot: Snapshot.empty, sync: Self.snap([]), arrivals: Arrivals(), nowUnixMs: 0, updateVersion: nil).folderSync == nil)
+        #expect(menuModel(snapshot: Snapshot.empty, sync: Self.snap([]), arrivals: Arrivals(), nowUnixMs: 0, updateVersion: nil, host: hostWindowsAll()).folderSync == nil)
     }
 
     @Test func theSubmenuDrawsTheCoresModel() {
         let removal = SyncRemoval()
         removal.toggle(id: "ID-B", onlyHere: 0)
-        let m = syncMenuModel(snapshot: Self.snap([Self.folder("A"), Self.folder("B")]), removal: removal)
+        let m = syncMenuModel(snapshot: Self.snap([Self.folder("A"), Self.folder("B")]), removal: removal, host: hostWindowsAll())
         #expect(m.rows.map(\.title) == ["A", "B"] && m.rows.map(\.confirming) == [false, true])
         #expect(m.confirm?.question == "Stop syncing “B” on this Mac? Other devices keep their copy.")
-        #expect(m.add.title == "Add Folder…" && m.add.help == "Sync a folder of this Mac, or one shared with you")
+        #expect(m.add?.title == "Add Folder…" && m.add?.help == "Sync a folder of this Mac, or one shared with you")
     }
 
     static func link(_ role: SyncRole, _ name: String? = nil, id: String = "MFZWI3D-BONSGYC", mine: Bool = false, expired: Bool = false,
@@ -81,14 +81,16 @@ import Testing
     }
 
     @Test func theAddModalsFormIsTheCores() {
-        var f = SyncAddForm()
-        #expect(f.mode == .local && !f.canStart)
+        var f = syncAddFormNew()
+        #expect(f.mode == .local && !syncAddCanStart(form: f))
         f.folder = "/Users/me/Novel"
-        #expect(f.canStart)
+        #expect(syncAddCanStart(form: f))
         f.mode = .shared
-        f.setKey("seedwell://sync/x", info: Self.link(.readWrite, "Photos", id: "F"), defaultLocation: "/Users/me/Seedwell/Photos")
-        #expect(f.canStart && f.keyUsable && f.keyLine == "Read & write · Photos" && f.location == "/Users/me/Seedwell/Photos")
-        f.chooseParent("/Volumes/Disk")
+        f = syncAddSetKey(form: f, text: "seedwell://sync/x", info: Self.link(.readWrite, "Photos", id: "F"),
+                          defaultLocation: "/Users/me/Seedwell/Photos", problem: nil)
+        #expect(syncAddCanStart(form: f) && syncAddKeyUsable(form: f) && syncAddKeyLine(form: f) == "Read & write · Photos")
+        #expect(f.location == "/Users/me/Seedwell/Photos")
+        f = syncAddChooseParent(form: f, parent: "/Volumes/Disk")
         #expect(f.location == "/Volumes/Disk/Photos" && f.locationChosen)
         #expect(syncAddModes().map { syncAddModeLabel(mode: $0) } == ["From this Mac", "Shared with me"])
     }
@@ -108,8 +110,32 @@ import Testing
         #expect(m.error == nil && m.form.key == "seedwell://sync/x", "a new link is a fresh start")
     }
 
-    @Test func theShareMenuSharesAFolderNotSyncedYetInOneStep() {
-        let t = ShareTarget(newFolder: "/Users/me/Novel")
-        #expect(t.name == "Novel" && t.role == .owner && !t.isChannel && t.id.isEmpty && t.shareUntilS == nil)
+    @MainActor @Test func theShareMenuSharesAFolderNotSyncedYetInOneStep() throws {
+        let dir = NSTemporaryDirectory() + "seedwell-sync-share-\(getpid())"
+        try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let core = try Core(options: CoreOptions(configDir: dir, mock: true, allowLoopbackTrackers: false, forbiddenRoot: nil))
+        let m = SyncShareModel(core: core, newFolder: "/Users/me/Novel")
+        let w = m.window()
+        #expect(m.id.isEmpty && w.title == "Share “Novel”" && w.newNote != nil && w.closeTitle == "Cancel" && w.copyTitle == "Copy Link")
+    }
+
+    /// The page draws the core's model: what the Mac passes keeps every item.
+    @MainActor @Test func theFolderSyncPageIsTheCores() throws {
+        let dir = NSTemporaryDirectory() + "seedwell-sync-page-\(getpid())"
+        try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let core = try Core(options: CoreOptions(configDir: dir, mock: true, allowLoopbackTrackers: false, forbiddenRoot: nil))
+        let m = LibraryModel(core: core, section: .folderSync)
+        let page = m.folderSyncPage(onDemandOff: { _ in false })
+        let p = try #require(page.page)
+        #expect(page.add?.title == "Add Folder…" && page.selected == p.folderId)
+        #expect(p.buttons.map(\.title).contains("Edit…") && p.buttons.last?.title == "Stop Syncing…")
+        m.askSyncRemove(p.folderId)
+        #expect(m.folderSyncPage(onDemandOff: { _ in false }).page?.removal?.removeTitle == "Remove")
+        m.setSyncTrash(true)
+        #expect(m.syncRemovalTrash && m.folderSyncPage(onDemandOff: { _ in false }).page?.removal?.trash == true)
+        m.cancelSyncRemove()
+        #expect(m.folderSyncPage(onDemandOff: { _ in false }).page?.removal == nil)
     }
 }

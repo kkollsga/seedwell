@@ -43,13 +43,18 @@ sealed class FolderSyncPage
         SyncSnapshot snapshot;
         try { snapshot = app.Core.SyncSnapshot(); } catch { return; }
         // In the core's order (the Folder Sync menu's rows), not the snapshot's.
-        var order = TrsFfiMethods.SyncMenuModel(snapshot, app.SyncRemoval).Rows.Select((r, i) => (r.Id, i)).ToDictionary(x => x.Id, x => x.i);
+        var order = TrsFfiMethods.SyncMenuModel(snapshot, app.SyncRemoval, App.HostWindows).Rows.Select((r, i) => (r.Id, i)).ToDictionary(x => x.Id, x => x.i);
         var folders = snapshot.Folders.OrderBy(f => order.TryGetValue(f.Id, out var i) ? i : int.MaxValue).ToArray();
         if (chosen is null || folders.All(f => f.Id != chosen))
         {
             chosen = folders.FirstOrDefault()?.Id;
         }
-        var key = string.Join("|", folders.Select(f => $"{f.Id}:{TrsFfiMethods.SyncFolderSubtitle(f)}:{f.Connected}:{f.Members}")) + $"#{chosen}";
+        FollowLine? follow = null;
+        if (chosen is string id)
+        {
+            try { follow = app.Core.SyncFollowLine(id); } catch (Exception e) { AppLog.Write($"follow line failed: {e.Message}"); }
+        }
+        var key = string.Join("|", folders.Select(f => $"{f.Id}:{TrsFfiMethods.SyncFolderSubtitle(f)}:{f.Connected}:{f.Members}")) + $"#{chosen}#{follow}";
         if (key == drawn)
         {
             return;
@@ -63,8 +68,56 @@ sealed class FolderSyncPage
         detail.Children.Clear();
         if (folders.FirstOrDefault(f => f.Id == chosen) is SyncFolder folder)
         {
-            Detail(folder, snapshot);
+            Detail(folder, snapshot, follow);
         }
+    }
+
+    /// <summary>
+    /// "On all my devices" (SPEC §7G.1 "Your devices", the Mac's FollowToggle): the core's title, the line under it, its
+    /// help as the tooltip, and whether it may be switched.
+    /// </summary>
+    UIElement Follow(string id, FollowLine line)
+    {
+        var s = new StackPanel { Spacing = 2, Margin = new Thickness(0, 8, 0, 0) };
+        var toggle = new ToggleSwitch { Header = line.Title, IsOn = line.On, IsEnabled = line.Enabled };
+        if (line.Help.Length > 0)
+        {
+            ToolTipService.SetToolTip(toggle, line.Help);
+        }
+        toggle.Toggled += (_, _) => SetFollow(id, toggle.IsOn);
+        s.Children.Add(toggle);
+        if (line.Line.Length > 0)
+        {
+            s.Children.Add(new TextBlock { Text = line.Line, FontSize = 12, Opacity = 0.7, TextWrapping = TextWrapping.Wrap });
+        }
+        return s;
+    }
+
+    /// <summary>Puts the folder on all the user's devices, or stops that (nothing is deleted anywhere).</summary>
+    internal void SetFollow(string id, bool on)
+    {
+        try
+        {
+            app.Core.SyncSetFollow(id, on);
+        }
+        catch (CoreException e)
+        {
+            // The core's sentence as the alert's message, as the Mac's.
+            app.Alert(new SyncAlert(TrsFfiMethods.CoreErrorMessage(e), ""));
+        }
+        drawn = "";
+        Update();
+    }
+
+    /// <summary>The folder shown on the right (QA).</summary>
+    internal string? Chosen => chosen;
+
+    /// <summary>Shows folder <paramref name="id"/> on the right (a seedwell://folder/ link), as a click on its row.</summary>
+    internal void Choose(string id)
+    {
+        chosen = id;
+        drawn = "";
+        Update();
     }
 
     UIElement FolderRow(SyncFolder f, bool on)
@@ -86,7 +139,7 @@ sealed class FolderSyncPage
         return g;
     }
 
-    void Detail(SyncFolder f, SyncSnapshot snapshot)
+    void Detail(SyncFolder f, SyncSnapshot snapshot, FollowLine? follow)
     {
         detail.Children.Add(new TextBlock { Text = f.Name, FontSize = 22, FontWeight = FontWeights.SemiBold });
         // The path in the secondary colour, a magnifier after it that shows the folder in File Explorer (the Mac's).
@@ -101,6 +154,10 @@ sealed class FolderSyncPage
         if (f.Error is string error)
         {
             detail.Children.Add(new TextBlock { Text = error, Foreground = (Brush)Application.Current.Resources["SystemFillColorCriticalBrush"], TextWrapping = TextWrapping.Wrap });
+        }
+        if (follow is { Shown: true } fl)
+        {
+            detail.Children.Add(Follow(f.Id, fl));
         }
 
         SyncMember[] members;

@@ -482,6 +482,7 @@ impl SyncHandle {
             hold_wait: Mutex::new(Duration::from_secs(10)),
             silent_ondemand: AtomicBool::new(false),
             folder_gen: std::sync::atomic::AtomicU64::new(0),
+            file_hooks: crate::files::Hooks::default(),
             sessions: std::sync::atomic::AtomicU64::new(0),
             ours: Mutex::new(cfg.folders.iter().filter_map(|f| f.id.parse().ok()).collect()),
             setup_wait: Mutex::new(Duration::ZERO),
@@ -608,6 +609,8 @@ impl SyncHandle {
             tasks.push(tokio::spawn(foreign_loop(h.clone(), rx)));
         }
         *lock(&h.inner.tasks) = tasks;
+        // Downloads that were running when the service stopped resume (paused until a device that has them connects).
+        h.wake_rooms();
         for url in h.relay_urls() {
             crate::relay_server::ensure_registered(&h, &url);
         }
@@ -643,6 +646,7 @@ impl SyncHandle {
     /// process. The handle shows no folders or channels afterwards.
     pub async fn shutdown(&self) {
         self.inner.stopping.store(true, Ordering::SeqCst);
+        self.halt_rooms();
         let runners: Vec<Runner> = lock(&self.inner.runners).drain().map(|(_, r)| r).collect();
         for r in &runners {
             let _ = r.stop.send(true);

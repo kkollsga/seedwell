@@ -191,7 +191,8 @@ struct InfoCard: View {
         let offer = commands.playOffer(row)
         self.row = row
         videos = offer.videos
-        card = GetInfoCard(core: core, row: row, clock: MacClock(), chooserAvailable: commands.chooserAvailable, play: offer)
+        card = GetInfoCard(core: core, row: row, clock: MacClock(), chooserAvailable: commands.chooserAvailable, play: offer,
+                           host: hostWindowsAll())
         model = card.model(row: row, nowUnixMs: Date().unixMs)
     }
 

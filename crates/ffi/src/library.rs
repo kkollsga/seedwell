@@ -16,6 +16,8 @@ use trs_platform::computer;
 
 use crate::backend::Backend;
 use crate::chat_text::{header, named, topic_line, UNNAMED_DEVICE};
+use crate::devices_text::follow_line_for;
+use crate::host::{disclosure_window, has, host_windows_all, offered_sidebar, row_command_window, HostWindow};
 use crate::library_rows::{
     filter_chip, list_signature, Lists, ListFilter, ListModel, RowContext, SharingRows, PAGE, SEED_GROUPS,
 };
@@ -132,7 +134,8 @@ pub struct LibraryViewModel {
     pub title: String,
     /// A star before the title: a favorite tracker's tab.
     pub title_star: bool,
-    /// The calm line under the title ("2 active · 1 up next · ↓ 2.1 MB/s · ↑ 340 KB/s").
+    /// The calm line under the title ("2 active · 1 up next · ↓ 2.1 MB/s · ↑ 340 KB/s"); empty for a page that has
+    /// none (Settings), which the host then leaves out, the title alone.
     pub summary: String,
     /// The list of a list page.
     pub list: Option<ListModel>,
@@ -196,6 +199,8 @@ pub(crate) struct LibraryState {
     pub open: bool,
     /// A new download that arrived while the window was closed (the newest).
     pub arrival: Option<String>,
+    /// The windows the host has (`Library::set_host_windows`); every one until it says otherwise.
+    pub host: Vec<HostWindow>,
 }
 
 impl LibraryState {
@@ -222,6 +227,7 @@ impl LibraryState {
             listed: Vec::new(),
             open: false,
             arrival: None,
+            host: host_windows_all(),
         }
     }
 
@@ -229,8 +235,8 @@ impl LibraryState {
     pub(crate) fn reset_window(&mut self) {
         let fresh = Self::new(Vec::new());
         let folded = std::mem::take(&mut self.folded);
-        let (arrival, scroll_count) = (self.arrival.take(), self.scroll_count);
-        *self = Self { folded, arrival, scroll_count, ..fresh };
+        let (arrival, scroll_count, host) = (self.arrival.take(), self.scroll_count, std::mem::take(&mut self.host));
+        *self = Self { folded, arrival, scroll_count, host, ..fresh };
     }
 
     /// Selecting a place: a tab opens on its first page of rows, unfiltered, on its torrents (not its Info), with nothing
@@ -390,7 +396,8 @@ pub(crate) fn build(i: &Inputs, st: &LibraryState, now_ms: u64, clock: &dyn Loca
             let me = if i.sync.device_name.is_empty() { String::new() } else { format!(concat!(" · This ", computer!(), ": {}"), i.sync.device_name) };
             ("Folder Sync".to_owned(), sync_summary_of(&i.sync) + &me)
         }
-        LibraryPlace::Settings => ("Settings".to_owned(), "Settings".to_owned()),
+        // The page's own tabs say where in Settings it is: no line under the title.
+        LibraryPlace::Settings => ("Settings".to_owned(), String::new()),
         LibraryPlace::Tracker { tracker_id } => match tracker {
             None => ("Tracker".to_owned(), tracker_id.clone()),
             Some(t) => {
@@ -451,6 +458,7 @@ pub(crate) fn build(i: &Inputs, st: &LibraryState, now_ms: u64, clock: &dyn Loca
         directs: &directs,
         place: &st.place,
         downloads_flag: st.downloads_flag,
+        host: &st.host,
     });
     let under = removal.as_ref().map(|r| (r.question.plural, r.group_key.clone(), r.row_id.clone()));
     let signature = format!("{:?}|{page:?}|{}|{}|{under:?}", st.place, sidebar.signature, list.as_ref().map_or("", |l| l.signature.as_str()));
@@ -501,6 +509,10 @@ fn list(i: &Inputs, st: &LibraryState, now_ms: u64, tracker_name: Option<&str>) 
     let mut groups = groups;
     for r in groups.iter_mut().flat_map(|g| &mut g.rows) {
         r.mark(st.selection.contains(&r.id), st.info.as_deref() == Some(r.id.as_str()));
+        // A button whose window the host lacks (Play without a player, Get Info) is not drawn, nor a disclosure triangle
+        // whose list it lacks (the file list, the chooser's choice).
+        r.controls.retain(|c| c.command.as_ref().is_none_or(|cmd| has(&st.host, row_command_window(cmd))));
+        r.disclosure = r.disclosure.filter(|d| has(&st.host, Some(disclosure_window(*d))));
     }
     let empty = groups.is_empty().then_some(empty);
     let filter_chip = st.category.map(filter_chip);
@@ -693,14 +705,24 @@ impl Library {
         self.with_state(|st| st.direct_names.insert(device_id, name));
     }
 
-    /// The context menu of a sidebar item (empty: none), from what the last model showed.
+    /// The context menu of a sidebar item (empty: none), from what the last model showed, without the commands whose
+    /// window the host lacks.
     pub fn sidebar_menu(&self, place: LibraryPlace) -> Vec<SidebarMenuEntry> {
         let Some(i) = lock(&self.last).clone() else { return Vec::new() };
-        match &place {
+        let menu = match &place {
             LibraryPlace::Tracker { tracker_id } => i.snapshot.trackers.iter().find(|t| &t.id == tracker_id).map(tracker_menu).unwrap_or_default(),
-            LibraryPlace::Chat { channel_id, topic_id: None } => i.channel(channel_id).map(|(c, _)| channel_menu(c)).unwrap_or_default(),
+            LibraryPlace::Chat { channel_id, topic_id: None } => {
+                i.channel(channel_id).map(|(c, _)| channel_menu(c, &follow_line_for(self.backend.as_ref(), &c.id))).unwrap_or_default()
+            }
             _ => Vec::new(),
-        }
+        };
+        offered_sidebar(menu, &lock(&self.state).host)
+    }
+
+    /// The windows this host can open (`host_windows_all()` until set: the Mac's). The sidebar's adds and menus and the
+    /// rows' buttons leave out what needs another; `row_commands` takes the same set.
+    pub fn set_host_windows(&self, windows: Vec<HostWindow>) {
+        self.with_state(|st| st.host = windows);
     }
 }
 

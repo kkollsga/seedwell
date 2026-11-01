@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use trs_control::display as d;
 
+use crate::host::{has, HostWindow};
 use crate::row_text::{
     category_label, download_waiting, fraction, is_held, pending_remaining_ms, percent, progress_done, progress_size,
     shows_play, starting_line,
@@ -279,7 +280,9 @@ pub struct MenuModel {
 }
 
 /// The menu for `snapshot`, with the torrents `arrivals` says just arrived listed first. `update_version`: the
-/// version an update waits with (the host's updater knows it).
+/// version an update waits with (the host's updater knows it). `host`: the windows the host has
+/// (`host_windows_all()` on the Mac): a row's click opens the chooser only with `Chooser`, its chevron needs
+/// `FileList` and its Play icon `Player`.
 #[uniffi::export]
 pub fn menu_model(
     snapshot: Snapshot,
@@ -287,9 +290,34 @@ pub fn menu_model(
     arrivals: Arc<Arrivals>,
     now_unix_ms: u64,
     update_version: Option<String>,
+    host: Vec<HostWindow>,
 ) -> MenuModel {
     let a = lock(&arrivals.state);
-    build(&snapshot, &sync, &a, now_unix_ms, update_version)
+    offered(build(&snapshot, &sync, &a, now_unix_ms, update_version), &host)
+}
+
+/// The menu without what `host` cannot open: the chooser click goes (the row still says it waits for a choice), the
+/// chevron goes without the file list (and a Recent row's Play with it: only a row with a file list has the row's
+/// controls there), Play without a player.
+fn offered(mut m: MenuModel, host: &[HostWindow]) -> MenuModel {
+    let chooser = has(host, Some(HostWindow::Chooser));
+    let file_list = has(host, Some(HostWindow::FileList));
+    let player = has(host, Some(HostWindow::Player));
+    for section in &mut m.sections {
+        for row in &mut section.rows {
+            if !chooser && row.click == Some(MenuClick::OpenChooser) {
+                row.click = None;
+            }
+            if !file_list {
+                row.expands = false;
+                if section.kind == MenuSectionKind::Recent {
+                    row.playable = false;
+                }
+            }
+            row.playable &= player;
+        }
+    }
+    m
 }
 
 /// The Downloading and Queued sections (SPEC 8.2). A torrent that just arrived is listed first in Downloading,
@@ -1361,5 +1389,31 @@ mod tests {
         assert_eq!((first.look.moving, first.next_refresh_ms, first.refresh_leeway_ms), (None, 500, 100));
         assert_eq!(icon.icon(moving, 10_500, true).look.moving, Some(0.3));
         assert_eq!(icon.icon(empty(), 11_000, false).next_refresh_ms, 30_000, "the move ended");
+    }
+
+    #[test]
+    fn a_host_without_the_chooser_the_file_list_or_a_player_gets_rows_without_them() {
+        use crate::host::host_windows_all;
+        let a = ArrivalsState::default();
+        let mut pack = recent("p", 0);
+        pack.file_ext = String::new();
+        pack.has_video = true;
+        pack.file_count = 8;
+        let mut s = down(vec![choice("c")]);
+        s.recent = vec![pack];
+        let full = build(&s, &sync_snap(Vec::new(), true), &a, 0, None);
+        assert_eq!(offered(full.clone(), &host_windows_all()), full, "the Mac keeps everything");
+        let rows = |m: &MenuModel| m.sections.iter().flat_map(|s| s.rows.clone()).collect::<Vec<_>>();
+        let before = rows(&full);
+        assert_eq!(before[0].click, Some(MenuClick::OpenChooser));
+        assert!(before[1].expands && before[1].playable, "the pack has its chevron and Play");
+        let windows = offered(full.clone(), &[HostWindow::GetInfo, HostWindow::MoveTo, HostWindow::NewChannel, HostWindow::ChatDialogs]);
+        let after = rows(&windows);
+        assert_eq!((after[0].click, after[0].subtitle.as_str()), (None, "Choose what to download…"), "it still says what it waits for");
+        assert!(!after[1].expands && !after[1].playable);
+        assert_eq!(after[1].click, Some(MenuClick::Reveal), "showing it in the file manager needs no window");
+        assert_eq!(windows.signature, full.signature);
+        let lists = rows(&offered(full, &[HostWindow::FileList]));
+        assert!(lists[1].expands && !lists[1].playable, "Play needs a player");
     }
 }

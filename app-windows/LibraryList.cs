@@ -325,7 +325,7 @@ sealed class LibraryList
 
         if (r.Disclosure is not null)
         {
-            // NEED: the file list and the chooser under a row (the Mac's steps 2 and 3); drawn, not yet opened.
+            // Files needs HostWindow.FileList and Choice HostWindow.Chooser: without them the core gives no triangle.
             grid.Children.Add(new FontIcon { Glyph = "", FontSize = 10, Opacity = 0.6, VerticalAlignment = VerticalAlignment.Center });
         }
 

@@ -72,7 +72,7 @@ import SwiftUI
     /// The channel's Agents: Yes/No, for every member device (owners and admins).
     func setAgents(_ c: SyncChannel, _ open: Bool) {
         do { try core.chatSetAgents(id: c.id, open: open) } catch {
-            sync.alert("Couldn't change whether agents may use “\(c.name)”", SyncText.message(error))
+            sync.alert(ChatText.agentsMenu(c).failureTitle, SyncText.message(error))
         }
     }
 
@@ -81,89 +81,74 @@ import SwiftUI
 
     func setDirectAgents(_ access: SyncAgentAccess) { core.chatSetDirectAgents(access: access) }
 
+    /// Draws one of the core's chat dialogs as an alert: its title, message and field, the action and Cancel at the
+    /// bottom right. What the action runs with (`chatDialogCheck` of the field), or nil when it was cancelled.
+    private func ask(_ d: ChatDialog) -> ChatDialogInput? {
+        let a = NSAlert()
+        a.messageText = d.title
+        a.informativeText = d.message
+        var field: NSTextField?
+        if let f = d.field {
+            let t = NSTextField(string: f.text)
+            if !f.placeholder.isEmpty { t.placeholderString = f.placeholder }
+            t.frame = NSRect(x: 0, y: 0, width: 320, height: 24)
+            a.accessoryView = t
+            a.window.initialFirstResponder = t
+            field = t
+        }
+        a.addButton(withTitle: d.confirmTitle).hasDestructiveAction = d.destructive
+        a.addButton(withTitle: d.cancelTitle)
+        NSApp.activate()
+        guard a.runModal() == .alertFirstButtonReturn else { return nil }
+        return chatDialogCheck(dialog: d, input: field?.stringValue ?? "")
+    }
+
     /// Asks for a topic's title and starts it in the channel; its page opens.
     func newTopic(_ c: SyncChannel) {
-        let a = NSAlert()
-        a.messageText = "New topic in “\(c.name)”"
-        a.informativeText = "A topic keeps a conversation apart from the channel’s General. Everyone in the channel sees it."
-        let field = NSTextField(string: "")
-        field.placeholderString = "Dinner on Saturday"
-        field.frame = NSRect(x: 0, y: 0, width: 320, height: 24)
-        a.accessoryView = field
-        a.window.initialFirstResponder = field
-        a.addButton(withTitle: "Start")
-        a.addButton(withTitle: "Cancel")
-        NSApp.activate()
-        guard a.runModal() == .alertFirstButtonReturn, let title = ChatText.topicTitle(field.stringValue) else { return }
+        let d = chatNewTopicDialog(channel: c)
+        guard case .ready(let title?) = ask(d) else { return }
         do { let t = try core.chatNewTopic(channelId: c.id, title: title); show(.chat(channelId: c.id, topicId: t.id)) } catch {
-            sync.alert("Couldn't start the topic", SyncText.message(error))
+            sync.alert(d.failureTitle, SyncText.message(error))
         }
     }
 
     /// Asks for the channel's new name (on this Mac only: each device names its channels, as folders).
     func rename(_ c: SyncChannel) {
-        let a = NSAlert()
-        a.messageText = "Rename “\(c.name)”"
-        a.informativeText = "The new name is used on this Mac. The other devices keep the name they know it by."
-        let field = NSTextField(string: c.name)
-        field.frame = NSRect(x: 0, y: 0, width: 320, height: 24)
-        a.accessoryView = field
-        a.window.initialFirstResponder = field
-        a.addButton(withTitle: "Rename")
-        a.addButton(withTitle: "Cancel")
-        NSApp.activate()
-        guard a.runModal() == .alertFirstButtonReturn, let name = ChatText.channelName(field.stringValue), name != c.name else { return }
-        do { try core.chatRename(id: c.id, name: name) } catch { sync.alert("Couldn't rename the channel", SyncText.message(error)) }
+        let d = chatRenameDialog(channel: c)
+        guard case .ready(let name?) = ask(d) else { return }
+        do { try core.chatRename(id: c.id, name: name) } catch { sync.alert(d.failureTitle, SyncText.message(error)) }
     }
 
     /// Asks for the command that wakes an agent when a message arrives (empty: none). It gets the message as JSON on
     /// its standard input, never as arguments.
     func askWakeCommand(_ c: SyncChannel) {
-        let a = NSAlert()
-        a.messageText = "Wake an agent for “\(c.name)”"
-        a.informativeText = "This command runs when a message from another device arrives, with the message as JSON on its standard input. It runs only while the channel is open to agents (Agents: Yes). Leave it empty for none."
-        let field = NSTextField(string: c.wakeCommand ?? "")
-        field.placeholderString = "~/bin/wake-agent"
-        field.frame = NSRect(x: 0, y: 0, width: 320, height: 24)
-        a.accessoryView = field
-        a.addButton(withTitle: "Save")
-        a.addButton(withTitle: "Cancel")
-        NSApp.activate()
-        guard a.runModal() == .alertFirstButtonReturn else { return }
-        let cmd = field.stringValue.trimmingCharacters(in: .whitespaces)
-        do { try core.chatSetWakeCommand(id: c.id, command: cmd.isEmpty ? nil : cmd) } catch {
-            sync.alert("Couldn't set the command", SyncText.message(error))
-        }
+        let d = chatWakeCommandDialog(channel: c)
+        guard case .ready(let cmd) = ask(d) else { return }
+        do { try core.chatSetWakeCommand(id: c.id, command: cmd) } catch { sync.alert(d.failureTitle, SyncText.message(error)) }
     }
 
     /// Deletes the private conversation with a device on this Mac (asks first), and goes to Folder Sync. The other
     /// device keeps its copy.
     func deleteDirect(_ device: String, name: String) {
-        let a = NSAlert()
-        a.messageText = "Delete the conversation with \(name)?"
-        a.informativeText = "Its messages are removed from this Mac, with everything this Mac knows of that device through it. \(name) keeps its copy."
-        a.addButton(withTitle: "Delete")
-        a.addButton(withTitle: "Cancel")
-        NSApp.activate()
-        guard a.runModal() == .alertFirstButtonReturn else { return }
+        let d = chatDeleteConversationDialog(name: name)
+        guard case .ready = ask(d) else { return }
         do {
             try core.chatDeleteDirect(deviceId: device)
             show(.folderSync)
-        } catch { sync.alert("Couldn't delete the conversation", SyncText.message(error)) }
+        } catch { sync.alert(d.failureTitle, SyncText.message(error)) }
+    }
+
+    /// Agents: Yes/No… of the sidebar's menu: asks, then switches the channel the other way (owners and admins).
+    func askAgents(_ c: SyncChannel) {
+        guard case .ready = ask(chatAgentsDialog(channel: c)) else { return }
+        setAgents(c, !c.agents)
     }
 
     /// Leaves the channel on this Mac (asks first). The others keep it.
     func leave(_ c: SyncChannel) {
-        let a = NSAlert()
-        a.messageText = "Leave “\(c.name)”?"
-        a.informativeText = c.role == .owner
-            ? "Its messages are removed from this Mac. The other members keep the channel; make another device an owner first if it should keep one."
-            : "Its messages are removed from this Mac. The other members keep the channel."
-        a.addButton(withTitle: "Leave")
-        a.addButton(withTitle: "Cancel")
-        NSApp.activate()
-        guard a.runModal() == .alertFirstButtonReturn else { return }
-        do { try core.chatLeave(id: c.id) } catch { sync.alert("Couldn't leave “\(c.name)”", SyncText.message(error)) }
+        let d = chatLeaveDialog(channel: c)
+        guard case .ready = ask(d) else { return }
+        do { try core.chatLeave(id: c.id) } catch { sync.alert(d.failureTitle, SyncText.message(error)) }
     }
 
     // MARK: Notifications
@@ -210,69 +195,56 @@ import SwiftUI
     }
 }
 
-/// The New Channel window: make a channel, or join one with a link.
+/// The New Channel window: make a channel, or join one with a link. The core keeps the form's rules and words
+/// (`ChatNewForm`, `chatNewWindow`); this only holds it and runs Start off the main thread.
 @MainActor @Observable final class ChatNewModel {
-    enum Mode: String, CaseIterable, Identifiable {
-        case new = "New Channel", join = "Join with a Link"
-        var id: String { rawValue }
-    }
-
     @ObservationIgnored let core: Core
-    var mode: Mode = .new
-    var name = ""
-    /// Agents: Yes or No for the new channel; No unless the user picks Yes.
-    var agents = false
-    /// "On all my devices" for the new channel: on by default while this Mac is paired with others.
-    let follow: FollowLine
-    var allDevices: Bool
-    var link = ""
-    private(set) var info: SyncLinkInfo?
-    private(set) var problem: String?
+    private(set) var form: ChatNewForm
     var error: String?
     var busy = false
 
     init(core: Core, prefill: String?) {
         self.core = core
-        follow = core.syncFollowLineNew(channel: true)
-        allDevices = follow.on
-        if let prefill { mode = .join; setLink(prefill) }
+        form = core.chatNewForm(prefill: prefill)
+    }
+
+    /// The window as the core draws it from the form.
+    var window: ChatNewWindowModel { chatNewWindow(form: form) }
+
+    var mode: ChatNewMode {
+        get { form.mode }
+        set { form.mode = newValue; error = nil }
+    }
+    var name: String {
+        get { form.name }
+        set { form.name = newValue }
+    }
+    var agents: Bool {
+        get { form.agents }
+        set { form.agents = newValue }
+    }
+    var allDevices: Bool {
+        get { form.allDevices }
+        set { form.allDevices = newValue }
     }
 
     func setLink(_ text: String) {
-        link = text
-        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        info = t.isEmpty ? nil : core.chatParseLink(text: t)
-        problem = info == nil && !t.isEmpty ? core.syncLinkProblem(text: t) : nil
+        form = core.chatNewSetLink(form: form, text: text)
         error = nil
     }
 
-    var linkLine: String { SyncText.linkLine(link, info: info, problem: problem) }
-
-    var canStart: Bool {
-        switch mode {
-        case .new: ChatText.channelName(name) != nil
-        case .join: info.map { !$0.expired && !$0.alreadySynced } ?? false
-        }
-    }
-
-    func start(done: @escaping (SyncChannel, Mode) -> Void) {
-        guard canStart, !busy else { return }
+    func start(done: @escaping (SyncChannel, ChatNewMode) -> Void) {
+        guard window.canStart, !busy else { return }
         busy = true
         error = nil
-        let (core, mode, name, agents, link) = (core, mode, ChatText.channelName(name) ?? "", agents, link.trimmingCharacters(in: .whitespacesAndNewlines))
-        let everywhere = mode == .new && follow.shown && allDevices
+        let (core, form) = (core, form)
         Task {
             let r: Result<SyncChannel, Error> = await Task.detached(priority: .userInitiated) {
-                Result {
-                    let c = mode == .new ? try core.chatNew(name: name, agents: agents) : try core.chatJoin(link: link)
-                    // On all my devices: the others join it by themselves (made either way).
-                    if everywhere { try? core.syncSetFollow(id: c.id, on: true) }
-                    return c
-                }
+                Result { try core.chatNewStart(form: form) }
             }.value
             busy = false
             switch r {
-            case .success(let c): done(c, mode)
+            case .success(let c): done(c, form.mode)
             case .failure(let e): error = SyncText.message(e)
             }
         }
@@ -282,16 +254,17 @@ import SwiftUI
 struct ChatNewView: View {
     @Bindable var model: ChatNewModel
     var cancel: () -> Void = {}
-    var done: (SyncChannel, ChatNewModel.Mode) -> Void = { _, _ in }
+    var done: (SyncChannel, ChatNewMode) -> Void = { _, _ in }
 
     var body: some View {
+        let w = model.window
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 3) {
-                ModalCaption(text: "Chats")
-                Text(model.mode == .new ? "New Channel" : "Join a Channel").font(.system(size: 17, weight: .semibold))
+                ModalCaption(text: w.caption)
+                Text(w.title).font(.system(size: 17, weight: .semibold))
             }
             Picker("", selection: $model.mode) {
-                ForEach(ChatNewModel.Mode.allCases) { Text($0.rawValue).tag($0) }
+                ForEach(w.modes, id: \.mode) { Text($0.title).tag($0.mode) }
             }
             .pickerStyle(.segmented).labelsHidden().padding(.top, 16)
             Group {
@@ -299,40 +272,39 @@ struct ChatNewView: View {
                 case .new:
                     VStack(alignment: .leading, spacing: 8) {
                         HStack(spacing: 10) {
-                            Text("Name").frame(width: 60, alignment: .leading)
-                            TextField("Family, Studio, Agents…", text: $model.name).textFieldStyle(.roundedBorder)
+                            Text(w.nameLabel).frame(width: 60, alignment: .leading)
+                            TextField(w.namePlaceholder, text: $model.name).textFieldStyle(.roundedBorder)
                                 .accessibilityIdentifier("chat-new-name")
                         }
-                        Text("You become its owner. After Start, Share… makes a link for each Mac that should join.")
+                        Text(w.nameNote)
                             .font(.system(size: 12)).foregroundStyle(.secondary).padding(.leading, 70)
                             .fixedSize(horizontal: false, vertical: true)
                         HStack(spacing: 10) {
-                            Text("Agents").frame(width: 60, alignment: .leading)
+                            Text(w.agentsLabel).frame(width: 60, alignment: .leading)
                             Picker("", selection: $model.agents) {
-                                Text("Yes").tag(true)
-                                Text("No").tag(false)
+                                ForEach(w.agentsChoices, id: \.open) { Text($0.title).tag($0.open) }
                             }
                             .pickerStyle(.segmented).labelsHidden().fixedSize()
                             .accessibilityIdentifier("chat-new-agents")
                         }
                         .padding(.top, 6)
-                        Text(ChatText.newAgentsNote(model.agents))
+                        Text(w.agentsNote)
                             .font(.system(size: 12)).foregroundStyle(.secondary).padding(.leading, 70)
                             .fixedSize(horizontal: false, vertical: true)
-                        if model.follow.shown {
-                            FollowToggle(line: model.follow, isOn: $model.allDevices).padding(.top, 6).padding(.leading, 70)
+                        if let follow = w.follow {
+                            FollowToggle(line: follow, isOn: $model.allDevices).padding(.top, 6).padding(.leading, 70)
                         }
                     }
                 case .join:
                     HStack(alignment: .firstTextBaseline, spacing: 10) {
-                        Text("Link").frame(width: 60, alignment: .leading)
+                        Text(w.linkLabel).frame(width: 60, alignment: .leading)
                         VStack(alignment: .leading, spacing: 5) {
-                            TextField("seedwell://chat/…", text: Binding(get: { model.link }, set: { model.setLink($0) }))
+                            TextField(w.linkPlaceholder, text: Binding(get: { model.form.link }, set: { model.setLink($0) }))
                                 .textFieldStyle(.roundedBorder)
                                 .accessibilityIdentifier("chat-join-link")
-                            if !model.linkLine.isEmpty {
-                                Label(model.linkLine, systemImage: model.canStart ? "checkmark.circle.fill" : "xmark.circle")
-                                    .font(.system(size: 12)).foregroundStyle(model.canStart ? Color.secondary : Color.orange)
+                            if !w.linkLine.isEmpty {
+                                Label(w.linkLine, systemImage: w.linkOk ? "checkmark.circle.fill" : "xmark.circle")
+                                    .font(.system(size: 12)).foregroundStyle(w.linkOk ? Color.secondary : Color.orange)
                             }
                         }
                     }
@@ -341,8 +313,8 @@ struct ChatNewView: View {
             .padding(.top, 18)
             .font(.system(size: 13))
             if let e = model.error { ModalError(text: e).padding(.top, 14) }
-            ModalButtons(primary: "Start", enabled: model.canStart, busy: model.busy,
-                         primaryHelp: model.mode == .new ? "Make the channel" : "Join the channel",
+            ModalButtons(primary: w.confirmTitle, enabled: w.canStart, busy: model.busy,
+                         primaryHelp: w.confirmHelp,
                          cancel: cancel, confirm: { model.start(done: done) })
                 .padding(.top, 22)
         }
@@ -358,7 +330,7 @@ struct ChatNewView: View {
 
     func showNew(prefill: String?, actions: ChatActions) {
         if let w = window { NSApp.activate(); w.makeKeyAndOrderFront(nil); return }
-        let pasted = NSPasteboard.general.string(forType: .string).flatMap { ChatText.looksLikeLink($0) ? $0 : nil }
+        let pasted = NSPasteboard.general.string(forType: .string).flatMap { chatLooksLikeLink(text: $0) ? $0 : nil }
         let model = ChatNewModel(core: actions.core, prefill: prefill ?? pasted)
         let view = ChatNewView(model: model, cancel: { [weak self] in self?.close() }, done: { [weak self] c, mode in
             self?.close()

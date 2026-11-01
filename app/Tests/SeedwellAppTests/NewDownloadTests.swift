@@ -54,7 +54,7 @@ struct NewDownloadTests {
         w.note(snap(down: [row("old1"), row("old2")]))
         let s = snap(down: [row("old1"), row("old2"), row("new")])
         w.note(s)
-        let m = menuModel(snapshot: s, sync: SyncTests.snap([]), arrivals: w.arrivals, nowUnixMs: 0, updateVersion: nil)
+        let m = menuModel(snapshot: s, sync: SyncTests.snap([]), arrivals: w.arrivals, nowUnixMs: 0, updateVersion: nil, host: hostWindowsAll())
         #expect(m.sections.map(\.title) == ["Downloading"])
         #expect(m.sections[0].rows.map(\.id) == ["new", "old1", "old2"])
     }

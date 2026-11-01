@@ -9,6 +9,7 @@
 
 use std::collections::BTreeSet;
 
+use crate::host::{has, HostWindow};
 use crate::library::{Inputs, Library, LibraryPlace, LibraryState, LibraryViewModel};
 use crate::removal::{removal_question, RemovalQuestion};
 use crate::types::{Snapshot, TransferRow};
@@ -102,7 +103,9 @@ pub struct WindowContext {
 }
 
 /// What the host does for a key: the parts that touch the file lists it still owns. Everything else (the selection,
-/// Get Info, the Remove… question) the library did already; the host asks for the model again.
+/// Get Info, the Remove… question) the library did already; the host asks for the model again. A host without the file
+/// list (`HostWindow::FileList` missing from `Library::set_host_windows`) never gets one: the keys that only act on
+/// it are not handled.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, uniffi::Enum)]
 pub enum LibraryKeyAction {
     /// Space on selected file rows: check them, or skip them when they are all checked.
@@ -398,6 +401,30 @@ impl LibraryState {
         if self.place == LibraryPlace::Settings {
             return (KeyOutcome::IGNORED, None);
         }
+        let file_list = has(&self.host, Some(HostWindow::FileList));
+        let info = has(&self.host, Some(HostWindow::GetInfo));
+        // Without the file list there are no open lists and no file rows, whatever the host says.
+        let none = WindowContext { editing: context.editing, ..WindowContext::default() };
+        let context = if file_list { context } else { &none };
+        let (outcome, remove) = self.key_in(key, mods, scope, context, info, rows);
+        match outcome.action {
+            // The key did something else too (Escape cleared the selection, ⌘A selected every row).
+            Some(LibraryKeyAction::ClearFileSelection) if !file_list => (KeyOutcome::HANDLED, remove),
+            Some(_) if !file_list => (KeyOutcome::IGNORED, remove),
+            _ => (outcome, remove),
+        }
+    }
+
+    /// [`Self::key`] for a host that has the file list when `context` says it has one; `info`: it has Get Info.
+    fn key_in(
+        &mut self,
+        key: LibraryKey,
+        mods: KeyModifiers,
+        scope: KeyScope,
+        context: &WindowContext,
+        info: bool,
+        rows: impl FnOnce(&Self) -> Vec<TransferRow>,
+    ) -> (KeyOutcome, Option<RemovalQuestion>) {
         let only_shift = !(mods.command || mods.option || mods.control);
         let only_command = mods == KeyModifiers { command: true, ..KeyModifiers::default() };
         let files_selected = context.file_torrent.is_some() && context.file_rows > 0;
@@ -436,7 +463,7 @@ impl LibraryState {
             },
             // ⌘I opens Get Info of the one selected torrent, as Space does (the context menu names it).
             (KeyScope::Window, LibraryKey::I) => match one(self) {
-                Some(id) if only_command => {
+                Some(id) if only_command && info => {
                     self.info = Some(id);
                     KeyOutcome::HANDLED
                 }
@@ -458,7 +485,7 @@ impl LibraryState {
             (KeyScope::List, LibraryKey::Space) => {
                 if files_selected {
                     KeyOutcome::run(LibraryKeyAction::ToggleFileRows)
-                } else if let Some(id) = one(self) {
+                } else if let Some(id) = one(self).filter(|_| info) {
                     self.info = Some(id);
                     KeyOutcome::HANDLED
                 } else {

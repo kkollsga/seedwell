@@ -17,6 +17,8 @@
 //!   key      = HKDF-SHA256(salt "seedwell-chat/v1/direct", X25519(ephemeral, recipient's x25519),
 //!                          info = ephemeral pk ‖ recipient's x25519 pk ‖ author ‖ recipient ‖ id)
 //!   body     = has_reply u8 [‖ reply_to id(16)] ‖ agent str ‖ kind u8 ‖ text bytes ‖ (later fields)
+//!   later    = as a channel message's (0.1.15: tag 1, its attachments, [`crate::attach`]); a version that does not
+//!              know them ignores them
 //! ```
 //!
 //! A new ephemeral key per message (so the key is never reused, and the nonce can be fixed). The author keeps its
@@ -108,6 +110,8 @@ pub struct DirectBody {
     pub kind: MessageKind,
     /// The body.
     pub body: Vec<u8>,
+    /// Its later fields (0.1.15: the attachments record, [`crate::attach`]), sealed with the rest; empty: none.
+    pub extra: Vec<u8>,
 }
 
 impl DirectBody {
@@ -124,6 +128,7 @@ impl DirectBody {
         put_str(&mut out, self.agent.as_deref().unwrap_or(""));
         out.push(self.kind.byte());
         put_bytes(&mut out, &self.body);
+        out.extend_from_slice(&self.extra);
         out
     }
 
@@ -138,7 +143,8 @@ impl DirectBody {
         if check_agent(agent.as_deref()).is_err() || check_body(kind, &body).is_err() {
             return Err(DecodeError::Invalid("message body"));
         }
-        Ok(DirectBody { reply_to, agent, kind, body })
+        let extra = r.take(r.remaining(), "later fields")?.to_vec();
+        Ok(DirectBody { reply_to, agent, kind, body, extra })
     }
 
     /// The text (text and JSON).
@@ -311,11 +317,29 @@ mod tests {
     use super::*;
 
     fn body(text: &str) -> DirectBody {
-        DirectBody { reply_to: Some([4; 16]), agent: Some("claude".into()), kind: MessageKind::Text, body: text.as_bytes().to_vec() }
+        DirectBody { reply_to: Some([4; 16]), agent: Some("claude".into()), kind: MessageKind::Text, body: text.as_bytes().to_vec(), extra: Vec::new() }
     }
 
     fn draft(text: &str, eph: u8) -> DirectDraft {
         DirectDraft { id: [eph; 16], seq: 1, at_ms: 1_800_000_000_000, body: body(text), ephemeral_secret: [eph; 32] }
+    }
+
+    /// The attachments of a private message ride in its sealed body's later fields: a version without them reads the
+    /// same body (it stops after the text), and one with them gets them back.
+    #[test]
+    fn a_body_keeps_its_later_fields_sealed_and_older_readers_skip_them() {
+        let plain = body("[file: report.pdf, 1.2 GB]");
+        let with = DirectBody { extra: vec![1, 3, 9, 9, 9], ..plain.clone() };
+        let bytes = with.to_bytes();
+        assert!(bytes.starts_with(&plain.to_bytes()), "the earlier fields are unchanged");
+        assert_eq!(DirectBody::from_bytes(&bytes).unwrap(), with);
+        assert_eq!(DirectBody::from_bytes(&plain.to_bytes()).unwrap().extra, Vec::<u8>::new());
+        let (a, b) = (DeviceKey::from_seed(&[1; 32]), DeviceKey::from_seed(&[2; 32]));
+        let bk = DirectKey::of(&b, 5);
+        let d = DirectDraft { body: with.clone(), ..draft("", 7) };
+        let m = DirectMessage::seal(&a, b.public_key(), &bk.x25519, d).unwrap();
+        assert!(!m.to_bytes().windows(10).any(|w| w == b"report.pdf"), "sealed on the wire");
+        assert_eq!(m.open(&secret_of(&b)), Some(with));
     }
 
     #[test]

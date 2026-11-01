@@ -29,7 +29,7 @@ sealed class LibraryPane
     readonly ContentControl page = new() { HorizontalContentAlignment = HorizontalAlignment.Stretch, VerticalContentAlignment = VerticalAlignment.Stretch };
     readonly Microsoft.UI.Dispatching.DispatcherQueueTimer timer;
     string signature = "";
-    string sidebarSignature = "";
+    string sidebarKey = "";
     LibraryList? list;
     FolderSyncPage? syncPage;
     // Get Info: the card shown, the row it is for, and the border it lies in.
@@ -101,27 +101,86 @@ sealed class LibraryPane
         Grid.SetRow(infoHost, 2);
         main.Children.Add(infoHost);
         root.Children.Add(main);
-        // Keys go to the Library, which decides what each does (nothing is decided here).
-        root.KeyDown += (_, e) =>
+        // Keys go to the Library, which decides what each does (nothing is decided here); Ctrl with a letter may be an
+        // app command's shortcut (the core's app_commands: Add Torrent File…, Limit Speed, ...). Handled keys too: the
+        // list takes the arrows itself, and the Library's selection must win.
+        root.AddHandler(UIElement.KeyDownEvent, new Microsoft.UI.Xaml.Input.KeyEventHandler((_, e) =>
         {
-            if (Key(e.Key) is LibraryKey key)
+            var mods = Modifiers();
+            if (mods.Command && !Editing() && AppCommandFor(e.Key, mods) is AppCommand command)
             {
-                e.Handled = PressKey(key, Modifiers());
+                app.RunAppCommand(command);
+                e.Handled = true;
+            }
+            else if (Key(e.Key) is LibraryKey key)
+            {
+                e.Handled = PressKey(key, mods);
+            }
+        }), true);
+        // Drag and drop onto the window: .torrent files and links go to the core like opened ones (it says why it
+        // refuses one), as the Mac's dropDestination.
+        root.AllowDrop = true;
+        root.DragOver += (_, e) =>
+        {
+            if (e.DataView.Contains(Windows.ApplicationModel.DataTransfer.StandardDataFormats.StorageItems)
+                || e.DataView.Contains(Windows.ApplicationModel.DataTransfer.StandardDataFormats.WebLink)
+                || e.DataView.Contains(Windows.ApplicationModel.DataTransfer.StandardDataFormats.Text))
+            {
+                e.AcceptedOperation = Windows.ApplicationModel.DataTransfer.DataPackageOperation.Copy;
+            }
+        };
+        root.Drop += async (_, e) =>
+        {
+            var deferral = e.GetDeferral();
+            var sources = new List<string>();
+            try
+            {
+                var data = e.DataView;
+                if (data.Contains(Windows.ApplicationModel.DataTransfer.StandardDataFormats.StorageItems))
+                {
+                    sources.AddRange((await data.GetStorageItemsAsync()).Select(i => i.Path).Where(p => p.Length > 0));
+                }
+                else if (data.Contains(Windows.ApplicationModel.DataTransfer.StandardDataFormats.WebLink))
+                {
+                    sources.Add((await data.GetWebLinkAsync()).OriginalString);
+                }
+                else if (data.Contains(Windows.ApplicationModel.DataTransfer.StandardDataFormats.Text)
+                    && TrsFfiMethods.AddLinkSource(await data.GetTextAsync()) is string link)
+                {
+                    sources.Add(link);
+                }
+            }
+            catch (Exception ex)
+            {
+                AppLog.Write($"drop failed: {ex.Message}");
+            }
+            finally
+            {
+                deferral.Complete();
+            }
+            AppLog.Write($"drop: {sources.Count} to add");
+            if (sources.Count > 0)
+            {
+                app.Add(sources.ToArray());
             }
         };
     }
 
     internal Library Library => library;
 
-    /// <summary>A key for the Library (the window's key handler and the QA command): whether it took it.</summary>
-    internal bool PressKey(LibraryKey key, KeyModifiers modifiers)
+    /// <summary>
+    /// A key for the Library (the window's key handler and the QA command): whether it took it. The window is asked
+    /// first, the list only when the window did not take it and the list has the focus (the core's KeyScope rule);
+    /// <paramref name="inList"/> says the list has it (QA, whose window never takes the focus).
+    /// </summary>
+    internal bool PressKey(LibraryKey key, KeyModifiers modifiers, bool inList = false)
     {
-        var outcome = library.Key(key, modifiers, ListHasFocus() ? KeyScope.List : KeyScope.Window, Context());
-        if (outcome.Action is LibraryKeyAction action)
+        var outcome = library.Key(key, modifiers, KeyScope.Window, Context());
+        if (!outcome.Handled && (inList || ListHasFocus()))
         {
-            // NEED: the file list under a row (the Mac's step 2): its actions are placeholders for now.
-            app.ShowPlaceholder(action.GetType().Name);
+            outcome = library.Key(key, modifiers, KeyScope.List, Context());
         }
+        // The file list's actions (LibraryKeyAction) come only with HostWindow.FileList, which Windows does not pass yet.
         AppLog.Write($"key {key} shift={modifiers.Shift} command={modifiers.Command}: handled {outcome.Handled}");
         Refresh();
         return outcome.Handled;
@@ -158,9 +217,33 @@ sealed class LibraryPane
         Windows.System.VirtualKey.Space => LibraryKey.Space,
         Windows.System.VirtualKey.Left => LibraryKey.Left,
         Windows.System.VirtualKey.Right => LibraryKey.Right,
+        Windows.System.VirtualKey.Up => LibraryKey.Up,
+        Windows.System.VirtualKey.Down => LibraryKey.Down,
         Windows.System.VirtualKey.I => LibraryKey.I,
+        Windows.System.VirtualKey.A => LibraryKey.A,
         _ => null,
     };
+
+    /// <summary>The enabled app command whose shortcut is this key with these modifiers (Ctrl held), if any.</summary>
+    AppCommand? AppCommandFor(Windows.System.VirtualKey k, KeyModifiers mods)
+    {
+        // A letter key's VirtualKey is its capital letter's code.
+        if (k is < Windows.System.VirtualKey.A or > Windows.System.VirtualKey.Z)
+        {
+            return null;
+        }
+        var letter = ((char)(int)k).ToString().ToLowerInvariant();
+        try
+        {
+            return app.Core.AppCommands().SelectMany(m => m.Entries).OfType<AppMenuEntry.Item>()
+                .FirstOrDefault(i => i.Enabled && i.Shortcut is KeyShortcut s && s.Key == letter && s.Shift == mods.Shift && s.Alt == mods.Option)?.Command;
+        }
+        catch (Exception e)
+        {
+            AppLog.Write($"app commands failed: {e.Message}");
+            return null;
+        }
+    }
 
     /// <summary>The modifiers held now; Ctrl is the Mac's command key, Alt its option key.</summary>
     static KeyModifiers Modifiers()
@@ -217,7 +300,7 @@ sealed class LibraryPane
         summary.Visibility = m.Summary.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
         // The rows' live rates, as the Mac's tracker header (Fmt.liveRate with its arrow).
         rates.Text = m.TrackerRates is TrackerRates r ? $"{TrsFfiMethods.FmtLiveRate(r.Down, "↓")}   {TrsFfiMethods.FmtLiveRate(r.Up, "↑")}" : "";
-        if (m.Sidebar.Signature != sidebarSignature || !Equals(before?.Place, m.Place))
+        if (SidebarKey(m.Sidebar) != sidebarKey || !Equals(before?.Place, m.Place))
         {
             DrawSidebar(m);
         }
@@ -253,7 +336,7 @@ sealed class LibraryPane
 
     void DrawSidebar(LibraryViewModel m)
     {
-        sidebarSignature = m.Sidebar.Signature;
+        sidebarKey = SidebarKey(m.Sidebar);
         sidebar.Children.Clear();
         foreach (var item in m.Sidebar.Places)
         {
@@ -272,11 +355,15 @@ sealed class LibraryPane
                 }
                 if (c.NewTopic is SidebarAdd add)
                 {
-                    sidebar.Children.Add(AddLine(add, 1));
+                    var place = c.Item.Place;
+                    sidebar.Children.Add(AddLine(add, 1, () => { if (Channel(place) is SyncChannel ch) app.ChatDialogs.Show(TrsFfiMethods.ChatNewTopicDialog(ch), ch); }));
                 }
             }
         }
-        sidebar.Children.Add(AddLine(chats.Add, 0));
+        if (chats.Add is SidebarAdd newChannel)
+        {
+            sidebar.Children.Add(AddLine(newChannel, 0, () => NewChannelDialog.Show(app, null)));
+        }
         foreach (var s in new[] { m.Sidebar.Directs, m.Sidebar.Trackers })
         {
             if (s is null)
@@ -289,6 +376,24 @@ sealed class LibraryPane
                 sidebar.Children.Add(Item(item, m.Place, 0));
             }
         }
+    }
+
+    /// <summary>
+    /// What the sidebar's drawing depends on: the core's signature (which items, in what order, open or not) and what
+    /// each item shows (its icon, counts, dot, tag and texts), which the core changes in place under the same signature
+    /// (a channel muted, a new unread message). The sidebar is small: any change redraws it.
+    /// </summary>
+    /// <summary>The sidebar as last drawn (QA checks it follows the core).</summary>
+    internal string SidebarDrawn => sidebarKey;
+
+    static string SidebarKey(SidebarModel s)
+    {
+        static string Item(SidebarItem i) => $"{i.Title}/{i.Icon}/{i.Unread}/{i.Badge}/{i.Count}/{i.Online}/{i.Flag?.Help}/{i.Tag?.Text}/{i.Help}";
+        var items = s.Places
+            .Concat(s.Chats.Channels.SelectMany(c => c.Topics.Prepend(c.Item)))
+            .Concat(s.Directs?.Items ?? [])
+            .Concat(s.Trackers?.Items ?? []);
+        return $"{s.Signature}#{string.Join(";", items.Select(Item))}#{s.Chats.Add?.Title}";
     }
 
     static string ChannelId(LibraryPlace p) => p is LibraryPlace.Chat c ? c.ChannelId : "";
@@ -416,15 +521,14 @@ sealed class LibraryPane
         return g;
     }
 
-    UIElement AddLine(SidebarAdd add, int indent)
+    UIElement AddLine(SidebarAdd add, int indent, Action run)
     {
-        // NEED: the New Channel and New Topic windows (stage D); drawn, a placeholder for now.
         // A + where the icons are, so it lines up with them (the Mac's).
         var line = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10, Opacity = 0.7, Padding = new Thickness(10 + indent * 18 + (indent == 0 ? 20 : 0), 6, 10, 6) };
         line.Children.Add(new FontIcon { Glyph = "", FontSize = 14 });
         line.Children.Add(new TextBlock { Text = add.Title });
         ToolTipService.SetToolTip(line, add.Help);
-        line.Tapped += (_, _) => app.ShowPlaceholder(add.Title);
+        line.Tapped += (_, _) => run();
         return line;
     }
 
@@ -439,33 +543,84 @@ sealed class LibraryPane
                     menu.Items.Add(new MenuFlyoutSeparator());
                     break;
                 case SidebarMenuEntry.Item it:
-                    var mi = new MenuFlyoutItem { Text = it.Title };
+                    // A checked entry (On All My Devices while it is on) draws its check mark.
+                    MenuFlyoutItem mi = it.Checked ? new ToggleMenuFlyoutItem { Text = it.Title, IsChecked = true } : new MenuFlyoutItem { Text = it.Title };
+                    mi.IsEnabled = it.Enabled;
+                    if (it.Help.Length > 0)
+                    {
+                        ToolTipService.SetToolTip(mi, it.Help);
+                    }
                     if (it.Destructive)
                     {
                         mi.Foreground = (Brush)Application.Current.Resources["SystemFillColorCriticalBrush"];
                     }
                     var command = it.Command;
-                    var title = it.Title;
-                    mi.Click += (_, _) =>
-                    {
-                        if (command == SidebarCommand.TrackerInfo)
-                        {
-                            library.SelectPlace(place);
-                            library.SetTrackerInfo(true);
-                            Refresh();
-                        }
-                        else
-                        {
-                            // NEED: the other sidebar commands' windows and sheets (rename, favorites, channel sharing).
-                            app.ShowPlaceholder(title);
-                        }
-                    };
+                    mi.Click += (_, _) => RunSidebarCommand(command, place);
                     menu.Items.Add(mi);
                     break;
             }
         }
         return menu;
     }
+
+    /// <summary>
+    /// What a sidebar menu entry does (the menu and the QA command sidebar). The core lists only commands whose window
+    /// this host has (<c>set_host_windows</c>); the chat ones act on the channel as it is now (the menu may have been
+    /// open a while), as the Mac's SidebarMenus.run.
+    /// </summary>
+    internal void RunSidebarCommand(SidebarCommand command, LibraryPlace place)
+    {
+        var c = Channel(place);
+        switch (command)
+        {
+            case SidebarCommand.TrackerInfo:
+                library.SelectPlace(place);
+                library.SetTrackerInfo(true);
+                break;
+            case SidebarCommand.Mute or SidebarCommand.Unmute when c is not null:
+                app.Core.ChatSetMuted(c.Id, command is SidebarCommand.Mute);
+                break;
+            case SidebarCommand.SetFollow follow when c is not null:
+                try { app.Core.SyncSetFollow(c.Id, follow.On); }
+                catch (CoreException e) { app.Alert(new SyncAlert(TrsFfiMethods.CoreErrorMessage(e), "")); }
+                break;
+            case SidebarCommand.NewTopic when c is not null:
+                app.ChatDialogs.Show(TrsFfiMethods.ChatNewTopicDialog(c), c);
+                break;
+            case SidebarCommand.RenameChannel when c is not null:
+                app.ChatDialogs.Show(TrsFfiMethods.ChatRenameDialog(c), c);
+                break;
+            case SidebarCommand.LeaveChannel when c is not null:
+                app.ChatDialogs.Show(TrsFfiMethods.ChatLeaveDialog(c), c);
+                break;
+            case SidebarCommand.ChannelAgents when c is not null:
+                app.ChatDialogs.Show(TrsFfiMethods.ChatAgentsDialog(c), c);
+                break;
+            default:
+                // Not offered on Windows (its window is not in the host's set) or the channel is gone.
+                AppLog.Write($"sidebar command {command} on {place}: nothing to run");
+                break;
+        }
+        Refresh();
+    }
+
+    /// <summary>The channel of a chat place, as the core has it now.</summary>
+    SyncChannel? Channel(LibraryPlace place)
+    {
+        if (place is not LibraryPlace.Chat chat)
+        {
+            return null;
+        }
+        try { return app.Core.ChatChannels().FirstOrDefault(c => c.Id == chat.ChannelId); }
+        catch (Exception e)
+        {
+            AppLog.Write($"chat channels failed: {e.Message}");
+            return null;
+        }
+    }
+
+    /// <summary>The visual QA run: a chat place's sidebar menu.</summary>
+    internal MenuFlyout RenderMenu(LibraryPlace place) => SidebarMenu(library.SidebarMenu(place), place);
 
     void DrawFooter(SidebarFooter f)
     {
@@ -495,7 +650,7 @@ sealed class LibraryPane
             ToolTipService.SetToolTip(t, off.Help);
             footer.Children.Add(t);
         }
-        // NEED: the Settings page (stage D); the gear selects the place, whose page is a placeholder for now.
+        // The gear selects Settings (its page: SettingsPage).
         var settings = new Button
         {
             Content = new FontIcon { Glyph = "", FontSize = 14 },
@@ -582,7 +737,7 @@ sealed class LibraryPane
     // ------------------------------------------------------------------------------------------- add sheet
 
     /// <summary>
-    /// NEED: where "Add a Download" opens from on Windows (the Mac's menu bar File menu). The QA command add-sheet opens it.
+    /// "Add a Download" opens with Ctrl+Shift+O (the Mac's ⌘⇧O in its File menu) and the QA command add-sheet.
     /// "Add a Download" while the model has it open: a link or path (add_link_source enables Add with what it finds),
     /// Choose File, Cancel and Add; closing it tells the Library.
     /// </summary>
@@ -620,12 +775,17 @@ sealed class LibraryPane
             }
             else if (result == ContentDialogResult.Secondary)
             {
-                // NEED: the Open dialog for a .torrent file (FileOpenPicker); a placeholder for now.
-                app.ShowPlaceholder(sheet.ChooseFileTitle);
+                app.ChooseTorrentFile();
             }
             Refresh();
         }
     }
+
+    /// <summary>The Folder Sync page while shown (QA).</summary>
+    internal FolderSyncPage? SyncPage => syncPage;
+
+    /// <summary>The Settings page last made (QA reaches its sections).</summary>
+    internal SettingsPage? SettingsPageShown { get; private set; }
 
     /// <summary>The add sheet's dialog while it is open (the visual QA run draws it).</summary>
     internal ContentDialog? AddSheetDialog => addSheet;
@@ -642,7 +802,8 @@ sealed class LibraryPane
         }
         if (m.Page == LibraryPage.Settings)
         {
-            return new SettingsPage(app).Root;
+            SettingsPageShown = new SettingsPage(app);
+            return SettingsPageShown.Root;
         }
         if (m.Page == LibraryPage.FolderSync)
         {

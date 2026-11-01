@@ -41,7 +41,7 @@ pub async fn run(c: &mut trs_control::client::Client, channel: &str, me: &str, i
         let mine = of_agent(&m.id, me, &l.messages);
         let set = change(&mine, add, remove, clear).map_err(|e| CliError::plain(2, e))?;
         if set != mine {
-            let req = ChatSendParams { channel: channel.to_string(), body: note(&m.id, m.agent.as_deref(), &set), reply_to: None, json: false, topic: m.topic.clone(), agent: Some(me.to_string()) };
+            let req = ChatSendParams { channel: channel.to_string(), body: note(&m.id, m.agent.as_deref(), &set), reply_to: None, json: false, topic: m.topic.clone(), agent: Some(me.to_string()), attachments: Vec::new(), files: Vec::new() };
             let (_, sent): (_, ChatMessageDto) = ask(c, Request::ChatSend(req)).await?;
             let me_owner = Owner::Agent(me.to_string());
             owned.retain(|o| !o.owner.same(&me_owner));

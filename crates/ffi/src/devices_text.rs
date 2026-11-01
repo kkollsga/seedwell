@@ -10,6 +10,7 @@ use trs_sync_net::devices::{DevicesState, DevicesStatus, FollowState, RemovePlan
 use trs_sync_proto::ids::{DeviceId, FolderId};
 use trs_sync_proto::members::{InviteLink, Role};
 
+use crate::backend::Backend;
 use crate::Core;
 use trs_control::display as d;
 use crate::sync::readable;
@@ -137,6 +138,31 @@ pub struct FollowLine {
     pub enabled: bool,
     /// "Your other devices (MacBook, Studio PC) join it by themselves, as admins." or why it cannot be switched on.
     pub line: String,
+    /// The toggle's tooltip: "Put it on every device paired with this Mac: they join it by themselves".
+    pub help: String,
+}
+
+/// A toggle with the fixed titles and tooltip.
+fn follow(shown: bool, on: bool, enabled: bool, line: String) -> FollowLine {
+    FollowLine {
+        shown,
+        title: "On all my devices".into(),
+        menu_title: MENU_TITLE.into(),
+        on,
+        enabled,
+        line,
+        help: concat!("Put it on every device paired with this ", computer!(), ": they join it by themselves").into(),
+    }
+}
+
+/// The "On all my devices" toggle of folder or channel `id` as `backend` has it (hidden while this computer is not
+/// paired).
+pub(crate) fn follow_line_for(backend: &dyn Backend, id: &str) -> FollowLine {
+    let hidden = follow(false, false, false, String::new());
+    let Some((h, _)) = backend.sync().service() else { return hidden };
+    let Ok(fid) = id.parse::<FolderId>() else { return hidden };
+    let channel = h.channel_status(&fid).is_some();
+    h.follow_state(&fid).map(|f| follow_line_of(&f, channel)).unwrap_or(hidden)
 }
 
 // ------------------------------------------------------------------------------------------------- texts
@@ -319,20 +345,14 @@ pub(crate) fn follow_line_of(f: &FollowState, channel: bool) -> FollowLine {
     } else {
         format!("Your other devices ({others}) join it by themselves, as admins.")
     };
-    FollowLine { shown: f.paired || f.on, title: "On all my devices".into(), menu_title: MENU_TITLE.into(), on: f.on, enabled: f.on || f.may, line }
+    follow(f.paired || f.on, f.on, f.on || f.may, line)
 }
 
 /// The toggle in Add Folder and New Channel, before the item exists: on by default for a channel, off for a folder.
 pub(crate) fn follow_line_new(others: &[String], channel: bool) -> FollowLine {
     let shown = !others.is_empty();
-    FollowLine {
-        shown,
-        title: "On all my devices".into(),
-        menu_title: MENU_TITLE.into(),
-        on: shown && channel,
-        enabled: shown,
-        line: if shown { format!("Your other devices ({}) join it by themselves, as admins.", quoted_list(others)) } else { String::new() },
-    }
+    let line = if shown { format!("Your other devices ({}) join it by themselves, as admins.", quoted_list(others)) } else { String::new() };
+    follow(shown, shown && channel, shown, line)
 }
 
 fn devices_err(e: trs_sync_net::SyncError) -> CoreError {
@@ -449,11 +469,7 @@ impl Core {
 
     /// The "On all my devices" toggle of folder or channel `id` (hidden while this Mac is not paired).
     pub fn sync_follow_line(&self, id: String) -> FollowLine {
-        let hidden = FollowLine { shown: false, title: "On all my devices".into(), menu_title: MENU_TITLE.into(), on: false, enabled: false, line: String::new() };
-        let Some((h, _)) = self.backend.sync().service() else { return hidden };
-        let Ok(fid) = id.parse::<FolderId>() else { return hidden };
-        let channel = h.channel_status(&fid).is_some();
-        h.follow_state(&fid).map(|f| follow_line_of(&f, channel)).unwrap_or(hidden)
+        follow_line_for(self.backend.as_ref(), &id)
     }
 
     /// The toggle in Add Folder (`channel` false) and New Channel, before the item exists.

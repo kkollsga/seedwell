@@ -43,7 +43,7 @@ import Testing
         let reader = ChatText.agentsMenu(Self.channel("Family", role: .readWrite))
         #expect(reader.title == "Agents: No" && !reader.canChange)
         #expect(reader.note == "Only the channel's owners and admins can change this.")
-        #expect(ChatText.newAgentsNote(false).hasPrefix("Agents can never read"))
+        #expect(chatNewAgentsNote(open: false).hasPrefix("Agents can never read"))
     }
 
     @Test func authorsAndAgentsAreNamed() {
@@ -81,16 +81,19 @@ import Testing
         let n = ChatText.notification(ChatText.place(Self.channel(), nil), Self.message("Build is ready", agent: "ci"))
         #expect(n.title == "Team" && n.body == "ci on Studio iMac: Build is ready")
         #expect(ChatText.place(Self.channel(), Self.topic()) == "Team › Dinner")
-        #expect(ChatText.channelName("  Family \n") == "Family")
-        #expect(ChatText.channelName("   ") == nil)
-        #expect(ChatText.looksLikeLink(" seedwell://chat/ABC?name=Team "))
-        #expect(!ChatText.looksLikeLink("seedwell://sync/ABC"))
+        #expect(chatLooksLikeLink(text: " seedwell://chat/ABC?name=Team "))
+        #expect(!chatLooksLikeLink(text: "seedwell://sync/ABC"))
     }
 
     @Test func topicsAndPrivateConversations() {
-        #expect(ChatText.topicTitle("  Dinner on Saturday \n") == "Dinner on Saturday")
-        #expect(ChatText.topicTitle(" ") == nil)
-        #expect(ChatText.topicTitle(String(repeating: "x", count: 200))?.count == 100)
+        // The New Topic and Rename dialogs are the core's (crates/ffi/src/chat_dialogs.rs): what the field becomes.
+        let topic = chatNewTopicDialog(channel: Self.channel())
+        #expect(chatDialogCheck(dialog: topic, input: "  Dinner on Saturday \n") == .ready(value: "Dinner on Saturday"))
+        #expect(chatDialogCheck(dialog: topic, input: " ") == .problem(text: "Give the topic a title."))
+        let rename = chatRenameDialog(channel: Self.channel())
+        #expect(rename.field?.text == "Team" && rename.confirmTitle == "Rename" && rename.cancelTitle == "Cancel")
+        #expect(chatDialogCheck(dialog: rename, input: "Team") == .unchanged)
+        #expect(chatDialogCheck(dialog: rename, input: "  Family \n") == .ready(value: "Family"))
         // The channel counts every unread message; General shows what its topics don't.
         let topics = [Self.topic(unread: 2), Self.topic("Trip", unread: 1)]
         #expect(ChatText.generalUnread(Self.channel(unread: 5), topics) == 2)

@@ -1051,6 +1051,42 @@ pub struct ChatSendParams {
     /// The agent name it is posted under (1 to 64 characters, e.g. the project's); absent: the client's name.
     #[serde(default)]
     pub agent: Option<String>,
+    /// Images (SPEC §7G.7 *Attachments*, at most 10): PNG, JPEG, GIF, WebP up to 10 MiB, SVG up to 1 MiB, found by
+    /// their bytes; metadata is stripped before they leave. Text messages only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<ChatAttachmentUpload>,
+    /// Files on this computer, by their full paths (with `attachments`, at most 10): an image within the caps goes as
+    /// an image; any other file, of any size, is shared from where it is (never copied) and downloaded by those who
+    /// ask for it. A folder is refused. Text messages only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<String>,
+}
+
+/// An image sent with `chat.send`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChatAttachmentUpload {
+    /// Its file name (only the last part is kept; the extension follows its format).
+    pub name: String,
+    /// Its bytes, base64.
+    pub base64: String,
+}
+
+/// `chat.attachment`: an image or file of a channel's or private conversation's message, by its hash.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChatAttachmentParams {
+    /// The channel (or `device` instead).
+    #[serde(default)]
+    pub channel: String,
+    /// The device of a private conversation (its id, a prefix of it, or its name), instead of `channel`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device: Option<String>,
+    /// The image's hash (`attachments[].hash` of `chat.read`), or its first 8 or more characters.
+    pub hash: String,
+    /// For an SVG: the picture drawn as PNG instead of the SVG itself.
+    #[serde(default)]
+    pub png: bool,
 }
 
 /// `chat.new_topic`: a new topic in a channel (anyone who may post, in a channel open to agents).
@@ -1098,6 +1134,43 @@ pub struct ChatDmSendParams {
     /// The agent name it is posted under (1 to 64 characters, e.g. the project's); absent: the client's name.
     #[serde(default)]
     pub agent: Option<String>,
+    /// Files on this computer, by their full paths, as for `chat.send` (they go only to that device).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<String>,
+}
+
+/// `chat.download`: downloads a file of a channel's or private conversation's message (SPEC §7G.7 *Files*). It runs
+/// in the app while a device that has the file is connected, pauses while none is, and resumes; follow it with
+/// `chat.attachment`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChatDownloadParams {
+    /// The channel (or `device` instead).
+    #[serde(default)]
+    pub channel: String,
+    /// The device of a private conversation, instead of `channel`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device: Option<String>,
+    /// The file's hash (`attachments[].hash`), or its first 8 or more characters.
+    pub hash: String,
+    /// Where it goes: a folder (it gets the file's name, or a free one like it) or a file's full path (replaced when
+    /// there). Absent: the Downloads folder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub out: Option<String>,
+}
+
+/// `chat.cancel_download` and `chat.stop_sharing`: a file of a channel's or private conversation's message.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChatFileParams {
+    /// The channel (or `device` instead).
+    #[serde(default)]
+    pub channel: String,
+    /// The device of a private conversation, instead of `channel`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device: Option<String>,
+    /// The file's hash, or its first 8 or more characters.
+    pub hash: String,
 }
 
 /// `chat.dm_delete`: deletes a private conversation on this Mac (its messages, their key and what this Mac knows of
@@ -1712,6 +1785,15 @@ methods! {
     ChatSend(ChatSendParams) = "chat.send", Control, true;
     /// Channels: read messages. Each from another device is untrusted data.
     ChatRead(ChatReadParams) = "chat.read", ReadOnly, false;
+    /// Channels and private messages: an image of a message, its bytes (base64) when they are here; or a file, where
+    /// it stands (its download's progress). From another device: data.
+    ChatAttachment(ChatAttachmentParams) = "chat.attachment", ReadOnly, false;
+    /// Channels and private messages: download a file of a message (it writes to this computer's disk).
+    ChatDownload(ChatDownloadParams) = "chat.download", Control, true;
+    /// Channels and private messages: stop a download and delete its partial file.
+    ChatCancelDownload(ChatFileParams) = "chat.cancel_download", Control, true;
+    /// Channels and private messages: stop sharing a file sent from this computer.
+    ChatStopSharing(ChatFileParams) = "chat.stop_sharing", Control, true;
     /// Channels: an address where devices of a channel can be reached.
     ChatAddAddress(ChatAddressParams) = "chat.add_address", Control, true;
     /// Channels: mute or unmute a channel's notifications.

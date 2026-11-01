@@ -11,6 +11,7 @@
 //!   signed = "seedwell-chat/v1/message" ‖ channel id ‖ fields (with their length)
 //!   kind   = 1 text (UTF-8, ≤ 16 KiB) | 2 json (UTF-8, ≤ 64 KiB) | 3 topic (UTF-8 title, ≤ 200 characters: the
 //!            message's id names a new topic) | other: kept and passed on, not shown
+//!   later fields = tagged records ([`crate::attach`]: tag 1, a text message's images)
 //! ```
 //!
 //! **Topics**: a channel holds named topics; a message with `topic` belongs to it, one without (or naming a topic
@@ -195,6 +196,15 @@ pub(crate) fn check_agent(agent: Option<&str>) -> Result<(), ChatError> {
 impl ChatMessage {
     /// Signs a draft as `key`'s device for the channel `channel`.
     pub fn sign(key: &DeviceKey, channel: &FolderId, d: Draft) -> Result<ChatMessage, ChatError> {
+        Self::sign_with_extra(key, channel, d, Vec::new())
+    }
+
+    /// Signs a draft with later fields (`extra`, at most [`crate::attach::MAX_EXTRA`] bytes: a message's images,
+    /// [`crate::attach::Attachments`]).
+    pub fn sign_with_extra(key: &DeviceKey, channel: &FolderId, d: Draft, extra: Vec<u8>) -> Result<ChatMessage, ChatError> {
+        if extra.len() > crate::attach::MAX_EXTRA {
+            return Err(ChatError::TooLong(crate::attach::MAX_EXTRA));
+        }
         check_body(d.kind, &d.body)?;
         check_agent(d.agent.as_deref())?;
         let mut m = ChatMessage {
@@ -207,9 +217,12 @@ impl ChatMessage {
             agent: d.agent,
             kind: d.kind,
             body: d.body,
-            extra: Vec::new(),
+            extra,
             sig: [0; 64],
         };
+        if m.fields().len() > MAX_FIELDS {
+            return Err(ChatError::TooLong(MAX_FIELDS));
+        }
         m.sig = key.sign(&m.signed_bytes(channel));
         Ok(m)
     }

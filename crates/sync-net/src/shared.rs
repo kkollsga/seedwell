@@ -410,6 +410,8 @@ pub struct PeerHandle {
     pub stale: Mutex<BTreeSet<FolderId>>,
     /// Our [`RenameRequest`](trs_sync_proto::msg::RenameRequest)s waiting for their answer.
     renames_pending: Mutex<HashMap<u32, oneshot::Sender<trs_sync_proto::msg::RenameReply>>>,
+    /// Our [`BlobWant`](trs_sync_proto::msg::BlobWant)s waiting for their part.
+    blobs_pending: Mutex<HashMap<u32, oneshot::Sender<trs_sync_proto::msg::BlobData>>>,
 }
 
 impl PeerHandle {
@@ -456,6 +458,7 @@ impl PeerHandle {
             links: Mutex::new(BTreeMap::new()),
             holds_pending: Mutex::new(HashMap::new()),
             renames_pending: Mutex::new(HashMap::new()),
+            blobs_pending: Mutex::new(HashMap::new()),
             stale: Mutex::new(BTreeSet::new()),
             joined: Mutex::new(BTreeSet::new()),
             got: Mutex::new(BTreeSet::new()),
@@ -542,6 +545,33 @@ impl PeerHandle {
     /// Hold queries waiting for their answer (tests).
     pub fn holds_waiting(&self) -> usize {
         lock(&self.holds_pending).len()
+    }
+
+    /// Asks the peer for part of an image of a channel ([`trs_sync_proto::msg::BlobWant`], its id set here): the
+    /// request's id, and the receiver its part arrives on (dropped when the session ends).
+    pub async fn ask_blob(&self, mut want: trs_sync_proto::msg::BlobWant) -> Option<(u32, oneshot::Receiver<trs_sync_proto::msg::BlobData>)> {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        want.id = id;
+        let (tx, rx) = oneshot::channel();
+        lock(&self.blobs_pending).insert(id, tx);
+        if self.control.send(Message::BlobWant(want)).await.is_err() {
+            lock(&self.blobs_pending).remove(&id);
+            return None;
+        }
+        Some((id, rx))
+    }
+
+    /// A part that will not be waited for any more.
+    pub fn forget_blob(&self, id: u32) {
+        lock(&self.blobs_pending).remove(&id);
+    }
+
+    /// A part of an image we asked for arrived.
+    pub fn answer_blob(&self, d: trs_sync_proto::msg::BlobData) {
+        self.rx_bytes.fetch_add(d.data.len() as u64, Ordering::Relaxed);
+        if let Some(tx) = lock(&self.blobs_pending).remove(&d.id) {
+            let _ = tx.send(d);
+        }
     }
 
     /// The answer to one of our hold queries arrived.
@@ -811,6 +841,8 @@ pub struct Ctx {
     /// Every folder this device has (its configuration's, open or not: held back, failed to open, stopped for a
     /// move): one a peer offers while it is not open here is stale on that session. (One it does not have is not.)
     pub ours: Mutex<BTreeSet<FolderId>>,
+    /// **Tests:** what serving files does to the pieces it sends.
+    pub file_hooks: crate::files::Hooks,
     /// **Tests:** sessions set up so far (to see that none started anew).
     pub sessions: std::sync::atomic::AtomicU64,
     /// **Tests:** how long an answering session waits between making its Join and going on.

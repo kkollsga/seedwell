@@ -153,7 +153,8 @@ macro_rules! shift_key {
 }
 
 /// A keyboard shortcut in user-visible text ("Settings (⌘,)"): the key with the system's command key, "⌘," on the
-/// Mac and "Ctrl+," elsewhere; `shortcut!(alt "L")` adds the Option / Alt key: "⌥⌘L", "Ctrl+Alt+L". A literal, like
+/// Mac and "Ctrl+," elsewhere; `shortcut!(alt "L")` adds the Option / Alt key: "⌥⌘L", "Ctrl+Alt+L", and
+/// `shortcut!(shift "O")` the Shift key: "⇧⌘O", "Ctrl+Shift+O". A literal, like
 /// [`computer!`].
 #[cfg(target_os = "macos")]
 #[macro_export]
@@ -161,19 +162,26 @@ macro_rules! shortcut {
     (alt $key:literal) => {
         concat!("⌥⌘", $key)
     };
+    (shift $key:literal) => {
+        concat!("⇧⌘", $key)
+    };
     ($key:literal) => {
         concat!("⌘", $key)
     };
 }
 
 /// A keyboard shortcut in user-visible text ("Settings (⌘,)"): the key with the system's command key, "⌘," on the
-/// Mac and "Ctrl+," elsewhere; `shortcut!(alt "L")` adds the Option / Alt key: "⌥⌘L", "Ctrl+Alt+L". A literal, like
+/// Mac and "Ctrl+," elsewhere; `shortcut!(alt "L")` adds the Option / Alt key: "⌥⌘L", "Ctrl+Alt+L", and
+/// `shortcut!(shift "O")` the Shift key: "⇧⌘O", "Ctrl+Shift+O". A literal, like
 /// [`computer!`].
 #[cfg(not(target_os = "macos"))]
 #[macro_export]
 macro_rules! shortcut {
     (alt $key:literal) => {
         concat!("Ctrl+Alt+", $key)
+    };
+    (shift $key:literal) => {
+        concat!("Ctrl+Shift+", $key)
     };
     ($key:literal) => {
         concat!("Ctrl+", $key)
@@ -224,8 +232,8 @@ mod tests {
     #[test]
     fn shortcuts_name_the_systems_own_keys() {
         #[cfg(target_os = "macos")]
-        assert_eq!((shortcut!(","), shortcut!(alt "L")), ("⌘,", "⌥⌘L"));
+        assert_eq!((shortcut!(","), shortcut!(alt "L"), shortcut!(shift "O")), ("⌘,", "⌥⌘L", "⇧⌘O"));
         #[cfg(not(target_os = "macos"))]
-        assert_eq!((shortcut!(","), shortcut!(alt "L")), ("Ctrl+,", "Ctrl+Alt+L"));
+        assert_eq!((shortcut!(","), shortcut!(alt "L"), shortcut!(shift "O")), ("Ctrl+,", "Ctrl+Alt+L", "Ctrl+Shift+O"));
     }
 }

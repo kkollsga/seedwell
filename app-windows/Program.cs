@@ -6,11 +6,12 @@ namespace Seedwell;
 
 /// <summary>
 /// The entry point (the generated one is disabled): one instance only. A second launch hands its
-/// activation to the first and ends: with .torrent files or magnet links on its command line (an opened file, a
-/// clicked link) the first adds them, without any it shows its window. <c>--render-snapshots &lt;dir&gt; [--theme
+/// activation to the first and ends: with .torrent files, magnet links or seedwell:// links on its command line (an
+/// opened file, a clicked link) the first opens what each asks for (the core's command_line_routes), without any it
+/// shows its window. <c>--render-snapshots &lt;dir&gt; [--theme
 /// light]</c> is the visual QA run instead (<see cref="SnapshotRenderer"/>): no single instance, no tray icon.
 /// <c>--register</c> / <c>--unregister</c> write or remove the file and link registration (<see cref="Registration"/>).
-/// <c>--quit</c> asks the running app to quit, as its Quit does (scripts, an installer, QA).
+/// <c>--quit</c> asks the running app to quit, as its Quit does (scripts, an installer, QA); with none running it just ends.
 /// </summary>
 public static class Program
 {
@@ -33,8 +34,8 @@ public static class Program
     /// </summary>
     internal static bool QaControl { get; private set; }
 
-    /// <summary>The .torrent files and magnet or web links this launch was given.</summary>
-    internal static string[] Sources { get; private set; } = [];
+    /// <summary>What this launch's command line opens: things to add and seedwell:// links, in order.</summary>
+    internal static uniffi.trs_ffi.LinkRoute[] Routes { get; private set; } = [];
 
     [STAThread]
     static int Main(string[] args)
@@ -45,7 +46,7 @@ public static class Program
             if (args.Contains("--register")) Registration.Register(); else Registration.Unregister();
             return 0;
         }
-        Sources = SourcesIn(args);
+        Routes = RoutesIn(args);
         int dir = Array.IndexOf(args, "--state-dir");
         if (dir >= 0 && dir + 1 < args.Length)
         {
@@ -80,26 +81,38 @@ public static class Program
             done.Wait(TimeSpan.FromSeconds(10));
             return 0;
         }
+        if (args.Contains("--quit"))
+        {
+            // Nothing runs on this state folder to quit: end, never start one in its place (an installer waits on this).
+            return 0;
+        }
         main.Activated += (_, e) =>
         {
             // A second launch: its command line comes with the activation.
             var line = (e.Data as Windows.ApplicationModel.Activation.ILaunchActivatedEventArgs)?.Arguments ?? "";
             var words = Split(line);
-            var sources = SourcesIn(words);
-            AppLog.Write($"second launch: {(words.Contains("--qa") ? "qa" : words.Contains("--quit") ? "quit" : sources.Length > 0 ? $"{sources.Length} to add" : "show the window")}");
+            var routes = RoutesIn(words);
+            AppLog.Write($"second launch: {(words.Contains("--qa") ? "qa" : words.Contains("--quit") ? "quit" : routes.Length > 0 ? $"{routes.Length} to open" : "show the window")}");
             int qa = Array.IndexOf(words, "--qa");
             if (qa >= 0 && QaControl) App.Current?.Qa(words[(qa + 1)..]);
             else if (qa >= 0) AppLog.Write("qa refused: this instance was not started with --qa-control");
             else if (words.Contains("--quit")) App.Current?.QuitFromAnyThread();
-            else if (sources.Length > 0) App.Current?.Add(sources);
+            else if (routes.Length > 0) App.Current?.Open(routes);
             else App.Current?.ShowMainWindow();
         };
         Start();
         return 0;
     }
 
-    /// <summary>What on a command line is something to add: the core's rule (command_line_sources).</summary>
-    internal static string[] SourcesIn(IEnumerable<string> args) => uniffi.trs_ffi.TrsFfiMethods.CommandLineSources(args.ToArray());
+    /// <summary>
+    /// What a command line opens: the core's rule (command_line_routes: seedwell:// links and what command_line_sources
+    /// adds). The QA words after --qa are the QA command's, never links to open.
+    /// </summary>
+    internal static uniffi.trs_ffi.LinkRoute[] RoutesIn(string[] args)
+    {
+        int qa = Array.IndexOf(args, "--qa");
+        return uniffi.trs_ffi.TrsFfiMethods.CommandLineRoutes(qa >= 0 ? args[..qa] : args);
+    }
 
     /// <summary>A command line split as Windows splits it (quotes, backslashes).</summary>
     static string[] Split(string line)

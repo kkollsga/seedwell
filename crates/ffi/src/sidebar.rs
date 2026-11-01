@@ -9,7 +9,9 @@ use trs_control::display as d;
 use trs_platform::shortcut;
 
 use crate::chat_text::{agent_tag, general_unread, named, subtitle, topic_line};
+use crate::devices_text::FollowLine;
 use crate::display::{rate_limit_help, RateDirection};
+use crate::host::{has, HostWindow};
 use crate::library::LibraryPlace;
 use crate::menu::APP_NAME;
 use crate::sync::{SyncChannel, SyncDirect, SyncRole, SyncTopic};
@@ -87,7 +89,7 @@ pub struct SidebarChannel {
     /// Its topics are shown (`Library::set_channel_open`).
     pub open: bool,
     pub topics: Vec<SidebarItem>,
-    /// Under the topics, unless this computer may only read the channel.
+    /// Under the topics, unless this computer may only read the channel or the host has no chat dialogs.
     pub new_topic: Option<SidebarAdd>,
 }
 
@@ -96,7 +98,8 @@ pub struct SidebarChannel {
 pub struct SidebarChats {
     pub title: String,
     pub channels: Vec<SidebarChannel>,
-    pub add: SidebarAdd,
+    /// "New Channel…", while the host has the New Channel window.
+    pub add: Option<SidebarAdd>,
 }
 
 /// A titled section of plain items.
@@ -171,6 +174,8 @@ pub enum SidebarCommand {
     LeaveChannel,
     /// The channel's Agents: Yes/No (`chat_agents_menu`: its choices; owners and admins).
     ChannelAgents,
+    /// "On All My Devices" switched to `on` (`Core::sync_set_follow`).
+    SetFollow { on: bool },
 }
 
 /// One line of a sidebar item's context menu.
@@ -181,6 +186,11 @@ pub enum SidebarMenuEntry {
         command: SidebarCommand,
         /// Drawn in the warning colour.
         destructive: bool,
+        /// Drawn with a check mark (On All My Devices while it is on).
+        checked: bool,
+        enabled: bool,
+        /// A tooltip, for a host whose menus show one (empty: none).
+        help: String,
     },
     Separator,
 }
@@ -285,6 +295,8 @@ pub(crate) struct SidebarInputs<'a> {
     pub place: &'a LibraryPlace,
     /// A new download arrived while the user was busy: Downloads carries a quiet dot.
     pub downloads_flag: bool,
+    /// The windows the host has: "New Channel…" and "New Topic…" only when it can open them.
+    pub host: &'a [HostWindow],
 }
 
 fn item(place: LibraryPlace, title: impl Into<String>, icon: SidebarIcon, help: impl Into<String>) -> SidebarItem {
@@ -307,7 +319,7 @@ fn places(i: &SidebarInputs) -> Vec<SidebarItem> {
     ]
 }
 
-fn channel(c: &SyncChannel, topics: &[SyncTopic], open: bool) -> SidebarChannel {
+fn channel(c: &SyncChannel, topics: &[SyncTopic], open: bool, dialogs: bool) -> SidebarChannel {
     let general = LibraryPlace::Chat { channel_id: c.id.clone(), topic_id: None };
     let unread = if c.muted { 0 } else if open { general_unread(c, topics) } else { c.unread };
     let icon = if c.muted { SidebarIcon::MutedChannel } else { SidebarIcon::Channel };
@@ -326,7 +338,7 @@ fn channel(c: &SyncChannel, topics: &[SyncTopic], open: bool) -> SidebarChannel 
                 )
             })
             .collect(),
-        new_topic: (c.role != SyncRole::ReadOnly).then(|| SidebarAdd {
+        new_topic: (dialogs && c.role != SyncRole::ReadOnly).then(|| SidebarAdd {
             title: "New Topic…".into(),
             help: format!("Start a topic in {}: a conversation of its own, apart from General", c.name),
         }),
@@ -398,7 +410,7 @@ fn signature(m: &SidebarModel) -> String {
         }
     }
     let f = &m.footer;
-    s.push_str(&format!("|{}{}{}", f.offline.is_some() as u8, f.limit_speed.is_some() as u8, f.settings_active as u8));
+    s.push_str(&format!("|{}{}{}{}", m.chats.add.is_some() as u8, f.offline.is_some() as u8, f.limit_speed.is_some() as u8, f.settings_active as u8));
     s
 }
 
@@ -412,11 +424,11 @@ pub(crate) fn sidebar(i: &SidebarInputs) -> SidebarModel {
         places: places(i),
         chats: SidebarChats {
             title: "Chats".into(),
-            channels: i.channels.iter().map(|c| channel(c, (i.topics)(&c.id), (i.open)(&c.id))).collect(),
-            add: SidebarAdd {
+            channels: i.channels.iter().map(|c| channel(c, (i.topics)(&c.id), (i.open)(&c.id), has(i.host, Some(HostWindow::ChatDialogs)))).collect(),
+            add: has(i.host, Some(HostWindow::NewChannel)).then(|| SidebarAdd {
                 title: "New Channel…".into(),
                 help: "Make a channel with your devices, the people you share with and their agents, or join one with a link".into(),
-            },
+            }),
         },
         directs: (!i.directs.is_empty()).then(|| SidebarSection { title: "Direct Messages".into(), items: i.directs.iter().map(direct).collect() }),
         trackers: (!trackers.is_empty()).then(|| SidebarSection { title: "Trackers".into(), items: trackers }),
@@ -430,7 +442,7 @@ pub(crate) fn sidebar(i: &SidebarInputs) -> SidebarModel {
 // MARK: Context menus
 
 fn entry(title: &str, command: SidebarCommand) -> SidebarMenuEntry {
-    SidebarMenuEntry::Item { title: title.into(), command, destructive: false }
+    SidebarMenuEntry::Item { title: title.into(), command, destructive: false, checked: false, enabled: true, help: String::new() }
 }
 
 /// The context menu of a tracker: a favorite's Info, Rename and Remove from Favorites; an automatic tracker's Info and
@@ -441,7 +453,14 @@ pub(crate) fn tracker_menu(t: &TrackerSummary) -> Vec<SidebarMenuEntry> {
             entry("Info", SidebarCommand::TrackerInfo),
             entry("Rename", SidebarCommand::RenameTracker),
             SidebarMenuEntry::Separator,
-            SidebarMenuEntry::Item { title: "Remove from Favorites".into(), command: SidebarCommand::RemoveFavorite, destructive: true },
+            SidebarMenuEntry::Item {
+                title: "Remove from Favorites".into(),
+                command: SidebarCommand::RemoveFavorite,
+                destructive: true,
+                checked: false,
+                enabled: true,
+                help: String::new(),
+            },
         ];
     }
     if t.id != "public" && t.id != "other-private" {
@@ -451,8 +470,9 @@ pub(crate) fn tracker_menu(t: &TrackerSummary) -> Vec<SidebarMenuEntry> {
 }
 
 /// The context menu of a channel: Share… (when this computer may share it), New Topic… (unless it may only read),
-/// Mute or Unmute, Agents: Yes/No… (owners and admins), Rename…, and Leave Channel….
-pub(crate) fn channel_menu(c: &SyncChannel) -> Vec<SidebarMenuEntry> {
+/// Mute or Unmute, Agents: Yes/No… (owners and admins), On All My Devices (`follow`, while it is shown), Rename…, and
+/// Leave Channel….
+pub(crate) fn channel_menu(c: &SyncChannel, follow: &FollowLine) -> Vec<SidebarMenuEntry> {
     let mut v = Vec::new();
     if sync_can_share(c.role) {
         v.push(entry("Share…", SidebarCommand::ShareChannel));
@@ -464,6 +484,16 @@ pub(crate) fn channel_menu(c: &SyncChannel) -> Vec<SidebarMenuEntry> {
     let agents = crate::chat_text::agents_menu(c);
     if agents.can_change {
         v.push(entry(&format!("{}…", agents.title), SidebarCommand::ChannelAgents));
+    }
+    if follow.shown {
+        v.push(SidebarMenuEntry::Item {
+            title: follow.menu_title.clone(),
+            command: SidebarCommand::SetFollow { on: !follow.on },
+            destructive: false,
+            checked: follow.on,
+            enabled: follow.enabled,
+            help: follow.line.clone(),
+        });
     }
     v.push(entry("Rename…", SidebarCommand::RenameChannel));
     v.push(SidebarMenuEntry::Separator);

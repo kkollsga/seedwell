@@ -9,8 +9,8 @@ namespace Seedwell;
 /// <c>DevicesView</c> (trs-ffi devices_text.rs, as the Mac's Settings tab): the list with Remove…, a device asking to
 /// pair (its id, Refuse and Pair), Pair a Device… (the link, Copy, the countdown), Pair with a Link… and Leave or
 /// Start Over, each in a dialog. Read again every second. Only the user's clicks reach these calls; agents never.
-/// NEED: "On all my devices" in the folder page and the channel menu (the core's sync_follow_line and
-/// sync_set_follow are there for them).
+/// "On all my devices" is on the Folder Sync page (<see cref="FolderSyncPage"/>). NEED: it in the folder editor and the
+/// channel menu (the core's sync_follow_line and sync_set_follow are there for them).
 /// </summary>
 sealed class DevicesSection
 {
@@ -19,6 +19,7 @@ sealed class DevicesSection
     readonly Microsoft.UI.Dispatching.DispatcherQueueTimer timer;
     string drawn = "";
     PairLinkView? link;
+    string myId = "";
     TextBlock? countdown;
 
     public UIElement Root => panel;
@@ -110,6 +111,7 @@ sealed class DevicesSection
         pair.Click += (_, _) => ShowPairLink();
         buttons.Children.Add(pair);
         var paste = new Button { Content = v.LinkTitle, IsEnabled = v.LinkEnabled };
+        myId = v.MyIdLine;
         paste.Click += (_, _) => ShowPaste(v.MyIdLine);
         buttons.Children.Add(paste);
         if (v.LeaveTitle is string leave)
@@ -186,7 +188,22 @@ sealed class DevicesSection
         countdown = null;
     }
 
-    async void ShowPaste(string myId)
+    /// <summary>
+    /// Pair with a Link… with <paramref name="link"/> filled in (a seedwell://devices/ link that opened the app); once the
+    /// section is on screen when it was just made.
+    /// </summary>
+    internal void ShowPaste(string link)
+    {
+        if (panel.XamlRoot is null)
+        {
+            void Once(object s, RoutedEventArgs e) { panel.Loaded -= Once; ShowPaste(myId, link); }
+            panel.Loaded += Once;
+            return;
+        }
+        ShowPaste(myId, link);
+    }
+
+    async void ShowPaste(string myId, string link = "")
     {
         if (panel.XamlRoot is not XamlRoot root)
         {
@@ -205,6 +222,8 @@ sealed class DevicesSection
             problem.Text = p ?? "";
             d.IsPrimaryButtonEnabled = p == null && box.Text.Trim().Length > 0;
         };
+        box.Text = link;
+        AppLog.Write($"devices: pair with a link{(link.Length > 0 ? " (filled in)" : "")}");
         if (await d.ShowAsync() == ContentDialogResult.Primary)
         {
             var text = box.Text.Trim();

@@ -172,6 +172,9 @@ mod tests {
             topic: None,
             kind: SyncMessageKind::Text,
             body: body.into(),
+            images: Vec::new(),
+            files: Vec::new(),
+            place: String::new(),
         }
     }
 

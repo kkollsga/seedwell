@@ -129,6 +129,62 @@ sealed class SnapshotRenderer(App app, FlyoutWindow flyout, string dir, string t
         await Place(new LibraryPlace.Downloads(), "library-downloads");
         await Place(new LibraryPlace.Sharing(), "library-sharing");
         await Place(new LibraryPlace.FolderSync(), "library-foldersync");
+        // Settings: Updates, Devices and Folder Sync's Cloudflare rendezvous (off: the guide).
+        await Place(new LibraryPlace.Settings(), "library-settings");
+        if (pane.SettingsPageShown?.Rendezvous.Root is UIElement rendezvous)
+        {
+            await Save(rendezvous, "settings-rendezvous");
+        }
+        await Place(new LibraryPlace.Downloads(), "library-downloads");
+        async Task Menu(MenuFlyout flyout, string name)
+        {
+            flyout.ShouldConstrainToRootBounds = true;
+            flyout.ShowAt(window.Content, new Windows.Foundation.Point(60, 300));
+            await PopupOpened(window.Content.XamlRoot);
+            await SavePopups(window.Content.XamlRoot, name);
+            flyout.Hide();
+            await PopupsClosed(window.Content.XamlRoot);
+        }
+        // The tray's right-click menu (the core's app commands, then Open and Quit), drawn in the window.
+        var tray = new MenuFlyout();
+        foreach (var item in app.TrayMenuItems())
+        {
+            tray.Items.Add(item);
+        }
+        await Menu(tray, "tray-menu");
+        // A channel's sidebar menu, as a right-click shows it, and its dialogs as its entries open them.
+        if (app.Core.ChatChannels().FirstOrDefault() is SyncChannel channel)
+        {
+            await Menu(pane.RenderMenu(new LibraryPlace.Chat(channel.Id, null)), "channel-menu");
+            foreach (var (dialog, name) in new[]
+            {
+                (TrsFfiMethods.ChatNewTopicDialog(channel), "dialog-new-topic"),
+                (TrsFfiMethods.ChatRenameDialog(channel), "dialog-rename"),
+                (TrsFfiMethods.ChatLeaveDialog(channel), "dialog-leave"),
+                (TrsFfiMethods.ChatAgentsDialog(channel), "dialog-agents"),
+                (TrsFfiMethods.ChatWakeCommandDialog(channel), "dialog-wake-command"),
+            })
+            {
+                app.ChatDialogs.Show(dialog, channel);
+                await PopupOpened(window.Content.XamlRoot);
+                await SavePopups(window.Content.XamlRoot, name);
+                app.ChatDialogs.QaCancel();
+                await PopupsClosed(window.Content.XamlRoot);
+            }
+        }
+        // New Channel, both sides; Join with a link that is not one (the core's line under it).
+        NewChannelDialog.Show(app, null);
+        await PopupOpened(window.Content.XamlRoot);
+        if (NewChannelDialog.Open is NewChannelDialog nc)
+        {
+            await SavePopups(window.Content.XamlRoot, "new-channel");
+            nc.QaMode(ChatNewMode.Join);
+            nc.QaLink("seedwell://chat/not-a-real-link");
+            await Settle();
+            await SavePopups(window.Content.XamlRoot, "new-channel-join");
+            nc.QaCancel();
+            await PopupsClosed(window.Content.XamlRoot);
+        }
         if (pane.Model?.Sidebar.Trackers?.Items.FirstOrDefault() is SidebarItem tracker)
         {
             await Place(tracker.Place, "library-tracker");
@@ -206,13 +262,33 @@ sealed class SnapshotRenderer(App app, FlyoutWindow flyout, string dir, string t
         await Save(sheet, "file-icons");
     }
 
+    /// <summary>Waits until a popup is open and drawn (a dialog opens with an animation), at most 3 s.</summary>
+    async Task PopupOpened(XamlRoot root)
+    {
+        for (int i = 0; i < 60 && !VisualTreeHelper.GetOpenPopupsForXamlRoot(root).Any(p => p.Child is FrameworkElement { ActualWidth: > 0 }); i++)
+        {
+            await Task.Delay(50);
+        }
+        await Settle();
+    }
+
+    /// <summary>Waits until no popup is open (a hidden dialog closes with an animation), at most 3 s.</summary>
+    static async Task PopupsClosed(XamlRoot root)
+    {
+        for (int i = 0; i < 60 && VisualTreeHelper.GetOpenPopupsForXamlRoot(root).Count > 0; i++)
+        {
+            await Task.Delay(50);
+        }
+    }
+
     /// <summary>Everything in the open popups (a menu, a dialog), one picture each.</summary>
     async Task SavePopups(XamlRoot root, string name)
     {
         int i = 0;
         foreach (var p in VisualTreeHelper.GetOpenPopupsForXamlRoot(root))
         {
-            if (p.Child is UIElement child)
+            // A popup still closing (a dialog just hidden) has no size left: nothing to draw.
+            if (p.Child is FrameworkElement { ActualWidth: > 0, ActualHeight: > 0 } child)
             {
                 await Save(child, i == 0 ? name : $"{name}-{i}");
                 i++;

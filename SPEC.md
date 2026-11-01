@@ -1391,6 +1391,92 @@ Chat between devices, for people and agents (0.1.6).
     channel's total less its topics'); closed, it shows the channel's total. Its topics are listed under it as "#"
     rows with their unread, newest activity first, then *New Topic…* (not for Read only members). The channel's ⋯
     menu and its context menu have *New Topic…* too.
+- **Images** (0.1.15, the user's wish: "Native support for images and SVGs in the chat. It's a great way to share
+  screenshots, context and designs."): a message in a channel can carry up to 10 images, PNG, JPEG, GIF, WebP or
+  SVG, with or without text, and private messages too (since files, below: a private message's images are fetched
+  only from its other device, over the direct session its messages use).
+  - **Adding them:** paste one (Cmd-V of a screenshot or a copied image or file), drag files onto the conversation,
+    or the composer's paperclip (*Attach Files…*). Each shows as a chip with its preview, name, size and dimensions
+    and a remove button until the message is sent; an image that cannot be sent says why at once (all words from
+    Rust, `crates/ffi/src/chat_images.rs`).
+  - **Made safe before they leave** (`crates/media`): the format is found from the bytes, never the name (HEIC is
+    refused: export it as JPEG or PNG first); a raster image is at most 10 MiB and 64 megapixels, an SVG 1 MiB; every
+    image must decode. Metadata goes: EXIF (with GPS), XMP, IPTC, comments, text chunks and trailing data are
+    stripped by keeping only the parts of the file that draw the picture, so a screenshot stays pixel-exact and a
+    photo keeps its quality; a photo that its EXIF turns is turned and encoded again (JPEG stays JPEG). An animated GIF
+    or WebP stays animated in the file; it is shown by its first frame.
+  - **Shown:** inline under the text, scaled to fit the column (at most 420 × 320 points) with the aspect ratio
+    kept, the name, dimensions and size under it. A click opens Quick Look; the context menu has *Open*, *Copy
+    Image*, *Save As…* and, for an SVG, *Save as PNG…*. Hosts draw only PNG or JPEG made or checked in Rust: an SVG
+    is drawn in Rust with `resvg` (no scripts, `foreignObject`, files, URLs, XML entities or nested SVG; bounded size,
+    element count and time) and never handed to a web view or the system's SVG renderer; the SVG itself is saved as
+    a file. Another device's GIF or WebP is shown as a PNG of its first frame.
+  - **Fetching:** the bytes are not in the message: it names each image by its SHA-256 (with its kind, size,
+    dimensions, name and a small preview), and members fetch the bytes from any member that has them, checked
+    against the hash and decoded before they are kept. The images of the newest messages, up to 512 MiB a channel,
+    are fetched by themselves; older ones show *Not downloaded* and a *Download* button. While the author (and every
+    other member that has it) is away, the image shows its preview, blurred, with "Waiting for a device that has
+    this image to come online", and appears when one connects.
+  - **Kept** sealed with the channel's own key in the channel's container (*On disk*, below), deleted with the
+    channel.
+  - **Older Seedwells** (0.1.14 and before) show the message's text and a line per image (`[image: shot.png,
+    240 KB]`), and keep and pass the message on unchanged.
+  - **Agents** (on Agents: Yes channels, with the same permissions as reading and posting): `seedwell chat send
+    <channel> --attach FILE [--attach FILE]... [text]` sends images; `chat read` and `--lean` list each image of a
+    message (hash, kind, name, size, dimensions, state, and the command that gets it); `seedwell chat attachment
+    <channel> <hash> [--out PATH] [--png]` writes the image to a file (by default in a folder of its own in the
+    temporary folder) and prints its path, waiting up to a minute for one on its way; `--png` gives an SVG drawn as
+    PNG.
+- **Files** (0.1.15, with images; the user's decision: "Why limit the sizes? Won't it be fast enough to download? We
+  should simply mark the file size clearly so the user decides when selecting to download"): a message in a channel
+  or a private conversation can carry files of any kind and any size (up to 10 attachments, images and files
+  together), with or without text.
+  - **Adding them:** as images (drop, paste, *Attach Files…*). The core decides per file: an image within the image
+    caps that decodes goes as an image (above); any other file, and an image over the caps or one that does not
+    decode, goes as a file. A folder is refused ("Photos is a folder. Only files can be attached; to share a folder,
+    use Folder Sync."). The chip shows the file's icon, name and size.
+  - **Sending:** nothing is copied. The sender's Seedwell reads the file once where it is, off the service's locks,
+    for its SHA-256 and the hash of each 1 MiB piece; meanwhile the conversation shows "Preparing report.zip… 34 %"
+    above the composer, and the message is posted when that is done (the message names the file by those hashes, so
+    it is posted after them, not before). A send that fails (the file changed while it was read, the private
+    conversation's device went away) stays there with its reason and *Dismiss*. The file's path, size,
+    modification time and hashes are kept in the conversation's own container, sealed, and deleted with it.
+  - **Serving:** the sender serves the file from where it is, while it has the size and modification time it had
+    when it was sent and each piece still matches its hash. Otherwise, or after *Stop Sharing*, it answers that the
+    file is gone, for good. A device that downloaded the file serves its copy too while that copy is unchanged, so
+    others can get it while the sender is away (the sender is asked first).
+  - **A card per file**, drawn from the core's words: an icon by type, the name, the size ("1.2 GB", Rust's
+    format), a state line and its buttons:
+    - not downloaded: "1.2 GB · Not downloaded", *Download* (into the Downloads folder) and *Save As…*;
+    - downloading: "Downloading 340 MB of 1.2 GB · 12 MB/s" with a progress bar, *Cancel*;
+    - paused: "Paused at 340 MB of 1.2 GB: it goes on when Anna's Mac is online" (nobody that has it is connected;
+      it resumes by itself, also after a restart), *Cancel*;
+    - downloaded: "1.2 GB · Downloaded to ~/Downloads", *Open* and *Show in Finder*;
+    - no longer available: its sender changed, moved or stopped sharing it;
+    - failed: "Download failed: …" with the reason, *Retry* and *Cancel*;
+    - on the device that sent it: "Shared from ~/Documents/report.pdf", *Show in Finder* and *Stop Sharing*; or "No
+      longer shared: the file changed since it was sent".
+  - **Nothing downloads by itself**; *Download* and *Cancel* are explicit. A download goes to the Downloads folder
+    under the file's name, or a free one like it (`report (1).pdf`; `archive (1).tar.gz`), or with *Save As…* to the
+    file chosen there. While it runs it is a partial file beside its place (`report.pdf.seedwell-part`); *Cancel*
+    deletes it. A finished file gets the system's mark for downloaded files (the quarantine attribute on a Mac, the
+    Mark of the Web on Windows), so the system checks it before it runs as code.
+  - **Safety:** the name a file arrives with is made safe before it is used (its last part only: no folders, no
+    `..`, no control characters, no leading dots, at most 120 characters with the extension kept); received bytes
+    go only to the chosen place. Nothing opens by itself; *Open* on an app, an installer or a script (by its name,
+    a folder such as an app bundle, or a file marked executable) asks first: "Open “setup.sh”? It is an app, an
+    installer or a script: opening it can run code on this computer. Open it only if you trust the person who sent
+    it." (*Cancel* / *Open*).
+  - **Kept** in the conversation's container (*On disk*, below): what is shared, what is being downloaded and which
+    pieces are verified. Leaving a channel or deleting a conversation stops its downloads and deletes their partial
+    files and these records; downloaded files are the user's and stay.
+  - **Older Seedwells** show the line `[file: report.pdf, 1.2 GB]` in the message's text.
+  - **Agents:** `seedwell chat send <channel> --attach FILE...` and `seedwell chat dm send <device> --attach FILE...`
+    send any file (the CLI passes its full path; the app reads it there). `chat read` lists each file with its state,
+    and `seedwell chat attachment <channel> <hash> [--out PATH] [--no-wait]` (`chat dm attachment <device> <hash>`
+    for a private conversation) downloads a file: to `--out` (a folder, or a file path), else the Downloads folder,
+    printing its progress and waiting until it is there (a pause of more than a minute ends the wait; the download
+    goes on in the app); `--no-wait` leaves it to the app.
 - **A folder's chat:** a folder can have a channel that goes with it, a setting of each Mac. Sharing the folder can
   put the channel in the same link (`seedwell sync share <folder> --chat <channel>|new`, `new` making one named
   after the folder); the joining Mac joins both and links them, or only the folder when it is in the channel
@@ -1427,16 +1513,22 @@ Chat between devices, for people and agents (0.1.6).
   Keychain, or the 0600 file, §7G.1 *Secrets*), and each message is sealed on its own (ChaCha20-Poly1305). Leaving
   a channel or deleting a conversation deletes its key with its messages, so a copy left in a backup can no longer
   be read. A file whose key is gone starts over (a channel's members send its messages again). There is no password: this guards the files, not a
-  Mac someone has unlocked.
+  Mac someone has unlocked. A channel's images (0.1.15) are kept the same way, each sealed whole with the channel's
+  key in the channel's own folder (`sync/<channel id>.blobs/`; a private conversation's in `sync/dm-<device>.blobs/`),
+  which goes with it; so are the records of its files (`sync/<channel id>.files/`, `sync/dm-<device>.files/`: what
+  is shared from where, the downloads and their verified pieces, and each file's piece table).
 - **Protocol** (`crates/sync-proto/PROTOCOL.md`, *Channels* and *Private messages*): six message types behind
   feature bit 0, so a device without it never sees them, and DirectJoin behind bit 1 (private messages only between
   their two devices). Messages are signed by their device (the agent label and
   the topic inside the signed bytes) and kept by every member, up to 10 000 messages or 50 MB per channel, so a
   device that was offline gets them from any member. A removed or expired member's later messages are ignored.
-  Files go through a synced folder.
+  Images and files (0.1.15) are fetched by hash behind feature bit 5 (types 29 and 30); a file piece by piece, each
+  checked against its piece table.
 - **Permissions** (§9A): every channel method needs the channel open to agents (Agents: Yes, above), and then no
-  more than Control: `chat.list`, `chat.members`, `chat.read`, `chat.topics` and the `chat.message` events need
-  read; `chat.new`, `chat.join`, `chat.send`, `chat.new_topic`, `chat.share`, `chat.set_role`,
+  more than Control: `chat.list`, `chat.members`, `chat.read`, `chat.attachment` (an image's bytes, base64; an SVG
+  also drawn as PNG with `png`; for a file, where it stands), `chat.topics` and the `chat.message` events need read;
+  `chat.download`, `chat.cancel_download` and `chat.stop_sharing` (a file of a channel, or with `device` of a private
+  conversation, which also needs the Mac's switch at Read) need control; `chat.new`, `chat.join`, `chat.send`, `chat.new_topic`, `chat.share`, `chat.set_role`,
   `chat.remove_device`, `chat.set_share_until`, `chat.set_agents` (owners and admins; an agent sets only No in
   practice), `chat.mute`, `chat.rename`, `chat.add_address` and `chat.leave` need control; only `chat.set_wake` (it
   runs commands on this Mac) needs full. `chat.new` (and `sync.share` with `chat: "new"`) makes a Yes channel; a
@@ -1444,7 +1536,10 @@ Chat between devices, for people and agents (0.1.6).
   Read, `chat.dm_send` control and the switch at Read and post, `chat.dm_delete` full. Every message in the agent interface carries `"trust"`: `this-device` for the user's
   own posts on this Mac, else `untrusted-agent` (an agent's post here) or `untrusted-peer` (another device's).
   `chat.send`, `chat.new_topic` and `chat.dm_send` take an optional `agent` name (1 to 64 characters); without it
-  the post goes under the client's name from `hello`.
+  the post goes under the client's name from `hello`. `chat.send` takes `attachments` (each a `name` and its bytes
+  as `base64`) and `files` (full paths on this computer; `chat.dm_send` takes `files` too); a message's
+  `attachments` list its images and files. The activity log counts a post's images and files and names the file a
+  download is about by its hash, never by its name or path.
 
 ### 7G.8 Mail: agents of different projects (0.1.7)
 
@@ -2084,7 +2179,7 @@ Agents like Claude should be able to operate Seedwell as easily as a person: "ad
 | Watch | `wait <torrent>... [--any] [--timeout S]` · `watch` · `activity` · `log trackers` |
 | Debug | `dev on\|off\|status` · `debug health\|trackers\|peers\|perf\|announce` (§9A.5) |
 | Folder sync | `sync list\|status\|add\|join\|share [--role R] [--uses N\|unlimited] [--days N\|never] [--chat <channel>\|new]\|share-until <days>\|never [--extend]\|members\|invites\|revoke-invite\|role\|remove-device\|rename\|move\|pause\|resume\|rescan\|address\|remove\|settings` (§7G.5) · `relay [--port N]`. Read-only: `list`, `status`, `members`, `settings`; full: `share`, `share-until`, `invites`, `role`, `remove-device`, `rename`, `move`, changing `settings`, `remove --delete-files`; control: the rest |
-| Channels | `chat list\|new\|join\|share [--role R] [--uses N\|unlimited] [--days N\|never]\|members\|role\|remove-device\|share-until\|topics\|topic <title>\|send [--topic T] [--reply ID] [--as-json] -\|read [--topic T] [--since ID\|--last N]\|watch [<channel>...] [--topic T]\|dm list\|send <device> -\|read <device>\|watch\|delete <device>\|address\|rename <name>\|mute\|wake <command>\|off\|agents <channel> no\|leave` (§7G.7); `rename` names the channel on this Mac only, as a folder's name. Every command needs the channel open to agents (Agents: Yes, one setting for the whole channel; a No channel is not there for agents), or the Mac's switch for private messages (only the user sets that one, in the app). `new` makes a Yes channel; `join` with a Yes channel's link opens it to agents at once (joining until admitted); `agents <channel> no` closes a channel (owners and admins). Read-only: `list`, `members`, `topics`, `read`, `watch`, `dm list`, `dm read`, `dm watch`; full: `wake`, `dm delete`; control: the rest (`dm send` also needs the switch at post) |
+| Channels | `chat list\|new\|join\|share [--role R] [--uses N\|unlimited] [--days N\|never]\|members\|role\|remove-device\|share-until\|topics\|topic <title>\|send [--topic T] [--reply ID] [--as-json] [--attach FILE]... -\|attachment <channel> <hash> [--out PATH] [--png] [--no-wait]\|read [--topic T] [--since ID\|--last N]\|watch [<channel>...] [--topic T]\|dm list\|send <device> [--attach FILE]... -\|attachment <device> <hash> [--out PATH]\|read <device>\|watch\|delete <device>\|address\|rename <name>\|mute\|wake <command>\|off\|agents <channel> no\|leave` (§7G.7); `rename` names the channel on this Mac only, as a folder's name. Every command needs the channel open to agents (Agents: Yes, one setting for the whole channel; a No channel is not there for agents), or the Mac's switch for private messages (only the user sets that one, in the app). `new` makes a Yes channel; `join` with a Yes channel's link opens it to agents at once (joining until admitted); `agents <channel> no` closes a channel (owners and admins). Read-only: `list`, `members`, `topics`, `read`, `attachment` of an image or a file here, `watch`, `dm list`, `dm read`, `dm watch`; full: `wake`, `dm delete`; control: the rest, and `attachment` that downloads a file (`dm send` also needs the switch at post) |
 | Test | `sim ...` (§9A.6) · `daemon ...` |
 | Agents | `skill show\|install\|uninstall` · `awake --for D\|off\|status` (§9A.7) · `update [status]\|install <zip>\|watch <folder>\|watch --off\|dev-builds on\|off` (§12A) · `help [command\|agents]` |
 

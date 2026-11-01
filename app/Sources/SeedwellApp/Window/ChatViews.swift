@@ -151,6 +151,17 @@ struct ChatConversationView: View {
     @State private var draft = ""
     @State private var replyTo: SyncMessage?
     @FocusState private var typing: Bool
+    /// Images and files waiting to be sent.
+    @State private var images = ChatComposerImages()
+
+    /// Where attachments go: a channel (and its topic), or `dm:<device>`.
+    private var attachPlace: (place: String, topic: String?)? {
+        switch place {
+        case .chat(let id, let topic): return (id, topic)
+        case .direct(let id): return ("dm:\(id)", nil)
+        default: return nil
+        }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -160,6 +171,7 @@ struct ChatConversationView: View {
                 Text(cannotPost).font(.system(size: 12)).foregroundStyle(.secondary).padding(12)
             }
         }
+        .chatImageInput(images, core: model.core, enabled: canPost && attachPlace != nil, focused: typing)
     }
 
     private var messages: some View {
@@ -177,7 +189,7 @@ struct ChatConversationView: View {
                                        reply: m.replyTo.flatMap { r in ms.first { $0.id == r } },
                                        tags: tags[String(m.id.prefix(8)).lowercased()] ?? [],
                                        onTag: canPost ? { set in tag(m, set) } : nil,
-                                       onReply: canPost ? { replyTo = m; typing = true } : nil)
+                                       onReply: canPost ? { replyTo = m; typing = true } : nil, core: model.core)
                             .id(m.id)
                     }
                 }
@@ -202,7 +214,12 @@ struct ChatConversationView: View {
                 }
                 .font(.system(size: 11.5)).foregroundStyle(.secondary)
             }
+            if let a = attachPlace, !model.chatPending.isEmpty {
+                ChatPendingSendsView(core: model.core, place: a.place, pending: model.chatPending) { [model] in model.loadChatMessages() }
+            }
+            if !images.items.isEmpty { ChatComposerChips(images: images, core: model.core) }
             HStack(alignment: .bottom, spacing: 8) {
+                if attachPlace != nil { ChatAttachButton(images: images, core: model.core).padding(.bottom, 3) }
                 TextField("Message \(name)", text: $draft, axis: .vertical)
                     .textFieldStyle(.roundedBorder).lineLimit(1...6)
                     .focused($typing)
@@ -212,7 +229,7 @@ struct ChatConversationView: View {
                         return .handled
                     }
                     .accessibilityIdentifier("chat-field")
-                Button("Send", action: send).disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                Button("Send", action: send).disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && images.items.isEmpty)
                     .help("Send (Return; Shift-Return for a new line)")
             }
         }
@@ -227,6 +244,14 @@ struct ChatConversationView: View {
 
     private func send() {
         let (text, reply) = (draft, replyTo?.id)
+        if let a = attachPlace, !images.items.isEmpty {
+            draft = ""
+            replyTo = nil
+            images.send(core: model.core, place: a.place, topic: a.topic, text: text, replyTo: reply) { [model] sent in
+                if sent { model.loadChatMessages() } else if draft.isEmpty { draft = text }
+            }
+            return
+        }
         draft = ""
         replyTo = nil
         actions.send(to: place, text, replyTo: reply) { [model] sent in
@@ -245,6 +270,8 @@ struct ChatMessageRow: View {
     /// Sets your tags on it (the whole set); `nil` where you cannot post.
     var onTag: (([String]) -> Void)? = nil
     let onReply: (() -> Void)?
+    /// Draws its images (none without it: the snapshots).
+    var core: Core? = nil
     @State private var hovered = false
 
     var body: some View {
@@ -297,6 +324,8 @@ struct ChatMessageRow: View {
                         .buttonStyle(.plain).foregroundStyle(.secondary).help("Reply")
                 }
             }
+            if let core, !message.images.isEmpty { ChatImagesView(core: core, channelId: message.place, images: message.images) }
+            if let core, !message.files.isEmpty { ChatFilesView(core: core, place: message.place, files: message.files) }
             if !tags.isEmpty { tagsLine }
         }
         // Each message is a card, so one ends visibly where the next begins; yours have the accent's tint.

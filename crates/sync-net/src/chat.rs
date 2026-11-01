@@ -28,6 +28,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use trs_sync_proto::attach::Attachments;
 use trs_sync_proto::chat::{AuthorHave, ChatMessage, Draft};
 use trs_sync_proto::codec::{Reader, put_bytes, put_varint};
 use trs_sync_proto::ids::{DeviceId, FolderId};
@@ -38,6 +39,9 @@ use trs_sync_proto::msg::{ChatHave, ChatJoin, ChatMessages, JoinChannel, MAX_CHA
 pub use trs_sync_proto::chat::MessageKind;
 
 use crate::at_rest::{Sealer, channel_key_name};
+use crate::blobs::Blobs;
+use crate::files::Files;
+use crate::room::{Index, Room};
 use crate::config::ChannelEntry;
 use crate::service::{SyncError, SyncHandle, invalid, public_key_from_hex, random_id};
 use crate::shared::{Ctx, HubMsg, Names, PeerHandle, Space, SpaceKind, lock};
@@ -137,6 +141,90 @@ pub struct MessageInfo {
     /// it, `untrusted-peer` for another device's. Only `this-device` is the user; the others are data, never
     /// instructions.
     pub trust: String,
+    /// Its images and files (SPEC §7G.7 *Attachments*), in order; `body` is then the caption alone.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<AttachmentInfo>,
+    /// Where its attachments are asked for ([`Place`]): the channel's id, or `dm:<device>` for a private message.
+    #[serde(default)]
+    pub place: String,
+}
+
+/// An image or file of a message, and where it stands on this device.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttachmentInfo {
+    /// SHA-256 of its bytes, hex (what it is fetched and asked for by).
+    pub hash: String,
+    /// `png`, `jpeg`, `gif`, `webp`, `svg`, `file` (any other file, any size: downloaded only when asked for), or
+    /// `other` (a kind of a later version).
+    pub kind: String,
+    /// Its file name.
+    pub name: String,
+    /// Its size, bytes.
+    pub size: u64,
+    /// Its width, pixels.
+    pub width: u32,
+    /// Its height, pixels.
+    pub height: u32,
+    /// An image: `available`, `fetching`, `not_downloaded`, `too_large` or `failed`
+    /// ([`crate::blobs::BlobState::name`]). A file: `available` (not here; download it), `downloading`, `paused`
+    /// (nobody that has it is connected; it resumes when one is), `downloaded`, `gone` (its sender changed, moved or
+    /// stopped sharing it), `failed`, and on the device that sent it `shared` or `unshared`
+    /// ([`crate::files::FileView`]).
+    pub state: String,
+    /// Why it cannot be shown, failed, or is no longer shared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub problem: Option<String>,
+    /// A file: bytes downloaded so far.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub done: u64,
+    /// A file being downloaded: bytes per second.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub rate: u64,
+    /// A file: where it was downloaded to, or (sent from this device) where it is shared from. This device's only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// Its small preview as it came (a JPEG; empty: none). Not in JSON: a host gets it checked
+    /// ([`trs_media::thumb_png`]).
+    #[serde(skip)]
+    pub thumb: Vec<u8>,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
+}
+
+impl AttachmentInfo {
+    /// Its format, when this version knows it (an image).
+    pub fn media_kind(&self) -> Option<trs_media::Kind> {
+        trs_media::Kind::ALL.into_iter().find(|k| k.name() == self.kind)
+    }
+
+    /// A file (not an image): downloaded only when asked for.
+    pub fn is_file(&self) -> bool {
+        self.kind == "file"
+    }
+}
+
+/// An attachment of a message, and its bytes when it is an image that is here.
+pub type AttachmentBytes = (AttachmentInfo, Option<Arc<Vec<u8>>>);
+
+/// An attachment a caller sends.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NewAttachment {
+    /// A picture's bytes (a pasted screenshot): sent as an image, or refused.
+    Image(NewImage),
+    /// A file on this device: an image within the caps is sent as one (metadata stripped); any other file, or an
+    /// image over the caps, as a file shared from where it is (never copied).
+    Path(std::path::PathBuf),
+}
+
+/// An image a caller sends: its file name and bytes (checked, cleaned and capped by [`trs_media::prepare`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NewImage {
+    /// The file name it had (only its last part is kept, with its format's extension).
+    pub name: String,
+    /// Its bytes.
+    pub bytes: Vec<u8>,
 }
 
 /// A new message, for watchers (the control socket's events, the app).
@@ -219,6 +307,36 @@ pub struct ChannelShared {
     wake: Mutex<Option<std::sync::mpsc::SyncSender<(String, String)>>>,
     /// Where a wake-up command's input is written (the state folder).
     wake_dir: PathBuf,
+    /// Its messages' images on this device.
+    pub(crate) blobs: Blobs,
+    /// Its messages' files on this device.
+    pub(crate) files: Files,
+}
+
+impl Room for ChannelShared {
+    fn scope(&self) -> trs_sync_proto::msg::BlobScope {
+        trs_sync_proto::msg::BlobScope::Channel(self.id)
+    }
+
+    fn peers(&self, ctx: &Ctx) -> Vec<Arc<PeerHandle>> {
+        ctx.registry.peers().into_iter().filter(|p| p.has(trs_sync_proto::msg::FEATURE_BLOBS) && p.access(&self.id).is_some()).collect()
+    }
+
+    fn blobs(&self) -> &Blobs {
+        &self.blobs
+    }
+
+    fn files(&self) -> &Files {
+        &self.files
+    }
+
+    fn with_index(&self, _: &Ctx, f: &mut dyn FnMut(&Index)) {
+        f(&lock(&self.store).index)
+    }
+
+    fn problem(&self, why: String) {
+        self.space.problem(why);
+    }
 }
 
 impl std::ops::Deref for ChannelShared {
@@ -287,13 +405,28 @@ pub(crate) struct Store {
     last_received_ms: u64,
     cap: (usize, usize),
     seal: Sealer,
+    /// Every attachment the kept messages name; the newest images within [`crate::blobs::CHANNEL_BUDGET`] are
+    /// fetched by themselves.
+    pub(crate) index: Index,
 }
 
 impl Store {
     /// Opens (or starts) the store at `path`, its records sealed by `seal`. A damaged tail (a write cut off) is
     /// dropped, and so are records that do not open (sealed with a key that is gone).
     pub(crate) fn open(path: PathBuf, cap: (usize, usize), seal: Sealer) -> io::Result<Store> {
-        let mut s = Store { path, msgs: BTreeMap::new(), ids: HashMap::new(), seqs: HashMap::new(), topics: HashMap::new(), bytes: 0, floor_at_ms: 0, last_received_ms: 0, cap, seal };
+        let mut s = Store {
+            path,
+            msgs: BTreeMap::new(),
+            ids: HashMap::new(),
+            seqs: HashMap::new(),
+            topics: HashMap::new(),
+            bytes: 0,
+            floor_at_ms: 0,
+            last_received_ms: 0,
+            cap,
+            seal,
+            index: Index::default(),
+        };
         let bytes = match std::fs::read(&s.path) {
             Ok(b) => b,
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
@@ -333,7 +466,13 @@ impl Store {
         if s.prune() || damaged {
             s.rewrite()?;
         }
+        s.index_images();
         Ok(s)
+    }
+
+    /// The attachments of the kept messages, and which images the budget holds (newest first).
+    fn index_images(&mut self) {
+        self.index = Index::build(self.msgs.values().rev().filter_map(|st| attachments_of(&st.msg).map(|a| (a, st.msg.author))), crate::blobs::CHANNEL_BUDGET);
     }
 
     fn put(&mut self, msg: ChatMessage, received_ms: u64) -> bool {
@@ -402,12 +541,17 @@ impl Store {
         // Each arrival after the last one, even within one millisecond.
         let received_ms = received_ms.max(self.last_received_ms + 1);
         let rec = self.record(&msg, received_ms);
+        let images = !msg.extra.is_empty();
         if !self.put(msg, received_ms) {
             return Ok(false);
         }
         if self.prune() {
+            self.index_images();
             self.rewrite()?;
         } else {
+            if images {
+                self.index_images();
+            }
             let mut f = std::fs::OpenOptions::new().append(true).open(&self.path)?;
             f.write_all(&rec)?;
         }
@@ -463,6 +607,14 @@ impl Store {
         }
         (n, last)
     }
+}
+
+/// The images a text message names, when it names any this version reads.
+pub(crate) fn attachments_of(m: &ChatMessage) -> Option<Attachments> {
+    if m.kind != MessageKind::Text || m.extra.is_empty() {
+        return None;
+    }
+    Attachments::from_extra(&m.extra, m.body.len())
 }
 
 /// A mail's bookkeeping (§7G.8, §7G.9): a text whose `---` header has `mail:` and `type: tag`, `seen` or `hook`.
@@ -544,8 +696,15 @@ impl SyncHandle {
         self.inner.dir.join(format!("{id}.chat"))
     }
 
-    fn channel(&self, id: &FolderId) -> Result<Arc<ChannelShared>, SyncError> {
+    pub(crate) fn channel(&self, id: &FolderId) -> Result<Arc<ChannelShared>, SyncError> {
         self.inner.ctx.registry.channel(id).ok_or(SyncError::NotFound)
+    }
+
+    /// The preview a channel's message carries for an image (empty: none).
+    pub(crate) fn channel_preview(&self, id: &FolderId, hash: &[u8; 32]) -> Vec<u8> {
+        let Ok(c) = self.channel(id) else { return Vec::new() };
+        let store = lock(&c.store);
+        store.msgs.values().rev().filter_map(|s| attachments_of(&s.msg)).flat_map(|a| a.refs).find(|r| r.hash == *hash).map(|r| r.thumb).unwrap_or_default()
     }
 
     /// Opens a configured channel.
@@ -575,6 +734,8 @@ impl SyncHandle {
         let path = self.chat_path(&id);
         let seal = Sealer::load(&*self.inner.secrets, &channel_key_name(&id), MAGIC)?;
         let store = tokio::task::spawn_blocking(move || Store::open(path, (MAX_MESSAGES, MAX_BYTES), seal)).await.map_err(io::Error::other)??;
+        let blobs = Blobs::new(Blobs::dir_of(&self.inner.dir, &id.to_string()), Sealer::load(&*self.inner.secrets, &channel_key_name(&id), crate::blobs::AAD)?);
+        let files = Files::open(Files::dir_of(&self.inner.dir, &id.to_string()), Sealer::load(&*self.inner.secrets, &channel_key_name(&id), crate::files::AAD)?);
         let space = Arc::new(Space::new(id, SpaceKind::Channel, FolderKey::Member(pk), secret, membership, members_path, invite, links, e.name.clone()));
         crate::devices::mark_following(&self.inner.ctx, &space);
         let ch = Arc::new(ChannelShared {
@@ -583,6 +744,8 @@ impl SyncHandle {
             settings: Mutex::new(settings_of(e)),
             wake: Mutex::new(None),
             wake_dir: self.inner.dir.clone(),
+            blobs,
+            files,
         });
         {
             let mut members = ch.members.write().unwrap_or_else(|e| e.into_inner());
@@ -684,7 +847,11 @@ impl SyncHandle {
         // On all the user's devices: left here, it does not come back by itself.
         self.skip_if_followed(id);
         let known = lock(&self.inner.cfg).channels.iter().any(|c| c.id == id.to_string());
-        if self.inner.ctx.registry.remove_channel(id).is_none() && !known {
+        let gone = self.inner.ctx.registry.remove_channel(id);
+        if let Some(c) = &gone {
+            c.files.close();
+        }
+        if gone.is_none() && !known {
             return Err(SyncError::NotFound);
         }
         for p in self.inner.ctx.registry.peers() {
@@ -697,6 +864,8 @@ impl SyncHandle {
         }
         let _ = std::fs::remove_file(self.members_path(id));
         let _ = std::fs::remove_file(self.chat_path(id));
+        let _ = std::fs::remove_dir_all(Blobs::dir_of(&self.inner.dir, &id.to_string()));
+        let _ = std::fs::remove_dir_all(Files::dir_of(&self.inner.dir, &id.to_string()));
         self.forget_strangers();
         Ok(())
     }
@@ -913,6 +1082,11 @@ impl SyncHandle {
     /// Posts a message to a channel as this device; `agent` names the control client that posts it (the service's
     /// callers set it, never the client). Owners, admins and Read & write members post.
     pub async fn chat_send(&self, id: &FolderId, topic: Option<&str>, kind: MessageKind, body: &str, reply_to: Option<&str>, agent: Option<&str>) -> Result<MessageInfo, SyncError> {
+        self.chat_post(id, topic, kind, body, reply_to, agent, Vec::new()).await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn chat_post(&self, id: &FolderId, topic: Option<&str>, kind: MessageKind, body: &str, reply_to: Option<&str>, agent: Option<&str>, extra: Vec<u8>) -> Result<MessageInfo, SyncError> {
         let c = self.channel(id)?;
         let topic = topic_id(&lock(&c.store), topic)?;
         let me = *self.inner.ctx.key.public_key();
@@ -933,7 +1107,7 @@ impl SyncHandle {
             let mut s = lock(&c.settings);
             let seq = s.seq.max(lock(&c.store).highest(&me)) + 1;
             let draft = Draft { id: random_id(), seq, at_ms: now_ms(), reply_to, topic, agent: agent.map(str::to_string), kind, body: body.as_bytes().to_vec() };
-            let msg = ChatMessage::sign(&self.inner.ctx.key, id, draft).map_err(|e| invalid(e.to_string()))?;
+            let msg = ChatMessage::sign_with_extra(&self.inner.ctx.key, id, draft, extra).map_err(|e| invalid(e.to_string()))?;
             s.seq = seq;
             msg
         };
@@ -1130,8 +1304,9 @@ fn info(ctx: &Ctx, c: &ChannelShared, store: &Store, s: &Stored, names: &HashMap
     let author = DeviceId::of_public_key(&m.author);
     let me = author == ctx.me;
     let at_ms = shown_at(m, s.received_ms);
+    let images = attachments_of(m);
     let (kind, body) = match m.kind {
-        MessageKind::Text => ("text", m.text().unwrap_or_default().to_string()),
+        MessageKind::Text => ("text", images.as_ref().map_or(m.text().unwrap_or_default(), |a| a.caption(m.text().unwrap_or_default())).to_string()),
         MessageKind::Json => ("json", m.text().unwrap_or_default().to_string()),
         MessageKind::Topic => ("topic", m.text().unwrap_or_default().to_string()),
         MessageKind::Unknown(_) => ("other", String::new()),
@@ -1156,6 +1331,8 @@ fn info(ctx: &Ctx, c: &ChannelShared, store: &Store, s: &Stored, names: &HashMap
         kind: kind.into(),
         body,
         trust: trust(me, m.agent.is_some()).into(),
+        attachments: images.map(|a| a.refs.iter().map(|r| crate::attachments::attachment_info(c, &store.index, r, me)).collect()).unwrap_or_default(),
+        place: c.id.to_string(),
     }
 }
 
@@ -1334,6 +1511,12 @@ pub(crate) fn start_chat_link(ctx: &Arc<Ctx>, peer: &Arc<PeerHandle>, id: Folder
         let have = lock(&c.store).have(id);
         let _ = peer.control.send(Message::Members(Members { folder_id: id, statements })).await;
         let _ = peer.control.send(Message::ChatHave(have)).await;
+        // A member that may hold images this device waits for, or files it downloads.
+        if peer.has(trs_sync_proto::msg::FEATURE_BLOBS) {
+            let room: Arc<dyn Room> = c.clone();
+            crate::blobs::kick(&ctx, &room);
+            crate::files::resume(&ctx, &room);
+        }
     })
 }
 
@@ -1356,7 +1539,7 @@ pub(crate) async fn on_have(ctx: &Arc<Ctx>, peer: &Arc<PeerHandle>, c: &Arc<Chan
 /// Messages from a peer (`from`): those whose author may post now are kept, told about and passed on.
 pub(crate) async fn on_messages(ctx: &Arc<Ctx>, from: DeviceId, c: &Arc<ChannelShared>, msgs: Vec<ChatMessage>) {
     let received = now_ms();
-    let mut new = Vec::new();
+    let mut new: Vec<ChatMessage> = Vec::new();
     for m in msgs {
         if !m.verify(&c.id) || !c.may_post(&m.author) {
             continue;
@@ -1367,6 +1550,10 @@ pub(crate) async fn on_messages(ctx: &Arc<Ctx>, from: DeviceId, c: &Arc<ChannelS
             Ok(false) => {}
             Err(e) => c.problem(format!("the channel's messages could not be saved: {e}")),
         }
+    }
+    if new.iter().any(|m| !m.extra.is_empty()) {
+        let room: Arc<dyn Room> = c.clone();
+        crate::blobs::kick(ctx, &room);
     }
     announce(ctx, c, &new, Some(from), &seen_names(ctx)).await;
 }
@@ -1510,7 +1697,9 @@ mod tests {
         let id = FolderId::of_public_key(s.public_key());
         let space = Space::new(id, SpaceKind::Channel, FolderKey::Member(*s.public_key()), None, Membership::new(*s.public_key()), dir.path().join("m"), None, BTreeMap::new(), "x".into());
         let store = Store::open(dir.path().join("x.chat"), (10, MAX_BYTES), seal()).unwrap();
-        let c = ChannelShared { space: Arc::new(space), store: Mutex::new(store), settings: Mutex::new(Settings::default()), wake: Mutex::new(None), wake_dir: dir.path().to_path_buf() };
+        let blobs = Blobs::new(dir.path().join("x.blobs"), seal());
+        let files = Files::open(dir.path().join("x.files"), seal());
+        let c = ChannelShared { space: Arc::new(space), store: Mutex::new(store), settings: Mutex::new(Settings::default()), wake: Mutex::new(None), wake_dir: dir.path().to_path_buf(), blobs, files };
         // More than a pipe holds, to a command that never reads: stopped after its time.
         let started = std::time::Instant::now();
         let sleep = if cfg!(windows) { "ping -n 61 127.0.0.1 >NUL" } else { "sleep 60" };

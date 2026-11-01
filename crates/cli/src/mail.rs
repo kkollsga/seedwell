@@ -569,7 +569,7 @@ async fn mark_seen(c: &mut trs_control::client::Client, channel: &str, me: &str,
     }
     let Ok(set) = crate::tags::change(&mine, &["seen".to_string()], &[], false) else { return };
     let body = crate::tags::note(&item.id, item.agent.as_deref(), &set);
-    let req = ChatSendParams { channel: channel.to_string(), body, reply_to: None, json: false, topic: item.topic.clone(), agent: Some(me.to_string()) };
+    let req = ChatSendParams { channel: channel.to_string(), body, reply_to: None, json: false, topic: item.topic.clone(), agent: Some(me.to_string()), attachments: Vec::new(), files: Vec::new() };
     let _: Result<(Value, ChatMessageDto), _> = ask(c, Request::ChatSend(req)).await;
 }
 
@@ -974,7 +974,7 @@ pub async fn run(m: Mail, g: &Global) -> R {
                         } else {
                             format!("Sessions of {me} on this computer are no longer told about mail.")
                         };
-                        let req = ChatSendParams { channel: channel.id.clone(), body: format_mail(&h, &body), reply_to: None, json: false, topic, agent: Some(me.clone()) };
+                        let req = ChatSendParams { channel: channel.id.clone(), body: format_mail(&h, &body), reply_to: None, json: false, topic, agent: Some(me.clone()), attachments: Vec::new(), files: Vec::new() };
                         let _: Option<(Value, ChatMessageDto)> = ask(&mut c, Request::ChatSend(req)).await.ok();
                     }
                     Some(())
@@ -1032,7 +1032,7 @@ pub async fn run(m: Mail, g: &Global) -> R {
             let unknown = !known.iter().any(|k| k.name.eq_ignore_ascii_case(to.trim()));
             let topic = project_topic(&mut c, &channel.id, to.trim(), Some(&me)).await?.1;
             let sent: Result<(Value, ChatMessageDto), CliError> =
-                ask(&mut c, Request::ChatSend(ChatSendParams { channel: channel.id.clone(), body: text, reply_to: re, json: false, topic, agent: Some(me.clone()) })).await;
+                ask(&mut c, Request::ChatSend(ChatSendParams { channel: channel.id.clone(), body: text, reply_to: re, json: false, topic, agent: Some(me.clone()), attachments: Vec::new(), files: Vec::new() })).await;
             let sent = match sent {
                 Ok((_, m)) => m,
                 Err(e) => {
@@ -1112,7 +1112,7 @@ pub async fn run(m: Mail, g: &Global) -> R {
             let topic = project_topic(&mut c, &channel.id, &to, Some(&me)).await?.1;
             let r: Result<(Value, ChatMessageDto), CliError> = ask(
                 &mut c,
-                Request::ChatSend(ChatSendParams { channel: channel.id.clone(), body: text, reply_to: Some(item.id.clone()), json: false, topic, agent: Some(me.clone()) }),
+                Request::ChatSend(ChatSendParams { channel: channel.id.clone(), body: text, reply_to: Some(item.id.clone()), json: false, topic, agent: Some(me.clone()), attachments: Vec::new(), files: Vec::new() }),
             )
             .await;
             let r = match r {
@@ -1852,7 +1852,7 @@ async fn close(c: &mut trs_control::client::Client, channel: &str, me: &str, ite
     let topic = project_topic(c, channel, me, Some(me)).await?.1;
     let (_, s): (_, ChatMessageDto) = ask(
         c,
-        Request::ChatSend(ChatSendParams { channel: channel.to_string(), body: format_mail(&h, status), reply_to: Some(item.id.clone()), json: false, topic, agent: Some(me.to_string()) }),
+        Request::ChatSend(ChatSendParams { channel: channel.to_string(), body: format_mail(&h, status), reply_to: Some(item.id.clone()), json: false, topic, agent: Some(me.to_string()), attachments: Vec::new(), files: Vec::new() }),
     )
     .await?;
     Ok(short(&s.id).to_string())

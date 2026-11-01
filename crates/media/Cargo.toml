@@ -1,0 +1,13 @@
+[package]
+name = "trs-media"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Images in chat (SPEC 7G.7 Attachments): format sniffing, size caps, metadata stripping, thumbnails and safe SVG rasterizing"
+
+[dependencies]
+# Each dependency is justified in README.md.
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+resvg = { version = "0.49", default-features = false, features = ["text", "system-fonts", "raster-images"] }

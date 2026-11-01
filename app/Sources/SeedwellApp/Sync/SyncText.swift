@@ -8,8 +8,6 @@ enum SyncText {
     /// The grey line under a folder's name: "Up to date · 3 devices", "Syncing · 42% · 12 MB/s", "Folder missing".
     static func subtitle(_ f: SyncFolder) -> String { syncFolderSubtitle(folder: f) }
     static func badge(_ f: SyncFolder) -> SyncBadge { syncFolderBadge(folder: f) }
-    /// A joining folder's note where its members will be: what the join does now, and what went wrong last.
-    static func joinNote(_ f: SyncFolder) -> String { syncFolderJoinNote(folder: f) }
     /// "Owner", "Admin", "Read & write", "Read only".
     static func role(_ r: SyncRole) -> String { syncRoleLabel(role: r) }
     /// The device may share the folder or channel (make invitation links).
@@ -39,22 +37,4 @@ enum SyncText {
 extension SyncBadge {
     /// What a screen reader says for the image: "up to date", "syncing", "needs attention".
     var accessibilityWord: String { syncBadgeLabel(badge: self) }
-}
-
-/// The add modal's choices and whether Start may be pressed (SPEC 7G.5): a value the modal edits, the rules the core's.
-extension SyncAddForm {
-    init() { self = syncAddFormNew() }
-
-    var keyLine: String { syncAddKeyLine(form: self) }
-    /// The pasted text is a usable link.
-    var keyUsable: Bool { syncAddKeyUsable(form: self) }
-    var canStart: Bool { syncAddCanStart(form: self) }
-
-    /// A new link was pasted: what it is, and the location follows it unless the user chose one.
-    mutating func setKey(_ text: String, info: SyncLinkInfo?, defaultLocation: String?, problem: String? = nil) {
-        self = syncAddSetKey(form: self, text: text, info: info, defaultLocation: defaultLocation, problem: problem)
-    }
-
-    /// The user chose where it goes: the parent folder; the folder itself is named after the link.
-    mutating func chooseParent(_ parent: String) { self = syncAddChooseParent(form: self, parent: parent) }
 }

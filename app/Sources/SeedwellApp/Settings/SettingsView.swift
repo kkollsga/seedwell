@@ -8,6 +8,8 @@ import SwiftUI
     @ObservationIgnored var openTracker: (String) -> Void = { _ in }
     /// "Create tracker profile…" for an unknown private tracker: its host, to pre-fill the editor.
     var newTrackerHost: String?
+    /// A link to pair a device that opened the app: Settings › Devices opens Pair with a Link… with it.
+    var pairLink: String?
     /// The tracker log viewer (Settings > Advanced > Developer) is open.
     var showTrackerLog = false
     @ObservationIgnored private var trackerLogModel: TrackerLogModel?
@@ -41,7 +43,7 @@ struct SettingsView: View {
             case .rules: RulesTab(model: model, nav: nav)
             case .network: NetworkTab(model: model)
             case .folderSync: SyncTab(model: model)
-            case .devices: DevicesTab(core: model.core)
+            case .devices: DevicesTab(core: model.core, nav: nav)
             case .agents: AgentsTab(model: model)
             case .advanced: AdvancedTab(model: model, nav: nav)
             }

@@ -645,6 +645,64 @@ pub fn set_modified(path: &Path, t: std::time::SystemTime) -> io::Result<()> {
     f.set_modified(t)
 }
 
+/// Marks a file as one that came from another computer, so the system asks before it runs or opens it as code: on
+/// macOS the quarantine attribute (`com.apple.quarantine`, Gatekeeper's check, "downloaded by Seedwell"), on Windows
+/// the Mark of the Web (a `Zone.Identifier` stream, Internet zone, which SmartScreen and Office read). Other systems
+/// have no such mark: nothing is done. A volume that keeps no extended attributes or streams (FAT, some network
+/// shares) fails with the system's error; callers treat that as best effort.
+pub fn mark_downloaded(path: &Path) -> io::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        // flags (0x0081: downloaded, from an app) ; time (hex) ; agent ; event id (none)
+        let value = format!("0081;{secs:08x};Seedwell;");
+        let p = std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+        let name = c"com.apple.quarantine";
+        // SAFETY: `p` and `name` are NUL-terminated strings and `value` a buffer of the given length, all alive
+        // across the call; position 0 and options 0 are the documented values for a whole attribute on a file.
+        let r = unsafe { libc::setxattr(p.as_ptr(), name.as_ptr(), value.as_ptr().cast(), value.len(), 0, 0) };
+        if r != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+    #[cfg(windows)]
+    {
+        let mut stream = path.as_os_str().to_owned();
+        stream.push(":Zone.Identifier");
+        std::fs::write(std::path::PathBuf::from(stream), b"[ZoneTransfer]\r\nZoneId=3\r\nHostUrl=about:internet\r\n")
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
+    {
+        let _ = path;
+        Ok(())
+    }
+}
+
+/// Whether the file carries the mark [`mark_downloaded`] sets (always false where there is none).
+pub fn is_marked_downloaded(path: &Path) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let Ok(p) = std::ffi::CString::new(path.as_os_str().as_bytes()) else { return false };
+        // SAFETY: `p` and the name are NUL-terminated and alive across the call; a null buffer of size 0 only asks
+        // for the attribute's length.
+        unsafe { libc::getxattr(p.as_ptr(), c"com.apple.quarantine".as_ptr(), std::ptr::null_mut(), 0, 0, 0) >= 0 }
+    }
+    #[cfg(windows)]
+    {
+        let mut stream = path.as_os_str().to_owned();
+        stream.push(":Zone.Identifier");
+        std::fs::metadata(std::path::PathBuf::from(stream)).is_ok()
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
+    {
+        let _ = path;
+        false
+    }
+}
+
 /// Flush the file at `path` to the drive (`File::sync_all`). Windows flushes only a handle with
 /// write access, so there the file is opened for writing (never created or truncated); a read-only
 /// file (a copy keeps the original's attribute) cannot be opened so and is left to the system's own
@@ -718,6 +776,17 @@ pub fn is_not_found(e: &io::Error) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_downloaded_file_is_marked_where_the_system_has_a_mark() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("tool.sh");
+        std::fs::write(&p, b"echo hi").unwrap();
+        assert!(!super::is_marked_downloaded(&p));
+        super::mark_downloaded(&p).unwrap();
+        assert_eq!(super::is_marked_downloaded(&p), cfg!(any(target_os = "macos", windows)));
+        assert_eq!(std::fs::read(&p).unwrap(), b"echo hi", "the file itself is unchanged");
+    }
+
     use super::*;
 
     #[test]

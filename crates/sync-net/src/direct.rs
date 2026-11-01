@@ -3,10 +3,12 @@
 //! ([`trs_sync_proto::msg::FEATURE_DIRECT`]).
 //!
 //! **Conversations.** Each conversation is a container of its own: the other device as this one knows it (its key,
-//! names and last addresses, a `[[conversation]]` entry in `sync.toml`) and its messages (`sync/dm-<device>.chat`,
-//! sealed with the conversation's own key, [`crate::at_rest`]). One starts when two devices that share a channel
+//! names and last addresses, a `[[conversation]]` entry in `sync.toml`), its messages (`sync/dm-<device>.chat`,
+//! sealed with the conversation's own key, [`crate::at_rest`]) and its attachments (`sync/dm-<device>.blobs/`,
+//! `sync/dm-<device>.files/`, [`crate::room`]: fetched only from the other device, over a direct session). One starts when two devices that share a channel
 //! write to each other; after that it stands on its own: while both keep it, a session may run for it alone
-//! ([`trs_sync_proto::msg::DirectJoin`]), so leaving the channel does not end it. Deleting it deletes all three.
+//! ([`trs_sync_proto::msg::DirectJoin`]), so leaving the channel does not end it. Deleting it deletes all of them (a
+//! download it started stops, and its partial file goes).
 //!
 //! **Delivery.** A message is written only while a direct session with its recipient is open, and goes only there:
 //! no device carries another's messages or passes on another's key. Each side sends its own key record
@@ -33,7 +35,10 @@ use trs_sync_proto::members::hex;
 use trs_sync_proto::msg::{DirectHave, DirectJoin, DirectKeys, DirectMessages, FEATURE_DIRECT, Message};
 
 use crate::at_rest::{DIRECT_KEY, Sealer};
+use crate::blobs::Blobs;
 use crate::chat::{AgentAccess, ChatEvent, FUTURE_SLACK_MS, Key, MAX_BYTES, MAX_MESSAGES, MessageInfo};
+use crate::files::Files;
+use crate::room::{Index, Place, Room};
 use crate::config::{ConversationEntry, SyncConfig};
 use crate::secrets::SecretStore;
 use crate::service::{SyncError, SyncHandle, invalid, random_id};
@@ -83,6 +88,14 @@ struct Store {
     seqs: HashMap<[u8; 32], BTreeSet<u64>>,
     bytes: usize,
     seal: Sealer,
+    /// The attachments the kept messages name.
+    pub(crate) index: Index,
+}
+
+/// The attachments a stored private message names.
+fn attachments_of(s: &Stored) -> Option<trs_sync_proto::attach::Attachments> {
+    let b = s.body.as_ref().filter(|b| b.kind == MessageKind::Text && !b.extra.is_empty())?;
+    trs_sync_proto::attach::Attachments::from_extra(&b.extra, b.body.len())
 }
 
 fn record(s: &Stored, seal: &Sealer) -> Vec<u8> {
@@ -105,7 +118,7 @@ fn record(s: &Stored, seal: &Sealer) -> Vec<u8> {
 
 impl Store {
     fn open(path: PathBuf, me: &[u8; 32], secret: &[u8; 32], seal: Sealer) -> io::Result<Store> {
-        let mut s = Store { path, msgs: BTreeMap::new(), ids: HashMap::new(), seqs: HashMap::new(), bytes: 0, seal };
+        let mut s = Store { path, msgs: BTreeMap::new(), ids: HashMap::new(), seqs: HashMap::new(), bytes: 0, seal, index: Index::default() };
         let bytes = match std::fs::read(&s.path) {
             Ok(b) => b,
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
@@ -156,7 +169,14 @@ impl Store {
         if s.prune() || damaged {
             s.rewrite(me)?;
         }
+        s.index_attachments();
         Ok(s)
+    }
+
+    /// Every attachment of the kept messages; every image is fetched by itself (a conversation is capped by its
+    /// messages).
+    fn index_attachments(&mut self) {
+        self.index = Index::build(self.msgs.values().rev().filter_map(|s| attachments_of(s).map(|a| (a, s.msg.author))), u64::MAX);
     }
 
     fn put(&mut self, s: Stored) -> bool {
@@ -199,12 +219,17 @@ impl Store {
 
     fn insert(&mut self, s: Stored, me: &[u8; 32]) -> io::Result<bool> {
         let rec = record(&own_copy(&s, me), &self.seal);
+        let attached = attachments_of(&s).is_some();
         if !self.put(s) {
             return Ok(false);
         }
         if self.prune() {
+            self.index_attachments();
             self.rewrite(me)?;
         } else {
+            if attached {
+                self.index_attachments();
+            }
             std::fs::OpenOptions::new().append(true).open(&self.path)?.write_all(&rec)?;
         }
         Ok(true)
@@ -243,6 +268,50 @@ struct Conversation {
     /// The last message of the other device read here.
     read: Key,
     store: Store,
+    /// Its attachments.
+    room: Arc<DirectRoom>,
+}
+
+/// A conversation's attachments: fetched only from its other device, over a direct session.
+pub(crate) struct DirectRoom {
+    pk: [u8; 32],
+    device: DeviceId,
+    blobs: Blobs,
+    files: Files,
+}
+
+impl Room for DirectRoom {
+    fn scope(&self) -> trs_sync_proto::msg::BlobScope {
+        trs_sync_proto::msg::BlobScope::Direct
+    }
+
+    fn peers(&self, ctx: &Ctx) -> Vec<Arc<PeerHandle>> {
+        ctx.registry.peer(&self.device).filter(|p| direct_ok(p) && p.has(trs_sync_proto::msg::FEATURE_BLOBS)).into_iter().collect()
+    }
+
+    fn blobs(&self) -> &Blobs {
+        &self.blobs
+    }
+
+    fn files(&self) -> &Files {
+        &self.files
+    }
+
+    fn with_index(&self, ctx: &Ctx, f: &mut dyn FnMut(&Index)) {
+        match lock(&ctx.direct.conversations).get(&self.pk) {
+            Some(c) => f(&c.store.index),
+            None => f(&Index::default()),
+        }
+    }
+
+    fn problem(&self, why: String) {
+        eprintln!("seedwell chat: the private conversation with {}: {why}", self.device);
+    }
+}
+
+/// The base name of a conversation's files in the state folder.
+fn base_of(device: &DeviceId) -> String {
+    format!("dm-{device}")
 }
 
 fn read_of(text: &str) -> Option<Key> {
@@ -309,9 +378,17 @@ impl Direct {
 
     fn open_one(&self, pk: [u8; 32], entry: ConversationEntry) -> io::Result<Conversation> {
         let device = DeviceId::of_public_key(&pk);
-        let seal = Sealer::load(&*self.secrets, &conversation_key_name(&device), MSGS_MAGIC)?;
+        let key = conversation_key_name(&device);
+        let seal = Sealer::load(&*self.secrets, &key, MSGS_MAGIC)?;
         let store = Store::open(conversation_path(&self.dir, &device), &self.me, &self.secret, seal)?;
-        Ok(Conversation { pk, read: read_of(&entry.read).unwrap_or_default(), entry, store })
+        let base = base_of(&device);
+        let room = Arc::new(DirectRoom {
+            pk,
+            device,
+            blobs: Blobs::new(Blobs::dir_of(&self.dir, &base), Sealer::load(&*self.secrets, &key, crate::blobs::AAD)?),
+            files: Files::open(Files::dir_of(&self.dir, &base), Sealer::load(&*self.secrets, &key, crate::files::AAD)?),
+        });
+        Ok(Conversation { pk, read: read_of(&entry.read).unwrap_or_default(), entry, store, room })
     }
 
     /// 0.1.8's `direct.chat` and `direct.keys`: each conversation in it becomes one of its own (what was carried for
@@ -434,11 +511,31 @@ impl Direct {
             pk.and_then(|pk| all.remove(&pk))
         };
         let Some(c) = gone else { return Ok(false) };
+        c.room.files.close();
         drop(c);
+        let base = base_of(device);
         let _ = std::fs::remove_file(conversation_path(&self.dir, device));
+        let _ = std::fs::remove_dir_all(Blobs::dir_of(&self.dir, &base));
+        let _ = std::fs::remove_dir_all(Files::dir_of(&self.dir, &base));
         self.secrets.delete(&conversation_key_name(device))?;
         Ok(true)
     }
+}
+
+/// The attachments of the conversation with `pk`, when this device keeps one.
+pub(crate) fn room_of(ctx: &Ctx, pk: &[u8; 32]) -> Option<Arc<dyn Room>> {
+    lock(&ctx.direct.conversations).get(pk).map(|c| c.room.clone() as Arc<dyn Room>)
+}
+
+/// Every conversation's attachments.
+pub(crate) fn rooms(ctx: &Ctx) -> Vec<Arc<dyn Room>> {
+    lock(&ctx.direct.conversations).values().map(|c| c.room.clone() as Arc<dyn Room>).collect()
+}
+
+/// Its attachments' fetching resumes: images wanted, and downloads asked for.
+fn wake_room(ctx: &Arc<Ctx>, room: Arc<dyn Room>) {
+    crate::blobs::kick(ctx, &room);
+    crate::files::resume(ctx, &room);
 }
 
 /// A session over which private messages may go: both sides have [`FEATURE_DIRECT`], and no device relays it.
@@ -469,6 +566,12 @@ pub(crate) async fn start(ctx: &Arc<Ctx>, peer: &Arc<PeerHandle>) {
     let have = lock(&ctx.direct.conversations).get(&peer.device_pk).map(|c| c.store.have_for(&ctx.direct.me));
     if let Some(authors) = have {
         let _ = peer.control.send(Message::DirectHave(DirectHave { authors })).await;
+    }
+    // Attachments that wait for this device.
+    if peer.has(trs_sync_proto::msg::FEATURE_BLOBS)
+        && let Some(room) = room_of(ctx, &peer.device_pk)
+    {
+        wake_room(ctx, room);
     }
 }
 
@@ -537,10 +640,16 @@ pub(crate) async fn on_messages(ctx: &Arc<Ctx>, peer: &PeerHandle, msgs: Vec<Dir
                 }
             }
         }
+        let attached = !body.extra.is_empty();
         let stored = Stored { msg: m.clone(), received_ms: now_ms(), body: Some(body) };
         let res = lock(&d.conversations).get_mut(&m.author).map(|c| c.store.insert(stored, &d.me));
         match res {
-            Some(Ok(true)) => new.push(m),
+            Some(Ok(true)) => {
+                if attached && let Some(room) = room_of(ctx, &m.author) {
+                    crate::blobs::kick(ctx, &room);
+                }
+                new.push(m)
+            }
             Some(Ok(false)) | None => {}
             Some(Err(e)) => eprintln!("seedwell chat: private messages could not be saved: {e}"),
         }
@@ -559,22 +668,23 @@ fn tell(ctx: &Ctx, new: &[DirectMessage]) {
     for m in new {
         let other = if m.author == ctx.direct.me { m.recipient } else { m.author };
         let Some(c) = all.get(&other) else { continue };
-        if let Some(i) = c.store.ids.get(&m.id).and_then(|k| c.store.msgs.get(k)).and_then(|s| info(ctx, s, &names)) {
+        if let Some(i) = c.store.ids.get(&m.id).and_then(|k| c.store.msgs.get(k)).and_then(|s| info(ctx, c, s, &names)) {
             let _ = ctx.chat_events.send(ChatEvent { message: i, agents: agents >= AgentAccess::Read });
         }
     }
 }
 
 /// A stored message as the UI sees it.
-fn info(ctx: &Ctx, s: &Stored, names: &HashMap<DeviceId, Names>) -> Option<MessageInfo> {
+fn info(ctx: &Ctx, c: &Conversation, s: &Stored, names: &HashMap<DeviceId, Names>) -> Option<MessageInfo> {
     let b = s.body.as_ref()?;
     let me = ctx.direct.me;
     let m = &s.msg;
     let author = DeviceId::of_public_key(&m.author);
     let other = if m.author == me { m.recipient } else { m.author };
     let at_ms = shown_at(m, s.received_ms);
+    let attached = attachments_of(s);
     let (kind, body) = match b.kind {
-        MessageKind::Text => ("text", b.text().unwrap_or_default().to_string()),
+        MessageKind::Text => ("text", attached.as_ref().map_or(b.text().unwrap_or_default(), |a| a.caption(b.text().unwrap_or_default())).to_string()),
         MessageKind::Json => ("json", b.text().unwrap_or_default().to_string()),
         _ => ("other", String::new()),
     };
@@ -598,7 +708,19 @@ fn info(ctx: &Ctx, s: &Stored, names: &HashMap<DeviceId, Names>) -> Option<Messa
         kind: kind.into(),
         body,
         trust: crate::chat::trust(mine, b.agent.is_some()).into(),
+        attachments: attached
+            .map(|a| a.refs.iter().map(|r| crate::attachments::attachment_info(&*c.room, &c.store.index, r, mine)).collect())
+            .unwrap_or_default(),
+        place: Place::Direct(DeviceId::of_public_key(&other)).to_string(),
     })
+}
+
+/// Why a private message cannot be written to `device` now.
+fn not_direct(ctx: &Ctx, device: &DeviceId) -> SyncError {
+    match ctx.registry.peer(device) {
+        Some(p) if p.agreed.features & FEATURE_DIRECT == 0 => invalid("that device runs an older Seedwell: update it to write to it privately"),
+        _ => invalid(concat!("that device is not connected to this ", trs_platform::computer!(), " directly; private messages go only over a direct connection between the two, never through another device, so write once both are online and can reach each other")),
+    }
 }
 
 impl SyncHandle {
@@ -644,7 +766,7 @@ impl SyncHandle {
             None => None,
         };
         let mut page: Vec<MessageInfo> =
-            c.store.msgs.iter().rev().filter(|(k, _)| end.is_none_or(|e| **k < e)).take(limit).filter_map(|(_, s)| info(&self.inner.ctx, s, &names)).collect();
+            c.store.msgs.iter().rev().filter(|(k, _)| end.is_none_or(|e| **k < e)).take(limit).filter_map(|(_, s)| info(&self.inner.ctx, c, s, &names)).collect();
         page.reverse();
         Ok(page)
     }
@@ -652,6 +774,12 @@ impl SyncHandle {
     /// Writes a private message to `device`: only while a direct session with it is open (none relayed), to a
     /// device this one keeps a conversation with or shares a channel with. `agent` as for channels.
     pub async fn chat_send_direct(&self, device: &DeviceId, kind: MessageKind, body: &str, reply_to: Option<&str>, agent: Option<&str>) -> Result<MessageInfo, SyncError> {
+        self.direct_post(device, kind, body, reply_to, agent, Vec::new()).await
+    }
+
+    /// Whether a private message to `device` can be written now (the reason when not), before anything slow is done
+    /// for it (reading the files it names).
+    pub(crate) fn direct_ready(&self, device: &DeviceId) -> Result<(), SyncError> {
         let ctx = &self.inner.ctx;
         let d = &ctx.direct;
         if *device == ctx.me {
@@ -663,10 +791,40 @@ impl SyncHandle {
         if !known {
             return Err(invalid(concat!("this ", trs_platform::computer!(), " has no conversation with that device and shares no channel with it, so it cannot write to it privately")));
         }
-        let peer = peer.filter(|p| direct_ok(p)).ok_or_else(|| match ctx.registry.peer(device) {
-            Some(p) if p.agreed.features & FEATURE_DIRECT == 0 => invalid("that device runs an older Seedwell: update it to write to it privately"),
-            _ => invalid(concat!("that device is not connected to this ", trs_platform::computer!(), " directly; private messages go only over a direct connection between the two, never through another device, so write once both are online and can reach each other")),
-        })?;
+        let peer = peer.filter(|p| direct_ok(p)).ok_or_else(|| not_direct(ctx, device))?;
+        if d.start_with(&peer)? {
+            self.save_conversations()?;
+        }
+        Ok(())
+    }
+
+    /// The preview a private message carries for an image (empty: none).
+    pub(crate) fn direct_preview(&self, device: &DeviceId, hash: &[u8; 32]) -> Vec<u8> {
+        let all = lock(&self.inner.ctx.direct.conversations);
+        let Some(c) = all.values().find(|c| DeviceId::of_public_key(&c.pk) == *device) else { return Vec::new() };
+        c.store.msgs.values().rev().filter_map(attachments_of).flat_map(|a| a.refs).find(|r| r.hash == *hash).map(|r| r.thumb).unwrap_or_default()
+    }
+
+    /// The attachments of the conversation with `device`.
+    pub(crate) fn direct_room(&self, device: &DeviceId) -> Result<Arc<dyn Room>, SyncError> {
+        let all = lock(&self.inner.ctx.direct.conversations);
+        all.values().find(|c| DeviceId::of_public_key(&c.pk) == *device).map(|c| c.room.clone() as Arc<dyn Room>).ok_or(SyncError::NotFound)
+    }
+
+    /// Writes a private message with later fields (its attachments) in its sealed body.
+    pub(crate) async fn direct_post(&self, device: &DeviceId, kind: MessageKind, body: &str, reply_to: Option<&str>, agent: Option<&str>, extra: Vec<u8>) -> Result<MessageInfo, SyncError> {
+        let ctx = &self.inner.ctx;
+        let d = &ctx.direct;
+        if *device == ctx.me {
+            return Err(invalid("a private message goes to another device"));
+        }
+        let peer = ctx.registry.peer(device);
+        let known = peer.as_ref().is_some_and(|p| d.has(&p.device_pk) || in_a_channel(ctx, &p.device_pk))
+            || lock(&d.conversations).values().any(|c| DeviceId::of_public_key(&c.pk) == *device);
+        if !known {
+            return Err(invalid(concat!("this ", trs_platform::computer!(), " has no conversation with that device and shares no channel with it, so it cannot write to it privately")));
+        }
+        let peer = peer.filter(|p| direct_ok(p)).ok_or_else(|| not_direct(ctx, device))?;
         let key = lock(&peer.direct_key).ok_or_else(|| invalid("the connection with that device is just starting; try again in a moment"))?;
         if kind == MessageKind::Json && serde_json::from_str::<serde_json::Value>(body).is_err() {
             return Err(invalid("the message is not JSON"));
@@ -684,7 +842,13 @@ impl SyncHandle {
         };
         let mut eph = [0u8; 32];
         ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut eph).map_err(|_| invalid("no random numbers"))?;
-        let plain = DirectBody { reply_to, agent: agent.map(str::to_string), kind, body: body.as_bytes().to_vec() };
+        if !extra.is_empty() && kind != MessageKind::Text {
+            return Err(invalid("attachments go with a text message"));
+        }
+        if !extra.is_empty() && peer.agreed.features & trs_sync_proto::msg::FEATURE_BLOBS == 0 {
+            return Err(invalid("that device runs an older Seedwell: update it to send it files"));
+        }
+        let plain = DirectBody { reply_to, agent: agent.map(str::to_string), kind, body: body.as_bytes().to_vec(), extra };
         let msg = {
             let mut s = lock(&d.settings);
             let highest = lock(&d.conversations).values().map(|c| c.store.highest(&d.me)).max().unwrap_or(0);
@@ -704,7 +868,7 @@ impl SyncHandle {
         let names = self.names();
         let out = {
             let all = lock(&d.conversations);
-            all.get(&peer.device_pk).and_then(|c| c.store.ids.get(&msg.id).and_then(|k| c.store.msgs.get(k))).and_then(|s| info(ctx, s, &names))
+            all.get(&peer.device_pk).and_then(|c| c.store.ids.get(&msg.id).and_then(|k| c.store.msgs.get(k)).and_then(|s| info(ctx, c, s, &names)))
         };
         let _ = peer.control.send(Message::DirectMessages(DirectMessages { messages: vec![msg.clone()] })).await;
         tell(ctx, std::slice::from_ref(&msg));
@@ -745,6 +909,13 @@ impl SyncHandle {
         }
         self.forget_strangers();
         Ok(())
+    }
+
+    /// Starts fetching every conversation's attachments that wait (the service started).
+    pub(crate) fn wake_direct_rooms(&self) {
+        for r in rooms(&self.inner.ctx) {
+            wake_room(&self.inner.ctx, r);
+        }
     }
 
     /// Tells the direct peers this user's name again (it changed).
@@ -805,7 +976,7 @@ impl SyncHandle {
             id: random_id(),
             seq,
             at_ms: now_ms(),
-            body: DirectBody { reply_to: None, agent: None, kind: MessageKind::Text, body: body.as_bytes().to_vec() },
+            body: DirectBody { reply_to: None, agent: None, kind: MessageKind::Text, body: body.as_bytes().to_vec(), extra: Vec::new() },
             ephemeral_secret: [seq as u8 | 1; 32],
         };
         DirectMessage::seal(&ctx.key, &peer.device_pk, &key.x25519, draft).ok().map(|m| m.to_bytes())
@@ -831,7 +1002,7 @@ mod tests {
             id: [n; 16],
             seq: n as u64,
             at_ms: 1_793_491_200_000 + n as u64,
-            body: DirectBody { reply_to: None, agent: None, kind: MessageKind::Text, body: text.as_bytes().to_vec() },
+            body: DirectBody { reply_to: None, agent: None, kind: MessageKind::Text, body: text.as_bytes().to_vec(), extra: Vec::new() },
             ephemeral_secret: [n | 1; 32],
         }
     }

@@ -499,6 +499,7 @@ async fn a_channel_closed_to_agents_does_not_exist_for_them() {
         match m {
             "chat.send" => json!({"channel": ch, "body": "hi"}),
             "chat.read" => json!({"channel": ch, "last": 5}),
+            "chat.attachment" | "chat.download" | "chat.cancel_download" | "chat.stop_sharing" => json!({"channel": ch, "hash": "0a1b2c3d"}),
             "chat.new_topic" => json!({"channel": ch, "title": "Mine"}),
             "chat.set_role" => json!({"channel": ch, "device": "Other", "role": "admin"}),
             "chat.remove_device" => json!({"channel": ch, "device": "Other"}),
@@ -516,6 +517,10 @@ async fn a_channel_closed_to_agents_does_not_exist_for_them() {
         "chat.members",
         "chat.topics",
         "chat.read",
+        "chat.attachment",
+        "chat.download",
+        "chat.cancel_download",
+        "chat.stop_sharing",
         "chat.send",
         "chat.new_topic",
         "chat.share",
@@ -993,4 +998,86 @@ async fn your_devices_are_invisible_to_agents_and_the_user_key_never_leaves() {
     assert!(!log.contains(&key_hex) && !log.contains(&key_b32.to_lowercase()));
     pc.h.shutdown().await;
     mac.h.shutdown().await;
+}
+
+/// A 1×1 PNG.
+const DOT_PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==";
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_agent_sends_images_lists_them_and_reads_each_as_a_file() {
+    let s = SyncRig::new(Permission::Control).await;
+    let mut c = s.rig.client("claude").await;
+    let id: FolderId = s.h.chat_new("Design", true).await.unwrap().id.parse().unwrap();
+    let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20"><script>alert(1)</script><rect width="40" height="20" fill="#00f"/></svg>"##;
+    let images = json!([{"name": "dot.png", "base64": DOT_PNG}, {"name": "/tmp/logo.svg", "base64": trs_control::b64::encode(svg.as_bytes())}]);
+    let sent: ChatMessageDto = serde_json::from_value(call(&mut c, "chat.send", json!({"channel": "Design", "body": "the logo", "attachments": images})).await.unwrap()).unwrap();
+    assert_eq!(sent.body, "the logo", "the caption alone");
+    let shape: Vec<(&str, &str, u32, u32, &str)> = sent.attachments.iter().map(|a| (a.kind.as_str(), a.name.as_str(), a.width, a.height, a.state.as_str())).collect();
+    assert_eq!(shape, [("png", "dot.png", 1, 1, "available"), ("svg", "logo.svg", 40, 20, "available")]);
+    let read: ChatMessagesDto = serde_json::from_value(call(&mut c, "chat.read", json!({"channel": "Design"})).await.unwrap()).unwrap();
+    assert_eq!(read.messages[0].attachments, sent.attachments);
+
+    // Each image as a file: by a prefix of its hash, checked against the hash.
+    let (png, logo) = (&sent.attachments[0], &sent.attachments[1]);
+    let got: ChatAttachmentDataDto = serde_json::from_value(call(&mut c, "chat.attachment", json!({"channel": "Design", "hash": &png.hash[..10]})).await.unwrap()).unwrap();
+    let bytes = trs_control::b64::decode(got.base64.as_deref().unwrap(), 1 << 20).unwrap();
+    assert_eq!((got.mime.as_deref(), got.rendered, trs_sync_net::blobs::sha256(&bytes)), (Some("image/png"), false, trs_sync_net::blobs::hash_from_hex(&png.hash).unwrap()));
+    let raw: ChatAttachmentDataDto = serde_json::from_value(call(&mut c, "chat.attachment", json!({"channel": "Design", "hash": logo.hash})).await.unwrap()).unwrap();
+    assert_eq!((raw.mime.as_deref(), trs_control::b64::decode(raw.base64.as_deref().unwrap(), 1 << 20).unwrap()), (Some("image/svg+xml"), svg.as_bytes().to_vec()), "the SVG as it was sent");
+    let drawn: ChatAttachmentDataDto = serde_json::from_value(call(&mut c, "chat.attachment", json!({"channel": "Design", "hash": logo.hash, "png": true})).await.unwrap()).unwrap();
+    let drawn_bytes = trs_control::b64::decode(drawn.base64.as_deref().unwrap(), 4 << 20).unwrap();
+    assert!(drawn.rendered && drawn.mime.as_deref() == Some("image/png") && drawn_bytes.starts_with(b"\x89PNG"), "the SVG drawn as PNG");
+
+    // Refused: what is not an image, bad base64, images with JSON, an unknown hash.
+    let e = call(&mut c, "chat.send", json!({"channel": "Design", "body": "", "attachments": [{"name": "notes.png", "base64": trs_control::b64::encode(b"plain text")}]})).await.unwrap_err();
+    assert!(e.message.contains("notes.png") && e.message.contains("PNG, JPEG, GIF, WebP and SVG"), "{}", e.message);
+    let e = call(&mut c, "chat.send", json!({"channel": "Design", "body": "", "attachments": [{"name": "a.png", "base64": "***"}]})).await.unwrap_err();
+    assert!(e.message.contains("not valid base64"), "{}", e.message);
+    let e = call(&mut c, "chat.send", json!({"channel": "Design", "body": "{}", "json": true, "attachments": [{"name": "a.png", "base64": DOT_PNG}]})).await.unwrap_err();
+    assert!(e.message.contains("text message"), "{}", e.message);
+    assert!(call(&mut c, "chat.attachment", json!({"channel": "Design", "hash": "00000000"})).await.is_err());
+    // The log says how many images, never what they are.
+    let log = activity(&s.rig).await;
+    assert!(log.contains("post 8 bytes and 2 images") && !log.contains("logo.svg") && !log.contains(DOT_PNG), "{log}");
+
+    // A channel closed to agents: its images are not there either.
+    s.h.chat_set_agents(&id, false).unwrap();
+    assert_eq!(call(&mut c, "chat.attachment", json!({"channel": "Design", "hash": png.hash})).await.unwrap_err().code, ErrorCode::NotFound);
+    s.h.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_agent_sends_a_file_of_any_kind_by_its_path_and_follows_it() {
+    let s = SyncRig::new(Permission::Control).await;
+    let mut c = s.rig.client("claude").await;
+    let id: FolderId = s.h.chat_new("Files", true).await.unwrap().id.parse().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("build.zip");
+    std::fs::write(&file, vec![7u8; 3 << 20]).unwrap();
+    let path = file.to_str().unwrap();
+    let sent: ChatMessageDto = serde_json::from_value(call(&mut c, "chat.send", json!({"channel": "Files", "body": "the build", "files": [path]})).await.unwrap()).unwrap();
+    let a = &sent.attachments[0];
+    assert_eq!((sent.body.as_str(), a.kind.as_str(), a.name.as_str(), a.size, a.state.as_str(), a.path.as_deref()), ("the build", "file", "build.zip", 3 << 20, "shared", Some(path)));
+    // Where it stands, by a prefix of its hash: no bytes, the sender's own copy.
+    let got: ChatAttachmentDataDto = serde_json::from_value(call(&mut c, "chat.attachment", json!({"channel": "Files", "hash": &a.hash[..10]})).await.unwrap()).unwrap();
+    assert_eq!((got.attachment.state.as_str(), got.base64), ("shared", None));
+    // Sent from here: not downloaded again; sharing stops when asked.
+    let e = call(&mut c, "chat.download", json!({"channel": "Files", "hash": a.hash})).await.unwrap_err();
+    assert!(e.message.contains("was sent from this"), "{}", e.message);
+    let stopped: ChatAttachmentDataDto = serde_json::from_value(call(&mut c, "chat.stop_sharing", json!({"channel": "Files", "hash": a.hash})).await.unwrap()).unwrap();
+    assert_eq!(stopped.attachment.state, "unshared");
+    // Refused: a path that is not full, a folder, files with JSON.
+    let e = call(&mut c, "chat.send", json!({"channel": "Files", "body": "", "files": ["build.zip"]})).await.unwrap_err();
+    assert!(e.message.contains("full path"), "{}", e.message);
+    let e = call(&mut c, "chat.send", json!({"channel": "Files", "body": "", "files": [dir.path().to_str().unwrap()]})).await.unwrap_err();
+    assert!(e.message.contains("is a folder") && e.message.contains("Folder Sync"), "{}", e.message);
+    let e = call(&mut c, "chat.send", json!({"channel": "Files", "body": "{}", "json": true, "files": [path]})).await.unwrap_err();
+    assert!(e.message.contains("text message"), "{}", e.message);
+    // The log counts the file, never names it.
+    let log = activity(&s.rig).await;
+    assert!(log.contains("post 9 bytes and 1 file") && !log.contains("build.zip"), "{log}");
+    // Closed to agents: not there.
+    s.h.chat_set_agents(&id, false).unwrap();
+    assert_eq!(call(&mut c, "chat.attachment", json!({"channel": "Files", "hash": a.hash})).await.unwrap_err().code, ErrorCode::NotFound);
+    s.h.shutdown().await;
 }

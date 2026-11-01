@@ -14,7 +14,7 @@ default = ["engine", "sync"]
 engine = ["dep:trs-engine"]
 # Folder sync (SPEC 7G): the `sync.*` methods over a `trs_sync_net::SyncHandle`, and the glue that lends
 # it the engine's DHT and port mapping. Wherever the engine is, sync is too.
-sync = ["engine", "dep:trs-sync-net", "dep:trs-sync", "dep:trs-sync-proto", "dep:trs-dht"]
+sync = ["engine", "dep:trs-sync-net", "dep:trs-sync", "dep:trs-sync-proto", "dep:trs-dht", "dep:trs-media"]
 
 [dependencies]
 trs-platform = { path = "../platform" }
@@ -25,6 +25,8 @@ trs-devlog = { path = "../devlog" }
 trs-engine = { path = "../engine", optional = true }
 trs-sync-net = { path = "../sync-net", optional = true }
 trs-sync = { path = "../sync", optional = true }
+# Images in chat: the caps, and an SVG drawn as PNG for `chat.attachment` with `png`.
+trs-media = { path = "../media", optional = true }
 # Folder ids and keys (parsing a link's name hint for the default place of a joined folder).
 trs-sync-proto = { path = "../sync-proto", optional = true }
 # `PublicInfoHash` and the lookup stream, for the DHT the engine lends to sync.

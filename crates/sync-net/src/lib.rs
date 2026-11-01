@@ -5,6 +5,10 @@
 //!   membership, index updates and chunk requests ([`framed`] carries the messages).
 //! * [`roles`]: a folder's or channel's membership on this device: kept, proved, applied when it changes.
 //! * [`chat`]: channels: their messages, kept and passed on, and the wake-up command for agents.
+//! * [`room`]: where attachments belong (a channel, a private conversation); [`attachments`]: sending them and what
+//!   they are for callers.
+//! * [`blobs`]: the images chat messages name: sealed at rest, fetched from members by hash.
+//! * [`files`]: the files chat messages name: served in place by their sender, downloaded on request piece by piece.
 //! * [`devices`]: the user's own devices: pairing, "on all my devices", and admitting each other.
 //! * [`runtime`]: one folder's loop (watcher → scan → announce; peers' changes → pull through [`source`]).
 //! * [`lan`]: finding devices on the local network; `joining`: what a joining folder or channel says it does.
@@ -19,6 +23,10 @@
 
 mod absence;
 mod at_rest;
+pub mod attachments;
+pub mod blobs;
+pub mod files;
+pub mod room;
 pub mod chat;
 pub mod config;
 pub mod devices;

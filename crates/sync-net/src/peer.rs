@@ -879,6 +879,31 @@ async fn read_loop(
                 });
             }
             Message::HoldReply(r) => peer.answer_holds(r),
+            Message::BlobWant(w) if peer.chat() && peer.has(trs_sync_proto::msg::FEATURE_BLOBS) => {
+                // An attachment of a channel shared with the peer, or of the private conversation with it (only over a
+                // direct session), answered on the data queue (bulk), within the upload limit.
+                let room: Option<Arc<dyn crate::room::Room>> = match w.scope {
+                    trs_sync_proto::msg::BlobScope::Channel(id) => shared_channel(ctx, peer, &id).map(|c| c as Arc<dyn crate::room::Room>),
+                    trs_sync_proto::msg::BlobScope::Direct if crate::direct::direct_ok(peer) => crate::direct::room_of(ctx, &peer.device_pk),
+                    trs_sync_proto::msg::BlobScope::Direct => None,
+                };
+                let (peer2, ctx2) = (peer.clone(), ctx.clone());
+                tokio::spawn(async move {
+                    let refused = trs_sync_proto::msg::BlobData { id: w.id, code: trs_sync_proto::msg::BlobCode::Refused, total: 0, data: Vec::new() };
+                    let ctx3 = ctx2.clone();
+                    let d = match room {
+                        Some(room) => tokio::task::spawn_blocking(move || crate::blobs::serve(&ctx3, &*room, &w)).await.unwrap_or(refused),
+                        None => refused,
+                    };
+                    let n = d.data.len() as u64;
+                    if !peer2.lan {
+                        ctx2.limits.up.take(n).await;
+                    }
+                    peer2.tx_bytes.fetch_add(n, Ordering::Relaxed);
+                    let _ = peer2.data.send(Message::BlobData(d)).await;
+                });
+            }
+            Message::BlobData(d) if peer.has(trs_sync_proto::msg::FEATURE_BLOBS) => peer.answer_blob(d),
             Message::RenameRequest(_) if ctx.silent_ondemand.load(Ordering::SeqCst) || ctx.features & trs_sync_proto::msg::FEATURE_RENAMES == 0 => {}
             Message::RenameRequest(q) => {
                 // Made here as this device's own rename, only for a writer of a folder it shares with us that runs here,
@@ -990,7 +1015,9 @@ async fn read_loop(
             | Message::DirectKeys(_)
             | Message::DirectHave(_)
             | Message::DirectMessages(_)
-            | Message::DevicesJoin(_) => {}
+            | Message::DevicesJoin(_)
+            | Message::BlobWant(_)
+            | Message::BlobData(_) => {}
             Message::Rendezvous(_) | Message::Introduce(_) | Message::RelayOpen(_) | Message::RelayData(_) | Message::RelayClose(_) => {
                 let _ = ctx.hub.send(HubMsg::Relay(peer.device, Box::new(msg)));
             }

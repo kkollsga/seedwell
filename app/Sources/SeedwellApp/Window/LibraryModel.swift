@@ -32,7 +32,7 @@ import SwiftUI
     /// Folder sync (SPEC 7G.5): every folder and device, read with each refresh of its page (cheap).
     private(set) var sync: SyncSnapshot
     /// The folder whose page is shown on Folder Sync.
-    var syncSelection: String? { didSet { if syncSelection != oldValue { syncAskRemove = nil; syncMembers = []; loadConflicts(); loadMembers() } } }
+    var syncSelection: String? { didSet { if syncSelection != oldValue { syncMembers = []; loadConflicts(); loadMembers() } } }
     /// The conflict copies of the selected folder (read when it is selected, then every 10 s, off the main
     /// thread: the core reads the folder's whole index).
     private(set) var syncConflicts: [SyncConflict] = []
@@ -47,14 +47,15 @@ import SwiftUI
     /// The devices this Mac has private conversations with (read on a private conversation's page).
     private(set) var directs: [SyncDirect] = []
     private(set) var chatMessages: [SyncMessage] = []
+    /// The shown conversation's sends whose files are being read, or that failed (the core's words).
+    private(set) var chatPending: [ChatPendingSend] = []
     private(set) var chatMembers: [SyncMember] = []
     /// The conversation `chatMessages` and `chatMembers` are of.
     private var chatLoaded: Section?
-    /// The folder whose "Stop syncing" question is open under its page header, and its Trash choice.
-    var syncAskRemove: String? { didSet { if syncAskRemove != oldValue { syncOnlyHere = syncAskRemove.map { core.syncOnlyHere(id: $0) } ?? 0 } } }
-    var syncTrash = false
-    /// How many of that folder's files no other device is known to hold (read once, when the question opens).
-    private(set) var syncOnlyHere: UInt64 = 0
+    /// The "Stop syncing" question under the Folder Sync page's header (its own, not the menu's: the core closes it
+    /// when another folder is selected), and a count that changes with it (the page reads it to redraw).
+    @ObservationIgnored let syncRemoval = SyncRemoval()
+    private(set) var syncRemovalRevision = 0
     private(set) var trackerStats: TrackerStats?
     private(set) var daily: [DailyStat] = []
     @ObservationIgnored private var timer: Timer?
@@ -124,7 +125,9 @@ import SwiftUI
         onSnapshot(snapshot)
         ticks += 1
         if view.page == .folderSync {
-            if syncSelection.map({ id in !sync.folders.contains { $0.id == id } }) ?? true { syncSelection = sync.folders.first?.id }
+            // The folder shown is the core's choice (the one picked, else the first).
+            let shown = folderSyncPage(onDemandOff: { _ in false }).selected
+            if shown != syncSelection { syncSelection = shown }
             else {
                 if ticks % 10 == 0 { loadConflicts() }
                 if ticks % 2 == 0 { loadMembers() }
@@ -238,6 +241,12 @@ import SwiftUI
             list = []
         }
         if list != chatMessages { chatMessages = list }
+        let pending: [ChatPendingSend] = switch place {
+        case .chat(let id, _): core.chatPendingSends(place: id)
+        case .direct(let id): core.chatPendingSends(place: "dm:\(id)")
+        default: []
+        }
+        if pending != chatPending { chatPending = pending }
     }
 
     func loadChatMembers() {
@@ -271,8 +280,38 @@ import SwiftUI
     func showSyncFolder(_ id: String?, askRemove: Bool) {
         if section != .folderSync { select(.folderSync) }
         if let id { syncSelection = id }
-        syncTrash = false
-        syncAskRemove = askRemove ? id : nil
+        if askRemove, let id { askSyncRemove(id) } else { cancelSyncRemove() }
+    }
+
+    /// The Folder Sync page as the core lays it out. `onDemandOff`: the system keeps that on-demand folder out of the
+    /// Finder (its File Provider domain is switched off).
+    func folderSyncPage(onDemandOff: (String) -> Bool) -> SyncPageModel {
+        _ = syncRemovalRevision
+        let input = SyncPageInput(snapshot: sync, selected: syncSelection, members: syncMembers, conflicts: syncConflicts, channels: chats,
+                                  onDemandOff: syncSelection.map(onDemandOff) ?? false, nowUnixS: UInt64(max(0, Date().timeIntervalSince1970)))
+        return syncPageModel(input: input, removal: syncRemoval, clock: MacClock(), host: hostWindowsAll())
+    }
+
+    /// Stop Syncing… on folder `id`: its question opens under the header (reading how many files only this Mac has).
+    func askSyncRemove(_ id: String) {
+        syncRemoval.open(id: id, onlyHere: core.syncOnlyHere(id: id))
+        syncRemovalRevision += 1
+    }
+
+    func cancelSyncRemove() {
+        syncRemoval.close()
+        syncRemovalRevision += 1
+    }
+
+    /// The question's "Also move the files to the Trash".
+    var syncRemovalTrash: Bool {
+        _ = syncRemovalRevision
+        return syncRemoval.trash()
+    }
+
+    func setSyncTrash(_ on: Bool) {
+        syncRemoval.setTrash(on: on)
+        syncRemovalRevision += 1
     }
 
     /// "Show more" under a Sharing group: another page of its rows.

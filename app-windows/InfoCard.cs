@@ -34,7 +34,7 @@ sealed class InfoCard
         this.row = row;
         this.close = close;
         // NEED: the file chooser on Windows (chooser_available false until it exists) and the play offers (Play With).
-        card = new GetInfoCard(app.Core, first, new Clock(), false, null);
+        card = new GetInfoCard(app.Core, first, new Clock(), false, null, App.HostWindows);
         Root = new ScrollViewer { Content = panel, MaxHeight = 720, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
         var q = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread();
         refresh = q.CreateTimer();
@@ -293,8 +293,9 @@ sealed class InfoCard
                     Windows.ApplicationModel.DataTransfer.Clipboard.SetContent(data);
                     break;
                 default:
-                    // NEED: the file chooser window (Choose…).
-                    app.ShowPlaceholder(c.ToString());
+                    // NEED: the file chooser window (Choose…): the card is made with chooser_available false, so it does
+                    // not offer it.
+                    AppLog.Write($"info command {c}: not on Windows yet");
                     break;
             }
         }

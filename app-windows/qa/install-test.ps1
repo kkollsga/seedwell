@@ -10,7 +10,8 @@
   seam on (SEEDWELL_INSTALL_TEST=1: registry keys under HKCU:\Software\SeedwellInstallTest, the shortcut in a temp
   folder, the app not started), into a temporary folder:
     1. irm .../latest/download/install.ps1 | iex, with -Cli      2. again (an update in place)
-    3. a pinned -Version                                         4. -Uninstall
+    3. a pinned -Version                                         4. an update while a program runs from the folder
+    5. -Uninstall
   and checks after each step what is there, and after the uninstall that nothing is left. It also checks that the
   real places (HKCU:\Software\Classes, the real Uninstall key, the real PATH, the real Start menu) are the same
   before and after. PASS/FAIL per step and exit 1 on any failure.
@@ -50,6 +51,7 @@ function Real {
         Path = (Get-Item 'HKCU:\Environment').GetValue('Path', '', 'DoNotExpandEnvironmentNames')
         Shortcut = Test-Path (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Seedwell.lnk')
         Magnet = (Get-Item 'HKCU:\Software\Classes\magnet\shell\open\command' -ErrorAction SilentlyContinue).GetValue('')
+        Scheme = (Get-Item 'HKCU:\Software\Classes\seedwell\shell\open\command' -ErrorAction SilentlyContinue).GetValue('')
     } | ConvertTo-Json -Compress
 }
 $realBefore = Real
@@ -72,6 +74,7 @@ function Installed {
     if (-not $u) { $problems += 'no Apps & features entry' }
     elseif ($u.DisplayName -ne 'Seedwell' -or $u.DisplayVersion -ne $version -or $u.InstallLocation -ne $dest -or $u.UninstallString -notlike '*install.ps1*-Uninstall') { $problems += "Apps & features entry: $($u | Select-Object DisplayName, DisplayVersion, InstallLocation, UninstallString | ConvertTo-Json -Compress)" }
     if (-not (Test-Path "$testKey\Classes\Seedwell.torrent\shell\open\command")) { $problems += 'no .torrent handler (Seedwell.exe --register)' }
+    if (-not (Test-Path "$testKey\Classes\seedwell\shell\open\command")) { $problems += 'no seedwell: handler (Seedwell.exe --register)' }
     if (($path -split ';') -notcontains (Join-Path $dest 'cli')) { $problems += 'the CLI folder is not on the (test) PATH' }
     $problems
 }
@@ -90,6 +93,19 @@ try {
     Step 'update' { Install "& ([scriptblock]::Create((irm $url/releases/latest/download/install.ps1))) -Cli -NoLaunch" | Out-Host; Installed }
     Step 'version' { Install "& ([scriptblock]::Create((irm $url/releases/download/v$version/install.ps1))) -Version $version -Cli -NoLaunch" | Out-Host; Installed }
     Step 'cli' { $said = & (Join-Path $dest 'cli\seedwell.exe') --version; if ($said -ne "seedwell $version") { "the installed CLI says '$said'" } }
+    # Something else running from the install folder (the CLI: an agent's watch) is not the app: it is ended, never sent
+    # --quit and waited on, and the update goes through.
+    Step 'busy' {
+        $busy = Join-Path $dest 'cli\busy.exe'
+        Copy-Item (Join-Path $env:SystemRoot 'System32\PING.EXE') $busy
+        $b = Start-Process $busy -ArgumentList '-n', '600', '127.0.0.1' -PassThru -WindowStyle Hidden
+        $clock = [Diagnostics.Stopwatch]::StartNew()
+        Install "& ([scriptblock]::Create((irm $url/releases/latest/download/install.ps1))) -Cli -NoLaunch" | Out-Host
+        $problems = @(Installed)
+        if (-not $b.HasExited) { $problems += 'the process running from the install folder was not ended'; $b.Kill() }
+        if ($clock.Elapsed.TotalSeconds -gt 90) { $problems += "the update took $([int]$clock.Elapsed.TotalSeconds) s" }
+        $problems
+    }
     Step 'uninstall' {
         Install "& ([scriptblock]::Create((irm $url/releases/latest/download/install.ps1))) -Uninstall" | Out-Host
         $left = @()
@@ -99,6 +115,7 @@ try {
         foreach ($k in 'Seedwell.torrent', 'Applications\Seedwell.exe') { if (Test-Path "$testKey\Classes\$k") { $left += "Classes\$k" } }
         if ((Get-ItemProperty "$testKey\Classes\.torrent\OpenWithProgids" -ErrorAction SilentlyContinue).'Seedwell.torrent' -ne $null) { $left += '.torrent OpenWithProgids entry' }
         if (Test-Path "$testKey\Classes\magnet") { $left += 'the magnet handler' }
+        if (Test-Path "$testKey\Classes\seedwell") { $left += 'the seedwell: handler' }
         $path = (Get-Item "$testKey\Environment" -ErrorAction SilentlyContinue).GetValue('Path', '', 'DoNotExpandEnvironmentNames')
         if (($path -split ';') -contains (Join-Path $dest 'cli')) { $left += 'the CLI folder on the (test) PATH' }
         if (-not (Test-Path (Join-Path $data 'config.toml'))) { $left += 'the data folder was deleted without a yes' }

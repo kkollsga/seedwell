@@ -11,11 +11,13 @@
 
 use trs_platform::file_manager;
 
+use crate::host::{has, offered_commands, HostWindow};
 use crate::play::is_mp4_family;
 use crate::row_text::{can_ask_again, category_label, is_finished_direct_video, is_held};
 use crate::settings::RuleRecord;
+use crate::sync_text::{core_error_message, SyncAlert};
 use crate::types::{
-    Category, Priority, SeedingGoal, TorrentFile, TorrentInfo, TransferKind, TransferRow, TransferState,
+    Category, CoreError, MoveResult, Priority, SeedingGoal, TorrentFile, TorrentInfo, TransferKind, TransferRow, TransferState,
 };
 
 /// What a command of the list does. Each applies to the rows the list was made for, unless it names its own.
@@ -159,9 +161,24 @@ fn priority_title(p: Priority) -> &'static str {
 /// row's Get Info (a single row only: its priority, goal and rule are checked), `rules` the rule list (the enabled
 /// ones are offered), `play` what the Play entries are made of (a single row only). `in_menu_bar`: the menu bar's
 /// version ("Move to Top of Queue", "Files…", no "Move to…"); `chooser_available`: the engine can hold a torrent
-/// for a choice and reopen it.
+/// for a choice and reopen it. `host`: the windows the host can open (`host_windows_all()` on the Mac); a command
+/// that needs another is left out.
 #[uniffi::export]
 pub fn row_commands(
+    rows: Vec<TransferRow>,
+    info: Option<TorrentInfo>,
+    rules: Vec<RuleRecord>,
+    play: Option<PlayOffer>,
+    in_menu_bar: bool,
+    chooser_available: bool,
+    host: Vec<HostWindow>,
+) -> Vec<CommandEntry> {
+    let play = play.filter(|_| has(&host, Some(HostWindow::Player)));
+    offered_commands(all_entries(rows, info, rules, play, in_menu_bar, chooser_available), &host)
+}
+
+/// [`row_commands`] for a host with every window.
+fn all_entries(
     rows: Vec<TransferRow>,
     info: Option<TorrentInfo>,
     rules: Vec<RuleRecord>,
@@ -348,6 +365,27 @@ fn rule_menu(rules: &[RuleRecord], current: Option<&str>) -> CommandEntry {
     submenu(format!("Rule: {}", current.unwrap_or("Default")), entries)
 }
 
+// MARK: Move to…
+
+/// The title of Move to…'s alerts.
+const NOT_MOVED: &str = "Not moved";
+
+/// The most reasons Move to…'s alert lists.
+const REASONS_SHOWN: usize = 3;
+
+/// The alert after Move to… (`Core::move_to`) when some rows were not moved: "Not moved" with the first three
+/// reasons, one a line; `None` when every row was queued.
+#[uniffi::export]
+pub fn move_failed(result: MoveResult) -> Option<SyncAlert> {
+    (!result.refused.is_empty()).then(|| SyncAlert { title: NOT_MOVED.into(), text: result.refused.iter().take(REASONS_SHOWN).cloned().collect::<Vec<_>>().join("\n") })
+}
+
+/// The alert when Move to… failed as a whole: "Not moved" with the error's sentence.
+#[uniffi::export]
+pub fn move_error(error: CoreError) -> SyncAlert {
+    SyncAlert { title: NOT_MOVED.into(), text: core_error_message(error) }
+}
+
 // MARK: Play
 
 /// "Play" and "Play With ▸" of one row: empty when it has nothing to play. A finished direct download plays its own
@@ -469,7 +507,20 @@ mod tests {
     use super::*;
     use crate::row_text::tests::row;
     use crate::settings::PrivateMatch;
+    use crate::host::host_windows_all;
     use crate::types::{FilePriority, PendingStart, SeedGroup};
+
+    /// The Mac's menu: every window there.
+    fn all_commands(
+        rows: Vec<TransferRow>,
+        info: Option<TorrentInfo>,
+        rules: Vec<RuleRecord>,
+        play: Option<PlayOffer>,
+        in_menu_bar: bool,
+        chooser_available: bool,
+    ) -> Vec<CommandEntry> {
+        row_commands(rows, info, rules, play, in_menu_bar, chooser_available, host_windows_all())
+    }
 
     fn titles(entries: &[CommandEntry]) -> String {
         entries
@@ -595,7 +646,7 @@ mod tests {
     }
 
     fn one(r: TransferRow, in_menu_bar: bool) -> Vec<CommandEntry> {
-        row_commands(vec![r], None, vec![], None, in_menu_bar, true)
+        all_commands(vec![r], None, vec![], None, in_menu_bar, true)
     }
 
     #[test]
@@ -624,7 +675,7 @@ mod tests {
         );
         assert_eq!(*command(&e, "Files…"), RowCommand::OpenChooser);
         // Without the chooser there is no "Files…".
-        let e = row_commands(vec![row("a", TransferState::Paused)], None, vec![], None, true, false);
+        let e = all_commands(vec![row("a", TransferState::Paused)], None, vec![], None, true, false);
         assert!(!titles(&e).contains("|Files…|"));
     }
 
@@ -649,7 +700,7 @@ mod tests {
         r.ratio_goal = Some(3.0);
         let goal = |r: &TransferRow, custom: bool| {
             let info = Some(info(Priority::Normal, "Default", custom));
-            let e = row_commands(vec![r.clone()], info, vec![], None, false, true);
+            let e = all_commands(vec![r.clone()], info, vec![], None, false, true);
             titles(sub(&e, "Seeding Goal"))
         };
         assert_eq!(goal(&r, false), "Rule default ✓|-|Ratio 1.0|Ratio 3.0|Seed Forever|-|Custom…");
@@ -674,7 +725,7 @@ mod tests {
         for (goal, custom) in [(Some(1.0), true), (Some(3.0), true), (None, true), (Some(2.0), true), (Some(1.0), false)] {
             r.ratio_goal = goal;
             let i = info(Priority::Normal, "Default", custom);
-            let menu = row_commands(vec![r.clone()], Some(i.clone()), vec![], None, false, true);
+            let menu = all_commands(vec![r.clone()], Some(i.clone()), vec![], None, false, true);
             assert_eq!(seeding_goal_commands(r.clone(), Some(i)), sub(&menu, "Seeding Goal"), "{goal:?} {custom}");
         }
         // A download's Get Info has the same menu (its row menu has none until it shares).
@@ -688,7 +739,7 @@ mod tests {
     #[test]
     fn several_rows_check_nothing_and_leave_out_the_single_row_commands() {
         let rows = vec![sharing("a", TransferState::Seeding), sharing("b", TransferState::Seeding)];
-        let e = row_commands(rows, Some(info(Priority::High, "Default", true)), vec![], None, false, true);
+        let e = all_commands(rows, Some(info(Priority::High, "Default", true)), vec![], None, false, true);
         assert_eq!(
             titles(&e),
             "Stop Sharing|-|Reveal|Move to…|-|Seeding Goal >|Priority >|Category >|Rule: Default >|-|\
@@ -698,7 +749,7 @@ mod tests {
         assert_eq!(titles(sub(&e, "Priority")), "★ High|Normal|Low");
         assert_eq!(titles(sub(&e, "Category")), "Movie|TV|Music|Audiobook|Book|App|Game|Other");
         let downloads = vec![row("a", TransferState::Downloading), row("b", TransferState::Paused)];
-        let e = row_commands(downloads, None, vec![], None, false, true);
+        let e = all_commands(downloads, None, vec![], None, false, true);
         assert!(titles(&e).starts_with("Pause|-|Reveal|Move to…|"));
     }
 
@@ -707,7 +758,7 @@ mod tests {
         let rules = vec![rule("r1", "Keep long", true), rule("r2", "Off", false), rule("r3", "Movies", true)];
         let mut r = row("a", TransferState::Downloading);
         r.category = Category::Tv;
-        let e = row_commands(vec![r], Some(info(Priority::Low, "Movies", false)), rules.clone(), None, false, true);
+        let e = all_commands(vec![r], Some(info(Priority::Low, "Movies", false)), rules.clone(), None, false, true);
         assert_eq!(titles(sub(&e, "Priority")), "★ High|Normal|Low ✓");
         assert_eq!(*command(sub(&e, "Priority"), "Low"), RowCommand::SetPriority { priority: Priority::Low });
         assert_eq!(titles(sub(&e, "Category")), "Movie|TV ✓|Music|Audiobook|Book|App|Game|Other|-|(Detected: TV)");
@@ -719,7 +770,7 @@ mod tests {
         assert_eq!(*command(sub(&e, "Rule"), "Automatic, by tracker"), RowCommand::SetRule { rule_id: None });
         assert_eq!(*command(sub(&e, "Rule"), "Edit Rules…"), RowCommand::EditRules);
         let queued = vec![row("a", TransferState::Queued)];
-        let e = row_commands(queued, Some(info(Priority::Normal, "Default", false)), rules, None, false, true);
+        let e = all_commands(queued, Some(info(Priority::Normal, "Default", false)), rules, None, false, true);
         assert_eq!(titles(sub(&e, "Rule")), "Automatic, by tracker ✓|-|Keep long|Movies|-|Edit Rules…");
     }
 
@@ -737,7 +788,7 @@ mod tests {
         assert_eq!(*command(&e, "Cancel"), RowCommand::CancelHeld);
         assert_eq!(*command(&e, "Choose Files…"), RowCommand::OpenChooser);
         // Several: only the chooser of the first.
-        let e = row_commands(vec![r.clone(), r.clone()], None, vec![], None, false, true);
+        let e = all_commands(vec![r.clone(), r.clone()], None, vec![], None, false, true);
         assert!(titles(&e).starts_with("Choose Files…|-|Reveal|-|"));
         // The menu bar also offers "Files…".
         assert!(titles(&one(r, true)).contains("|Files…|"));
@@ -756,7 +807,7 @@ mod tests {
         assert_eq!(*command(&e, "Start"), RowCommand::StartNow);
         assert_eq!(*command(&e, "Choose Files…"), RowCommand::ChooseFiles);
         // Several countdowns are paused or resumed like downloads.
-        let e = row_commands(vec![r.clone(), r], None, vec![], None, false, true);
+        let e = all_commands(vec![r.clone(), r], None, vec![], None, false, true);
         assert!(titles(&e).starts_with("Pause|-|Reveal|-|"));
     }
 
@@ -767,7 +818,7 @@ mod tests {
         let fine = row("b", TransferState::Downloading);
         let mut dead = sharing("c", TransferState::Seeding);
         dead.seed_group = Some(SeedGroup::Dead);
-        let e = row_commands(vec![fine.clone(), halted, dead], None, vec![], None, false, true);
+        let e = all_commands(vec![fine.clone(), halted, dead], None, vec![], None, false, true);
         assert_eq!(titles(&e).split('|').next(), Some("Ask Tracker Again"));
         let ids = vec!["a".to_string(), "c".to_string()];
         assert_eq!(*command(&e, "Ask Tracker Again"), RowCommand::AskTrackerAgain { ids });
@@ -798,6 +849,15 @@ mod tests {
         assert_eq!(titles(sub(&tidy(list), "S")), "(n)");
     }
 
+    #[test]
+    fn move_to_says_what_was_not_moved_three_reasons_at_most() {
+        assert_eq!(move_failed(MoveResult { queued: 2, refused: vec![] }), None);
+        let r = MoveResult { queued: 0, refused: ["a is seeding", "b is gone", "c is busy", "d is busy"].map(String::from).to_vec() };
+        assert_eq!(move_failed(r), Some(SyncAlert { title: "Not moved".into(), text: "a is seeding\nb is gone\nc is busy".into() }));
+        let e = move_error(CoreError::Failed { message: "The folder is read-only.".into() });
+        assert_eq!((e.title.as_str(), e.text.as_str()), ("Not moved", "The folder is read-only."));
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn the_mac_shows_in_finder() {
@@ -809,23 +869,45 @@ mod tests {
 
     #[test]
     fn no_rows_no_commands() {
-        assert!(row_commands(vec![], None, vec![], None, false, true).is_empty());
+        assert!(all_commands(vec![], None, vec![], None, false, true).is_empty());
     }
 
     #[test]
     fn play_comes_first_for_a_single_row_with_videos() {
         let offer = PlayOffer { videos: vec![video(3, "Sintel.2010.mkv")], players: vec![player("vlc", true, false)] };
         let a = || vec![row("a", TransferState::Downloading)];
-        let e = row_commands(a(), None, vec![], Some(offer.clone()), false, true);
+        let e = all_commands(a(), None, vec![], Some(offer.clone()), false, true);
         assert!(titles(&e).starts_with("Play|Play With >|-|Pause|"));
         assert_eq!(*command(&e, "Play"), RowCommand::Play { file_index: Some(3), player_id: None });
         let vlc = RowCommand::Play { file_index: Some(3), player_id: Some("vlc".into()) };
         assert_eq!(*command(sub(&e, "Play With"), "VLC"), vlc);
         // Not for a selection, and nothing without videos.
         let two = vec![row("a", TransferState::Downloading), row("b", TransferState::Downloading)];
-        assert!(titles(&row_commands(two, None, vec![], Some(offer), false, true)).starts_with("Pause|"));
+        assert!(titles(&all_commands(two, None, vec![], Some(offer), false, true)).starts_with("Pause|"));
         let none = PlayOffer { videos: vec![], players: vec![player("vlc", true, false)] };
-        assert!(titles(&row_commands(a(), None, vec![], Some(none), false, true)).starts_with("Pause|"));
+        assert!(titles(&all_commands(a(), None, vec![], Some(none), false, true)).starts_with("Pause|"));
+    }
+
+    #[test]
+    fn a_host_without_a_window_never_offers_the_commands_that_need_it() {
+        let offer = PlayOffer { videos: vec![video(3, "Sintel.2010.mkv")], players: vec![player("vlc", true, false)] };
+        let r = sharing("a", TransferState::Seeding);
+        let mac = all_commands(vec![r.clone()], None, vec![], Some(offer.clone()), false, true);
+        for t in ["Play", "Get Info", "Move to…"] {
+            command(&mac, t);
+        }
+        assert!(titles(sub(&mac, "Seeding Goal")).ends_with("|Custom…") && titles(sub(&mac, "Rule")).ends_with("|Edit Rules…"));
+        // A host with Get Info only (the Windows app today): no Play, no Move to…, no Custom…, no Edit Rules….
+        let e = row_commands(vec![r], None, vec![], Some(offer), false, true, vec![HostWindow::GetInfo]);
+        assert!(titles(&e).starts_with("Stop Sharing|-|Reveal|Get Info|-|Seeding Goal >"), "{}", titles(&e));
+        assert_eq!(titles(sub(&e, "Seeding Goal")), "Rule default ✓|-|Ratio 1.0|Ratio 3.0|Seed Forever");
+        assert_eq!(titles(sub(&e, "Rule")), "Automatic, by tracker");
+        assert!(!titles(&e).contains("Move to") && !titles(&e).contains("Play"));
+        // The menu bar's Files… needs the chooser.
+        let held = row("b", TransferState::Downloading);
+        let has_files = |e: &[CommandEntry]| titles(e).split('|').any(|t| t == "Files…");
+        assert!(has_files(&all_commands(vec![held.clone()], None, vec![], None, true, true)));
+        assert!(!has_files(&row_commands(vec![held], None, vec![], None, true, true, vec![])));
     }
 
     #[test]

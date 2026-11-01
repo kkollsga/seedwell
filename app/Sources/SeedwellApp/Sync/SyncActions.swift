@@ -66,14 +66,14 @@ import os
         }
     }
 
-    /// Resolves a conflict; the version not kept goes to the folder's archive on this Mac. Errors are told
-    /// in an alert; `done` runs either way (the page reads its conflicts again).
-    func resolve(_ folder: SyncFolder, _ c: SyncConflict, keep: SyncKeep, done: @escaping () -> Void) {
+    /// Resolves the conflict copy `copy` (of `original`); the version not kept goes to the folder's archive on this Mac.
+    /// Errors are told in an alert; `done` runs either way (the page reads its conflicts again).
+    func resolve(_ folder: SyncFolder, copy: String, original: String, keep: SyncKeep, done: @escaping () -> Void) {
         Task {
             let core = self.core
-            let (id, copy) = (folder.id, c.copy)
+            let id = folder.id
             if case .failure(let e) = await run({ try core.syncResolveConflict(id: id, copy: copy, keep: keep) }) {
-                alert(syncResolveFailed(original: c.original, error: SyncText.message(e)))
+                alert(syncResolveFailed(original: original, error: SyncText.message(e)))
             }
             done()
         }
@@ -100,11 +100,14 @@ import os
     /// Gives a device another role in a folder or channel `id` (owners only; the core says so otherwise). Errors are
     /// told in an alert; `done` runs either way (the page reads the members again).
     func setRole(_ id: String, _ m: SyncMember, _ role: SyncRole, done: @escaping () -> Void) {
+        setRole(id, device: m.deviceId, deviceName: m.name, role, done: done)
+    }
+
+    func setRole(_ id: String, device: String, deviceName: String, _ role: SyncRole, done: @escaping () -> Void) {
         Task {
             let core = self.core
-            let device = m.deviceId
             if case .failure(let e) = await run({ try core.syncSetRole(id: id, deviceId: device, role: role) }) {
-                alert(syncSetRoleFailed(device: m.name, error: SyncText.message(e)))
+                alert(syncSetRoleFailed(device: deviceName, error: SyncText.message(e)))
             }
             done()
         }
@@ -121,7 +124,7 @@ import os
         removeDevice(id, name: name, device: d.deviceId, deviceName: d.name, done: done)
     }
 
-    private func removeDevice(_ id: String, name: String, device: String, deviceName: String, done: @escaping () -> Void) {
+    func removeDevice(_ id: String, name: String, device: String, deviceName: String, done: @escaping () -> Void) {
         Task {
             let core = self.core
             if case .failure(let e) = await run({ try core.syncRemoveDevice(id: id, deviceId: device) }) {

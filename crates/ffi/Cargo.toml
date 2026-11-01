@@ -34,6 +34,8 @@ trs-control = { path = "../control" }
 trs-platform = { path = "../platform" }
 # Folder sync (SPEC 7G): the service's handle, its secret store and status, keys and links.
 trs-sync-net = { path = "../sync-net" }
+# Images in chat: checking, drawing and saving them for the hosts (chat_images.rs).
+trs-media = { path = "../media" }
 trs-sync-proto = { path = "../sync-proto" }
 # Conflict copy names read back (device and time, for the folder page).
 trs-sync = { path = "../sync" }

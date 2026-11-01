@@ -197,7 +197,7 @@ public sealed partial class FlyoutWindow : Window
         {
             last = app.TakeSnapshot();
             lastSync = app.Core.SyncSnapshot();
-            model = TrsFfiMethods.MenuModel(last, lastSync, app.Arrivals, App.Now(), app.Updater.Updates.AvailableVersion());
+            model = TrsFfiMethods.MenuModel(last, lastSync, app.Arrivals, App.Now(), app.Updater.Updates.AvailableVersion(), App.HostWindows);
         }
         catch (Exception e)
         {
@@ -210,7 +210,7 @@ public sealed partial class FlyoutWindow : Window
             refresh.Start();
             return;
         }
-        SyncMenuModel? sync = syncOpen ? TrsFfiMethods.SyncMenuModel(lastSync, app.SyncRemoval) : null;
+        SyncMenuModel? sync = syncOpen ? TrsFfiMethods.SyncMenuModel(lastSync, app.SyncRemoval, App.HostWindows) : null;
         if (opening || model.Signature != signature || (sync?.Signature ?? "") != syncSignature)
         {
             Build(model, sync);
@@ -253,7 +253,8 @@ public sealed partial class FlyoutWindow : Window
             }
             if (s.More is string more)
             {
-                Body.Children.Add(Line(Text(more, secondary: true), app.ShowMainWindow));
+                // "+ 2 more" shows the downloads in the window (the Mac's).
+                Body.Children.Add(Line(Text(more, secondary: true), () => app.ShowPlace(new LibraryPlace.Downloads())));
             }
         }
         if (m.Sharing is MenuSharingLine sh)
@@ -267,7 +268,7 @@ public sealed partial class FlyoutWindow : Window
             var g = new Grid();
             g.Children.Add(Text(sh.Title));
             g.Children.Add(sharingRate);
-            Body.Children.Add(Line(g, app.ShowMainWindow));
+            Body.Children.Add(Line(g, () => app.ShowPlace(new LibraryPlace.Sharing())));
         }
         if (m.FolderSync is MenuSyncLine fs)
         {
@@ -384,7 +385,7 @@ public sealed partial class FlyoutWindow : Window
                 }
                 catch (Exception e)
                 {
-                    app.ShowPlaceholder(e.Message);
+                    AppLog.Write($"menu row {id}: pause or resume failed: {e.Message}");
                 }
                 Refresh(false);
             };
@@ -394,8 +395,6 @@ public sealed partial class FlyoutWindow : Window
         Action? click = r.Click switch
         {
             MenuClick.Reveal => () => { var t = Find(r.Id); if (t is not null) { Hide(); RowCommands.Reveal([t]); } },
-            // NEED: the file chooser window (the Mac's ChoiceStore and chooser are Swift).
-            MenuClick.OpenChooser => () => app.ShowPlaceholder("OpenChooser"),
             _ => null,
         };
         var line = Line(g, click);
@@ -551,23 +550,20 @@ public sealed partial class FlyoutWindow : Window
                 text.Children.Add(subtitle);
             }
             g.Children.Add(text);
-            // As the Mac's: a pencil and a bin at the row's end, shown while the pointer or the keyboard is on the row or
-            // while its confirmation is open (the bin then lit); the labels are their tooltips and names.
+            // As the Mac's: a bin at the row's end (the pencil comes with the folder editor), shown while the pointer or
+            // the keyboard is on the row or while its confirmation is open (the bin then lit); the label is its tooltip
+            // and name.
             var buttons = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 2, VerticalAlignment = VerticalAlignment.Center };
             // Over the end of the text column: the name has the full width while they are hidden (as the Mac's).
             Grid.SetColumn(buttons, 1);
             buttons.HorizontalAlignment = HorizontalAlignment.Right;
             var id = r.Id;
-            // NEED: the folder editor window (Edit); drawn, opens a placeholder for now.
-            void Edit() => app.ShowPlaceholder(r.EditLabel);
+            // The pencil (edit_label) and Ctrl+E come with the folder editor: the core leaves them out without it.
             void Remove() { app.SyncRemoval.Toggle(id, app.Core.SyncOnlyHere(id)); Refresh(false); }
-            var pencil = IconButton("", r.EditLabel, Edit);
-            buttons.Children.Add(pencil);
             var bin = IconButton("", r.RemoveLabel, Remove);
             if (r.Confirming)
             {
-                // While its question is open: the bin lit, the pencil secondary.
-                pencil.Foreground = (Brush)Application.Current.Resources["TextFillColorSecondaryBrush"];
+                // While its question is open: the bin lit.
                 bin.Foreground = (Brush)Application.Current.Resources["AccentTextFillColorPrimaryBrush"];
             }
             buttons.Children.Add(bin);
@@ -579,25 +575,18 @@ public sealed partial class FlyoutWindow : Window
             {
                 bool shown = pointer || keyboard || r.Confirming;
                 buttons.Opacity = shown ? 1 : 0;
-                // The text stops short of them only while they show (2 x 28 px and a gap).
-                text.Margin = new Thickness(0, 0, shown ? 60 : 0, 0);
+                // The text stops short of it only while it shows (28 px and a gap).
+                text.Margin = new Thickness(0, 0, shown ? 32 : 0, 0);
             }
             Show();
             line.PointerEntered += (_, _) => { pointer = true; Show(); };
             line.PointerExited += (_, _) => { pointer = false; Show(); };
             line.GotFocus += (_, _) => { keyboard = true; Show(); };
             line.LostFocus += (_, _) => { keyboard = false; Show(); };
-            // The Mac's Cmd+E and Cmd+Backspace: Ctrl+E edits, Delete asks to remove the row the keyboard is on.
+            // The Mac's Cmd+Backspace: Delete asks to remove the row the keyboard is on (Ctrl+E comes with the editor).
             line.KeyDown += (_, e) =>
             {
-                var ctrl = Microsoft.UI.Input.InputKeyboardSource.GetKeyStateForCurrentThread(Windows.System.VirtualKey.Control)
-                    .HasFlag(Windows.UI.Core.CoreVirtualKeyStates.Down);
-                if (e.Key == Windows.System.VirtualKey.E && ctrl)
-                {
-                    Edit();
-                    e.Handled = true;
-                }
-                else if (e.Key == Windows.System.VirtualKey.Delete)
+                if (e.Key == Windows.System.VirtualKey.Delete)
                 {
                     Remove();
                     e.Handled = true;
@@ -609,11 +598,11 @@ public sealed partial class FlyoutWindow : Window
                 panel.Children.Add(Confirm(c));
             }
         }
-        panel.Children.Add(Separator());
-        // NEED: Add Folder… (a folder picker and sync_add); drawn, opens a placeholder for now.
-        var add = Text(sm.Add.Title);
-        ToolTipService.SetToolTip(add, sm.Add.Help);
-        panel.Children.Add(Line(add, () => app.ShowPlaceholder(sm.Add.Title)));
+        // Add Folder… and the separator above it only with the Add Folder dialog (the core leaves it out without it).
+        if (sm.Add is not null)
+        {
+            panel.Children.Add(Separator());
+        }
         return panel;
     }
 
@@ -660,8 +649,9 @@ public sealed partial class FlyoutWindow : Window
                 }
                 catch (Exception e)
                 {
-                    // The dialog itself could not open (another one is showing): say it in a window of its own.
-                    app.ShowPlaceholder($"{alert.Title}\n\n{alert.Text}\n\n{e.Message}");
+                    // The dialog itself could not open (another one is showing): the app's own alert window says it.
+                    AppLog.Write($"sync removal alert failed: {e.Message}");
+                    app.Alert(alert);
                 }
             }
         };

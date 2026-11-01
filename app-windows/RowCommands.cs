@@ -25,7 +25,7 @@ static class RowCommands
         }
         RuleRecord[] rules = [];
         try { rules = core.RulesLoad().Rules; } catch { }
-        var list = TrsFfiMethods.RowCommands(rows, info, rules, null, inMenuBar, false);
+        var list = TrsFfiMethods.RowCommands(rows, info, rules, null, inMenuBar, false, App.HostWindows);
         var menu = new MenuFlyout();
         foreach (var item in Draw(core, list, rows, root, remove))
         {
@@ -39,7 +39,7 @@ static class RowCommands
     /// from the row's commands (CancelHeld; StartNow while it counts down, ConfirmChoice while it waits for a choice).
     /// </summary>
     public static CommandEntry.Item[] Held(TransferRow row) =>
-        TrsFfiMethods.RowCommands([row], null, [], null, false, false)
+        TrsFfiMethods.RowCommands([row], null, [], null, false, false, App.HostWindows)
             .OfType<CommandEntry.Item>()
             .Where(i => i.Command is RowCommand.CancelHeld or RowCommand.StartNow or RowCommand.ConfirmChoice)
             .OrderBy(i => i.Command is RowCommand.CancelHeld ? 0 : 1)
@@ -110,7 +110,7 @@ static class RowCommands
                         }
                         catch (Exception e)
                         {
-                            App.Current?.ShowPlaceholder(e.Message);
+                            AppLog.Write($"removal question failed: {e.Message}");
                             return;
                         }
                         Run(core, command, rows, root);
@@ -172,7 +172,7 @@ static class RowCommands
     /// button the accent style whatever PrimaryButtonStyle says, so the accent button's own colours are set red here, in
     /// the dialog's resources, which that style reads; only the default button uses them.
     /// </summary>
-    static void Destructive(ContentDialog d)
+    internal static void Destructive(ContentDialog d)
     {
         Microsoft.UI.Xaml.Media.SolidColorBrush Brush(byte r, byte g, byte b) => new(Windows.UI.Color.FromArgb(255, r, g, b));
         var white = new Microsoft.UI.Xaml.Media.SolidColorBrush(Microsoft.UI.Colors.White);
@@ -188,7 +188,7 @@ static class RowCommands
     }
 
     /// <summary>Everything in the open popups (a dialog lives in the popup layer, not under the window's content).</summary>
-    static IEnumerable<DependencyObject> Descendants(XamlRoot root) =>
+    internal static IEnumerable<DependencyObject> Descendants(XamlRoot root) =>
         Microsoft.UI.Xaml.Media.VisualTreeHelper.GetOpenPopupsForXamlRoot(root).SelectMany(p => Tree(p.Child));
 
     static IEnumerable<DependencyObject> Tree(DependencyObject? o)
@@ -247,15 +247,45 @@ static class RowCommands
                     data.SetText(core.MagnetLink(first.Id));
                     Windows.ApplicationModel.DataTransfer.Clipboard.SetContent(data);
                     break;
+                case RowCommand.MoveTo: _ = MoveTo(core, ids); break;
                 default:
-                    // Move To, Choose Files / the chooser, custom goal, rules, Play: no window for them yet.
-                    App.Current?.ShowPlaceholder(command.GetType().Name);
+                    // The core offers only commands whose window Windows has (App.HostWindows).
+                    AppLog.Write($"row command {command.GetType().Name}: not offered on Windows");
                     break;
             }
         }
         catch (Exception e)
         {
-            App.Current?.ShowPlaceholder(e.Message);
+            AppLog.Write($"row command {command.GetType().Name} failed: {e.Message}");
+        }
+    }
+
+    /// <summary>
+    /// "Move to…": the torrents go below a folder the user picks and stay pinned there (SPEC §7A.5, the Mac's moveTo).
+    /// </summary>
+    internal static async Task MoveTo(Core core, string[] ids)
+    {
+        if (App.Current is not App app || await app.PickFolder() is not string folder)
+        {
+            return;
+        }
+        try
+        {
+            var r = core.MoveTo(ids, folder);
+            AppLog.Write($"move to {folder}: {r.Queued} queued, {r.Refused.Length} refused");
+            foreach (var reason in r.Refused)
+            {
+                AppLog.Write($"move refused: {reason}");
+            }
+            if (TrsFfiMethods.MoveFailed(r) is SyncAlert alert)
+            {
+                app.Alert(alert);
+            }
+        }
+        catch (CoreException e)
+        {
+            AppLog.Write($"move failed: {TrsFfiMethods.CoreErrorMessage(e)}");
+            app.Alert(TrsFfiMethods.MoveError(e));
         }
     }
 

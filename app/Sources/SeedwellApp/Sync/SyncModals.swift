@@ -4,37 +4,25 @@ import SwiftUI
 // The add and edit modals of folder sync (SPEC 7G.5): small standalone windows, centred, in the chooser's style,
 // with Cancel and the primary action at the bottom right.
 
-/// The add modal's state: what is chosen or pasted, and Start.
+/// The add modal's state: what is chosen or pasted, and Start. The form, its rules and every word are the core's
+/// (`Core::sync_add_*`, trs-ffi `sync_dialogs.rs`).
 @MainActor @Observable final class SyncAddModel {
     @ObservationIgnored let core: Core
-    var form = SyncAddForm()
+    var form: SyncAddForm
     var error: String?
     var busy = false
-    /// The default place for the pasted link (`~/Seedwell/<name>`), offered first in the Location popup.
-    private(set) var defaultLocation: String?
-    /// A folder of that name already in the default place (left over from an earlier join, say) and not synced:
-    /// offered next to the new one, which gets a number (`~/Seedwell/Team 2`).
-    private(set) var existingFolder: String?
-    /// "On all my devices" for a folder of this Mac (shown while this Mac is paired with others; off by default).
-    let follow: FollowLine
-    var allDevices: Bool
 
     /// `prefill`: a pasted link (Shared with me).
     init(core: Core, prefill: String? = nil) {
         self.core = core
-        follow = core.syncFollowLineNew(channel: false)
-        allDevices = follow.on
-        if let prefill { form.mode = .shared; setKey(prefill) }
+        form = core.syncAddForm(prefill: prefill)
     }
 
+    /// The dialog as the core draws it from the form.
+    var window: SyncAddWindowModel { core.syncAddWindow(form: form) }
+
     func setKey(_ text: String) {
-        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        let info = t.isEmpty ? nil : core.syncParseLink(text: t)
-        defaultLocation = info == nil ? nil : core.syncJoinPath(keyOrLink: t)
-        existingFolder = info.flatMap { i in
-            defaultLocation.flatMap { syncExistingFolder(name: syncSuggestedName(info: i), next: $0, synced: core.syncSnapshot().folders.map(\.path)) }
-        }
-        form.setKey(text, info: info, defaultLocation: defaultLocation, problem: info == nil && !t.isEmpty ? core.syncLinkProblem(text: t) : nil)
+        form = core.syncAddSetLink(form: form, text: text)
         error = nil
     }
 
@@ -45,60 +33,48 @@ import SwiftUI
         if text != form.key { setKey(text) }
     }
 
-    func chooseFolder() {
+    /// A place picked in the Location popup.
+    func setLocation(_ path: String) { form = syncAddSetLocation(form: form, location: path) }
+
+    private func pick(_ p: SyncFolderPicker) -> String? {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.canCreateDirectories = true
-        panel.prompt = "Choose"
-        panel.message = "Choose a folder to keep the same on your devices"
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        form.folder = url.path
+        panel.prompt = p.prompt
+        panel.message = p.message
+        if let start = p.start { panel.directoryURL = URL(fileURLWithPath: start) }
+        guard panel.runModal() == .OK, let url = panel.url else { return nil }
+        return url.path
+    }
+
+    func chooseFolder() {
+        guard let path = pick(window.folderPicker) else { return }
+        form.folder = path
         error = nil
     }
 
     /// Where a shared folder goes: a parent folder; the folder itself is named after the link's name.
     func chooseLocation() {
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.canCreateDirectories = true
-        panel.prompt = "Choose"
-        panel.message = "Choose where the shared folder goes"
-        let start = (form.location as NSString).deletingLastPathComponent
-        if FileManager.default.fileExists(atPath: start) { panel.directoryURL = URL(fileURLWithPath: start) }
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        form.chooseParent(url.path)
+        guard let path = pick(window.locationPicker) else { return }
+        form = syncAddChooseParent(form: form, parent: path)
     }
 
-    /// Start: shares the folder, or joins the pasted one. `done` gets the new folder.
-    func start(done: @escaping (SyncFolder, SyncAddMode) -> Void) {
-        guard form.canStart, !busy else { return }
+    /// Start: shares the folder, or joins the pasted one. `done` gets the new folder and whether its Share dialog opens
+    /// next.
+    func start(done: @escaping (SyncFolder, Bool) -> Void) {
+        let w = window
+        guard w.canStart, !busy else { return }
         busy = true
         error = nil
         let (core, form) = (core, form)
-        let everywhere = form.mode == .local && follow.shown && allDevices
         Task {
             let r: Result<SyncFolder, Error> = await Task.detached(priority: .userInitiated) {
-                Result { () throws -> SyncFolder in
-                    let key = form.key.trimmingCharacters(in: .whitespacesAndNewlines)
-                    let f: SyncFolder
-                    switch (form.mode, form.onDemand) {
-                    case (.local, false): f = try core.syncAddFolder(path: form.folder)
-                    // Its files go into this Mac's storage before it ever opens: added whole or not at all.
-                    case (.local, true): f = try core.syncAddFolderOnDemand(path: form.folder)
-                    case (.shared, false): f = try core.syncJoin(keyOrLink: key, path: form.location)
-                    case (.shared, true): f = try core.syncJoinOnDemand(link: key, place: form.location)
-                    }
-                    // On all my devices: the others join it by themselves (this Mac is its owner).
-                    // (Added either way: the Edit sheet shows the toggle as it is.)
-                    if everywhere { try? core.syncSetFollow(id: f.id, on: true) }
-                    return f
-                }
+                Result { try core.syncAddStart(form: form) }
             }.value
             busy = false
             switch r {
-            case .success(let f): done(f, form.mode)
+            case .success(let f): done(f, w.shareAfterStart)
             case .failure(let e): error = SyncText.message(e)
             }
         }
@@ -129,6 +105,8 @@ struct ModalButtons: View {
     var enabled = true
     var busy = false
     var primaryHelp = ""
+    var cancelTitle = "Cancel"
+    var cancelHelp = "Close without changing anything"
     let cancel: () -> Void
     let confirm: () -> Void
 
@@ -136,7 +114,7 @@ struct ModalButtons: View {
         HStack(spacing: 8) {
             if busy { ProgressView().controlSize(.small) }
             Spacer(minLength: 0)
-            Button("Cancel", role: .cancel, action: cancel).keyboardShortcut(.cancelAction).help("Close without changing anything")
+            Button(cancelTitle, role: .cancel, action: cancel).keyboardShortcut(.cancelAction).help(cancelHelp)
             Button(primary, action: confirm).buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
                 .disabled(!enabled || busy).help(primaryHelp)
         }
@@ -146,34 +124,34 @@ struct ModalButtons: View {
 struct SyncAddView: View {
     @Bindable var model: SyncAddModel
     var cancel: () -> Void = {}
-    var done: (SyncFolder, SyncAddMode) -> Void = { _, _ in }
+    var done: (SyncFolder, Bool) -> Void = { _, _ in }
 
     var body: some View {
+        let w = model.window
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 3) {
-                ModalCaption(text: "Folder Sync")
-                Text("Add Folder").font(.system(size: 17, weight: .semibold))
+                ModalCaption(text: w.caption)
+                Text(w.title).font(.system(size: 17, weight: .semibold))
             }
             Picker("", selection: Binding(get: { model.form.mode }, set: { model.form.mode = $0; model.error = nil })) {
-                ForEach(syncAddModes(), id: \.self) { Text(syncAddModeLabel(mode: $0)).tag($0) }
+                ForEach(w.modes, id: \.mode) { Text($0.title).tag($0.mode) }
             }
             .pickerStyle(.segmented).labelsHidden()
             .padding(.top, 16)
             Group {
                 switch model.form.mode {
-                case .local: local
-                case .shared: shared
+                case .local: local(w)
+                case .shared: shared(w)
                 }
             }
             .padding(.top, 18)
-            onDemand.padding(.top, 14)
-            if model.form.mode == .local, model.follow.shown {
-                FollowToggle(line: model.follow, isOn: $model.allDevices).padding(.top, 10).padding(.leading, 92)
+            onDemand(w).padding(.top, 14)
+            if let follow = w.follow {
+                FollowToggle(line: follow, isOn: $model.form.allDevices).padding(.top, 10).padding(.leading, 92)
             }
             if let e = model.error { ModalError(text: e).padding(.top, 14) }
-            ModalButtons(primary: "Start", enabled: model.form.canStart, busy: model.busy,
-                         primaryHelp: model.form.mode == .local ? "Start syncing this folder" : "Join the shared folder",
-                         cancel: cancel, confirm: { model.start(done: done) })
+            ModalButtons(primary: w.confirmTitle, enabled: w.canStart, busy: model.busy, primaryHelp: w.confirmHelp,
+                         cancelTitle: w.cancelTitle, cancelHelp: w.cancelHelp, cancel: cancel, confirm: { model.start(done: done) })
                 .padding(.top, 22)
         }
         .padding(22)
@@ -181,17 +159,17 @@ struct SyncAddView: View {
         .background(.background)
     }
 
-    private var local: some View {
+    private func local(_ w: SyncAddWindowModel) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 10) {
-                Text("Folder").frame(width: 82, alignment: .leading)
-                Text(model.form.folder.isEmpty ? "No folder chosen" : Notifier.abbreviate(model.form.folder))
-                    .foregroundStyle(model.form.folder.isEmpty ? .secondary : .primary)
+                Text(w.folderLabel).frame(width: 82, alignment: .leading)
+                Text(w.folderText)
+                    .foregroundStyle(w.folderChosen ? .primary : .secondary)
                     .lineLimit(1).truncationMode(.middle)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                Button("Choose…", action: model.chooseFolder).help("Pick the folder to sync")
+                Button(w.chooseTitle, action: model.chooseFolder).help(w.chooseHelp)
             }
-            Text("You become its owner. After Start, Share… makes a link for each Mac that should join.")
+            Text(w.localNote)
                 .font(.system(size: 12)).foregroundStyle(.secondary)
                 .padding(.leading, 92)
                 .fixedSize(horizontal: false, vertical: true)
@@ -199,38 +177,37 @@ struct SyncAddView: View {
         .font(.system(size: 13))
     }
 
-    private var shared: some View {
+    private func shared(_ w: SyncAddWindowModel) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .firstTextBaseline, spacing: 10) {
-                Text("Link").frame(width: 82, alignment: .leading)
+                Text(w.linkLabel).frame(width: 82, alignment: .leading)
                 VStack(alignment: .leading, spacing: 5) {
-                    TextField("seedwell://sync/…", text: Binding(get: { model.form.key }, set: { model.editKey($0) }))
+                    TextField(w.linkPlaceholder, text: Binding(get: { model.form.key }, set: { model.editKey($0) }))
                         .textFieldStyle(.roundedBorder)
                         .accessibilityIdentifier("sync-key-field")
-                    if !model.form.keyLine.isEmpty {
-                        Label(model.form.keyLine, systemImage: model.form.keyUsable ? "checkmark.circle.fill" : "xmark.circle")
+                    if !w.linkLine.isEmpty {
+                        Label(w.linkLine, systemImage: w.linkOk ? "checkmark.circle.fill" : "xmark.circle")
                             .font(.system(size: 12))
-                            .foregroundStyle(model.form.keyUsable ? Color.secondary : Color.orange)
+                            .foregroundStyle(w.linkOk ? Color.secondary : Color.orange)
                             .accessibilityIdentifier("sync-key-line")
                     }
                 }
             }
             HStack(spacing: 10) {
-                Text("Location").frame(width: 82, alignment: .leading)
-                Picker("", selection: Binding(get: { model.form.location }, set: { v in
-                    if v == Self.choose { model.chooseLocation() } else { model.form.location = v; model.form.locationChosen = v != model.defaultLocation }
+                Text(w.locationLabel).frame(width: 82, alignment: .leading)
+                Picker("", selection: Binding(get: { w.location }, set: { v in
+                    if v == Self.choose { model.chooseLocation() } else { model.setLocation(v) }
                 })) {
-                    if locations.isEmpty { Text("Paste a link first").tag("") }
-                    ForEach(locations, id: \.self) { p in Text(Notifier.abbreviate(p)).tag(p) }
-                    if !locations.isEmpty { Divider() }
-                    Text("Choose…").tag(Self.choose)
+                    if w.locations.isEmpty { Text(w.locationPlaceholder).tag("") }
+                    ForEach(w.locations, id: \.path) { Text($0.title).tag($0.path) }
+                    if !w.locations.isEmpty { Divider() }
+                    Text(w.locationChoose).tag(Self.choose)
                 }
                 .labelsHidden()
-                .disabled(!model.form.keyUsable)
-                .help("Where the shared folder goes on this Mac")
+                .disabled(!w.locationEnabled)
+                .help(w.locationHelp)
             }
-            if model.form.keyUsable, let note = syncLocationNote(location: model.form.location, existing: model.existingFolder,
-                                                                 existingShown: model.existingFolder.map(Notifier.abbreviate) ?? "") {
+            if let note = w.locationNote {
                 Text(note).font(.system(size: 12)).foregroundStyle(.secondary)
                     .padding(.leading, 92)
                     .fixedSize(horizontal: false, vertical: true)
@@ -241,13 +218,13 @@ struct SyncAddView: View {
     }
 
     /// Files on demand (SPEC 7G.11), and what it means for this way in.
-    private var onDemand: some View {
+    private func onDemand(_ w: SyncAddWindowModel) -> some View {
         VStack(alignment: .leading, spacing: 5) {
-            Toggle(syncOnDemandLabel(), isOn: $model.form.onDemand)
-                .toggleStyle(.checkbox).help(syncOnDemandHelp())
+            Toggle(w.onDemandLabel, isOn: $model.form.onDemand)
+                .toggleStyle(.checkbox).help(w.onDemandHelp)
                 .accessibilityIdentifier("sync-on-demand")
-            if model.form.onDemand {
-                Text(model.form.mode == .local ? model.core.syncOnDemandAddNote(path: model.form.folder) : syncOnDemandNote(change: .join, placeShown: ""))
+            if let note = w.onDemandNote {
+                Text(note)
                     .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     .accessibilityIdentifier("sync-on-demand-note")
             }
@@ -257,33 +234,14 @@ struct SyncAddView: View {
     }
 
     private static let choose = "\u{1}choose"
-
-    /// The popup's places: the default for this link, and the one the user chose.
-    private var locations: [String] {
-        var out: [String] = []
-        if let d = model.defaultLocation { out.append(d) }
-        if let e = model.existingFolder { out.append(e) }
-        if !model.form.location.isEmpty, !out.contains(model.form.location) { out.append(model.form.location) }
-        return out
-    }
 }
 
-/// The edit modal's state. Name, location and options apply on Save.
+/// The edit modal's state. Name, location and options apply on Save. The form, its rules and every word are the
+/// core's (`Core::sync_edit_*`, trs-ffi `sync_dialogs.rs`).
 @MainActor @Observable final class SyncEditModel {
     @ObservationIgnored let core: Core
     let id: String
-    private(set) var folder: SyncFolder?
-    var name = ""
-    /// The new parent folder chosen with Move… (the folder keeps its name).
-    var newParent: String?
-    var paused = false
-    var lanOnly = false
-    /// Files on demand (SPEC 7G.11).
-    var onDemand = false
-    /// "On all my devices" (the core's line; hidden while this Mac is not paired).
-    private(set) var follow = FollowLine(shown: false, title: "", menuTitle: "", on: false, enabled: false, line: "")
-    var allDevices = false
-    var optionsOpen = false
+    var form: SyncEditForm
     /// The Finder's side of on-demand folders (its domain goes first when switching back to full).
     @ObservationIgnored var fileProvider: FileProviderHost?
     var error: String?
@@ -292,44 +250,36 @@ struct SyncAddView: View {
     init(core: Core, id: String) {
         self.core = core
         self.id = id
-        reload()
+        form = core.syncEditForm(id: id)
     }
 
-    func reload() {
-        folder = core.syncSnapshot().folders.first { $0.id == id }
-        if let f = folder {
-            name = f.name
-            paused = f.state == .paused
-            lanOnly = f.lanOnly
-            onDemand = f.onDemand
-        }
-        follow = core.syncFollowLine(id: id)
-        allDevices = follow.on
-    }
+    func reload() { form = core.syncEditForm(id: id) }
 
-    var parent: String { newParent ?? ((folder?.path ?? "") as NSString).deletingLastPathComponent }
-    var target: String { (parent as NSString).appendingPathComponent(name.trimmingCharacters(in: .whitespaces)) }
-    var changed: Bool {
-        folder.map { target != $0.path || paused != ($0.state == .paused) || lanOnly != $0.lanOnly || onDemand != $0.onDemand || allDevices != follow.on } ?? false
-    }
+    var folder: SyncFolder? { form.folder }
+    var name: String { get { form.name } set { form.name = newValue } }
+    var paused: Bool { get { form.paused } set { form.paused = newValue } }
+    var lanOnly: Bool { get { form.lanOnly } set { form.lanOnly = newValue } }
+    var onDemand: Bool { get { form.onDemand } set { form.onDemand = newValue } }
+    var allDevices: Bool { get { form.allDevices } set { form.allDevices = newValue } }
+    var optionsOpen: Bool { get { form.optionsOpen } set { form.optionsOpen = newValue } }
 
+    /// The dialog as the core draws it (Share… only with the Share dialog, which the Mac has).
+    var window: SyncEditWindowModel { syncEditWindow(form: form, share: hostWindowsAll().contains(.folderShare)) }
+    var changed: Bool { window.changed }
     /// What Files on demand means as it is set now (`nil` for a full folder that stays full).
-    var onDemandNote: String? {
-        guard let f = folder else { return nil }
-        let change: SyncOnDemandChange? = onDemand ? (f.onDemand ? .stays : .turnOn) : (f.onDemand ? .turnOff : nil)
-        return change.map { syncOnDemandNote(change: $0, placeShown: Notifier.abbreviate(f.path)) }
-    }
+    var onDemandNote: String? { window.onDemandNote }
 
     func move() {
+        let p = window.movePicker
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.canCreateDirectories = true
-        panel.prompt = "Move Here"
-        panel.message = "Choose where “\(name)” goes. It keeps its name."
-        if FileManager.default.fileExists(atPath: parent) { panel.directoryURL = URL(fileURLWithPath: parent) }
+        panel.prompt = p.prompt
+        panel.message = p.message
+        if let start = p.start { panel.directoryURL = URL(fileURLWithPath: start) }
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        newParent = url.path
+        form = syncEditChooseParent(form: form, parent: url.path)
         error = nil
     }
 
@@ -338,33 +288,17 @@ struct SyncAddView: View {
     }
 
     func save(done: @escaping () -> Void) {
-        guard let f = folder, !busy else { return }
-        if let p = syncFolderNameProblem(name: name) { error = p; return }
-        let (core, id, target, newName, moved) = (core, id, target, name.trimmingCharacters(in: .whitespaces), newParent != nil)
-        let pause = paused != (f.state == .paused) ? Optional(paused) : nil
-        let lan = lanOnly != f.lanOnly ? Optional(lanOnly) : nil
-        let mode = onDemand != f.onDemand ? Optional(onDemand) : nil
-        let everywhere = allDevices != follow.on ? Optional(allDevices) : nil
-        let place = target != f.path
-        let fp = fileProvider
+        guard folder != nil, !busy else { return }
+        let (core, form, fp) = (core, form, fileProvider)
+        let turnsOnDemand = form.onDemand && form.folder?.onDemand == false
         busy = true
         error = nil
         Task {
             // (Back to full: the core has the Finder's domain removed first, so the place is an ordinary folder again.)
-            let r: Result<Void, Error> = await Task.detached(priority: .userInitiated) {
-                Result {
-                    if mode == false { _ = try core.syncSetOnDemand(id: id, onDemand: false, path: nil) }
-                    if place, moved { _ = try core.syncMove(id: id, path: target) }
-                    else if place { _ = try core.syncRename(id: id, name: newName) }
-                    if let pause { try core.syncPause(id: id, paused: pause) }
-                    if let lan { try core.syncSetLanOnly(id: id, lanOnly: lan) }
-                    if mode == true { _ = try core.syncSetOnDemand(id: id, onDemand: true, path: nil) }
-                    if let everywhere { try core.syncSetFollow(id: id, on: everywhere) }
-                }
+            let r: Result<SyncFolder, Error> = await Task.detached(priority: .userInitiated) {
+                Result { try core.syncEditSave(form: form) }
             }.value
-            if mode == true, let now = core.syncSnapshot().folders.first(where: { $0.id == id }), now.onDemand {
-                await fp?.added(now)
-            }
+            if turnsOnDemand, case .success(let now) = r, now.onDemand { await fp?.added(now) }
             busy = false
             switch r {
             case .success: done()
@@ -381,22 +315,24 @@ struct SyncEditView: View {
     var done: () -> Void = {}
 
     var body: some View {
+        let w = model.window
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 3) {
-                ModalCaption(text: "Folder Sync")
-                Text(model.folder?.name ?? "Folder").font(.system(size: 17, weight: .semibold)).lineLimit(1).truncationMode(.middle)
-                if let f = model.folder {
-                    Text("\(SyncText.role(f.role)) · \(SyncText.subtitle(f))").font(.system(size: 13)).foregroundStyle(.secondary)
+                ModalCaption(text: w.caption)
+                Text(w.title).font(.system(size: 17, weight: .semibold)).lineLimit(1).truncationMode(.middle)
+                if let s = w.subtitle {
+                    Text(s).font(.system(size: 13)).foregroundStyle(.secondary)
                 }
             }
-            if model.folder == nil {
-                Text("This folder is no longer synced on this Mac.").foregroundStyle(.secondary).padding(.top, 16)
+            if let gone = w.gone {
+                Text(gone).foregroundStyle(.secondary).padding(.top, 16)
             } else {
-                form.padding(.top, 18)
+                form(w).padding(.top, 18)
             }
             if let e = model.error { ModalError(text: e).padding(.top, 14) }
-            ModalButtons(primary: "Save", enabled: model.folder != nil, busy: model.busy, primaryHelp: "Apply the new name, place and options",
-                         cancel: cancel, confirm: { model.changed ? model.save(done: done) : done() })
+            ModalButtons(primary: w.confirmTitle, enabled: w.canSave, busy: model.busy, primaryHelp: w.confirmHelp,
+                         cancelTitle: w.cancelTitle, cancelHelp: w.cancelHelp,
+                         cancel: cancel, confirm: { w.changed ? model.save(done: done) : done() })
                 .padding(.top, 22)
         }
         .padding(22)
@@ -404,62 +340,62 @@ struct SyncEditView: View {
         .background(.background)
     }
 
-    private var form: some View {
+    private func form(_ w: SyncEditWindowModel) -> some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(spacing: 10) {
-                Text("Name").frame(width: 82, alignment: .leading)
+                Text(w.nameLabel).frame(width: 82, alignment: .leading)
                 TextField("", text: $model.name).textFieldStyle(.roundedBorder)
-                    .help("Renames the folder on this Mac only. Other devices keep their own name.")
+                    .help(w.nameHelp)
                     .accessibilityIdentifier("sync-name-field")
             }
             HStack(spacing: 10) {
-                Text("Location").frame(width: 82, alignment: .leading)
-                Text(model.folder.map { syncPlaceLine(folder: $0, pathShown: Notifier.abbreviate(model.parent)) } ?? "")
-                    .foregroundStyle(model.newParent == nil ? .secondary : .primary)
+                Text(w.locationLabel).frame(width: 82, alignment: .leading)
+                Text(w.location)
+                    .foregroundStyle(w.locationMoved ? .primary : .secondary)
                     .lineLimit(1).truncationMode(.middle)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .help(model.target)
+                    .help(w.locationHelp)
                 // An on-demand folder is where the Finder shows it; it moves once it is full again.
-                Button("Move…", action: model.move).help("Choose another folder for it on this Mac; it keeps its name")
-                    .disabled(model.folder?.onDemand == true)
+                Button(w.moveTitle, action: model.move).help(w.moveHelp)
+                    .disabled(!w.moveEnabled)
             }
             Divider().padding(.vertical, 2)
             VStack(alignment: .leading, spacing: 5) {
-                Toggle(syncOnDemandLabel(), isOn: $model.onDemand)
-                    .toggleStyle(.switch).controlSize(.small).help(syncOnDemandHelp())
+                Toggle(w.onDemandLabel, isOn: $model.onDemand)
+                    .toggleStyle(.switch).controlSize(.small).help(w.onDemandHelp)
                     .accessibilityIdentifier("sync-edit-on-demand")
-                if let note = model.onDemandNote {
+                if let note = w.onDemandNote {
                     Text(note).font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
             }
-            if model.follow.shown {
+            if let follow = w.follow {
                 Divider().padding(.vertical, 2)
-                FollowToggle(line: model.follow, isOn: $model.allDevices)
+                FollowToggle(line: follow, isOn: $model.allDevices)
             }
             Divider().padding(.vertical, 2)
             VStack(alignment: .leading, spacing: 8) {
-                ModalCaption(text: "Share")
+                ModalCaption(text: w.shareCaption)
                 HStack(spacing: 10) {
-                    Text(shareNote).font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    Text(w.shareNote).font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     Spacer(minLength: 8)
-                    if let f = model.folder, SyncText.canShare(f.role) {
-                        Button("Share…") { actions.showShare(f.id) }.help("Make a link that lets another Mac join this folder")
+                    if let share = w.shareTitle {
+                        Button(share) { actions.showShare(model.id) }.help(w.shareHelp)
                             .accessibilityIdentifier("sync-edit-share")
                     }
                 }
             }
             Divider().padding(.vertical, 2)
-            DisclosureGroup("Options", isExpanded: $model.optionsOpen) {
+            DisclosureGroup(w.optionsTitle, isExpanded: $model.optionsOpen) {
                 VStack(alignment: .leading, spacing: 10) {
-                    Toggle("Pause syncing", isOn: $model.paused)
+                    Toggle(w.pauseLabel, isOn: $model.paused)
                         .toggleStyle(.switch).controlSize(.small)
-                        .help("Stop sending and receiving changes for this folder until you resume")
-                    Toggle("Only sync on the local network", isOn: $model.lanOnly)
+                        .help(w.pauseHelp)
+                    Toggle(w.lanLabel, isOn: $model.lanOnly)
                         .toggleStyle(.switch).controlSize(.small)
-                        .help("Sync this folder only with devices on the same network as this Mac, never over the Internet")
+                        .help(w.lanHelp)
                     HStack(spacing: 10) {
-                        Button("Rescan Now", action: model.rescan).help("Look at every file of the folder again now")
-                        Text("Changes are seen within seconds; a full scan also runs every hour.")
+                        Button(w.rescanTitle, action: model.rescan).help(w.rescanHelp)
+                        Text(w.rescanNote)
                             .font(.system(size: 11.5)).foregroundStyle(.secondary)
                     }
                 }
@@ -468,8 +404,6 @@ struct SyncEditView: View {
         }
         .font(.system(size: 13))
     }
-
-    private var shareNote: String { model.folder.map { syncEditShareNote(role: $0.role) } ?? "" }
 }
 
 /// "On all my devices" (SPEC §7G.1 "Your devices"): the core's title, its line under it, and whether it may be switched.
@@ -482,7 +416,7 @@ struct FollowToggle: View {
             Toggle(line.title, isOn: $isOn)
                 .toggleStyle(.switch).controlSize(.small)
                 .disabled(!line.enabled)
-                .help("Put it on every device paired with this Mac: they join it by themselves")
+                .help(line.help)
                 .accessibilityIdentifier("sync-all-devices")
             if !line.line.isEmpty {
                 Text(line.line).font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
@@ -510,12 +444,12 @@ struct FollowToggle: View {
             return
         }
         let model = SyncAddModel(core: actions.core, prefill: prefill ?? actions.pastedKey())
-        let view = SyncAddView(model: model, cancel: { [weak self] in self?.closeAdd() }, done: { [weak self] f, mode in
+        let view = SyncAddView(model: model, cancel: { [weak self] in self?.closeAdd() }, done: { [weak self] f, share in
             self?.closeAdd()
             // On demand: its domain now, and the window that asks the user to allow it when macOS keeps it off.
             if f.onDemand, let fp = actions.fileProvider { Task { await fp.added(f) } }
             // A folder shared from this Mac: the next step is sharing it.
-            if mode == .local { self?.showShare(id: f.id, actions: actions) }
+            if share { self?.showShare(id: f.id, actions: actions) }
         })
         let w = makeWindow(NSHostingController(rootView: view), id: "sync-add")
         add = (w, model)

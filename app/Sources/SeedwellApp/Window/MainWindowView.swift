@@ -64,12 +64,14 @@ struct SidebarView: View {
                             .contextMenu { MenuEntriesView(entries: SidebarMenus.entries(for: c.item.place, model: model, commands: commands)) }
                     }
                 }
-                Button { commands.chat.showNew() } label: {
-                    Label(sb.chats.add.title, systemImage: "plus").foregroundStyle(.secondary)
+                if let add = sb.chats.add {
+                    Button { commands.chat.showNew() } label: {
+                        Label(add.title, systemImage: "plus").foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help(add.help)
+                    .accessibilityIdentifier("chat-new-channel")
                 }
-                .buttonStyle(.plain)
-                .help(sb.chats.add.help)
-                .accessibilityIdentifier("chat-new-channel")
             }
             // Private conversations (end-to-end encrypted, carried by the channels' members).
             if let directs = sb.directs {
@@ -152,8 +154,10 @@ enum SidebarSymbols {
             switch e {
             case .separator:
                 return .separator
-            case let .item(title, command, destructive):
-                return .item(title, role: destructive ? .destructive : .normal) { run(command, on: place, commands: commands) }
+            case let .item(title, command, destructive, checked, enabled, _):
+                return .item(title, checked: checked, enabled: enabled, role: destructive ? .destructive : .normal) {
+                    run(command, on: place, commands: commands)
+                }
             }
         }
     }
@@ -180,6 +184,8 @@ enum SidebarSymbols {
             case .unmute: chat.setMuted(c, false)
             case .renameChannel: chat.rename(c)
             case .leaveChannel: chat.leave(c)
+            case .channelAgents: chat.askAgents(c)
+            case .setFollow(let on): chat.setFollow(c, on)
             default: break
             }
         default:
@@ -366,7 +372,10 @@ struct TitleToolbarItem: ToolbarContent {
                 if favorite { Image(systemName: "star.fill").font(.system(size: 12)).foregroundStyle(Color.accentColor.opacity(0.85)).accessibilityHidden(true) }
                 Text(title).font(.system(size: 18, weight: .semibold)).lineLimit(1)
             }
-            Text(summary).font(.system(size: 11.5)).foregroundStyle(.secondary).monospacedDigit().lineLimit(1)
+            // A page without a line (Settings) has its title alone.
+            if !summary.isEmpty {
+                Text(summary).font(.system(size: 11.5)).foregroundStyle(.secondary).monospacedDigit().lineLimit(1)
+            }
         }
         .fixedSize()
         .accessibilityElement(children: .contain)

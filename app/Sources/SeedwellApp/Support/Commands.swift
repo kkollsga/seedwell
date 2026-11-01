@@ -18,6 +18,8 @@ indirect enum MenuEntry {
     /// Wired by the app delegate.
     var showMain: (_ section: LibraryModel.Section?, _ info: String?) -> Void = { _, _ in }
     var showSettings: (_ tab: SettingsTab?) -> Void = { _ in }
+    /// Settings › Devices with Pair with a Link… open on this link (a `seedwell://devices/` link opened the app).
+    var pairDevice: (_ link: String) -> Void = { _ in }
     /// Opens the main window on a tracker's Info page.
     var showTrackerInfo: (_ id: String) -> Void = { _ in }
     /// The main window with the "Add a Download" sheet (magnet link or URL) open.
@@ -68,6 +70,20 @@ indirect enum MenuEntry {
 
     func add(urls: [URL]) {
         for url in urls { add(url.isFileURL ? url.path : url.absoluteString) }
+    }
+
+    /// Opens what a link asks for, as the core routes it (`Core.routeLink`).
+    func open(_ route: LinkRoute) {
+        switch route {
+        case .addFolder(let link): sync.showAdd(link)
+        case .joinChannel(let link): chat.showNew(prefill: link)
+        case .pairDevice(let link): pairDevice(link)
+        case .sharePath(let path): sync.share(path: path)
+        case .showFolder(let id): sync.showFolder(id, false)
+        case .shareFolder(let id): sync.showShare(id)
+        case .addSource(let source): add(source)
+        case let .problem(title, text): alert(title, text)
+        }
     }
 
     func chooseTorrentFile() {
@@ -195,8 +211,8 @@ indirect enum MenuEntry {
         guard let picked = FolderPicker.choose(start: rows.first?.savePath ?? "~") else { return }
         do {
             let r = try core.moveTo(ids: rows.map(\.id), path: core.expandPath(path: picked))
-            if !r.refused.isEmpty { alert("Not moved", r.refused.prefix(3).joined(separator: "\n")) }
-        } catch { alert("Not moved", "\(error)") }
+            if let a = moveFailed(result: r) { alert(a.title, a.text) }
+        } catch { let a = moveError(error: (error as? CoreError) ?? .Failed(message: "\(error)")); alert(a.title, a.text) }
     }
 
     // MARK: Menu model (SPEC §8.5): the list is the core's (`rowCommands`); the app draws it and runs its commands.
@@ -208,7 +224,7 @@ indirect enum MenuEntry {
         let info = single ? try? core.info(id: first.id) : nil
         let play = single ? playOffer(first) : nil
         let list = rowCommands(rows: rows, info: info, rules: core.rulesLoad().rules, play: play,
-                               inMenuBar: inMenuBar, chooserAvailable: chooserAvailable)
+                               inMenuBar: inMenuBar, chooserAvailable: chooserAvailable, host: hostWindowsAll())
         return draw(list, rows: rows, videos: play?.videos ?? [], inMenuBar: inMenuBar)
     }
 

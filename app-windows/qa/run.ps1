@@ -11,8 +11,8 @@
   minutes before they start, the most the setting allows, and the checks end long before), and nothing else reaches
   the network either (no DHT, PEX, LSD, UPnP or NAT-PMP).
 
-  Checks: render, handoff, separate, gate, selection, removal, info, alert, trash, choice, notray, settings, quit (all
-  of them: all, the default).
+  Checks: render, handoff, separate, gate, selection, keys, removal, info, alert, trash, choice, move, add, chat,
+  dialogs, newchannel, links, tray, scheme, rendezvous, follow, notray, settings, quit (all of them: all, the default).
   -Build builds the app first (build.ps1; -CoreProfile Debug builds its core from the debug test build, as CI does).
   -Out keeps the pictures in <dir> (default: a temp folder, printed).
   Needs the seedwell CLI: target\debug\seedwell.exe (built with cargo when missing).
@@ -31,7 +31,7 @@ $Repo = Split-Path $App -Parent
 $Exe = Join-Path $App 'bin\x64\Release\net10.0-windows10.0.19041.0\win-x64\Seedwell.exe'
 $Cli = Join-Path $Repo 'target\debug\seedwell.exe'
 $Fixtures = Join-Path $Repo 'crates\metainfo\tests\fixtures'
-$All = @('render', 'handoff', 'separate', 'gate', 'selection', 'removal', 'info', 'alert', 'trash', 'choice', 'notray', 'settings', 'quit')
+$All = @('render', 'handoff', 'separate', 'gate', 'selection', 'keys', 'removal', 'info', 'alert', 'trash', 'choice', 'move', 'add', 'chat', 'dialogs', 'newchannel', 'links', 'tray', 'scheme', 'rendezvous', 'follow', 'notray', 'settings', 'quit')
 
 if ($Build) {
   & powershell -NoProfile -File (Join-Path $App 'build.ps1') -CoreProfile $CoreProfile | Out-Host
@@ -70,7 +70,7 @@ function WaitFor([scriptblock]$test, [int]$ms, [string]$what) {
 # A temporary state: its own folders, .torrent files left where they are, new torrents held ten minutes (no tracker is
 # asked), no network beyond its own port (no DHT, PEX, LSD, UPnP or NAT-PMP: nothing reaches the router or the
 # Internet), agents read-only (the checks read the core through the CLI).
-function New-State {
+function New-State([string]$permission = 'read_only') {
   $dir = Join-Path ([IO.Path]::GetTempPath()) "seedwell-qa-$([Guid]::NewGuid().ToString('N').Substring(0, 8))"
   New-Item -ItemType Directory -Force "$dir\state", "$dir\dl" | Out-Null
   @"
@@ -93,7 +93,7 @@ torrent_after_add = "leave"
 watch = []
 
 [agents]
-permission = "read_only"
+permission = "$permission"
 "@ | Set-Content -Encoding utf8 "$dir\state\config.toml"
   $dir
 }
@@ -139,6 +139,11 @@ function Qa([string]$dir, [string[]]$words) {
   WaitFor { Log $dir | Select-Object -Skip $before | Where-Object { $_ -like "*$pattern*" -or $_ -like '*qa refused*' } | Select-Object -Last 1 } 10000 "'$pattern' in app.log"
 }
 
+# Folder sync starts in the background, a moment after the core answers.
+function WaitForSync([string]$dir) {
+  WaitFor { & $Cli --socket "$dir\state\control.sock" sync settings 2>&1 | Out-Null; $LASTEXITCODE -eq 0 } 20000 'folder sync to start' | Out-Null
+}
+
 function Stop-App([string]$dir, $p) {
   if ($p -and -not $p.HasExited) {
     Launch $dir @('--quit') | Out-Null
@@ -171,7 +176,7 @@ $checks.render = {
     if ($front -gt 0) { Fail "the $theme render held the foreground ($front samples)" }
   }
   $pictures = @(Get-ChildItem $dir -Filter *.png | ForEach-Object FullName)
-  foreach ($must in 'menu-dark', 'menu-sync-confirm-light', 'row-menu-dark', 'remove-light', 'library-downloads-dark', 'library-info-light', 'library-removal-dark', 'library-foldersync-light', 'file-icons-dark', 'tray-both-32') {
+  foreach ($must in 'menu-dark', 'menu-sync-confirm-light', 'row-menu-dark', 'remove-light', 'library-downloads-dark', 'library-info-light', 'library-removal-dark', 'library-foldersync-light', 'library-settings-dark', 'channel-menu-light', 'tray-menu-dark', 'new-channel-light', 'new-channel-join-dark', 'dialog-new-topic-dark', 'dialog-leave-light', 'dialog-agents-dark', 'file-icons-dark', 'tray-both-32') {
     if (-not (Test-Path "$dir\$must.png")) { Fail "missing $must.png" }
   }
   $pictures
@@ -184,7 +189,7 @@ $checks.handoff = {
     $ms = Launch $dir @($fixture.debian)
     if ($ms -gt 5000) { Fail "the second launch took $ms ms to hand over" }
     WaitFor { List $dir | Where-Object { $_ -match 'pending' -and $_ -match 'Debian' } } 10000 'the added torrent, held' | Out-Null
-    WaitFor { Log $dir | Where-Object { $_ -like '*second launch: 1 to add*' } } 5000 'the hand-off in app.log' | Out-Null
+    WaitFor { Log $dir | Where-Object { $_ -like '*second launch: 1 to open*' } } 5000 'the hand-off in app.log' | Out-Null
   } finally { Stop-App $dir $p; Remove-Item -Recurse -Force $dir }
   @()
 }
@@ -250,6 +255,29 @@ $checks.selection = {
     Copy-Item "$dir\state\qa\selection.png" "$Out\selection.png"
   } finally { Stop-App $dir $p; Remove-Item -Recurse -Force $dir }
   @("$Out\selection.png")
+}
+
+# Keys through the Library (the window's handler calls the same), in the list as when it has the focus: Down moves the
+# selection to the next row, Up back, Ctrl+A selects every row.
+$checks.keys = {
+  $dir = New-State
+  $p = Start-App $dir -QaControl -extra @($fixture.debian, $fixture.ubuntu)
+  try {
+    WaitFor { (List $dir | Where-Object { $_ -match 'pending' }).Count -ge 2 } 10000 'both torrents' | Out-Null
+    Qa $dir @('window') | Out-Null
+    $one = Qa $dir @('rowclick', 'debian')
+    if ($one -notmatch 'selection \[([0-9a-f]{40})\]') { Fail "a click did not select one row: $one" }
+    $first = $Matches[1]
+    $down = Qa $dir @('key', 'down', 'list')
+    if ($down -notmatch 'handled True.*selection \[([0-9a-f]{40})\]' -or $Matches[1] -eq $first) { Fail "Down did not move the selection: $down" }
+    $up = Qa $dir @('key', 'up', 'list')
+    if ($up -notmatch "selection \[$first\]") { Fail "Up did not move it back: $up" }
+    $all = Qa $dir @('key', 'a', 'command', 'list')
+    if ($all -notmatch 'selection \[[0-9a-f]{40}, [0-9a-f]{40}\]') { Fail "Ctrl+A did not select both rows: $all" }
+    Qa $dir @('shot', 'keys') | Out-Null
+    Copy-Item "$dir\state\qa\keys.png" "$Out\keys.png"
+  } finally { Stop-App $dir $p; Remove-Item -Recurse -Force $dir }
+  @("$Out\keys.png")
 }
 
 $checks.removal = {
@@ -374,6 +402,259 @@ $checks.choice = {
   @("$Out\choice.png")
 }
 
+# Move to…: the folder the dialog would answer goes to move_to. The torrent is held (it waits ten minutes), so the core
+# refuses it with its reason, which is logged (NEED: shown, once Rust has the alert).
+$checks.move = {
+  $dir = New-State
+  New-Item -ItemType Directory -Force "$dir\moved" | Out-Null
+  $p = Start-App $dir -QaControl -extra @($fixture.debian)
+  try {
+    WaitFor { List $dir | Where-Object { $_ -match 'Debian' } } 10000 'the torrent' | Out-Null
+    Qa $dir @('window') | Out-Null
+    Qa $dir @('move', 'debian', "$dir\moved") | Out-Null
+    $line = WaitFor { Log $dir | Where-Object { $_ -like '*move to *' -or $_ -like '*move failed:*' } | Select-Object -Last 1 } 5000 'the move in app.log'
+    if ($line -notmatch 'move to .*moved: (1 queued, 0 refused|0 queued, 1 refused)') { Fail "the move did not reach the core: $line" }
+    if ($line -match '1 refused' -and -not (Log $dir | Where-Object { $_ -like '*move refused: ?*' })) { Fail 'a refusal without its reason' }
+    if (Log $dir | Where-Object { $_ -like '*placeholder:*' }) { Fail 'a placeholder opened' }
+  } finally { Stop-App $dir $p; Remove-Item -Recurse -Force $dir }
+  @()
+}
+
+# Add Torrent File… (Ctrl+O) opens the Open dialog (logged in a QA run); the flyout's "+N more" and Sharing lines open
+# their places in the window.
+$checks.add = {
+  $dir = New-State
+  $p = Start-App $dir -QaControl
+  try {
+    Qa $dir @('add-file') | Out-Null
+    WaitFor { Log $dir | Where-Object { $_ -like '*open dialog: .torrent files*' } } 5000 'the Open dialog' | Out-Null
+    $sharing = Qa $dir @('menu-line', 'sharing')
+    if ($sharing -notmatch 'place Sharing') { Fail "the Sharing line did not open Sharing: $sharing" }
+    $more = Qa $dir @('menu-line', 'more')
+    if ($more -notmatch 'place Downloads') { Fail "+N more did not open Downloads: $more" }
+  } finally { Stop-App $dir $p; Remove-Item -Recurse -Force $dir }
+  @()
+}
+
+# A channel's sidebar menu: Mute and Unmute, and Agents No and Yes (this PC made it: its owner). The channel is made
+# through the CLI on the temp state (agents may control there) and never leaves it (no network).
+$checks.chat = {
+  $dir = New-State 'control'
+  $p = Start-App $dir -QaControl
+  try {
+    WaitForSync $dir
+    & $Cli --socket "$dir\state\control.sock" chat new 'QA-Channel' | Out-Null
+    if ($LASTEXITCODE -ne 0) { Fail "the CLI could not make a channel (exit $LASTEXITCODE)" }
+    Qa $dir @('window') | Out-Null
+    $muted = Qa $dir @('sidebar', 'qa-channel', 'Mute')
+    if ($muted -notmatch 'channel muted True') { Fail "Mute did not mute: $muted" }
+    # The sidebar follows a change the core makes in place (the same items, a muted icon).
+    if ($muted -notmatch 'drawn muted True') { Fail "the sidebar still draws the channel unmuted: $muted" }
+    Qa $dir @('shot', 'chat-muted') | Out-Null
+    Copy-Item "$dir\state\qa\chat-muted.png" "$Out\chat-muted.png"
+    $unmuted = Qa $dir @('sidebar', 'qa-channel', 'Unmute')
+    if ($unmuted -notmatch 'channel muted False, .*drawn muted False') { Fail "Unmute did not unmute: $unmuted" }
+    # Agents: Yes… asks first (the core's chat_agents_dialog), then switches it the other way.
+    $asked = Qa $dir @('sidebar', 'qa-channel', 'ChannelAgents')
+    if ($asked -notmatch 'agents True') { Fail "the question changed the channel before it was answered: $asked" }
+    $confirmed = Qa $dir @('dialog', 'confirm')
+    if ($confirmed -notmatch 'dialog none') { Fail "the Agents question did not close: $confirmed" }
+    $closed = Qa $dir @('sidebar', 'qa-channel', 'Mute')
+    if ($closed -notmatch 'agents False') { Fail "Agents: No did not close it: $closed" }
+    Qa $dir @('sidebar', 'qa-channel', 'Unmute') | Out-Null
+  } finally { Stop-App $dir $p; Remove-Item -Recurse -Force $dir }
+  @("$Out\chat-muted.png")
+}
+
+# The chat dialogs from a channel's sidebar menu, each drawn from the core's ChatDialog and checked by
+# chat_dialog_check: New Topic (empty: Start disabled; a title: the topic is made and opens), Rename (the core's name
+# check, then renamed), Wake Command (saved), Leave (the channel is gone). The channel is made through the CLI on the
+# temp state and never leaves it.
+$checks.dialogs = {
+  $dir = New-State 'control'
+  $p = Start-App $dir -QaControl
+  try {
+    WaitForSync $dir
+    & $Cli --socket "$dir\state\control.sock" chat new 'QA-Channel' | Out-Null
+    if ($LASTEXITCODE -ne 0) { Fail "the CLI could not make a channel (exit $LASTEXITCODE)" }
+    Qa $dir @('window') | Out-Null
+    function Shot([string]$name) { Qa $dir @('shot', $name, 'dialog') | Out-Null; Copy-Item "$dir\state\qa\$name.png" "$Out\$name.png" }
+    $topic = Qa $dir @('sidebar', 'qa-channel', 'NewTopic')
+    if ($topic -match 'no such entry') { Fail "no New Topic… in the channel menu: $topic" }
+    $empty = Qa $dir @('dialog', 'confirm')
+    if ($empty -notmatch 'not confirmed') { Fail "an empty topic title could start: $empty" }
+    Qa $dir @('dialog', 'type', 'Plans') | Out-Null
+    Shot 'dialog-new-topic'
+    $made = Qa $dir @('dialog', 'confirm')
+    if ($made -notmatch 'place Chat') { Fail "the new topic did not open: $made" }
+    $topics = (& $Cli --socket "$dir\state\control.sock" chat topics 'QA-Channel' 2>&1) -join ' '
+    if ($topics -notmatch 'Plans') { Fail "the topic was not made: $topics" }
+    Qa $dir @('sidebar', 'qa-channel', 'RenameChannel') | Out-Null
+    Qa $dir @('dialog', 'type', 'Renamed') | Out-Null
+    Shot 'dialog-rename'
+    Qa $dir @('dialog', 'confirm') | Out-Null
+    $names = (& $Cli --socket "$dir\state\control.sock" chat list 2>&1) -join ' '
+    if ($names -notmatch 'Renamed') { Fail "the channel was not renamed: $names" }
+    Qa $dir @('wake-command', 'renamed') | Out-Null
+    Qa $dir @('dialog', 'type', 'cmd /c exit 0') | Out-Null
+    Shot 'dialog-wake-command'
+    Qa $dir @('dialog', 'confirm') | Out-Null
+    if (-not (Log $dir | Where-Object { $_ -like '*chat dialog WakeCommand: done*' })) { Fail 'the wake command was not saved' }
+    Qa $dir @('sidebar', 'renamed', 'LeaveChannel') | Out-Null
+    Shot 'dialog-leave'
+    $left = Qa $dir @('dialog', 'confirm')
+    if ($left -notmatch 'dialog none') { Fail "Leave did not close: $left" }
+    WaitFor { -not ((& $Cli --socket "$dir\state\control.sock" chat list 2>&1) -join ' ' -match 'Renamed') } 5000 'the channel to be left' | Out-Null
+    if (Log $dir | Where-Object { $_ -like '*placeholder*' }) { Fail 'a placeholder opened' }
+  } finally { Stop-App $dir $p; Remove-Item -Recurse -Force $dir }
+  @('dialog-new-topic', 'dialog-rename', 'dialog-wake-command', 'dialog-leave') | ForEach-Object { "$Out\$_.png" }
+}
+
+# New Channel / Join with a Link: the New side makes a channel (named as typed, Agents as chosen) and opens it; the
+# Join side reads a link through the core and says why one cannot be joined (Start stays off).
+$checks.newchannel = {
+  $dir = New-State 'control'
+  $p = Start-App $dir -QaControl
+  $pictures = @()
+  try {
+    WaitForSync $dir
+    Qa $dir @('window') | Out-Null
+    $opened = Qa $dir @('new-channel', 'open')
+    if ($opened -notmatch 'new channel New, can start False') { Fail "New Channel did not open empty: $opened" }
+    Qa $dir @('new-channel', 'name', 'Family') | Out-Null
+    $ready = Qa $dir @('new-channel', 'agents', 'yes')
+    if ($ready -notmatch 'can start True') { Fail "a name did not enable Start: $ready" }
+    Qa $dir @('shot', 'new-channel', 'dialog') | Out-Null
+    Copy-Item "$dir\state\qa\new-channel.png" "$Out\new-channel.png"; $pictures += "$Out\new-channel.png"
+    $started = Qa $dir @('new-channel', 'start')
+    if ($started -notmatch 'started.*place Chat') { Fail "Start did not make and open the channel: $started" }
+    $list = (& $Cli --socket "$dir\state\control.sock" chat list 2>&1) -join ' '
+    if ($list -notmatch 'Family') { Fail "no channel Family: $list" }
+    Qa $dir @('new-channel', 'open') | Out-Null
+    Qa $dir @('new-channel', 'mode', 'join') | Out-Null
+    $bad = Qa $dir @('new-channel', 'link', 'seedwell://chat/not-a-real-link')
+    if ($bad -notmatch 'new channel Join, can start False, link line "[^"]+"') { Fail "a broken link was not refused with the core's line: $bad" }
+    Qa $dir @('shot', 'new-channel-join', 'dialog') | Out-Null
+    Copy-Item "$dir\state\qa\new-channel-join.png" "$Out\new-channel-join.png"; $pictures += "$Out\new-channel-join.png"
+    Qa $dir @('new-channel', 'cancel') | Out-Null
+  } finally { Stop-App $dir $p; Remove-Item -Recurse -Force $dir }
+  $pictures
+}
+
+# seedwell:// links: through the single-instance hand-off (a second launch with the link, as Windows starts the app for
+# a registered scheme) a channel link opens New Channel on Join with the link filled in; an unknown kind and a folder
+# that is not synced here are the core's alerts; a pairing link opens Settings.
+$checks.links = {
+  $dir = New-State
+  $p = Start-App $dir -QaControl
+  try {
+    Qa $dir @('window') | Out-Null
+    Launch $dir @('seedwell://chat/not-a-real-link') | Out-Null
+    WaitFor { Log $dir | Where-Object { $_ -like '*second launch: 1 to open*' } } 5000 'the hand-off' | Out-Null
+    WaitFor { Log $dir | Where-Object { $_ -like '*new channel: open on Join*' } } 5000 'New Channel on Join' | Out-Null
+    $join = Qa $dir @('new-channel', 'status')
+    if ($join -notmatch 'link line "[^"]+"') { Fail "the link was not filled in and read: $join" }
+    Qa $dir @('new-channel', 'cancel') | Out-Null
+    Launch $dir @('seedwell://nonsense/x') | Out-Null
+    $unknown = WaitFor { Log $dir | Where-Object { $_ -like '*alert: *' } | Select-Object -Last 1 } 5000 'the alert for an unknown link'
+    if ($unknown -notmatch "Couldn't open the link") { Fail "an unknown link: $unknown" }
+    $before = @(Log $dir | Where-Object { $_ -like '*alert: *' }).Count
+    Qa $dir @('link', 'seedwell://folder/NOPE') | Out-Null
+    $gone = WaitFor { $a = @(Log $dir | Where-Object { $_ -like '*alert: *' }); if ($a.Count -gt $before) { $a[-1] } } 5000 'the alert for a folder not synced'
+    if ($gone -notmatch 'no longer synced') { Fail "a folder not synced here: $gone" }
+    $pair = Qa $dir @('link', 'seedwell://devices/not-a-real-link')
+    if ($pair -notmatch 'place Settings') { Fail "a pairing link did not open Settings: $pair" }
+    WaitFor { Log $dir | Where-Object { $_ -like '*devices: pair with a link (filled in)*' } } 5000 'Pair with a Link, filled in' | Out-Null
+  } finally { Stop-App $dir $p; Remove-Item -Recurse -Force $dir }
+  @()
+}
+
+# The tray's right-click menu from the core's app commands: Add Torrent File…, Add Magnet Link or URL…, Pause All,
+# Resume All, Limit Speed, then Open and Quit; Limit Speed switches the alternative speed on and draws its check mark;
+# Add Magnet Link or URL… opens the window's add sheet.
+$checks.tray = {
+  $dir = New-State
+  $p = Start-App $dir -QaControl
+  try {
+    $menu = Qa $dir @('tray-menu')
+    foreach ($t in 'Add Torrent File', 'Add Magnet Link or URL', 'Pause All', 'Resume All', 'Limit Speed', 'Quit') {
+      if ($menu -notmatch [regex]::Escape($t)) { Fail "the tray menu has no $t`: $menu" }
+    }
+    Qa $dir @('app-command', 'SetLimitSpeed') | Out-Null
+    $on = Qa $dir @('tray-menu')
+    if ($on -notmatch 'Limit Speed \[x\]') { Fail "Limit Speed is not checked after it was switched on: $on" }
+    Qa $dir @('app-command', 'AddLink') | Out-Null
+    WaitFor { Log $dir | Where-Object { $_ -like '*app command AddLink*' } } 5000 'the add sheet' | Out-Null
+  } finally { Stop-App $dir $p; Remove-Item -Recurse -Force $dir }
+  @()
+}
+
+# The seedwell: scheme's registration under the test seam (SEEDWELL_INSTALL_TEST=1: HKCU\Software\SeedwellInstallTest,
+# never the real Classes key): --register writes it with the app's open command, --unregister removes it, and the
+# real key is the same before and after.
+$checks.scheme = {
+  $real = 'HKCU:\Software\Classes\seedwell\shell\open\command'
+  function RealValue { $k = Get-Item $real -ErrorAction SilentlyContinue; if ($k) { $k.GetValue('') } else { '' } }
+  $realBefore = RealValue
+  $test = 'HKCU:\Software\SeedwellInstallTest\Classes\seedwell'
+  $env:SEEDWELL_INSTALL_TEST = '1'
+  try {
+    Start-Process $Exe -ArgumentList '--register' -Wait
+    if (-not (Test-Path $test)) { Fail 'no seedwell: key after --register' }
+    if ((Get-ItemProperty $test).'URL Protocol' -ne '') { Fail 'the seedwell: key is not a URL protocol' }
+    $cmd = (Get-Item "$test\shell\open\command").GetValue('')
+    if ($cmd -notlike "*Seedwell.exe*%1*") { Fail "its open command: $cmd" }
+    Start-Process $Exe -ArgumentList '--unregister' -Wait
+    if (Test-Path $test) { Fail 'the seedwell: key is left after --unregister' }
+  } finally {
+    Remove-Item env:SEEDWELL_INSTALL_TEST
+    Remove-Item -Recurse -Force 'HKCU:\Software\SeedwellInstallTest' -ErrorAction SilentlyContinue
+  }
+  $realAfter = RealValue
+  if ($realAfter -ne $realBefore) { Fail 'the real seedwell: key changed' }
+  @()
+}
+
+# Settings › Folder Sync › Cloudflare: Use with an address that does not answer (a closed port on loopback) runs in the
+# background and ends with the core's problem sentence, drawn under the section.
+$checks.rendezvous = {
+  $dir = New-State
+  $p = Start-App $dir -QaControl
+  try {
+    Qa $dir @('window') | Out-Null
+    $off = Qa $dir @('rendezvous', 'status')
+    if ($off -notmatch 'rendezvous Off') { Fail "not off at first: $off" }
+    Qa $dir @('shot', 'rendezvous-off', 'rendezvous') | Out-Null
+    Copy-Item "$dir\state\qa\rendezvous-off.png" "$Out\rendezvous-off.png"
+    Qa $dir @('rendezvous', 'use', 'http://127.0.0.1:9') | Out-Null
+    $done = WaitFor { $l = Qa $dir @('rendezvous', 'status'); if ($l -match 'problem True' -or $l -match 'refused "[^"]+"') { $l } } 60000 'the result'
+    Qa $dir @('shot', 'rendezvous-result', 'rendezvous') | Out-Null
+    Copy-Item "$dir\state\qa\rendezvous-result.png" "$Out\rendezvous-result.png"
+    if ($done -notmatch 'rendezvous Off') { Fail "an address that does not answer was taken: $done" }
+  } finally { Stop-App $dir $p; Remove-Item -Recurse -Force $dir }
+  @("$Out\rendezvous-off.png", "$Out\rendezvous-result.png")
+}
+
+# "On all my devices" on the Folder Sync page: hidden while this PC is paired with no other device; turning it on is
+# refused by the core with its sentence (an alert, logged), and nothing changes.
+$checks.follow = {
+  $dir = New-State 'control'
+  New-Item -ItemType Directory -Force "$dir\shared" | Out-Null
+  $p = Start-App $dir -QaControl
+  try {
+    WaitForSync $dir
+    & $Cli --socket "$dir\state\control.sock" sync add "$dir\shared" | Out-Null
+    if ($LASTEXITCODE -ne 0) { Fail "the CLI could not add a folder (exit $LASTEXITCODE)" }
+    Qa $dir @('window') | Out-Null
+    $on = Qa $dir @('follow', 'on')
+    if ($on -notmatch 'follow shown False, on False') { Fail "an unpaired PC follows: $on" }
+    WaitFor { Log $dir | Where-Object { $_ -like '*alert: *' } } 5000 'the refusal' | Out-Null
+    Qa $dir @('shot', 'foldersync') | Out-Null
+    Copy-Item "$dir\state\qa\foldersync.png" "$Out\foldersync.png"
+  } finally { Stop-App $dir $p; Remove-Item -Recurse -Force $dir }
+  @("$Out\foldersync.png")
+}
+
 $checks.settings = {
   $dir = New-State
   $p = Start-App $dir -QaControl
@@ -418,6 +699,12 @@ $checks.quit = {
     if ($done -notmatch 'finished True') { Fail "no finished shutdown in app.log: $done" }
     $last = Get-Content "$dir\state\launches.log" | Select-Object -Last 1
     if ($last -notmatch 'clean') { Fail "the run is not marked clean in launches.log: $last" }
+    # Again, with nothing left to quit (an installer asks each copy it found): it ends, it never starts an app.
+    $before = (Log $dir).Count
+    $again = Start-Process $Exe -ArgumentList @('--state-dir', "$dir\state", '--quit') -PassThru
+    if (-not $again.WaitForExit(15000)) { $again.Kill(); $again.WaitForExit(5000) | Out-Null; Fail '--quit with no app running did not end within 15 s' }
+    $started = Log $dir | Select-Object -Skip $before | Where-Object { $_ -like '*launch:*' }
+    if ($started) { Fail "--quit with no app running started one: $started" }
   } finally { Stop-App $dir $p; Remove-Item -Recurse -Force $dir }
   @()
 }

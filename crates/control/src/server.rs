@@ -66,7 +66,7 @@ impl Default for ServerOptions {
     fn default() -> Self {
         Self {
             max_connections: 8,
-            max_line_bytes: 24 << 20,
+            max_line_bytes: 32 << 20,
             prehello_line_bytes: 4096,
             rate_per_sec: 20,
             burst: 40,
@@ -1172,6 +1172,10 @@ async fn dispatch<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &mut Conn, req: Request) 
         | Request::ChatSetShareUntil(_)
         | Request::ChatSend(_)
         | Request::ChatRead(_)
+        | Request::ChatAttachment(_)
+        | Request::ChatDownload(_)
+        | Request::ChatCancelDownload(_)
+        | Request::ChatStopSharing(_)
         | Request::ChatMute(_)
         | Request::ChatRename(_)
         | Request::ChatAddAddress(_)

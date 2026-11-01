@@ -12,6 +12,12 @@ pub fn home() -> Option<PathBuf> {
     v.filter(|v| !v.is_empty()).map(PathBuf::from)
 }
 
+/// The user's Downloads folder: `~/Downloads` on every system (Windows: `%USERPROFILE%\Downloads`, unless `HOME` is
+/// set, as [`home`] reads it). `None` when the system says no home. Not created here.
+pub fn downloads() -> Option<PathBuf> {
+    home().map(|h| h.join("Downloads"))
+}
+
 /// `path` as user-visible text writes it: inside the home folder as `~/…` (`~` for the home folder itself) on Unix
 /// systems, as the Mac's Finder texts and shells do; the full path on Windows, where `~` means nothing.
 pub fn shown(path: &Path) -> String {

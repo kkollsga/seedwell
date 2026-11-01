@@ -44,8 +44,10 @@ pub enum Cmd {
     RemoveDevice { channel: String, device: String },
     /// `chat share-until <channel> <days>|never [--extend]`
     ShareUntil { channel: String, days: u32, extend: bool },
-    /// `chat send <channel> [--project P | --topic T] [--as NAME] [--reply ID] [--json] -|<text>`
-    Send { channel: String, topic: Option<String>, project: Option<String>, agent: Option<String>, reply: Option<String>, json: bool, body: String },
+    /// `chat send <channel> [--project P | --topic T] [--as NAME] [--reply ID] [--json] [--attach FILE]... [-|<text>]`
+    Send { channel: String, topic: Option<String>, project: Option<String>, agent: Option<String>, reply: Option<String>, json: bool, body: String, attach: Vec<String> },
+    /// `chat attachment <channel> <hash> [--out PATH] [--png] [--no-wait]`, `chat dm attachment <device> <hash> …`
+    Attachment { channel: String, device: Option<String>, hash: String, out: Option<String>, png: bool, wait: bool },
     /// `chat read <channel> [--project P | --topic T] [--since ID | [--unread] [--last N]] [--as NAME] [--lean]`
     Read { channel: String, topic: Option<String>, project: Option<String>, since: Option<String>, last: Option<u32>, agent: Option<String>, unread: bool, lean: bool },
     /// `chat watch [<channel>…] [--project P | --topic T] [--as NAME] [--all] [--count N]`
@@ -57,7 +59,7 @@ pub enum Cmd {
     /// `chat dm list`
     DmList,
     /// `chat dm send <device> [--as NAME] [--reply ID] [--json] -|<text>`
-    DmSend { device: String, agent: Option<String>, reply: Option<String>, json: bool, body: String },
+    DmSend { device: String, agent: Option<String>, reply: Option<String>, json: bool, body: String, attach: Vec<String> },
     /// `chat dm read <device> [--before ID] [--last N]`
     DmRead { device: String, before: Option<String>, last: Option<u32> },
     /// `chat dm watch [<device>…] [--count N]`
@@ -79,16 +81,21 @@ pub enum Cmd {
     Leave { channel: String },
 }
 
+/// Most attachments in one message.
+const MAX_ATTACHMENTS: usize = 10;
+/// How long `chat attachment` waits for an image that is on its way, or for a paused download to go on.
+const ATTACHMENT_WAIT: Duration = Duration::from_secs(60);
+
 /// Longest agent name and topic title, in characters (as the channel protocol has them).
 const MAX_AGENT: usize = 64;
 const MAX_TITLE: usize = 200;
 
 /// The one-line usage.
-pub const USAGE: &str = "usage: seedwell chat list | new <name> | join <link>|- | share <channel> [--role read_write|read_only|admin|owner] [--uses N|unlimited] [--days N|never] | members <channel> | role <channel> <device> owner|admin|read_write|read_only | remove-device <channel> <device> | share-until <channel> <days>|never [--extend] | topics <channel> | topic <channel> <title> [--as NAME] | send <channel> [--project P | --topic T] [--as NAME] [--reply ID] [--as-json] -|<text> | read <channel> [--project P | --topic T] [--since ID | [--unread] [--last N]] [--as NAME] [--lean] | watch [<channel>...] [--project P | --topic T] [--as NAME] [--unread] [--all] [--count N] [--batch] [--timeout S] [--lean] | dm list | dm send <device> [--as NAME] [--reply ID] [--as-json] -|<text> | dm read <device> [--before ID] [--last N] | dm watch [<device>...] [--count N] | dm delete <device> | address <channel> <host:port> | mute <channel> [on|off] | wake <channel> <command>|off | agents <channel> no | tag <channel> <id> [TAG...] [--remove TAG]... [--clear] [--as NAME] | leave <channel>";
+pub const USAGE: &str = "usage: seedwell chat list | new <name> | join <link>|- | share <channel> [--role read_write|read_only|admin|owner] [--uses N|unlimited] [--days N|never] | members <channel> | role <channel> <device> owner|admin|read_write|read_only | remove-device <channel> <device> | share-until <channel> <days>|never [--extend] | topics <channel> | topic <channel> <title> [--as NAME] | send <channel> [--project P | --topic T] [--as NAME] [--reply ID] [--as-json] [--attach FILE]... [-|<text>] | attachment <channel> <hash> [--out PATH] [--png] [--no-wait] | read <channel> [--project P | --topic T] [--since ID | [--unread] [--last N]] [--as NAME] [--lean] | watch [<channel>...] [--project P | --topic T] [--as NAME] [--unread] [--all] [--count N] [--batch] [--timeout S] [--lean] | dm list | dm send <device> [--as NAME] [--reply ID] [--as-json] [--attach FILE]... [-|<text>] | dm attachment <device> <hash> [--out PATH] [--no-wait] | dm read <device> [--before ID] [--last N] | dm watch [<device>...] [--count N] | dm delete <device> | address <channel> <host:port> | mute <channel> [on|off] | wake <channel> <command>|off | agents <channel> no | tag <channel> <id> [TAG...] [--remove TAG]... [--clear] [--as NAME] | leave <channel>";
 
 const READ_USAGE: &str = "read <channel> [--project P | --topic T] [--since ID | [--unread] [--last N]] [--as NAME] [--lean]";
 
-const DM_USAGE: &str = "usage: seedwell chat dm list | send <device> [--as NAME] [--reply ID] [--as-json] -|<text> | read <device> [--before ID] [--last N] | watch [<device>...] [--count N] | delete <device>";
+const DM_USAGE: &str = "usage: seedwell chat dm list | send <device> [--as NAME] [--reply ID] [--as-json] [--attach FILE]... [-|<text>] | attachment <device> <hash> [--out PATH] [--no-wait] | read <device> [--before ID] [--last N] | watch [<device>...] [--count N] | delete <device>";
 
 /// `chat dm agents`: the switch for private messages is the user's, in the app; no command changes it.
 fn switch_is_the_users() -> Usage {
@@ -117,12 +124,20 @@ fn parse_dm(mut it: impl Iterator<Item = String>) -> Result<Cmd, Usage> {
             let agent = given_as.clone();
             let reply = o.value(&["--reply", "--reply-to"])?;
             let json = o.flag(&["--json-body", "--as-json"]);
+            let attach = o.values(&["--attach", "--image", "--file"])?;
             let mut p = o.finish()?;
-            if p.len() < 2 {
-                return Err(Usage("usage: seedwell chat dm send <device> [--as NAME] [--reply ID] [--as-json] -|<text>   (- reads the message from standard input)".into()));
+            if p.is_empty() || (p.len() < 2 && attach.is_empty()) {
+                return Err(Usage("usage: seedwell chat dm send <device> [--as NAME] [--reply ID] [--as-json] [--attach FILE]... [-|<text>]   (- reads the message from standard input; --attach sends a file of any kind and size)".into()));
             }
+            check_attach(json, &attach)?;
             let device = p.remove(0);
-            Cmd::DmSend { device, agent, reply, json, body: p.join(" ") }
+            Cmd::DmSend { device, agent, reply, json, body: p.join(" "), attach }
+        }
+        "attachment" | "file" | "download" => {
+            let out = o.value(&["--out", "-o"])?;
+            let wait = !o.flag(&["--no-wait"]);
+            let mut p = args(o, 2, "dm attachment <device> <hash> [--out PATH] [--no-wait]")?;
+            Cmd::Attachment { hash: p.remove(1), device: Some(p.remove(0)), channel: String::new(), out, png: false, wait }
         }
         "read" => {
             let before = o.value(&["--before"])?;
@@ -262,12 +277,21 @@ pub fn parse(args_in: Vec<String>) -> Result<Cmd, Usage> {
             let agent = given_as.clone();
             let reply = o.value(&["--reply", "--reply-to"])?;
             let json = o.flag(&["--json-body", "--as-json"]);
+            let attach = o.values(&["--attach", "--image", "--file"])?;
             let mut p = o.finish()?;
-            if p.len() < 2 {
-                return Err(Usage("usage: seedwell chat send <channel> [--project P | --topic T] [--as NAME] [--reply ID] [--as-json] -|<text>   (- reads the message from standard input)".into()));
+            if p.is_empty() || (p.len() < 2 && attach.is_empty()) {
+                return Err(Usage("usage: seedwell chat send <channel> [--project P | --topic T] [--as NAME] [--reply ID] [--as-json] [--attach FILE]... [-|<text>]   (- reads the message from standard input; --attach sends a file of any kind and size, up to 10 per message: an image is shown inline, any other file is shared from where it is)".into()));
             }
+            check_attach(json, &attach)?;
             let channel = p.remove(0);
-            Cmd::Send { channel, topic, project, agent, reply, json, body: p.join(" ") }
+            Cmd::Send { channel, topic, project, agent, reply, json, body: p.join(" "), attach }
+        }
+        "attachment" | "image" | "file" | "download" => {
+            let out = o.value(&["--out", "-o"])?;
+            let png = o.flag(&["--png"]);
+            let wait = !o.flag(&["--no-wait"]);
+            let mut p = args(o, 2, "attachment <channel> <hash> [--out PATH] [--png] [--no-wait]   (the hash from chat read: at least its first 8 characters; --png draws an SVG as PNG; a file downloads to --out, else the Downloads folder, and --no-wait leaves it downloading in the app)")?;
+            Cmd::Attachment { hash: p.remove(1), channel: p.remove(0), device: None, out, png, wait }
         }
         "read" => {
             let (topic, project) = place(&mut o)?;
@@ -456,8 +480,9 @@ pub async fn run(cmd: Cmd, g: &Global) -> R {
                 None => format!("{} is shared with no end.", d.name),
             });
         }
-        Cmd::Send { channel, topic, project, agent, reply, json, body } => {
+        Cmd::Send { channel, topic, project, agent, reply, json, body, attach } => {
             let body = if body == "-" { stdin_text("Message")? } else { body };
+            let files = full_paths(&attach)?;
             let agent = label(g, &agent, &project);
             // One thread per project: its topic, made by the first post.
             let topic = match &project {
@@ -465,12 +490,49 @@ pub async fn run(cmd: Cmd, g: &Global) -> R {
                 None => topic,
             };
             let (raw, m): (_, ChatMessageDto) =
-                ask(&mut c, Request::ChatSend(ChatSendParams { channel, body, reply_to: reply, json, topic, agent: Some(agent) })).await?;
+                ask(&mut c, Request::ChatSend(ChatSendParams { channel, body, reply_to: reply, json, topic, agent: Some(agent), attachments: Vec::new(), files })).await?;
             let id = &m.id[..m.id.len().min(8)];
+            let images = with_attachments(&m.attachments);
             show(g, &raw, || match &m.topic_title {
-                Some(t) => format!("Posted to {} › {t} ({id}).", m.channel_name),
-                None => format!("Posted to {} › General ({id}).", m.channel_name),
+                Some(t) => format!("Posted to {} › {t} ({id}){images}.", m.channel_name),
+                None => format!("Posted to {} › General ({id}){images}.", m.channel_name),
             });
+        }
+        Cmd::Attachment { channel, device, hash, out, png, wait } => {
+            let params = ChatAttachmentParams { channel, device, hash, png };
+            let (raw, d): (Value, ChatAttachmentDataDto) = ask(&mut c, Request::ChatAttachment(params.clone())).await?;
+            if d.attachment.kind == "file" {
+                return file(&mut c, g, params, raw, d, out.as_deref(), wait).await;
+            }
+            let started = std::time::Instant::now();
+            let (raw, d): (Value, ChatAttachmentDataDto) = loop {
+                let (raw, d): (Value, ChatAttachmentDataDto) = ask(&mut c, Request::ChatAttachment(params.clone())).await?;
+                let waiting = matches!(d.attachment.state.as_str(), "fetching" | "not_downloaded");
+                if d.base64.is_some() || !waiting || started.elapsed() > ATTACHMENT_WAIT {
+                    break (raw, d);
+                }
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            };
+            let a = &d.attachment;
+            let Some(b64) = &d.base64 else {
+                let why = a.problem.clone().unwrap_or_else(|| match a.state.as_str() {
+                    "too_large" => "it is larger than an image may be".into(),
+                    "fetching" | "not_downloaded" => "no device that has it is connected yet; try again later".into(),
+                    s => s.replace('_', " "),
+                });
+                return Err(CliError::plain(1, format!("image {} ({}) is not here: {why}", a.name, &a.hash[..a.hash.len().min(12)])));
+            };
+            let bytes = trs_control::b64::decode(b64, 64 << 20).ok_or_else(|| CliError::plain(1, "the app sent an image that is not base64"))?;
+            let name = if d.rendered { format!("{}.png", a.name.rsplit_once('.').map_or(a.name.as_str(), |(s, _)| s)) } else { a.name.clone() };
+            let path = attachment_path(out.as_deref(), &a.hash, &name)?;
+            std::fs::write(&path, &bytes).map_err(|e| CliError::plain(1, format!("cannot write {}: {e}", path.display())))?;
+            let mut raw = raw;
+            if let Some(o) = raw.as_object_mut() {
+                o.remove("base64");
+                o.insert("path".into(), Value::from(path.display().to_string()));
+            }
+            let what = if d.rendered { "drawn as PNG" } else { a.kind.as_str() };
+            show(g, &raw, || format!("{} ({what}, {}×{}, {}) written to {}", a.name, a.width, a.height, size_text(bytes.len() as u64), path.display()));
         }
         Cmd::Read { channel, topic, project, since, last, agent, unread, lean } => {
             let unread_for = unread.then(|| label(g, &agent, &project));
@@ -521,11 +583,13 @@ pub async fn run(cmd: Cmd, g: &Global) -> R {
             let (raw, l): (_, ChatDirectsDto) = ask(&mut c, Request::ChatDmList(Empty {})).await?;
             show(g, &raw, || directs(&l));
         }
-        Cmd::DmSend { device, agent, reply, json, body } => {
+        Cmd::DmSend { device, agent, reply, json, body, attach } => {
             let body = if body == "-" { stdin_text("Message")? } else { body };
             let agent = Some(label(g, &agent, &None));
-            let (raw, m): (_, ChatMessageDto) = ask(&mut c, Request::ChatDmSend(ChatDmSendParams { device, body, reply_to: reply, json, agent })).await?;
-            show(g, &raw, || format!("Written privately to {} ({}).", m.peer_device.as_deref().map_or("?", first_group), m.id));
+            let files = full_paths(&attach)?;
+            let (raw, m): (_, ChatMessageDto) = ask(&mut c, Request::ChatDmSend(ChatDmSendParams { device, body, reply_to: reply, json, agent, files })).await?;
+            let with = with_attachments(&m.attachments);
+            show(g, &raw, || format!("Written privately to {} ({}){with}.", m.peer_device.as_deref().map_or("?", first_group), m.id));
         }
         Cmd::DmRead { device, before, last } => {
             let (raw, l): (_, ChatMessagesDto) = ask(&mut c, Request::ChatDmRead(ChatDmParams { device, before, last })).await?;
@@ -861,6 +925,31 @@ pub fn lean_message(m: &ChatMessageDto, with_channel: bool) -> Value {
     if m.kind != "text" {
         o.insert("kind".into(), Value::from(m.kind.clone()));
     }
+    if !m.attachments.is_empty() {
+        let images: Vec<Value> = m
+            .attachments
+            .iter()
+            .map(|a| {
+                let mut i = serde_json::json!({
+                    "hash": a.hash, "kind": a.kind, "name": a.name, "size": a.size, "state": a.state, "get": get_command(m, a),
+                });
+                if a.kind != "file" {
+                    (i["width"], i["height"]) = (Value::from(a.width), Value::from(a.height));
+                }
+                if let Some(p) = &a.problem {
+                    i["problem"] = Value::from(p.clone());
+                }
+                if a.done > 0 && a.state != "downloaded" {
+                    i["done"] = Value::from(a.done);
+                }
+                if let Some(p) = &a.path {
+                    i["path"] = Value::from(p.clone());
+                }
+                i
+            })
+            .collect();
+        o.insert("attachments".into(), Value::from(images));
+    }
     let named = mentions(&m.body);
     if !named.is_empty() {
         o.insert("mentions".into(), Value::from(named));
@@ -1063,12 +1152,182 @@ pub fn message(m: &ChatMessageDto) -> String {
         },
         _ => m.body.clone(),
     };
+    let images: Vec<String> = m.attachments.iter().map(|a| image_line(m, a)).collect();
+    let body = match (body.trim().is_empty(), images.is_empty()) {
+        (_, true) => body,
+        (true, false) => images.join("\n"),
+        (false, false) => format!("{body}\n{}", images.join("\n")),
+    };
     let (head, id) = (format!("[{}] {who}{place}{reply}", time(m.at)), &m.id[..m.id.len().min(8)]);
     if body.contains('\n') {
         format!("{head}:   #{id}\n  {}", body.lines().collect::<Vec<_>>().join("\n  "))
     } else {
         format!("{head}: {body}   #{id}")
     }
+}
+
+/// The command an agent runs to get an image (an SVG also as PNG) or download a file.
+fn get_command(m: &ChatMessageDto, a: &ChatAttachmentDto) -> String {
+    let hash = &a.hash[..a.hash.len().min(12)];
+    let png = if a.kind == "svg" { " [--png]" } else { "" };
+    let out = if a.kind == "file" { " [--out PATH]" } else { "" };
+    match (m.direct, &m.peer_device) {
+        (true, Some(d)) => format!("seedwell chat dm attachment {} {hash}{out}", first_group(d)),
+        _ => format!("seedwell chat attachment {} {hash}{png}{out}", m.channel_id),
+    }
+}
+
+/// One image of a message, for people: `[image: shot.png, 1280×800, 240 KB]`, and where it stands when not here.
+fn image_line(m: &ChatMessageDto, a: &ChatAttachmentDto) -> String {
+    let state = match a.state.as_str() {
+        "available" => String::new(),
+        "fetching" => ", on its way".into(),
+        "not_downloaded" => ", not downloaded".into(),
+        "too_large" => ", too large".into(),
+        _ => format!(", {}", a.problem.as_deref().unwrap_or("cannot be shown")),
+    };
+    if a.kind == "file" {
+        let state = match a.state.as_str() {
+            "available" => String::new(),
+            "downloading" => format!(", downloading {} of {}", size_text(a.done), size_text(a.size)),
+            "paused" => format!(", paused at {}", size_text(a.done)),
+            "downloaded" => format!(", downloaded to {}", a.path.as_deref().unwrap_or("?")),
+            "shared" => format!(", shared from {}", a.path.as_deref().unwrap_or("?")),
+            "gone" => ", no longer available".into(),
+            _ => format!(", {}", a.problem.as_deref().unwrap_or(&a.state)),
+        };
+        return format!("[file: {}, {}{state}]   get: {}", a.name, size_text(a.size), get_command(m, a));
+    }
+    format!("[image: {}, {}×{}, {}{state}]   get: {}", a.name, a.width, a.height, size_text(a.size), get_command(m, a))
+}
+
+/// A size as people read it (as the app shows it).
+fn size_text(bytes: u64) -> String {
+    if bytes < 1000 {
+        return format!("{bytes} bytes");
+    }
+    if bytes < 999_500 {
+        return format!("{} KB", (bytes + 500) / 1000);
+    }
+    let (value, unit) = if bytes < 999_500_000 {
+        (bytes as f64 / 1e6, "MB")
+    } else if bytes < 999_500_000_000 {
+        (bytes as f64 / 1e9, "GB")
+    } else {
+        (bytes as f64 / 1e12, "TB")
+    };
+    let text = if value < 9.95 { format!("{value:.1}") } else { format!("{}", value.round() as u64) };
+    format!("{} {unit}", text.strip_suffix(".0").unwrap_or(&text))
+}
+
+/// `--attach` with what it goes with.
+fn check_attach(json: bool, attach: &[String]) -> Result<(), Usage> {
+    if json && !attach.is_empty() {
+        return Err(Usage("attachments go with a text message, not --as-json".into()));
+    }
+    if attach.len() > MAX_ATTACHMENTS {
+        return Err(Usage(format!("a message can have at most {MAX_ATTACHMENTS} attachments")));
+    }
+    Ok(())
+}
+
+/// The files `--attach` names, by their full paths: the app reads them where they are (an image is sent as one, any
+/// other file is shared from there, never copied).
+fn full_paths(paths: &[String]) -> R<Vec<String>> {
+    paths
+        .iter()
+        .map(|p| {
+            let full = std::path::absolute(p).map_err(|e| CliError::plain(1, format!("{p}: {e}")))?;
+            if !full.exists() {
+                return Err(CliError::plain(1, format!("{p}: there is no such file")));
+            }
+            Ok(full.display().to_string())
+        })
+        .collect()
+}
+
+/// " with 1 image", " with 2 files", " with 3 attachments".
+fn with_attachments(a: &[ChatAttachmentDto]) -> String {
+    let files = a.iter().filter(|x| x.kind == "file").count();
+    let images = a.len() - files;
+    match (images, files) {
+        (0, 0) => String::new(),
+        (1, 0) => " with 1 image".into(),
+        (n, 0) => format!(" with {n} images"),
+        (0, 1) => " with 1 file".into(),
+        (0, n) => format!(" with {n} files"),
+        (i, f) => format!(" with {} attachments", i + f),
+    }
+}
+
+/// `chat attachment` for a file: downloads it (to `out`, else the Downloads folder) unless it is here, and waits for it
+/// with its progress on standard error (`wait`), or leaves it to the app.
+async fn file(c: &mut trs_control::client::Client, g: &Global, params: ChatAttachmentParams, raw: Value, d: ChatAttachmentDataDto, out: Option<&str>, wait: bool) -> R {
+    let a = &d.attachment;
+    if matches!(a.state.as_str(), "downloaded" | "shared") {
+        let place = a.path.clone().unwrap_or_default();
+        let how = if a.state == "shared" { "is shared from" } else { "was downloaded to" };
+        show(g, &raw, || format!("{} ({}) {how} {place}", a.name, size_text(a.size)));
+        return Ok(());
+    }
+    let (mut raw, mut d) = (raw, d.clone());
+    if !matches!(d.attachment.state.as_str(), "downloading") {
+        let out = out.map(|o| std::path::absolute(o).map(|p| p.display().to_string()).map_err(|e| CliError::plain(1, format!("{o}: {e}")))).transpose()?;
+        let p = ChatDownloadParams { channel: params.channel.clone(), device: params.device.clone(), hash: params.hash.clone(), out };
+        (raw, d) = ask(c, Request::ChatDownload(p)).await?;
+    }
+    let mut paused_since: Option<std::time::Instant> = None;
+    let mut said = std::time::Instant::now() - Duration::from_secs(10);
+    loop {
+        let a = &d.attachment;
+        match a.state.as_str() {
+            "downloaded" => {
+                show(g, &raw, || format!("{} ({}) downloaded to {}", a.name, size_text(a.size), a.path.as_deref().unwrap_or("?")));
+                return Ok(());
+            }
+            "gone" | "failed" | "unshared" => {
+                let why = a.problem.clone().unwrap_or_else(|| "its sender changed, moved or stopped sharing it".into());
+                return Err(CliError::plain(1, format!("file {} ({}) cannot be downloaded: {}", a.name, &a.hash[..a.hash.len().min(12)], if a.state == "gone" { "it is no longer available: ".to_string() + &why } else { why })));
+            }
+            "paused" => {
+                let since = *paused_since.get_or_insert_with(std::time::Instant::now);
+                if !wait || since.elapsed() > ATTACHMENT_WAIT {
+                    show(g, &raw, || format!("{} ({}): paused at {}; no device that has it is connected. It resumes by itself in the app; check with: seedwell chat attachment …", a.name, size_text(a.size), size_text(a.done)));
+                    return Ok(());
+                }
+            }
+            _ => paused_since = None,
+        }
+        if !wait {
+            show(g, &raw, || format!("{} ({}): downloading in the app; check with: seedwell chat attachment …", a.name, size_text(a.size)));
+            return Ok(());
+        }
+        if !g.json && said.elapsed() >= Duration::from_secs(2) {
+            said = std::time::Instant::now();
+            let rate = if a.rate > 0 { format!(", {}/s", size_text(a.rate)) } else { String::new() };
+            eprintln!("{}: {} of {}{rate}", a.name, size_text(a.done), size_text(a.size));
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        (raw, d) = ask(c, Request::ChatAttachment(params.clone())).await?;
+    }
+}
+
+/// Where `chat attachment` writes an image: `--out` (a folder gets the image's name), else a folder of its own in the
+/// temporary folder.
+fn attachment_path(out: Option<&str>, hash: &str, name: &str) -> R<std::path::PathBuf> {
+    let name: String = name.chars().filter(|c| !c.is_control() && !matches!(c, '/' | '\\' | ':')).collect();
+    let name = name.trim().trim_start_matches('.').trim();
+    let name = if name.is_empty() { "image".to_string() } else { name.to_string() };
+    let path = match out {
+        Some(o) if Path::new(o).is_dir() => Path::new(o).join(&name),
+        Some(o) => Path::new(o).to_path_buf(),
+        None => {
+            let dir = std::env::temp_dir().join("seedwell-attachments").join(&hash[..hash.len().min(16)]);
+            std::fs::create_dir_all(&dir).map_err(|e| CliError::plain(1, format!("cannot make {}: {e}", dir.display())))?;
+            dir.join(&name)
+        }
+    };
+    Ok(path)
 }
 
 /// `chat topics`.
@@ -1128,7 +1387,7 @@ mod tests {
         assert_eq!(parse(w("list")).unwrap(), Cmd::List);
         assert_eq!(parse(w("new Plans")).unwrap(), Cmd::New { name: "Plans".into() });
         let o = |s: &str| Some(s.to_string());
-        let send = |topic, project, agent, reply, json, body: &str| Cmd::Send { channel: "Plans".into(), topic, project, agent, reply, json, body: body.into() };
+        let send = |topic, project, agent, reply, json, body: &str| Cmd::Send { channel: "Plans".into(), topic, project, agent, reply, json, body: body.into(), attach: Vec::new() };
         assert_eq!(parse(w("send Plans --reply ab12 -")).unwrap(), send(None, None, None, o("ab12"), false, "-"));
         assert_eq!(parse(w("send Plans hello there")).unwrap(), send(None, None, None, None, false, "hello there"));
         assert_eq!(parse(w("send Plans --as-json -")).unwrap(), send(None, None, None, None, true, "-"));
@@ -1148,8 +1407,8 @@ mod tests {
         assert_eq!(parse(w("topic Plans Trip in May")).unwrap(), Cmd::Topic { channel: "Plans".into(), title: "Trip in May".into(), agent: None });
         assert_eq!(parse(w("topic Plans Trip --as Seedwell")).unwrap(), Cmd::Topic { channel: "Plans".into(), title: "Trip".into(), agent: Some("Seedwell".into()) });
         assert_eq!(parse(w("dm list")).unwrap(), Cmd::DmList);
-        assert_eq!(parse(w("dm send QKZ4 --reply ab12 -")).unwrap(), Cmd::DmSend { device: "QKZ4".into(), agent: None, reply: Some("ab12".into()), json: false, body: "-".into() });
-        assert_eq!(parse(w("dm send QKZ4 --as Seedwell -")).unwrap(), Cmd::DmSend { device: "QKZ4".into(), agent: Some("Seedwell".into()), reply: None, json: false, body: "-".into() });
+        assert_eq!(parse(w("dm send QKZ4 --reply ab12 -")).unwrap(), Cmd::DmSend { device: "QKZ4".into(), agent: None, reply: Some("ab12".into()), json: false, body: "-".into(), attach: Vec::new() });
+        assert_eq!(parse(w("dm send QKZ4 --as Seedwell -")).unwrap(), Cmd::DmSend { device: "QKZ4".into(), agent: Some("Seedwell".into()), reply: None, json: false, body: "-".into(), attach: Vec::new() });
         assert_eq!(parse(w("dm read QKZ4 --last 3")).unwrap(), Cmd::DmRead { device: "QKZ4".into(), before: None, last: Some(3) });
         assert_eq!(parse(w("dm watch --count 1")).unwrap(), Cmd::DmWatch { devices: vec![], count: Some(1) });
         assert_eq!(parse(w("dm delete QKZ4")).unwrap(), Cmd::DmDelete { device: "QKZ4".into() });
@@ -1299,5 +1558,67 @@ mod tests {
         assert_eq!(default_agent(None, None, Path::new("/Users/me/notes"), home, repo("/Users/me")), "notes", "a repository at home is not the project");
         assert_eq!(default_agent(None, None, Path::new("/tmp/x"), None, repo("/tmp")), "tmp");
         assert_eq!(default_agent(Some(&"x".repeat(80)), None, cwd, home, |_| false).chars().count(), 64);
+    }
+
+    #[test]
+    fn images_are_sent_listed_and_written_as_files() {
+        // `--attach` (one or more), with or without text.
+        let Cmd::Send { body, attach, .. } = parse(w("send Plans --attach shot.png --attach /tmp/logo.svg")).unwrap() else { panic!() };
+        assert_eq!((body.as_str(), attach), ("", vec!["shot.png".to_string(), "/tmp/logo.svg".to_string()]));
+        let Cmd::Send { body, attach, .. } = parse(w("send Plans look at this --attach a.png")).unwrap() else { panic!() };
+        assert_eq!((body.as_str(), attach.len()), ("look at this", 1));
+        assert!(parse(w("send Plans")).is_err(), "nothing to send");
+        assert!(parse(w("send Plans --as-json --attach a.png {}")).is_err(), "images go with text");
+        assert!(parse(w(&format!("send Plans{}", " --attach a.png".repeat(11)))).is_err());
+        assert_eq!(
+            parse(w("attachment Plans 0a1b2c3d4e5f --png --out /tmp/x.png")).unwrap(),
+            Cmd::Attachment { channel: "Plans".into(), device: None, hash: "0a1b2c3d4e5f".into(), out: Some("/tmp/x.png".into()), png: true, wait: true }
+        );
+        assert!(parse(w("attachment Plans")).is_err());
+
+        // Listed in `read --lean` and in text, with the command that gets each.
+        let a = ChatAttachmentDto { hash: "ab".repeat(32), kind: "svg".into(), name: "logo.svg".into(), size: 12_300, width: 40, height: 20, state: "available".into(), problem: None, ..Default::default() };
+        let m = ChatMessageDto { id: "0392ba7cd31d6153fa8fd11cc8d188f5".into(), channel_id: "UAIQA6S-X".into(), kind: "text".into(), body: "the logo".into(), attachments: vec![a], ..Default::default() };
+        let v = lean_message(&m, false);
+        assert_eq!(v["attachments"][0]["get"], "seedwell chat attachment UAIQA6S-X abababababab [--png]");
+        assert_eq!((v["attachments"][0]["width"].as_u64(), v["attachments"][0]["state"].as_str(), v["text"].as_str()), (Some(40), Some("available"), Some("the logo")));
+        let text = message(&m);
+        assert!(text.contains("the logo\n  [image: logo.svg, 40×20, 12 KB]   get: seedwell chat attachment UAIQA6S-X abababababab [--png]"), "{text}");
+        assert_eq!(size_text(2_400_000), "2.4 MB");
+
+        // Written where asked (a folder gets the image's name), else in a folder of its own in the temporary folder.
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(attachment_path(Some(dir.path().to_str().unwrap()), "ab", "../x.png").unwrap(), dir.path().join("x.png"));
+        let tmp = attachment_path(None, &"cd".repeat(32), "logo.png").unwrap();
+        assert!(tmp.starts_with(std::env::temp_dir()) && tmp.ends_with("cdcdcdcdcdcdcdcd/logo.png"), "{}", tmp.display());
+    }
+
+    #[test]
+    fn files_are_sent_by_path_listed_with_their_state_and_downloaded() {
+        let Cmd::Send { attach, .. } = parse(w("send Plans --attach film.mov the cut")).unwrap() else { panic!() };
+        assert_eq!(attach, ["film.mov"]);
+        let Cmd::DmSend { attach, body, .. } = parse(w("dm send QKZ4 --attach a.zip")).unwrap() else { panic!() };
+        assert_eq!((attach, body.as_str()), (vec!["a.zip".to_string()], ""));
+        assert!(parse(w(&format!("dm send QKZ4{}", " --attach a".repeat(11)))).is_err());
+        assert_eq!(
+            parse(w("dm attachment QKZ4 0a1b2c3d --out /tmp --no-wait")).unwrap(),
+            Cmd::Attachment { channel: String::new(), device: Some("QKZ4".into()), hash: "0a1b2c3d".into(), out: Some("/tmp".into()), png: false, wait: false }
+        );
+        // Sent by full path; a missing one is said at once.
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("x.bin");
+        std::fs::write(&f, b"x").unwrap();
+        assert_eq!(full_paths(&[f.display().to_string()]).unwrap(), [f.display().to_string()]);
+        assert!(full_paths(&[dir.path().join("nope").display().to_string()]).is_err());
+
+        let a = ChatAttachmentDto { hash: "cd".repeat(32), kind: "file".into(), name: "film.mov".into(), size: 1_234_000_000, state: "downloading".into(), done: 340_000_000, ..Default::default() };
+        let m = ChatMessageDto { id: "0392ba7c".into(), channel_id: "UAIQA6S-X".into(), kind: "text".into(), body: "the cut".into(), attachments: vec![a.clone()], ..Default::default() };
+        assert!(message(&m).contains("[file: film.mov, 1.2 GB, downloading 340 MB of 1.2 GB]   get: seedwell chat attachment UAIQA6S-X cdcdcdcdcdcd [--out PATH]"), "{}", message(&m));
+        let v = lean_message(&m, false);
+        assert_eq!((v["attachments"][0]["done"].as_u64(), v["attachments"][0].get("width")), (Some(340_000_000), None));
+        let dm = ChatMessageDto { direct: true, peer_device: Some("QKZ4XNA-ABCD".into()), ..m };
+        assert_eq!(lean_message(&dm, false)["attachments"][0]["get"], "seedwell chat dm attachment QKZ4XNA cdcdcdcdcdcd [--out PATH]");
+        assert_eq!(with_attachments(&[a.clone(), a]), " with 2 files");
+        assert_eq!(size_text(2_500_000_000_000), "2.5 TB");
     }
 }

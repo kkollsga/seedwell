@@ -1,11 +1,13 @@
 use super::*;
 use crate::chat_text::tests::{channel, topic};
 use crate::library_rows::tests::{download, seed};
-use crate::library_rows::{GroupMore, ListCommand, ListGroup, RowControlKind};
+use crate::library_rows::{GroupMore, ListCommand, ListGroup, RowControlKind, RowDisclosure};
+use crate::row_commands::RowCommand;
 use crate::row_text::TextTone;
 use crate::sidebar::{tracker_order, SidebarCommand, SidebarIcon};
 use crate::sync::SyncRole;
 use crate::types::{PendingStart, SharingCounts, TrackerSummary, TransferRow, TransferState};
+use crate::devices_text::{follow_line_new, FollowLine};
 use crate::CoreOptions;
 
 /// 2027-01-15, Unix ms.
@@ -489,7 +491,7 @@ fn the_mac_says_mac_finder_and_its_shortcuts() {
 #[test]
 fn settings_and_folder_sync_have_their_own_pages() {
     let m = model(&inputs(snap()), &state(LibraryPlace::Settings));
-    assert_eq!((m.page, m.title.as_str(), m.summary.as_str(), m.list.is_none()), (LibraryPage::Settings, "Settings", "Settings", true));
+    assert_eq!((m.page, m.title.as_str(), m.summary.as_str(), m.list.is_none()), (LibraryPage::Settings, "Settings", "", true), "no second \"Settings\" under the title");
     let fs = model(&inputs(snap()), &state(LibraryPlace::FolderSync));
     assert_eq!(fs.summary, "No folders", "no device name: nothing after it");
 }
@@ -539,8 +541,8 @@ fn the_sidebar_lists_channels_with_their_unread_messages() {
     assert_eq!((quiet.item.unread, quiet.topics[0].unread, quiet.item.icon), (0, 0, SidebarIcon::MutedChannel), "muted: no counts");
     assert_eq!(quiet.item.help, "Quiet: 1 of 2 online · Muted");
     assert!(chats.channels[2].new_topic.is_none(), "read only: no new topics");
-    assert_eq!(chats.add.title, "New Channel…");
-    assert_eq!(chats.add.help, "Make a channel with your devices, the people you share with and their agents, or join one with a link");
+    assert_eq!(chats.add.as_ref().map(|a| a.title.as_str()), Some("New Channel…"));
+    assert_eq!(chats.add.as_ref().unwrap().help, "Make a channel with your devices, the people you share with and their agents, or join one with a link");
     assert!(model(&i, &st).sidebar.directs.is_none(), "no Direct Messages without any");
     assert!(chats.channels.iter().all(|c| c.item.tag.is_none() && c.topics.iter().all(|t| t.tag.is_none())), "the user's channels: no tag");
 }
@@ -677,13 +679,25 @@ fn the_sidebar_menus_offer_what_each_item_can_do() {
     assert_eq!(titles(tracker_menu(&tracker("fav", 1, true))), ["Info", "Rename", "-", "Remove from Favorites!"]);
     assert_eq!(titles(tracker_menu(&tracker("auto.org", 1, false))), ["Info", "Save as Favorite"]);
     assert!(tracker_menu(&tracker("public", 1, false)).is_empty() && tracker_menu(&tracker("other-private", 1, false)).is_empty());
-    assert_eq!(titles(channel_menu(&channel("Team", 2, 1, 0, false))), ["Share…", "New Topic…", "Mute", "Agents: No…", "Rename…", "-", "Leave Channel…"]);
+    let alone = follow_line_new(&[], true);
+    assert_eq!(titles(channel_menu(&channel("Team", 2, 1, 0, false), &alone)), ["Share…", "New Topic…", "Mute", "Agents: No…", "Rename…", "-", "Leave Channel…"]);
     let mut c = channel("News", 2, 1, 0, true);
     c.role = SyncRole::ReadWrite;
-    assert_eq!(titles(channel_menu(&c)), ["New Topic…", "Unmute", "Rename…", "-", "Leave Channel…"]);
+    assert_eq!(titles(channel_menu(&c, &alone)), ["New Topic…", "Unmute", "Rename…", "-", "Leave Channel…"]);
     c.role = SyncRole::ReadOnly;
-    assert_eq!(titles(channel_menu(&c)), ["Unmute", "Rename…", "-", "Leave Channel…"]);
-    assert!(matches!(channel_menu(&c)[0], SidebarMenuEntry::Item { command: SidebarCommand::Unmute, .. }));
+    assert_eq!(titles(channel_menu(&c, &alone)), ["Unmute", "Rename…", "-", "Leave Channel…"]);
+    assert!(matches!(channel_menu(&c, &alone)[0], SidebarMenuEntry::Item { command: SidebarCommand::Unmute, .. }));
+    // Paired with other devices: On All My Devices, checked while on, switching it the other way.
+    let paired = follow_line_new(&["MacBook".into()], true);
+    let menu = channel_menu(&channel("Team", 2, 1, 0, false), &paired);
+    assert_eq!(titles(menu.clone()), ["Share…", "New Topic…", "Mute", "Agents: No…", "On All My Devices", "Rename…", "-", "Leave Channel…"]);
+    let SidebarMenuEntry::Item { command, checked, enabled, help, .. } = &menu[4] else { panic!() };
+    assert_eq!((*command, *checked, *enabled), (SidebarCommand::SetFollow { on: false }, true, true));
+    assert_eq!(help, &paired.line);
+    let off = FollowLine { on: false, enabled: false, ..paired };
+    let menu = channel_menu(&channel("Team", 2, 1, 0, false), &off);
+    assert!(matches!(menu[4], SidebarMenuEntry::Item { command: SidebarCommand::SetFollow { on: true }, checked: false, enabled: false, .. }));
+    assert!(off.help.starts_with("Put it on every device paired with this "), "{}", off.help);
 }
 
 // MARK: Structure and cadence
@@ -824,6 +838,72 @@ fn a_topic_shown_opens_its_channel_and_selecting_resets_the_tab() {
     assert_eq!(lib.sidebar_menu(LibraryPlace::Tracker { tracker_id: "tracker-z.cc".into() }).len(), 2);
     assert!(!lib.sidebar_menu(LibraryPlace::Chat { channel_id: c.id.clone(), topic_id: None }).is_empty());
     assert!(lib.sidebar_menu(LibraryPlace::Downloads).is_empty());
+}
+
+#[test]
+fn a_host_without_a_window_is_never_offered_what_needs_it() {
+    // The model: "New Channel…", "New Topic…" and the rows' Play and Get Info buttons need their windows.
+    let mut s = snap();
+    s.downloading = vec![named("d", download(TransferState::Downloading))];
+    let mut i = inputs(s);
+    i.channels = vec![channel("Team", 2, 1, 0, false)];
+    i.topics = vec![vec![]];
+    let mut st = state(LibraryPlace::Downloads);
+    let mac = model(&i, &st);
+    assert!(mac.sidebar.chats.add.is_some() && mac.sidebar.chats.channels[0].new_topic.is_some());
+    let row_controls = |m: &LibraryViewModel| list(m).groups.iter().flat_map(|g| &g.rows).flat_map(|r| r.controls.iter().filter_map(|c| c.command.clone())).collect::<Vec<_>>();
+    assert!(row_controls(&mac).contains(&RowCommand::GetInfo), "{:?}", row_controls(&mac));
+    st.host = vec![HostWindow::NewChannel];
+    let bare = model(&i, &st);
+    assert!(bare.sidebar.chats.add.is_some() && bare.sidebar.chats.channels[0].new_topic.is_none());
+    assert!(!row_controls(&bare).iter().any(|c| matches!(c, RowCommand::GetInfo | RowCommand::PlayRow)), "{:?}", row_controls(&bare));
+    st.host = vec![];
+    assert!(model(&i, &st).sidebar.chats.add.is_none());
+    // A row's disclosure triangle: the file list needs FileList, a choice's list the chooser.
+    let mut pack = named("p", download(TransferState::Downloading));
+    pack.file_count = 3;
+    let mut waiting = named("w", download(TransferState::Downloading));
+    waiting.awaiting_choice = true;
+    let mut s = snap();
+    s.downloading = vec![pack, waiting];
+    let i = inputs(s);
+    let triangles = |st: &LibraryState| list(&model(&i, st)).groups.iter().flat_map(|g| &g.rows).map(|r| (r.id.clone(), r.disclosure)).collect::<Vec<_>>();
+    st.host = host_windows_all();
+    let all = triangles(&st);
+    assert!(all.contains(&("p".into(), Some(RowDisclosure::Files))) && all.contains(&("w".into(), Some(RowDisclosure::Choice))), "{all:?}");
+    st.host = vec![HostWindow::Chooser];
+    let some = triangles(&st);
+    assert!(some.contains(&("p".into(), None)) && some.contains(&("w".into(), Some(RowDisclosure::Choice))), "{some:?}");
+    st.host = vec![HostWindow::FileList];
+    let other = triangles(&st);
+    assert!(other.contains(&("p".into(), Some(RowDisclosure::Files))) && other.contains(&("w".into(), None)), "{other:?}");
+    assert_ne!(model(&i, &st).sidebar.signature, mac.sidebar.signature);
+
+    // The menus: a channel keeps Mute and Agents; a tracker its Info only with the Info page.
+    let (core, _d) = mock();
+    let lib = library(&core);
+    let c = core.chat_channels().into_iter().next().expect("a mock channel");
+    lib.model(NOW_MS);
+    let titles = |place: LibraryPlace| {
+        lib.sidebar_menu(place)
+            .into_iter()
+            .map(|e| match e {
+                SidebarMenuEntry::Item { title, .. } => title,
+                SidebarMenuEntry::Separator => "-".into(),
+            })
+            .collect::<Vec<_>>()
+    };
+    let chat = LibraryPlace::Chat { channel_id: c.id.clone(), topic_id: None };
+    assert!(titles(chat.clone()).contains(&"Leave Channel…".to_owned()));
+    lib.set_host_windows(vec![HostWindow::TrackerInfo]);
+    let left = titles(chat);
+    assert!(left.iter().all(|t| !["Share…", "New Topic…", "Rename…", "Leave Channel…", "-"].contains(&t.as_str())), "{left:?}");
+    assert!(left.iter().any(|t| t == "Mute" || t == "Unmute"), "{left:?}");
+    assert_eq!(titles(LibraryPlace::Tracker { tracker_id: "tracker-z.cc".into() }), ["Info", "Save as Favorite"], "Save as Favorite needs no window");
+    lib.set_host_windows(vec![]);
+    assert_eq!(titles(LibraryPlace::Tracker { tracker_id: "tracker-z.cc".into() }), ["Save as Favorite"]);
+    lib.set_host_windows(host_windows_all());
+    assert_eq!(titles(LibraryPlace::Tracker { tracker_id: "tracker-z.cc".into() }).len(), 2);
 }
 
 #[test]

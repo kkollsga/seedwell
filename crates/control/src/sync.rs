@@ -691,6 +691,24 @@ pub fn message_dto(m: &trs_sync_net::chat::MessageInfo) -> ChatMessageDto {
         kind: m.kind.clone(),
         body: m.body.clone(),
         trust: m.trust.clone(),
+        attachments: m.attachments.iter().map(attachment_dto).collect(),
+    }
+}
+
+/// An image of a message in protocol form (its name cleaned as names are).
+pub fn attachment_dto(a: &trs_sync_net::chat::AttachmentInfo) -> ChatAttachmentDto {
+    ChatAttachmentDto {
+        hash: a.hash.clone(),
+        kind: a.kind.clone(),
+        name: clip(&ops::clean_name(&a.name), 200),
+        size: a.size,
+        width: a.width,
+        height: a.height,
+        state: a.state.clone(),
+        problem: a.problem.as_deref().map(|p| clip(p, 300)),
+        done: a.done,
+        rate: a.rate,
+        path: a.path.clone(),
     }
 }
 

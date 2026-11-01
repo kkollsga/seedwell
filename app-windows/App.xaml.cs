@@ -24,6 +24,14 @@ public partial class App : Application
     internal IconState IconState { get; } = new();
     /// <summary>The Folder Sync menu's stop-syncing confirmation (one open at a time).</summary>
     internal SyncRemoval SyncRemoval { get; } = new();
+    /// <summary>
+    /// The windows Windows has (the core's HostWindow): commands that need another are not offered (row_commands, the
+    /// sidebar's adds and menus). Not yet: the chooser, custom goal, rules editor, player, Tracker Info, favorite
+    /// editing and a channel's Share dialog.
+    /// </summary>
+    internal static HostWindow[] HostWindows { get; } = [HostWindow.GetInfo, HostWindow.MoveTo, HostWindow.NewChannel, HostWindow.ChatDialogs];
+    /// <summary>The small chat dialogs (New Topic…, Rename…, Leave…, ...).</summary>
+    internal ChatDialogs ChatDialogs { get; private set; } = null!;
     readonly SleepGuard sleep = new();
     /// <summary>The app's updates (the core's Updates): its timer, checks and installs.</summary>
     internal Updater Updater { get; private set; } = null!;
@@ -83,7 +91,7 @@ public partial class App : Application
         // The app's real data folder, as the core picks it on Windows (%LOCALAPPDATA%\Seedwell), unless --state-dir.
         var dir = Program.StateDir ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Seedwell");
         AppLog.Open(dir);
-        AppLog.Write($"launch: state {dir}, {Program.Sources.Length} to add");
+        AppLog.Write($"launch: state {dir}, {Program.Routes.Length} to open");
         if (GoBackAfterFailedLaunches(dir))
         {
             return;
@@ -121,9 +129,59 @@ public partial class App : Application
             iconTimer.Stop();
             UpdateIcon();
         });
-        if (Program.Sources.Length > 0)
+        if (Program.Routes.Length > 0)
         {
-            Add(Program.Sources);
+            Open(Program.Routes);
+        }
+    }
+
+    /// <summary>
+    /// What a command line or a clicked link opens (the core's LinkRoute, from command_line_routes or route_link): things
+    /// to add go to <see cref="Add"/> together; each other route opens its window.
+    /// </summary>
+    internal void Open(LinkRoute[] routes)
+    {
+        if (!ui.HasThreadAccess)
+        {
+            ui.TryEnqueue(() => Open(routes));
+            return;
+        }
+        var sources = routes.OfType<LinkRoute.AddSource>().Select(r => r.Source).ToArray();
+        if (sources.Length > 0)
+        {
+            Add(sources);
+        }
+        foreach (var route in routes.Where(r => r is not LinkRoute.AddSource))
+        {
+            AppLog.Write($"open: {route.GetType().Name}");
+            switch (route)
+            {
+                case LinkRoute.JoinChannel j:
+                    ShowMainWindow();
+                    NewChannelDialog.Show(this, j.Link);
+                    break;
+                case LinkRoute.PairDevice p:
+                    // Settings › Devices, Pair with a Link… filled in.
+                    ShowPlace(new LibraryPlace.Settings());
+                    LibraryWindow.Pane.SettingsPageShown?.Devices.ShowPaste(p.Link);
+                    break;
+                case LinkRoute.ShowFolder f:
+                    ShowPlace(new LibraryPlace.FolderSync());
+                    LibraryWindow.Pane.SyncPage?.Choose(f.FolderId);
+                    break;
+                // NEED: Add Folder and the folder's Share dialog (batch W3). Until they exist these open the Folder Sync
+                // page, the folder chosen where the link names one.
+                case LinkRoute.ShareFolder sf:
+                    ShowPlace(new LibraryPlace.FolderSync());
+                    LibraryWindow.Pane.SyncPage?.Choose(sf.FolderId);
+                    break;
+                case LinkRoute.AddFolder or LinkRoute.SharePath:
+                    ShowPlace(new LibraryPlace.FolderSync());
+                    break;
+                case LinkRoute.Problem problem:
+                    Alert(new SyncAlert(problem.Title, problem.Text));
+                    break;
+            }
         }
     }
 
@@ -234,6 +292,8 @@ public partial class App : Application
         string[] folded = [];
         try { folded = File.ReadAllLines(foldsFile).Where(l => l.Length > 0).ToArray(); } catch { }
         Library = new Library(Core, folded, new Clock());
+        Library.SetHostWindows(HostWindows);
+        ChatDialogs = new ChatDialogs(this);
     }
 
     /// <summary>Folds or unfolds a group and remembers the folds.</summary>
@@ -274,18 +334,21 @@ public partial class App : Application
 
     void CreateTray()
     {
-        // The right-click menu: Open and Quit, worded by the menu model.
-        MenuModel m;
-        try { m = TrsFfiMethods.MenuModel(TakeSnapshot(), Core.SyncSnapshot(), Arrivals, Now(), Updater?.Updates.AvailableVersion()); }
-        catch { m = new MenuModel(null, [], null, null, null, "Open Seedwell…", "Quit", 1000, ""); }
-        var open = new MenuFlyoutItem { Text = m.OpenTitle };
-        open.Click += (_, _) => ShowMainWindow();
-        var quit = new MenuFlyoutItem { Text = m.QuitTitle };
-        quit.Click += (_, _) => Quit();
+        // The right-click menu, made anew each time it opens: the core's app commands (File, then Transfers), then Open
+        // and Quit, worded by the menu model.
         var menu = new MenuFlyout();
-        menu.Items.Add(open);
-        menu.Items.Add(new MenuFlyoutSeparator());
-        menu.Items.Add(quit);
+        menu.Opening += (_, _) =>
+        {
+            menu.Items.Clear();
+            foreach (var item in TrayMenuItems())
+            {
+                menu.Items.Add(item);
+            }
+        };
+        foreach (var item in TrayMenuItems())
+        {
+            menu.Items.Add(item);
+        }
 
         var icon = new TaskbarIcon
         {
@@ -316,6 +379,78 @@ public partial class App : Application
             try { icon.Dispose(); } catch { }
             tray = null;
         }
+    }
+
+    /// <summary>The tray's right-click menu: each app menu's entries, a separator between them, then Open and Quit.</summary>
+    internal List<MenuFlyoutItemBase> TrayMenuItems()
+    {
+        var items = new List<MenuFlyoutItemBase>();
+        AppMenu[] menus;
+        try { menus = Core.AppCommands(); } catch (Exception e) { AppLog.Write($"app commands failed: {e.Message}"); menus = []; }
+        foreach (var m in menus)
+        {
+            if (items.Count > 0)
+            {
+                items.Add(new MenuFlyoutSeparator());
+            }
+            foreach (var e in m.Entries)
+            {
+                if (e is AppMenuEntry.Item it)
+                {
+                    MenuFlyoutItem mi = it.Checked ? new ToggleMenuFlyoutItem { IsChecked = true } : new MenuFlyoutItem();
+                    mi.Text = it.Title;
+                    mi.IsEnabled = it.Enabled;
+                    if (it.Shortcut is KeyShortcut k)
+                    {
+                        mi.KeyboardAcceleratorTextOverride = k.Label;
+                    }
+                    var command = it.Command;
+                    mi.Click += (_, _) => RunAppCommand(command);
+                    items.Add(mi);
+                }
+                else
+                {
+                    items.Add(new MenuFlyoutSeparator());
+                }
+            }
+        }
+        MenuModel model;
+        try { model = TrsFfiMethods.MenuModel(TakeSnapshot(), Core.SyncSnapshot(), Arrivals, Now(), Updater?.Updates.AvailableVersion(), HostWindows); }
+        catch { model = new MenuModel(null, [], null, null, null, "Open Seedwell…", "Quit", 1000, ""); }
+        var open = new MenuFlyoutItem { Text = model.OpenTitle };
+        open.Click += (_, _) => ShowMainWindow();
+        var quit = new MenuFlyoutItem { Text = model.QuitTitle };
+        quit.Click += (_, _) => Quit();
+        if (items.Count > 0)
+        {
+            items.Add(new MenuFlyoutSeparator());
+        }
+        items.Add(open);
+        items.Add(new MenuFlyoutSeparator());
+        items.Add(quit);
+        return items;
+    }
+
+    /// <summary>What an app command does (the tray menu, the window's shortcuts, QA): a core call or a window of the app's.</summary>
+    internal void RunAppCommand(AppCommand command)
+    {
+        AppLog.Write($"app command {command}");
+        switch (command)
+        {
+            case AppCommand.AddTorrentFile:
+                ShowMainWindow();
+                ChooseTorrentFile();
+                break;
+            case AppCommand.AddLink:
+                ShowMainWindow();
+                Library.ShowAddSheet();
+                LibraryWindow.Pane.Refresh();
+                break;
+            case AppCommand.PauseAll: Core.PauseAll(); break;
+            case AppCommand.ResumeAll: Core.ResumeAll(); break;
+            case AppCommand.SetLimitSpeed limit: Core.SetAltSpeed(limit.On); break;
+        }
+        LibraryWindowIfCreated?.Pane.Refresh();
     }
 
     /// <summary>
@@ -420,24 +555,66 @@ public partial class App : Application
         AppLog.Write($"window shown, in front: {main.IsInFront}");
     }
 
+    /// <summary>The library window on a place (the flyout's "+N more" shows Downloads, its Sharing line Sharing).</summary>
+    internal void ShowPlace(LibraryPlace place)
+    {
+        ShowMainWindow();
+        Library.SelectPlace(place);
+        LibraryWindow.Pane.Refresh();
+    }
+
     /// <summary>
-    /// A command whose window the Windows app does not have yet. NEED: each such window (Get Info, Move To, the
-    /// chooser, rules, Folder Sync's Edit / Add Folder, the updater).
+    /// Add Torrent File… (Ctrl+O, the add sheet's Choose .torrent File…): the Open dialog for .torrent files, each added
+    /// as an opened one (the Mac's chooseTorrentFile). A QA run opens no dialog: the log says it would have.
     /// </summary>
-    internal void ShowPlaceholder(string what)
+    internal async void ChooseTorrentFile()
     {
         if (Quiet.On)
         {
-            // A QA run opens no window that would take the foreground: the log says what it would have shown.
-            AppLog.Write($"placeholder: {what}");
+            AppLog.Write("open dialog: .torrent files");
             return;
         }
-        var w = new Window { Title = "Seedwell" };
-        Chrome.Apply(w, new TextBlock { Text = what, Margin = new Thickness(24), TextWrapping = TextWrapping.Wrap }, "Seedwell");
-        w.SystemBackdrop = new Microsoft.UI.Xaml.Media.MicaBackdrop();
-        w.AppWindow.Resize(new Windows.Graphics.SizeInt32(420, 200));
-        w.Activate();
+        var picker = new Windows.Storage.Pickers.FileOpenPicker();
+        picker.FileTypeFilter.Add(".torrent");
+        WinRT.Interop.InitializeWithWindow.Initialize(picker, WinRT.Interop.WindowNative.GetWindowHandle(LibraryWindow));
+        try
+        {
+            var files = await picker.PickMultipleFilesAsync();
+            if (files.Count > 0)
+            {
+                Add(files.Select(f => f.Path).ToArray());
+            }
+        }
+        catch (Exception e)
+        {
+            AppLog.Write($"open dialog failed: {e.Message}");
+        }
     }
+
+    /// <summary>A folder the user picks (Move To…), or null; a QA run takes <see cref="QaFolder"/> instead of asking.</summary>
+    internal async Task<string?> PickFolder()
+    {
+        if (Quiet.On)
+        {
+            AppLog.Write($"folder dialog: {QaFolder ?? "(none)"}");
+            return QaFolder;
+        }
+        var picker = new Windows.Storage.Pickers.FolderPicker();
+        picker.FileTypeFilter.Add("*");
+        WinRT.Interop.InitializeWithWindow.Initialize(picker, WinRT.Interop.WindowNative.GetWindowHandle(LibraryWindow));
+        try
+        {
+            return (await picker.PickSingleFolderAsync())?.Path;
+        }
+        catch (Exception e)
+        {
+            AppLog.Write($"folder dialog failed: {e.Message}");
+            return null;
+        }
+    }
+
+    /// <summary>QA: the folder the next folder dialog answers with (the QA command pick-folder).</summary>
+    internal string? QaFolder { get; set; }
 
     /// <summary>A quiet notification from the tray icon (no sound, held back in Do Not Disturb).</summary>
     internal void Notify(string title, string body)
@@ -516,10 +693,12 @@ public partial class App : Application
     /// instance was started with <c>--qa-control</c>, see <see cref="Program.QaControl"/>): each calls what the
     /// click or key it stands for calls, so tests drive the app without synthetic input; each is logged with the state
     /// after it. window | menu | place downloads|sharing|foldersync|settings|tracker &lt;id&gt; | rowclick &lt;title
-    /// part&gt; [command] [shift] | key delete|return|escape|space|left|right|i [shift] [command] | remove &lt;title part&gt;
-    /// [files] | info &lt;title part&gt; | control &lt;title part&gt; &lt;command&gt; | confirm | cancel | add-sheet |
-    /// search &lt;text&gt; | update-check | update-install | update-status | taskbar-created | shot &lt;name&gt; (the
-    /// library window to &lt;state&gt;\qa\&lt;name&gt;.png).
+    /// part&gt; [command] [shift] | key delete|return|escape|space|left|right|up|down|i|a [shift] [command] [list] |
+    /// remove &lt;title part&gt; [files] | info &lt;title part&gt; | control &lt;title part&gt; &lt;command&gt; | confirm |
+    /// cancel | add-sheet | add-file | move &lt;title part&gt; &lt;folder&gt; | menu-line more|sharing | sidebar
+    /// &lt;channel&gt; &lt;command&gt; | agents &lt;channel&gt; yes|no | rendezvous use &lt;address&gt;|test|off|status |
+    /// follow on|off | search &lt;text&gt; | update-check | update-install | update-status | taskbar-created | shot
+    /// &lt;name&gt; [rendezvous] (the library window, or the Cloudflare section, to &lt;state&gt;\qa\&lt;name&gt;.png).
     /// </summary>
     internal void Qa(string[] words)
     {
@@ -583,10 +762,13 @@ public partial class App : Application
                         "space" => LibraryKey.Space,
                         "left" => LibraryKey.Left,
                         "right" => LibraryKey.Right,
+                        "up" => LibraryKey.Up,
+                        "down" => LibraryKey.Down,
                         "i" => LibraryKey.I,
+                        "a" => LibraryKey.A,
                         _ => (LibraryKey?)null,
                     };
-                    if (key is LibraryKey k) result = $"handled {pane.PressKey(k, new KeyModifiers(Has("shift"), Has("command"), false, false))}";
+                    if (key is LibraryKey k) result = $"handled {pane.PressKey(k, new KeyModifiers(Has("shift"), Has("command"), false, false), Has("list"))}";
                     else result = "no such key";
                     break;
                 case "remove":
@@ -608,6 +790,114 @@ public partial class App : Application
                 case "confirm": Library.ConfirmRemoval(); break;
                 case "cancel": Library.CancelRemoval(); break;
                 case "add-sheet": Library.ShowAddSheet(); break;
+                // Ctrl+O and the add sheet's Choose .torrent File… (a QA run logs the dialog instead of opening it).
+                case "add-file": ChooseTorrentFile(); break;
+                // Move to… on a row, with the folder the dialog would have answered.
+                case "move":
+                    if (Row(Arg(1), out _) is not ListRow moveRow) result = "no such row";
+                    else { QaFolder = string.Join(' ', w.Skip(2)); await RowCommands.MoveTo(Core, [moveRow.Id]); QaFolder = null; }
+                    break;
+                // The flyout's "+N more" line and its Sharing line.
+                case "menu-line": ShowPlace(Arg(1) == "sharing" ? new LibraryPlace.Sharing() : new LibraryPlace.Downloads()); break;
+                // A channel's sidebar menu entry (Mute, Unmute, ...), or its Agents choice (agents <channel> yes|no).
+                // A channel's sidebar menu entry, by its command's name (Mute, Unmute, NewTopic, RenameChannel,
+                // LeaveChannel, ChannelAgents, SetFollow), as its click runs it.
+                case "sidebar":
+                    var channel = Core.ChatChannels().FirstOrDefault(c => c.Name.Contains(Arg(1), StringComparison.OrdinalIgnoreCase));
+                    if (channel is null) { result = "no such channel"; break; }
+                    var chatPlace = new LibraryPlace.Chat(channel.Id, null);
+                    var menuItems = Library.SidebarMenu(chatPlace).OfType<SidebarMenuEntry.Item>().ToArray();
+                    if (menuItems.FirstOrDefault(i => i.Command.GetType().Name.Equals(Arg(2), StringComparison.OrdinalIgnoreCase)) is SidebarMenuEntry.Item entry)
+                    {
+                        pane.RunSidebarCommand(entry.Command, chatPlace);
+                    }
+                    else { result = $"no such entry (the menu has {string.Join(", ", menuItems.Select(i => i.Command.GetType().Name))})"; break; }
+                    var now = Core.ChatChannels().FirstOrDefault(c => c.Id == channel.Id);
+                    pane.Refresh();
+                    result = now is null ? "channel gone" : $"channel muted {now.Muted}, agents {now.Agents}, drawn muted {pane.SidebarDrawn.Contains(nameof(SidebarIcon.MutedChannel))}";
+                    break;
+                // The open chat dialog: type <text> | confirm | cancel | status.
+                case "dialog":
+                    switch (Arg(1))
+                    {
+                        case "type": ChatDialogs.QaType(string.Join(' ', w.Skip(2))); break;
+                        case "confirm": if (!ChatDialogs.QaConfirm()) result = "not confirmed (none open, or its action is disabled)"; break;
+                        case "cancel": ChatDialogs.QaCancel(); break;
+                    }
+                    if (result == "done") result = $"dialog {(ChatDialogs.Shown is ChatDialog sd ? $"{sd.Kind} \"{sd.Title}\"" : "none")}";
+                    break;
+                // A private conversation's Delete Conversation… (it has no menu on Windows until the conversation page).
+                case "delete-conversation":
+                    var direct = Core.ChatDirects().FirstOrDefault(d => d.Name.Contains(Arg(1), StringComparison.OrdinalIgnoreCase));
+                    if (direct is null) { result = "no such conversation"; break; }
+                    ChatDialogs.Show(TrsFfiMethods.ChatDeleteConversationDialog(direct.Name), null, direct.DeviceId);
+                    break;
+                // A channel's Wake Command… (in the conversation page's ⋯ menu on the Mac; no menu on Windows yet).
+                case "wake-command":
+                    var wakeChannel = Core.ChatChannels().FirstOrDefault(c => c.Name.Contains(Arg(1), StringComparison.OrdinalIgnoreCase));
+                    if (wakeChannel is null) { result = "no such channel"; break; }
+                    ChatDialogs.Show(TrsFfiMethods.ChatWakeCommandDialog(wakeChannel), wakeChannel);
+                    break;
+                // The New Channel window: open [link] | mode new|join | name <text> | link <text> | agents yes|no |
+                // start | cancel | status.
+                case "new-channel":
+                    if (Arg(1) == "open") { NewChannelDialog.Show(this, w.Length > 2 ? w[2] : null); await Quiet.Settle(LibraryWindow.Content); }
+                    else if (NewChannelDialog.Open is not NewChannelDialog nc) { result = "not open"; break; }
+                    else switch (Arg(1))
+                    {
+                        case "mode": nc.QaMode(Arg(2) == "join" ? ChatNewMode.Join : ChatNewMode.New); break;
+                        case "name": nc.QaName(string.Join(' ', w.Skip(2))); break;
+                        case "link": nc.QaLink(string.Join(' ', w.Skip(2))); break;
+                        case "agents": nc.QaAgents(Arg(2) == "yes"); break;
+                        case "start": result = await nc.QaStart() ? "started" : "not started"; break;
+                        case "cancel": nc.QaCancel(); break;
+                    }
+                    if (NewChannelDialog.Open is NewChannelDialog open)
+                    {
+                        result += $"; new channel {open.Form.Mode}, can start {open.Model.CanStart}, link line \"{open.Model.LinkLine}\"";
+                    }
+                    break;
+                // The tray's right-click menu as drawn (its entries' titles, [x] when checked, (off) when disabled), or one
+                // of its app commands run by name (AddTorrentFile, AddLink, PauseAll, ResumeAll, SetLimitSpeed).
+                case "tray-menu":
+                    result = string.Join(" | ", TrayMenuItems().Select(i => i switch
+                    {
+                        ToggleMenuFlyoutItem t => $"{t.Text} [x]{(t.IsEnabled ? "" : " (off)")}",
+                        MenuFlyoutItem m => $"{m.Text}{(m.IsEnabled ? "" : " (off)")}",
+                        _ => "-",
+                    }));
+                    break;
+                case "app-command":
+                    var appCommand = Core.AppCommands().SelectMany(m => m.Entries).OfType<AppMenuEntry.Item>()
+                        .FirstOrDefault(i => i.Command.GetType().Name.Equals(Arg(1), StringComparison.OrdinalIgnoreCase))?.Command;
+                    if (appCommand is null) { result = "no such app command"; break; }
+                    RunAppCommand(appCommand);
+                    break;
+                // A link as the system would hand it over (route_link), and the window it opens.
+                case "link":
+                    Open([Core.RouteLink(Arg(1))]);
+                    break;
+                // Settings › Folder Sync › Cloudflare: use <address> | test | off | status (the section as drawn).
+                case "rendezvous":
+                    if (pane.Model?.Page != LibraryPage.Settings) { Library.SelectPlace(new LibraryPlace.Settings()); pane.Refresh(); }
+                    if (pane.SettingsPageShown?.Rendezvous is not RendezvousSection rs) { result = "no settings page"; break; }
+                    switch (Arg(1))
+                    {
+                        case "use": rs.QaAddress(string.Join(' ', w.Skip(2))); rs.UseAddress(); break;
+                        case "test": Core.SyncRendezvousTest(); break;
+                        case "off": Core.SyncRendezvousTurnOff(); break;
+                    }
+                    var rv = Core.SyncRendezvous();
+                    result = $"rendezvous {rv.State}, refused \"{rs.Refused}\", result \"{rv.Result}\", problem {rv.ResultIsProblem}";
+                    break;
+                // The Folder Sync page's "On all my devices" for its folder: follow on|off.
+                case "follow":
+                    if (pane.Model?.Page != LibraryPage.FolderSync) { Library.SelectPlace(new LibraryPlace.FolderSync()); pane.Refresh(); }
+                    if (pane.SyncPage is not FolderSyncPage sp || sp.Chosen is not string folderId) { result = "no folder"; break; }
+                    sp.SetFollow(folderId, Arg(1) == "on");
+                    var fl = Core.SyncFollowLine(folderId);
+                    result = $"follow shown {fl.Shown}, on {fl.On}, enabled {fl.Enabled}";
+                    break;
                 case "search": Library.SetSearch(string.Join(' ', w.Skip(1))); break;
                 case "taskbar-created": TaskbarCreated(); result = $"tray {(tray is null ? "none" : "created")}"; break;
                 case "update-check": Updater.Check(false); break;
@@ -619,8 +909,14 @@ public partial class App : Application
                     var dir = Path.Combine(Path.GetDirectoryName(foldsFile) ?? "", "qa");
                     Directory.CreateDirectory(dir);
                     var file = Path.Combine(dir, $"{Arg(1)}.png");
-                    // The whole window's content: the Get Info card and the title-bar question are part of it.
-                    await SnapshotRenderer.SaveImage(LibraryWindow.Content, file, RequestedTheme == ApplicationTheme.Light);
+                    // The whole window's content (the Get Info card and the title-bar question are part of it), or with
+                    // "rendezvous" the Settings page's Cloudflare section alone (it lies below the window's fold).
+                    // With "dialog" the open dialog (it lives in the popup layer, not under the window's content).
+                    var dialogPopup = Arg(2) == "dialog" && LibraryWindow.Content.XamlRoot is XamlRoot xr
+                        ? Microsoft.UI.Xaml.Media.VisualTreeHelper.GetOpenPopupsForXamlRoot(xr).Select(p => p.Child).OfType<UIElement>().FirstOrDefault()
+                        : null;
+                    UIElement shown = dialogPopup ?? (Arg(2) == "rendezvous" && pane.SettingsPageShown?.Rendezvous.Root is UIElement section ? section : LibraryWindow.Content);
+                    await SnapshotRenderer.SaveImage(shown, file, RequestedTheme == ApplicationTheme.Light);
                     result = file;
                     break;
                 default: result = "unknown"; break;

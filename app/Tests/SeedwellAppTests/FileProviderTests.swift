@@ -309,7 +309,7 @@ import Testing
     // MARK: The setup choice
 
     @Test func theAddModalChoosesFilesOnDemand() {
-        var form = SyncAddForm()
+        var form = syncAddFormNew()
         #expect(!form.onDemand, "full unless chosen")
         form.onDemand = true
         #expect(syncOnDemandLabel() == "Files on demand")

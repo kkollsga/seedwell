@@ -38,9 +38,10 @@ extension NSImage {
     }
 }
 
-/// One folder of the submenu: status image, the name cut in the middle and the grey line; Edit (pencil) and Delete
-/// (trash) at the right edge while the pointer is over the row (or the keyboard has it). A click elsewhere reveals
-/// the folder in Finder. Both buttons are accessibility elements of their own ("Edit Photos", "Remove Photos").
+/// One folder of the submenu: status image, the name cut in the middle and the grey line; Edit (pencil, when the model
+/// offers it) and Delete (trash) at the right edge while the pointer is over the row (or the keyboard has it). A click
+/// elsewhere reveals the folder in Finder. Both buttons are accessibility elements of their own ("Edit Photos",
+/// "Remove Photos").
 @MainActor final class MenuSyncRow: NSView, HoverRow {
     private(set) var row: SyncMenuRow
     var onReveal: @MainActor () -> Void = {}
@@ -67,9 +68,13 @@ extension NSImage {
             e.setAccessibilityRole(.button)
             e.setAccessibilityParent(self)
         }
-        setAccessibilityChildren([editElement, deleteElement])
+        setAccessibilityChildren(buttonElements)
         refreshAccessibility()
     }
+
+    /// The row offers Edit (the model's `editLabel`).
+    private var editable: Bool { row.editLabel != nil }
+    private var buttonElements: [NSAccessibilityElement] { editable ? [editElement, deleteElement] : [deleteElement] }
 
     required init?(coder: NSCoder) { fatalError("not used") }
 
@@ -86,8 +91,9 @@ extension NSImage {
         setAccessibilityHelp("Show in Finder")
         editElement.setAccessibilityLabel(row.editLabel)
         deleteElement.setAccessibilityLabel(row.removeLabel)
-        setAccessibilityCustomActions([
-            NSAccessibilityCustomAction(name: row.editLabel) { [weak self] in self?.press(edit: true); return true },
+        setAccessibilityChildren(buttonElements)
+        let edit = row.editLabel.map { name in NSAccessibilityCustomAction(name: name) { [weak self] in self?.press(edit: true); return true } }
+        setAccessibilityCustomActions([edit].compactMap { $0 } + [
             NSAccessibilityCustomAction(name: row.removeLabel) { [weak self] in self?.press(edit: false); return true },
         ])
     }
@@ -107,7 +113,7 @@ extension NSImage {
     override func accessibilityChildren() -> [Any]? {
         editElement.setAccessibilityFrame(NSAccessibility.screenRect(fromView: self, rect: editZone))
         deleteElement.setAccessibilityFrame(NSAccessibility.screenRect(fromView: self, rect: deleteZone))
-        return [editElement, deleteElement]
+        return buttonElements
     }
 
     override func updateTrackingAreas() {
@@ -127,13 +133,13 @@ extension NSImage {
         let p = convert(event.locationInWindow, from: nil)
         guard bounds.contains(p) else { return }
         if deleteZone.contains(p) { press(edit: false) }
-        else if editZone.contains(p) { press(edit: true) }
+        else if editable, editZone.contains(p) { press(edit: true) }
         else { hovered = false; MenuSync.closeThen(enclosingMenuItem?.menu, onReveal) }
     }
 
     /// The Edit or Delete button, from a click, the keyboard or VoiceOver.
     func press(edit: Bool) {
-        if edit { hovered = false; MenuSync.closeThen(enclosingMenuItem?.menu, onEdit) } else { onDelete() }
+        if edit { if editable { hovered = false; MenuSync.closeThen(enclosingMenuItem?.menu, onEdit) } } else { onDelete() }
     }
 
     override func accessibilityPerformPress() -> Bool { MenuSync.closeThen(enclosingMenuItem?.menu, onReveal); return true }
@@ -153,7 +159,7 @@ extension NSImage {
         x += 16 + 8
         var right = bounds.maxX - Self.edge - 10
         if showsButtons {
-            for (zone, name) in [(editZone, "pencil"), (deleteZone, "trash")] {
+            for (zone, name) in (editable ? [(editZone, "pencil")] : []) + [(deleteZone, "trash")] {
                 let lit = name == "trash" && confirming
                 let color: NSColor = hovered ? .selectedMenuItemTextColor : (lit ? .controlAccentColor : .secondaryLabelColor)
                 let cfg = NSImage.SymbolConfiguration(pointSize: 12, weight: .medium).applying(.init(paletteColors: [color]))
@@ -161,7 +167,7 @@ extension NSImage {
                     img.draw(at: NSPoint(x: zone.midX - img.size.width / 2, y: (bounds.height - img.size.height) / 2), from: .zero, operation: .sourceOver, fraction: 1)
                 }
             }
-            right = editZone.minX - 4
+            right = (editable ? editZone : deleteZone).minX - 4
         }
         let style = NSMutableParagraphStyle()
         style.lineBreakMode = .byTruncatingTail
@@ -287,7 +293,7 @@ private final class FlippedPanel: NSView { override var isFlipped: Bool { true }
     /// The rows (hover).
     var hoverRows: [MenuSyncRow] { Array(rows.values) }
 
-    private func model(_ s: SyncSnapshot) -> SyncMenuModel { syncMenuModel(snapshot: s, removal: removal) }
+    private func model(_ s: SyncSnapshot) -> SyncMenuModel { syncMenuModel(snapshot: s, removal: removal, host: hostWindowsAll()) }
 
     /// The whole menu opened: every confirmation starts closed (SPEC 8.2 item 5).
     func menuOpened(_ s: SyncSnapshot) {
@@ -323,12 +329,15 @@ private final class FlippedPanel: NSView { override var isFlipped: Bool { true }
             menu.addItem(item)
             if let c = m.confirm, c.folderId == id { menu.addItem(makeConfirm(c)) }
         }
-        menu.addItem(.separator())
-        let add = ActionItem(title: m.add.title) { [actions] in actions.showAdd(nil) }
-        add.toolTip = m.add.help
-        menu.addItem(add)
+        if let a = m.add {
+            menu.addItem(.separator())
+            let add = ActionItem(title: a.title) { [actions] in actions.showAdd(nil) }
+            add.toolTip = a.help
+            menu.addItem(add)
+        }
         // The keyboard's way to the hover buttons: ⌘E edits and ⌘⌫ asks to remove the highlighted folder.
-        for (title, key, edit) in [(m.editTitle, "e", true), (m.removeTitle, "\u{8}", false)] {
+        let keys: [(String?, String, Bool)] = [(m.editTitle, "e", true), (m.removeTitle, "\u{8}", false)]
+        for case let (title?, key, edit) in keys {
             let item = ActionItem(title: title, key: key) { [weak self] in self?.keyboard(edit: edit) }
             item.isHidden = true
             item.allowsKeyEquivalentWhenHidden = true

@@ -154,9 +154,20 @@ import SwiftUI
 
 struct DevicesTab: View {
     @State private var model: DevicesModel
+    /// Brings a link to pair with (`seedwell://devices/…` opened the app).
+    var nav: SettingsNavigation
 
-    init(core: Core) {
+    init(core: Core, nav: SettingsNavigation = SettingsNavigation()) {
         _model = State(initialValue: DevicesModel(core: core))
+        self.nav = nav
+    }
+
+    /// Pair with a Link…, filled in with the link that opened the app.
+    private func takeLink() {
+        guard let link = nav.pairLink else { return }
+        nav.pairLink = nil
+        model.showPaste()
+        model.setPasted(link)
     }
 
     var body: some View {
@@ -192,6 +203,8 @@ struct DevicesTab: View {
             Text(model.view.note).font(.system(size: 11.5)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
         }
         .task { await model.watch() }
+        .onAppear { takeLink() }
+        .onChange(of: nav.pairLink) { takeLink() }
         .sheet(isPresented: Binding(get: { model.sheet != nil }, set: { if !$0 { model.sheet = nil } })) { sheet }
     }
 

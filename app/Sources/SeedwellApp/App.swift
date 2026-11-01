@@ -183,6 +183,7 @@ import os
         commands.askRemoval = { rows, deleteFiles in main.libraryModel?.askRemoval(rows, deleteFiles: deleteFiles) }
         // Settings is a section of the main window: every way in opens it on the right tab.
         commands.showSettings = { tab in main.show(settings: tab, openSettings: true) }
+        commands.pairDevice = { link in main.show(settings: .devices, pairLink: link) }
         commands.editTracker = { id in main.show(settings: .rules, editTracker: id) }
         commands.createTracker = { host in main.show(settings: .rules, newTrackerHost: host) }
         commands.showTorrent = { id in main.showTorrent(id) }
@@ -417,25 +418,12 @@ import os
 
     // MARK: URLs, notification clicks
 
-    /// Double-clicked .torrent files and clicked magnet: links both arrive here.
+    /// Double-clicked .torrent files, clicked magnet: links and `seedwell://` links (invitations, the Finder and Share
+    /// extensions' links) all arrive here. A file is added; a link goes where the core routes it (SPEC 7G.5).
     func application(_ application: NSApplication, open urls: [URL]) {
-        // A folder sync link (`seedwell://sync/<key>?name=…`) opens the add modal, filled in (SPEC 7G.5).
-        let links = urls.filter { $0.scheme?.lowercased() == "seedwell" }
-        for link in links where link.host?.lowercased() == "sync" { commands.sync.showAdd(link.absoluteString) }
-        // A channel link (`seedwell://chat/<invite>?name=…`) opens the New Channel window on Join, filled in.
-        for link in links where link.host?.lowercased() == "chat" { commands.chat.showNew(prefill: link.absoluteString) }
-        // `seedwell://share?path=…`: the system Share menu (the Share extension).
-        for link in links where link.host?.lowercased() == "share" {
-            if let path = URLComponents(url: link, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "path" })?.value,
-               path.hasPrefix("/") { commands.sync.share(path: path) }
+        for url in urls {
+            if url.isFileURL { commands.add(url.path) } else { commands.open(core.routeLink(url: url.absoluteString)) }
         }
-        // `seedwell://folder/<id>` and `…/<id>/share`: the Finder extension's Show in Seedwell and Share….
-        for link in links where link.host?.lowercased() == "folder" {
-            let parts = link.pathComponents.filter { $0 != "/" }
-            guard let id = parts.first, commands.sync.snapshot().folders.contains(where: { $0.id == id }) else { continue }
-            if parts.dropFirst().first == "share" { commands.sync.showShare(id) } else { commands.sync.showFolder(id, false) }
-        }
-        commands.add(urls: urls.filter { $0.scheme?.lowercased() != "seedwell" })
     }
 
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
@@ -594,17 +582,54 @@ import os
     }
 }
 
-/// Puts the check mark on Transfers ▸ Limit Speed while the alternative limits are on.
-@MainActor final class LimitSpeedChecker: NSObject, NSMenuDelegate {
-    private let isOn: @MainActor () -> Bool
-    init(isOn: @escaping @MainActor () -> Bool) { self.isOn = isOn }
+/// An app command of the core's model (`Core.appCommands`): File's adding and Transfers' Pause All, Resume All and
+/// Limit Speed. Each time its menu opens or its key is pressed it asks the core again whether it is enabled and
+/// checked, and runs the command the core gives then.
+@MainActor final class AppCommandItem: NSMenuItem, NSMenuItemValidation {
+    private let commands: Commands
+    private let menuTitle: String
+    private let index: Int
 
-    func menuNeedsUpdate(_ menu: NSMenu) {
-        menu.items.first { $0.title == "Limit Speed" }?.state = isOn() ? .on : .off
+    init(title: String, shortcut: KeyShortcut?, menu: String, index: Int, commands: Commands) {
+        self.commands = commands
+        menuTitle = menu
+        self.index = index
+        super.init(title: title, action: #selector(fire), keyEquivalent: shortcut?.key ?? "")
+        target = self
+        if let k = shortcut {
+            var mods: NSEvent.ModifierFlags = .command
+            if k.shift { mods.insert(.shift) }
+            if k.alt { mods.insert(.option) }
+            keyEquivalentModifierMask = mods
+        }
+    }
+
+    required init(coder: NSCoder) { fatalError("not used") }
+
+    /// The entry as the core has it now.
+    private var current: (command: AppCommand, enabled: Bool, checked: Bool)? {
+        let entries = commands.core.appCommands().first { $0.title == menuTitle }?.entries ?? []
+        guard entries.indices.contains(index), case let .item(command, _, _, enabled, checked) = entries[index] else { return nil }
+        return (command, enabled, checked)
+    }
+
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        guard let c = current else { return false }
+        state = c.checked ? .on : .off
+        return c.enabled
+    }
+
+    @objc private func fire() {
+        guard let c = current, c.enabled else { return }
+        switch c.command {
+        case .addTorrentFile: commands.chooseTorrentFile()
+        case .addLink: commands.showAddLink()
+        case .pauseAll: commands.core.pauseAll()
+        case .resumeAll: commands.core.resumeAll()
+        case .setLimitSpeed(let on): commands.core.setAltSpeed(on: on)
+        }
     }
 }
-
-@MainActor private var limitSpeedChecker: LimitSpeedChecker?
 
 @MainActor enum MainMenu {
     /// The menu bar is hidden for an LSUIElement app, but its key equivalents still work
@@ -623,6 +648,18 @@ import os
             i.keyEquivalentModifierMask = mods
             return i
         }
+        // File's adding and the Transfers menu: the core's commands, in its order.
+        let model = commands.core.appCommands()
+        func appItems(_ title: String) -> [NSMenuItem] {
+            let entries = model.first { $0.title == title }?.entries ?? []
+            return entries.enumerated().map { i, e in
+                switch e {
+                case .separator: .separator()
+                case let .item(_, itemTitle, shortcut, _, _):
+                    AppCommandItem(title: itemTitle, shortcut: shortcut, menu: title, index: i, commands: commands)
+                }
+            }
+        }
         add(AppInfo.name, [
             act("Settings…", ",") { commands.showSettings(nil) },
             .separator(),
@@ -631,9 +668,7 @@ import os
             // ⌘Q only closes the windows: Seedwell keeps sharing from the menu bar (Quit is in its menu).
             NSMenuItem(title: "Close \(AppInfo.name)", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"),
         ])
-        add("File", [
-            act("Add Torrent File…", "o") { commands.chooseTorrentFile() },
-            act("Add Magnet Link or URL…", "o", [.command, .shift]) { commands.showAddLink() },
+        add("File", appItems("File") + [
             act("Open \(AppInfo.name)", "l") { commands.showMain(nil, nil) },
             NSMenuItem(title: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w"),
         ])
@@ -643,17 +678,7 @@ import os
             NSMenuItem(title: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v"),
             NSMenuItem(title: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a"),
         ])
-        add("Transfers", [
-            act("Pause All") { commands.core.pauseAll() },
-            act("Resume All") { commands.core.resumeAll() },
-            .separator(),
-            act("Limit Speed", "l", [.command, .option]) { commands.core.setAltSpeed(on: !commands.core.snapshot().altSpeed) },
-        ])
-        // Limit Speed is a toggle: its check mark follows the engine whenever the menu opens.
-        if let menu = bar.items.last?.submenu {
-            limitSpeedChecker = LimitSpeedChecker(isOn: { commands.core.snapshot().altSpeed })
-            menu.delegate = limitSpeedChecker
-        }
+        add("Transfers", appItems("Transfers"))
         return bar
     }
 }

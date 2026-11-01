@@ -3,9 +3,9 @@ using Microsoft.Win32;
 namespace Seedwell;
 
 /// <summary>
-/// Opening .torrent files and magnet: links with Seedwell, registered for this user only (HKCU\Software\Classes, no
-/// administrator rights): the Windows side of the Mac's CFBundleDocumentTypes and CFBundleURLTypes (app/build.sh), with
-/// the same names. <c>Seedwell.exe --register</c> writes it, <c>--unregister</c> removes exactly what it wrote. Windows
+/// Opening .torrent files, magnet: links and Seedwell's own seedwell: links with Seedwell, registered for this user only
+/// (HKCU\Software\Classes, no administrator rights): the Windows side of the Mac's CFBundleDocumentTypes and
+/// CFBundleURLTypes (app/build.sh), with the same names. <c>Seedwell.exe --register</c> writes it, <c>--unregister</c> removes exactly what it wrote. Windows
 /// then offers Seedwell for both; it becomes the default where nothing else is, otherwise the user picks it once
 /// (Windows asks, or Settings > Apps > Default apps). install.ps1 runs both, so this is the one place for the rule; its
 /// test seam SEEDWELL_INSTALL_TEST=1 puts every key under HKCU\Software\SeedwellInstallTest instead.
@@ -48,6 +48,15 @@ static class Registration
                 using (var cmd = m.CreateSubKey(@"shell\open\command")) cmd.SetValue("", Open);
             }
         }
+        // seedwell: is Seedwell's own scheme (folder, channel and pairing links, the file manager's Share): always this
+        // app's, so it is written whatever was there (an older install's path).
+        using (var s = Registry.CurrentUser.CreateSubKey($@"{Classes}\seedwell"))
+        {
+            s.SetValue("", "URL:Seedwell link");
+            s.SetValue("URL Protocol", "");
+            using (var icon = s.CreateSubKey("DefaultIcon")) icon.SetValue("", $"\"{Exe}\",0");
+            using (var cmd = s.CreateSubKey(@"shell\open\command")) cmd.SetValue("", Open);
+        }
         // The application itself, so "Open with" and Default apps list it for both.
         using (var app = Registry.CurrentUser.CreateSubKey(AppKey))
         {
@@ -74,6 +83,7 @@ static class Registration
                 Registry.CurrentUser.DeleteSubKeyTree($@"{Classes}\magnet", false);
             }
         }
+        Registry.CurrentUser.DeleteSubKeyTree($@"{Classes}\seedwell", false);
         Registry.CurrentUser.DeleteSubKeyTree(AppKey, false);
         Changed();
     }

@@ -13,17 +13,8 @@ enum ChatText {
     /// A channel's Agents: Yes/No menu: its title, choices, and whether this Mac may change it (the core's).
     static func agentsMenu(_ c: SyncChannel) -> ChatAgentsMenu { chatAgentsMenu(channel: c) }
 
-    /// The New Channel window's line under its Agents choice (the core's words).
-    static func newAgentsNote(_ open: Bool) -> String { chatNewAgentsNote(open: open) }
-
     /// A channel's unread messages under General: its total less its topics' (the core's rule).
     static func generalUnread(_ c: SyncChannel, _ topics: [SyncTopic]) -> UInt32 { chatGeneralUnread(channel: c, topics: topics) }
-
-    /// A topic name as typed: trimmed, at most 100 characters; `nil` when empty.
-    static func topicTitle(_ text: String) -> String? {
-        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        return t.isEmpty ? nil : String(t.prefix(100))
-    }
 
     /// A message's time: "14.32" today, "Yesterday 14.32", "1 Nov 14.32" before.
     static func time(_ at: UInt64, now: Date = .now) -> String {
@@ -50,7 +41,9 @@ enum ChatText {
     /// One line of a message, for notifications, replies and the list: at most `limit` characters.
     static func preview(_ m: SyncMessage, limit: Int = 120) -> String {
         let text: String = switch m.kind {
-        case .text: chatMail(text: m.body)?.line ?? ChatMarkdown.plain(m.body)
+        case .text: m.body.isEmpty && !(m.images.isEmpty && m.files.isEmpty)
+            ? (m.images.map(\.caption) + m.files.map { "\($0.name) · \($0.sizeText)" }).joined(separator: ", ")
+            : chatMail(text: m.body)?.line ?? ChatMarkdown.plain(m.body)
         case .json: "JSON message"
         case .other: "A message this version cannot show"
         }
@@ -70,17 +63,5 @@ enum ChatText {
     /// The banner for a new message: "Team › Dinner" / "Studio iMac: Hello there".
     static func notification(_ place: String, _ m: SyncMessage) -> (title: String, body: String) {
         (place, "\(author(m)): \(preview(m, limit: 200))")
-    }
-
-    /// A channel name as typed: trimmed, at most 64 characters; `nil` when empty.
-    static func channelName(_ text: String) -> String? {
-        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        return t.isEmpty ? nil : String(t.prefix(64))
-    }
-
-    /// A pasteboard text worth prefilling the join field with: a `seedwell://chat/` link.
-    static func looksLikeLink(_ text: String) -> Bool {
-        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        return t.count < 2_000 && t.lowercased().hasPrefix("seedwell://chat/")
     }
 }

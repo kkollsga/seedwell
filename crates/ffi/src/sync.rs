@@ -287,7 +287,17 @@ pub struct SyncMessage {
     /// The topic it belongs to; `None`: General (and for a private message).
     pub topic: Option<String>,
     pub kind: SyncMessageKind,
+    /// The text (with images: their caption, may be empty).
     pub body: String,
+    /// Its images (SPEC §7G.7 *Attachments*), in order ([`crate::chat_images`]).
+    #[uniffi(default = [])]
+    pub images: Vec<crate::chat_images::ChatImage>,
+    /// Its files, in order, as cards ([`crate::chat_files`]).
+    #[uniffi(default = [])]
+    pub files: Vec<crate::chat_files::ChatFileCard>,
+    /// What its attachments are asked for by: the channel's id, or `dm:<device>` for a private message.
+    #[uniffi(default = "")]
+    pub place: String,
 }
 
 /// A topic of a channel (General is not one).
@@ -472,6 +482,11 @@ pub mod ondemand;
 /// What the UI can ask of folder sync. Calls may block (moving a folder copies across disks): the app
 /// calls the changing ones off the main thread.
 pub trait SyncBackend: Send + Sync {
+    /// The running service and its runtime, for the calls that work on it directly ([`crate::chat_images`]). `None`:
+    /// not running, or not a real service (the mock).
+    fn chat_service(&self) -> Option<(SyncHandle, tokio::runtime::Handle)> {
+        None
+    }
     fn snapshot(&self) -> SyncSnapshot;
     fn add_folder(&self, path: &str) -> Result<SyncFolder, CoreError>;
     fn join(&self, key_or_link: &str, path: &str) -> Result<SyncFolder, CoreError>;
@@ -816,7 +831,7 @@ fn channel_of(c: &ChannelStatus) -> SyncChannel {
     }
 }
 
-fn message_of(m: &MessageInfo) -> SyncMessage {
+pub(crate) fn message_of(m: &MessageInfo) -> SyncMessage {
     SyncMessage {
         id: m.id.clone(),
         channel_id: m.channel_id.clone(),
@@ -834,6 +849,9 @@ fn message_of(m: &MessageInfo) -> SyncMessage {
             _ => SyncMessageKind::Other,
         },
         body: m.body.clone(),
+        images: m.attachments.iter().filter(|a| !a.is_file()).map(|a| crate::chat_images::image_of(a, false)).collect(),
+        files: m.attachments.iter().filter(|a| a.is_file()).map(|a| crate::chat_files::card_of(a, &m.author_name)).collect(),
+        place: m.place.clone(),
     }
 }
 
@@ -1084,9 +1102,18 @@ impl SyncBackend for RealSync {
         Ok(channel_of(&c))
     }
 
+    fn chat_service(&self) -> Option<(SyncHandle, tokio::runtime::Handle)> {
+        Some((self.slot.get()?, self.rt.clone()))
+    }
+
     fn chat_messages(&self, id: &str, topic: Option<&str>, before: Option<&str>, limit: u32) -> Vec<SyncMessage> {
         let (Some(h), Ok(id)) = (self.slot.get(), folder_id(id)) else { return Vec::new() };
-        h.chat_messages(&id, topic, before, limit.clamp(1, 1000) as usize).map(|v| v.iter().map(message_of).collect()).unwrap_or_default()
+        // An image on its way while no other member is connected waits for one that has it.
+        let waiting = h.channel_status(&id).is_some_and(|c| c.online <= 1);
+        let list = h.chat_messages(&id, topic, before, limit.clamp(1, 1000) as usize).unwrap_or_default();
+        list.iter()
+            .map(|m| SyncMessage { images: m.attachments.iter().filter(|a| !a.is_file()).map(|a| crate::chat_images::image_of(a, waiting)).collect(), ..message_of(m) })
+            .collect()
     }
 
     fn chat_send(&self, id: &str, topic: Option<&str>, body: &str, reply_to: Option<&str>) -> Result<SyncMessage, CoreError> {
@@ -1856,6 +1883,9 @@ impl MockSync {
             topic: None,
             kind: SyncMessageKind::Text,
             body: body.into(),
+            images: Vec::new(),
+            files: Vec::new(),
+            place: String::new(),
         };
         let directs = vec![MockDirect {
             device_id: ola.into(),
@@ -1865,6 +1895,11 @@ impl MockSync {
                 pm(&"e1".repeat(16), false, 5400, "Kan vi ta budsjettet på tomannshånd?"),
                 pm(&"e2".repeat(16), true, 5000, "Ja, i morgen kl. 10?"),
                 pm(&"e3".repeat(16), false, 1200, "Passer fint 👍"),
+                SyncMessage {
+                    files: vec![crate::chat_files::card_of(&crate::chat_files::sample_info("Budsjett 2027.xlsx", 2_400_000, "available", 0, 0, None, None), "Ola's MacBook Air")],
+                    place: format!("dm:{ola}"),
+                    ..pm(&"e4".repeat(16), false, 900, "Her er utkastet")
+                },
             ],
             read: 2,
         }];
@@ -1889,6 +1924,9 @@ impl MockSync {
             topic: None,
             kind,
             body: body.into(),
+            images: Vec::new(),
+            files: Vec::new(),
+            place: String::new(),
         };
         let in_topic = |mut m: SyncMessage, t: &str| {
             m.topic = Some(t.to_string());
@@ -2279,6 +2317,9 @@ impl SyncBackend for MockSync {
             topic: None,
             kind: SyncMessageKind::Text,
             body: body.into(),
+            images: Vec::new(),
+            files: Vec::new(),
+            place: String::new(),
         };
         if !s.directs.iter().any(|d| d.device_id == device_id) {
             s.directs.push(MockDirect { device_id: device_id.into(), name, online: true, messages: Vec::new(), read: 0 });
@@ -2332,6 +2373,9 @@ impl SyncBackend for MockSync {
                 topic: topic.map(str::to_string),
                 kind: SyncMessageKind::Text,
                 body: body.into(),
+                images: Vec::new(),
+                files: Vec::new(),
+                place: String::new(),
             };
             c.messages.push(msg.clone());
             c.read.insert(msg.id.clone());
@@ -3187,9 +3231,11 @@ mod tests {
         assert_eq!(t.title, "Søndag");
         // A private conversation, and a new one with a channel member.
         let dms = core.chat_directs();
-        assert_eq!((dms.len(), dms[0].unread), (1, 1));
+        assert_eq!((dms.len(), dms[0].unread), (1, 2));
         let pm = core.chat_direct_messages(dms[0].device_id.clone(), None, 10);
-        assert!(pm.len() == 3 && pm.iter().all(|m| m.channel_id.is_empty()));
+        assert!(pm.len() == 4 && pm.iter().all(|m| m.channel_id.is_empty()));
+        // The last carries a file, asked for by the conversation's place.
+        assert_eq!((pm[3].files.len(), pm[3].place.clone()), (1, format!("dm:{}", dms[0].device_id)));
         core.chat_mark_direct_read(dms[0].device_id.clone());
         assert_eq!(core.chat_directs()[0].unread, 0);
         let kari = core.sync_members(fam.id.clone()).into_iter().find(|m| !m.is_me).unwrap();

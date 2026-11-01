@@ -65,6 +65,24 @@ fn n(count: usize, what: &str) -> String {
     format!("{count} {what}{}", if count == 1 { "" } else { "s" })
 }
 
+/// " and 2 images", " and 1 file": how many attachments a post has (never what they are).
+fn attached(images: usize, files: usize) -> String {
+    match (images, files) {
+        (0, 0) => String::new(),
+        (i, 0) => format!(" and {i} image{}", if i == 1 { "" } else { "s" }),
+        (0, f) => format!(" and {f} file{}", if f == 1 { "" } else { "s" }),
+        (i, f) => format!(" and {} attachments", i + f),
+    }
+}
+
+/// Where a file of a message is: a channel, or a private conversation.
+fn file_place(channel: &str, device: Option<&str>) -> String {
+    match device {
+        Some(d) => format!("the private conversation with device {}", clip(d, 60)),
+        None => format!("channel {}", folder(channel)),
+    }
+}
+
 /// A one-line description of a request that is safe to store and show: ids shortened, magnet
 /// links and URLs redacted, no file contents.
 pub fn describe(r: &Request) -> String {
@@ -185,7 +203,10 @@ pub fn describe(r: &Request) -> String {
         Request::ChatRemoveDevice(p) => format!("remove device {} from channel {}", clip(&p.device, 60), folder(&p.channel)),
         Request::ChatSetShareUntil(p) => format!("share channel {} for {} days{}", folder(&p.channel), p.days, if p.extend { " more" } else { "" }),
         // What it says stays out of the log; how long it is does not.
-        Request::ChatSend(p) => format!("post {} bytes{} to channel {}", p.body.len(), if p.json { " of JSON" } else { "" }, folder(&p.channel)),
+        Request::ChatSend(p) => {
+            let images = attached(p.attachments.len(), p.files.len());
+            format!("post {} bytes{}{images} to channel {}", p.body.len(), if p.json { " of JSON" } else { "" }, folder(&p.channel))
+        }
         Request::ChatAddAddress(p) => format!("add address {} to channel {}", clip(&p.address, 100), folder(&p.channel)),
         Request::ChatRename(p) => format!("rename channel {}", folder(&p.channel)),
         Request::ChatMute(p) => format!("{} channel {}", if p.muted { "mute" } else { "unmute" }, folder(&p.channel)),
@@ -196,7 +217,13 @@ pub fn describe(r: &Request) -> String {
         Request::ChatSetAgents(p) => format!("set Agents: {} for channel {}", clip(&p.agents, 10), folder(&p.channel)),
         Request::ChatLeave(p) => format!("leave channel {}", folder(&p.channel)),
         Request::ChatNewTopic(p) => format!("make the topic {} in channel {}", clip(&p.title, 100), folder(&p.channel)),
-        Request::ChatDmSend(p) => format!("write {} bytes{} privately to device {}", p.body.len(), if p.json { " of JSON" } else { "" }, clip(&p.device, 60)),
+        Request::ChatDmSend(p) => {
+            format!("write {} bytes{}{} privately to device {}", p.body.len(), if p.json { " of JSON" } else { "" }, attached(0, p.files.len()), clip(&p.device, 60))
+        }
+        // Which file, never its name or where it goes.
+        Request::ChatDownload(p) => format!("download file {} of {}", clip(&p.hash, 16), file_place(&p.channel, p.device.as_deref())),
+        Request::ChatCancelDownload(p) => format!("cancel the download of file {} of {}", clip(&p.hash, 16), file_place(&p.channel, p.device.as_deref())),
+        Request::ChatStopSharing(p) => format!("stop sharing file {} of {}", clip(&p.hash, 16), file_place(&p.channel, p.device.as_deref())),
         Request::UpdateDevBuilds(p) => format!("turn development builds {}", if p.on { "on" } else { "off" }),
         other => other.method().name().to_owned(),
     };

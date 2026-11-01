@@ -64,9 +64,9 @@ pub fn chat_agents_label(access: SyncAgentAccess) -> String {
 }
 
 /// What Agents: Yes means, in one line (the tag's tooltip, the menu's and the New Channel window's note).
-const AGENTS_YES: &str = "Agents on every member's device can read and post here. Their messages are marked.";
+pub(crate) const AGENTS_YES: &str = "Agents on every member's device can read and post here. Their messages are marked.";
 /// What Agents: No means, in one line.
-const AGENTS_NO: &str = "Agents can never read anything in this channel.";
+pub(crate) const AGENTS_NO: &str = "Agents can never read anything in this channel.";
 
 /// A channel open to agents (Agents: Yes) has a tag ("agents"), the same in the sidebar and on its page; `None` for
 /// a channel closed to them.
@@ -103,6 +103,9 @@ pub struct ChatAgentsMenu {
     pub can_change: bool,
     /// One line under the choices: what the setting means, or why this computer cannot change it.
     pub note: String,
+    /// The alert's title when the change fails ("Couldn't change whether agents may use “Bridge”"); its text is the
+    /// error's sentence.
+    pub failure_title: String,
 }
 
 /// A channel's Agents menu (its ⋯ menu): "Agents: Yes" with Yes and No, enabled for owners and admins.
@@ -118,6 +121,7 @@ pub(crate) fn agents_menu(channel: &SyncChannel) -> ChatAgentsMenu {
         choices: [("Yes", true), ("No", false)].map(|(t, open)| ChatAgentsChoice { title: t.into(), open, checked: channel.agents == open }).to_vec(),
         can_change,
         note,
+        failure_title: format!("Couldn't change whether agents may use “{}”", channel.name),
     }
 }
 
@@ -254,6 +258,7 @@ pub(crate) mod tests {
         assert_eq!((m.title.as_str(), m.can_change), ("Agents: No", true));
         assert_eq!(m.choices.iter().map(|x| (x.title.as_str(), x.open, x.checked)).collect::<Vec<_>>(), [("Yes", true, false), ("No", false, true)]);
         assert!(m.note.contains("never read"), "{}", m.note);
+        assert_eq!(m.failure_title, "Couldn't change whether agents may use “Bridge”");
         c.agents = true;
         c.role = SyncRole::Admin;
         let m = chat_agents_menu(c.clone());
