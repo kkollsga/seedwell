@@ -166,8 +166,12 @@ mod tests {
 
     #[test]
     fn the_file_managers_links_name_a_path_or_a_folder() {
-        assert_eq!(route("seedwell://share?path=/Users/kari/My%20Photos"), LinkRoute::SharePath { path: "/Users/kari/My Photos".into() });
-        assert_eq!(route("seedwell://share?x=1&path=/a+b/%C3%A6"), LinkRoute::SharePath { path: "/a+b/æ".into() }, "a + stays");
+        // A path without a drive is not absolute on Windows.
+        #[cfg(not(windows))]
+        {
+            assert_eq!(route("seedwell://share?path=/Users/kari/My%20Photos"), LinkRoute::SharePath { path: "/Users/kari/My Photos".into() });
+            assert_eq!(route("seedwell://share?x=1&path=/a+b/%C3%A6"), LinkRoute::SharePath { path: "/a+b/æ".into() }, "a + stays");
+        }
         #[cfg(windows)]
         assert_eq!(route(r"seedwell://share?path=C:%5CUsers%5Ckari"), LinkRoute::SharePath { path: r"C:\Users\kari".into() });
         assert!(is_problem(&route("seedwell://share?path=relative/folder")), "only an absolute path");

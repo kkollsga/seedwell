@@ -180,10 +180,12 @@ async fn a_device_not_connected_shows_when_it_was_last_seen_and_why_it_cannot_be
     let hold = tokio::net::TcpSocket::new_v4().unwrap();
     hold.set_reuseaddr(true).unwrap();
     hold.bind(SocketAddr::from((Ipv4Addr::LOCALHOST, port))).unwrap();
-    until(30, "Anna lists Bo as not connected, with why", || {
-        a.h.snapshot().offline.iter().any(|d| d.id == bid && d.name == "Bo" && d.last_seen_s.is_some() && d.problem.as_deref().is_some_and(|p| p.starts_with("nothing answers at ")))
-    })
-    .await;
+    let shown = |a: &Device| a.h.snapshot().offline.into_iter().find(|d| d.id == bid);
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while !shown(&a).is_some_and(|d| d.name == "Bo" && d.last_seen_s.is_some() && d.problem.as_deref().is_some_and(|p| p.starts_with("nothing answers at "))) {
+        assert!(std::time::Instant::now() < end, "Anna lists Bo as not connected, with why; she shows {:?}", shown(&a));
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
     let o = a.h.snapshot().offline.into_iter().find(|d| d.id == bid).unwrap();
     assert_eq!(o.folders, vec![id.to_string()]);
     a.h.shutdown().await;

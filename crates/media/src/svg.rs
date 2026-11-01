@@ -111,10 +111,13 @@ fn precheck(b: &[u8]) -> Result<(), MediaError> {
     Ok(())
 }
 
-/// Parses and draws on a thread of its own, within [`TIME`]: the SVG's own size (rounded) and the picture, its
+/// Parses and draws on a thread of its own, within [`TIME`] (the fonts loaded first, outside it): the SVG's own size (rounded) and the picture, its
 /// longest side `side` pixels.
 fn draw(b: &[u8], side: u32) -> Result<(u32, u32, RgbaImage), MediaError> {
     precheck(b)?;
+    // The system's fonts load once, outside the time limit: on a slow computer, or one with many fonts, loading them
+    // can take longer than drawing ever should, and the first SVG would fail.
+    fonts();
     let bytes = b.to_vec();
     let (tx, rx) = mpsc::channel();
     std::thread::Builder::new()

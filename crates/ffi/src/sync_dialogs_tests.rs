@@ -81,8 +81,9 @@ fn a_pasted_link_brings_its_place_and_a_folder_of_that_name_already_there() {
     assert!(!sync_add_set_location(form.clone(), default).location_chosen);
     // Choose…: a parent, the folder named after the link.
     let chosen = sync_add_choose_parent(form, "/tmp/elsewhere".into());
-    assert_eq!(chosen.location, "/tmp/elsewhere/Team");
-    assert!(core.sync_add_window(chosen.clone()).locations.iter().any(|l| l.path == "/tmp/elsewhere/Team"));
+    let team = Path::new("/tmp/elsewhere").join("Team").display().to_string();
+    assert_eq!(chosen.location, team);
+    assert!(core.sync_add_window(chosen.clone()).locations.iter().any(|l| l.path == team));
     // Not a link: why, and no Start.
     let bad = core.sync_add_set_link(chosen, "hello".into());
     let w = core.sync_add_window(bad.clone());
@@ -102,7 +103,7 @@ fn the_edit_dialog_saves_what_changed() {
     let computer = computer!();
     assert_eq!((w.title.as_str(), w.subtitle.clone()), ("Notes", Some(format!("Owner · {}", subtitle(&f)))));
     assert_eq!((w.location.as_str(), w.location_moved, w.move_enabled), ("/tmp/seedwell-mock", false, true));
-    assert_eq!(w.location_help, "/tmp/seedwell-mock/Notes");
+    assert_eq!(w.location_help, Path::new("/tmp/seedwell-mock").join("Notes").display().to_string());
     assert_eq!(w.move_picker.message, "Choose where “Notes” goes. It keeps its name.");
     assert_eq!(w.share_title.as_deref(), Some("Share…"));
     assert_eq!(w.share_note, sync_edit_share_note(SyncRole::Owner));
