@@ -440,7 +440,8 @@ async fn remove_confirm<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &Conn, h: &SyncHand
     if let Some(trash) = trash {
         // To the Trash from where the files are (an on-demand folder's from its cache, checked above), so the check
         // holds; refused, they stay as an ordinary folder at the folder's place.
-        let files = h.remove_folder_for_trash(&id).await.map_err(s::err)?;
+        // (From this device only: agents never change what is on the user's other devices.)
+        let files = h.remove_folder_here(&id, true).await.map_err(s::err)?;
         let from = files.clone();
         let t = blocking(move || s::move_to_trash(&from, trash.as_deref())).await?;
         let place = PathBuf::from(&f.path);
@@ -458,7 +459,7 @@ async fn remove_confirm<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &Conn, h: &SyncHand
         out.files = "trashed".into();
         out.trashed_to = t.path().map(|p| p.display().to_string());
     } else {
-        out.path = h.remove_folder(&id).await.map_err(s::err)?.display().to_string();
+        out.path = h.remove_folder_here(&id, false).await.map_err(s::err)?.display().to_string();
     }
     let mut r = reply(&out)?;
     r.note = Some(format!(

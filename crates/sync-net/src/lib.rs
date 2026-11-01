@@ -46,4 +46,4 @@ pub mod tls;
 
 pub use relay_server::{RelayOptions, run_relay};
 pub use rendezvous::RendezvousStatus;
-pub use service::{Activity, DeleteSeen, InviteInfo, Keep, MemberInfo, OnDemandError, OnDemandHost, OnDemandHostCell, Options, PublicDiscovery, SyncError, SyncHandle};
+pub use service::{Activity, DeleteSeen, FULL_HERE, InviteInfo, Keep, MemberInfo, OnDemandError, OnDemandHost, OnDemandHostCell, Options, PublicDiscovery, SyncError, SyncHandle};

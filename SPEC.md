@@ -943,7 +943,11 @@ baseline every later version must still sync with:
   - **On all my devices.** A folder or channel the user puts on all devices (a *Follow* statement in the group, signed
     by the device that says it; the latest per folder or channel counts) comes to each other device by itself: a
     folder at the default location for joined folders under its name (with a number when taken: never into a folder
-    that is there), synced in full; a channel. It waits "from your devices" until admitted: each device that is
+    that is there), on demand when it is on demand on the device that put it there (since 0.1.14: its place there, its
+    files in this device's cache, nothing downloaded until asked for), else synced in full; a channel. A device that
+    keeps no folders on demand yet (Windows, Linux) joins such a folder in full, and its page says so. The mode is only
+    the default at joining: each device switches its own afterwards, and a switch on one device changes no other (one
+    that joined in full under 0.1.13 stays so). It waits "from your devices" until admitted: each device that is
     owner there grants the others Admin with the folder key, one that is admin admits them at Read & write with a
     one-use invitation of its own (an admin's ordinary admission), when the group or the setting changes and when such
     a device proves itself; an owner raises one it finds at Read & write to Admin, and never lowers a role. These are
@@ -952,6 +956,15 @@ baseline every later version must still sync with:
     stops it coming to new devices and deletes nothing. A folder or channel taken off one device (removed or left
     there) does not come back to it by itself (the skip list). Nothing follows on its own: an agent's channel or
     folder never does. A channel closed to agents follows and stays closed on every device.
+  - **Removed by its owner** (0.1.14). The device that owns a folder on all devices (its owner, normally the device
+    that added it) removing it in the app removes it from Seedwell on every device: it says so in the group (its
+    Follow turns off, marked removed), and each other device stops syncing it, its files kept where they are (an
+    on-demand folder's become an ordinary folder at its place; nothing is deleted or moved to the Trash). A device
+    that is away does it when it is back. The Remove question on the owner says so ("It is also removed from Seedwell
+    on your other devices; their files stay where they are."). Removed on any other device, or through the agent
+    interface (agents never change what is on the user's other devices), it goes from that device only and does not
+    come back there. Done once per removal: a device that joins the folder again afterwards keeps it. Channels are
+    not removed on the other devices.
   - **Removal is final, and changes the key.** *Remove…* on any of the devices takes a device out for good: it never
     joins the group again, and none of the devices admits it anywhere again. The dialog lists the folders and channels
     where this device is owner and the removed one a member, all ticked (it is removed there too), and those where

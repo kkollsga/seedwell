@@ -99,6 +99,10 @@ pub struct Options {
     /// The host that shows on-demand folders in the file manager, once there is one (the app sets it when it serves
     /// the Mac's File Provider; a headless daemon has none). Shared, so it outlives a restart of the service.
     pub on_demand_host: OnDemandHostCell,
+    /// This device keeps folders on demand ([`trs_platform::ON_DEMAND_FOLDERS`]: a file manager host shows them). Off,
+    /// a folder that is on demand on the device that put it on all the user's devices is joined here in full, and its
+    /// page says why.
+    pub on_demand: bool,
 }
 
 /// The host that shows on-demand folders in the file manager (the Mac's File Provider domain, SPEC 7G.11). Before a
@@ -149,6 +153,7 @@ impl Options {
             forbidden_root: None,
             chat_agents: None,
             on_demand_host: Arc::new(Mutex::new(None)),
+            on_demand: trs_platform::ON_DEMAND_FOLDERS,
         }
     }
 }
@@ -355,6 +360,8 @@ pub(crate) struct Inner {
     pub(crate) forbidden_root: Option<PathBuf>,
     /// The file manager's host of on-demand folders ([`Options::on_demand_host`]).
     pub(crate) on_demand_host: OnDemandHostCell,
+    /// This device keeps folders on demand ([`Options::on_demand`]).
+    pub(crate) on_demand: bool,
     /// Network changes ([`crate::netchange`]).
     pub(crate) netwatch: crate::netchange::NetWatch,
     /// The rendezvous ([`crate::rendezvous`]).
@@ -368,6 +375,13 @@ pub struct SyncHandle {
 }
 
 const DEVICE_KEY: &str = "device";
+
+/// The page of a folder joined in full although it is on demand on the device that put it on all the user's devices.
+pub const FULL_HERE: &str = concat!(
+    "On demand on your other device, but this ",
+    trs_platform::computer!(),
+    " can't keep folders on demand yet: every file is downloaded here."
+);
 
 /// How long stopping a folder waits for its runtime and its index to let go.
 const STOP_WAIT: Duration = Duration::from_secs(60);
@@ -510,6 +524,7 @@ impl SyncHandle {
             rt: tokio::runtime::Handle::current(),
             forbidden_root: opts.forbidden_root,
             on_demand_host: opts.on_demand_host,
+            on_demand: opts.on_demand,
             netwatch: crate::netchange::NetWatch::default(),
             rendezvous: crate::rendezvous::State::default(),
         });
@@ -1048,18 +1063,38 @@ impl SyncHandle {
     }
 
     /// Joins a folder that one of the user's own devices put on all of them ([`crate::devices`]), at `path` (made
-    /// here, never one that is there): no invitation, it proves it is one of that device's own.
-    pub(crate) async fn join_following_at(&self, folder_pk: [u8; 32], path: PathBuf) -> Result<(), SyncError> {
+    /// here, never one that is there; on demand, it is the folder's place, where the host shows it, and is not made):
+    /// no invitation, it proves it is one of that device's own.
+    pub(crate) async fn join_following_at(&self, folder_pk: [u8; 32], path: PathBuf, on_demand: bool) -> Result<(), SyncError> {
         let path = absolute(&path)?;
-        refuse_cloud_root(&path)?;
+        if !on_demand {
+            refuse_cloud_root(&path)?;
+        }
         self.refuse_forbidden(&path)?;
         self.refuse_overlap(&path)?;
         let id = FolderId::of_public_key(&folder_pk);
         if self.inner.ctx.registry.folder(&id).is_some() || lock(&self.inner.cfg).folder(&id.to_string()).is_some() {
             return Ok(());
         }
-        std::fs::create_dir(&path)?;
-        self.install(folder_pk, path, None, false).await.map(|_| ())
+        if on_demand {
+            // Files of an earlier time on demand are never read in as this device's: the user decides what they are.
+            let cache = self.cache_path(&id);
+            if cache.exists() {
+                return Err(invalid(format!("files this folder had on this {} earlier are still in {}: move them away first", trs_platform::computer!(), cache.display())));
+            }
+        } else {
+            std::fs::create_dir(&path)?;
+        }
+        self.install(folder_pk, path, None, on_demand).await.map(|_| ())
+    }
+
+    /// Folder `id` was joined in full although it is on demand on the device that put it on all the user's devices
+    /// ([`FolderEntry::full_here`]): its page says why.
+    pub(crate) fn note_full_here(&self, id: &FolderId) {
+        if let Some(e) = lock(&self.inner.cfg).folder_mut(&id.to_string()) {
+            e.full_here = true;
+        }
+        let _ = self.save_config();
     }
 
     async fn install(&self, folder_pk: [u8; 32], path: PathBuf, channel: Option<FolderId>, on_demand: bool) -> Result<FolderStatus, SyncError> {
@@ -1112,8 +1147,18 @@ impl SyncHandle {
 
     /// Stops syncing a folder on this device. The files stay; its index and `.seedwell` go. (Moving the
     /// files to the Trash is the app's job, which knows the user's Trash.) Returns where the files are.
+    ///
+    /// A folder on all the user's devices that this device owns goes from Seedwell on all of them, their files kept
+    /// ([`Self::removes_everywhere`]); any other followed folder goes from this device only, and does not come back.
     pub async fn remove_folder(&self, id: &FolderId) -> Result<PathBuf, SyncError> {
-        self.remove(id, false).await
+        self.remove(id, false, true).await
+    }
+
+    /// [`Self::remove_folder`] (or [`Self::remove_folder_for_trash`], `for_trash`) on this device only, also for a
+    /// folder on all the user's devices that this device owns: the agent interface's removal (agents never change what
+    /// is on the user's other devices). A followed folder does not come back here.
+    pub async fn remove_folder_here(&self, id: &FolderId, for_trash: bool) -> Result<PathBuf, SyncError> {
+        self.remove(id, for_trash, false).await
     }
 
     /// How many files of a folder no other device is known to hold (they go from the others' reach if this device stops
@@ -1140,7 +1185,7 @@ impl SyncHandle {
     /// folder's name beside it (`<id>.removed/<name>`, the same volume, so a Trash check of the cache holds for it).
     /// Returns the files to move to the Trash; then [`Self::finish_removal`] says how that went.
     pub async fn remove_folder_for_trash(&self, id: &FolderId) -> Result<PathBuf, SyncError> {
-        self.remove(id, true).await
+        self.remove(id, true, true).await
     }
 
     /// After [`Self::remove_folder_for_trash`]: `files` went to the Trash, or not (it refused): then an on-demand
@@ -1165,9 +1210,23 @@ impl SyncHandle {
         Ok(to)
     }
 
-    async fn remove(&self, id: &FolderId, for_trash: bool) -> Result<PathBuf, SyncError> {
-        // On all the user's devices: taken off this one, it does not come back by itself.
-        self.skip_if_followed(id);
+    async fn remove(&self, id: &FolderId, for_trash: bool, everywhere: bool) -> Result<PathBuf, SyncError> {
+        // On all the user's devices and owned here: removed, it goes from all of them (their files kept). Otherwise,
+        // taken off this one, it does not come back by itself.
+        let everywhere = if everywhere { self.everywhere_follow(id) } else { None };
+        if everywhere.is_none() {
+            self.skip_if_followed(id);
+        }
+        let removed = self.remove_here(id, for_trash).await;
+        if removed.is_ok()
+            && let Some((pk, name)) = everywhere
+        {
+            self.removed_everywhere(pk, name).await;
+        }
+        removed
+    }
+
+    async fn remove_here(&self, id: &FolderId, for_trash: bool) -> Result<PathBuf, SyncError> {
         let entry = lock(&self.inner.cfg).folder(&id.to_string()).cloned();
         // The file manager's host lets go of an on-demand folder first (told when it is over).
         let _settle = match entry.as_ref().filter(|e| e.on_demand) {
@@ -2233,6 +2292,9 @@ impl SyncHandle {
         };
         let mut live = lock(&f.live).clone();
         live.issues.extend(f.note_issues());
+        if !f.on_demand && lock(&self.inner.cfg).folder(&f.id.to_string()).is_some_and(|e| e.full_here) {
+            live.issues.push((String::new(), FULL_HERE.into()));
+        }
         let refused = lock(&f.notes).refused.clone();
         let role = f.role_of(self.inner.ctx.key.public_key());
         // (Also one following the user's own devices, which joins with no invitation.)

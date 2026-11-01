@@ -106,6 +106,10 @@ pub struct FolderEntry {
     /// this is cleared (so a crash in between loses nothing: it happens at the next start).
     #[serde(default)]
     pub mode_switched: bool,
+    /// Joined in full although it is on demand on the device that put it on all the user's devices, because this device
+    /// keeps no folders on demand ([`crate::Options::on_demand`]): its page says so.
+    #[serde(default)]
+    pub full_here: bool,
 }
 
 fn yes() -> bool {
@@ -134,6 +138,7 @@ impl FolderEntry {
             on_demand: false,
             pins: Vec::new(),
             mode_switched: false,
+            full_here: false,
         }
     }
 }
@@ -222,7 +227,8 @@ pub struct MyDevicesEntry {
     /// Folders and channels (ids, as text) the user took off this device although they are on all the others: not
     /// joined again by themselves.
     pub skip: Vec<String>,
-    /// How a folder that follows is joined here: `full` (the only one in this version).
+    /// How a folder that follows is joined here: `full` (written for 0.1.13; since 0.1.14 a folder joins on demand when
+    /// it is on demand on the device that put it on all devices, [`trs_sync_proto::members::FOLLOW_ON_DEMAND`]).
     pub mode: String,
     /// The groups this one moved on from (its key changed after a removal), oldest first, at most
     /// [`MAX_PREVIOUS_GROUPS`]: their memberships stay (without their keys) to tell a device that was away where the
@@ -231,6 +237,10 @@ pub struct MyDevicesEntry {
     /// Devices (keys, hex) removed in an earlier group that this device still takes out of the current one once it
     /// holds its key (two removals at once settled on the other's group).
     pub pending_remove: Vec<String>,
+    /// Folders (ids, as text) whose owner removed them on all devices, and that went from here for it (or were not
+    /// here): not removed again when the user joins one anew. An id goes from the list when its folder is on all
+    /// devices again.
+    pub removed: Vec<String>,
 }
 
 /// A group the devices group moved on from.

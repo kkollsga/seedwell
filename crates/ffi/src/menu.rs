@@ -1066,6 +1066,7 @@ mod tests {
             waiting: None,
             gone: Vec::new(),
             can_reshare: false,
+            removes_everywhere: false,
         }
     }
 

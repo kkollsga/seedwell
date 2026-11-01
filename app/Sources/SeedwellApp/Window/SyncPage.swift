@@ -153,7 +153,10 @@ struct SyncFolderPage: View {
                     ForEach(Array(folder.issues.enumerated()), id: \.offset) { n, i in
                         if n > 0 { Divider().opacity(0.6) }
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(i.path.replacingOccurrences(of: "\r", with: "␍")).font(.system(size: 13)).lineLimit(1).truncationMode(.middle)
+                            // An empty path: the issue is the whole folder's (its reason alone).
+                            if !i.path.isEmpty {
+                                Text(i.path.replacingOccurrences(of: "\r", with: "␍")).font(.system(size: 13)).lineLimit(1).truncationMode(.middle)
+                            }
                             Text(i.reason).font(.system(size: 11.5)).foregroundStyle(.secondary)
                         }
                         .padding(.vertical, 6)
@@ -268,7 +271,7 @@ struct SyncFolderPage: View {
         HStack(spacing: 10) {
             Image(systemName: model.syncTrash ? "trash" : "minus.circle").font(.system(size: 11)).foregroundStyle(.secondary)
             VStack(alignment: .leading, spacing: 6) {
-                Text(syncRemoveQuestion(name: folder.name, onlyHere: model.syncOnlyHere)).font(.system(size: 12)).foregroundStyle(.secondary)
+                Text(syncRemoveFolderQuestion(folder: folder, onlyHere: model.syncOnlyHere)).font(.system(size: 12)).foregroundStyle(.secondary)
                 Toggle(syncRemoveTrashLabel(), isOn: $model.syncTrash).toggleStyle(.checkbox).font(.system(size: 12))
             }
             Spacer(minLength: 8)

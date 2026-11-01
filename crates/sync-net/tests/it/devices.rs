@@ -6,6 +6,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use trs_sync::ondemand::ItemState;
 use trs_sync_net::SyncHandle;
 use trs_sync_net::chat::MessageKind;
 use trs_sync_net::devices::DevicesState;
@@ -472,4 +473,103 @@ async fn paired_devices_share_the_rendezvous_and_find_each_other_again_after_a_n
     .await;
     assert_eq!(b.h.rendezvous_status().url, "", "still off on B");
     shutdown(&[&a, &b]).await;
+}
+
+fn snapshot_folder(d: &Dev, id: &FolderId) -> Option<trs_sync_net::status::FolderStatus> {
+    d.h.snapshot().folders.into_iter().find(|f| f.id == id.to_string())
+}
+
+/// A folder on demand on the device that puts it on all devices comes on demand to a sibling: every file listed,
+/// nothing downloaded until asked for. A device that keeps no folders on demand (Windows today) joins it in full and
+/// says why. Its owner removing it removes it from Seedwell on every sibling, each keeping its files.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_on_demand_folder_follows_on_demand_and_its_owner_removing_it_removes_it_everywhere() {
+    let (a, b) = (Dev::new("Anna's Mac").await, Dev::new("MacBook").await);
+    let full_state = tempfile::tempdir().unwrap();
+    let pc = start_at(full_state.path(), "Studio PC", |o| {
+        o.forbidden_root = trs_platform::dirs::home();
+        o.on_demand = false;
+    })
+    .await;
+    let pc = Dev { h: pc, state: full_state, name: "Studio PC", features: FEATURES };
+    let work = tempfile::tempdir().unwrap();
+    let src = work.path().join("Photos");
+    std::fs::create_dir_all(src.join("2026")).unwrap();
+    std::fs::write(src.join("2026/beach.jpg"), b"beach").unwrap();
+    std::fs::write(src.join("big.bin"), vec![7u8; 1_000_000]).unwrap();
+    let f: FolderId = a.h.add_folder_on_demand(src.clone()).await.unwrap().id.parse().unwrap();
+    pair(&a, &b).await;
+    pair(&a, &pc).await;
+    a.h.set_follow(&f, true).await.unwrap();
+
+    // B: on demand, its place the default location's (not made: the host's), every file listed and none fetched.
+    until(40, "B lists the folder's files", || b.h.od_item_at(&f, "2026/beach.jpg").ok().flatten().is_some() && b.h.od_item_at(&f, "big.bin").ok().flatten().is_some())
+        .await;
+    let st = snapshot_folder(&b, &f).unwrap();
+    assert!(st.on_demand, "joined on demand");
+    assert_eq!(PathBuf::from(&st.path), b.sync_dir().join("Photos"));
+    assert!(!b.sync_dir().join("Photos").exists(), "the place is the host's");
+    assert_eq!(b.h.od_item_at(&f, "big.bin").unwrap().unwrap().state, ItemState::OnlineOnly);
+    assert!(!b.h.od_cache_path(&f, "big.bin").unwrap().exists(), "nothing downloaded");
+    assert!(st.issues.is_empty(), "{:?}", st.issues);
+    let at = b.h.od_fetch(&f, "2026/beach.jpg", Duration::from_secs(30)).await.unwrap().path;
+    assert_eq!(read(&at).as_deref(), Some(&b"beach"[..]));
+
+    // The PC keeps no folders on demand: in full, saying why.
+    until(40, "the PC has every file", || read(&pc.sync_dir().join("Photos/big.bin")).is_some_and(|b| b.len() == 1_000_000)).await;
+    let st = snapshot_folder(&pc, &f).unwrap();
+    assert!(!st.on_demand);
+    assert!(st.issues.iter().any(|(p, why)| p.is_empty() && why == trs_sync_net::FULL_HERE), "{:?}", st.issues);
+    // A switch on demand on the owner later is the owner's only: a device that joined keeps its own.
+    assert!(a.h.removes_everywhere(&f) && !b.h.removes_everywhere(&f), "only the owner's removal goes everywhere");
+
+    // A, the owner, removes it: it goes from Seedwell everywhere, every device keeping its files.
+    a.h.remove_folder(&f).await.unwrap();
+    assert_eq!(read(&src.join("2026/beach.jpg")).as_deref(), Some(&b"beach"[..]), "A's files back at its place");
+    // (A folder leaves the list when it stops, before its files are where they go: the removal is over once they are.)
+    let removed = |d: &Dev| !has_folder(d, &f) && d.sync_dir().join("Photos").exists() && !d.sync_dir().join("Photos/.seedwell").exists();
+    until(30, "gone from B and the PC", || removed(&b) && removed(&pc)).await;
+    assert_eq!(read(&b.sync_dir().join("Photos/2026/beach.jpg")).as_deref(), Some(&b"beach"[..]), "B's fetched file at its place");
+    assert_eq!(read(&pc.sync_dir().join("Photos/big.bin")).map(|b| b.len()), Some(1_000_000), "the PC's files stay");
+    assert!(!a.h.is_followed(&f) && b.h.follow_state(&f).is_err());
+    shutdown(&[&a, &b, &pc]).await;
+}
+
+/// Removed on a sibling that is not its owner, a folder goes from that device only (its files stay there) and does
+/// not come back; the owner removing it later reaches a sibling that was away at the time when it is back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_siblings_removal_stays_local_and_an_away_sibling_removes_it_when_back() {
+    let (a, b, c) = (Dev::new("Anna's Mac").await, Dev::new("MacBook").await, Dev::new("Mac mini").await);
+    let work = tempfile::tempdir().unwrap();
+    let f = folder(&a, work.path(), "Dev").await;
+    pair(&a, &b).await;
+    pair(&a, &c).await;
+    a.h.set_follow(&f, true).await.unwrap();
+    until(40, "B and C have the folder's file", || read(&b.sync_dir().join("Dev/seed.txt")).is_some() && read(&c.sync_dir().join("Dev/seed.txt")).is_some()).await;
+    assert!(!b.h.removes_everywhere(&f), "B is an admin there, not its owner");
+
+    // B removes it: from B only.
+    b.h.remove_folder(&f).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(has_folder(&a, &f) && has_folder(&c, &f), "A and C keep it");
+    assert!(a.h.is_followed(&f), "still on all devices");
+    assert!(read(&b.sync_dir().join("Dev/seed.txt")).is_some(), "B's files stay");
+    assert!(!has_folder(&b, &f), "and it does not come back to B");
+
+    // The agent interface's removal on the owner is this device's only too (agents never change the other devices).
+    let g = folder(&a, work.path(), "Notes").await;
+    a.h.set_follow(&g, true).await.unwrap();
+    until(40, "C has the second folder", || read(&c.sync_dir().join("Notes/seed.txt")).is_some()).await;
+    a.h.remove_folder_here(&g, false).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(has_folder(&c, &g) && c.h.is_followed(&g), "C keeps it, still on all devices");
+
+    // C is away when A removes it; back, it removes it too, keeping its files.
+    c.h.shutdown().await;
+    a.h.remove_folder(&f).await.unwrap();
+    assert!(read(&work.path().join("Dev/seed.txt")).is_some(), "A's files stay");
+    let c = c.restart().await;
+    until(40, "C removed it once back", || !has_folder(&c, &f) && !c.sync_dir().join("Dev/.seedwell").exists()).await;
+    assert!(read(&c.sync_dir().join("Dev/seed.txt")).is_some(), "C's files stay");
+    shutdown(&[&a, &b, &c]).await;
 }

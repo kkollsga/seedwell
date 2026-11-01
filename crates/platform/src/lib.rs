@@ -108,6 +108,10 @@ macro_rules! trash {
 /// The same word as [`trash!`], for `format!` and the like.
 pub const TRASH: &str = trash!();
 
+/// This system's file manager can show folders on demand (SPEC §7G.11): the Mac's File Provider. Windows (Cloud Files)
+/// and Linux have no host for them yet, so a folder that comes on demand from another device is joined in full there.
+pub const ON_DEMAND_FOLDERS: bool = cfg!(target_os = "macos");
+
 /// What the key that confirms is called in user-visible text ("Remove (Return)"): "Return" on the Mac, "Enter"
 /// elsewhere. A literal, like [`computer!`].
 #[cfg(target_os = "macos")]

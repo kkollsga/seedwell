@@ -178,7 +178,7 @@ signed    = "seedwell-sync/v2/statement" ‖ folder_id ‖ kind ‖ body (with i
 | 6 | profile (0.1.9) | `device_name` str (1 to 64 characters, no control characters) ‖ `user_name` str (empty = none, else as `device_name`) ‖ `serial` varint ‖ `at_s` varint | the device it names, while a member; its latest (by `serial`, then signature bytes) replaces the older ones |
 | 7 | channel (0.1.12) | `flags` varint (bit 0: open to agents, 0.1.12's agent channel; other bits: none yet, kept and ignored) ‖ `at_s` varint | owners; no longer written since 0.1.13 |
 | 8 | agents (0.1.13) | `open` u8 (0 = No, 1 = Yes; another value: the body is unknown) ‖ `serial` varint ‖ `at_s` varint | owners (channel key) and admins (device key); the latest of the owners' and current admins' (by `serial`, then `at_s`, then signature bytes) counts |
-| 9 | follow (0.1.13) | `target` u8 (1 folder, 2 channel; another value: unknown) ‖ `target_pk` (32) ‖ `name` str (≤ 255 B, no control characters) ‖ `on` u8 (0 or 1; another value: unknown) ‖ `serial` varint ‖ `at_s` varint | in a devices group only: a member, with its device key; per target the latest of a current member's (by `serial`, then `at_s`, then signature bytes) counts. Anywhere else it means nothing |
+| 9 | follow (0.1.13) | `target` u8 (1 folder, 2 channel; another value: unknown) ‖ `target_pk` (32) ‖ `name` str (≤ 255 B, no control characters) ‖ `on` u8 (0 or 1; another value: unknown) ‖ `serial` varint ‖ `at_s` varint [‖ `flags` varint, 0.1.14: written only when not 0; bit 0 on demand, bit 1 removed] | in a devices group only: a member, with its device key; per target the latest of a current member's (by `serial`, then `at_s`, then signature bytes) counts. Anywhere else it means nothing. 0.1.13 reads a Follow with flags as the same Follow with bytes after it (kept, signed, passed on) |
 | 10 | moved (0.1.13) | `target_pk` (32) ‖ `at_s` varint | in a devices group only: a member, with its device key: the group moved to the group with this key (its key changed after a removal). Of the current members' moved statements the lowest target group id counts |
 | 11 | rendezvous (0.1.13) | `url` str (≤ 200 B, no spaces or control characters; empty: none) ‖ `serial` varint ‖ `at_s` varint | in a devices group only: the device it is about, with its device key, while a member: the rendezvous (§7G.3) it publishes to; its latest (by `serial`, then signature bytes) counts. A device that never said one takes the newest non-empty one of another member; one that turned it off says empty and takes none |
 
@@ -371,6 +371,14 @@ OwnerKey). Its id, discovery topic and LAN tag come from its public key as for a
   do so when the group or the Follow changes (push) and when a sibling proves itself (pull); an owner raises a sibling
   it finds at Read & write to Admin. These are ordinary kind 1 statements: every member accepts them, also one without
   the devices bit, which never sees the group, proof 6 or type 28.
+- A Follow's **flags** (0.1.14) come after `at_s`, only when not 0 (so a Follow without them is 0.1.13's bytes; a
+  zero or a varint written longer than needed is not read as flags but kept after the body). **On demand** (bit 0):
+  the folder is on demand on the device that put it on all devices, so a sibling joins it on demand where it can
+  (a device that keeps no folders on demand joins it in full); it is the default at joining only, and each device
+  switches its own afterwards. **Removed** (bit 1, with `on` 0): the folder's owner removed it from Seedwell, so each
+  sibling removes it too, its files kept where they are (an on-demand folder's become an ordinary folder at its
+  place). An off Follow without it only stops the folder coming to more devices. 0.1.13 reads either as the Follow
+  without flags: it joins in full and keeps a removed folder.
 
 ## Other formats
 

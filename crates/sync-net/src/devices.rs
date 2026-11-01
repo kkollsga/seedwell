@@ -12,8 +12,13 @@
 //!   an owner and sends it U ([`trs_sync_proto::msg::OwnerKey`]).
 //! - **On all my devices**: a sibling signs a Follow for a folder or channel. Each sibling that does not have it joins
 //!   it by itself: a folder at the default location for joined folders (under a name that is free, never merged into
-//!   one that exists), synced in full; a channel. It waits "following" ([`Space::following`]), proving to its
-//!   siblings that it is one of them ([`Proof::Sibling`]).
+//!   one that exists), on demand when it is on demand on the device that put it there ([`FOLLOW_ON_DEMAND`]; in full
+//!   on a device that keeps no folders on demand, which its page says), else in full; a channel. It waits
+//!   "following" ([`Space::following`]), proving to its siblings that it is one of them ([`Proof::Sibling`]).
+//! - **Removed by its owner**: a folder's owner that removes a folder on all devices signs its Follow off with
+//!   [`FOLLOW_REMOVED`], and every sibling removes it from Seedwell too, its files kept (an on-demand folder's become an
+//!   ordinary folder at its place). Removed anywhere else, or by a sibling that is not its owner, it goes from that
+//!   device only and does not come back there ("Not on This Mac").
 //! - **Admission**: a sibling that is owner of the folder or channel signs `Grant{Admin}` for the others; one that is
 //!   admin makes a one-use invitation of its own and signs `Grant{Read & write}` with it, exactly an admin's admission.
 //!   It does so when the group or the Follow changes (push) and when a sibling proves itself (pull). An owner raises a
@@ -34,7 +39,9 @@ use std::sync::atomic::Ordering;
 use trs_sync_proto::device::DeviceKey;
 use trs_sync_proto::ids::{DeviceId, FolderId};
 use trs_sync_proto::keys::{Access, FolderKey, FolderSecret, Proof};
-use trs_sync_proto::members::{Body, Follow, FollowTarget, Invite, InviteLink, Membership, Role, Signer, Statement, hex, new_invite};
+use trs_sync_proto::members::{
+    Body, FOLLOW_ON_DEMAND, FOLLOW_REMOVED, Follow, FollowTarget, Invite, InviteLink, Membership, Role, Signer, Statement, hex, new_invite,
+};
 use trs_sync_proto::msg::{DevicesJoin, JoinChannel, Members, Message};
 
 use crate::config::{ChannelEntry, MyDevicesEntry};
@@ -827,14 +834,15 @@ impl SyncHandle {
         let (mut members, follows, removed) = {
             let m = g.membership.read().unwrap_or_else(|e| e.into_inner());
             let members: Vec<[u8; 32]> = m.members().map(|(pk, _)| *pk).filter(|pk| *pk != me).collect();
-            (members, m.follows().filter(|f| f.on).cloned().collect::<Vec<_>>(), m.removed_devices())
+            // What follows, and the folders removed on all devices (a sibling that did not take one out yet still does).
+            (members, m.follows().filter(|f| f.on || f.removed()).cloned().collect::<Vec<_>>(), m.removed_devices())
         };
         members.insert(0, me);
         let mut m = Membership::new_devices(pk);
         let grants = members.iter().enumerate().map(|(i, d)| Statement::by_owner(&secret, Body::Grant { device: *d, role: Role::Owner, serial: 1 + i as u64, at_s: now, invite: None }));
         m.add(grants.collect::<Vec<_>>());
         let carried = follows.iter().map(|f| {
-            Statement::by_device(&ctx.key, &id, Body::Follow { target: f.target, target_pk: f.target_pk, name: f.name.clone(), on: true, serial: 1, at_s: now })
+            Statement::by_device(&ctx.key, &id, Body::Follow { target: f.target, target_pk: f.target_pk, name: f.name.clone(), on: f.on, serial: 1, at_s: now, flags: f.flags })
         });
         m.add(carried.collect::<Vec<_>>());
         crate::roles::save(&self.members_path(&id), &m)?;
@@ -980,8 +988,9 @@ impl SyncHandle {
     }
 
     /// Turns "On all my devices" on or off for folder or channel `id`: on puts it on every device of the group (only
-    /// an owner or admin here, so siblings can be admitted); off only stops it coming to new ones, and deletes
-    /// nothing anywhere.
+    /// an owner or admin here, so siblings can be admitted), on demand where it can be when it is on demand here
+    /// ([`FOLLOW_ON_DEMAND`]: only the default when a sibling joins it); off only stops it coming to new ones, and
+    /// deletes nothing anywhere.
     pub async fn set_follow(&self, id: &FolderId, on: bool) -> Result<(), SyncError> {
         let ctx = self.inner.ctx.clone();
         let g = my_group(&ctx).ok_or_else(|| invalid(concat!("pair this ", trs_platform::computer!(), " with your other devices first (Settings › Devices)")))?;
@@ -999,7 +1008,8 @@ impl SyncHandle {
             return Ok(());
         }
         let name = lock(&f.name).clone();
-        let st = Statement::by_device(&ctx.key, &g.id, Body::Follow { target, target_pk: pk, name, on, serial, at_s: now_s() });
+        let flags = if on && f.kind == SpaceKind::Folder && self.configured(id) == Some(true) { FOLLOW_ON_DEMAND } else { 0 };
+        let st = Statement::by_device(&ctx.key, &g.id, Body::Follow { target, target_pk: pk, name, on, serial, at_s: now_s(), flags });
         if on && let Some(e) = lock(&self.inner.cfg).my_devices.as_mut() {
             e.skip.retain(|s| *s != id.to_string());
         }
@@ -1012,6 +1022,36 @@ impl SyncHandle {
     /// Folder or channel `id` is on all the user's devices (the hosts ask before removing it).
     pub fn is_followed(&self, id: &FolderId) -> bool {
         self.inner.ctx.registry.user_space(id).is_some_and(|f| followed(&self.inner.ctx, &f))
+    }
+
+    /// Removing folder `id` here removes it from Seedwell on all the user's devices: it is on all of them and this
+    /// device is its owner (the hosts say so before removing it). Their files stay where they are.
+    pub fn removes_everywhere(&self, id: &FolderId) -> bool {
+        let ctx = &self.inner.ctx;
+        ctx.registry.user_space(id).is_some_and(|f| f.kind == SpaceKind::Folder && f.role_of(ctx.key.public_key()) == Some(Role::Owner) && followed(ctx, &f))
+    }
+
+    /// What [`Self::removed_everywhere`] needs of folder `id`, taken before it is removed: `None` when removing it here
+    /// does not remove it on the other devices ([`Self::removes_everywhere`]).
+    pub(crate) fn everywhere_follow(&self, id: &FolderId) -> Option<([u8; 32], String)> {
+        if !self.removes_everywhere(id) {
+            return None;
+        }
+        let f = self.inner.ctx.registry.user_space(id)?;
+        let name = lock(&f.name).clone();
+        Some((pk_of(&f), name))
+    }
+
+    /// Folder `pk` was removed here by its owner: the group says so ([`FOLLOW_REMOVED`]), and every sibling removes it
+    /// too, keeping its files.
+    pub(crate) async fn removed_everywhere(&self, pk: [u8; 32], name: String) {
+        let ctx = self.inner.ctx.clone();
+        let Some(g) = my_group(&ctx) else { return };
+        let serial = g.membership.read().unwrap_or_else(|e| e.into_inner()).next_follow_serial(&pk);
+        let body = Body::Follow { target: FollowTarget::Folder, target_pk: pk, name, on: false, serial, at_s: now_s(), flags: FOLLOW_REMOVED };
+        if crate::roles::add(&g, [Statement::by_device(&ctx.key, &g.id, body)]) {
+            crate::roles::changed(&ctx, &g).await;
+        }
     }
 
     /// A folder or channel that is on all the user's devices is taken off this one (removed, or left): it does not come
@@ -1037,7 +1077,8 @@ impl SyncHandle {
 
     /// Brings what follows in line with the group: each folder and channel on all the user's devices is here (joined
     /// by itself, unless the user took it off this device), its siblings admitted where this device is owner or admin,
-    /// and one turned off that this device was only waiting for goes.
+    /// one turned off that this device was only waiting for goes, and a folder its owner removed on all devices goes,
+    /// its files kept (once: joined again afterwards, it stays).
     pub(crate) async fn devices_sync(&self) {
         let ctx = self.inner.ctx.clone();
         let _one = ctx.devices_lock.lock().await;
@@ -1061,13 +1102,24 @@ impl SyncHandle {
             let m = g.membership.read().unwrap_or_else(|e| e.into_inner());
             (group_members(&m, &me), m.follows().cloned().collect::<Vec<_>>())
         };
-        let skip: BTreeSet<String> = self.group_entry().map(|e| e.skip.into_iter().collect()).unwrap_or_default();
+        let (skip, gone): (BTreeSet<String>, BTreeSet<String>) =
+            self.group_entry().map(|e| (e.skip.into_iter().collect(), e.removed.into_iter().collect())).unwrap_or_default();
         for fl in follows {
             let id = FolderId::of_public_key(&fl.target_pk);
             let kind = match fl.target {
                 FollowTarget::Folder => SpaceKind::Folder,
                 FollowTarget::Channel => SpaceKind::Channel,
             };
+            if kind == SpaceKind::Folder {
+                if fl.removed() && !gone.contains(&id.to_string()) {
+                    self.remove_removed(&g, &fl, &id).await;
+                    continue;
+                }
+                if fl.on && gone.contains(&id.to_string()) {
+                    // On all devices again: a later removal is carried out again.
+                    self.note_removed(&id, false);
+                }
+            }
             match ctx.registry.user_space(&id).filter(|f| f.kind == kind) {
                 Some(f) => {
                     let was = f.following.load(Ordering::SeqCst);
@@ -1094,6 +1146,41 @@ impl SyncHandle {
                     }
                 }
             }
+        }
+    }
+
+    /// Folder `id`'s owner removed it on all devices: it goes from Seedwell here too (if it is here, running or not),
+    /// its files kept where they are (an on-demand folder's become an ordinary folder at its place). Noted once done,
+    /// so a folder joined again afterwards stays; a removal that fails (the folder busy) is tried again at the next
+    /// change.
+    async fn remove_removed(&self, g: &Space, fl: &Follow, id: &FolderId) {
+        if self.inner.ctx.registry.user_space(id).is_some() || self.configured(id).is_some() {
+            match self.remove_folder(id).await {
+                Ok(at) => eprintln!("seedwell sync: “{}” was removed on all your devices; its files are in {}", fl.name, at.display()),
+                Err(e) => {
+                    g.problem(format!("“{}” was removed on all your devices, but could not be removed here yet: {e}", fl.name));
+                    return;
+                }
+            }
+        }
+        self.note_removed(id, true);
+    }
+
+    /// Notes folder `id` as removed here because its owner removed it on all devices (`on`), or no longer.
+    fn note_removed(&self, id: &FolderId, on: bool) {
+        let changed = {
+            let mut cfg = lock(&self.inner.cfg);
+            let Some(e) = cfg.my_devices.as_mut() else { return };
+            let had = e.removed.contains(&id.to_string());
+            if on && !had {
+                e.removed.push(id.to_string());
+            } else if !on && had {
+                e.removed.retain(|r| *r != id.to_string());
+            }
+            on != had
+        };
+        if changed {
+            let _ = self.save_config();
         }
     }
 
@@ -1261,8 +1348,10 @@ impl SyncHandle {
     }
 
     /// Joins a folder or channel one of the user's devices put on all of them: a folder at the default location for
-    /// joined folders, under its name (with a number when that is taken: never into a folder that is there), in full;
-    /// a channel under its name.
+    /// joined folders, under its name (with a number when that is taken: never into a folder that is there), on demand
+    /// when it is on demand on the device that put it there and this device keeps folders on demand (its place there,
+    /// its files in this device's cache), else in full (saying why on its page when it was on demand there); a channel
+    /// under its name.
     async fn join_following(&self, fl: &Follow) -> Result<(), SyncError> {
         let id = FolderId::of_public_key(&fl.target_pk);
         match fl.target {
@@ -1284,8 +1373,14 @@ impl SyncHandle {
                 }
                 std::fs::create_dir_all(&base)?;
                 let name = folder_name(&fl.name).unwrap_or_else(|| id.to_string().split('-').next().unwrap_or("Folder").to_string());
-                let path = unique_in(&base, &name);
-                self.join_following_at(fl.target_pk, path).await
+                let places: Vec<PathBuf> = lock(&self.inner.cfg).folders.iter().map(|e| e.path.clone()).collect();
+                let path = unique_in(&base, &name, |p| places.iter().any(|q| p.starts_with(q) || q.starts_with(p)));
+                let on_demand = fl.on_demand() && self.inner.on_demand;
+                self.join_following_at(fl.target_pk, path, on_demand).await?;
+                if fl.on_demand() && !on_demand {
+                    self.note_full_here(&id);
+                }
+                Ok(())
             }
         }
     }
@@ -1349,16 +1444,17 @@ fn folder_name(name: &str) -> Option<String> {
     (!n.is_empty()).then_some(n)
 }
 
-/// `dir/name`, or `dir/name 2`, `dir/name 3`, … while it is taken: a folder that follows is never put into one that is
-/// there.
-fn unique_in(dir: &Path, name: &str) -> PathBuf {
+/// `dir/name`, or `dir/name 2`, `dir/name 3`, … while it is taken (there on disk, or `taken`: another folder's place,
+/// which an on-demand folder's is without being on disk): a folder that follows is never put into one that is there.
+fn unique_in(dir: &Path, name: &str, taken: impl Fn(&Path) -> bool) -> PathBuf {
+    let free = |p: &Path| std::fs::symlink_metadata(p).is_err() && !taken(p);
     let first = dir.join(name);
-    if std::fs::symlink_metadata(&first).is_err() {
+    if free(&first) {
         return first;
     }
     for i in 2..10_000 {
         let p = dir.join(format!("{name} {i}"));
-        if std::fs::symlink_metadata(&p).is_err() {
+        if free(&p) {
             return p;
         }
     }
@@ -1399,10 +1495,14 @@ mod tests {
     #[test]
     fn a_folder_that_follows_never_lands_in_one_that_is_there() {
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(unique_in(dir.path(), "Dev"), dir.path().join("Dev"));
+        let none = |_: &Path| false;
+        assert_eq!(unique_in(dir.path(), "Dev", none), dir.path().join("Dev"));
         std::fs::create_dir(dir.path().join("Dev")).unwrap();
         std::fs::create_dir(dir.path().join("Dev 2")).unwrap();
-        assert_eq!(unique_in(dir.path(), "Dev"), dir.path().join("Dev 3"));
+        assert_eq!(unique_in(dir.path(), "Dev", none), dir.path().join("Dev 3"));
+        // An on-demand folder's place is not on disk, and still taken.
+        let place = dir.path().join("Dev 3");
+        assert_eq!(unique_in(dir.path(), "Dev", |p| p == place), dir.path().join("Dev 4"));
         let n = folder_name("  ../Dev/x  ").unwrap();
         assert!(!n.contains('/') && !n.starts_with('.'), "one plain component: {n}");
         assert_eq!(folder_name("   "), None);

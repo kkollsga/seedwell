@@ -63,7 +63,8 @@ Target release: 0.1.13 (the user asked for everything in this release; "0.1.14" 
   - The toggle is offered only where this device is **Owner or Admin**. Otherwise no sibling can admit the others, and the line says so.
   - Defaults: on in the user's New Channel window (only when paired); off in Add Folder.
 - **On each sibling, when it learns of a Follow with `on`** for something it does not have and that is not in its `skip` list:
-  - A folder is placed at the **default location for joined folders**, named `<name>`, or `<name> 2` if taken. A followed folder is **never merged silently** into an existing unsynced folder. It is synced in full in v1; a per-device "On demand" choice comes later.
+  - A folder is placed at the **default location for joined folders**, named `<name>`, or `<name> 2` if taken (also when an on-demand folder's place has that name). A followed folder is **never merged silently** into an existing unsynced folder. It is synced in full in v1 (0.1.13).
+  - **On demand (0.1.14).** The Follow carries flags after `at_s` (written only when not 0, so 0.1.13 reads the same Follow with bytes after it, keeps them, and its signature checks). Flag **on demand** (bit 0) is set when the folder is on demand on the device that turns *On all my devices* on. A sibling then joins it on demand: its place is `<default location>/<name>` (not made; the File Provider shows it), its files go to this device's cache, nothing is downloaded until asked for. A device that keeps no folders on demand (`trs_platform::ON_DEMAND_FOLDERS`: Windows and Linux today) joins it in full and its page shows the issue "On demand on your other device, but this PC can't keep folders on demand yet: every file is downloaded here." The flag is only the default at joining: switching the folder later on one device changes no other device, and a sibling that joined in full under 0.1.13 stays full.
   - A channel gets a `ChannelEntry`.
   - Either one starts in a new state, "following, not admitted". It is a joining space whose `invite` is `None`. `Space::joining` and `roles::proofs` learn this state, and its Join proof is the new **proof kind 6 `Sibling`**, whose bytes are the group id. The peer's identity is already proved by its TLS device key, so no exporter binding is needed.
 - **Admission, two complementary paths. Both produce ordinary statements:**
@@ -78,8 +79,9 @@ Target release: 0.1.13 (the user asked for everything in this release; "0.1.14" 
   - An owner sibling raises a sibling it finds at Read & write to Admin. It never lowers a role.
   - Making a second device co-owner stays a deliberate step in the existing role menu. The Devices page explains why that is worth doing as a backup.
 - **Opting out and turning off:**
-  - *Not on This Mac* on a follower adds the item to `skip`. When removing a followed folder or channel, the dialog asks: "Only from this Mac (it won't come back)" or "Stop putting it on all my devices".
+  - *Not on This Mac* on a follower adds the item to `skip`. When removing a followed folder or channel, the dialog asks: "Only from this Mac (it won't come back)" or "Stop putting it on all my devices". (Not built: removing on a device that is not the folder's owner is "only from this device"; on its owner, see below.)
   - Turning *On all my devices* off signs `Follow{on: 0}`. Siblings keep what they have, and nothing is deleted anywhere. New siblings just stop getting it.
+  - **The owner removes it (0.1.14).** Removing a followed folder in the app on the device that is its **Owner** signs `Follow{on: 0, flags: removed (bit 1)}` once the removal here succeeded. Every sibling that sees it removes the folder from Seedwell with the ordinary removal: a full folder's files stay where they are, an on-demand folder's cache becomes an ordinary folder at its place; nothing goes to the Trash. A sibling away at the time does it when the group's statements reach it. Each device notes the removal (`removed` in `[my_devices]`), so a folder joined again afterwards stays; the note goes when the folder follows again. A key change carries removed Follows that some sibling may not have acted on yet. The Remove question on the owner adds: "It is also removed from Seedwell on your other devices; their files stay where they are." (`SyncFolder.removes_everywhere`, `sync_remove_folder_question`.) A removal on a non-owner sibling, and any removal through the agent interface (`sync.remove`, so the CLI too), stays on that device (the skip list). Channels are left as they are: leaving one never removes it on the other devices.
 
 ## 4. Security
 - **Matching user names never grants anything.** Names come from profile statements and are shown only.
@@ -120,14 +122,14 @@ Target release: 0.1.13 (the user asked for everything in this release; "0.1.14" 
 - the device list, final removal with the owner cascade and the key change, Leave/Start Over;
 - the Follow statement and the two toggles;
 - push and pull admission (Admin from an owner, Read & write from an admin);
-- auto-join in full mode at the default location;
+- auto-join in full mode at the default location (0.1.14: on demand when the folder is on demand where it was put on all devices);
 - the `skip` list;
 - the agent exclusions.
 
 **Later:**
 - pairing over an existing session with a 6-digit code compared on both screens (no link at all, ideal between Mac and Windows);
 - a QR code;
-- an on-demand default per device;
+- an on-demand default per device (0.1.14 takes the mode of the device that put the folder on all devices instead);
 - system notifications for new pairings;
 - `may_relay` counting siblings;
 - DPAPI on Windows;

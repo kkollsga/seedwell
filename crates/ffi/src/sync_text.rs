@@ -711,6 +711,17 @@ pub fn sync_remove_question(name: String, only_here: u64) -> String {
     format!(concat!("Stop syncing “{}” on this ", computer!(), "? {}"), name, trs_control::sync::others_after_removal(only_here))
 }
 
+/// The question of removing `folder` ([`sync_remove_question`]), and, when that removes it from Seedwell on the user's
+/// other devices too (it is on all of them and this computer owns it), that it does, their files kept.
+#[uniffi::export]
+pub fn sync_remove_folder_question(folder: SyncFolder, only_here: u64) -> String {
+    let q = sync_remove_question(folder.name, only_here);
+    if folder.removes_everywhere { format!("{q} {EVERYWHERE}") } else { q }
+}
+
+/// What removing a folder on all the user's devices does there, after the question.
+const EVERYWHERE: &str = "It is also removed from Seedwell on your other devices; their files stay where they are.";
+
 /// The option of that question.
 #[uniffi::export]
 pub fn sync_remove_trash_label() -> String {
@@ -1083,6 +1094,7 @@ pub(crate) mod tests {
             waiting: None,
             gone: Vec::new(),
             can_reshare: false,
+            removes_everywhere: false,
         }
     }
 
@@ -1540,6 +1552,16 @@ pub(crate) mod tests {
         assert_eq!(
             sync_remove_question("Photos".into(), 3),
             format!("Stop syncing “Photos” on this {c}? 3 files exist only on this {c}; other devices lose access to them.", c = computer!())
+        );
+        let mut f = folder("Photos", SyncState::UpToDate);
+        assert_eq!(sync_remove_folder_question(f.clone(), 0), sync_remove_question("Photos".into(), 0), "this computer only");
+        f.removes_everywhere = true;
+        assert_eq!(
+            sync_remove_folder_question(f, 0),
+            format!(
+                "Stop syncing “Photos” on this {}? Other devices keep their copy. It is also removed from Seedwell on your other devices; their files stay where they are.",
+                computer!()
+            )
         );
         assert_eq!(sync_remove_trash_label(), concat!("Also move the files to the ", trash!()));
         assert_eq!(sync_remove_help(true), concat!("Stop syncing and move the folder to the ", trash!()));

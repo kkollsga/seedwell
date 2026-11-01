@@ -12,7 +12,7 @@ import Testing
         SyncFolder(id: id ?? "ID-\(name)", name: name, path: "/Users/me/Seedwell/\(name)", access: access, role: role, shareUntilS: nil, state: state,
                    files: 10, bytes: bytes, needFiles: need > 0 ? 3 : 0, needBytes: need, rateIn: rate, rateOut: 0,
                    connected: connected, members: connected, conflicts: conflicts, lanOnly: false, issues: [], error: nil, lastSyncedS: nil,
-                   channelId: nil, onDemand: false, unavailable: 0, progress: nil, problem: nil, waiting: nil, gone: [], canReshare: false)
+                   channelId: nil, onDemand: false, unavailable: 0, progress: nil, problem: nil, waiting: nil, gone: [], canReshare: false, removesEverywhere: false)
     }
 
     static func folder(_ state: SyncState, bytes: UInt64 = 1_000_000_000, need: UInt64 = 0, rate: UInt64 = 0,

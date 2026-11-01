@@ -14,7 +14,7 @@ use trs_control::display as d;
 use trs_platform::computer;
 
 use crate::sync::SyncSnapshot;
-use crate::sync_text::{badge, subtitle, sync_remove_question, sync_remove_trash_label, SyncBadge, TITLE_LIMIT};
+use crate::sync_text::{badge, subtitle, sync_remove_folder_question, sync_remove_trash_label, SyncBadge, TITLE_LIMIT};
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -192,7 +192,7 @@ fn build(s: &SyncSnapshot, r: &RemovalState) -> SyncMenuModel {
         .collect();
     let confirm = open.and_then(|id| s.folders.iter().find(|f| f.id == id)).map(|f| SyncMenuConfirm {
         folder_id: f.id.clone(),
-        question: sync_remove_question(f.name.clone(), r.only_here),
+        question: sync_remove_folder_question(f.clone(), r.only_here),
         trash_label: sync_remove_trash_label(),
         trash: r.trash,
         cancel_title: "Cancel".into(),

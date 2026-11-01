@@ -139,7 +139,11 @@ sealed class FolderSyncPage
         foreach (var issue in f.Issues)
         {
             var s = new StackPanel { Padding = new Thickness(0, 4, 0, 4) };
-            s.Children.Add(new TextBlock { Text = issue.Path });
+            // An empty path: the issue is the whole folder's (its reason alone).
+            if (issue.Path.Length > 0)
+            {
+                s.Children.Add(new TextBlock { Text = issue.Path });
+            }
             s.Children.Add(new TextBlock { Text = issue.Reason, FontSize = 12, Opacity = 0.65, TextWrapping = TextWrapping.Wrap });
             detail.Children.Add(s);
         }

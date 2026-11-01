@@ -134,6 +134,9 @@ pub struct SyncFolder {
     /// Every owner and admin of the folder is gone (nobody can let devices in or change roles any more): *Share Again
     /// from This Mac…* (`sync_reshare_prompt`, `Core::sync_reshare`).
     pub can_reshare: bool,
+    /// Removing it here also removes it from Seedwell on the user's other devices, their files kept: it is on all of
+    /// them and this computer owns it (`sync_remove_folder_question` says so).
+    pub removes_everywhere: bool,
 }
 
 /// A member of a folder or channel not connected for a day or more (or never here).
@@ -744,6 +747,7 @@ fn folder_of(f: &FolderStatus) -> SyncFolder {
         waiting: f.waiting.clone(),
         gone: f.gone.iter().map(gone_of).collect(),
         can_reshare: f.reshare,
+        removes_everywhere: false,
     }
 }
 
@@ -1194,7 +1198,14 @@ impl SyncBackend for RealSync {
             device_id: s.device_id,
             device_name: s.device_name,
             port: s.port,
-            folders: s.folders.iter().map(folder_of).collect(),
+            folders: s
+                .folders
+                .iter()
+                .map(|f| {
+                    let everywhere = f.id.parse().is_ok_and(|id| h.removes_everywhere(&id));
+                    SyncFolder { removes_everywhere: everywhere, ..folder_of(f) }
+                })
+                .collect(),
             devices: s
                 .devices
                 .into_iter()
@@ -1782,6 +1793,7 @@ impl MockSync {
             waiting: None,
             gone: Vec::new(),
             can_reshare: false,
+            removes_everywhere: false,
         };
         let mut photos = mk(1, "Photos", SyncAccess::ReadWrite, SyncState::UpToDate, 3, 3);
         photos.role = SyncRole::Owner;
@@ -2054,6 +2066,7 @@ impl MockSync {
             waiting: None,
             gone: Vec::new(),
             can_reshare: false,
+            removes_everywhere: false,
         };
         let members = mock_members(if joining { SyncRole::ReadOnly } else { role }, &[], None);
         s.folders.push(MockFolder { n, f: f.clone(), members, invites: Vec::new(), chat: None });

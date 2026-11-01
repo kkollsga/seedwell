@@ -16,7 +16,7 @@ use trs_sync_proto::device::DeviceKey;
 use trs_sync_proto::ids::{DeviceId, FolderId, ShortId};
 use trs_sync_proto::keys::{FolderSecret, KeyError, Proof};
 use trs_sync_proto::members::{
-    Body, CHANNEL_AGENTS, FollowTarget, Invite, InviteLink, Membership, Role, Signer, Statement, check_redeem, new_invite, redeem_proof,
+    Body, CHANNEL_AGENTS, FOLLOW_ON_DEMAND, FOLLOW_REMOVED, FollowTarget, Invite, InviteLink, Membership, Role, Signer, Statement, check_redeem, new_invite, redeem_proof,
 };
 use trs_sync_proto::model::{ChunkRef, Counter, FileInfo, FileKind, IndexEntry, SignedFile, Version};
 use trs_sync_proto::msg::*;
@@ -77,12 +77,21 @@ fn statements() -> Vec<(&'static str, Statement)> {
         // 0.1.13: "on all my devices", in a devices group.
         (
             "statement 9 follow",
-            Statement::by_device(&admin, &fid(), Body::Follow { target: FollowTarget::Folder, target_pk: [0x3c; 32], name: "Seedwell Development".into(), on: true, serial: 1, at_s: T }),
+            Statement::by_device(&admin, &fid(), Body::Follow { target: FollowTarget::Folder, target_pk: [0x3c; 32], name: "Seedwell Development".into(), on: true, serial: 1, at_s: T, flags: 0 }),
         ),
         ("statement 10 moved", Statement::by_device(&admin, &fid(), Body::Moved { target_pk: [0x3e; 32], at_s: T + 9 })),
         (
             "statement 11 rendezvous",
             Statement::by_device(&admin, &fid(), Body::Rendezvous { url: "https://seedwell-rendezvous.kim.workers.dev".into(), serial: 1, at_s: T }),
+        ),
+        // 0.1.14: a Follow with flags (on demand; removed by its owner), the 0.1.13 bytes and the flags after them.
+        (
+            "statement 9 follow on demand",
+            Statement::by_device(&admin, &fid(), Body::Follow { target: FollowTarget::Folder, target_pk: [0x3c; 32], name: "Photos".into(), on: true, serial: 2, at_s: T, flags: FOLLOW_ON_DEMAND }),
+        ),
+        (
+            "statement 9 follow removed",
+            Statement::by_device(&admin, &fid(), Body::Follow { target: FollowTarget::Folder, target_pk: [0x3c; 32], name: "Photos".into(), on: false, serial: 3, at_s: T + 1, flags: FOLLOW_REMOVED }),
         ),
     ]
 }
@@ -766,6 +775,9 @@ const GOLDEN: &[(&str, &str)] = &[
     ("statement 9 follow", "093d013c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c145365656477656c6c20446576656c6f706d656e74010180829ad706018139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b3940094639d396f8697573b582b92270381a84ebfa71cbfefff32572076c72376d85d33e1f9e47996765113d2ebbec20949796881ce36b2202c7b66758c24e06c0e"),
     ("statement 10 moved", "0a253e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e89829ad706018139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394c881c4dd5f9fa1f83aab5c85a0da344567a98953a28e3d006b492145c79dd6bf1a0adaa3aa44915778d7e6ade8d4f64680384a66e0f90b0fc7e9cc38ef6ec807"),
     ("statement 11 rendezvous", "0b322b68747470733a2f2f7365656477656c6c2d72656e64657a766f75732e6b696d2e776f726b6572732e6465760180829ad706018139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394e622d2e58c744dad54bc23e563b7489b2c3e8985d491ae6bcddc37eb773d8482a306206f014198d77c586874e352bfedd78a1541f4924853bc4a8634ca23ff0e"),
+    // 0.1.14
+    ("statement 9 follow on demand", "0930013c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c0650686f746f73010280829ad70601018139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b39492fc30411ad66b5aa16d023a999d9dde15ceeaecf2c9fa05a92409a8a7346cd8c52fdc0c033f134bdeb2aac1b4792a74e24d25f11643b6eb9d9a8464627e9a06"),
+    ("statement 9 follow removed", "0930013c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c0650686f746f73000381829ad70602018139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394ec6bcefebffb8a48969ef37a8ce7360d6159e9f5c9705111cfca79637ffe27b2e9885d0209b5871f537738c62d98c3a22725c321725e8db75fa56495a5a52b06"),
     ("message 28 devices join","000001741c0001ef029e64389090ed3bd0aecea44c8015b863a7eea036114e2aa1d76daa5ed1f14c5602046b0128ed4928c628d1c2c6eae90338905995612959273a5c63f93636c14614ac8737d1010180829ad70600006e0fac6bc3157adbfa575e36b997a504aca780fd63baa2cfd3e3dfe8226c53a0c4dfb9e8356fa1463e3b6f3cefb254cfb512aefbdb4c250a5e9f72e6d73c4d0905de01019637b249c05e7c8e0191e443ba0d55bf87f417dd29ae535f51072e62af8ec13208080808080808080808080808080808030180f7bed70680829ad706001398f62c6d1a457c51ba6a4b5f3dbd2f69fca93216218dc8997e416bd17d93caadec86809f80941eb3d15ee572b6f1c98f498ec98279554f37107228c506d9c6d3ba625eedeb709fb1c7f99b0fa398e0741e1b7863f056ac5ba48d9549173406b4125bfe4ef842f5d4357d82bafc144a2e88a8dda4c437dd35886b034d025778159f67f11e7416e7c51c4edb90a87d6ba66f6ee7e802b07a152accae6b14380b"),
     ("message 2 join with a sibling proof", "0000004a020001469e64389090ed3bd0aecea44c8015b863a7eea036114e2aa1d76daa5ed1f14c560106203d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d050000"),
     ("devices link", "seedwell://devices/AGLDPMSJYBPHZDQBSHSEHOQNKW7YP5AX3UU24U27KEDS4YVPR3ATEDAMBQGAYDAMBQGAYDAMBQGAYDADAGAPPPWXA2AIFGWXAYAW46Q43UU3BN4P2E5PJRKZR7X7J3ZKS4LG4PFG6LSPX7GNQBIFX4LAKC6RDCDFYUJDWIGLQERDHDKQ2UBILDPPXLH26BKLIJU44XOU7UEG6N46OSKWTVYFWTULSCV75MYPV65I2KDYKQSRWIZYSZNNLWBQ6DAMBQGAYDAMBQGAYDAMBQGAYDAMBQGAYDAMBQGAYDAMBQGAYDAMYGRA?name=Kristian%27s%20Mac%20mini&a=AH5VI2P6YFI5TR4MFIAMR5G5MXQ6V5KKVYTZSIFJCKRH3XTVOBMRMOWS4ODSCYR4SHJFSUVSKLYFDIYDE4HLH7AELDE7QUZTCASBRWA72PGVLOJGZ7MUURQS4I7WBSLZYZ7OBCVVRB6L5KVM7APO7BVT4GEIDQTWCH4EFRS4BV2P5JD6JGZ6FXCB"),

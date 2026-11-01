@@ -376,6 +376,10 @@ pub enum Body {
     /// no longer does. Signed by the device that says it, while it is a member; per target the latest (by serial,
     /// then time, then signature) of a current member counts ([`Membership::follows`]). Anywhere else it means
     /// nothing; a device before 0.1.13 keeps it as [`Body::Unknown`].
+    ///
+    /// `flags` (0.1.14) are written after `at_s` only when not 0, so a Follow without flags is the 0.1.13 bytes, and
+    /// 0.1.13 reads one with flags as the same Follow with those bytes kept after it (its signature checks, it is
+    /// passed on as it came): [`FOLLOW_ON_DEMAND`], [`FOLLOW_REMOVED`].
     Follow {
         /// A folder or a channel.
         target: FollowTarget,
@@ -389,6 +393,8 @@ pub enum Body {
         serial: u64,
         /// When it was made.
         at_s: u64,
+        /// [`FOLLOW_ON_DEMAND`], [`FOLLOW_REMOVED`]; bits this version does not know are kept (0: none, as 0.1.13).
+        flags: u64,
     },
     /// "This group moved" (0.1.13): in a devices group only, a member says the group now goes on under a new key
     /// (made after a removal, so the removed device's copy of the old key is worth nothing). Signed by the device that
@@ -455,6 +461,31 @@ pub const MAX_RENDEZVOUS_URL: usize = 200;
 
 /// Longest name a [`Body::Follow`] carries, in bytes.
 pub const MAX_FOLLOW_NAME: usize = 255;
+
+/// [`Body::Follow`]'s flag (0.1.14) of a folder that is on demand on the device that put it on all devices: a sibling
+/// joins it on demand too, where it can (only the default when it joins; each device switches its own afterwards).
+pub const FOLLOW_ON_DEMAND: u64 = 1;
+
+/// [`Body::Follow`]'s flag (0.1.14), with `on` false: the folder's owner removed it from Seedwell, so every sibling
+/// removes it too, keeping its files. Without it, off only stops the folder coming to more devices.
+pub const FOLLOW_REMOVED: u64 = 2;
+
+/// A Follow's flags after its time (0.1.14): read only when they are there, not 0 and written as this version writes
+/// them, so the statement is written back byte for byte; anything else stays in the statement's `extra`.
+fn follow_flags(r: &mut Reader<'_>) -> u64 {
+    if r.remaining() == 0 {
+        return 0;
+    }
+    let mut peek = r.clone();
+    let Ok(v) = peek.varint("follow flags") else { return 0 };
+    let mut canonical = Vec::new();
+    put_varint(&mut canonical, v);
+    if v == 0 || r.remaining() - peek.remaining() != canonical.len() {
+        return 0;
+    }
+    *r = peek;
+    v
+}
 
 /// [`Body::Channel`]'s flag of a channel open to agents (0.1.12's agent channel): read as an Agents: Yes at serial 0.
 pub const CHANNEL_AGENTS: u64 = 1;
@@ -542,13 +573,17 @@ impl Statement {
                 put_varint(&mut out, *at_s);
                 8
             }
-            Body::Follow { target, target_pk, name, on, serial, at_s } => {
+            Body::Follow { target, target_pk, name, on, serial, at_s, flags } => {
                 out.push(target.byte());
                 out.extend_from_slice(target_pk);
                 put_str(&mut out, name);
                 out.push(u8::from(*on));
                 put_varint(&mut out, *serial);
                 put_varint(&mut out, *at_s);
+                // None: exactly the 0.1.13 bytes.
+                if *flags != 0 {
+                    put_varint(&mut out, *flags);
+                }
                 9
             }
             Body::Moved { target_pk, at_s } => {
@@ -669,7 +704,8 @@ impl Statement {
                     1 => true,
                     _ => return None,
                 };
-                Body::Follow { target, target_pk, name, on, serial: r.varint("serial").ok()?, at_s: r.varint("time").ok()? }
+                let (serial, at_s) = (r.varint("serial").ok()?, r.varint("time").ok()?);
+                Body::Follow { target, target_pk, name, on, serial, at_s, flags: follow_flags(r) }
             }
             10 => Body::Moved { target_pk: r.array("target key").ok()?, at_s: r.varint("time").ok()? },
             11 => {
@@ -825,6 +861,20 @@ pub struct Follow {
     pub serial: u64,
     /// When it was said.
     pub at_s: u64,
+    /// The statement's flags ([`FOLLOW_ON_DEMAND`], [`FOLLOW_REMOVED`]).
+    pub flags: u64,
+}
+
+impl Follow {
+    /// On demand on the device that put it on all devices: a sibling joins it on demand where it can.
+    pub fn on_demand(&self) -> bool {
+        self.flags & FOLLOW_ON_DEMAND != 0
+    }
+
+    /// Off because its owner removed it from Seedwell: every sibling removes it too, keeping its files.
+    pub fn removed(&self) -> bool {
+        !self.on && self.flags & FOLLOW_REMOVED != 0
+    }
 }
 
 /// A folder's membership: every statement this device knows, and the roles they give. Every device that knows
@@ -1404,7 +1454,7 @@ impl Membership {
         let mut follow_serial: BTreeMap<[u8; 32], u64> = BTreeMap::new();
         if self.devices {
             for st in self.statements.values() {
-                let (Body::Follow { target, target_pk, name, on, serial, at_s }, Signer::Device(by)) = (&st.body, st.signer) else { continue };
+                let (Body::Follow { target, target_pk, name, on, serial, at_s, flags }, Signer::Device(by)) = (&st.body, st.signer) else { continue };
                 let top = follow_serial.entry(*target_pk).or_insert(0);
                 *top = (*top).max(*serial);
                 if !self.members.contains_key(&by) {
@@ -1412,7 +1462,7 @@ impl Membership {
                 }
                 let key = (*serial, *at_s, st.sig);
                 if follows.get(target_pk).is_none_or(|(k, _)| key > *k) {
-                    let f = Follow { target: *target, target_pk: *target_pk, name: name.clone(), on: *on, by, serial: *serial, at_s: *at_s };
+                    let f = Follow { target: *target, target_pk: *target_pk, name: name.clone(), on: *on, by, serial: *serial, at_s: *at_s, flags: *flags };
                     follows.insert(*target_pk, (key, f));
                 }
             }
@@ -2287,7 +2337,7 @@ mod tests {
     // ------------------------------------------------------------------------------------------ devices groups
 
     fn follow(d: &DeviceKey, fid: &FolderId, target: [u8; 32], on: bool, serial: u64, at_s: u64) -> Statement {
-        let body = Body::Follow { target: FollowTarget::Folder, target_pk: target, name: "Dev".into(), on, serial, at_s };
+        let body = Body::Follow { target: FollowTarget::Folder, target_pk: target, name: "Dev".into(), on, serial, at_s, flags: 0 };
         Statement::by_device(d, fid, body)
     }
 
@@ -2304,12 +2354,12 @@ mod tests {
     fn a_follow_round_trips_and_a_bad_body_is_unknown() {
         let s = owner();
         let fid = FolderId::of_public_key(s.public_key());
-        let st = Statement::by_device(&dev(2), &fid, Body::Follow { target: FollowTarget::Channel, target_pk: [5; 32], name: "Seedwell Development".into(), on: true, serial: 3, at_s: NOW });
+        let st = Statement::by_device(&dev(2), &fid, Body::Follow { target: FollowTarget::Channel, target_pk: [5; 32], name: "Seedwell Development".into(), on: true, serial: 3, at_s: NOW, flags: 0 });
         let back = Statement::from_bytes(&st.to_bytes()).unwrap();
         assert_eq!(back, st);
         assert!(back.verify(s.public_key()));
         // Only a device says what it follows: the group key cannot.
-        let by_key = Statement::by_owner(&s, Body::Follow { target: FollowTarget::Folder, target_pk: [5; 32], name: String::new(), on: true, serial: 1, at_s: NOW });
+        let by_key = Statement::by_owner(&s, Body::Follow { target: FollowTarget::Folder, target_pk: [5; 32], name: String::new(), on: true, serial: 1, at_s: NOW, flags: 0 });
         assert!(!by_key.verify(s.public_key()));
         // A target or an on value this version does not know: kept as Unknown, passed on byte for byte.
         let mut odd = st.to_bytes();
@@ -2317,6 +2367,51 @@ mod tests {
         let unknown = Statement::from_bytes(&odd).unwrap();
         assert!(matches!(unknown.body, Body::Unknown { kind: 9, .. }));
         assert_eq!(unknown.to_bytes(), odd);
+    }
+
+    /// 0.1.14's flags to 0.1.13 and back: a Follow without flags is the 0.1.13 bytes; one with flags is, to 0.1.13,
+    /// the same Follow with the flags' bytes after it (kept in `extra`, so the signature checks and the statement goes
+    /// on as it came), and 0.1.13's Follow reads here as one without flags.
+    #[test]
+    fn follow_flags_are_read_by_0_1_13_as_the_same_follow_with_bytes_after_it() {
+        let s = owner();
+        let fid = FolderId::of_public_key(s.public_key());
+        let follow = |on, serial, flags| Body::Follow { target: FollowTarget::Folder, target_pk: [5; 32], name: "Photos".into(), on, serial, at_s: NOW, flags };
+        let body = |flags| follow(true, 4, flags);
+        let plain = Statement::by_device(&dev(2), &fid, body(0));
+        let flagged = Statement::by_device(&dev(2), &fid, body(FOLLOW_ON_DEMAND));
+        let (_, plain_body) = Statement::body_bytes(&plain.body, &[]);
+        let (_, flagged_body) = Statement::body_bytes(&flagged.body, &[]);
+        assert_eq!(flagged_body, [plain_body.as_slice(), &[1]].concat(), "the 0.1.13 body, then the flags");
+        // Read here: each as it was made.
+        for st in [&plain, &flagged] {
+            let back = Statement::from_bytes(&st.to_bytes()).unwrap();
+            assert_eq!(&back, st);
+            assert!(back.extra.is_empty() && back.verify(s.public_key()));
+        }
+        // Read by 0.1.13 (its reader knows the fields up to the time, and keeps what follows): the same Follow, no
+        // flags, the byte kept, the signature good, written back byte for byte.
+        let old = Statement { body: body(0), signer: flagged.signer, sig: flagged.sig, extra: vec![1] };
+        assert!(old.verify(s.public_key()));
+        assert_eq!(old.to_bytes(), flagged.to_bytes());
+        let mut m = group(&s, &dev(1), &[&dev(2)]);
+        m.add([old]);
+        assert_eq!(m.follow(&[5; 32]).map(|f| (f.on, f.flags)), Some((true, 0)), "0.1.13 follows it, in full");
+        // Flags this version does not know are kept; a zero or a padded varint is not read as flags but kept after.
+        let future = Statement::by_device(&dev(2), &fid, body(FOLLOW_ON_DEMAND | 64));
+        assert_eq!(Statement::from_bytes(&future.to_bytes()).unwrap(), future);
+        for tail in [vec![0u8], vec![0x81, 0x00]] {
+            let odd = Statement { body: body(0), signer: plain.signer, sig: plain.sig, extra: tail.clone() };
+            let back = Statement::from_bytes(&odd.to_bytes()).unwrap();
+            assert_eq!((back.to_bytes(), back.extra), (odd.to_bytes(), tail));
+        }
+        // Removed: only an off Follow with the flag.
+        let mut g = group(&s, &dev(1), &[&dev(2)]);
+        g.add([Statement::by_device(&dev(2), &fid, follow(false, 5, FOLLOW_REMOVED))]);
+        assert!(g.follow(&[5; 32]).unwrap().removed());
+        g.add([Statement::by_device(&dev(2), &fid, follow(true, 6, FOLLOW_REMOVED | FOLLOW_ON_DEMAND))]);
+        let f = g.follow(&[5; 32]).unwrap();
+        assert!(f.on && f.on_demand() && !f.removed());
     }
 
     #[test]
