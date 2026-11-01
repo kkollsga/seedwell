@@ -484,7 +484,15 @@ fn snapshot_folder(d: &Dev, id: &FolderId) -> Option<trs_sync_net::status::Folde
 /// says why. Its owner removing it removes it from Seedwell on every sibling, each keeping its files.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_on_demand_folder_follows_on_demand_and_its_owner_removing_it_removes_it_everywhere() {
-    let (a, b) = (Dev::new("Anna's Mac").await, Dev::new("MacBook").await);
+    let a = Dev::new("Anna's Mac").await;
+    // B keeps folders on demand wherever the test runs (a Mac's default; not a PC's).
+    let mac_state = tempfile::tempdir().unwrap();
+    let mac = start_at(mac_state.path(), "MacBook", |o| {
+        o.forbidden_root = trs_platform::dirs::home();
+        o.on_demand = true;
+    })
+    .await;
+    let b = Dev { h: mac, state: mac_state, name: "MacBook", features: FEATURES };
     let full_state = tempfile::tempdir().unwrap();
     let pc = start_at(full_state.path(), "Studio PC", |o| {
         o.forbidden_root = trs_platform::dirs::home();
