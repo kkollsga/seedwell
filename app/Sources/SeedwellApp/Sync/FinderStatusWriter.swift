@@ -23,7 +23,7 @@ import SeedwellFinderShared
     }
 
     /// The user has switched the extension on in System Settings.
-    static var extensionEnabled: Bool { FIFinderSyncController.isExtensionEnabled }
+    nonisolated static var extensionEnabled: Bool { FIFinderSyncController.isExtensionEnabled }
 
     func start() {
         tick()
@@ -35,28 +35,48 @@ import SeedwellFinderShared
     func stop() {
         timer?.invalidate()
         timer = nil
-        write(FinderStatus(running: false, folders: last?.folders ?? []))
+        // After a status still being made (the same queue): the last word is "not running".
+        let (s, dir, log) = (FinderStatus(running: false, folders: last?.folders ?? []), self.dir, self.log)
+        work.async {
+            do { try s.write(to: dir) } catch { log.error("finder status: \(error.localizedDescription, privacy: .public)") }
+        }
     }
 
     private func tick() {
         let snap = core.syncSnapshot()
-        let core = self.core
-        write(Self.status(snap, activity: { core.syncActivity(id: $0) }))
         if !snap.folders.isEmpty, let first = onFirstFolder {
             onFirstFolder = nil
             first()
         }
-    }
-
-    private func write(_ s: FinderStatus) {
-        guard s != last else { return }
-        do {
-            try s.write(to: dir)
-            last = s
-        } catch {
-            log.error("finder status: \(error.localizedDescription, privacy: .public)")
+        // The status names each folder by its real path (symlinks resolved: a look at a disk that may be slow or gone)
+        // and is written to a file: both off the main thread, one at a time.
+        guard !busy else { return }
+        busy = true
+        let (core, dir, previous, log) = (self.core, self.dir, last, self.log)
+        work.async { [weak self] in
+            let s = Self.status(snap, activity: { core.syncActivity(id: $0) })
+            var wrote = false
+            if s != previous {
+                do {
+                    try s.write(to: dir)
+                    wrote = true
+                } catch {
+                    log.error("finder status: \(error.localizedDescription, privacy: .public)")
+                }
+            }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    self?.busy = false
+                    if wrote, self?.timer != nil { self?.last = s }
+                }
+            }
         }
     }
+
+    /// Where the status is made and written (off the main thread).
+    private let work = DispatchQueue(label: "seedwell.finder-status", qos: .utility)
+    /// A status is being made.
+    private var busy = false
 
     /// The status for a snapshot. Pure apart from resolving symlinks in the roots (Finder hands the extension
     /// real paths, see `realPath`).

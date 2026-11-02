@@ -550,3 +550,66 @@ async fn a_folder_moved_while_the_other_device_is_connected_keeps_syncing() {
     a.h.shutdown().await;
     b.h.shutdown().await;
 }
+
+/// Files below `root`, `.seedwell` left out.
+fn files_below(root: &Path) -> usize {
+    let mut n = 0;
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+            if e.file_name() == ".seedwell" {
+                continue;
+            }
+            if e.file_type().is_ok_and(|t| t.is_dir()) {
+                stack.push(e.path());
+            } else {
+                n += 1;
+            }
+        }
+    }
+    n
+}
+
+/// A big folder's first scan goes in steps, each committed and announced: the other device sees the list grow and
+/// fetches files while this one still hashes the rest (it does not wait for the whole scan).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_sibling_receives_files_while_the_first_scan_still_runs() {
+    let (a, b) = (device("Alpha").await, device("Beta").await);
+    let (fa, fb) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    for d in 0..15 {
+        let dir = fa.path().join(format!("d{d:02}"));
+        std::fs::create_dir(&dir).unwrap();
+        for i in 0..100 {
+            std::fs::write(dir.join(format!("f{i:02}.txt")), format!("{d} {i}")).unwrap();
+        }
+    }
+    // A long first scan: a pause of two seconds after each step (at most a thousand changes each).
+    a.h.test_scan_step_wait(Duration::from_secs(2));
+    let st = a.h.add_folder(fa.path().to_path_buf()).await.unwrap();
+    let id: FolderId = st.id.parse().unwrap();
+    let key = a.h.create_invite(&id, Role::ReadWrite, 1, 1).unwrap().link;
+    let dest = fb.path().join("Shared");
+    b.h.join_folder(&key, dest.clone()).await.unwrap();
+    b.h.add_address(&id, addr(&a)).unwrap();
+
+    let scanning = || a.h.snapshot().folders.iter().any(|f| f.state == FolderState::Scanning);
+    let mut seen = None;
+    until(60, "B has some of A's files while A still scans", || {
+        let (n, still) = (files_below(&dest), scanning());
+        if n > 0 && still {
+            seen = Some(n);
+        }
+        seen.is_some() || (!still && n == 1500)
+    })
+    .await;
+    let seen = seen.expect("files arrived only after A's whole first scan");
+    assert!(seen < 1500, "{seen}");
+    // A's own count grows as its scan goes too.
+    let mid = a.h.snapshot().folders[0].files;
+    assert!(mid > 0, "A counts what it scanned so far");
+
+    a.h.test_scan_step_wait(Duration::ZERO);
+    until(180, "B has all of A's files", || files_below(&dest) == 1500).await;
+    a.h.shutdown().await;
+    b.h.shutdown().await;
+}

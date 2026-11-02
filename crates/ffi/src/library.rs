@@ -57,7 +57,7 @@ pub trait LocalClock: Send + Sync {
 }
 
 /// The local calendar day of a moment, as days since 1970-01-01 there.
-fn local_day_number(clock: &dyn LocalClock, unix_s: u64) -> i64 {
+pub(crate) fn local_day_number(clock: &dyn LocalClock, unix_s: u64) -> i64 {
     (unix_s as i64 + i64::from(clock.utc_offset_s(unix_s))).div_euclid(DAY_S)
 }
 

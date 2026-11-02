@@ -21,6 +21,15 @@ The host app (Swift on macOS, later one app for Windows and one for Linux) keeps
 A host asks Rust for a **view model** (a record with ready text, flags and rows) and draws it. A rule found in
 Swift that is not drawing or OS integration is a bug in this sense and moves to Rust (§4).
 
+**The UI thread never waits.** Every FFI call that can take noticeable time (an engine round trip, a disk, the
+network) is an `async` function (`crates/ffi/src/async_calls.rs`; Swift `await`, C# `await` on the generated `Task`):
+it returns at once and runs on the core's own threads, the user's commands to the engine in the order they arrive. A
+host starts the user's commands in the order given (the Mac: `CoreCalls.inOrder`) and refreshes when they are done.
+The synchronous calls left are cheap or bounded (a few milliseconds, then the last value), which `ui_wait_tests`
+proves with the engine stalled. The host keeps blocking system calls (file system looks at user paths, system
+services) off its UI thread too, quits on a thread of its own with a deadline, and runs the core's hang watchdog
+(`ui_watchdog`, `Core::ui_stall`: a stall over a second is logged, a test run that hangs two seconds fails).
+
 ## 2. Seams
 
 **Host seams** (the app implements them; Rust holds the policy):
@@ -182,7 +191,11 @@ Each step is its own commit with tests; `tools/check.sh` passes after each.
       sidebar's Agents question as `ChatDialog` with `chat_dialog_check`); the Mac draws them.
 - [ ] Chat view model (text, mail, tags, markdown).
 - [x] `seedwell://` link routing: `trs-ffi`'s `links.rs` (`link_route`, `Core::route_link`, `command_line_routes`).
-- [ ] Notices (which events notify, texts, bursts, click routing), launch options.
+- [x] Notices: `trs-ffi`'s `notify.rs` (`Notices`: which core events notify, their texts, the finished burst and the keys
+      that replace a notice, hidden trackers, the settings, muted channels and the conversation on screen, the chat
+      poll's cadence; `notice_route` for a click; `settings_banner`) and `prompts.rs` (the add request, location move and
+      backlog questions); the Mac posts and draws them.
+- [ ] Launch options.
 - [ ] Settings parsing and save policy (ports, rates, times, goals, rules, folders, sync settings).
 - [ ] Update checker; Play's player choice (the setting, Automatic, "needs update"; the episode labels and Play With
       are done with the row commands); the other context-menu models (a file's in the file list); the QA control

@@ -342,7 +342,6 @@ pub fn chat_file_samples() -> ChatFileSamples {
     }
 }
 
-#[uniffi::export]
 impl Core {
     /// Posts a text message with images and files to `place` (a channel's id, with `topic`; or `dm:<device>`), as the
     /// person at this computer, without waiting for the files to be read: until the message is posted
@@ -368,19 +367,6 @@ impl Core {
         Ok(())
     }
 
-    /// The sends of a channel or conversation whose files are being read, or that failed (until dismissed).
-    pub fn chat_pending_sends(&self, place: String) -> Vec<ChatPendingSend> {
-        let (Some((h, _)), Ok(p)) = (self.backend.sync().chat_service(), self::place(&place)) else { return Vec::new() };
-        h.chat_preparing(p).iter().map(pending_of).collect()
-    }
-
-    /// Forgets a send that failed.
-    pub fn chat_dismiss_pending(&self, place: String, id: u64) {
-        if let (Some((h, _)), Ok(p)) = (self.backend.sync().chat_service(), self::place(&place)) {
-            h.chat_dismiss_preparing(p, id);
-        }
-    }
-
     /// *Download* (into the Downloads folder), *Retry*, or *Save As…* to `to` (the file the save panel chose, which
     /// replaces one there). Returns the card as it stands now.
     pub fn chat_file_download(&self, place: String, hash: String, to: Option<String>) -> Result<ChatFileCard, CoreError> {
@@ -402,6 +388,30 @@ impl Core {
         Ok(card_of(&h.chat_file_stop_sharing(self::place(&place)?, &hash).map_err(sync_failed)?, ""))
     }
 
+    /// *Open*: the file's path, and what to ask first when it is an app, an installer or a script. Never opened here.
+    pub fn chat_file_open(&self, place: String, hash: String) -> Result<ChatFileOpen, CoreError> {
+        let (h, _) = self.backend.sync().chat_service().ok_or_else(|| failed("Folder sync is not running."))?;
+        let (a, _) = h.chat_attachment(self::place(&place)?, &hash).map_err(sync_failed)?;
+        let path = a.path.clone().filter(|p| Path::new(p).exists()).ok_or_else(|| failed(concat!("The file is not on this ", trs_platform::computer!(), ".")))?;
+        Ok(ChatFileOpen { confirm: open_check(Path::new(&path), &a.name), path })
+    }
+}
+
+#[uniffi::export]
+impl Core {
+    /// The sends of a channel or conversation whose files are being read, or that failed (until dismissed).
+    pub fn chat_pending_sends(&self, place: String) -> Vec<ChatPendingSend> {
+        let (Some((h, _)), Ok(p)) = (self.backend.sync().chat_service(), self::place(&place)) else { return Vec::new() };
+        h.chat_preparing(p).iter().map(pending_of).collect()
+    }
+
+    /// Forgets a send that failed.
+    pub fn chat_dismiss_pending(&self, place: String, id: u64) {
+        if let (Some((h, _)), Ok(p)) = (self.backend.sync().chat_service(), self::place(&place)) {
+            h.chat_dismiss_preparing(p, id);
+        }
+    }
+
     /// The name *Save As…* suggests.
     pub fn chat_file_save_name(&self, place: String, hash: String) -> String {
         self.backend
@@ -411,13 +421,6 @@ impl Core {
             .map_or_else(|| "file".into(), |(a, _)| a.name)
     }
 
-    /// *Open*: the file's path, and what to ask first when it is an app, an installer or a script. Never opened here.
-    pub fn chat_file_open(&self, place: String, hash: String) -> Result<ChatFileOpen, CoreError> {
-        let (h, _) = self.backend.sync().chat_service().ok_or_else(|| failed("Folder sync is not running."))?;
-        let (a, _) = h.chat_attachment(self::place(&place)?, &hash).map_err(sync_failed)?;
-        let path = a.path.clone().filter(|p| Path::new(p).exists()).ok_or_else(|| failed(concat!("The file is not on this ", trs_platform::computer!(), ".")))?;
-        Ok(ChatFileOpen { confirm: open_check(Path::new(&path), &a.name), path })
-    }
 }
 
 #[cfg(test)]

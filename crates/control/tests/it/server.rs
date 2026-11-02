@@ -526,6 +526,41 @@ async fn activity_log_records_who_and_hides_secrets() {
     assert_eq!(via["entries"].as_array().unwrap().len(), 2);
 }
 
+/// An agent's `chat watch --unread` holds its place alone: a second open watch for it is refused (two would take
+/// messages from each other), and a watch that went away (its connection closed) never blocks the next one.
+#[tokio::test]
+async fn a_hold_is_refused_while_another_open_connection_has_it_and_freed_when_that_closes() {
+    let rig = Rig::new(Permission::ReadOnly).await;
+    let place = json!({"kinds": ["chat.message"], "hold": "seedwell\u{1f}C\u{1f}general"});
+    let mut first = rig.client("watch-a").await;
+    assert_eq!(call(&mut first, "events_subscribe", place.clone()).await.unwrap()["subscribed"], true);
+    assert_eq!(call(&mut first, "events_subscribe", place.clone()).await.unwrap()["subscribed"], true, "the same connection again: fine");
+    let mut second = rig.client("watch-b").await;
+    let e = call(&mut second, "events_subscribe", place.clone()).await.unwrap_err();
+    assert_eq!(e.code, ErrorCode::Duplicate);
+    assert_eq!(e.data.as_ref().and_then(|d| d["client"].as_str()), Some("watch-a"));
+    // Another place, or none, is not held.
+    assert!(call(&mut second, "events_subscribe", json!({"kinds": ["chat.message"], "hold": "other\u{1f}C\u{1f}general"})).await.is_ok());
+    let mut third = rig.client("watch-c").await;
+    assert!(call(&mut third, "events_subscribe", json!({"kinds": ["chat.message"]})).await.is_ok());
+    // The first one dies: its place is free at once.
+    drop(first);
+    let started = std::time::Instant::now();
+    loop {
+        match call(&mut third, "events_subscribe", place.clone()).await {
+            Ok(_) => break,
+            Err(e) => {
+                assert_eq!(e.code, ErrorCode::Duplicate);
+                assert!(started.elapsed() < Duration::from_secs(5), "the closed connection's hold was never freed");
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }
+    }
+    // Unsubscribing lets go too.
+    call(&mut third, "events_unsubscribe", json!({})).await.unwrap();
+    assert!(call(&mut second, "events_subscribe", place).await.is_ok());
+}
+
 #[tokio::test]
 async fn events_push_poll_and_filter() {
     let rig = Rig::new(Permission::ReadOnly).await;

@@ -56,8 +56,8 @@ import Testing
                              caption: "shot.png · 1280 × 800 · 240 KB", status: "", hasPreview: true)
         var m = ChatTests.message("")
         m.images = [shot]
-        #expect(ChatText.preview(m) == "shot.png · 1280 × 800 · 240 KB", "the core's words for it")
+        #expect(chatMessagePreview(message: m, limit: 120) == "shot.png · 1280 × 800 · 240 KB", "the core's words for it")
         m.body = "look"
-        #expect(ChatText.preview(m) == "look", "a caption is the preview")
+        #expect(chatMessagePreview(message: m, limit: 120) == "look", "a caption is the preview")
     }
 }

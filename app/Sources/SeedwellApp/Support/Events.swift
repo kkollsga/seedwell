@@ -41,75 +41,33 @@ final class CoreEvents: CoreListener, Sendable {
     func onPendingChanged() { send(.pending) }
 }
 
-/// System notifications (SPEC §9). Clicking one opens the main window on the transfer.
+/// System notifications (SPEC §9): posts what the core's `Notices` decided; a click gives the notice's `click` back to
+/// the core (`noticeRoute`), which says what to open.
 @MainActor enum Notifier {
     /// Notification centre needs a real bundle; skipped under `swift run`. A quiet QA run posts none (QuietRun).
     static var available: Bool { Bundle.main.bundleIdentifier != nil && Bundle.main.bundlePath.hasSuffix(".app") && !QuietRun.on }
     private static let log = Logger(subsystem: "io.github.kkollsga.Seedwell", category: "notify")
+    /// The `userInfo` key of a notice's `click`.
+    nonisolated static let clickKey = "click"
 
     static func requestAuthorization() {
         guard available else { return }
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
     }
 
-    /// `transfer` or `chat` (a conversation): what a click opens.
-    static func post(title: String, body: String, transfer: String? = nil, chat: LibraryModel.Section? = nil, key: String = UUID().uuidString) {
+    /// A notice of the core's; one with a `key` takes the place of the last one with that key.
+    static func post(_ n: Notice) {
+        post(title: n.title, body: n.body, key: n.key ?? UUID().uuidString, click: n.click)
+    }
+
+    /// A notification whose click opens the window, unless `click` (a `Notice.click`) says otherwise.
+    static func post(title: String, body: String, key: String = UUID().uuidString, click: String = "") {
         guard available else { log.notice("(notification) \(title, privacy: .public): \(body, privacy: .private)"); return }
         let content = UNMutableNotificationContent()
         content.title = title
         content.body = body
-        if let transfer { content.userInfo = ["transfer": transfer] }
-        switch chat {
-        case .chat(let id, let topic): content.userInfo = ["channel": id, "topic": topic ?? ""]
-        case .direct(let device): content.userInfo = ["direct": device]
-        default: break
-        }
+        content.userInfo = [clickKey: click]
         UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: key, content: content, trigger: nil))
-    }
-
-    private static var burst: [Date] = []
-
-    /// More than three in ten seconds become one "N downloads finished" that replaces itself.
-    static func finished(_ row: TransferRow) {
-        let now = Date()
-        burst = burst.filter { now.timeIntervalSince($0) < 10 } + [now]
-        if burst.count <= 3 {
-            post(title: "Download finished", body: row.displayName, transfer: row.id)
-        } else {
-            post(title: "\(burst.count) downloads finished", body: "Open \(AppInfo.name) to see them.", key: "finished-burst")
-        }
-    }
-
-    static func failed(_ name: String, message: String, id: String?) {
-        post(title: "Problem with \(name)", body: message, transfer: id)
-    }
-
-    /// SPEC §7A.1: "Added Night of the Living Dead (1968) · Movie · tracker-y.net → ~/Media/Movies".
-    static func autoAdded(_ a: AutoAdded) {
-        var parts = [a.category.label, a.tracker]
-        if let d = a.destination { parts.append("→ " + abbreviate(d)) }
-        post(title: "Added \(a.name)", body: parts.joined(separator: " · "), transfer: a.id)
-    }
-
-    static func needsChoice(_ row: TransferRow) {
-        post(title: "Choose what to download", body: row.displayName, transfer: row.id, key: "choice-\(row.id)")
-    }
-
-    static func duplicate(_ name: String, trackersAdded: Int = 0) {
-        if trackersAdded > 0 {
-            post(title: "Added \(trackersAdded) tracker\(trackersAdded == 1 ? "" : "s") to \(name)", body: "It was already in \(AppInfo.name)")
-            return
-        }
-        post(title: "Already in \(AppInfo.name)", body: name)
-    }
-
-    static func goalReached(_ name: String) {
-        post(title: "Seeding goal reached", body: name)
-    }
-
-    static func agent(_ a: AgentActivity) {
-        guard a.outcome == "ok" else { return }
-        post(title: "\(a.client)", body: a.summary)
     }
 
     /// `/Users/me/Movies` as `~/Movies`; `$HOME` is the one the app runs with (`--home-root` aware).

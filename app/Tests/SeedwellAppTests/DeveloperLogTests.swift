@@ -53,26 +53,26 @@ struct DeveloperLogTests {
         #expect(count(limit: 2) == 2)
     }
 
-    @Test func clearingDeletesTheFileAndTheViewerGetsNothing() throws {
+    @Test func clearingDeletesTheFileAndTheViewerGetsNothing() async throws {
         let (core, dir) = try makeCore(log: [line(1_000, event: "started", error: false)])
         defer { try? FileManager.default.removeItem(at: dir) }
         #expect(core.trackerLogPath().hasSuffix("logs/trackers.log"))
         #expect(FileManager.default.fileExists(atPath: core.trackerLogPath()))
-        core.trackerLogClear()
+        await core.trackerLogClear()
         #expect(!FileManager.default.fileExists(atPath: core.trackerLogPath()))
         #expect(core.trackerLog(query: TrackerLogQuery(text: "", tracker: "", event: "", errorsOnly: false, limit: 0)).isEmpty)
     }
 
-    @Test func theSettingIsOffByDefaultAndSurvivesASave() throws {
+    @Test func theSettingIsOffByDefaultAndSurvivesASave() async throws {
         let (core, dir) = try makeCore(log: [])
         defer { try? FileManager.default.removeItem(at: dir) }
         var s = core.settingsLoad()
         #expect(!s.advanced.developerMode)
         s.advanced.developerMode = true
-        try core.settingsSave(settings: s)
+        try await core.settingsSave(settings: s)
         #expect(core.settingsLoad().advanced.developerMode)
         s.advanced.developerMode = false
-        try core.settingsSave(settings: s)
+        try await core.settingsSave(settings: s)
         #expect(!core.settingsLoad().advanced.developerMode)
     }
 

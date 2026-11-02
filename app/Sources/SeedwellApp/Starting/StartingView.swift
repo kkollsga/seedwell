@@ -1,12 +1,13 @@
 import SwiftUI
 
-/// What the notifier can do with one torrent.
+/// What the notifier's clicks do with one torrent (each runs the core's `Starting`, then looks again).
 struct StartingActions {
-    var chooseFiles: (String) -> Void
-    var togglePause: (String, Bool) -> Void
-    var startNow: (String) -> Void
-    /// OK on a checklist: apply the ticks and start. Cancel: remove the held torrent and move its `.torrent`
-    /// file to the Trash; the flag is ⇧-Cancel: keep the file (SPEC 7A.6).
+    /// A countdown's chevron: ends the countdown and opens the block's checklist here.
+    var chooseFiles: (String) -> Void = { _ in }
+    /// Start on a countdown: it starts now.
+    var startNow: (String) -> Void = { _ in }
+    /// Start on a choice: the ticks go to the engine. Cancel: the held torrent is removed and its `.torrent` file goes
+    /// to the Trash; the flag is ⇧-Cancel: keep the file (SPEC 7A.6).
     var confirm: (String) -> Void = { _ in }
     var cancel: (_ id: String, _ keepFile: Bool) -> Void = { _, _ in }
     /// The title and its line: open the main window on this torrent, its file list open (SPEC 8.6).
@@ -15,10 +16,12 @@ struct StartingActions {
     var changeCategory: (String, Category) -> Void = { _, _ in }
     /// The small ×: put the popover away and leave the torrents waiting.
     var closePanel: () -> Void = {}
+    /// A choice's chevron: opens or closes its checklist.
+    var toggleExpanded: (String) -> Void = { _ in }
 }
 
-/// The notifier's content (SPEC 8.6): one block per torrent that waits, to start or for a choice. Dark
-/// first, native materials from the popover, no boxes: hierarchy from type and spacing.
+/// The notifier's content (SPEC 8.6): one block per torrent that waits, to start or for a choice, as the core lays it
+/// out (`StartingPage`). Dark first, native materials from the popover, no boxes: hierarchy from type and spacing.
 struct StartingView: View {
     let model: StartingModel
     let store: ChoiceStore
@@ -29,18 +32,16 @@ struct StartingView: View {
     static let maxHeight: CGFloat = 560
 
     var body: some View {
-        let items = model.items
+        let page = model.page
         ScrollView(.vertical) {
             VStack(alignment: .leading, spacing: 0) {
-                ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
-                    if index > 0 { Divider().padding(.vertical, items.count > 1 ? 12 : 14) }
+                ForEach(Array(page.blocks.enumerated()), id: \.element.id) { index, block in
+                    if index > 0 { Divider().padding(.vertical, page.blocks.count > 1 ? 12 : 14) }
                     Group {
-                        if item.choosing {
-                            ChoiceBlock(item: item, model: store.models[item.id], expanded: model.isExpanded(item.id),
-                                        active: model.activeBlockID == item.id, actions: actions,
-                                        toggleExpanded: { model.toggleExpanded(item.id) })
+                        if case let .countdown(countdown) = block.state {
+                            StartingRow(block: block, countdown: countdown, actions: actions, compact: page.compact)
                         } else {
-                            StartingRow(item: item, actions: actions, compact: items.count > 1, active: model.activeBlockID == item.id)
+                            ChoiceBlock(block: block, store: store, actions: actions)
                         }
                     }
                     .transition(.opacity)
@@ -53,77 +54,68 @@ struct StartingView: View {
         .frame(maxHeight: Self.maxHeight)
         .fixedSize(horizontal: false, vertical: true)
         .overlay(alignment: .topTrailing) {
-            if model.hasChoice {
+            if let help = page.closeHelp {
                 Button(action: actions.closePanel) {
                     Image(systemName: "xmark").font(.system(size: 9, weight: .bold)).foregroundStyle(.secondary)
                         .frame(width: 20, height: 20).contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .help("Close this and leave the torrents waiting. They stay in the menu and the main window")
+                .help(help)
                 .padding(6)
             }
         }
-        .animation(.easeOut(duration: 0.2), value: model.items.map(\.id))
-        .animation(.easeOut(duration: 0.22), value: model.expandedID)
+        .animation(.easeOut(duration: 0.2), value: page.blocks.map(\.id))
+        .animation(.easeOut(duration: 0.22), value: page.blocks.first { $0.state == .choice(expanded: true) }?.id)
     }
 }
 
-/// A torrent: its name, what and where, the countdown, and the three things to do about it.
+/// A torrent counting down: its name, what and where, the countdown, Cancel and Start.
 struct StartingRow: View {
-    let item: StartingItem
+    let block: StartingBlock
+    let countdown: StartingCountdown
     let actions: StartingActions
-    /// Several torrents share the popover: the primary button shrinks to sit on one line with the
-    /// secondary controls, so that three fit without scrolling.
+    /// Several torrents share the popover: tighter spacing, so that three fit without scrolling.
     var compact = false
-    /// Owns Return (Start) and Escape (Cancel).
-    var active = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: compact ? 9 : 12) {
             // The chevron is the one way to the file list: it ends the countdown and opens the checklist here.
-            BlockHeader(item: item, chevron: .init(open: false, help: "Choose files: ends the countdown and shows the files") { actions.chooseFiles(item.id) },
-                        actions: actions)
+            BlockHeader(block: block, actions: actions) { actions.chooseFiles(block.id) }
             // The clock only runs while the popover is on screen: the view does not exist otherwise.
             TimelineView(.animation(minimumInterval: 1.0 / 15)) { context in
-                let now = context.date
+                let tick = startingTick(countdown: countdown, nowMs: context.date.unixMs)
                 HStack(spacing: 8) {
-                    CountdownRing(fraction: item.fraction(at: now), paused: item.paused)
+                    CountdownRing(fraction: tick.fraction, paused: tick.paused)
                         .frame(width: 16, height: 16)
-                    Text(item.line(at: now))
+                    Text(tick.line)
                         .font(.system(size: 12.5))
                         .monospacedDigit()
-                        .foregroundStyle(item.paused ? .secondary : .primary)
+                        .foregroundStyle(tick.paused ? .secondary : .primary)
                         .contentTransition(.numericText())
                 }
                 .accessibilityElement(children: .combine)
             }
-            HeldButtons(hasSourceFile: item.hasSource, active: active, startHelp: "Skip the wait and start downloading now",
-                        cancel: { actions.cancel(item.id, $0) }, start: { actions.startNow(item.id) })
+            HeldButtons(actions: block.actions, cancel: { actions.cancel(block.id, $0) }, start: { actions.startNow(block.id) })
         }
     }
 }
 
-/// A block's first line: the fold chevron (24 x 28 hit area; nil for a magnet link that is only fetching) and the
-/// title with its line, which together open the torrent in the main window.
+/// A block's first line: the fold chevron (24 x 28 hit area; none for a magnet link that is only fetching) and the
+/// title with its line, which together open the torrent in the main window, and the category pill.
 struct BlockHeader: View {
-    struct Chevron {
-        var open: Bool
-        var help: String
-        var action: () -> Void
-    }
-    let item: StartingItem
-    var chevron: Chevron?
+    let block: StartingBlock
     let actions: StartingActions
+    let chevronAction: () -> Void
 
     var body: some View {
         HStack(alignment: .top, spacing: 0) {
-            if let chevron {
-                FoldChevron(open: chevron.open, size: 10, width: 24, height: 28, help: chevron.help, action: chevron.action)
+            if let chevron = block.chevron {
+                FoldChevron(open: chevron.open, size: 10, width: 24, height: 28, help: chevron.help, label: chevron.label, action: chevronAction)
                     .padding(.leading, -6)
             }
-            StartingHeader(item: item) { actions.open(item.id) }
-            if item.showsCategory {
-                CategoryPill(category: item.category) { actions.changeCategory(item.id, $0) }
+            StartingHeader(title: block.title, detail: block.detail, help: block.openHelp) { actions.open(block.id) }
+            if let pill = block.category {
+                CategoryPill(pill: pill) { actions.changeCategory(block.id, $0) }
                     .padding(.leading, 6)
             }
             // The room of the × in the corner.
@@ -134,20 +126,23 @@ struct BlockHeader: View {
 
 /// The title and the "Movie · ~/Media/Movies" line every block starts with.
 struct StartingHeader: View {
-    let item: StartingItem
+    let title: String
+    let detail: String
+    /// The tooltip of the two lines as a link.
+    var help = ""
     /// Clicking the two lines (one link): open the torrent in the main window. Nil: plain text.
     var open: (() -> Void)?
     @State private var hovering = false
 
     var body: some View {
         let text = VStack(alignment: .leading, spacing: 3) {
-            Text(item.title)
+            Text(title)
                 .font(.system(size: 14, weight: .semibold))
                 .underline(hovering && open != nil)
                 .lineLimit(2)
                 .truncationMode(.middle)
                 .fixedSize(horizontal: false, vertical: true)
-            Text(item.detail)
+            Text(detail)
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
                 .underline(hovering && open != nil)
@@ -160,7 +155,7 @@ struct StartingHeader: View {
                 .buttonStyle(.plain)
                 .pointerStyle(.link)
                 .onHover { hovering = $0 }
-                .help("Open in Seedwell")
+                .help(help)
         } else {
             text
         }
@@ -186,51 +181,26 @@ struct CountdownRing: View {
     }
 }
 
-/// A secondary control: plain secondary text that takes the accent colour under the pointer.
-struct SubtleButton: View {
-    let title: String
-    var help: String = ""
-    let action: () -> Void
-    @State private var hovering = false
-
-    var body: some View {
-        Button(action: action) {
-            Text(title)
-                .font(.system(size: 12.5))
-                .lineLimit(1)
-                .fixedSize()
-                .foregroundStyle(hovering ? Color.accentColor : .secondary)
-                .padding(.vertical, 3)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .help(help)
-        .onHover { hovering = $0 }
-    }
-}
-
 /// The category of a torrent as a small capsule in the corner of its block (SPEC 8.6): symbol and short label, and a
 /// menu of every category on a click; the choice re-plans the torrent (destination, rule, title, structure).
 struct CategoryPill: View {
-    let category: Category
+    let pill: StartingCategory
     let choose: (Category) -> Void
 
     /// The menu: every category, the current one ticked (also what QA's `starting pill` shows as a native menu).
-    static func entries(category: Category, choose: @escaping (Category) -> Void) -> [MenuEntry] {
-        Category.all.map { c in .item(c.label, checked: c == category) { choose(c) } }
+    static func entries(_ pill: StartingCategory, choose: @escaping (Category) -> Void) -> [MenuEntry] {
+        pill.choices.map { c in .item(c.title, checked: c.checked) { choose(c.category) } }
     }
 
     var body: some View {
         Menu {
-            ForEach(Array(Self.entries(category: category, choose: choose).enumerated()), id: \.offset) { _, entry in
-                if case let .item(title, checked, _, _, _, run) = entry {
-                    Toggle(title, isOn: Binding(get: { checked }, set: { _ in run() }))
-                }
+            ForEach(pill.choices, id: \.title) { c in
+                Toggle(c.title, isOn: Binding(get: { c.checked }, set: { _ in choose(c.category) }))
             }
         } label: {
             HStack(spacing: 4) {
-                Image(systemName: category.symbol).font(.system(size: 9.5, weight: .medium))
-                Text(category.label).font(.system(size: 11, weight: .medium))
+                Image(systemName: pill.category.symbol).font(.system(size: 9.5, weight: .medium))
+                Text(pill.title).font(.system(size: 11, weight: .medium))
             }
             .foregroundStyle(.secondary)
             .padding(.horizontal, 8).padding(.vertical, 3)
@@ -241,6 +211,6 @@ struct CategoryPill: View {
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
         .fixedSize()
-        .help("Category: \(category.label) — click to change")
+        .help(pill.help)
     }
 }

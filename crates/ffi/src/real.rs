@@ -25,6 +25,15 @@ const RECENT_SHOWN: usize = 10;
 const RECENT_SECS: u64 = 15 * 3600;
 /// Rows are re-read from the engine at most this often, however often the UI asks.
 const CACHE_AGE: Duration = Duration::from_millis(400);
+/// How long a library read waits for the engine before it shows the last one: the app's main thread never waits for a
+/// busy engine (a commit, a stat of a slow disk), it shows what it had and the newer read comes with the next refresh.
+const UI_WAIT: Duration = Duration::from_millis(40);
+/// After a command of the user's the next read waits a little longer for its result (the engine just answered the
+/// command). Well under what counts as a hang (the app's watchdog reports a main thread held for a second): an engine
+/// that is busy meanwhile is not waited for.
+const COMMAND_WAIT: Duration = Duration::from_millis(250);
+/// The first read has nothing to show meanwhile.
+const FIRST_WAIT: Duration = Duration::from_secs(5);
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
@@ -130,6 +139,81 @@ struct Loaded {
     totals: Totals,
 }
 
+impl Loaded {
+    /// Nothing read (the engine did not answer).
+    fn empty() -> Self {
+        Loaded {
+            at: Instant::now(),
+            rows: Vec::new(),
+            groups: Vec::new(),
+            attrs: Vec::new(),
+            recent: Vec::new(),
+            totals: Totals { down_rate: 0, up_rate: 0, alt_speed: false, down_limit: None, up_limit: None, listen_port: 0, connections: 0, online: true, offline_since_ms: None },
+        }
+    }
+}
+
+/// The `seedwell-library` thread: a read each time one is asked for, until the backend is gone. It holds the backend
+/// only while it reads (the last `Arc` may go here: dropping the runtime is fine on a thread of its own).
+fn read_loop(r: &Refresh, me: &std::sync::Weak<RealBackend>) {
+    loop {
+        {
+            let mut st = lock(&r.state);
+            while !st.asked && !st.closed {
+                st = r.cv.wait(st).unwrap_or_else(PoisonError::into_inner);
+            }
+            if st.closed {
+                return;
+            }
+            st.asked = false;
+            st.running = true;
+        }
+        let Some(b) = me.upgrade() else {
+            let mut st = lock(&r.state);
+            st.closed = true;
+            st.running = false;
+            r.cv.notify_all();
+            return;
+        };
+        b.read_now();
+        drop(b);
+        let mut st = lock(&r.state);
+        st.running = false;
+        st.done += 1;
+        r.cv.notify_all();
+    }
+}
+
+/// Debug builds: a call from the app that waited long for the engine says so in the developer log (and on stderr).
+fn ui_wait_note(engine: &EngineHandle, what: &str, waited: Duration) {
+    let note = format!("{what}: the engine did not answer within {} ms; the last read was shown", waited.as_millis());
+    eprintln!("seedwell: {note}");
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+    engine.devlog().log(&trs_devlog::Entry { ts_ms: now, kind: trs_devlog::Kind::Decision, event: "ui-wait", note: Some(note), ..Default::default() });
+}
+
+/// The library reads of [`RealBackend::loaded`], made on a thread of their own (`seedwell-library`) so a caller
+/// waits only as long as it chooses.
+#[derive(Default)]
+struct Refresh {
+    state: Mutex<RefreshState>,
+    cv: Condvar,
+}
+
+#[derive(Default)]
+struct RefreshState {
+    /// A read is asked for.
+    asked: bool,
+    /// A read is being made.
+    running: bool,
+    /// Reads made so far.
+    done: u64,
+    /// The thread runs.
+    started: bool,
+    /// The backend is gone: the thread ends.
+    closed: bool,
+}
+
 struct Shutdown {
     started: AtomicBool,
     result: Mutex<Option<ShutdownInfo>>,
@@ -181,6 +265,16 @@ pub struct RealBackend {
     settings: SettingsStore,
     policy: Arc<Mutex<Policy>>,
     cache: Mutex<Option<Arc<Loaded>>>,
+    /// The last read, shown while a newer one is on its way ([`RealBackend::loaded`]).
+    last: Mutex<Option<Arc<Loaded>>>,
+    refresh: Arc<Refresh>,
+    /// A command of the user's changed something since the last read: the next one waits longer for it.
+    after_command: AtomicBool,
+    /// The read (by [`Refresh`]'s count, plus one) a caller stopped waiting for: while it is still under way, no caller
+    /// waits for the engine again.
+    gave_up: std::sync::atomic::AtomicU64,
+    /// This backend, for its reading thread.
+    me: std::sync::OnceLock<std::sync::Weak<RealBackend>>,
     listener: Arc<Mutex<Option<Arc<dyn CoreListener>>>>,
     server: Mutex<Option<ServerHandle>>,
     socket: Option<String>,
@@ -315,7 +409,12 @@ impl RealBackend {
                 state_dir: o.dir.clone(),
                 store: Some(store.clone()),
                 permission: PermissionSource::from_config_dir(&o.dir),
-                options: ServerOptions { builds: o.builds.clone(), ..ServerOptions::default().with_config(&cfg) },
+                // The user's app looks for other Seedwells; an isolated (test) run does not (it would find the user's).
+                options: ServerOptions {
+                    builds: o.builds.clone(),
+                    others: o.forbidden_root.is_none().then_some(trs_control::others::line_now as fn(&std::path::Path) -> Option<String>),
+                    ..ServerOptions::default().with_config(&cfg)
+                },
                 tz_offset: Some(Arc::new(|| trs_engine::util::local_utc_offset(trs_engine::util::unix_secs() as i64))),
             },
             sync.slot(),
@@ -362,6 +461,11 @@ impl RealBackend {
             settings,
             policy,
             cache: Mutex::new(None),
+            last: Mutex::new(None),
+            refresh: Arc::new(Refresh::default()),
+            after_command: AtomicBool::new(false),
+            gave_up: std::sync::atomic::AtomicU64::new(0),
+            me: std::sync::OnceLock::new(),
             listener,
             server: Mutex::new(server),
             socket,
@@ -376,6 +480,7 @@ impl RealBackend {
                 deadline: Mutex::new(None),
             }),
         });
+        let _ = me.me.set(Arc::downgrade(&me));
         me.spawn_event_pump();
         Ok(me)
     }
@@ -545,12 +650,85 @@ impl RealBackend {
 
     // ------------------------------------------------------------ snapshots
 
+    /// The library as the engine last told it, at most `max_age` old when the engine answers in time. Called from the
+    /// app's main thread: the engine is asked on the `seedwell-library` thread, and when it does not answer within
+    /// [`UI_WAIT`] (a busy actor: a commit, a stat of a slow disk) the last read is shown and the newer one comes with
+    /// the next refresh. The app never hangs on the engine.
     fn loaded(&self, max_age: Duration) -> Arc<Loaded> {
         if let Some(c) = lock(&self.cache).as_ref()
             && c.at.elapsed() < max_age
         {
             return c.clone();
         }
+        let Some((target, stuck)) = self.ask_read() else { return self.read_now() };
+        let fallback = lock(&self.last).clone();
+        let wait = match &fallback {
+            None => FIRST_WAIT,
+            // A read this side already gave up on is still under way: the engine is busy, nothing is waited for again
+            // (a refresh that reads the library several times waits once).
+            Some(_) if stuck => Duration::ZERO,
+            Some(_) if self.after_command.swap(false, Ordering::SeqCst) => COMMAND_WAIT,
+            Some(_) => UI_WAIT,
+        };
+        let started = Instant::now();
+        if self.wait_read(target, wait)
+            && let Some(l) = lock(&self.last).clone()
+        {
+            return l;
+        }
+        let done = lock(&self.refresh.state).done;
+        if self.gave_up.swap(done + 1, Ordering::SeqCst) != done + 1 && cfg!(debug_assertions) {
+            ui_wait_note(&self.engine, "the library", started.elapsed());
+        }
+        fallback.unwrap_or_else(|| Arc::new(Loaded::empty()))
+    }
+
+    /// Asks the reading thread for a read (starting it the first time): the number of reads made once it is done.
+    /// `None` while there is no `Arc` of the backend to give the thread (being built).
+    fn ask_read(&self) -> Option<(u64, bool)> {
+        let weak = self.me.get()?.clone();
+        let r = self.refresh.clone();
+        let mut st = lock(&r.state);
+        // A read under way may have begun before what the caller wants to see: one more after it.
+        let target = st.done + 1 + u64::from(st.running);
+        let stuck = st.running && self.gave_up.load(Ordering::SeqCst) == st.done + 1;
+        st.asked = true;
+        if !st.started {
+            let r2 = r.clone();
+            let spawned = std::thread::Builder::new().name("seedwell-library".into()).spawn(move || read_loop(&r2, &weak));
+            if spawned.is_err() {
+                return None;
+            }
+            st.started = true;
+        }
+        r.cv.notify_all();
+        Some((target, stuck))
+    }
+
+    /// Waits up to `wait` for `target` reads; false when it ran out.
+    fn wait_read(&self, target: u64, wait: Duration) -> bool {
+        let end = Instant::now() + wait;
+        let mut st = lock(&self.refresh.state);
+        while st.done < target {
+            let now = Instant::now();
+            if now >= end || st.closed {
+                return false;
+            }
+            st = self.refresh.cv.wait_timeout(st, end - now).unwrap_or_else(PoisonError::into_inner).0;
+        }
+        true
+    }
+
+    /// Something the user did changed the library: the next read is made anew and waited for a little longer.
+    fn invalidate(&self) {
+        *lock(&self.cache) = None;
+        self.after_command.store(true, Ordering::SeqCst);
+    }
+
+    /// Reads the library from the engine now, on the calling thread (the `seedwell-library` thread).
+    fn read_now(&self) -> Arc<Loaded> {
+        // This read comes after any command given so far: the reads after it need not wait longer for one.
+        self.after_command.store(false, Ordering::SeqCst);
         let snap = self.rt.block_on(self.engine.snapshot());
         // A profile the engine just made for a private torrent reaches us through the file
         // watcher a moment later; do not show its bare id meanwhile.
@@ -609,17 +787,11 @@ impl RealBackend {
                     },
                 }
             }
-            Err(_) => Loaded {
-                at: Instant::now(),
-                rows: Vec::new(),
-                groups: Vec::new(),
-                attrs: Vec::new(),
-                recent: Vec::new(),
-                totals: Totals { down_rate: 0, up_rate: 0, alt_speed: false, down_limit: None, up_limit: None, listen_port: 0, connections: 0, online: true, offline_since_ms: None },
-            },
+            Err(_) => Loaded::empty(),
         };
         let loaded = Arc::new(loaded);
         *lock(&self.cache) = Some(loaded.clone());
+        *lock(&self.last) = Some(loaded.clone());
         loaded
     }
 
@@ -938,7 +1110,25 @@ fn host_of(url: Option<&str>) -> String {
         .unwrap_or_default()
 }
 
+impl Drop for RealBackend {
+    fn drop(&mut self) {
+        // The reading thread ends (it holds only a weak handle and waits for the next ask).
+        lock(&self.refresh.state).closed = true;
+        self.refresh.cv.notify_all();
+    }
+}
+
 impl Backend for RealBackend {
+    fn note_decision(&self, event: &'static str, note: String) {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+        self.engine.devlog().log(&trs_devlog::Entry { ts_ms: now, kind: trs_devlog::Kind::Decision, event, note: Some(note), ..Default::default() });
+    }
+
+    #[cfg(test)]
+    fn test_stall_engine(&self, d: Duration) {
+        self.engine.test_stall(d);
+    }
+
     fn sync(&self) -> Arc<dyn crate::sync::SyncBackend> {
         self.sync.clone()
     }
@@ -1148,7 +1338,7 @@ impl Backend for RealBackend {
             }
             self.rt.block_on(async move { engine.add_torrent_path(&path, AddOptions::default(), None).await })
         };
-        *lock(&self.cache) = None;
+        self.invalidate();
         match added {
             Ok(a) => Ok(hex(&a.id)),
             // New trackers were merged into the torrent already here: not an error; the listener
@@ -1161,27 +1351,27 @@ impl Backend for RealBackend {
 
     fn pause(&self, ids_: &[String]) {
         self.engine.pause(&ids(ids_));
-        *lock(&self.cache) = None;
+        self.invalidate();
     }
 
     fn resume(&self, ids_: &[String]) {
         self.engine.resume(&ids(ids_));
-        *lock(&self.cache) = None;
+        self.invalidate();
     }
 
     fn pause_by_app(&self, ids_: &[String]) {
         self.engine.pause_by_app(&ids(ids_));
-        *lock(&self.cache) = None;
+        self.invalidate();
     }
 
     fn resume_by_app(&self, ids_: &[String]) {
         self.engine.resume_by_app(&ids(ids_));
-        *lock(&self.cache) = None;
+        self.invalidate();
     }
 
     fn move_to_top(&self, id: &str) {
         self.engine.move_to_top(&ids(&[id.to_string()]));
-        *lock(&self.cache) = None;
+        self.invalidate();
     }
 
     fn remove(&self, ids_: &[String], delete_files: bool) {
@@ -1189,7 +1379,7 @@ impl Backend for RealBackend {
         self.rt.spawn(async move {
             let _ = engine.remove(&v, delete_files).await;
         });
-        *lock(&self.cache) = None;
+        self.invalidate();
     }
 
     fn set_priority(&self, ids_: &[String], p: Priority) {
@@ -1199,12 +1389,12 @@ impl Backend for RealBackend {
             Priority::Low => eng::Priority::Low,
         };
         self.engine.set_priority(&ids(ids_), p);
-        *lock(&self.cache) = None;
+        self.invalidate();
     }
 
     fn set_category(&self, ids_: &[String], c: Category) {
         self.engine.set_category(&ids(ids_), Some(category_from(c)));
-        *lock(&self.cache) = None;
+        self.invalidate();
     }
 
     fn set_seeding_goal(&self, ids_: &[String], goal: crate::types::SeedingGoal) {
@@ -1215,12 +1405,12 @@ impl Backend for RealBackend {
             crate::types::SeedingGoal::Forever => self.engine.set_seed_goal(&ids(ids_), SeedGoal::FOREVER),
             crate::types::SeedingGoal::RuleDefault => self.engine.clear_seed_goal(&ids(ids_)),
         }
-        *lock(&self.cache) = None;
+        self.invalidate();
     }
 
     fn set_rule(&self, ids_: &[String], rule: Option<String>) {
         self.engine.set_rule(&ids(ids_), rule);
-        *lock(&self.cache) = None;
+        self.invalidate();
     }
 
     fn verify(&self, ids_: &[String]) {
@@ -1230,7 +1420,7 @@ impl Backend for RealBackend {
     fn ask_tracker_again(&self, ids_: &[String], force: bool) -> AskAgainOutcome {
         let list = ids(ids_);
         let results = self.rt.block_on(self.engine.reannounce_with(&list, force)).unwrap_or_default();
-        *lock(&self.cache) = None;
+        self.invalidate();
         let now_ms = now_secs() * 1000;
         let sent = results.iter().filter(|r| r.sent).count() as u32;
         let waits: Vec<u64> = results.iter().filter(|r| !r.sent).filter_map(|r| r.not_before_ms).collect();
@@ -1243,12 +1433,12 @@ impl Backend for RealBackend {
 
     fn pause_all(&self) {
         self.engine.pause_all();
-        *lock(&self.cache) = None;
+        self.invalidate();
     }
 
     fn resume_all(&self) {
         self.engine.resume_all();
-        *lock(&self.cache) = None;
+        self.invalidate();
     }
 
     fn clear_recent(&self) {
@@ -1265,7 +1455,7 @@ impl Backend for RealBackend {
         if !direct.is_empty() {
             self.engine.forget_finished(&direct);
         }
-        *lock(&self.cache) = None;
+        self.invalidate();
     }
 
     fn set_limits(&self, down: Option<u64>, up: Option<u64>) {
@@ -1279,12 +1469,12 @@ impl Backend for RealBackend {
 
     fn set_alt_speed(&self, on: bool) {
         self.engine.set_alt_speed(on);
-        *lock(&self.cache) = None;
+        self.invalidate();
     }
 
     fn set_alt_speed_by_app(&self, on: bool) {
         self.engine.set_alt_speed_by_app(on);
-        *lock(&self.cache) = None;
+        self.invalidate();
     }
 
     fn torrent_attrs(&self) -> Vec<AttrRow> {
@@ -1444,7 +1634,7 @@ impl Backend for RealBackend {
             }
         }
         let r = self.rt.block_on(self.engine.set_file_priorities(tid, prios)).map_err(|e| engine_err(&e));
-        *lock(&self.cache) = None;
+        self.invalidate();
         r
     }
 
@@ -1456,7 +1646,7 @@ impl Backend for RealBackend {
         let i = self.rt.block_on(self.engine.stream_url(tid, file_index)).map_err(|e| stream_err(&e, &name))?;
         if i.selected {
             // The file list and the row's progress change: the UI refreshes.
-            *lock(&self.cache) = None;
+            self.invalidate();
         }
         Ok(StreamInfo {
             url: i.url.unwrap_or_default(),
@@ -1511,13 +1701,13 @@ impl Backend for RealBackend {
 
     fn move_torrents(&self, ids_: &[String]) -> MoveResult {
         let r = self.rt.block_on(self.engine.move_torrents(&ids(ids_)));
-        *lock(&self.cache) = None;
+        self.invalidate();
         move_result(r)
     }
 
     fn move_to(&self, ids_: &[String], path: &Path) -> Result<MoveResult, CoreError> {
         let r = self.rt.block_on(self.engine.move_to(&ids(ids_), path)).map_err(|e| engine_err(&e));
-        *lock(&self.cache) = None;
+        self.invalidate();
         r.map(|r| move_result(Ok(r)))
     }
 
@@ -1547,7 +1737,7 @@ impl Backend for RealBackend {
                 .collect(),
         );
         let r = self.rt.block_on(self.engine.confirm_choice(tid, sel)).map_err(|e| engine_err(&e));
-        *lock(&self.cache) = None;
+        self.invalidate();
         r
     }
 
@@ -1563,14 +1753,14 @@ impl Backend for RealBackend {
                 A::Choose => e.pending_choose(tid).await,
             }
         });
-        *lock(&self.cache) = None;
+        self.invalidate();
         r.map_err(|e| engine_err(&e))
     }
 
     fn cancel_choice(&self, id: &str) -> Result<(), CoreError> {
         let tid = parse_id(id).ok_or_else(|| CoreError::NotFound { id: id.into() })?;
         let r = self.rt.block_on(self.engine.cancel_choice(tid)).map_err(|e| engine_err(&e));
-        *lock(&self.cache) = None;
+        self.invalidate();
         r
     }
 
@@ -1589,7 +1779,7 @@ impl Backend for RealBackend {
 
     fn settings_saved(&self) {
         reload_policy(&self.policy, &self.dir);
-        *lock(&self.cache) = None;
+        self.invalidate();
         // Developer mode follows the switch at once; the settings poller applies the rest of the
         // file within a couple of seconds and sets the same value.
         self.engine.devlog().set_enabled(self.settings.config().advanced.developer_mode);

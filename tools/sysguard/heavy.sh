@@ -10,10 +10,16 @@
 set -uo pipefail
 MIN_FREE="${MIN_FREE:-40}"
 # Machine-specific settings (untracked, optional): HEAVY_LOCK, SYSGUARD_LOG, SYSGUARD_EXTRA.
+# A git worktree has no copy of the untracked file: it uses the main checkout's, so every worktree shares one lock.
 LOCAL_ENV="$(dirname "$0")/local.env"
+if [ ! -f "$LOCAL_ENV" ]; then
+  common="$(git -C "$(dirname "$0")" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" &&
+    LOCAL_ENV="$(dirname "$common")/tools/sysguard/local.env"
+fi
 # shellcheck source=/dev/null
 [ -f "$LOCAL_ENV" ] && . "$LOCAL_ENV"
-LOCK="${HEAVY_LOCK:-${TMPDIR:-/tmp}/seedwell-heavy.lock}"
+# Not $TMPDIR: a sandboxed session gets its own, and the lock must be one for every agent and shell of this user.
+LOCK="${HEAVY_LOCK:-/tmp/seedwell-heavy-$(id -u).lock}"
 export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-8}"
 [ $# -gt 0 ] || { echo "usage: heavy.sh <command...>" >&2; exit 2; }
 

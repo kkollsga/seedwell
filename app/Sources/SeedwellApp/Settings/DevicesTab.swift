@@ -72,7 +72,13 @@ import SwiftUI
     func pair() {
         error = nil
         if let l = core.devicesCurrentLink() { sheet = .pair(l); return }
-        do { sheet = .pair(try core.devicesPairLink()) } catch { self.error = SyncText.message(error) }
+        let core = self.core
+        Task {
+            switch await catching({ try await core.devicesPairLink() }) {
+            case .success(let l): sheet = .pair(l)
+            case .failure(let error): self.error = SyncText.message(error)
+            }
+        }
     }
 
     func copy(_ link: PairLinkView) {
@@ -80,8 +86,8 @@ import SwiftUI
         NSPasteboard.general.setString(link.link, forType: .string)
     }
 
-    func confirm(_ r: PairRequestRow) { act { try $0.devicesConfirm(deviceId: r.id) } }
-    func refuse(_ r: PairRequestRow) { act { try $0.devicesRefuse(deviceId: r.id) } }
+    func confirm(_ r: PairRequestRow) { act { try await $0.devicesConfirm(deviceId: r.id) } }
+    func refuse(_ r: PairRequestRow) { act { try await $0.devicesRefuse(deviceId: r.id) } }
 
     func showPaste() {
         error = nil
@@ -102,16 +108,20 @@ import SwiftUI
     func join() {
         guard canJoin else { return }
         let link = pasted.trimmingCharacters(in: .whitespacesAndNewlines)
-        act { _ = try $0.devicesJoin(link: link) }
+        act { _ = try await $0.devicesJoin(link: link) }
     }
 
     func askRemove(_ row: DeviceRow) {
         error = nil
-        do {
-            let v = try core.devicesRemoveView(deviceId: row.id)
-            ticked = Set(v.places.filter(\.ticked).map(\.id))
-            sheet = .remove(v)
-        } catch { self.error = SyncText.message(error) }
+        let core = self.core
+        Task {
+            switch await catching({ try await core.devicesRemoveView(deviceId: row.id) }) {
+            case .success(let v):
+                ticked = Set(v.places.filter(\.ticked).map(\.id))
+                sheet = .remove(v)
+            case .failure(let error): self.error = SyncText.message(error)
+            }
+        }
     }
 
     func toggle(_ place: RemovePlaceRow) {
@@ -120,7 +130,7 @@ import SwiftUI
 
     func remove(_ v: RemoveDeviceView) {
         let places = v.places.map(\.id).filter { ticked.contains($0) }
-        act { try $0.devicesRemove(deviceId: v.deviceId, places: places) }
+        act { try await $0.devicesRemove(deviceId: v.deviceId, places: places) }
     }
 
     func askLeave() {
@@ -131,17 +141,17 @@ import SwiftUI
     /// Leave, or (once removed) Start Over.
     func leave() {
         let startOver = view.kind == .removed
-        act { core in if startOver { _ = try core.devicesStartOver() } else { try core.devicesLeave() } }
+        act { core in if startOver { _ = try await core.devicesStartOver() } else { try await core.devicesLeave() } }
     }
 
     /// Runs a call off the main thread; done, the sheet closes and the view is read again.
-    private func act(_ work: @escaping @Sendable (Core) throws -> Void) {
+    private func act(_ work: @escaping @Sendable (Core) async throws -> Void) {
         guard !busy else { return }
         busy = true
         error = nil
         let core = core
         Task {
-            let r: Result<Void, Error> = await Task.detached(priority: .userInitiated) { Result { try work(core) } }.value
+            let r: Result<Void, Error> = await catching { try await work(core) }
             busy = false
             switch r {
             case .success: sheet = nil
@@ -175,7 +185,7 @@ struct DevicesTab: View {
             Text(model.view.intro).font(.system(size: 13)).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             if !model.view.rows.isEmpty {
-                SettingsGroup(title: "Your Devices") {
+                SettingsBox(title: "Your Devices") {
                     ForEach(model.view.rows, id: \.id) { row in DeviceRowView(row: row) { model.askRemove(row) } }
                 }
             }

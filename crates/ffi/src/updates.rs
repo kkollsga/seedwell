@@ -31,6 +31,11 @@ const RETRY_AFTER_MS: u64 = 3600 * 1000;
 const MIN_GAP_MS: u64 = 60 * 1000;
 /// The installer quits the app within seconds; still running after this, the install did not work.
 const INSTALL_WATCHDOG_MS: u64 = 90 * 1000;
+/// How long an installer may still be at work after it started: quitting every Seedwell (up to 30 s each), unpacking,
+/// and its own wait of up to 2 minutes for the new app to start (`install.sh`, `install.ps1`). A Seedwell of another
+/// version that starts meanwhile (one the system or a person opened) says the install is under way, not that it
+/// failed.
+const INSTALL_RUNS_MS: u64 = 5 * 60 * 1000;
 const DEFAULT_REPO: &str = "https://github.com/kkollsga/seedwell";
 const MAX_LATEST_BYTES: usize = 64 * 1024;
 const FETCH_TIMEOUT: Duration = Duration::from_secs(15);
@@ -178,7 +183,9 @@ enum Status {
     Available { version: String, notes: Option<String> },
     NoReleases,
     CheckFailed(String),
-    Installing { version: String, since_ms: u64 },
+    /// `here`: this app started the installer (it is quit within seconds); else it found the install under way at
+    /// launch (another version, opened while the installer runs).
+    Installing { version: String, since_ms: u64, here: bool },
     InstallFailed(String),
     Updated(String),
     /// Following a folder; `Some`: why nothing can be installed from it ("no build there yet").
@@ -195,6 +202,13 @@ struct Saved {
     notes: Option<String>,
     /// An install was started for this version: the next launch says whether it worked.
     pending: Option<String>,
+    /// When that install started (Unix ms): until [`INSTALL_RUNS_MS`] after it, another version that starts is one
+    /// the installer has not replaced yet. `None` from a version before this was kept: it is judged at once.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pending_since_ms: Option<u64>,
+    /// The installer's process, when the core started it (a build): once it has ended, nothing is under way any more.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pending_pid: Option<u32>,
     /// The last automatic or manual check, whatever its outcome, and how many failed in a row since the last one
     /// that worked: a failing check is retried later and later (`RETRY_AFTER_MS`), never at once.
     last_attempt_ms: Option<u64>,
@@ -213,6 +227,13 @@ struct Saved {
 
 fn is_zero(n: &u32) -> bool {
     *n == 0
+}
+
+/// The pending install's installer may still be at work at `now_ms`: it started less than [`INSTALL_RUNS_MS`] ago
+/// and, when its process is known, that process still runs.
+fn under_way(saved: &Saved, now_ms: u64) -> bool {
+    saved.pending_since_ms.is_some_and(|since| now_ms >= since && now_ms - since < INSTALL_RUNS_MS)
+        && saved.pending_pid.is_none_or(trs_platform::running::alive)
 }
 
 fn read_saved(file: &Path) -> (Option<Saved>, bool) {
@@ -476,7 +497,7 @@ impl Updates {
             st.dev_on_seen = on;
             st.folder_build = None;
             if matches!(st.status, Status::Watching(_)) || (on && matches!(st.status, Status::Available { .. })) {
-                st.status = Self::restored(&mut st.saved.clone(), &self.current);
+                st.status = Self::restored(&mut st.saved.clone(), &self.current, now_ms);
             }
         }
         if changed {
@@ -496,9 +517,18 @@ impl Updates {
         s.moving_percent.is_some() || s.downloading.iter().chain(&s.hidden_downloading).any(|r| !row_is_held(r.clone()))
     }
 
-    /// The status after a restore: a pending install either worked (this is its version) or did not (a development
-    /// build that did not is remembered as failed); else what the last check found.
-    fn restored(saved: &mut Saved, current: &str) -> Status {
+    /// The status after a restore at `now_ms`: a pending install either worked (this is its version), is still under
+    /// way (another version started while its installer may still be at work: said as installing, nothing decided),
+    /// or did not work (a development build that did not is remembered as failed); else what the last check found.
+    fn restored(saved: &mut Saved, current: &str, now_ms: u64) -> Status {
+        if let (Some(p), Some(since)) = (&saved.pending, saved.pending_since_ms)
+            && *p != current
+            && under_way(saved, now_ms)
+        {
+            return Status::Installing { version: p.clone(), since_ms: since, here: false };
+        }
+        saved.pending_since_ms = None;
+        saved.pending_pid = None;
         if let Some(p) = saved.pending.take() {
             return if p == current {
                 saved.offered = None;
@@ -580,14 +610,21 @@ impl Updates {
         }
     }
 
-    /// An install started more than the watchdog's time ago, with the app still running: it did not work.
+    /// An install started more than the watchdog's time ago, with the app that started it still running, or one this
+    /// app found under way at launch whose installer ended (or ran out of time) while this app runs on: it did not
+    /// work.
     fn expire_install(&self, st: &mut St, now_ms: u64) {
-        if let Status::Installing { version, since_ms } = &st.status
-            && now_ms.saturating_sub(*since_ms) >= INSTALL_WATCHDOG_MS
-        {
-            st.status = Status::InstallFailed(version.clone());
-            st.saved.pending = None;
-            self.save(&st.saved);
+        if let Status::Installing { version, since_ms, here } = &st.status {
+            let over = if *here { now_ms.saturating_sub(*since_ms) >= INSTALL_WATCHDOG_MS } else { !under_way(&st.saved, now_ms) };
+            if over {
+                // The new version may have started fine meanwhile (it says so in launch-ok) while this one ran on.
+                let started = std::fs::read_to_string(self.core.dir.join(STARTED_FILE)).ok().and_then(|t| t.lines().next().map(str::to_owned));
+                st.status = if started.as_deref() == Some(version.as_str()) { Status::Updated(version.clone()) } else { Status::InstallFailed(version.clone()) };
+                st.saved.pending = None;
+                st.saved.pending_since_ms = None;
+                st.saved.pending_pid = None;
+                self.save(&st.saved);
+            }
         }
     }
 
@@ -606,14 +643,22 @@ impl Updates {
         let i = os::Install { install_dir: &self.install_dir, state_dir: &state_dir, relaunch: &relaunch };
         let c = os::local_installer_command(&self.installer, &zip.display().to_string(), sha256, watched && !self.core.isolated, &i);
         st.saved.pending = Some(version.to_owned());
+        st.saved.pending_since_ms = Some(now_ms);
         self.save(&st.saved);
-        if let Err(e) = os::spawn(&c, &log_in(&self.core.dir)) {
-            st.saved.pending = None;
-            self.save(&st.saved);
-            st.status = Status::InstallFailed(version.to_owned());
-            return Err(format!("the installer did not start: {e}"));
+        match os::spawn(&c, &log_in(&self.core.dir)) {
+            Ok(pid) => {
+                st.saved.pending_pid = Some(pid);
+                self.save(&st.saved);
+            }
+            Err(e) => {
+                st.saved.pending = None;
+                st.saved.pending_since_ms = None;
+                self.save(&st.saved);
+                st.status = Status::InstallFailed(version.to_owned());
+                return Err(format!("the installer did not start: {e}"));
+            }
         }
-        st.status = Status::Installing { version: version.to_owned(), since_ms: now_ms };
+        st.status = Status::Installing { version: version.to_owned(), since_ms: now_ms, here: true };
         st.folder_build = None;
         Ok(())
     }
@@ -943,7 +988,7 @@ impl Updates {
             let mut st = self.lock();
             st.folder_build = None;
             if matches!(st.status, Status::Watching(_)) {
-                st.status = Self::restored(&mut st.saved.clone(), &self.current);
+                st.status = Self::restored(&mut st.saved.clone(), &self.current, unix_ms());
             }
         }
         self.sync_watch();
@@ -955,6 +1000,92 @@ impl Updates {
             ),
             None => "Stopped watching".into(),
         })
+    }
+}
+
+impl Updates {
+    /// One look: at the watched folder (a newer build there is installed by the core itself), else one request for
+    /// `latest.json` (blocking, up to 15 s: call it off the main thread). `silent`: an automatic check, which keeps
+    /// what it knew when it fails.
+    pub fn check(&self, silent: bool, now_ms: u64) {
+        self.sync_watch();
+        if let Some(folder) = self.watched() {
+            return self.check_folder(&folder, now_ms);
+        }
+        let before = {
+            let mut st = self.lock();
+            self.note_switch(&mut st, now_ms);
+            if st.checking || matches!(st.status, Status::Installing { .. }) {
+                return;
+            }
+            st.checking = true;
+            st.saved.last_attempt_ms = Some(now_ms);
+            let before = st.status.clone();
+            if !silent {
+                st.status = Status::Checking;
+            }
+            before
+        };
+        let outcome = self.fetch();
+        let mut st = self.lock();
+        st.checking = false;
+        st.saved.failures = if outcome.is_ok() { 0 } else { st.saved.failures.saturating_add(1) };
+        let back = st.saved.back_to_release_ms.is_some();
+        match outcome {
+            Ok(Some(l)) => {
+                st.saved.last_check_ms = Some(now_ms);
+                // On the way back to the release, the latest release is offered whatever its version.
+                if l.offered(&self.current, &self.system) || (back && l.version != self.current && l.runs_on(&self.system)) {
+                    st.saved.offered = Some(l.version.clone());
+                    st.saved.notes = l.notes_url.clone();
+                    st.status = Status::Available { version: l.version, notes: l.notes_url };
+                } else {
+                    st.saved.offered = None;
+                    st.saved.notes = None;
+                    st.status = Status::UpToDate;
+                }
+            }
+            Ok(None) => {
+                st.saved.last_check_ms = Some(now_ms);
+                st.saved.offered = None;
+                st.saved.notes = None;
+                st.status = Status::NoReleases;
+            }
+            Err(why) => {
+                st.status = if silent && !matches!(before, Status::CheckFailed(_)) { before } else { Status::CheckFailed(why) };
+            }
+        }
+        self.save(&st.saved);
+    }
+
+    /// Starts the install of the release on offer into `install_dir` (the folder that holds the app): the command
+    /// for the host to start detached. `None` when nothing is on offer, it is a watched folder's build (the core
+    /// installs those) or an install runs. The next launch reports whether it worked; if the app still runs after
+    /// 90 s, the model says it failed.
+    pub fn install(&self, install_dir: String, now_ms: u64) -> Option<InstallCommand> {
+        let mut st = self.lock();
+        let Status::Available { version, .. } = &st.status else { return None };
+        if st.folder_build.is_some() {
+            return None;
+        }
+        let version = version.clone();
+        let installer = format!("{}/releases/download/v{version}/{}", base(&self.repo), os::INSTALLER);
+        let (state_dir, relaunch) = self.place();
+        let i = os::Install { install_dir: &install_dir, state_dir: &state_dir, relaunch: &relaunch };
+        let c = os::installer_command(&installer, Some(&version), base(&self.repo), &i);
+        st.saved.pending = Some(version.clone());
+        st.saved.pending_since_ms = Some(now_ms);
+        // The host starts it: its process is not known here, so only the installer's time says whether it may run.
+        st.saved.pending_pid = None;
+        st.status = Status::Installing { version, since_ms: now_ms, here: true };
+        self.save(&st.saved);
+        Some(command(c, &log_in(&self.core.dir)))
+    }
+
+    /// Install the build in `zip` (the host's Install Build…), checked against `sha256` when given: the core starts
+    /// the installer. A sentence for the person: what happens now, or why not.
+    pub fn install_build(&self, zip: String, sha256: Option<String>, now_ms: u64) -> Result<String, CoreError> {
+        self.install_build_at(Path::new(&zip), sha256.as_deref(), now_ms).map_err(|message| CoreError::Failed { message })
     }
 }
 
@@ -991,7 +1122,7 @@ impl Updates {
         if !is_development(&current) {
             saved.back_to_release_ms = None;
         }
-        let status = Self::restored(&mut saved, &current);
+        let status = Self::restored(&mut saved, &current, now_ms);
         let dev_on = core.settings_load().updates.dev_builds;
         let build_keys = build_keys(core.isolated);
         let u = Arc::new_cyclic(|me| Updates {
@@ -1043,7 +1174,7 @@ impl Updates {
         }
         st.may_import = false;
         let mut saved = Saved { last_check_ms, offered, notes, pending, ..st.saved.clone() };
-        st.status = Self::restored(&mut saved, &self.current);
+        st.status = Self::restored(&mut saved, &self.current, unix_ms());
         st.saved = saved;
         self.save(&st.saved);
     }
@@ -1102,60 +1233,6 @@ impl Updates {
         Some(next.saturating_sub(now_ms))
     }
 
-    /// One look: at the watched folder (a newer build there is installed by the core itself), else one request for
-    /// `latest.json` (blocking, up to 15 s: call it off the main thread). `silent`: an automatic check, which keeps
-    /// what it knew when it fails.
-    pub fn check(&self, silent: bool, now_ms: u64) {
-        self.sync_watch();
-        if let Some(folder) = self.watched() {
-            return self.check_folder(&folder, now_ms);
-        }
-        let before = {
-            let mut st = self.lock();
-            self.note_switch(&mut st, now_ms);
-            if st.checking || matches!(st.status, Status::Installing { .. }) {
-                return;
-            }
-            st.checking = true;
-            st.saved.last_attempt_ms = Some(now_ms);
-            let before = st.status.clone();
-            if !silent {
-                st.status = Status::Checking;
-            }
-            before
-        };
-        let outcome = self.fetch();
-        let mut st = self.lock();
-        st.checking = false;
-        st.saved.failures = if outcome.is_ok() { 0 } else { st.saved.failures.saturating_add(1) };
-        let back = st.saved.back_to_release_ms.is_some();
-        match outcome {
-            Ok(Some(l)) => {
-                st.saved.last_check_ms = Some(now_ms);
-                // On the way back to the release, the latest release is offered whatever its version.
-                if l.offered(&self.current, &self.system) || (back && l.version != self.current && l.runs_on(&self.system)) {
-                    st.saved.offered = Some(l.version.clone());
-                    st.saved.notes = l.notes_url.clone();
-                    st.status = Status::Available { version: l.version, notes: l.notes_url };
-                } else {
-                    st.saved.offered = None;
-                    st.saved.notes = None;
-                    st.status = Status::UpToDate;
-                }
-            }
-            Ok(None) => {
-                st.saved.last_check_ms = Some(now_ms);
-                st.saved.offered = None;
-                st.saved.notes = None;
-                st.status = Status::NoReleases;
-            }
-            Err(why) => {
-                st.status = if silent && !matches!(before, Status::CheckFailed(_)) { before } else { Status::CheckFailed(why) };
-            }
-        }
-        self.save(&st.saved);
-    }
-
     /// Install by itself now: a release build, both switches on, a version on offer that a check of this run
     /// confirmed (one remembered from an earlier run may have been withdrawn since), nothing downloading or being
     /// moved, no install running. Seeding does not stop it. On the way back to the release (the development-builds
@@ -1169,31 +1246,23 @@ impl Updates {
         self.confirmed_offer() && !self.busy()
     }
 
-    /// Starts the install of the release on offer into `install_dir` (the folder that holds the app): the command
-    /// for the host to start detached. `None` when nothing is on offer, it is a watched folder's build (the core
-    /// installs those) or an install runs. The next launch reports whether it worked; if the app still runs after
-    /// 90 s, the model says it failed.
-    pub fn install(&self, install_dir: String, now_ms: u64) -> Option<InstallCommand> {
-        let mut st = self.lock();
-        let Status::Available { version, .. } = &st.status else { return None };
-        if st.folder_build.is_some() {
-            return None;
-        }
-        let version = version.clone();
-        let installer = format!("{}/releases/download/v{version}/{}", base(&self.repo), os::INSTALLER);
-        let (state_dir, relaunch) = self.place();
-        let i = os::Install { install_dir: &install_dir, state_dir: &state_dir, relaunch: &relaunch };
-        let c = os::installer_command(&installer, Some(&version), base(&self.repo), &i);
-        st.saved.pending = Some(version.clone());
-        st.status = Status::Installing { version, since_ms: now_ms };
-        self.save(&st.saved);
-        Some(command(c, &log_in(&self.core.dir)))
+    /// One look for an update (the FFI's `check`: [`Updates::check`] off the caller's thread; a request may take
+    /// seconds). The host reads the `model` again when it is done.
+    #[uniffi::method(name = "check")]
+    pub async fn check_async(self: Arc<Self>, silent: bool, now_ms: u64) {
+        crate::calls::apart(move || self.check(silent, now_ms)).await
     }
 
-    /// Install the build in `zip` (the host's Install Build…), checked against `sha256` when given: the core starts
-    /// the installer. A sentence for the person: what happens now, or why not.
-    pub fn install_build(&self, zip: String, sha256: Option<String>, now_ms: u64) -> Result<String, CoreError> {
-        self.install_build_at(Path::new(&zip), sha256.as_deref(), now_ms).map_err(|message| CoreError::Failed { message })
+    /// Starts the install of the release on offer ([`Updates::install`]): the command for the host to start.
+    #[uniffi::method(name = "install")]
+    pub async fn install_async(self: Arc<Self>, install_dir: String, now_ms: u64) -> Option<InstallCommand> {
+        crate::calls::apart(move || self.install(install_dir, now_ms)).await
+    }
+
+    /// Installs the build in `zip` ([`Updates::install_build`]; its checksum is read first).
+    #[uniffi::method(name = "install_build")]
+    pub async fn install_build_async(self: Arc<Self>, zip: String, sha256: Option<String>, now_ms: u64) -> Result<String, CoreError> {
+        crate::calls::apart(move || self.install_build(zip, sha256, now_ms)).await
     }
 
     /// Stop following the watched folder (Settings' Stop Watching).
@@ -1207,6 +1276,8 @@ impl Updates {
         if let Status::Installing { version, .. } = &st.status {
             st.status = Status::InstallFailed(version.clone());
             st.saved.pending = None;
+            st.saved.pending_since_ms = None;
+            st.saved.pending_pid = None;
             self.save(&st.saved);
         }
     }
@@ -1268,6 +1339,8 @@ pub fn launch_guard(state_dir: String, version: String, install_dir: String, rel
     if back.is_some() {
         saved.unstarted = 0;
         saved.pending = None;
+        saved.pending_since_ms = None;
+        saved.pending_pid = None;
     }
     let _ = std::fs::create_dir_all(&dir);
     write_saved(&file, &saved);

@@ -58,8 +58,9 @@ pub struct SyncShareRoleChoice {
     pub title: String,
 }
 
-/// A setting of the dialog: its name on the left and its switch on the right, with a value menu beside the switch
-/// while it is shown (`choices` empty: none).
+/// A setting of the dialog: its name on the left and its switch on the right, and beside the switch a menu of
+/// `choices` whenever there are any. The core leaves them out while the menu must not show: Single use's uses while it
+/// is on, Link expires' days while it is off. Stop sharing after shows its days with the switch off.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct SyncShareSetting {
     pub label: String,
@@ -243,10 +244,16 @@ fn window(f: &SyncShareForm, t: Option<&Target>, channels: &[SyncChannel], invit
             "Single use",
             concat!("The link stops working once one ", computer!(), " has joined with it"),
             f.single_use,
-            sync_share_use_choices(),
+            if f.single_use { Vec::new() } else { sync_share_use_choices() },
             f.uses,
         ),
-        link_expires: setting("Link expires", "How long the link can be used to join", f.link_expires, sync_share_day_choices(), f.link_days),
+        link_expires: setting(
+            "Link expires",
+            "How long the link can be used to join",
+            f.link_expires,
+            if f.link_expires { sync_share_day_choices() } else { Vec::new() },
+            f.link_days,
+        ),
         chat: t.filter(|t| !t.is_channel).map(|t| SyncShareChat {
             label: "Include a chat".into(),
             help: "The same link also joins a channel, for the people and agents of this folder".into(),
@@ -297,34 +304,7 @@ impl Core {
     }
 }
 
-#[uniffi::export]
 impl Core {
-    /// The Share dialog's form for folder or channel `id` as it opens: Read & write, single use, 7 days; a folder's
-    /// link joins its chat too when it has one this computer may share.
-    pub fn sync_share_form(&self, id: String) -> SyncShareForm {
-        let mut f = form(id, None);
-        if let Some(t) = self.share_target(&f)
-            && let Some(c) = t.channel_id
-            && chat_choices(&self.chat_channels()).iter().any(|x| x.id == c)
-        {
-            f.with_chat = true;
-            f.chat = c;
-        }
-        f
-    }
-
-    /// The Share dialog of a folder not synced yet (the file manager's Share menu): Copy Link syncs it from this
-    /// computer first, as its owner.
-    pub fn sync_share_form_new(&self, path: String) -> SyncShareForm {
-        form(String::new(), Some(path))
-    }
-
-    /// The Share dialog drawn from `form`, with the links the host read (`Core::sync_invites`). Cheap: it reads the
-    /// folders and channels, nothing slow.
-    pub fn sync_share_window(&self, form: SyncShareForm, invites: Vec<SyncInvite>, now_unix_s: u64, clock: Arc<dyn LocalClock>) -> SyncShareWindowModel {
-        window(&form, self.share_target(&form).as_ref(), &self.chat_channels(), invites, now_unix_s, clock.as_ref())
-    }
-
     /// Copy Link: syncs a folder not synced yet first, makes the chat when a new one was chosen (named after the
     /// folder) and links it, then makes the link with the form's settings. The host copies `invite.link` (a secret:
     /// never shown or logged), shows "Link copied", keeps the returned form and reads the links again. Slow: off the
@@ -357,6 +337,36 @@ impl Core {
     }
 }
 
+#[uniffi::export]
+impl Core {
+    /// The Share dialog's form for folder or channel `id` as it opens: Read & write, single use, 7 days; a folder's
+    /// link joins its chat too when it has one this computer may share.
+    pub fn sync_share_form(&self, id: String) -> SyncShareForm {
+        let mut f = form(id, None);
+        if let Some(t) = self.share_target(&f)
+            && let Some(c) = t.channel_id
+            && chat_choices(&self.chat_channels()).iter().any(|x| x.id == c)
+        {
+            f.with_chat = true;
+            f.chat = c;
+        }
+        f
+    }
+
+    /// The Share dialog of a folder not synced yet (the file manager's Share menu): Copy Link syncs it from this
+    /// computer first, as its owner.
+    pub fn sync_share_form_new(&self, path: String) -> SyncShareForm {
+        form(String::new(), Some(path))
+    }
+
+    /// The Share dialog drawn from `form`, with the links the host read (`Core::sync_invites`). Cheap: it reads the
+    /// folders and channels, nothing slow.
+    pub fn sync_share_window(&self, form: SyncShareForm, invites: Vec<SyncInvite>, now_unix_s: u64, clock: Arc<dyn LocalClock>) -> SyncShareWindowModel {
+        window(&form, self.share_target(&form).as_ref(), &self.chat_channels(), invites, now_unix_s, clock.as_ref())
+    }
+
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -375,18 +385,24 @@ mod tests {
         assert_eq!(w.roles.iter().map(|r| r.title.as_str()).collect::<Vec<_>>(), ["Read & write", "Read only", "Admin"]);
         assert_eq!((w.role, w.role_help.clone()), (SyncRole::ReadWrite, sync_role_note(SyncRole::ReadWrite)));
         assert_eq!((w.single_use.label.as_str(), w.single_use.on), ("Single use", true));
+        assert!(w.single_use.choices.is_empty(), "one use: no menu of uses");
         assert_eq!((w.link_expires.label.as_str(), w.link_expires.on, w.link_expires.value), ("Link expires", true, 7));
+        assert_eq!(w.link_expires.choices, sync_share_day_choices());
         assert_eq!(w.summary, format!("One {computer} can join with this link within 7 days, as Read & write."));
         let chat = w.chat.clone().unwrap();
         assert!(!chat.on && chat.choices[0] == SyncShareChatChoice { id: String::new(), title: "New channel “Notes”".into() });
         let sharing = w.sharing.clone().unwrap();
         assert_eq!((sharing.countdown.clone(), sharing.extend_title.clone()), (None, None));
-        assert_eq!(sharing.start.unwrap().label, "Stop sharing after");
+        let start = sharing.start.unwrap();
+        assert_eq!((start.label.as_str(), start.on, start.value), ("Stop sharing after", false, 7));
+        assert_eq!(start.choices, sync_share_day_choices(), "its days show with the switch off");
         assert_eq!(sharing.line, sync_sharing_line(None, true));
         assert_eq!((w.close_title.as_str(), w.copy_title.as_deref(), w.refresh_ms), ("Done", Some("Copy Link"), None));
         // With a chat: the summary says so.
         let with_chat = SyncShareForm { with_chat: true, single_use: false, uses: 0, link_expires: false, ..form.clone() };
         let w = core.sync_share_window(with_chat.clone(), Vec::new(), NOW_S, Arc::new(Clock));
+        assert_eq!(w.single_use.choices, sync_share_use_choices(), "more than one use: how many");
+        assert!(w.link_expires.choices.is_empty(), "no end: no menu of days");
         assert_eq!(w.summary, format!("Any number of {computer}s can join with this link, as Read & write. It joins the channel “Notes” too."));
         // Copy Link: a new channel named after the folder, linked to it; the form keeps that channel.
         let copied = core.sync_share_copy_link(with_chat).unwrap();

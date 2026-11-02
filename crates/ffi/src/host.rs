@@ -40,6 +40,8 @@ pub enum HostWindow {
     FolderEditor,
     /// A synced folder's Share dialog (links, roles, the sharing period).
     FolderShare,
+    /// The tracker log viewer (Settings › Advanced › Developer › View Log…).
+    TrackerLog,
 }
 
 /// Every window: what the Mac passes.
@@ -61,7 +63,29 @@ pub fn host_windows_all() -> Vec<HostWindow> {
         HostWindow::AddFolder,
         HostWindow::FolderEditor,
         HostWindow::FolderShare,
+        HostWindow::TrackerLog,
     ]
+}
+
+/// Something a host can do that is not a window: the models leave out what needs one the host lacks, the same way
+/// they leave out the commands of a missing [`HostWindow`]. The Mac has them all ([`host_features_all`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, uniffi::Enum)]
+pub enum HostFeature {
+    /// Files on demand (SPEC 7G.11): folders the file manager lists whole and fetches file by file when opened (the
+    /// Mac: a File Provider domain). Without it nothing offers or mentions on-demand folders: the Add Folder and Edit
+    /// dialogs' switch, its help and note, the folder page's notice and its `AllowOnDemand`.
+    OnDemandFolders,
+    /// The file manager's extensions for sync badges and the Share menu, switched on in the system's settings (the
+    /// Mac: Finder Sync and the Share extension): Settings › Folder Sync's Finder rows.
+    FinderExtensions,
+    /// Linking the command-line tool onto the PATH from Settings › Agents (Install Command-Line Tool…).
+    CommandLineLink,
+}
+
+/// Every feature: what the Mac passes.
+#[uniffi::export]
+pub fn host_features_all() -> Vec<HostFeature> {
+    vec![HostFeature::OnDemandFolders, HostFeature::FinderExtensions, HostFeature::CommandLineLink]
 }
 
 /// The window `command` opens, if it opens one (the rest are core calls or the host's own services: the file manager,
@@ -156,7 +180,8 @@ mod tests {
         let all = host_windows_all();
         let unique: std::collections::HashSet<_> = all.iter().collect();
         assert_eq!(unique.len(), all.len());
-        assert_eq!(all.len(), 15, "a new HostWindow belongs in host_windows_all");
+        assert_eq!(all.len(), 16, "a new HostWindow belongs in host_windows_all");
+        assert_eq!(host_features_all().len(), 3, "a new HostFeature belongs in host_features_all");
     }
 
     #[test]

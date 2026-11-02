@@ -1897,9 +1897,11 @@ async fn new_mail(c: &mut trs_control::client::Client, channel: &str, me: &str, 
 async fn watch(mut c: trs_control::client::Client, g: &Global, me: &str, channel: &ChatChannelDto, timeout: Option<Duration>, receipts: bool) -> R {
     let deadline = timeout.map(|t| tokio::time::Instant::now() + t);
     let timed_out = || CliError::plain(6, "timed out: no new mail came in time");
+    // One watch of a project's mail at a time: a second would print the same mail and move the place under the first.
+    let hold = crate::chat::Hold { key: format!("mail.watch\u{1f}{me}\u{1f}{}", channel.id), what: format!("the mail in {}", channel.name), agent: me.to_owned() };
     loop {
         let run = async {
-            c.call(&Request::EventsSubscribe(EventsSubscribeParams { kinds: Some(vec!["chat.message".into()]) })).await?;
+            crate::chat::subscribe_chat(&mut c, Some(&hold)).await?;
             loop {
                 let (pending, _) = new_mail(&mut c, &channel.id, me, "mail", true).await?;
                 if !pending.is_empty() {
@@ -1938,7 +1940,7 @@ async fn watch(mut c: trs_control::client::Client, g: &Global, me: &str, channel
         };
         match run.await {
             Ok(()) => return Ok(()),
-            Err(e) if !lost(&e) => return Err(e),
+            Err(e) if !lost(&e) || e.api_code == Some(ErrorCode::Duplicate) => return Err(e),
             Err(_) => {}
         }
         if !g.json {
@@ -2106,7 +2108,7 @@ async fn watch_for(mut c: trs_control::client::Client, g: &Global, me: &str, cha
             .cloned()
             .collect()
     };
-    c.call(&Request::EventsSubscribe(EventsSubscribeParams { kinds: Some(vec!["chat.message".into()]) })).await?;
+    crate::chat::subscribe_chat(&mut c, None).await?;
     loop {
         if !answers_of(&read_all(&mut c, &channel.id).await?).is_empty() {
             // A reply and its status come one after the other: give the second a moment.

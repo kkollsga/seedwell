@@ -42,7 +42,7 @@ sealed class InfoCard
         refresh.Tick += (_, _) => Refresh();
         reload = q.CreateTimer();
         reload.IsRepeating = false;
-        reload.Tick += (_, _) => _ = Task.Run(() => { try { card.Reload(); } catch { } });
+        reload.Tick += async (_, _) => { try { await card.Reload(); } catch { } };
         Refresh();
     }
 
@@ -285,12 +285,16 @@ sealed class InfoCard
             {
                 case InfoCommand.Reveal: RowCommands.Reveal([r]); break;
                 case InfoCommand.Remove: app.Library.AskRemoval(app.Library.MenuRows(r.Id), false); break;
-                case InfoCommand.AskTrackerAgain: app.Core.AskTrackerAgain([r.Id]); break;
-                case InfoCommand.AnnounceAnyway: app.Core.AnnounceAnyway([r.Id]); break;
+                case InfoCommand.AskTrackerAgain: CoreCalls.InOrder("ask tracker again", () => app.Core.AskTrackerAgain([r.Id]), Refresh); break;
+                case InfoCommand.AnnounceAnyway: CoreCalls.InOrder("announce anyway", () => app.Core.AnnounceAnyway([r.Id]), Refresh); break;
                 case InfoCommand.CopyTrackerUrl when tracker is uint index:
-                    var data = new Windows.ApplicationModel.DataTransfer.DataPackage();
-                    data.SetText(app.Core.TrackerUrl(r.Id, index));
-                    Windows.ApplicationModel.DataTransfer.Clipboard.SetContent(data);
+                    // The address when the core has read it; the clipboard is set back on the UI thread.
+                    CoreCalls.InOrder("tracker url", () => app.Core.TrackerUrl(r.Id, index), url =>
+                    {
+                        var data = new Windows.ApplicationModel.DataTransfer.DataPackage();
+                        data.SetText(url);
+                        Windows.ApplicationModel.DataTransfer.Clipboard.SetContent(data);
+                    });
                     break;
                 default:
                     // NEED: the file chooser window (Choose…): the card is made with chooser_available false, so it does

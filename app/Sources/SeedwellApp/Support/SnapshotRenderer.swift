@@ -8,9 +8,15 @@ import SwiftUI
     let commands: Commands
     let settings: SettingsModel
     let dir: String
+    /// `SEEDWELL_RENDER_ONLY=prompt-,settings-banner-`: only the snapshots whose names start so (and no menus).
+    private let only = ProcessInfo.processInfo.environment["SEEDWELL_RENDER_ONLY"].flatMap { $0.isEmpty ? nil : $0.split(separator: ",").map(String.init) }
+
+    private func wanted(_ name: String) -> Bool { only.map { $0.contains { name.hasPrefix($0) } } ?? true }
 
     func renderAll() async {
         try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        // SEEDWELL_SNAPSHOTS=files: only the file lists, the chooser and the notifier (a quick before/after of them).
+        if ProcessInfo.processInfo.environment["SEEDWELL_SNAPSHOTS"] == "files" { return await renderFileLists() }
         let mainSize = NSSize(width: 1180, height: 820)
 
         await render("downloads-dark", size: mainSize) { MainWindowView(model: model(.downloads, select: nil), commands: commands, settings: settings, nav: SettingsNavigation()) }
@@ -33,10 +39,77 @@ import SwiftUI
         await render("settings-transfers-light", size: NSSize(width: 860, height: 860), dark: false, settings: true) {
             SettingsView(model: settings, nav: nav(.transfers))
         }
-        await render("chooser-dark", size: NSSize(width: 640, height: 640), settings: true) { ChooserView(model: ChooserModel.sample()) }
+        await render("chooser-dark", size: NSSize(width: 640, height: 640), settings: true) { ChooserView(chooser: Chooser(info: chooserSample(), origin: "Opened from Finder")) }
+        await renderTrackerInfo()
         await renderSync()
-        await renderMenus()
-        await render("chooser-light", size: NSSize(width: 640, height: 640), dark: false, settings: true) { ChooserView(model: ChooserModel.sample()) }
+        if only == nil { await renderMenus() }
+        await render("chooser-light", size: NSSize(width: 640, height: 640), dark: false, settings: true) { ChooserView(chooser: Chooser(info: chooserSample(), origin: "Opened from Finder")) }
+        await renderPrompts()
+        await renderFileLists()
+    }
+
+    /// The prompts (an add request of a watch folder in "Ask first" mode, the location move, the backlog offer) and the
+    /// settings banner, from fixed sample inputs (never the user's data).
+    private func renderPrompts() async {
+        let request = AddRequestInfo(path: "/tmp/sample.torrent", name: "Night of the Living Dead (1968)", totalBytes: 1_468_006_400,
+                                     category: .movie, tracker: "tracker-y.net")
+        let item = { (i: Int, cross: Bool) in
+            MoveItemInfo(id: "m\(i)", name: "Sample \(i)", bytes: 4_000_000_000, from: "/Volumes/Old/Movies", to: "/Volumes/New/Movies", crossVolume: cross)
+        }
+        let banner = SettingsModel(core: core)
+        banner.noteRejected("config.toml: network.listen_port: 80 is not a valid value (below 1024); the running values stay")
+        banner.noteReloaded(warnings: [], restart: ["uTP", "listening interface"])
+        for dark in [true, false] {
+            let suffix = dark ? "dark" : "light"
+            await renderAlert("prompt-add-request-\(suffix)", dark: dark, ChooserPresenter.addRequestAlert(addRequestPrompt(request: request)))
+            if let p = locationMovePrompt(proposal: MoveProposalInfo(items: [item(1, true), item(2, false), item(3, false)],
+                                                                     totalBytes: 12_000_000_000, crossVolume: 1)) {
+                await renderAlert("prompt-location-move-\(suffix)", dark: dark, AppDelegate.locationMoveAlert(p))
+            }
+            if let p = locationMovePrompt(proposal: MoveProposalInfo(items: [item(1, false)], totalBytes: 4_000_000_000, crossVolume: 0)) {
+                await renderAlert("prompt-location-move-one-\(suffix)", dark: dark, AppDelegate.locationMoveAlert(p))
+            }
+            await renderAlert("prompt-backlog-\(suffix)", dark: dark,
+                              AppDelegate.backlogAlert(backlogOffer(count: 5, folderPath: "/Users/me/Downloads", afterAdd: .trash)))
+            await render("settings-banner-\(suffix)", size: NSSize(width: 860, height: 700), dark: dark, settings: true) {
+                SettingsView(model: banner, nav: nav(.general))
+            }
+        }
+    }
+
+    /// A tracker's Info page (SPEC 7E): an automatic tracker, then a favorite (the mock lists none, so one is saved in
+    /// the mock's state and drawn on its own) with a speed limit, after an address with a passkey was added, with a bad
+    /// address being edited, and with its Remove from Favorites question.
+    private func renderTrackerInfo() async {
+        let size = NSSize(width: 760, height: 1180)
+        if let auto = core.snapshot().trackers.first(where: { $0.id == "tracker-y.net" }) {
+            await render("tracker-info-auto-dark", size: size, settings: true) {
+                TrackerInfoPage(model: model(.tracker(trackerId: auto.id), select: nil), tracker: auto, commands: commands).background(.background)
+            }
+        }
+        guard let fav = try? core.favoriteAdd(groupId: "tracker-z.cc") else { return }
+        let t = TrackerSummary(id: fav.id, name: fav.name, count: 0, favorite: true, hidden: false, hideOnlySeeding: false, private: true)
+        let e = commands.favorites
+        e.reload()
+        e.setLimits(fav.id, down: 5_000_000, up: 0)
+        func page(_ name: String, dark: Bool = true) async {
+            await render(name, size: size, dark: dark, settings: true) {
+                TrackerInfoPage(model: model(.tracker(trackerId: "tracker-z.cc"), select: nil), tracker: t, commands: commands).background(.background)
+            }
+        }
+        await page("tracker-info-favorite-dark")
+        e.run(fav.id, .addAddress)
+        e.text = "https://tracker.example.org/a/0123456789abcdef0123456789abcdef/announce?passkey=XYZ"
+        e.commit()
+        await page("tracker-info-passkey-dark")
+        e.run(fav.id, .editAddress(index: 0))
+        e.text = "bad address!"
+        e.commit()
+        await page("tracker-info-editing-dark")
+        e.cancel()
+        e.askRemove(fav.id)
+        await page("tracker-info-removal-light", dark: false)
+        e.cancelRemoval()
     }
 
     /// Folder sync (SPEC 7G.5): the window page, the menu's submenu (a stand-in: a real menu cannot be drawn
@@ -60,9 +133,9 @@ import SwiftUI
                 m.form.folder = NSHomeDirectory() + "/Documents/Novel"
                 return SyncAddView(model: m)
             }
+            let link = (try? await core.syncCreateInvite(id: folders[0].id, role: .readOnly, maxUses: 1, validDays: 7, channelId: core.syncSnapshot().folders[0].channelId))?.link ?? ""
             await render("sync-add-shared-\(suffix)", size: NSSize(width: 480, height: 290), dark: dark, settings: true) {
-                let link = (try? core.syncCreateInvite(id: folders[0].id, role: .readOnly, maxUses: 1, validDays: 7, channelId: core.syncSnapshot().folders[0].channelId))?.link ?? ""
-                return SyncAddView(model: SyncAddModel(core: core, prefill: link))
+                SyncAddView(model: SyncAddModel(core: core, prefill: link))
             }
             await render("sync-add-bad-\(suffix)", size: NSSize(width: 480, height: 340), dark: dark, settings: true) {
                 let m = SyncAddModel(core: core, prefill: "SWW-NOTAKEY")
@@ -74,14 +147,14 @@ import SwiftUI
                 m.optionsOpen = true
                 return SyncEditView(model: m, actions: sync)
             }
+            _ = try? await core.syncCreateInvite(id: folders[0].id, role: .readWrite, maxUses: 1, validDays: 7, channelId: nil)
             await render("sync-share-\(suffix)", size: NSSize(width: 460, height: 440), dark: dark, settings: true) {
-                _ = try? core.syncCreateInvite(id: folders[0].id, role: .readWrite, maxUses: 1, validDays: 7, channelId: nil)
-                return SyncShareView(model: SyncShareModel(core: core, id: folders[0].id, copied: true), actions: sync)
+                SyncShareView(model: SyncShareModel(core: core, id: folders[0].id, copied: true), actions: sync)
             }
+            // A sharing period running: the countdown with Extend.
+            _ = try? await core.syncSetShareUntil(id: folders[0].id, untilS: UInt64(Date().timeIntervalSince1970) + 7 * 86_400 - 3_600)
             await render("sync-share-period-\(suffix)", size: NSSize(width: 460, height: 360), dark: dark, settings: true) {
-                // A sharing period running: the countdown with Extend.
-                _ = try? core.syncSetShareUntil(id: folders[0].id, untilS: UInt64(Date().timeIntervalSince1970) + 7 * 86_400 - 3_600)
-                return SyncShareView(model: SyncShareModel(core: core, id: folders[0].id), actions: sync)
+                SyncShareView(model: SyncShareModel(core: core, id: folders[0].id), actions: sync)
             }
             await render("sync-share-new-\(suffix)", size: NSSize(width: 460, height: 330), dark: dark, settings: true) {
                 // Share ▸ Seedwell on a folder not synced yet: add and share in one.
@@ -115,18 +188,9 @@ import SwiftUI
                 return MainWindowView(model: m, commands: commands, settings: settings, nav: SettingsNavigation())
             }
             await render("chat-markdown-\(suffix)", size: NSSize(width: 820, height: 1700), dark: dark, settings: true) {
-                // Complex messages (ChatSamples) as the conversation shows them: in a scroll view, as there.
+                // Complex messages (the core's `chatSampleMessages`) as the conversation shows them: in a scroll view, as there.
                 ScrollView { VStack(alignment: .leading, spacing: 0) {
-                    ForEach(Array(ChatSamples.messages.enumerated()), id: \.offset) { n, s in
-                        ChatMessageRow(message: SyncMessage(id: "S\(n)", channelId: "C", authorDevice: "D\(n)", authorName: s.computer, authorUser: "", isMe: false,
-                                                            agent: s.agent, atS: 1_792_953_675 + UInt64(n) * 60, replyTo: nil, topic: nil,
-                                                            kind: .text, body: s.body),
-                                       header: true, reply: nil,
-                                       tags: s.body == ChatSamples.bugMail
-                                           ? [ChatTagOwner(owner: "kglite", isYou: false, tags: ["seen", "backlog"]), ChatTagOwner(owner: "You", isYou: true, tags: ["needs-triage"])]
-                                           : [],
-                                       onReply: nil)
-                    }
+                    ForEach(Self.sampleCards(), id: \.id) { ChatMessageRow(card: $0) }
                 }
                 .padding(.horizontal, 22).padding(.vertical, 12) }
                 .frame(width: 820, height: 1700)
@@ -137,9 +201,20 @@ import SwiftUI
             }
         }
         await renderFiles()
+        await renderImages()
         await render("settings-folderSync-light", size: NSSize(width: 860, height: 900), dark: false, settings: true) {
             SettingsView(model: settings, nav: nav(.folderSync))
         }
+    }
+
+    /// The core's sample conversation as cards, in a channel this Mac may only read (no Reply or tags under the pointer).
+    nonisolated static func sampleCards() -> [ChatMessageCard] {
+        let c = SyncChannel(id: "C", name: "Samples", role: .readOnly, shareUntilS: nil, members: 2, online: 1, unread: 0, lastMessageS: nil,
+                            muted: false, agents: true, wakeCommand: nil, progress: nil, problem: nil, waiting: nil, gone: [])
+        let read = ChatPageRead(messages: chatSampleMessages(), pending: [], follow: nil, directAgents: .off)
+        let input = ChatPageInput(place: .chat(channelId: "C", topicId: nil), title: c.name, channel: c, topic: nil, direct: nil, read: read,
+                                  members: [], nowUnixS: UInt64(Date().timeIntervalSince1970))
+        return chatPageModel(input: input, clock: MacClock(), host: hostWindowsAll())?.messages ?? []
     }
 
     /// Files in chat (SPEC 7G.7 Files): a card in each state, the pending sends, the question before opening a script,
@@ -167,8 +242,36 @@ import SwiftUI
         }
     }
 
+    /// Images in chat (SPEC 7G.7 Attachments): an image in each state with its preview or picture, and the composer's
+    /// chips. Fixtures made by the core (`chatImageSamples`), never chat state.
+    private func renderImages() async {
+        let samples = chatImageSamples(maxSide: ChatImageLayout.side)
+        for dark in [true, false] {
+            let suffix = dark ? "dark" : "light"
+            for s in samples.images {
+                let size = ChatImageLayout.fit(width: s.image.width, height: s.image.height)
+                let canvas = NSSize(width: size.width + 32, height: size.height + 52)
+                await render("chat-image-\(s.label)-\(suffix)", size: canvas, dark: dark, settings: true) {
+                    ChatImageTile(core: core, channelId: "", image: s.image, sample: s).padding(16)
+                        .frame(width: canvas.width, height: canvas.height, alignment: .topLeading).background(.background)
+                }
+            }
+            await render("chat-image-chips-\(suffix)", size: NSSize(width: 620, height: 120), dark: dark, settings: true) {
+                let images = ChatComposerImages()
+                images.items = samples.drafts.map {
+                    ChatComposerImage(input: ChatImageInput(name: $0.name, path: nil, bytes: nil), draft: $0, chip: NSImage(data: $0.previewPng))
+                }
+                return ChatComposerChips(images: images, core: core).padding(16)
+                    .frame(width: 620, height: 120, alignment: .topLeading).background(.background)
+            }
+        }
+    }
+
     /// An alert's window, drawn as it is laid out (never run: nothing waits for an answer).
     private func renderAlert(_ name: String, dark: Bool, _ alert: NSAlert) async {
+        guard wanted(name) else { return }
+        UIAction.mark("render \(name)")
+        alert.window.animationBehavior = .none
         alert.window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
         alert.layout()
         alert.window.setFrameOrigin(SnapshotWindow.offscreen)
@@ -186,7 +289,7 @@ import SwiftUI
         return n
     }
 
-    private func model(_ s: LibraryModel.Section, select: String?) -> LibraryModel {
+    func model(_ s: LibraryModel.Section, select: String?) -> LibraryModel {
         let m = LibraryModel(core: core, section: s)
         if select == "sprite" { m.setSelection(m.snapshot.downloading.dropFirst().first.map { [$0.id] } ?? []) }
         return m
@@ -203,8 +306,10 @@ import SwiftUI
         }
     }
 
-    private func render<V: View>(_ name: String, size: NSSize, dark: Bool = true, settings: Bool = false,
-                                 @ViewBuilder _ content: () -> V) async {
+    func render<V: View>(_ name: String, size: NSSize, dark: Bool = true, settings: Bool = false,
+                         @ViewBuilder _ content: () -> V) async {
+        guard wanted(name) else { return }
+        UIAction.mark("render \(name)")
         let w = SnapshotWindow(contentViewController: NSHostingController(rootView: content()))
         w.styleMask = settings ? [.titled, .closable, .fullSizeContentView] : [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView]
         w.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
@@ -230,6 +335,14 @@ import SwiftUI
 class SnapshotWindow: NSWindow {
     /// Far from every screen: nothing shows, and the pointer never lights a row.
     static let offscreen = NSPoint(x: -30_000, y: -30_000)
+
+    /// No ordering animation: it would never end off every screen. Each one kept a system worker thread waiting
+    /// (`-[NSAnimation _runBlocking]`) for good; a render left sixty of them, the pool ran dry, and the shutdown of the
+    /// quit after it never got a thread.
+    override init(contentRect: NSRect, styleMask style: NSWindow.StyleMask, backing backingStoreType: NSWindow.BackingStoreType, defer flag: Bool) {
+        super.init(contentRect: contentRect, styleMask: style, backing: backingStoreType, defer: flag)
+        animationBehavior = .none
+    }
 
     override var isKeyWindow: Bool { true }
     override var isMainWindow: Bool { true }

@@ -214,10 +214,10 @@ struct InfoCard: View {
         refresh()
     }
 
-    /// Reads the torrent again (after a command), then draws it.
+    /// Reads the torrent again after a command (once the command reached the engine, off the main thread), then draws it.
     func reload() {
-        card.reload()
-        refresh()
+        let card = self.card
+        CoreCalls.inOrder({ await card.reload() }) { [weak self] in self?.refresh() }
     }
 
     private func refresh() {
@@ -242,7 +242,7 @@ struct InfoCard: View {
         reading = true
         let card = self.card
         Task {
-            await Task.detached(priority: .utility) { card.reload() }.value
+            await card.reload()
             reading = false
             refresh()
         }

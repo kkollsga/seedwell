@@ -469,7 +469,7 @@ pub enum SeedingGoal {
 }
 
 /// Errors surfaced to the UI.
-#[derive(Debug, uniffi::Error)]
+#[derive(Clone, Debug, uniffi::Error)]
 pub enum CoreError {
     InvalidSource { message: String },
     NotFound { id: String },

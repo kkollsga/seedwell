@@ -29,7 +29,10 @@ public partial class App : Application
     /// sidebar's adds and menus). Not yet: the chooser, custom goal, rules editor, player, Tracker Info, favorite
     /// editing and a channel's Share dialog.
     /// </summary>
-    internal static HostWindow[] HostWindows { get; } = [HostWindow.GetInfo, HostWindow.MoveTo, HostWindow.NewChannel, HostWindow.ChatDialogs];
+    /// <summary>What this host can do beyond its windows (the core's HostFeature): none yet; OnDemandFolders comes with Cloud Files.</summary>
+    internal static HostFeature[] HostFeatures { get; } = [];
+
+    internal static HostWindow[] HostWindows { get; } = [HostWindow.GetInfo, HostWindow.MoveTo, HostWindow.NewChannel, HostWindow.ChatDialogs, HostWindow.AddFolder, HostWindow.FolderEditor, HostWindow.FolderShare, HostWindow.ChannelShare];
     /// <summary>The small chat dialogs (New Topic…, Rename…, Leave…, ...).</summary>
     internal ChatDialogs ChatDialogs { get; private set; } = null!;
     readonly SleepGuard sleep = new();
@@ -47,6 +50,10 @@ public partial class App : Application
     MainWindow? main;
     FlyoutWindow? flyout;
     bool quitting;
+    /// <summary>The core is there (it starts off the UI thread); until then what arrives waits in <see cref="pending"/>.</summary>
+    bool started;
+    bool quitBeforeCore;
+    readonly List<Action> pending = [];
     /// <summary>Kept alive for its ColorValuesChanged event (the light/dark taskbar changes the icon's grey).</summary>
     readonly Windows.UI.ViewManagement.UISettings uiSettings = new();
 
@@ -96,18 +103,67 @@ public partial class App : Application
         {
             return;
         }
+        // The UI thread is watched from the start; in a QA run a stall of fail_ms fails it (qa/run.ps1 reads the log).
+        _ = new HangWatch(ui, () => started ? Core : null, Program.QaControl);
+        // The icon at once, in its plain look; its menu and the flyout come with the core.
+        CreateTray();
+        StartCore(dir, 0);
+    }
+
+    /// <summary>
+    /// Starts the core off the UI thread (docs/CROSS-PLATFORM.md §1: it opens the state, loads every torrent and reads
+    /// the library once, which takes a while for a big library), then <see cref="CoreStarted"/> on the UI thread. The
+    /// previous run may still be quitting and hold the state (up to 120 s while trackers hear "stopped"): it is waited
+    /// for quietly, as the Mac's startCore does.
+    /// </summary>
+    void StartCore(string dir, int waitedSecs)
+    {
         // A --state-dir run (QA, tests) is isolated: the core refuses it when a configured folder lies in the user's
         // profile outside the temp folder, and it trashes into <state>\Trash, never the Recycle Bin.
         var forbidden = Program.StateDir is null ? null : Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-        try
+        // QA only (an isolated run): a core that takes this long to start (SEEDWELL_QA_SLOW_CORE_MS).
+        var slow = Program.StateDir is not null && int.TryParse(Environment.GetEnvironmentVariable("SEEDWELL_QA_SLOW_CORE_MS"), out var ms) ? ms : 0;
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        _ = Task.Run(() =>
         {
-            Core = new Core(new CoreOptions(dir, false, false, forbidden));
-        }
-        catch (Exception e) when (forbidden is not null)
+            if (slow > 0 && waitedSecs == 0) Thread.Sleep(slow);
+            var core = new Core(new CoreOptions(dir, false, false, forbidden));
+            // The first library read may wait for the engine: done here, so the UI thread's reads find it.
+            _ = core.Snapshot();
+            return core;
+        }).ContinueWith(t => ui.TryEnqueue(() => CoreStarted(t, dir, waitedSecs, clock.ElapsedMilliseconds)));
+    }
+
+    void CoreStarted(Task<Core> t, string dir, int waitedSecs, long ms)
+    {
+        if (!t.IsCompletedSuccessfully)
         {
-            AppLog.Write($"launch refused: {e.Message}");
-            Environment.Exit(2);
+            // The core's sentence (a CoreException's own message carries its record's fields).
+            var error = t.Exception is { } ex ? CoreCalls.Message(ex) : "";
+            // The control socket says "another instance"; the state database, opened first, says it is locked.
+            bool busy = new[] { "another instance", "Database already open", "Cannot acquire lock", "being used by another process" }.Any(b => error.Contains(b, StringComparison.OrdinalIgnoreCase));
+            // Quit while waiting for a previous run: there is no core to shut down yet.
+            if (quitBeforeCore)
+            {
+                AppLog.Write("quit: before the core started");
+                Environment.Exit(0);
+            }
+            if (busy && waitedSecs < 150)
+            {
+                if (waitedSecs % 10 == 0) AppLog.Write($"launch: the previous run is still quitting; waiting ({waitedSecs} s so far)");
+                var timer = ui.CreateTimer();
+                timer.Interval = TimeSpan.FromSeconds(1);
+                timer.IsRepeating = false;
+                timer.Tick += (_, _) => StartCore(dir, waitedSecs + 1);
+                timer.Start();
+                return;
+            }
+            Fatal(dir, error);
+            return;
         }
+        Core = t.Result;
+        started = true;
+        AppLog.Write($"launch: core ready after {ms} ms");
         Core.SetListener(new Listener(this));
         PowerWatch.Start(Core);
         NetWatch.Start(Core);
@@ -117,6 +173,9 @@ public partial class App : Application
         ApplySettings();
         flyout = new FlyoutWindow(this);
         TaskbarWatch.Start(flyout.Hwnd, TaskbarCreated);
+        // The plain icon of the start gives way to the full one (its menu and flyout): one icon, never two.
+        tray?.Dispose();
+        tray = null;
         CreateTray();
         iconTimer = ui.CreateTimer();
         iconTimer.IsRepeating = false;
@@ -129,10 +188,78 @@ public partial class App : Application
             iconTimer.Stop();
             UpdateIcon();
         });
+        // What arrived while the core started (a second launch's links, QA commands, Show), in order.
+        var waiting = pending.ToArray();
+        pending.Clear();
+        if (waiting.Length > 0) AppLog.Write($"launch: {waiting.Length} waited for the core");
+        foreach (var run in waiting)
+        {
+            run();
+        }
         if (Program.Routes.Length > 0)
         {
             Open(Program.Routes);
         }
+    }
+
+    /// <summary>
+    /// The core could not start (a damaged state, a folder it refuses, …): the app never runs on without it. As the Mac's
+    /// fatal: an alert with the core's sentence, Quit, and the core's ways out (<c>recovery_actions</c>: Go Back to the
+    /// kept version, Install the Release; neither touches the data); the chosen one is started, then the app ends. An
+    /// isolated run (QA, tests) shows no window nobody could answer: it logs what it would offer and ends.
+    /// </summary>
+    void Fatal(string dir, string error)
+    {
+        AppLog.Write($"launch refused: {error}");
+        RecoveryAction[] actions;
+        try { actions = TrsFfiMethods.RecoveryActions(dir, Updater.InstallDir, Updater.Repo, Updater.RelaunchArgs); }
+        catch (Exception e) { AppLog.Write($"recovery actions failed: {e.Message}"); actions = []; }
+        AppLog.Write($"launch: recovery offered: {(actions.Length == 0 ? "none" : string.Join(", ", actions.Select(a => a.Title)))}");
+        if (Program.StateDir is not null)
+        {
+            Console.Error.WriteLine($"Seedwell could not start: {error}");
+            Environment.Exit(2);
+        }
+        tray?.Dispose();
+        tray = null;
+        // NEED: the title and Quit from Rust (the Mac's are Swift too: "<app> could not start", "Quit").
+        var w = new Window { Title = "Seedwell could not start" };
+        var panel = new StackPanel { Margin = new Thickness(24), Spacing = 12, MaxWidth = 520 };
+        panel.Children.Add(new TextBlock { Text = "Seedwell could not start", FontSize = 18, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, TextWrapping = TextWrapping.Wrap });
+        panel.Children.Add(new TextBlock { Text = error, TextWrapping = TextWrapping.Wrap, IsTextSelectionEnabled = true });
+        var buttons = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, HorizontalAlignment = HorizontalAlignment.Right };
+        var quit = new Button { Content = "Quit", MinWidth = 80, Style = (Style)Resources["AccentButtonStyle"] };
+        quit.Click += (_, _) => Environment.Exit(1);
+        buttons.Children.Add(quit);
+        foreach (var a in actions)
+        {
+            var b = new Button { Content = a.Title, MinWidth = 80 };
+            ToolTipService.SetToolTip(b, a.Help);
+            var command = a.Command;
+            b.Click += (_, _) =>
+            {
+                AppLog.Write($"launch: recovery chosen: {a.Title}");
+                Updater.Start(command);
+                Environment.Exit(1);
+            };
+            buttons.Children.Add(b);
+        }
+        panel.Children.Add(buttons);
+        w.Content = panel;
+        w.Closed += (_, _) => Environment.Exit(1);
+        w.AppWindow.Resize(new Windows.Graphics.SizeInt32(600, 280));
+        w.Activate();
+    }
+
+    /// <summary>True when the core is there; else <paramref name="run"/> waits until it is (the UI thread never waits).</summary>
+    bool Ready(Action run)
+    {
+        if (started)
+        {
+            return true;
+        }
+        pending.Add(run);
+        return false;
     }
 
     /// <summary>
@@ -144,6 +271,10 @@ public partial class App : Application
         if (!ui.HasThreadAccess)
         {
             ui.TryEnqueue(() => Open(routes));
+            return;
+        }
+        if (!Ready(() => Open(routes)))
+        {
             return;
         }
         var sources = routes.OfType<LinkRoute.AddSource>().Select(r => r.Source).ToArray();
@@ -169,14 +300,18 @@ public partial class App : Application
                     ShowPlace(new LibraryPlace.FolderSync());
                     LibraryWindow.Pane.SyncPage?.Choose(f.FolderId);
                     break;
-                // NEED: Add Folder and the folder's Share dialog (batch W3). Until they exist these open the Folder Sync
-                // page, the folder chosen where the link names one.
                 case LinkRoute.ShareFolder sf:
                     ShowPlace(new LibraryPlace.FolderSync());
                     LibraryWindow.Pane.SyncPage?.Choose(sf.FolderId);
+                    ShareDialog.Show(this, sf.FolderId);
                     break;
-                case LinkRoute.AddFolder or LinkRoute.SharePath:
+                case LinkRoute.SharePath sp:
+                    // A folder not synced yet: its Share dialog syncs it with the first link.
+                    ShareDialog.ShowNew(this, sp.Path);
+                    break;
+                case LinkRoute.AddFolder af:
                     ShowPlace(new LibraryPlace.FolderSync());
+                    AddFolderDialog.Show(this, af.Link);
                     break;
                 case LinkRoute.Problem problem:
                     Alert(new SyncAlert(problem.Title, problem.Text));
@@ -227,27 +362,13 @@ public partial class App : Application
             ui.TryEnqueue(() => Add(sources));
             return;
         }
-        bool added = false;
+        // In order, off the UI thread; the menu shows what was added (nothing added, nothing to show: the alert said why).
         foreach (var source in sources)
         {
-            try
-            {
-                Core.AddSource(source);
-                added = true;
-            }
-            catch (CoreException e)
-            {
-                Alert(TrsFfiMethods.AddFailed(TrsFfiMethods.CoreErrorMessage(e)));
-            }
-            catch (Exception e)
-            {
-                Alert(TrsFfiMethods.AddFailed(e.Message));
-            }
-        }
-        // The menu shows what was added; nothing added, nothing to show (the alert said why).
-        if (added)
-        {
-            flyout?.ShowOpen();
+            bool added = true;
+            CoreCalls.InOrder("add", () => Core.AddSource(source),
+                () => { if (added) flyout?.ShowOpen(); },
+                e => { added = false; Alert(TrsFfiMethods.AddFailed(e)); });
         }
     }
 
@@ -259,6 +380,8 @@ public partial class App : Application
     {
         var state = Path.Combine(Path.GetTempPath(), $"seedwell-render-{Environment.ProcessId}");
         Core = new Core(new CoreOptions(state, true, false, null));
+        // A render that hangs fails (the core's fail_ms), as a QA run does.
+        _ = new HangWatch(ui, () => Core, testRun: true);
         CreateLibrary(state);
         // The menu reads its update row from it; a development build never checks by itself, so nothing goes out.
         Updater = new Updater(this, Core);
@@ -279,6 +402,11 @@ public partial class App : Application
             flyout.Close();
             await Task.Run(() => Core.Shutdown(10));
             try { Directory.Delete(state, true); } catch { }
+            if (HangWatch.Failed && code == 0)
+            {
+                File.WriteAllText(Path.Combine(dir, $"error-{(light ? "light" : "dark")}.txt"), "the UI thread stalled (see stderr)");
+                code = 3;
+            }
             Environment.Exit(code);
         });
     }
@@ -340,14 +468,18 @@ public partial class App : Application
         menu.Opening += (_, _) =>
         {
             menu.Items.Clear();
+            if (!started) return;
             foreach (var item in TrayMenuItems())
             {
                 menu.Items.Add(item);
             }
         };
-        foreach (var item in TrayMenuItems())
+        if (started)
         {
-            menu.Items.Add(item);
+            foreach (var item in TrayMenuItems())
+            {
+                menu.Items.Add(item);
+            }
         }
 
         var icon = new TaskbarIcon
@@ -357,7 +489,7 @@ public partial class App : Application
             ContextFlyout = menu,
             ContextMenuMode = ContextMenuMode.SecondWindow,
             NoLeftClickDelay = true,
-            LeftClickCommand = new Command(() => flyout?.Toggle()),
+            LeftClickCommand = new Command(() => { if (Ready(() => flyout?.Toggle())) flyout?.Toggle(); }),
         };
         // No notification area (Explorer not running or restarting, a session without a shell): the app runs on
         // without its icon (the core, the control socket and the window all work) and makes it when the taskbar comes.
@@ -446,9 +578,9 @@ public partial class App : Application
                 Library.ShowAddSheet();
                 LibraryWindow.Pane.Refresh();
                 break;
-            case AppCommand.PauseAll: Core.PauseAll(); break;
-            case AppCommand.ResumeAll: Core.ResumeAll(); break;
-            case AppCommand.SetLimitSpeed limit: Core.SetAltSpeed(limit.On); break;
+            case AppCommand.PauseAll: CoreCalls.InOrder("pause all", Core.PauseAll, Refreshed); return;
+            case AppCommand.ResumeAll: CoreCalls.InOrder("resume all", Core.ResumeAll, Refreshed); return;
+            case AppCommand.SetLimitSpeed limit: CoreCalls.InOrder("limit speed", () => Core.SetAltSpeed(limit.On), Refreshed); return;
         }
         LibraryWindowIfCreated?.Pane.Refresh();
     }
@@ -462,7 +594,7 @@ public partial class App : Application
         if (tray is null && !quitting)
         {
             CreateTray();
-            UpdateIcon();
+            if (started) UpdateIcon();
         }
     }
 
@@ -546,6 +678,11 @@ public partial class App : Application
             ui.TryEnqueue(ShowMainWindow);
             return;
         }
+        // The window needs the library (the core's): before the core is there, it opens once it is.
+        if (!Ready(ShowMainWindow))
+        {
+            return;
+        }
         flyout?.Hide();
         main = LibraryWindow;
         main.ShowAndActivate();
@@ -591,16 +728,23 @@ public partial class App : Application
         }
     }
 
-    /// <summary>A folder the user picks (Move To…), or null; a QA run takes <see cref="QaFolder"/> instead of asking.</summary>
-    internal async Task<string?> PickFolder()
+    /// <summary>
+    /// A folder the user picks (Move To…, the folder dialogs' Choose… with the core's <paramref name="asked"/>: its prompt
+    /// as the button; Windows' picker has no message or start path), or null; a QA run takes <see cref="QaFolder"/>.
+    /// </summary>
+    internal async Task<string?> PickFolder(SyncFolderPicker? asked = null)
     {
         if (Quiet.On)
         {
-            AppLog.Write($"folder dialog: {QaFolder ?? "(none)"}");
+            AppLog.Write($"folder dialog{(asked is null ? "" : $" \"{asked.Prompt}\"")}: {QaFolder ?? "(none)"}");
             return QaFolder;
         }
         var picker = new Windows.Storage.Pickers.FolderPicker();
         picker.FileTypeFilter.Add("*");
+        if (asked is not null && asked.Prompt.Length > 0)
+        {
+            picker.CommitButtonText = asked.Prompt;
+        }
         WinRT.Interop.InitializeWithWindow.Initialize(picker, WinRT.Interop.WindowNative.GetWindowHandle(LibraryWindow));
         try
         {
@@ -612,6 +756,50 @@ public partial class App : Application
             return null;
         }
     }
+
+    /// <summary>The library window drawn again (after a command returned).</summary>
+    internal void Refreshed() => LibraryWindowIfCreated?.Pane.Refresh();
+
+    /// <summary>Runs <paramref name="action"/> on the UI thread (now when already there).</summary>
+    internal void Dispatch(Action action)
+    {
+        if (ui.HasThreadAccess) action(); else ui.TryEnqueue(() => action());
+    }
+
+    /// <summary>Where to save a file named <paramref name="suggested"/> (Save As…), or null; a QA run takes <see cref="QaSaveFile"/>.</summary>
+    internal async Task<string?> PickSaveFile(string suggested)
+    {
+        if (Quiet.On)
+        {
+            AppLog.Write($"save dialog \"{suggested}\": {QaSaveFile ?? "(none)"}");
+            return QaSaveFile;
+        }
+        var picker = new Windows.Storage.Pickers.FileSavePicker { SuggestedFileName = Path.GetFileNameWithoutExtension(suggested) };
+        var ext = Path.GetExtension(suggested);
+        picker.FileTypeChoices.Add(ext.Length > 0 ? ext : "File", [ext.Length > 0 ? ext : "."]);
+        WinRT.Interop.InitializeWithWindow.Initialize(picker, WinRT.Interop.WindowNative.GetWindowHandle(LibraryWindow));
+        try { return (await picker.PickSaveFileAsync())?.Path; }
+        catch (Exception e) { AppLog.Write($"save dialog failed: {e.Message}"); return null; }
+    }
+
+    /// <summary>Files the user picks to attach (the core's image extensions first, any file allowed), or none in a QA run.</summary>
+    internal async Task<string[]> PickFiles(IEnumerable<string> extensions)
+    {
+        if (Quiet.On)
+        {
+            AppLog.Write("open dialog: attachments");
+            return [];
+        }
+        var picker = new Windows.Storage.Pickers.FileOpenPicker();
+        picker.FileTypeFilter.Add("*");
+        foreach (var e in extensions) picker.FileTypeFilter.Add(e.StartsWith('.') ? e : $".{e}");
+        WinRT.Interop.InitializeWithWindow.Initialize(picker, WinRT.Interop.WindowNative.GetWindowHandle(LibraryWindow));
+        try { return (await picker.PickMultipleFilesAsync()).Select(f => f.Path).ToArray(); }
+        catch (Exception e) { AppLog.Write($"open dialog failed: {e.Message}"); return []; }
+    }
+
+    /// <summary>QA: the path the next save dialog answers with.</summary>
+    internal string? QaSaveFile { get; set; }
 
     /// <summary>QA: the folder the next folder dialog answers with (the QA command pick-folder).</summary>
     internal string? QaFolder { get; set; }
@@ -680,12 +868,13 @@ public partial class App : Application
         flyout?.Close();
         main?.CloseForQuit();
         tray?.Dispose();
-        Task.Run(() =>
+        // On a thread of its own, never the pool's (docs/CROSS-PLATFORM.md §1): the engine's deadline bounds it.
+        new Thread(() =>
         {
             var r = Core.Shutdown(120);
             AppLog.Write($"quit: shutdown confirmed {r.Confirmed}, abandoned {r.Abandoned}, finished {r.Finished}, {clock.ElapsedMilliseconds} ms");
             ui.TryEnqueue(Exit);
-        });
+        }) { IsBackground = true, Name = "core shutdown" }.Start();
     }
 
     /// <summary>
@@ -707,13 +896,21 @@ public partial class App : Application
             ui.TryEnqueue(() => Qa(words));
             return;
         }
+        if (!Ready(() => Qa(words)))
+        {
+            AppLog.Write($"qa {string.Join(' ', words)}: waits for the core");
+            return;
+        }
         _ = QaRun(words);
     }
 
     async Task QaRun(string[] w)
     {
         string verb = w.Length > 0 ? w[0] : "";
+        HangWatch.LastAction = $"qa {string.Join(' ', w)}";
         string Arg(int i) => w.Length > i ? w[i] : "";
+        // A folder (or channel) named by its name or its id.
+        string FolderId(string name) => Core.SyncSnapshot().Folders.FirstOrDefault(f => f.Name == name)?.Id ?? Core.ChatChannels().FirstOrDefault(c => c.Name == name)?.Id ?? name;
         bool Has(string flag) => w.Skip(1).Contains(flag);
         var pane = LibraryWindow.Pane;
         ListRow? Row(string part, out string group)
@@ -746,6 +943,9 @@ public partial class App : Application
                         "foldersync" => new LibraryPlace.FolderSync(),
                         "settings" => new LibraryPlace.Settings(),
                         "tracker" => new LibraryPlace.Tracker(Arg(2)),
+                        // A channel by name or id (its General), or a private conversation by device id.
+                        "chat" => new LibraryPlace.Chat(FolderId(Arg(2)), null),
+                        "direct" => new LibraryPlace.Direct(Arg(2)),
                         _ => new LibraryPlace.Downloads(),
                     });
                     break;
@@ -857,6 +1057,154 @@ public partial class App : Application
                         result += $"; new channel {open.Form.Mode}, can start {open.Model.CanStart}, link line \"{open.Model.LinkLine}\"";
                     }
                     break;
+                // The players the core found on this PC (Windows: the registry and PATH), each with what Automatic plays.
+                case "play-players":
+                    result = string.Join(" | ", Core.PlayPlayersReport());
+                    break;
+                // Another Seedwell on this PC (Settings › Advanced's warning line): the process list, read off the UI thread.
+                case "others":
+                    result = await Task.Run(() => Core.OtherSeedwells()) ?? "none";
+                    break;
+                // The conversation shown: describe | type <text> | send | reply <card> | attach <path> | menu <title> | menu-text |
+                // members | file <card> <file> <action> | image <card> <image> open|fetch | tag <card> <tag> | open-answer yes|no.
+                // Cards count from 0; a file action is the core's kind (Download, SaveAs, Retry, Cancel, Open, ShowInFolder,
+                // StopSharing).
+                case "chatpage":
+                    pane.Refresh();
+                    if (pane.ChatPageShown is not ChatPage cp) { result = "no conversation"; break; }
+                    cp.Update();
+                    var cards = cp.Model?.Messages ?? [];
+                    ChatMessageCard? CardAt(string n) => int.TryParse(n, out var i) && i >= 0 && i < cards.Length ? cards[i] : null;
+                    switch (Arg(1))
+                    {
+                        case "type": cp.QaType(string.Join(' ', w.Skip(2))); break;
+                        case "send": result = await cp.Send() ? "sent; " : "not sent; "; await Task.Delay(300); break;
+                        case "reply": cp.QaReply(int.TryParse(Arg(2), out var rn) ? rn : -1); break;
+                        case "attach": cp.Attach(new ChatImageInput(Path.GetFileName(string.Join(' ', w.Skip(2))), string.Join(' ', w.Skip(2)), null)); await Task.Delay(1000); break;
+                        case "menu": result = cp.QaMenu(Arg(2)) + "; "; await Quiet.Settle(LibraryWindow.Content); break;
+                        case "menu-text": result = cp.QaMenuText() + "; "; break;
+                        case "members": cp.QaMembers(); await Task.Delay(1500); break;
+                        case "open-answer": ChatAttachments.QaOpenAnswer = Arg(2) == "yes"; break;
+                        case "file":
+                            if (CardAt(Arg(2)) is not ChatMessageCard fc || !int.TryParse(Arg(3), out var fi) || fi < 0 || fi >= fc.Files.Length) { result = "no such file; "; break; }
+                            var cardFile = fc.Files[fi];
+                            if (!Enum.TryParse<ChatFileActionKind>(Arg(4), out var kind) || cardFile.Actions.All(a => a.Kind != kind)) { result = $"no {Arg(4)} on it ({string.Join(",", cardFile.Actions.Select(a => a.Kind))}); "; break; }
+                            cp.Attachments.RunFile(fc.Place, cardFile, kind, cp.Update);
+                            await Task.Delay(1500);
+                            result = $"asked \"{ChatAttachments.Asked ?? ""}\"; ";
+                            break;
+                        case "image":
+                            if (CardAt(Arg(2)) is not ChatMessageCard ic || !int.TryParse(Arg(3), out var ii) || ii < 0 || ii >= ic.Images.Length) { result = "no such image; "; break; }
+                            if (Arg(4) == "fetch") cp.Attachments.Fetch(ic.Place, ic.Images[ii].Hash, cp.Update); else cp.Attachments.OpenImage(ic.Place, ic.Images[ii].Hash);
+                            await Task.Delay(1000);
+                            break;
+                        case "tag":
+                            if (CardAt(Arg(2))?.TagMenu?.Entries.OfType<ChatPageMenuEntry.Item>().FirstOrDefault(t => t.Title.StartsWith(Arg(3))) is not ChatPageMenuEntry.Item tagItem) { result = "no such tag; "; break; }
+                            cp.Run(tagItem.Command);
+                            await Task.Delay(800);
+                            break;
+                    }
+                    cp.Update();
+                    var cm = cp.Model;
+                    if (cm is null) { result += "no model"; break; }
+                    var lastCard = cm.Messages.LastOrDefault();
+                    string BodyText(ChatMessageCard c) => c.Body switch
+                    {
+                        ChatMessageBody.Markdown md => string.Join(" / ", md.Blocks.Select(ChatMarkdown.Plain)),
+                        ChatMessageBody.Mail ml => "mail " + string.Join(" / ", ml.Blocks.Select(ChatMarkdown.Plain)),
+                        ChatMessageBody.Json js => "json " + js.Text,
+                        ChatMessageBody.Unsupported un => "unsupported " + un.Text,
+                        _ => "",
+                    };
+                    result += $"cards {cm.Messages.Length}, empty \"{cm.Empty ?? ""}\", last \"{(lastCard is null ? "" : BodyText(lastCard))}\", last images {lastCard?.Images.Length ?? 0} [{string.Join(",", lastCard?.Images.Select(i => i.State) ?? [])}], last files {lastCard?.Files.Length ?? 0} [{string.Join(",", lastCard?.Files.Select(f => $"{f.State}:{string.Join("+", f.Actions.Select(a => a.Kind))}") ?? [])}], last tags \"{string.Join("; ", lastCard?.Tags.Select(t => t.Text) ?? [])}\", tags total {cm.Messages.Sum(m => m.Tags.Length)}, reply quote \"{lastCard?.ReplyQuote ?? ""}\", toolbar [{(cm.Toolbar.Tag is null ? "" : "tag ")}{(cm.Toolbar.Members is null ? "" : "members ")}{(cm.Toolbar.Share is null ? "" : "share ")}menu], can post {cm.Composer.CanPost} \"{cm.Composer.CannotPost ?? ""}\", attach {cm.Composer.Attach}, attached {cp.Attached}, pending {cm.Composer.Pending.Length}, replying {cp.ReplyingTo ?? "none"}, members panel {(cm.Members is null ? "none" : $"{cm.Members.Rows.Length} rows")}, open {cp.MembersOpen}";
+                    break;
+                // The Folder Sync page: describe | press <title> [<folder>] (a button, or a list row's menu item; its question
+                // counts as confirmed) | trash on|off | remove (the Stop Syncing question's Remove) | choose <folder>. A folder is named by its name or id.
+                case "syncpage":
+                    if (pane.Model?.Page != LibraryPage.FolderSync) { Library.SelectPlace(new LibraryPlace.FolderSync()); pane.Refresh(); }
+                    if (pane.SyncPage is not FolderSyncPage page) { result = "no page"; break; }
+                    switch (Arg(1))
+                    {
+                        case "press": result = page.QaPress(Arg(2), w.Length > 3 ? FolderId(Arg(3)) : null) + "; "; break;
+                        case "trash": page.QaTrash(Arg(2) == "on"); break;
+                        case "remove": page.Run(new SyncPageCommand.Remove(), page.Chosen); await Task.Delay(1000); break;
+                        case "choose": page.Choose(FolderId(Arg(2))); break;
+                    }
+                    await Quiet.Settle(LibraryWindow.Content);
+                    page.Update();
+                    result += page.QaDescribe();
+                    break;
+                // Add Folder: open [link] | mode local|shared | folder <path> | link <text> | location <path> | parent <path> |
+                // devices on|off | start | cancel | status.
+                case "add-folder":
+                    if (Arg(1) == "open") { AddFolderDialog.Show(this, w.Length > 2 ? w[2] : null); await Quiet.Settle(LibraryWindow.Content); }
+                    else if (AddFolderDialog.Open is not AddFolderDialog af) { result = "not open"; break; }
+                    else switch (Arg(1))
+                    {
+                        case "mode": af.QaMode(Arg(2) == "shared" ? SyncAddMode.Shared : SyncAddMode.Local); break;
+                        case "folder": af.QaFolder(string.Join(' ', w.Skip(2))); break;
+                        case "link": af.QaLink(string.Join(' ', w.Skip(2))); break;
+                        case "location": af.QaLocation(string.Join(' ', w.Skip(2))); break;
+                        case "parent": af.QaParent(string.Join(' ', w.Skip(2))); break;
+                        case "devices": af.QaAllDevices(Arg(2) == "on"); break;
+                        case "start": result = await af.QaStart() ? "started" : "not started"; await Quiet.Settle(LibraryWindow.Content); break;
+                        case "cancel": af.QaCancel(); break;
+                    }
+                    if (AddFolderDialog.Open is AddFolderDialog afOpen)
+                    {
+                        var am = afOpen.Model;
+                        result += $"; add folder {afOpen.Form.Mode}, can start {am.CanStart}, folder \"{am.FolderText}\", link line \"{am.LinkLine}\", location \"{am.Location}\", failure \"{afOpen.Failure}\"";
+                    }
+                    if (ShareDialog.Open is not null) result += "; share open";
+                    break;
+                // A folder's Edit dialog: open <folder> | name <text> | pause on|off | lan on|off | devices on|off | options on|off |
+                // parent <path> | share | save | cancel | status.
+                case "edit-folder":
+                    if (Arg(1) == "open") { EditFolderDialog.Show(this, FolderId(Arg(2))); await Quiet.Settle(LibraryWindow.Content); }
+                    else if (EditFolderDialog.Open is not EditFolderDialog ef) { result = "not open"; break; }
+                    else switch (Arg(1))
+                    {
+                        case "name": ef.QaName(string.Join(' ', w.Skip(2))); break;
+                        case "pause": ef.QaPaused(Arg(2) == "on"); break;
+                        case "lan": ef.QaLanOnly(Arg(2) == "on"); break;
+                        case "devices": ef.QaAllDevices(Arg(2) == "on"); break;
+                        case "options": ef.QaOptions(Arg(2) == "on"); break;
+                        case "parent": ef.QaParent(string.Join(' ', w.Skip(2))); break;
+                        case "share": ef.QaShare(); await Quiet.Settle(LibraryWindow.Content); break;
+                        case "save": result = await ef.QaSave() ? "saved" : "not saved"; break;
+                        case "cancel": ef.QaCancel(); break;
+                    }
+                    if (EditFolderDialog.Open is EditFolderDialog efOpen)
+                    {
+                        var em = efOpen.Model;
+                        result += $"; edit {em.Title}, changed {em.Changed}, can save {em.CanSave}, location \"{em.Location}\", share {(em.ShareTitle ?? "none")}, follow {(em.Follow is null ? "none" : em.Follow.On.ToString())}, failure \"{efOpen.Failure}\"";
+                    }
+                    if (ShareDialog.Open is not null) result += "; share open";
+                    break;
+                // The Share dialog: open <folder or channel> | role read_only|read_write|admin | single on|off | expires on|off
+                // [days] | chat on|off [channel id] | copy | revoke (the first link) | for <days> | noend | cancel | status. The
+                // link copied is never printed.
+                case "share":
+                    if (Arg(1) == "open") { ShareDialog.Show(this, FolderId(Arg(2))); await Quiet.Settle(LibraryWindow.Content); }
+                    else if (ShareDialog.Open is not ShareDialog sd) { result = "not open"; break; }
+                    else switch (Arg(1))
+                    {
+                        case "role": sd.QaRole(Arg(2) switch { "admin" => SyncRole.Admin, "read_write" => SyncRole.ReadWrite, _ => SyncRole.ReadOnly }); break;
+                        case "single": sd.QaSingleUse(Arg(2) == "on"); break;
+                        case "expires": sd.QaExpires(Arg(2) == "on", uint.TryParse(Arg(3), out var days) ? days : 0); break;
+                        case "chat": sd.QaChat(Arg(2) == "on", Arg(3)); break;
+                        case "copy": result = await sd.Copy() ? "copied" : "not copied"; break;
+                        case "revoke": sd.QaRevokeFirst(); await Task.Delay(500); break;
+                        case "for": sd.QaShareFor(uint.TryParse(Arg(2), out var forDays) ? forDays : 7); await Task.Delay(500); break;
+                        case "noend": sd.QaNoEnd(); await Task.Delay(500); break;
+                        case "cancel": sd.QaCancel(); break;
+                    }
+                    if (ShareDialog.Open is ShareDialog sdOpen)
+                    {
+                        var sm = sdOpen.Model;
+                        result += $"; share {sm.Title}, role {sm.Role}, summary \"{sm.Summary}\", links {sm.Links.Length}, sharing \"{sm.Sharing?.Countdown ?? sm.Sharing?.Line ?? "none"}\", copy {(sm.CopyTitle ?? "none")}, refusal \"{sm.Gone ?? sm.Refusal ?? ""}\", failure \"{sdOpen.Failure}\"";
+                    }
+                    break;
                 // The tray's right-click menu as drawn (its entries' titles, [x] when checked, (off) when disabled), or one
                 // of its app commands run by name (AddTorrentFile, AddLink, PauseAll, ResumeAll, SetLimitSpeed).
                 case "tray-menu":
@@ -890,11 +1238,15 @@ public partial class App : Application
                     var rv = Core.SyncRendezvous();
                     result = $"rendezvous {rv.State}, refused \"{rs.Refused}\", result \"{rv.Result}\", problem {rv.ResultIsProblem}";
                     break;
-                // The Folder Sync page's "On all my devices" for its folder: follow on|off.
+                // "On all my devices" for the folder the Folder Sync page shows: follow on|off, through its Edit dialog and Save.
                 case "follow":
                     if (pane.Model?.Page != LibraryPage.FolderSync) { Library.SelectPlace(new LibraryPlace.FolderSync()); pane.Refresh(); }
                     if (pane.SyncPage is not FolderSyncPage sp || sp.Chosen is not string folderId) { result = "no folder"; break; }
-                    sp.SetFollow(folderId, Arg(1) == "on");
+                    EditFolderDialog.Show(this, folderId);
+                    await Quiet.Settle(LibraryWindow.Content);
+                    if (EditFolderDialog.Open is not EditFolderDialog fe) { result = "no edit dialog"; break; }
+                    fe.QaAllDevices(Arg(1) == "on");
+                    if (!await fe.QaSave()) { result = $"not saved: {fe.Failure}; "; fe.QaCancel(); }
                     var fl = Core.SyncFollowLine(folderId);
                     result = $"follow shown {fl.Shown}, on {fl.On}, enabled {fl.Enabled}";
                     break;
@@ -932,7 +1284,13 @@ public partial class App : Application
     }
 
     /// <summary>Quit, asked from another thread (a second launch with --quit).</summary>
-    internal void QuitFromAnyThread() => ui.TryEnqueue(Quit);
+    internal void QuitFromAnyThread() => ui.TryEnqueue(() =>
+    {
+        // Before the core is there, Quit waits for it (a core being made must be shut down cleanly), unless the start
+        // only waits for a previous run: then the next retry ends the app.
+        if (!started) quitBeforeCore = true;
+        if (Ready(Quit)) Quit();
+    });
 
     /// <summary>A command for the tray icon's left click.</summary>
     sealed class Command(Action run) : System.Windows.Input.ICommand

@@ -1,7 +1,7 @@
 import SwiftUI
 
 /// Settings building blocks that give every tab the System Settings look of the concepts.
-struct SettingsGroup<Content: View>: View {
+struct SettingsBox<Content: View>: View {
     let title: String
     /// Two groups side by side: the boxes get the same height.
     var fillHeight = false
@@ -38,7 +38,7 @@ extension EnvironmentValues {
     }
 }
 
-struct SettingsRow<Control: View>: View {
+struct SettingsLine<Control: View>: View {
     let label: String
     var hint: String?
     @ViewBuilder var control: Control
@@ -76,36 +76,6 @@ struct SettingsRow<Control: View>: View {
         .padding(.horizontal, 14)
         .padding(.vertical, 9)
         .frame(minHeight: 40)
-    }
-}
-
-/// A full-width row: title on the left, switch on the right.
-struct ToggleRow: View {
-    let title: String
-    @Binding var isOn: Bool
-
-    var body: some View {
-        HStack {
-            Text(title)
-            Spacer(minLength: 12)
-            Toggle("", isOn: $isOn).labelsHidden().toggleStyle(.switch)
-                .help(isOn ? "On: \(title)" : "Off: \(title)")
-        }
-        .font(.system(size: 13))
-        .padding(.horizontal, 14).padding(.vertical, 9)
-        .frame(minHeight: 40)
-    }
-}
-
-/// Segmented choice for small enums (Weekdays / Every day / Custom, Read-only / Control / Full).
-struct Segmented<T: Hashable & CaseIterable & RawRepresentable>: View where T.RawValue == String, T.AllCases: RandomAccessCollection {
-    @Binding var value: T
-
-    var body: some View {
-        Picker("", selection: $value) {
-            ForEach(Array(T.allCases), id: \.self) { Text($0.rawValue).tag($0) }
-        }
-        .pickerStyle(.segmented).labelsHidden().fixedSize()
     }
 }
 

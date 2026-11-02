@@ -372,22 +372,10 @@ public sealed partial class FlyoutWindow : Window
             check.Click += (_, _) =>
             {
                 var on = check.IsChecked == true;
-                try
-                {
-                    if (countdown)
-                    {
-                        if (on) app.Core.PendingResume(id); else app.Core.PendingPause(id);
-                    }
-                    else
-                    {
-                        if (on) app.Core.Resume([id]); else app.Core.Pause([id]);
-                    }
-                }
-                catch (Exception e)
-                {
-                    AppLog.Write($"menu row {id}: pause or resume failed: {e.Message}");
-                }
-                Refresh(false);
+                Func<Task> work = countdown
+                    ? (on ? () => app.Core.PendingResume(id) : () => app.Core.PendingPause(id))
+                    : (on ? () => app.Core.Resume([id]) : () => app.Core.Pause([id]));
+                CoreCalls.InOrder($"menu row {id}: pause or resume", work, () => Refresh(false));
             };
             g.Children.Add(check);
         }
@@ -558,8 +546,22 @@ public sealed partial class FlyoutWindow : Window
             Grid.SetColumn(buttons, 1);
             buttons.HorizontalAlignment = HorizontalAlignment.Right;
             var id = r.Id;
-            // The pencil (edit_label) and Ctrl+E come with the folder editor: the core leaves them out without it.
-            void Remove() { app.SyncRemoval.Toggle(id, app.Core.SyncOnlyHere(id)); Refresh(false); }
+            // The pencil before the bin when the core gives its label (it does only with the folder editor).
+            void Edit() { Hide(); EditFolderDialog.Show(app, id); }
+            if (r.EditLabel is string editLabel)
+            {
+                buttons.Children.Add(IconButton("", editLabel, Edit));
+            }
+            void Remove()
+            {
+                // The question opens at once; how many files only this PC has follows when the core has counted them.
+                app.SyncRemoval.Toggle(id, 0);
+                Refresh(false);
+                _ = Task.Run(() => app.Core.SyncOnlyHere(id)).ContinueWith(t => app.Dispatch(() =>
+                {
+                    if (t.IsCompletedSuccessfully) { app.SyncRemoval.SetOnlyHere(id, t.Result); Refresh(false); }
+                }));
+            }
             var bin = IconButton("", r.RemoveLabel, Remove);
             if (r.Confirming)
             {
@@ -583,12 +585,18 @@ public sealed partial class FlyoutWindow : Window
             line.PointerExited += (_, _) => { pointer = false; Show(); };
             line.GotFocus += (_, _) => { keyboard = true; Show(); };
             line.LostFocus += (_, _) => { keyboard = false; Show(); };
-            // The Mac's Cmd+Backspace: Delete asks to remove the row the keyboard is on (Ctrl+E comes with the editor).
+            // The Mac's Cmd+Backspace and Cmd+E: Delete asks to remove the row the keyboard is on, Ctrl+E edits it.
             line.KeyDown += (_, e) =>
             {
                 if (e.Key == Windows.System.VirtualKey.Delete)
                 {
                     Remove();
+                    e.Handled = true;
+                }
+                else if (e.Key == Windows.System.VirtualKey.E && r.EditLabel is not null
+                    && Microsoft.UI.Input.InputKeyboardSource.GetKeyStateForCurrentThread(Windows.System.VirtualKey.Control).HasFlag(Windows.UI.Core.CoreVirtualKeyStates.Down))
+                {
+                    Edit();
                     e.Handled = true;
                 }
             };
@@ -599,9 +607,12 @@ public sealed partial class FlyoutWindow : Window
             }
         }
         // Add Folder… and the separator above it only with the Add Folder dialog (the core leaves it out without it).
-        if (sm.Add is not null)
+        if (sm.Add is SyncMenuItem add)
         {
             panel.Children.Add(Separator());
+            var line = Line(Text(add.Title), () => { Hide(); AddFolderDialog.Show(app, null); });
+            ToolTipService.SetToolTip(line, add.Help);
+            panel.Children.Add(line);
         }
         return panel;
     }
@@ -628,7 +639,7 @@ public sealed partial class FlyoutWindow : Window
             SyncAlert? alert;
             try
             {
-                alert = app.Core.SyncRemove(c.FolderId, trash.IsChecked == true);
+                alert = await app.Core.SyncRemove(c.FolderId, trash.IsChecked == true);
             }
             catch (CoreException e)
             {

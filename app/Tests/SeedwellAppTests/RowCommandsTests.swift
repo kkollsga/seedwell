@@ -27,8 +27,8 @@ struct RowCommandsTests {
 
     @Test func aDownloadsMenuIsTheCoresListWithFinderTheShortcutAndTheRedRemove() throws {
         let core = try #require(Self.core)
-        PlayerDirectory.shared.override = []
-        defer { PlayerDirectory.shared.override = nil }
+        playersOverride(players: [])
+        defer { playersOverride(players: nil) }
         let commands = Commands(core: core)
         let row = try #require(core.snapshot().allDownloading.first { !$0.isHeld && $0.state == .downloading })
         let window = Self.titles(commands.entries(for: [row]))
@@ -58,10 +58,10 @@ struct RowCommandsTests {
         #expect(Self.titles(children) == ["TV ✓", "-", "Detected: Movie (off)"])
     }
 
-    @Test func pauseFromTheMenuPausesTheRowInTheCore() throws {
+    @Test func pauseFromTheMenuPausesTheRowInTheCore() async throws {
         let core = try #require(Self.core)
-        PlayerDirectory.shared.override = []
-        defer { PlayerDirectory.shared.override = nil }
+        playersOverride(players: [])
+        defer { playersOverride(players: nil) }
         let commands = Commands(core: core)
         let row = try #require(core.snapshot().allDownloading.first { !$0.isHeld && $0.state == .downloading })
         let pause = commands.entries(for: [row]).compactMap { e -> (@MainActor () -> Void)? in
@@ -69,7 +69,9 @@ struct RowCommandsTests {
         }.first
         try #require(pause != nil)
         pause?()
+        // The command returns at once and reaches the core in order: wait for it.
+        await CoreCalls.settled()
         #expect(try core.info(id: row.id).state == .paused)
-        core.resume(ids: [row.id])
+        await core.resume(ids: [row.id])
     }
 }

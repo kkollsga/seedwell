@@ -716,3 +716,86 @@ fn a_temp_file_nobody_will_finish_is_removed_by_the_next_scan() {
     write_all(&b.fs, ".seedwell.tmp", b"x").unwrap();
     b.core.scan("").unwrap();
 }
+
+/// Runs a scan in steps as the folder's driver does: each step on its own, the big files hashed in between.
+fn scan_in_steps(d: &mut Dev, job: &mut trs_sync::scan::ScanJob) -> (usize, usize) {
+    let (mut steps, mut apart) = (0, 0);
+    while !d.core.scan_step(job).unwrap() {
+        steps += 1;
+        let tasks = job.take_to_hash();
+        apart += tasks.len();
+        let fs = d.core.fs();
+        job.hashed(tasks.iter().map(|t| t.run(&*fs)).collect());
+    }
+    (steps, apart)
+}
+
+#[test]
+fn a_scan_in_steps_records_what_one_scan_does_with_big_files_hashed_apart() {
+    use trs_sync::scan::ScanJob;
+    let key = rw();
+    let (mut a, mut b) = (dev("A", 1, &key), dev("B", 2, &key));
+    for d in [&a, &b] {
+        d.fs.create_dir("docs").unwrap();
+        for i in 0..30 {
+            write_all(&d.fs, &format!("docs/{i:02}.txt"), format!("small {i}").as_bytes()).unwrap();
+        }
+        write_all(&d.fs, "docs/big.bin", &vec![7u8; 300_000]).unwrap();
+        write_all(&d.fs, "docs/huge.bin", &vec![9u8; 500_000]).unwrap();
+    }
+    let one = a.core.scan("").unwrap();
+    // No time at all: each step ends after one path (and commits it), as a busy folder's would.
+    let mut job = ScanJob::stepped("", std::time::Duration::ZERO, 100_000);
+    let (steps, apart) = scan_in_steps(&mut b, &mut job);
+    let stepped = job.into_report();
+    assert_eq!((stepped.changed, stepped.deleted, stepped.hashed_bytes), (one.changed, one.deleted, one.hashed_bytes));
+    assert_eq!(apart, 2, "the two big files are hashed apart");
+    assert!(steps > 30, "a step per path: {steps}");
+    for p in ["docs", "docs/00.txt", "docs/29.txt", "docs/big.bin", "docs/huge.bin"] {
+        let (ra, rb) = (a.core.store().local(p).unwrap().unwrap(), b.core.store().local(p).unwrap().unwrap());
+        assert_eq!((ra.file.info.size, &ra.file.info.chunks), (rb.file.info.size, &rb.file.info.chunks), "{p}");
+        assert_eq!(rb.stamp.is_some(), ra.stamp.is_some(), "{p}");
+    }
+
+    // Deletes come in steps too.
+    b.fs.remove_file("docs/05.txt").unwrap();
+    b.fs.remove_file("docs/huge.bin").unwrap();
+    let mut job = ScanJob::stepped("", std::time::Duration::ZERO, 100_000);
+    scan_in_steps(&mut b, &mut job);
+    assert_eq!((job.report().changed, job.report().deleted), (0, 2));
+    assert!(b.core.store().local("docs/huge.bin").unwrap().unwrap().file.info.deleted);
+
+    // Nothing changed: a stepped scan reads nothing.
+    let mut job = ScanJob::stepped("", std::time::Duration::from_secs(10), 100_000);
+    scan_in_steps(&mut b, &mut job);
+    assert_eq!((job.report().changed, job.report().deleted, job.report().hashed_bytes), (0, 0, 0));
+}
+
+#[test]
+fn a_big_file_that_changes_while_hashed_apart_is_scanned_again_not_recorded() {
+    use trs_sync::scan::ScanJob;
+    let key = rw();
+    let mut a = dev("A", 1, &key);
+    write_all(&a.fs, "big.bin", &vec![1u8; 200_000]).unwrap();
+    let mut job = ScanJob::stepped("", std::time::Duration::from_secs(10), 100_000);
+    let mut tasks = Vec::new();
+    while !a.core.scan_step(&mut job).unwrap() {
+        tasks = job.take_to_hash();
+        if !tasks.is_empty() {
+            break;
+        }
+    }
+    assert_eq!(tasks.len(), 1);
+    let fs = a.core.fs();
+    let hashed: Vec<_> = tasks.iter().map(|t| t.run(&*fs)).collect();
+    // Written again after it was read, before the step that records it.
+    write_all(&a.fs, "big.bin", &vec![2u8; 250_000]).unwrap();
+    job.hashed(hashed);
+    scan_in_steps(&mut a, &mut job);
+    assert_eq!(job.report().busy, vec!["big.bin".to_string()]);
+    assert!(a.core.store().local("big.bin").unwrap().is_none(), "no version of bytes nobody has");
+    // The next scan takes what is there now.
+    let r = a.core.scan("").unwrap();
+    assert_eq!(r.changed, 1);
+    assert_eq!(a.core.store().local("big.bin").unwrap().unwrap().file.info.size, 250_000);
+}

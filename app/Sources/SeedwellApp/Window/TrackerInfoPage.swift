@@ -1,107 +1,51 @@
 import SwiftUI
 
-/// What the Info page says about a tracker's health, from a few of its torrents' announce lines
-/// (Get Info already has them; nothing new is tracked).
-struct TrackerFacts: Equatable {
-    /// Unix seconds of the newest successful announce.
-    var lastAnnounce: UInt64?
-    /// Mean gap between the last and the next announce of the lines that have both, seconds.
-    var intervalSecs: UInt64?
-    /// The first failure text ("failed: …"), if any line failed.
-    var problem: String?
-    /// Lines looked at.
-    var sampled = 0
-
-    /// `lines` are the tracker lines of the sampled torrents that belong to this tracker.
-    static func summarize(_ lines: [TrackerLine]) -> TrackerFacts {
-        var f = TrackerFacts()
-        f.sampled = lines.count
-        var gaps: [UInt64] = []
-        for l in lines {
-            if l.status.lowercased().hasPrefix("failed") || l.status.lowercased().contains("error") {
-                if f.problem == nil { f.problem = l.status }
-            } else if let last = l.lastAnnounce {
-                f.lastAnnounce = max(f.lastAnnounce ?? 0, last)
-            }
-            if let last = l.lastAnnounce, let next = l.nextAnnounce, next > last { gaps.append(next - last) }
-        }
-        if !gaps.isEmpty { f.intervalSecs = gaps.reduce(0, +) / UInt64(gaps.count) }
-        return f
-    }
-
-    /// The host of a (masked) announce URL, lower case.
-    static func host(of url: String) -> String {
-        var s = Substring(url)
-        if let r = s.range(of: "://") { s = s[r.upperBound...] }
-        let end = s.firstIndex { "/?#".contains($0) } ?? s.endIndex
-        var h = String(s[..<end]).lowercased()
-        if h.hasPrefix("["), let close = h.firstIndex(of: "]") { return String(h[h.index(after: h.startIndex)..<close]) }
-        if let colon = h.lastIndex(of: ":"), h.filter({ $0 == ":" }).count == 1 { h = String(h[..<colon]) }
-        return h
-    }
-
-    /// Whether an announce URL belongs to the tracker: its host is one of `hosts` (a `*.` pattern
-    /// matches subdomains), or lies under the automatic tracker's `domain`.
-    static func belongs(_ url: String, hosts: [String], domain: String?) -> Bool {
-        let h = host(of: url)
-        if let d = domain, h == d || h.hasSuffix("." + d) { return true }
-        return hosts.contains { p in
-            let ph = host(of: p.contains("://") ? p : "x://" + p)
-            if ph.hasPrefix("*.") { return h.hasSuffix(String(ph.dropFirst(1))) }
-            return ph == h
-        }
-    }
-}
-
-/// The Info page of a tracker (a view in the main window): interesting numbers, then the tracker's
-/// addresses. A favorite's addresses are edited here with a pen, an x and a plus; an automatic
-/// tracker's are read-only.
+/// The Info page of a tracker (a view in the main window), drawn from the core's page (`trackerInfoPage`): interesting
+/// numbers, then the tracker's settings and addresses. A favorite's addresses are edited here with a pen, an x and a
+/// plus; an automatic tracker's are read-only.
 struct TrackerInfoPage: View {
     @Bindable var model: LibraryModel
     let tracker: TrackerSummary
     let commands: Commands
-    @State private var facts = TrackerFacts()
-    @State private var hosts: [String] = []
-    @State private var seeding = 0
-    @State private var downloading = 0
-    @State private var busiest: TransferRow?
-    /// The tracker's torrents moving now, bytes/s, against its shared caps (all of them: the core counts).
-    private var nowDown: UInt64 { model.view.trackerRates?.down ?? 0 }
-    private var nowUp: UInt64 { model.view.trackerRates?.up ?? 0 }
-    /// The folders being edited, until saved or reverted (a path typed half way must not move anything).
-    @State private var folderDraft: ProfileRecord?
-    /// Peer exchange for this private tracker (SPEC 7B.4) and the master switch in Settings > Network.
-    @State private var pexOn = false
-    @State private var pexMaster = true
+    /// The tracker as last read (`trackerInfoRead`, off the main thread every `refreshMs`).
+    @State private var read: TrackerInfoRead?
+
+    private var page: TrackerInfoPageModel {
+        let e = commands.favorites
+        _ = e.view  // redrawn when the edit changes
+        let rates = model.view.trackerRates
+        return e.editor.trackerInfoPage(input: TrackerInfoInput(
+            tracker: tracker, read: read, down: rates?.down ?? 0, up: rates?.up ?? 0,
+            nowUnixS: UInt64(max(0, Date().timeIntervalSince1970)), host: hostWindowsAll()))
+    }
 
     var body: some View {
+        let p = page
         let e = commands.favorites
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 Button { model.trackerInfo = false } label: {
-                    Label("Torrents", systemImage: "chevron.left").font(.system(size: 12))
+                    Label(p.back.title, systemImage: "chevron.left").font(.system(size: 12))
                 }
                 .buttonStyle(.plain).foregroundStyle(Color.accentColor)
-                .help("Back to this tracker's torrents")
+                .help(p.back.help)
 
                 HStack(spacing: 8) {
-                    if tracker.favorite { Image(systemName: "star.fill").foregroundStyle(Color.accentColor.opacity(0.85)) }
-                    Text(tracker.name).font(.system(size: 20, weight: .semibold)).lineLimit(1)
-                    Text("Info").font(.system(size: 13)).foregroundStyle(.tertiary)
+                    if p.favorite { Image(systemName: "star.fill").foregroundStyle(Color.accentColor.opacity(0.85)) }
+                    Text(p.title).font(.system(size: 20, weight: .semibold)).lineLimit(1)
+                    Text(p.subtitle).font(.system(size: 13)).foregroundStyle(.tertiary)
                 }
 
-                if let q = e.removal, q.id == tracker.id {
-                    FavoriteRemoveStrip(question: q, confirm: e.confirmRemoval, cancel: e.cancelRemoval)
+                if let q = p.removal {
+                    FavoriteRemoveStrip(question: q, confirm: { e.run(tracker.id, .confirmRemoval) }, cancel: { e.run(tracker.id, .cancelRemoval) })
                 }
 
-                if let stats = model.trackerStats {
-                    TrackerHeader(tracker: tracker, stats: stats, daily: model.daily, down: nowDown, up: nowUp).padding(.horizontal, -10)
-                }
-                factsBlock
-                peerExchange
-                speedLimits(e)
-                downloadLocation(e)
-                addresses(e)
+                if let h = p.header { TrackerHeader(model: h).padding(.horizontal, -10) }
+                facts(p)
+                if let x = p.pex { peerExchange(x) }
+                speedLimits(p.limits)
+                downloadLocation(p.location)
+                addresses(p.addresses)
             }
             .padding(.horizontal, 22).padding(.vertical, 16)
             .frame(maxWidth: 640, alignment: .leading)
@@ -109,212 +53,150 @@ struct TrackerInfoPage: View {
         }
         .task(id: tracker.id) {
             while !Task.isCancelled {
-                load()
-                try? await Task.sleep(for: .seconds(10))
+                await load()
+                try? await Task.sleep(for: .milliseconds(Int(p.refreshMs)))
             }
         }
-        .onChange(of: model.snapshot.trackers.map(\.count)) { _, _ in tally() }
-        .onChange(of: tracker.id) { _, _ in folderDraft = nil }
+        .onChange(of: model.snapshot.trackers.map(\.count)) { _, _ in Task { await load() } }
+        .onChange(of: tracker.id) { _, _ in commands.favorites.editor.revertFolders() }
     }
 
-    // MARK: Facts
-
-    private var factsBlock: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            section("Now")
-            fact("Torrents", "\(seeding) sharing · \(downloading) downloading")
-            if let b = busiest, b.upRate > 0 { fact("Busiest now", "\(b.displayName) · ↑ \(Fmt.rate(b.upRate))") }
-            fact("Tracker", stateText, error: facts.problem != nil)
-            if let t = facts.lastAnnounce { fact("Last announce", Self.ago(t)) }
-            if let i = facts.intervalSecs { fact("Announce interval", "about \(Self.span(i))") }
-        }
+    private func load() async {
+        let (core, t) = (commands.core, tracker)
+        let r = await core.trackerInfoRead(tracker: t)
+        commands.favorites.reload()
+        read = r
     }
 
-    private var stateText: String {
-        if let p = facts.problem { return p }
-        return facts.sampled == 0 ? "Not announced yet" : "Working"
-    }
-
-    private func fact(_ k: String, _ v: String, error: Bool = false) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 10) {
-            Text(k).font(.system(size: 12)).foregroundStyle(.secondary).frame(width: 120, alignment: .leading)
-            Text(v).font(.system(size: 13)).foregroundStyle(error ? Color.red : Color.primary).lineLimit(2)
-        }
-    }
+    // MARK: Sections
 
     private func section(_ t: String) -> some View {
         Text(t).font(.system(size: 11, weight: .semibold)).foregroundStyle(.tertiary).textCase(.uppercase)
     }
 
-    // MARK: Peer exchange
-
-    /// Peer exchange (BEP 11) for a private tracker's torrents: off unless the user allows it, since most private
-    /// trackers forbid it (SPEC 7B.4). The master switch in Settings > Network overrides it.
-    @ViewBuilder private var peerExchange: some View {
-        if tracker.private {
-            let on = Binding<Bool>(get: { pexOn }, set: { setPex($0) })
-            VStack(alignment: .leading, spacing: 7) {
-                section("Peer exchange")
-                HStack(alignment: .firstTextBaseline, spacing: 10) {
-                    Text("Peer exchange (PEX)").font(.system(size: 13))
-                    Spacer(minLength: 12)
-                    Toggle("", isOn: on).labelsHidden().toggleStyle(.switch)
-                        .disabled(!pexMaster)
-                        .help(!pexMaster ? "Peer exchange is off in Settings › Network" : (pexOn ? "On, click to turn off" : "Off, click to turn on"))
-                }
-                if pexMaster {
-                    Text("Only turn this on if the tracker's rules allow peer exchange. Most private trackers forbid it.")
-                        .font(.system(size: 11)).foregroundStyle(.tertiary).fixedSize(horizontal: false, vertical: true)
-                } else {
-                    Text("Peer exchange is off in Settings › Network")
-                        .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                }
-            }
-        }
+    private func quiet(_ t: String) -> some View {
+        Text(t).font(.system(size: 11)).foregroundStyle(.tertiary).fixedSize(horizontal: false, vertical: true)
     }
 
-    private func setPex(_ allow: Bool) {
-        let before = pexOn
-        pexOn = allow
-        do { try commands.core.trackerPexSet(trackerId: tracker.id, allow: allow) } catch { pexOn = before }
-    }
-
-    // MARK: Speed limits
-
-    /// One cap for the tracker's torrents together (SPEC 7E.4), for a favorite; an automatic tracker
-    /// says how to get one.
-    @ViewBuilder private func speedLimits(_ e: FavoriteEditing) -> some View {
+    private func facts(_ p: TrackerInfoPageModel) -> some View {
         VStack(alignment: .leading, spacing: 7) {
-            section("Speed limits")
-            if tracker.favorite {
-                let down = Binding<UInt64>(get: { e.record(tracker.id)?.downLimit ?? 0 }, set: { e.setLimits(tracker.id, down: $0, up: e.record(tracker.id)?.upLimit ?? 0) })
-                let up = Binding<UInt64>(get: { e.record(tracker.id)?.upLimit ?? 0 }, set: { e.setLimits(tracker.id, down: e.record(tracker.id)?.downLimit ?? 0, up: $0) })
-                limitRow("Download", down, now: nowDown)
-                limitRow("Upload", up, now: nowUp)
-                Text("One cap for all torrents on \(tracker.name) together. The global limits still apply; the lower one wins.")
-                    .font(.system(size: 11)).foregroundStyle(.tertiary).fixedSize(horizontal: false, vertical: true)
-            } else {
-                Text("Save as Favorite to set limits").font(.system(size: 11)).foregroundStyle(.tertiary)
+            section(p.nowTitle)
+            ForEach(Array(p.now.enumerated()), id: \.offset) { _, f in
+                HStack(alignment: .firstTextBaseline, spacing: 10) {
+                    Text(f.label).font(.system(size: 12)).foregroundStyle(.secondary).frame(width: 120, alignment: .leading)
+                    Text(f.value).font(.system(size: 13)).foregroundStyle(f.error ? Color.red : Color.primary).lineLimit(2)
+                }
             }
         }
     }
 
-    private func limitRow(_ k: String, _ limit: Binding<UInt64>, now: UInt64) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 10) {
-            Text(k).font(.system(size: 12)).foregroundStyle(.secondary).frame(width: 120, alignment: .leading)
-            RateField(bytes: limit)
-            Text(rateWithLimitLine(rate: now, limit: limit.wrappedValue))
-                .font(.system(size: 12)).monospacedDigit().foregroundStyle(.secondary)
+    private func peerExchange(_ x: TrackerInfoPex) -> some View {
+        let on = Binding<Bool>(get: { x.on }, set: { allow in
+            read?.pexAllowed = allow
+            commands.favorites.run(tracker.id, .setPex(allow: allow))
+        })
+        return VStack(alignment: .leading, spacing: 7) {
+            section(x.title)
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                Text(x.label).font(.system(size: 13))
+                Spacer(minLength: 12)
+                Toggle("", isOn: on).labelsHidden().toggleStyle(.switch)
+                    .disabled(!x.enabled)
+                    .help(x.help)
+            }
+            Text(x.note).font(.system(size: 11)).foregroundStyle(x.noteIsReason ? .secondary : .tertiary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
-    // MARK: Download location
+    /// One cap for the tracker's torrents together (SPEC 7E.4), for a favorite; an automatic tracker says how to get one.
+    private func speedLimits(_ l: TrackerInfoLimits) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            section(l.title)
+            ForEach(Array(l.rows.enumerated()), id: \.offset) { _, row in
+                HStack(alignment: .firstTextBaseline, spacing: 10) {
+                    Text(row.label).font(.system(size: 12)).foregroundStyle(.secondary).frame(width: 120, alignment: .leading)
+                    RateField(bytes: limit(l, row.direction))
+                    Text(row.line).font(.system(size: 12)).monospacedDigit().foregroundStyle(.secondary)
+                }
+            }
+            quiet(l.note)
+        }
+    }
+
+    /// A limit's field; a change saves both (the other as shown).
+    private func limit(_ l: TrackerInfoLimits, _ direction: RateDirection) -> Binding<UInt64> {
+        let value = { (d: RateDirection) in l.rows.first { $0.direction == d }?.limit ?? 0 }
+        return Binding(get: { value(direction) }, set: { new in
+            let down = direction == .download ? new : value(.download)
+            let up = direction == .upload ? new : value(.upload)
+            commands.favorites.setLimits(tracker.id, down: down, up: up)
+        })
+    }
 
     /// The favorite's own folders (SPEC 7A.4); an automatic tracker says how to get them.
-    @ViewBuilder private func downloadLocation(_ e: FavoriteEditing) -> some View {
+    private func downloadLocation(_ l: TrackerInfoLocation) -> some View {
         VStack(alignment: .leading, spacing: 7) {
-            section("Download location")
-            if tracker.favorite, let saved = e.record(tracker.id) {
-                let draft = Binding<ProfileRecord>(get: { folderDraft ?? saved }, set: { folderDraft = $0 })
-                TrackerLocationEditor(record: draft, warnings: e.volumeWarnings(for: draft.wrappedValue))
-                if let d = folderDraft, !d.sameFolders(as: saved) {
+            section(l.title)
+            if let rec = l.record {
+                let draft = Binding<ProfileRecord>(get: { rec }, set: { commands.favorites.setFolderDraft(tracker.id, $0) })
+                TrackerLocationEditor(record: draft, warnings: l.warnings)
+                if !l.buttons.isEmpty {
                     HStack(spacing: 8) {
                         Spacer()
-                        Button("Revert") { folderDraft = nil }.help("Discard the changed folders")
-                        Button("Save") { e.saveFolders(tracker.id, from: d); folderDraft = nil }
-                            .buttonStyle(.borderedProminent).help("Use these folders for this tracker")
+                        ForEach(Array(l.buttons.enumerated()), id: \.offset) { _, b in
+                            if b.prominent {
+                                Button(b.title) { commands.favorites.run(tracker.id, b.command) }.buttonStyle(.borderedProminent).help(b.help)
+                            } else {
+                                Button(b.title) { commands.favorites.run(tracker.id, b.command) }.help(b.help)
+                            }
+                        }
                     }
                 }
-                if let h = e.hint { Text(h).font(.system(size: 11)).foregroundStyle(.red) }
-            } else {
-                Text("Save as Favorite to choose folders").font(.system(size: 11)).foregroundStyle(.tertiary)
+                if let h = l.hint { Text(h).font(.system(size: 11)).foregroundStyle(.red) }
             }
+            if let n = l.note { quiet(n) }
         }
         .id(tracker.id)
     }
 
-    // MARK: Addresses
-
-    @ViewBuilder private func addresses(_ e: FavoriteEditing) -> some View {
-        let urls = tracker.favorite ? e.urls(tracker.id) : hosts
+    private func addresses(_ a: TrackerInfoAddresses) -> some View {
         VStack(alignment: .leading, spacing: 5) {
-            section("Tracker URLs")
-            ForEach(Array(urls.enumerated()), id: \.offset) { i, url in
-                if tracker.favorite, e.target == .url(tracker.id, i) {
-                    field(e, .url(tracker.id, i))
+            section(a.title)
+            ForEach(Array(a.rows.enumerated()), id: \.offset) { _, row in
+                if let f = row.field {
+                    field(f)
                 } else {
                     HStack(spacing: 6) {
-                        Text(url).font(.system(size: 12, design: .monospaced)).foregroundStyle(.secondary)
+                        Text(row.text).font(.system(size: 12, design: .monospaced)).foregroundStyle(.secondary)
                             .lineLimit(1).truncationMode(.middle)
                             .textSelection(.enabled)
                         Spacer(minLength: 8)
-                        if tracker.favorite {
-                            RowIconButton(symbol: "pencil", help: "Edit this address") { e.beginEditURL(tracker.id, index: i) }
-                            RowIconButton(symbol: "xmark", help: urls.count == 1 ? "Remove this address (it is the only one: removes the favorite)" : "Remove this address") {
-                                e.removeURL(tracker.id, index: i)
-                            }
-                        }
+                        ForEach(Array(row.buttons.enumerated()), id: \.offset) { _, b in symbolButton(b) }
                     }
                     .frame(minHeight: 22)
                 }
             }
-            if tracker.favorite, e.target == .url(tracker.id, nil) { field(e, .url(tracker.id, nil)) }
-            if tracker.favorite {
-                RowIconButton(symbol: "plus", help: "Add a tracker address") { e.beginAddURL(tracker.id) }
-                if let note = e.note { Text(note).font(.system(size: 11)).foregroundStyle(.tertiary) }
-            } else {
-                Text("Save as Favorite to edit").font(.system(size: 11)).foregroundStyle(.tertiary)
-            }
+            if let f = a.adding { field(f) }
+            if let b = a.add { symbolButton(b) }
+            if let n = a.note { Text(n).font(.system(size: 11)).foregroundStyle(.tertiary) }
         }
     }
 
-    private func field(_ e: FavoriteEditing, _ t: FavoriteEditing.Target) -> some View {
+    private func symbolButton(_ b: TrackerInfoButton) -> some View {
+        let symbol = switch b.symbol {
+        case .edit: "pencil"
+        case .remove: "xmark"
+        case .back: "chevron.left"
+        case .add, nil: "plus"
+        }
+        return RowIconButton(symbol: symbol, help: b.help) { commands.favorites.run(tracker.id, b.command) }
+    }
+
+    private func field(_ f: TrackerInfoField) -> some View {
         VStack(alignment: .leading, spacing: 2) {
-            InlineField(editing: e, target: t, prompt: "tracker.example.org or a full announce URL", font: .system(size: 12, design: .monospaced))
-            if let h = e.hint { Text(h).font(.system(size: 11)).foregroundStyle(.red).padding(.leading, 4) }
-        }
-    }
-
-    // MARK: Loading
-
-    private func load() {
-        commands.favorites.reload()
-        pexOn = commands.core.trackerPexAllowed(trackerId: tracker.id)
-        pexMaster = commands.core.settingsLoad().network.pex
-        if !tracker.favorite { hosts = commands.core.trackerHosts(groupId: tracker.id) }
-        tally()
-        let rows = model.snapshot.allDownloading + model.snapshot.allQueued
-            + commands.core.sharingRows(query: RowQuery(group: nil, trackerId: tracker.id, text: "", offset: 0, limit: 200))
-        let mine = rows.filter { $0.trackerId == tracker.id && $0.kind == .torrent }
-        busiest = mine.max { $0.upRate < $1.upRate }
-        // A few torrents' announce lines tell the tracker's health; Get Info already has them.
-        let urls = tracker.favorite ? commands.favorites.urls(tracker.id) : hosts
-        var lines: [TrackerLine] = []
-        for r in mine.prefix(4) {
-            guard let info = try? commands.core.info(id: r.id) else { continue }
-            lines += info.trackers.filter { TrackerFacts.belongs($0.url, hosts: urls, domain: tracker.favorite ? nil : tracker.id) }
-        }
-        facts = TrackerFacts.summarize(lines)
-    }
-
-    private func tally() {
-        let s = model.snapshot
-        downloading = (s.allDownloading + s.allQueued).filter { $0.trackerId == tracker.id }.count
-        let c = commands.core.sharingCounts(trackerId: tracker.id, category: nil, text: "")
-        seeding = c.total
-    }
-
-    static func ago(_ unix: UInt64) -> String {
-        let now = UInt64(Date().timeIntervalSince1970)
-        return now <= unix ? "just now" : "\(span(now - unix)) ago"
-    }
-
-    static func span(_ s: UInt64) -> String {
-        switch s {
-        case ..<90: return "\(s) s"
-        case ..<5400: return "\((s + 30) / 60) min"
-        case ..<172_800: return "\((s + 1800) / 3600) h"
-        default: return "\((s + 43_200) / 86_400) days"
+            InlineField(editing: commands.favorites, target: f.target, prompt: f.prompt, font: .system(size: 12, design: .monospaced))
+            if let h = f.hint { Text(h).font(.system(size: 11)).foregroundStyle(.red).padding(.leading, 4) }
         }
     }
 }

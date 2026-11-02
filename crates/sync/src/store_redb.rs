@@ -201,9 +201,9 @@ pub struct RedbStore {
     path: PathBuf,
     durability: Durability,
     /// `Eventual` batches were committed since the last durable commit.
-    unflushed: AtomicBool,
+    unflushed: Arc<AtomicBool>,
     report: OpenReport,
-    /// A view from a [`RedbReader`]: reads only (`apply` refuses), and never commits (no flush).
+    /// A view from a [`RedbReader`]: reads only (`apply` refuses); it flushes only before `local_since`.
     read_only: bool,
     /// [`IndexStore::feeds_host`].
     feeds_host: bool,
@@ -215,6 +215,8 @@ pub struct RedbStore {
 pub struct RedbReader {
     db: Arc<Database>,
     path: PathBuf,
+    /// The owner's: a view's `local_since` (a peer's index sent from it) makes `Eventual` batches durable first too.
+    unflushed: Arc<AtomicBool>,
 }
 
 impl RedbReader {
@@ -224,14 +226,15 @@ impl RedbReader {
     }
 
     /// Every read of [`IndexStore`] on what is committed, without waiting for the store's owner: an on-demand
-    /// folder's host lists items while a pull holds the folder. It never commits (`local_since` reads what is
-    /// committed, durable or not), and `apply` refuses.
+    /// folder's host lists items while a pull holds the folder, a peer is sent the index while a scan holds it. It
+    /// commits nothing of its own (`local_since` makes the owner's `Eventual` batches durable first, as the owner's
+    /// does), and `apply` refuses.
     pub fn view(&self) -> RedbStore {
         RedbStore {
             db: self.db.clone(),
             path: self.path.clone(),
             durability: Durability::Immediate,
-            unflushed: AtomicBool::new(false),
+            unflushed: self.unflushed.clone(),
             report: OpenReport { created: false, migrated: None },
             read_only: true,
             feeds_host: false,
@@ -323,7 +326,7 @@ impl RedbStore {
                 db: Arc::new(db),
                 path: path.to_path_buf(),
                 durability: opts.durability,
-                unflushed: AtomicBool::new(false),
+                unflushed: Arc::new(AtomicBool::new(false)),
                 read_only: false,
                 feeds_host: false,
                 report: OpenReport { created, migrated },
@@ -333,7 +336,7 @@ impl RedbStore {
 
     /// A handle for reads that do not go through the store's owner ([`RedbReader`]).
     pub fn reader(&self) -> RedbReader {
-        RedbReader { db: self.db.clone(), path: self.path.clone() }
+        RedbReader { db: self.db.clone(), path: self.path.clone(), unflushed: self.unflushed.clone() }
     }
 
     /// What happened at open.
@@ -408,7 +411,10 @@ impl RedbStore {
 
 impl Drop for RedbStore {
     fn drop(&mut self) {
-        let _ = self.flush_shared();
+        // (A view is dropped wherever it was read, maybe on the app's main thread: the owner flushes.)
+        if !self.read_only {
+            let _ = self.flush_shared();
+        }
     }
 }
 

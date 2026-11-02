@@ -30,13 +30,15 @@ private let link = PairLinkView(link: "seedwell://devices/X", expiresS: 1_000 + 
 
 @MainActor @Suite("Settings › Devices")
 struct DevicesTests {
-    @Test func aMockCoreIsUnpairedAndCannotPair() throws {
+    @Test func aMockCoreIsUnpairedAndCannotPair() async throws {
         let (core, dir) = try makeCore()
         defer { try? FileManager.default.removeItem(at: dir) }
         let m = DevicesModel(core: core)
         #expect(m.view.kind == .unpaired && m.view.rows.isEmpty && m.view.leaveTitle == nil)
         #expect(m.view.intro.hasPrefix("Your devices trust each other"))
         m.pair()
+        // The core's answer comes off the main thread.
+        for _ in 0..<100 where m.error == nil { try await Task.sleep(for: .milliseconds(20)) }
         #expect(m.sheet == nil && m.error != nil, "no service: said, and nothing opens")
         #expect(core.syncFollowLineNew(channel: true).shown == false, "not paired: no toggle")
     }

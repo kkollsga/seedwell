@@ -49,8 +49,8 @@ struct RowList<Header: View>: View {
                             RemoveConfirmStrip(pending: p.question, confirm: model.confirmRemoval, cancel: model.cancelRemoval)
                                 .id(RemoveConfirmStrip.id)
                         }
-                        if row.transfer.awaitingChoice, files.isExpanded(row.id), let m = ChoiceStore.shared.models[row.id] {
-                            HeldFilesBlock(model: m, id: row.id)
+                        if row.transfer.awaitingChoice, files.isExpanded(row.id), ChoiceStore.shared.loaded(row.id) != nil {
+                            HeldFilesBlock(id: row.id, store: ChoiceStore.shared)
                         } else if files.isExpanded(row.id), row.transfer.fileCount > 1 {
                             FileTreeBlock(row: row.transfer, commands: commands, store: files) { model.setSelection([]) }
                         }
@@ -147,7 +147,7 @@ struct RowList<Header: View>: View {
 
     private func run(_ command: ListCommand) {
         switch command {
-        case .clearRecent: commands.core.clearRecent()
+        case .clearRecent: commands.clearRecent()
         }
     }
 
@@ -155,7 +155,7 @@ struct RowList<Header: View>: View {
     private func hasList(_ row: ListRow) -> Bool {
         switch row.disclosure {
         case .files: true
-        case .choice: (ChoiceStore.shared.models[row.id]?.fileFlags().count ?? 0) > 1
+        case .choice: (ChoiceStore.shared.loaded(row.id)?.fileFlags().count ?? 0) > 1
         case nil: false
         }
     }

@@ -180,6 +180,80 @@ fn the_next_launch_says_whether_the_install_worked() {
     assert_eq!(u.model(T0).status, format!("Update to {} failed", newer()));
 }
 
+/// An installer that says it ran (`ran`), then stays at work until `release` appears (at most a minute).
+#[cfg(unix)]
+fn waiting_installer(dir: &Path) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
+    let script = dir.join("install.sh");
+    let (ran, release) = (dir.join("ran"), dir.join("release"));
+    let (r, g) = (ran.display(), release.display());
+    std::fs::write(&script, format!("echo ran > '{r}.part' && mv '{r}.part' '{r}'\nfor i in $(seq 600); do [ -e '{g}' ] && exit 0; sleep 0.1; done\n")).unwrap();
+    (script, ran, release)
+}
+
+/// Waits until the installer the updater started has ended.
+#[cfg(unix)]
+fn wait_ended(core: &Arc<Core>) {
+    let file = core.dir.join(STATE_FILE);
+    let saved: Saved = serde_json::from_slice(&std::fs::read(file).unwrap()).unwrap();
+    let pid = saved.pending_pid.expect("the installer's process is kept");
+    for _ in 0..500 {
+        if !trs_platform::running::alive(pid) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    panic!("the installer never ended");
+}
+
+/// A Seedwell of the old version that starts while the installer is still at work (one the system or a person
+/// opened; on Windows it once said "didn't start; back on" while install.ps1 still ran) says the install is under
+/// way: it neither takes the pending install nor marks the build as failed, and the new version, when it starts,
+/// still says it was updated. Once the installer has ended without the new version, it says it did not start.
+#[cfg(unix)]
+#[test]
+fn another_version_that_starts_while_the_installer_runs_says_it_is_installing() {
+    let v = format!("{}.2", current());
+    for works in [true, false] {
+        let (core, dir) = mock();
+        let (script, ran, release) = waiting_installer(dir.path());
+        let zip = dir.path().join(os::release_zip(&v));
+        std::fs::write(&zip, b"zip").unwrap();
+        set_dev(&core, true, None);
+        let u = dev_updates(&core, 1, "http://127.0.0.1:9", &script, T0);
+        u.install_build(zip.display().to_string(), None, T0).unwrap();
+        let _ = wait_for(&ran);
+        assert_eq!(u.model(T0).status, format!("Installing {v} (development build)…"));
+        drop(u);
+        // The old version starts again 40 s later, the installer still at work.
+        let stray = dev_updates(&core, 1, "http://127.0.0.1:9", &script, T0 + 40_000);
+        assert_eq!(stray.model(T0 + 40_000).status, format!("Installing {v} (development build)…"));
+        assert!(!stray.model(T0 + 40_000).check_now.enabled, "nothing else while it installs");
+        let kept: Saved = serde_json::from_slice(&std::fs::read(dir.path().join(STATE_FILE)).unwrap()).unwrap();
+        assert_eq!((kept.pending.as_deref(), kept.pending_since_ms, kept.failed.len()), (Some(v.as_str()), Some(T0), 0), "nothing taken, nothing failed");
+        if works {
+            drop(stray);
+            // The new version then starts: the install worked.
+            let new = dev_updates(&core, 2, "http://127.0.0.1:9", &script, T0 + 70_000);
+            assert_eq!(new.model(T0 + 70_000).status, format!("Updated to {v} (development build)"));
+            std::fs::write(&release, b"").unwrap();
+        } else {
+            // The installer ends (it put the old app back) while this one runs on: it did not start.
+            std::fs::write(&release, b"").unwrap();
+            wait_ended(&core);
+            assert_eq!(stray.model(T0 + 50_000).status, format!("{v} didn't start; back on {}.1", current()));
+            drop(stray);
+            // A launch after the installer ended says so at once, and never takes that build again.
+            std::fs::write(dir.path().join(STATE_FILE), serde_json::to_vec(&kept).unwrap()).unwrap();
+            let later = dev_updates(&core, 1, "http://127.0.0.1:9", &script, T0 + MIN);
+            assert_eq!(later.model(T0 + MIN).status, format!("{v} didn't start; back on {}.1", current()));
+            assert_eq!(later.lock().saved.failed, vec![v.clone()]);
+        }
+    }
+    // Long after the install started, the installer's time is over whatever its process: judged at once.
+    let mut s = Saved { pending: Some(v.clone()), pending_since_ms: Some(T0), pending_pid: Some(std::process::id()), ..Saved::default() };
+    assert!(matches!(Updates::restored(&mut s.clone(), &format!("{}.1", current()), T0 + 4 * MIN), Status::Installing { .. }));
+    assert_eq!(Updates::restored(&mut s, &format!("{}.1", current()), T0 + 5 * MIN), Status::InstallFailed(v));
+}
 #[test]
 fn checks_come_a_minute_after_launch_then_once_a_day_and_only_in_release_builds() {
     let (core, _d) = mock();
@@ -480,7 +554,9 @@ fn a_handed_over_build_runs_the_apps_installer_with_its_checksum_and_the_state_f
     assert_eq!(args, format!("--zip\n{}\n--sha256\n{sha}\n{}\n", zip.display(), dir.path().display()));
     assert_eq!(u.model(T0).status, format!("Installing {v} (development build)…"));
     assert!(u.install_build_at(&zip, None, T0).unwrap_err().contains("already running"));
-    // The next launch is the old build (the new one did not start): it says so and never takes that build again.
+    // The next launch is the old build (the new one did not start; its installer has ended): it says so and never
+    // takes that build again.
+    wait_ended(&core);
     let back = dev_updates(&core, 1, "http://127.0.0.1:9", &script, T0 + MIN);
     assert_eq!(back.model(T0 + MIN).status, format!("{v} didn't start; back on {}.1", current()));
     assert!(back.model(T0 + MIN).show_log.is_some());

@@ -21,7 +21,7 @@ use crate::ignore::Ignore;
 use crate::index::{Batch, IndexStore, LocalRecord, NeedRecord, PeerState};
 use crate::ondemand::{self, ChangePage, Deleted, Evicted, Item, Items, Page};
 use crate::pull::{ChunkSource, PullReport, Puller, Unsupported};
-use crate::scan::{ScanError, ScanReport, Scanner, Signer};
+use crate::scan::{ScanError, ScanJob, ScanReport, Scanner, Signer};
 
 /// The stamp of a file renamed as recorded: the new one (a rename changes its ctime) when its size, time and inode are
 /// still the record's (`old`); `None` otherwise, so the scanner reads it again (a write between the check and the
@@ -263,7 +263,22 @@ impl FolderCore {
         self.scan_with(scope, false)
     }
 
+    /// One step of a scan in steps ([`ScanJob`]): true when it is done. Between steps the caller may let go of the core
+    /// (and hash [`ScanJob::take_to_hash`] with [`Self::fs`] meanwhile).
+    pub fn scan_step(&mut self, job: &mut ScanJob) -> Result<bool, ScanError> {
+        self.with_scanner(false, |s, store| s.step(store, job))
+    }
+
+    /// The folder on disk, for work done off the core (hashing a scan's big files).
+    pub fn fs(&self) -> Arc<dyn Fs> {
+        self.fs.clone()
+    }
+
     fn scan_with(&mut self, scope: &str, host_write: bool) -> Result<ScanReport, ScanError> {
+        self.with_scanner(host_write, |s, store| s.scan(store, scope))
+    }
+
+    fn with_scanner<T>(&mut self, host_write: bool, f: impl FnOnce(&Scanner<'_>, &mut dyn IndexStore) -> T) -> T {
         let new_id = self.new_file_id.clone();
         let pins = &self.pins;
         let pinned = |p: &str| ondemand::pinned(pins, p);
@@ -281,7 +296,7 @@ impl FolderCore {
             on_demand: self.cfg.on_demand.then_some(&pinned as &dyn Fn(&str) -> bool),
             host_write,
         };
-        scanner.scan(&mut *self.store, scope)
+        f(&scanner, &mut *self.store)
     }
 
     /// One pull round. `device_name` names devices in conflict copies.
@@ -328,14 +343,7 @@ impl FolderCore {
     /// Our entries with a sequence above `after`, at most `limit`, for a peer. A read-only device's
     /// own new files (never signed) are left out; its changed copies go out marked invalid.
     pub fn announce_since(&self, after: u64, limit: usize) -> io::Result<Vec<IndexEntry>> {
-        let on_demand = self.cfg.on_demand;
-        Ok(self
-            .store
-            .local_since(after, limit)?
-            .into_iter()
-            .filter(|r| !(r.invalid && r.file.info.version.is_empty()))
-            .map(|r| IndexEntry { sequence: r.sequence, invalid: r.invalid, dataless: r.dataless, on_demand: on_demand && !r.dataless, file: r.file })
-            .collect())
+        announce_since(&*self.store, self.cfg.on_demand, after, limit)
     }
 
     /// Our index id and the last sequence we gave out.
@@ -636,6 +644,17 @@ impl FolderCore {
         }
         Ok(out)
     }
+}
+
+/// [`FolderCore::announce_since`] from any handle on the folder's index (a read-only view, so a peer's index is sent
+/// without waiting for the core): `on_demand` is the folder's mode.
+pub fn announce_since(store: &dyn IndexStore, on_demand: bool, after: u64, limit: usize) -> io::Result<Vec<IndexEntry>> {
+    Ok(store
+        .local_since(after, limit)?
+        .into_iter()
+        .filter(|r| !(r.invalid && r.file.info.version.is_empty()))
+        .map(|r| IndexEntry { sequence: r.sequence, invalid: r.invalid, dataless: r.dataless, on_demand: on_demand && !r.dataless, file: r.file })
+        .collect())
 }
 
 /// Why a change from the host was refused.

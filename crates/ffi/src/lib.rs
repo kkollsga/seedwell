@@ -8,15 +8,22 @@
 
 mod app_commands;
 mod app_place;
+mod async_calls;
 mod backend;
 mod battery;
+mod calls;
 mod chat_dialogs;
 mod chat_files;
 mod chat_images;
+mod chat_markdown;
+mod chat_page;
 mod chat_text;
+mod chooser;
 mod devices_text;
 mod display;
+mod favorite_editor;
 mod favorites;
+mod file_list;
 mod files;
 mod held;
 mod host;
@@ -28,17 +35,26 @@ mod links;
 mod mail;
 mod menu;
 mod mock;
+mod notify;
+mod others;
 mod play;
+mod player;
 mod power;
+mod prompts;
 mod real;
 mod removal;
 mod row_commands;
 mod row_text;
 mod rows;
 mod settings;
+mod settings_parse;
+mod settings_rules;
 mod settings_text;
+mod settings_view;
+mod settings_view_apply;
 mod sidebar;
 mod sources;
+mod starting;
 mod sync;
 mod sync_host;
 mod sync_menu;
@@ -48,7 +64,11 @@ mod sync_share;
 mod sync_rendezvous;
 mod sync_removal;
 mod sync_text;
+mod tracker_page;
 mod types;
+#[cfg(test)]
+mod ui_wait_tests;
+mod ui_watch;
 mod updates;
 
 use std::path::PathBuf;
@@ -58,15 +78,21 @@ pub use app_commands::*;
 pub use backend::{AttrRow, Backend, ShutdownInfo};
 pub use chat_dialogs::*;
 pub use chat_text::*;
+pub use chooser::*;
 pub use display::RateDirection;
+pub use favorite_editor::{FavoriteEditor, FavoriteEditorView, FavoriteEffect, FavoriteRemoval, FavoriteTarget};
+pub use file_list::*;
 pub use held::{CancelNote, CancelQuestion};
-pub use host::{host_windows_all, HostWindow};
+pub use host::{host_features_all, host_windows_all, HostFeature, HostWindow};
 pub use info_card::*;
 pub use library::*;
 pub use library_rows::*;
 pub use library_window::*;
 pub use links::*;
 pub use menu::*;
+pub use notify::*;
+pub use player::*;
+pub use prompts::*;
 pub use removal::*;
 pub use updates::{EnvVar, InstallCommand, UpdateButton, Updates, UpdatesModel};
 pub use row_commands::*;
@@ -74,6 +100,7 @@ pub use row_text::*;
 pub use settings::*;
 pub use settings_text::*;
 pub use sidebar::*;
+pub use starting::*;
 pub use sync::*;
 pub use sync_host::{SyncHostBatch, SyncHostDomain, SyncHostFolderState, SyncHostListener, SyncHostNotice, SyncHostRemoval, SyncHostText};
 pub use sync_menu::*;
@@ -82,7 +109,9 @@ pub use sync_page::*;
 pub use sync_share::*;
 pub use sync_rendezvous::{RendezvousState, RendezvousView};
 pub use sync_text::*;
+pub use tracker_page::*;
 pub use types::*;
+pub use ui_watch::*;
 
 use trs_state::rules::TorrentAttrs;
 
@@ -134,6 +163,10 @@ pub struct Core {
     /// The File Provider extension's server, while the app runs it (`sync_host_start`).
     #[cfg(unix)]
     host: std::sync::Mutex<Option<sync_host::Server>>,
+    /// The user's commands to the engine, run one after another in the order they came (`async_calls`).
+    commands: calls::Lane,
+    /// Reads a host makes while it draws, never waiting for a busy engine (`async_calls::Polls`).
+    polls: async_calls::Polls,
 }
 
 impl Core {
@@ -155,6 +188,8 @@ impl Core {
                 builds: builds.clone(),
             })?
         };
+        // The Play entries of the first menu need the players: looked up now, in the background.
+        player::look_up_players();
         let battery = Arc::new(battery::Battery::new(backend.clone(), dir.clone()));
         let isolated = options.forbidden_root.is_some();
         Ok(Arc::new(Self {
@@ -166,52 +201,14 @@ impl Core {
             builds,
             #[cfg(unix)]
             host: std::sync::Mutex::new(None),
+            commands: calls::Lane::new("seedwell-commands"),
+            polls: async_calls::Polls::default(),
         }))
     }
 
 }
 
-#[uniffi::export]
 impl Core {
-    /// Opens (or creates) the state in `options.config_dir` and starts the engine.
-    #[uniffi::constructor]
-    pub fn new(options: CoreOptions) -> Result<Arc<Self>, CoreError> {
-        Self::open(options, None)
-    }
-
-    /// Cheap; the shell calls it about once a second while something is visible.
-    pub fn snapshot(&self) -> Snapshot {
-        self.backend.snapshot()
-    }
-
-    /// Registers the event listener, replacing any previous one.
-    pub fn set_listener(&self, listener: Arc<dyn CoreListener>) {
-        self.backend.set_listener(Arc::new(battery::Listener { inner: listener, battery: self.battery.clone() }));
-    }
-
-    /// The power source: `true` on battery. The host reports it at start and whenever it changes (macOS:
-    /// IOPS; Windows: `GetSystemPowerStatus` and `WM_POWERBROADCAST`); repeating the same report does
-    /// nothing. The "On battery" setting decides what follows: nothing, the app's own Limit Speed, or
-    /// pausing the downloads until AC power is back (SPEC §8.4).
-    pub fn power_changed(&self, on_battery: bool) {
-        self.battery.power_changed(on_battery);
-    }
-
-    /// Finished torrents (the Sharing view), filtered and paged.
-    pub fn sharing_rows(&self, query: RowQuery) -> Vec<TransferRow> {
-        self.backend.rows(&query)
-    }
-
-    /// The sidebar tracker id of a transfer, hidden or not (notifications of hidden trackers are held back).
-    pub fn tracker_of(&self, id: String) -> Option<String> {
-        self.backend.tracker_of(&id)
-    }
-
-    /// Sizes of the Sharing groups, optionally within one tracker and matching a search text.
-    pub fn sharing_counts(&self, tracker_id: Option<String>, category: Option<Category>, text: String) -> SharingCounts {
-        self.backend.sharing_counts(tracker_id.as_deref(), category, &text)
-    }
-
     /// Lifetime totals of one tracker; call when its header is shown, not every second.
     pub fn tracker_stats(&self, tracker_id: String) -> TrackerStats {
         self.backend.tracker_stats(&tracker_id)
@@ -222,19 +219,9 @@ impl Core {
         self.backend.tracker_daily(&tracker_id, days)
     }
 
-    /// Details for the Get Info popover.
-    pub fn info(&self, id: String) -> Result<TorrentInfo, CoreError> {
-        self.backend.info(&id)
-    }
-
     /// The real announce URL of one tracker line of Get Info, passkey included: for "Copy URL" only.
     pub fn tracker_url(&self, id: String, index: u32) -> Result<String, CoreError> {
         self.backend.tracker_url(&id, index)
-    }
-
-    /// A magnet link without any passkey (SPEC §7B.4).
-    pub fn magnet_link(&self, id: String) -> Result<String, CoreError> {
-        self.backend.magnet_link(&id)
     }
 
     /// Adds a magnet link, `.torrent` file path or http(s) URL.
@@ -326,34 +313,12 @@ impl Core {
         let _ = self.settings.save_alt_speed(on);
     }
 
-    // ---------------------------------------------------------------- settings
-
-    /// Every setting the Settings window edits.
-    pub fn settings_load(&self) -> AppSettings {
-        self.settings.load_settings()
-    }
-
-    /// Problems in the settings files, one sentence each, for the host to show (Settings, a
-    /// notice at start). A bad value in `config.toml` costs only itself: the line names the key,
-    /// the bad value and what is used instead and why ("config.toml: folders.torrent_after_add:
-    /// \"keep\" is not a valid value (…); \"leave\", which leaves your files alone, is used until
-    /// it is fixed"; or the last good value from the backup, or the default).
-    /// Empty when the files are fine.
-    pub fn settings_problems(&self) -> Vec<String> {
-        self.settings.load_notes()
-    }
-
     /// Validates and saves; the engine applies the file within seconds.
     pub fn settings_save(&self, settings: AppSettings) -> Result<(), CoreError> {
         self.settings.save_settings(&settings)?;
         self.backend.settings_saved();
         self.battery.settings_changed();
         Ok(())
-    }
-
-    /// Ordered rules and the Default rule.
-    pub fn rules_load(&self) -> RulesDoc {
-        self.settings.load_rules()
     }
 
     /// Validates and saves the whole rule list; returns it with ids filled in.
@@ -363,65 +328,11 @@ impl Core {
         Ok(saved)
     }
 
-    /// Dry run of saving `doc`: how many torrents the rule `rule_id` governs (`"*"` = the Default
-    /// rule, `""` = the rule that was appended last and has no id yet) ("affects 44
-    /// torrents") and how many would change their goal, priority or limit.
-    pub fn rule_preview(&self, doc: RulesDoc, rule_id: String) -> RulePreview {
-        let before = self.settings.load_rules_set();
-        let after = self.settings.build_rules(&doc);
-        let profiles = self.settings.load_profiles_set();
-        let attrs = self.backend.torrent_attrs();
-        // A rule that is not saved yet has no id: it is the one the builder made last.
-        let default_rule = rule_id == "*";
-        let id = if rule_id.is_empty() {
-            after.rules.last().map(|r| r.id.clone()).unwrap_or_default()
-        } else {
-            rule_id
-        };
-        let (mut affected, mut changed) = (0u32, 0u32);
-        let mut note = String::new();
-        for a in &attrs {
-            let linked = a.profile.as_deref().and_then(|p| profiles.get(p)).and_then(|p| p.rule.as_deref());
-            let t = TorrentAttrs {
-                tracker: a.profile.as_deref(),
-                linked_rule: linked,
-                private: a.private,
-                category: settings::category_from(a.category),
-            };
-            let governed = if default_rule {
-                after.find(&t).is_none()
-            } else {
-                after.find(&t).is_some_and(|(r, _)| r.id == id)
-            };
-            if governed {
-                affected += 1;
-            }
-            let (b, n) = (before.resolve(&t), after.resolve(&t));
-            if b.goal != n.goal || b.priority != n.priority || b.up_limit != n.up_limit || b.min_seed_time != n.min_seed_time || b.idle != n.idle {
-                changed += 1;
-                if note.is_empty() && b.goal != n.goal {
-                    note = goal_change_note(&n.goal);
-                }
-            }
-        }
-        RulePreview { affected, changed, change_note: note }
-    }
-
-    /// Tracker profiles (SPEC §7E.1).
-    pub fn profiles_load(&self) -> Vec<ProfileRecord> {
-        self.settings.load_profiles()
-    }
-
     /// Validates and saves the whole list; returns it with ids filled in.
     pub fn profiles_save(&self, profiles: Vec<ProfileRecord>) -> Result<Vec<ProfileRecord>, CoreError> {
         let saved = self.settings.save_profiles(&profiles)?;
         self.backend.settings_saved();
         Ok(saved)
-    }
-
-    /// A profile named after an announce URL's host, ready for "Create tracker profile…".
-    pub fn profile_suggest(&self, announce_url: String) -> Result<ProfileRecord, CoreError> {
-        self.settings.suggest_profile(&announce_url)
     }
 
     /// Incomplete/finished pairs on different disks (the orange warning of SPEC §7A.4), for the
@@ -433,16 +344,6 @@ impl Core {
     /// The different-disk warnings of a favorite's own folders, from the editor's draft.
     pub fn tracker_volume_warnings(&self, profile: ProfileRecord) -> Vec<VolumeWarning> {
         settings::tracker_volume_warnings(&self.settings.config(), &profile)
-    }
-
-    /// `~/` expanded against the home folder in use (`--home-root` aware).
-    pub fn expand_path(&self, path: String) -> String {
-        settings::expand_home(&path).display().to_string()
-    }
-
-    /// Counters for the Advanced tab.
-    pub fn diagnostics(&self) -> DiagnosticsInfo {
-        self.backend.diagnostics()
     }
 
     /// The torrents a change of locations leaves elsewhere than the settings say (nothing moves).
@@ -538,8 +439,6 @@ impl Core {
         self.backend.watch_backlog(&settings::expand_home(&folder))
     }
 
-    // ---------------------------------------------------------------- play while downloading (SPEC §7F)
-
     /// The files of a torrent, for the Play entries (video files, whether they are selected, how far
     /// they are). Padding files are left out.
     pub fn files(&self, id: String) -> Result<Vec<TorrentFile>, CoreError> {
@@ -557,6 +456,163 @@ impl Core {
     /// skipped file is selected for download first. Errors carry a plain sentence for the user.
     pub fn stream_url(&self, torrent_id: String, file_index: u32) -> Result<StreamInfo, CoreError> {
         self.backend.stream_url(&torrent_id, file_index)
+    }
+
+    /// Deletes the tracker log. The setting is untouched.
+    pub fn tracker_log_clear(&self) {
+        self.backend.tracker_log_clear(&self.dir.join("logs"));
+    }
+}
+
+#[uniffi::export]
+impl Core {
+    /// Opens (or creates) the state in `options.config_dir` and starts the engine.
+    #[uniffi::constructor]
+    pub fn new(options: CoreOptions) -> Result<Arc<Self>, CoreError> {
+        Self::open(options, None)
+    }
+
+    /// Cheap; the shell calls it about once a second while something is visible.
+    pub fn snapshot(&self) -> Snapshot {
+        self.backend.snapshot()
+    }
+
+    /// Registers the event listener, replacing any previous one.
+    pub fn set_listener(&self, listener: Arc<dyn CoreListener>) {
+        self.backend.set_listener(Arc::new(battery::Listener { inner: listener, battery: self.battery.clone() }));
+    }
+
+    /// The power source: `true` on battery. The host reports it at start and whenever it changes (macOS:
+    /// IOPS; Windows: `GetSystemPowerStatus` and `WM_POWERBROADCAST`); repeating the same report does
+    /// nothing. The "On battery" setting decides what follows: nothing, the app's own Limit Speed, or
+    /// pausing the downloads until AC power is back (SPEC §8.4).
+    pub fn power_changed(&self, on_battery: bool) {
+        self.battery.power_changed(on_battery);
+    }
+
+    /// Finished torrents (the Sharing view), filtered and paged.
+    pub fn sharing_rows(&self, query: RowQuery) -> Vec<TransferRow> {
+        self.backend.rows(&query)
+    }
+
+    /// The sidebar tracker id of a transfer, hidden or not (notifications of hidden trackers are held back).
+    pub fn tracker_of(&self, id: String) -> Option<String> {
+        self.backend.tracker_of(&id)
+    }
+
+    /// Sizes of the Sharing groups, optionally within one tracker and matching a search text.
+    pub fn sharing_counts(&self, tracker_id: Option<String>, category: Option<Category>, text: String) -> SharingCounts {
+        self.backend.sharing_counts(tracker_id.as_deref(), category, &text)
+    }
+
+    /// Details for the Get Info popover and a context menu's checkmarks. Never waits for a busy engine: read within a
+    /// few milliseconds, or as last read (an error when it has not been read yet). A Get Info card reads its own
+    /// (`GetInfoCard`).
+    pub fn info(&self, id: String) -> Result<TorrentInfo, CoreError> {
+        self.info_now(&id)
+    }
+
+    /// A magnet link without any passkey (SPEC §7B.4).
+    pub fn magnet_link(&self, id: String) -> Result<String, CoreError> {
+        self.backend.magnet_link(&id)
+    }
+
+    // ---------------------------------------------------------------- settings
+
+    /// Every setting the Settings window edits.
+    pub fn settings_load(&self) -> AppSettings {
+        self.settings.load_settings()
+    }
+
+    /// Problems in the settings files, one sentence each, for the host to show (Settings, a
+    /// notice at start). A bad value in `config.toml` costs only itself: the line names the key,
+    /// the bad value and what is used instead and why ("config.toml: folders.torrent_after_add:
+    /// \"keep\" is not a valid value (…); \"leave\", which leaves your files alone, is used until
+    /// it is fixed"; or the last good value from the backup, or the default).
+    /// Empty when the files are fine. Also why the folder and channel keys are not in the system's vault, when it
+    /// failed (Windows: DPAPI; they stay in the plain file, nothing is lost).
+    pub fn settings_problems(&self) -> Vec<String> {
+        let mut out = self.settings.load_notes();
+        out.extend(self.backend.sync().secrets_problem());
+        out
+    }
+
+    /// Ordered rules and the Default rule.
+    pub fn rules_load(&self) -> RulesDoc {
+        self.settings.load_rules()
+    }
+
+    /// Dry run of saving `doc`: how many torrents the rule `rule_id` governs (`"*"` = the Default
+    /// rule, `""` = the rule that was appended last and has no id yet) ("affects 44
+    /// torrents") and how many would change their goal, priority or limit.
+    pub fn rule_preview(&self, doc: RulesDoc, rule_id: String) -> RulePreview {
+        let before = self.settings.load_rules_set();
+        let after = self.settings.build_rules(&doc);
+        let profiles = self.settings.load_profiles_set();
+        let attrs = self.backend.torrent_attrs();
+        // A rule that is not saved yet has no id: it is the one the builder made last.
+        let default_rule = rule_id == "*";
+        let id = if rule_id.is_empty() {
+            after.rules.last().map(|r| r.id.clone()).unwrap_or_default()
+        } else {
+            rule_id
+        };
+        let (mut affected, mut changed) = (0u32, 0u32);
+        let mut note = String::new();
+        for a in &attrs {
+            let linked = a.profile.as_deref().and_then(|p| profiles.get(p)).and_then(|p| p.rule.as_deref());
+            let t = TorrentAttrs {
+                tracker: a.profile.as_deref(),
+                linked_rule: linked,
+                private: a.private,
+                category: settings::category_from(a.category),
+            };
+            let governed = if default_rule {
+                after.find(&t).is_none()
+            } else {
+                after.find(&t).is_some_and(|(r, _)| r.id == id)
+            };
+            if governed {
+                affected += 1;
+            }
+            let (b, n) = (before.resolve(&t), after.resolve(&t));
+            if b.goal != n.goal || b.priority != n.priority || b.up_limit != n.up_limit || b.min_seed_time != n.min_seed_time || b.idle != n.idle {
+                changed += 1;
+                if note.is_empty() && b.goal != n.goal {
+                    note = goal_change_note(&n.goal);
+                }
+            }
+        }
+        RulePreview { affected, changed, change_note: note }
+    }
+
+    /// Tracker profiles (SPEC §7E.1).
+    pub fn profiles_load(&self) -> Vec<ProfileRecord> {
+        self.settings.load_profiles()
+    }
+
+    /// A profile named after an announce URL's host, ready for "Create tracker profile…".
+    pub fn profile_suggest(&self, announce_url: String) -> Result<ProfileRecord, CoreError> {
+        self.settings.suggest_profile(&announce_url)
+    }
+
+    /// `~/` expanded against the home folder in use (`--home-root` aware).
+    pub fn expand_path(&self, path: String) -> String {
+        settings::expand_home(&path).display().to_string()
+    }
+
+    /// Counters for the Advanced tab.
+    pub fn diagnostics(&self) -> DiagnosticsInfo {
+        self.backend.diagnostics()
+    }
+
+    // ---------------------------------------------------------------- play while downloading (SPEC §7F)
+
+    /// The files of a torrent for a list about to be shown at once (the menu bar's inline list): read within a few
+    /// milliseconds, or as last read; `None` while they have not been read yet (the read goes on, a later call has it).
+    /// `files` waits for the engine instead.
+    pub fn files_shown(&self, id: String) -> Option<Vec<TorrentFile>> {
+        self.files_read(&id)
     }
 
     /// The OS path monitor reports whether a usable network path exists (SPEC 7C.4c). The app
@@ -642,11 +698,6 @@ impl Core {
     /// Path of `trackers.log` (Show Log in Finder).
     pub fn tracker_log_path(&self) -> String {
         self.dir.join("logs").join("trackers.log").display().to_string()
-    }
-
-    /// Deletes the tracker log. The setting is untouched.
-    pub fn tracker_log_clear(&self) {
-        self.backend.tracker_log_clear(&self.dir.join("logs"));
     }
 
     /// Lines dropped because the writer could not keep up (0 normally).

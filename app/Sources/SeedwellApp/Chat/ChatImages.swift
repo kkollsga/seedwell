@@ -67,9 +67,18 @@ struct ChatImageTile: View {
     let core: Core
     let channelId: String
     let image: ChatImage
+    /// The snapshot renderer's fixture (`chatImageSamples`): its pictures are drawn instead of asking the core.
+    let sample: ChatImageSample?
     @State private var picture: NSImage?
     @State private var preview: NSImage?
     @State private var quickLook: URL?
+
+    init(core: Core, channelId: String, image: ChatImage, sample: ChatImageSample? = nil) {
+        self.core = core
+        self.channelId = channelId
+        self.image = image
+        self.sample = sample
+    }
 
     private var texts: ChatImageTexts { ChatImageWords.texts(core) }
 
@@ -127,29 +136,35 @@ struct ChatImageTile: View {
     }
 
     private func load() async {
+        if let sample {
+            picture = sample.view.flatMap { NSImage(data: $0.bytes) }
+            preview = sample.preview.flatMap { NSImage(data: $0.bytes) }
+            return
+        }
         let (core, channel, hash) = (core, channelId, image.hash)
         let key = "\(channel)/\(hash)/\(ChatImageLayout.side)"
         if image.state == .available {
             if let cached = ChatImageCache.shared.image(key) { picture = cached; return }
-            let view = await Task.detached(priority: .userInitiated) { core.chatImageView(channelId: channel, hash: hash, maxSide: ChatImageLayout.side) }.value
+            let view = await core.chatImageView(channelId: channel, hash: hash, maxSide: ChatImageLayout.side)
             if let view, let img = NSImage(data: view.bytes) {
                 ChatImageCache.shared.put(key, img)
                 picture = img
             }
         } else if image.hasPreview, preview == nil {
-            let view = await Task.detached(priority: .utility) { core.chatImagePreview(channelId: channel, hash: hash) }.value
+            let view = await core.chatImagePreview(channelId: channel, hash: hash)
             if let view { preview = NSImage(data: view.bytes) }
         }
     }
 
     private func fetch() {
-        do { try core.chatImageFetch(channelId: channelId, hash: image.hash) } catch { alert(error) }
+        let (core, channel, hash) = (core, channelId, image.hash)
+        Task { if case .failure(let error) = await catching({ try await core.chatImageFetch(channelId: channel, hash: hash) }) { alert(error) } }
     }
 
     /// A file of the picture the core made (never the bytes as they came), for Quick Look and the default viewer.
     private func pictureFile() async -> URL? {
         let (core, channel, hash) = (core, channelId, image.hash)
-        let r = await Task.detached(priority: .userInitiated) { Result { try core.chatImageOpenPath(channelId: channel, hash: hash) } }.value
+        let r = await catching { try await core.chatImageOpenPath(channelId: channel, hash: hash) }
         switch r {
         case .success(let path): return URL(fileURLWithPath: path)
         case .failure(let e): alert(e); return nil
@@ -163,7 +178,7 @@ struct ChatImageTile: View {
     private func copy() {
         let (core, channel, hash) = (core, channelId, image.hash)
         Task {
-            let view = await Task.detached(priority: .userInitiated) { core.chatImageView(channelId: channel, hash: hash, maxSide: 0) }.value
+            let view = await core.chatImageView(channelId: channel, hash: hash, maxSide: 0)
             guard let view else { return }
             ChatImagePasteboard.write(view, to: .general)
         }
@@ -174,7 +189,12 @@ struct ChatImageTile: View {
         panel.nameFieldStringValue = core.chatImageSaveName(channelId: channelId, hash: image.hash, asPng: asPng)
         panel.canCreateDirectories = true
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        do { try core.chatImageSave(channelId: channelId, hash: image.hash, path: url.path, asPng: asPng) } catch { alert(error) }
+        let (core, channel, hash) = (core, channelId, image.hash)
+        Task {
+            if case .failure(let error) = await catching({ try await core.chatImageSave(channelId: channel, hash: hash, path: url.path, asPng: asPng) }) {
+                alert(error)
+            }
+        }
     }
 
     private func alert(_ error: Error) {

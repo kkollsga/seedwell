@@ -670,6 +670,11 @@ pub struct EventsSubscribeParams {
     /// Only these event kinds (absent: all).
     #[serde(default)]
     pub kinds: Option<Vec<String>>,
+    /// A name this subscription holds alone while its connection is open (an agent's place that a `chat watch
+    /// --unread` moves: agent, channel and thread). Refused with `duplicate` while another open connection holds it;
+    /// released when the connection closes, so a watch that died never blocks the next one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hold: Option<String>,
 }
 
 /// `events`: poll the recent event buffer.

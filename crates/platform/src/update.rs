@@ -151,8 +151,9 @@ fn powershell(args: &[&str], i: &Install) -> Command {
 
 /// Starts `c` so that it outlives the app it is about to quit: no window, standard input empty, its output appended to
 /// `log` (made if missing); on the Mac in a session of its own, on Windows with `CREATE_NO_WINDOW` in a process group
-/// of its own and in the temporary folder (see [`Command`]). It is not waited for.
-pub fn spawn(c: &Command, log: &std::path::Path) -> std::io::Result<()> {
+/// of its own and in the temporary folder (see [`Command`]). It is not waited for; its process id is returned (whether
+/// it still runs: `crate::running::alive`).
+pub fn spawn(c: &Command, log: &std::path::Path) -> std::io::Result<u32> {
     use std::process::Stdio;
     let (program, args) = c.argv.split_first().ok_or_else(|| std::io::Error::other("no program"))?;
     if let Some(d) = log.parent() {
@@ -180,10 +181,11 @@ pub fn spawn(c: &Command, log: &std::path::Path) -> std::io::Result<()> {
         p.creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP).current_dir(std::env::temp_dir());
     }
     let mut child = p.spawn()?;
+    let pid = child.id();
     std::thread::spawn(move || {
         let _ = child.wait();
     });
-    Ok(())
+    Ok(pid)
 }
 
 #[cfg(test)]

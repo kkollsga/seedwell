@@ -1,6 +1,6 @@
 use super::*;
 use crate::chat_text::tests::channel;
-use crate::host::host_windows_all;
+use crate::host::{host_features_all, host_windows_all};
 use crate::library::tests::Clock;
 use crate::sync::{SyncGoneDevice, SyncIssue};
 use crate::sync_text::tests::folder;
@@ -25,8 +25,24 @@ fn input(folders: Vec<SyncFolder>) -> SyncPageInput {
     }
 }
 
+/// The page for a host with `host`'s windows and every feature.
 fn model(i: &SyncPageInput, host: &[HostWindow]) -> SyncPageModel {
-    sync_page_model(i.clone(), SyncRemoval::new(), Arc::new(Clock), host.to_vec())
+    sync_page_model(i.clone(), SyncRemoval::new(), Arc::new(Clock), host.to_vec(), host_features_all())
+}
+
+/// The page on Windows since W3: its windows (`App.HostWindows`), no on-demand folders.
+fn windows_w3(i: &SyncPageInput) -> SyncPageModel {
+    let host = [
+        HostWindow::GetInfo,
+        HostWindow::MoveTo,
+        HostWindow::NewChannel,
+        HostWindow::ChatDialogs,
+        HostWindow::AddFolder,
+        HostWindow::FolderEditor,
+        HostWindow::FolderShare,
+        HostWindow::ChannelShare,
+    ];
+    sync_page_model(i.clone(), SyncRemoval::new(), Arc::new(Clock), host.to_vec(), Vec::new())
 }
 
 fn titles(entries: &[SyncPageMenuEntry]) -> Vec<String> {
@@ -137,6 +153,37 @@ fn a_missing_a_failing_and_a_hidden_on_demand_folder_say_so() {
     let n = model(&i, &host_windows_all()).page.unwrap().on_demand_off.unwrap();
     assert_eq!(n.text, sync_on_demand_off_line());
     assert_eq!(n.button.unwrap().command, SyncPageCommand::AllowOnDemand);
+    // A host without on-demand folders never shows the notice or offers AllowOnDemand.
+    let w = windows_w3(&i);
+    let p = w.page.clone().unwrap();
+    assert_eq!(p.on_demand_off, None);
+    assert!(!format!("{w:?}").contains("AllowOnDemand"));
+}
+
+#[test]
+fn the_host_reads_members_and_conflicts_at_the_core_s_pace() {
+    let i = input(vec![folder("A", SyncState::UpToDate)]);
+    for m in [model(&i, &host_windows_all()), windows_w3(&i), model(&input(Vec::new()), &host_windows_all())] {
+        assert_eq!((m.members_refresh_ms, m.conflicts_refresh_ms), (2_000, 10_000));
+    }
+}
+
+#[test]
+fn reveal_shows_the_place_or_the_page_when_there_is_nothing_to_show() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut f = folder("A", SyncState::UpToDate);
+    f.path = dir.path().display().to_string();
+    assert_eq!(sync_reveal(f.clone(), None), SyncReveal::Show { path: f.path.clone() });
+    // Missing (the folder or its disk): its page.
+    let mut gone = f.clone();
+    gone.path = dir.path().join("Gone").display().to_string();
+    assert_eq!(sync_reveal(gone, None), SyncReveal::Page);
+    // On demand: where the file manager has it; without that, its page (its place on disk is not where it is).
+    let mut od = f.clone();
+    od.on_demand = true;
+    let root = "/Users/me/Library/CloudStorage/Seedwell-A".to_string();
+    assert_eq!(sync_reveal(od.clone(), Some(root.clone())), SyncReveal::Show { path: root });
+    assert_eq!(sync_reveal(od, None), SyncReveal::Page);
 }
 
 #[test]
@@ -247,7 +294,7 @@ fn the_stop_syncing_question_opens_under_its_folder_and_goes_with_the_selection(
     let mut i = input(vec![folder("A", SyncState::UpToDate), folder("B", SyncState::UpToDate)]);
     i.selected = Some("ID-B".into());
     let removal = SyncRemoval::new();
-    let page = |i: &SyncPageInput| sync_page_model(i.clone(), removal.clone(), Arc::new(Clock), host_windows_all()).page.unwrap();
+    let page = |i: &SyncPageInput| sync_page_model(i.clone(), removal.clone(), Arc::new(Clock), host_windows_all(), host_features_all()).page.unwrap();
     assert!(page(&i).removal.is_none());
     removal.open("ID-B".into(), 3);
     removal.open("ID-B".into(), 0);

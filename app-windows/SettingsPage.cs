@@ -123,16 +123,15 @@ sealed class SettingsPage
 
     void Save(Func<AppSettings, AppSettings> change)
     {
-        try
+        AppSettings next;
+        try { next = change(app.Core.SettingsLoad()); }
+        catch (Exception e) { AppLog.Write($"settings load failed: {e.Message}"); return; }
+        // Written by the core (with fsync) off the UI thread, in order; drawn again once it is saved.
+        CoreCalls.InOrder("settings save", () => app.Core.SettingsSave(next), () =>
         {
-            app.Core.SettingsSave(change(app.Core.SettingsLoad()));
-        }
-        catch (Exception e)
-        {
-            AppLog.Write($"settings save failed: {e.Message}");
-        }
-        app.Updater.Schedule();
-        drawn = "";
-        Update();
+            app.Updater.Schedule();
+            drawn = "";
+            Update();
+        });
     }
 }

@@ -19,7 +19,7 @@ import SwiftUI
     }
 
     /// The dialog as the core draws it from the form.
-    var window: SyncAddWindowModel { core.syncAddWindow(form: form) }
+    var window: SyncAddWindowModel { core.syncAddWindow(form: form, features: hostFeaturesAll()) }
 
     func setKey(_ text: String) {
         form = core.syncAddSetLink(form: form, text: text)
@@ -69,9 +69,7 @@ import SwiftUI
         error = nil
         let (core, form) = (core, form)
         Task {
-            let r: Result<SyncFolder, Error> = await Task.detached(priority: .userInitiated) {
-                Result { try core.syncAddStart(form: form) }
-            }.value
+            let r: Result<SyncFolder, Error> = await catching { try await core.syncAddStart(form: form) }
             busy = false
             switch r {
             case .success(let f): done(f, w.shareAfterStart)
@@ -145,7 +143,7 @@ struct SyncAddView: View {
                 }
             }
             .padding(.top, 18)
-            onDemand(w).padding(.top, 14)
+            if let label = w.onDemandLabel { onDemand(w, label: label).padding(.top, 14) }
             if let follow = w.follow {
                 FollowToggle(line: follow, isOn: $model.form.allDevices).padding(.top, 10).padding(.leading, 92)
             }
@@ -218,10 +216,10 @@ struct SyncAddView: View {
     }
 
     /// Files on demand (SPEC 7G.11), and what it means for this way in.
-    private func onDemand(_ w: SyncAddWindowModel) -> some View {
+    private func onDemand(_ w: SyncAddWindowModel, label: String) -> some View {
         VStack(alignment: .leading, spacing: 5) {
-            Toggle(w.onDemandLabel, isOn: $model.form.onDemand)
-                .toggleStyle(.checkbox).help(w.onDemandHelp)
+            Toggle(label, isOn: $model.form.onDemand)
+                .toggleStyle(.checkbox).help(w.onDemandHelp ?? "")
                 .accessibilityIdentifier("sync-on-demand")
             if let note = w.onDemandNote {
                 Text(note)
@@ -263,8 +261,8 @@ struct SyncAddView: View {
     var allDevices: Bool { get { form.allDevices } set { form.allDevices = newValue } }
     var optionsOpen: Bool { get { form.optionsOpen } set { form.optionsOpen = newValue } }
 
-    /// The dialog as the core draws it (Share… only with the Share dialog, which the Mac has).
-    var window: SyncEditWindowModel { syncEditWindow(form: form, share: hostWindowsAll().contains(.folderShare)) }
+    /// The dialog as the core draws it for what the Mac has (the Share dialog, on-demand folders).
+    var window: SyncEditWindowModel { syncEditWindow(form: form, host: hostWindowsAll(), features: hostFeaturesAll()) }
     var changed: Bool { window.changed }
     /// What Files on demand means as it is set now (`nil` for a full folder that stays full).
     var onDemandNote: String? { window.onDemandNote }
@@ -284,7 +282,8 @@ struct SyncAddView: View {
     }
 
     func rescan() {
-        do { try core.syncRescan(id: id) } catch { self.error = SyncText.message(error) }
+        let (core, id) = (core, id)
+        Task { if case .failure(let error) = await catching({ try await core.syncRescan(id: id) }) { self.error = SyncText.message(error) } }
     }
 
     func save(done: @escaping () -> Void) {
@@ -295,9 +294,7 @@ struct SyncAddView: View {
         error = nil
         Task {
             // (Back to full: the core has the Finder's domain removed first, so the place is an ordinary folder again.)
-            let r: Result<SyncFolder, Error> = await Task.detached(priority: .userInitiated) {
-                Result { try core.syncEditSave(form: form) }
-            }.value
+            let r: Result<SyncFolder, Error> = await catching { try await core.syncEditSave(form: form) }
             if turnsOnDemand, case .success(let now) = r, now.onDemand { await fp?.added(now) }
             busy = false
             switch r {
@@ -359,13 +356,15 @@ struct SyncEditView: View {
                 Button(w.moveTitle, action: model.move).help(w.moveHelp)
                     .disabled(!w.moveEnabled)
             }
-            Divider().padding(.vertical, 2)
-            VStack(alignment: .leading, spacing: 5) {
-                Toggle(w.onDemandLabel, isOn: $model.onDemand)
-                    .toggleStyle(.switch).controlSize(.small).help(w.onDemandHelp)
-                    .accessibilityIdentifier("sync-edit-on-demand")
-                if let note = w.onDemandNote {
-                    Text(note).font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            if let label = w.onDemandLabel {
+                Divider().padding(.vertical, 2)
+                VStack(alignment: .leading, spacing: 5) {
+                    Toggle(label, isOn: $model.onDemand)
+                        .toggleStyle(.switch).controlSize(.small).help(w.onDemandHelp ?? "")
+                        .accessibilityIdentifier("sync-edit-on-demand")
+                    if let note = w.onDemandNote {
+                        Text(note).font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    }
                 }
             }
             if let follow = w.follow {

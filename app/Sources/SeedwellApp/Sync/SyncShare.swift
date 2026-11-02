@@ -65,9 +65,7 @@ import SwiftUI
     private func setSharing(until: UInt64) {
         let (core, id) = (core, form.id)
         Task {
-            let r: Result<Void, Error> = await Task.detached(priority: .userInitiated) {
-                Result { try core.syncSetShareUntil(id: id, untilS: until) }
-            }.value
+            let r: Result<Void, Error> = await catching { try await core.syncSetShareUntil(id: id, untilS: until) }
             if case .failure(let e) = r { error = SyncText.message(e) }
             reload()
         }
@@ -81,9 +79,7 @@ import SwiftUI
         let (core, form) = (core, form)
         let wasNew = form.newPath != nil
         Task {
-            let r: Result<SyncShareCopied, Error> = await Task.detached(priority: .userInitiated) {
-                Result { try core.syncShareCopyLink(form: form) }
-            }.value
+            let r: Result<SyncShareCopied, Error> = await catching { try await core.syncShareCopyLink(form: form) }
             busy = false
             switch r {
             case .success(let c):
@@ -115,9 +111,7 @@ import SwiftUI
     func revoke(_ linkId: String) {
         let (core, id) = (core, form.id)
         Task {
-            let r: Result<Void, Error> = await Task.detached(priority: .userInitiated) {
-                Result { try core.syncRevokeInvite(id: id, inviteId: linkId) }
-            }.value
+            let r: Result<Void, Error> = await catching { try await core.syncRevokeInvite(id: id, inviteId: linkId) }
             if case .failure(let e) = r { error = SyncText.message(e) }
             reload()
         }
@@ -197,12 +191,8 @@ struct SyncShareView: View {
             .frame(maxWidth: .infinity)
             .help(w.roleHelp)
             .accessibilityIdentifier("sync-share-role")
-            row(w.singleUse, on: $model.form.singleUse) {
-                if !model.form.singleUse { menu($model.form.uses, w.singleUse.choices) }
-            }
-            row(w.linkExpires, on: $model.form.linkExpires) {
-                if model.form.linkExpires { menu($model.form.linkDays, w.linkExpires.choices) }
-            }
+            row(w.singleUse, on: $model.form.singleUse) { menu($model.form.uses, w.singleUse.choices) }
+            row(w.linkExpires, on: $model.form.linkExpires) { menu($model.form.linkDays, w.linkExpires.choices) }
             if let chat = w.chat {
                 row(label: chat.label, help: chat.help, on: $model.form.withChat) {
                     if chat.on {
@@ -270,11 +260,14 @@ struct SyncShareView: View {
         .help(help)
     }
 
-    private func menu(_ value: Binding<UInt32>, _ choices: [SyncChoice]) -> some View {
-        Picker("", selection: value) {
-            ForEach(choices, id: \.value) { Text($0.label).tag($0.value) }
+    /// A setting's value menu, while the core gives it choices.
+    @ViewBuilder private func menu(_ value: Binding<UInt32>, _ choices: [SyncChoice]) -> some View {
+        if !choices.isEmpty {
+            Picker("", selection: value) {
+                ForEach(choices, id: \.value) { Text($0.label).tag($0.value) }
+            }
+            .labelsHidden().fixedSize().controlSize(.small)
         }
-        .labelsHidden().fixedSize().controlSize(.small)
     }
 
     private func links(_ w: SyncShareWindowModel) -> some View {

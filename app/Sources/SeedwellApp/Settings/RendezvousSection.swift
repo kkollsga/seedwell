@@ -22,7 +22,7 @@ struct RendezvousSection: View {
     @State private var refused: String?
 
     var body: some View {
-        SettingsGroup(title: view.title) {
+        SettingsBox(title: view.title) {
             VStack(alignment: .leading, spacing: 12) {
                 Text(view.explanation).font(.system(size: 12)).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

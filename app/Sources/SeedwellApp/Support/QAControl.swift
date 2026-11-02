@@ -89,7 +89,7 @@ import AppKit
         FileManager.default.createFile(atPath: path, contents: nil)
         try? "0".write(toFile: path + ".ack", atomically: true, encoding: .utf8)
         // Play never reaches a player here, but the URL it would have handed over lands in `<file>.bench`.
-        PlayerLauncher.onBlockedLaunch = { [weak self] url in self?.report("play-url: \(url.absoluteString)") }
+        PlayerLauncher.onBlockedLaunch = { [weak self] url in self?.report("play-url: \(url)") }
         // A file-system watch instead of a timer: the harness must not add wake-ups of its own
         // while idle numbers are measured.
         fd = open(path, O_EVTONLY)
@@ -239,6 +239,7 @@ import AppKit
     }
 
     private func run(_ line: String) async {
+        UIAction.mark("qa \(line)")
         let parts = line.split(separator: " ", maxSplits: 1).map(String.init)
         let cmd = parts[0]
         let arg = parts.count > 1 ? parts[1] : ""
@@ -395,7 +396,7 @@ import AppKit
             let all = snap.allDownloading + snap.allQueued + snap.allRecent + snap.sharingBusiest
                 + commands.core.sharingRows(query: RowQuery(group: nil, trackerId: nil, text: "", offset: 0, limit: 400))
             guard let row = all.first(where: { $0.id.hasPrefix(arg) || $0.displayName.localizedCaseInsensitiveContains(arg) }) else { return report("play-row: no row \(arg)") }
-            let largest = commands.largestVideo(row)
+            let largest = commands.core.playMainVideo(row: row)
             report("play-row: \(row.displayName) largest video \(largest?.name ?? "none") (\(largest?.length ?? 0) bytes)")
             commands.playButtonPressed(row)
         case "play-live":
@@ -410,31 +411,34 @@ import AppKit
         case "play-app":
             // `play-app /path/App.app /path/video.mkv`: a real launch, once, of a local file.
             let parts = arg.components(separatedBy: " /").enumerated().map { $0.offset == 0 ? $0.element : "/" + $0.element }
-            guard parts.count == 2, let spec = Bundle(path: parts[0])?.bundleIdentifier.flatMap(KnownPlayers.spec(forID:)) else { return report("play-app: need '<App.app> <file>' of a known player") }
-            let archs = MachO.executable(ofApp: URL(fileURLWithPath: parts[0])).flatMap(MachO.architectures(ofFileAt:))
-            let player = InstalledPlayer(spec: spec, appURL: URL(fileURLWithPath: parts[0]), archs: archs, runs: HostCPU.current.canRun(archs))
-            guard player.runs else { return report("play-app: \(player.name) cannot run on this Mac") }
-            PlayerLauncher.blocked = false
-            PlayerLauncher.play(url: URL(fileURLWithPath: parts[1]), with: player) { [weak self] err in
-                self?.report("play-app: \(player.name) \(err ?? "opened")")
+            guard parts.count == 2 else { return report("play-app: need '<App.app> <file>' of a known player") }
+            switch commands.core.playApp(app: parts[0], file: parts[1]) {
+            case let .note(text):
+                report("play-app: \(text)")
+            case let .launch(launch, player):
+                PlayerLauncher.blocked = false
+                PlayerLauncher.start(launch, player: player) { [weak self] err in
+                    self?.report("play-app: \(player) \(err ?? "opened")")
+                }
+                PlayerLauncher.blocked = true
             }
-            PlayerLauncher.blocked = true
         case "diag":
             let d = commands.core.diagnostics()
             report("diagnostics: wakeups \(d.wakeups), connections \(d.connections), rechecks \(d.rechecks), promotions \(d.promotions), demotions \(d.demotions)")
         case "bench-snapshot":
-            benchSnapshot()
+            await benchSnapshot()
         case "bench-scroll":
             benchScroll()
         case "chatfile":
             let p = arg.split(separator: " ").map(String.init)
             let kinds: [String: ChatFileActionKind] = ["download": .download, "retry": .retry, "cancel": .cancel, "stop-sharing": .stopSharing]
             guard p.count == 3, let kind = kinds[p[0]] else { return report("chatfile: download|retry|cancel|stop-sharing <place> <hash>") }
-            do {
-                let card = try ChatFileCardView.press(kind, core: commands.core, place: p[1], hash: p[2])
-                report("chatfile: \(card.map { "\($0.state) · \($0.status)" } ?? "done")")
-            } catch {
-                report("chatfile: \(SyncText.message(error))")
+            let core = commands.core
+            Task {
+                switch await catching({ try await ChatFileCardView.press(kind, core: core, place: p[1], hash: p[2]) }) {
+                case .success(let card): report("chatfile: \(card.map { "\($0.state) · \($0.status)" } ?? "done")")
+                case .failure(let error): report("chatfile: \(SyncText.message(error))")
+                }
             }
         case "alert":
             // `alert 1` presses the first button of the alert that is open (1000 = first button).
@@ -575,9 +579,9 @@ import AppKit
         let current = app.mainWindowController?.libraryModel?.trackerID
         switch words.first {
         case "rename": if let t = qaTracker(rest) { f.beginRename(t.id) }
-        case "addurl": if let id = qaTracker(rest)?.id ?? current { f.beginAddURL(id) }
-        case "removeurl": if let id = current, let i = Int(rest) { f.removeURL(id, index: i) }
-        case "editurl": if let id = current, let i = Int(rest) { f.beginEditURL(id, index: i) }
+        case "addurl": if let id = qaTracker(rest)?.id ?? current { f.run(id, .addAddress) }
+        case "removeurl": if let id = current, let i = UInt32(rest) { f.run(id, .removeAddress(index: i)) }
+        case "editurl": if let id = current, let i = UInt32(rest) { f.run(id, .editAddress(index: i)) }
         case "type": f.text = rest
         case "commit": f.commit()
         case "cancel": f.cancel(); f.cancelRemoval()
@@ -605,26 +609,7 @@ import AppKit
     }
 
     private func playPlayers() {
-        let host = HostCPU.current
-        report("host: \(host.appleSilicon ? "Apple silicon" : "Intel"), Rosetta \(host.rosettaInstalled ? "installed" : "not installed")")
-        let installed = PlayerDirectory.shared.installed(maxAge: 0)
-        for p in installed {
-            let archs = (p.archs ?? []).map { "\($0)" }.sorted().joined(separator: "+")
-            report("player: \(p.menuTitle) at \(p.appURL.path) [\(archs.isEmpty ? "unknown" : archs)] \(p.runs ? "runs" : "CANNOT RUN")")
-        }
-        if installed.isEmpty { report("player: none installed") }
-        let pref = app.commands.core.settingsLoad().general.playWith
-        for (label, c) in [("mkv", VideoContainer.other), ("mp4", .mp4Family)] {
-            let choice = PlayerCatalog.resolve(preference: pref, installed: installed, container: c)
-            let text: String
-            switch choice {
-            case let .play(p): text = "plays with \(p.name)"
-            case let .needsUpdate(p): text = "needs update: \(p.name)"
-            case .nothingInstalled: text = "no player"
-            }
-            let withList = PlayerCatalog.capable(installed, for: c).map(\.name).joined(separator: ", ")
-            report("setting \(pref): \(label) \(text); Play With: \(withList.isEmpty ? "-" : withList)")
-        }
+        for line in app.commands.core.playPlayersReport() { report(line) }
     }
 
     /// The pop-up of Settings ▸ General ▸ Play videos with, as a menu over the Settings window.
@@ -633,15 +618,13 @@ import AppKit
         let pref = app.commands.core.settingsLoad().general.playWith
         let menu = NSMenu()
         menu.autoenablesItems = false
-        let auto = NSMenuItem(title: "Automatic", action: nil, keyEquivalent: "")
-        auto.state = pref == "auto" ? .on : .off
-        menu.addItem(auto)
-        for p in PlayerDirectory.shared.installed(maxAge: 0) {
-            let item = NSMenuItem(title: p.menuTitle, action: nil, keyEquivalent: "")
-            item.isEnabled = p.runs
-            item.state = pref == p.id ? .on : .off
+        for c in app.commands.core.playWithChoices(selection: pref) {
+            let item = NSMenuItem(title: c.title, action: nil, keyEquivalent: "")
+            item.isEnabled = c.enabled
+            item.state = pref == c.value ? .on : .off
             menu.addItem(item)
         }
+        guard let auto = menu.items.first else { return }
         // Over the Playback row's pop-up (QA captures the General tab at 860 x 700).
         let p = NSPoint(x: 209, y: 570)
         pop(menu) { menu.popUp(positioning: auto, at: p, in: content) }
@@ -667,14 +650,12 @@ import AppKit
         case "toggle": store.toggle(row.id)
         case "folders":
             store.expand(row.id)
-            if let st = store.states[row.id], let t = st.tree { for f in t.folderIds() { st.setFolder(f, open: true) } }
-        case "filter": store.states[row.id]?.filter = rest
+            store.openAllFolders(row.id)
+        case "filter": store.setFilter(row.id, rest)
         default:
-            guard let st = store.states[row.id], let tree = st.tree else { return report("files: \(row.name) is not open") }
+            guard store.views[row.id]?.status == nil, store.isExpanded(row.id) else { return report("files: \(row.name) is not open") }
             let fileWords = rest.split(separator: " ", maxSplits: 1).map(String.init)
-            guard let pat = fileWords.first,
-                  let file = tree.rows(expanded: tree.folderIds(), filter: "").first(where: { $0.name.localizedCaseInsensitiveContains(pat) }) else { return report("files: no file \(rest)") }
-            let node = file.id
+            guard let pat = fileWords.first, let node = store.lists.find(torrent: row.id, text: pat) else { return report("files: no file \(rest)") }
             switch verb {
             case "select":
                 // A click on the row, with ⌘ or ⇧ held when named: the torrent rows lose the selection, as for a click.
@@ -682,11 +663,11 @@ import AppKit
                 FileRowView.click(torrent: row.id, node: node, store: store, command: held.contains("command"), shift: held.contains("shift")) { [weak self] in
                     self?.app.mainWindowController?.libraryModel?.setSelection([])
                 }
-            case "skip": st.toggle([node])
-            case "high": st.setPriority([node], .high)
+            case "skip": store.toggleCheck(row.id, node)
+            case "high": store.setPriority(row.id, node, .high)
             case "menu":
                 store.select(torrent: row.id, node: node, command: false, shift: false)
-                var entries = FileRowView.menuEntries(row: row, commands: app.commands, state: st, store: store, file: file)
+                var entries = FileRowView.menuEntries(row: row, commands: app.commands, store: store, node: node)
                 if fileWords.count > 1 {
                     // The Priority submenu on its own (a hover-opened submenu is a window we cannot summon).
                     entries = entries.compactMap { if case let .submenu("Priority", c) = $0 { return c } else { return nil } }.first ?? []
@@ -777,25 +758,24 @@ import AppKit
         let words = arg.split(separator: " ", maxSplits: 1).map(String.init)
         let verb = words.first ?? "state"
         let rest = words.count > 1 ? words[1] : ""
-        let models = ChoiceStore.shared.models.sorted { $0.key < $1.key }.map(\.value)
-        guard let m = models.first(where: \.awaiting) ?? models.first else { return report("choice: no chooser") }
-        let all = m.items + m.items.flatMap(\.children)
-        let item = all.first { $0.title.localizedCaseInsensitiveCompare(rest) == .orderedSame }
-            ?? all.first { $0.title.localizedCaseInsensitiveContains(rest) }
+        let store = ChoiceStore.shared
+        let models = (store.choices?.ids() ?? []).compactMap { store.loaded($0) }
+        guard let m = models.first(where: { $0.awaiting() }) ?? models.first else { return report("choice: no chooser") }
         switch verb {
         case "tick", "fold":
-            guard !rest.isEmpty, let item else { return report("choice: no row \(rest)") }
-            if verb == "tick" { m.toggle(item) } else { m.toggleExpanded(item) }
-        case "all": m.toggleAll()
+            guard !rest.isEmpty, let row = m.findRow(text: rest) else { return report("choice: no row \(rest)") }
+            store.edit { if verb == "tick" { m.toggle(id: row) } else { m.toggleFolded(id: row) } }
+        case "all": store.edit { m.toggleAll() }
         case "pick":
-            guard let p = ChooserModel.QuickPick.allCases.first(where: { $0.rawValue.localizedCaseInsensitiveCompare(rest) == .orderedSame })
+            guard let p = m.view(hasSourceFile: false).picks.first(where: { $0.title.localizedCaseInsensitiveCompare(rest) == .orderedSame })
             else { return report("choice: no quick pick \(rest)") }
-            m.apply(p)
+            store.edit { m.applyPick(pick: p.pick) }
         case "state": break
         default: return report("choice: \(arg)?")
         }
-        let open = m.items.filter { m.expanded.contains($0.id) }.map(\.title)
-        report("choice: \(arg) -> checked \(m.checked.count) all \(m.allState) expanded \(open) rows \(m.visibleRows.map(\.item.title))")
+        let page = m.view(hasSourceFile: false)
+        let open = page.rows.filter { $0.level == 0 && $0.open }.map(\.title)
+        report("choice: \(arg) -> checked \(page.checkedCount) all \(page.all.check) expanded \(open) rows \(page.rows.map(\.title))")
     }
 
     /// `devlog open|close|filter|errors|event|expand|state`: drives the tracker log viewer.
@@ -853,8 +833,12 @@ import AppKit
 
     /// The shared choice models in one clause: `choice <id8> checked <n> confirm <bool> primary "<title>" all <state> rows <n>`.
     private var qaChoiceState: String {
-        ChoiceStore.shared.models.sorted { $0.key < $1.key }.map { id, m in
-            "choice \(id.prefix(8)) checked \(m.checked.count) bytes \(m.selectedBytes) confirm \(m.canConfirm) primary \"\(m.primaryTitle)\" all \(m.allState) rows \(m.visibleRows.count) expanded [\(m.expanded.sorted().joined(separator: ","))]"
+        let store = ChoiceStore.shared
+        return (store.choices?.ids() ?? []).compactMap { id in
+            store.loaded(id).map { m in
+                let p = m.view(hasSourceFile: false)
+                return "choice \(id.prefix(8)) checked \(p.checkedCount) bytes \(m.selectedBytes()) confirm \(p.canConfirm) primary \"\(p.buttons.start?.title ?? "")\" all \(p.all.check) rows \(p.rows.count) expanded [\(p.openGroups.sorted().joined(separator: ","))]"
+            }
         }.joined(separator: " ")
     }
 
@@ -865,15 +849,15 @@ import AppKit
         let names = (m?.visibleRows ?? []).reduce(into: [String: String]()) { $0[$1.id] = $1.displayName }
         let sel = (m?.selection ?? []).map { String((names[$0] ?? $0).prefix(14)) }.sorted()
         let chev = (m?.visibleRows ?? []).filter { $0.fileCount > 1 && $0.kind == .torrent && !$0.isHeld }.map { String($0.displayName.prefix(10)) }
-        let trees = f.states.sorted { $0.key < $1.key }.map { id, st in
-            "\(id.prefix(8)):\(st.totals.map { "\($0.wantedCount)/\($0.fileCount)" } ?? "-")\(st.hasPending ? "+pending" : "")"
+        let trees = f.views.sorted { $0.key < $1.key }.map { id, v in
+            "\(id.prefix(8)):\(v.header.map { "\($0.wantedCount)/\($0.fileCount)" } ?? "-")\(f.lists.hasPending(torrent: id) ? "+pending" : "")"
         }
         return "state: trees \(trees) chevrons \(chev) rows \(sel) files \(f.selectedTorrent.map { String($0.prefix(8)) } ?? "-") nodes \(f.selectedNodes.sorted()) expanded \(f.expanded.map { String($0.prefix(8)) }.sorted()) \(qaChoiceState)"
     }
 
     /// The inline file list of the open menu bar menu (`menu open` first):
     ///     menu-files expand <torrent>      a click on the row's chevron (opens, or closes when open; another one closes)
-    ///     menu-files press <file|folder|all|none>   a click on a row of the list; `menu-files fold <folder>` its chevron
+    ///     menu-files press <file|folder>   a click on a row of the list; `menu-files fold <folder>` its chevron
     ///     menu-files state <torrent>       engine wanted/total, which list is open, rows, footer, menu still tracking
     ///     menu-files context <row>         the titles of the row's right-click menu, its check and Play icon
     /// `menu-sync`: the Folder Sync submenu as drawn (rows, the open confirmation, the items) and its state;
@@ -940,11 +924,12 @@ import AppKit
 
     /// Cost of what the window polls once a second: `snapshot()` (cold: the core caches for 400 ms)
     /// and the sharing queries, measured on the main thread as the UI would.
-    private func benchSnapshot() {
+    private func benchSnapshot() async {
         let core = app.commands.core
         var snap: [Double] = [], rows: [Double] = []
         for _ in 0..<15 {
-            Thread.sleep(forTimeInterval: 0.45)
+            // Waits without holding the main thread (the hang watchdog fails a QA run whose main thread stops answering).
+            try? await Task.sleep(for: .milliseconds(450))
             let t0 = DispatchTime.now().uptimeNanoseconds
             let s = core.snapshot()
             snap.append(Double(DispatchTime.now().uptimeNanoseconds - t0) / 1e6)

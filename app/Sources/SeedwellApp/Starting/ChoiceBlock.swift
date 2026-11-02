@@ -1,45 +1,36 @@
 import SwiftUI
 
-/// A torrent that waits for the user's choice of files (SPEC 7A.6, 8.6), inside the notifier. Compact
-/// first: its header (title, "Category · size · folder") and two buttons, Download (the smart default) and
-/// Cancel. The chevron in front of the title opens this block's checklist in place (the popover grows by at most
-/// `listHeight`, the list scrolls): tree, tri-state boxes, sizes, "Select all / none", the selected size, OK and
-/// Cancel; the chevron folds it back. The title opens the torrent in the main window.
+/// A torrent that waits for the user's choice of files (SPEC 7A.6, 8.6), inside the notifier, as the core lays it
+/// out. Compact first: its header (title, "Category · size · folder") and Cancel and Start (everything but the
+/// Extras). The chevron in front of the title opens this block's checklist in place (the popover grows by at most
+/// `listHeight`, the list scrolls): tree, tri-state boxes, sizes, "Select all / none", the selected size, Cancel and
+/// Start; the chevron folds it back. The title opens the torrent in the main window. A magnet link fetching its file
+/// list shows a spinner and Cancel.
 struct ChoiceBlock: View {
-    let item: StartingItem
-    /// The shared chooser model; nil while the magnet link has no file list yet.
-    let model: ChooserModel?
-    let expanded: Bool
-    /// Owns Return (OK) and Escape (Cancel) when the popover is key.
-    let active: Bool
+    let block: StartingBlock
+    let store: ChoiceStore
     let actions: StartingActions
-    let toggleExpanded: () -> Void
 
     /// The checklist never grows past this; longer lists scroll inside.
     static let listHeight: CGFloat = 220
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            BlockHeader(item: item,
-                        chevron: item.awaiting
-                            ? .init(open: expanded, help: expanded ? "Back to the short view" : "Show the files") { toggleExpanded() }
-                            : nil,
-                        actions: actions)
-            if let model, item.awaiting {
+            BlockHeader(block: block, actions: actions) { actions.toggleExpanded(block.id) }
+            if case let .choice(expanded) = block.state, let page = store.page(block.id) {
                 if expanded {
-                    ChoiceChecklist(model: model, active: active, id: item.id, hasSource: item.hasSource, actions: actions)
+                    ChoiceChecklist(id: block.id, page: page, store: store, buttons: block.actions,
+                                    cancel: { actions.cancel(block.id, $0) }, start: { actions.confirm(block.id) })
                         .transition(.opacity)
                 } else {
-                    HeldButtons(hasSourceFile: item.hasSource, active: active, canStart: model.canConfirm,
-                                startHelp: "Start downloading every file. Open the list to choose",
-                                cancel: { actions.cancel(item.id, $0) }, start: { actions.confirm(item.id) })
+                    HeldButtons(actions: block.actions, cancel: { actions.cancel(block.id, $0) }, start: { actions.confirm(block.id) })
                 }
             } else {
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)
-                    Text("Fetching file list…").font(.system(size: 12.5)).foregroundStyle(.secondary)
+                    Text(block.line).font(.system(size: 12.5)).foregroundStyle(.secondary)
                     Spacer()
-                    CancelControl(hasSourceFile: false, escape: active) { actions.cancel(item.id, $0) }
+                    CancelControl(cancel: block.actions.cancel, keep: nil) { actions.cancel(block.id, $0) }
                 }
                 .accessibilityElement(children: .combine)
             }
@@ -47,48 +38,46 @@ struct ChoiceBlock: View {
     }
 }
 
-/// The list and the buttons under it.
+/// The list of a chooser and the buttons under it: the notifier's open block, and (without buttons) the list under a
+/// held torrent's row in the window. Every tick, fold and key goes to the shared chooser in the core.
 struct ChoiceChecklist: View {
-    @Bindable var model: ChooserModel
-    let active: Bool
     let id: String
-    var hasSource = false
-    let actions: StartingActions
-    /// False in the main window, where Download and Cancel sit on the torrent's row.
-    var showButtons = true
+    let page: ChooserPage
+    let store: ChoiceStore
+    /// Cancel and Start under the list (the notifier's); nil in the main window, where they sit on the torrent's row.
+    var buttons: HeldActions?
+    var cancel: (_ keepFile: Bool) -> Void = { _ in }
+    var start: () -> Void = {}
     /// The list never grows past this; the popover's is `ChoiceBlock.listHeight`.
     var maxListHeight = ChoiceBlock.listHeight
     /// The main window's list has "Show All" (SPEC 8.3); the popover's does not.
     var offersShowAll = false
-    @AppStorage(FileLayout.showAllKey) private var showAll = false
     @FocusState private var focused: Bool
-    @State private var cursor: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Button { model.toggleAll() } label: {
+                Button { edit { $0.toggleAll() } } label: {
                     HStack(spacing: 6) {
-                        TriCheck(state: model.allState) { model.toggleAll() }.scaleEffect(0.85).frame(width: 16, height: 16)
-                        Text(model.allState == .on ? "Select none" : "Select all").font(.system(size: 12.5))
+                        TriCheck(state: page.all.check, help: page.all.checkHelp, value: page.all.checkValue) { edit { $0.toggleAll() } }
+                            .scaleEffect(0.85).frame(width: 16, height: 16)
+                        Text(page.all.title).font(.system(size: 12.5))
                     }
                 }
                 .buttonStyle(.plain)
-                .help(model.allState == .on ? "Untick every file" : "Tick every file")
+                .help(page.all.help)
                 Spacer()
-                if offersShowAll {
-                    ShowAllButton(overflows: fullHeight > maxListHeight)
+                if offersShowAll, fullHeight > maxListHeight || FilesStore.shared.showAll {
+                    ShowAllButton(button: fileListShowAll(on: FilesStore.shared.showAll))
                         .buttonStyle(.plain).font(.system(size: 12)).foregroundStyle(Color.accentColor)
                 }
-                Text("\(Fmt.bytes(model.selectedBytes)) of \(Fmt.bytes(model.totalBytes))")
+                Text(page.selectedLine)
                     .font(.system(size: 12)).monospacedDigit()
-                    .foregroundStyle(model.notEnoughSpace ? Color.orange : .secondary)
+                    .foregroundStyle(page.notEnoughSpace ? Color.orange : .secondary)
             }
             ScrollView {
                 VStack(spacing: 0) {
-                    ForEach(model.visibleRows, id: \.item.id) { entry in
-                        row(entry.item, level: entry.level)
-                    }
+                    ForEach(page.rows, id: \.id) { r in row(r) }
                 }
             }
             .scrollDisabled(unlimited)
@@ -98,75 +87,61 @@ struct ChoiceChecklist: View {
             .focusable()
             .focused($focused)
             .focusEffectDisabled()
-            .onKeyPress(.space) { toggleCursor(); return .handled }
-            .onKeyPress(.downArrow) { moveCursor(1); return .handled }
-            .onKeyPress(.upArrow) { moveCursor(-1); return .handled }
-            if model.notEnoughSpace {
-                Text("Not enough space at the destination").font(.system(size: 12)).foregroundStyle(Color.orange)
+            .onKeyPress(.space) { edit { $0.toggleCursor() }; return .handled }
+            .onKeyPress(.downArrow) { edit { $0.moveCursor(delta: 1) }; return .handled }
+            .onKeyPress(.upArrow) { edit { $0.moveCursor(delta: -1) }; return .handled }
+            if page.notEnoughSpace {
+                Text(page.spaceNote).font(.system(size: 12)).foregroundStyle(Color.orange)
             }
-            if showButtons {
-                HeldButtons(hasSourceFile: hasSource, active: active, canStart: model.canConfirm,
-                            startHelp: "Start downloading the ticked files",
-                            cancel: { actions.cancel(id, $0) }, start: { actions.confirm(id) })
+            if let buttons {
+                HeldButtons(actions: buttons, cancel: cancel, start: start)
             }
         }
     }
 
-    private var fullHeight: CGFloat { max(60, CGFloat(model.visibleRows.count) * 28 + 4) }
+    /// A change to the shared chooser; everything that shows it draws again.
+    private func edit(_ body: (Chooser) -> Void) {
+        guard let c = store.loaded(id) else { return }
+        store.edit { body(c) }
+    }
+
+    private var fullHeight: CGFloat { max(60, CGFloat(page.rows.count) * 28 + 4) }
     /// "Show All" is on: the list is as tall as its rows and does not scroll inside.
-    private var unlimited: Bool { offersShowAll && showAll }
+    private var unlimited: Bool { offersShowAll && FilesStore.shared.showAll }
     private var listHeight: CGFloat { unlimited ? fullHeight : min(maxListHeight, fullHeight) }
 
-    private func toggleCursor() {
-        let rows = model.visibleRows
-        guard let item = rows.first(where: { $0.item.id == cursor })?.item ?? rows.first?.item else { return }
-        cursor = item.id
-        model.toggle(item)
-    }
-
-    private func moveCursor(_ delta: Int) {
-        let rows = model.visibleRows.map(\.item.id)
-        guard !rows.isEmpty else { return }
-        let at = cursor.flatMap(rows.firstIndex(of:)) ?? (delta > 0 ? -1 : rows.count)
-        cursor = rows[min(rows.count - 1, max(0, at + delta))]
-    }
-
-    private func row(_ item: ChoiceItem, level: Int) -> some View {
-        let open = model.expanded.contains(item.id)
-        let state = model.state(item)
-        let dim = (item.inLibrary && state == .off) || item.isExtras
-        return HStack(spacing: 4) {
-            if level == 0 {
-                FoldChevron(open: open, size: 9, width: 26, height: 28, help: open ? "Hide the contents" : "Show the contents") {
-                    cursor = item.id
-                    model.toggleExpanded(item)
+    private func row(_ item: ChooserRow) -> some View {
+        HStack(spacing: 4) {
+            if item.level == 0 {
+                FoldChevron(open: item.open, size: 9, width: 26, height: 28, help: item.foldHelp, label: item.foldLabel) {
+                    edit { $0.toggleFolded(id: item.id) }
                 }
-                .opacity(item.children.isEmpty ? 0 : 1).allowsHitTesting(!item.children.isEmpty)
+                .opacity(item.foldable ? 1 : 0).allowsHitTesting(item.foldable)
             } else {
                 Spacer().frame(width: 26)
             }
-            TriCheck(state: state) { cursor = item.id; model.toggle(item) }
+            TriCheck(state: item.check, help: item.checkHelp, value: item.checkValue) { edit { $0.toggle(id: item.id) } }
                 .scaleEffect(0.85).frame(width: 22, height: 22)
             // The tap that ticks the row covers the title area only, never the chevron or the box.
             HStack(spacing: 6) {
                 Text(item.title).font(.system(size: 12.5))
-                    .foregroundStyle(dim ? .secondary : .primary)
+                    .foregroundStyle(item.dimmed ? .secondary : .primary)
                     .lineLimit(1).truncationMode(.middle)
-                if item.inLibrary {
-                    Text(item.badge).font(.system(size: 10.5)).foregroundStyle(Color.green)
+                if let badge = item.badge {
+                    Text(badge).font(.system(size: 10.5)).foregroundStyle(Color.green)
                         .padding(.horizontal, 6).padding(.vertical, 1)
                         .background(Capsule().fill(Color.green.opacity(0.16)))
                 }
                 Spacer(minLength: 4)
-                Text(Fmt.bytes(item.size)).font(.system(size: 11.5)).foregroundStyle(.secondary).monospacedDigit()
+                Text(item.size).font(.system(size: 11.5)).foregroundStyle(.secondary).monospacedDigit()
             }
             .frame(maxHeight: .infinity)
             .contentShape(Rectangle())
-            .onTapGesture { cursor = item.id; focused = true; model.toggle(item) }
+            .onTapGesture { focused = true; edit { $0.toggle(id: item.id) } }
         }
-        .padding(.leading, level == 0 ? 4 : 18).padding(.trailing, 8).frame(height: 28)
-        .background(focused && cursor == item.id ? Color.accentColor.opacity(0.18) : .clear)
+        .padding(.leading, item.level == 0 ? 4 : 18).padding(.trailing, 8).frame(height: 28)
+        .background(focused && item.cursor ? Color.accentColor.opacity(0.18) : .clear)
         .accessibilityElement(children: .contain)
-        .accessibilityValue(state == .on ? "checked" : state == .mixed ? "partly checked" : "unchecked")
+        .accessibilityValue(item.checkValue)
     }
 }

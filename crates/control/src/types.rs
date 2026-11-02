@@ -344,6 +344,10 @@ pub struct StatusDto {
     /// Can peers on the Internet reach the listening port (absent from a backend without an engine).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reachability: Option<ReachabilityDto>,
+    /// Another Seedwell app or daemon runs on this computer with a state folder of its own (a forgotten one keeps
+    /// its torrents, folders and chats running): one line naming each, its process and state folder. Absent when none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub others: Option<String>,
 }
 
 /// Can peers on the Internet reach the listening port? Built by [`crate::ops::reachability`].

@@ -79,36 +79,41 @@ struct ChatFileCardView: View {
 
     private func run(_ kind: ChatFileActionKind) {
         let (core, place, hash) = (core, place, card.hash)
-        do {
-            switch kind {
-            case .saveAs:
-                let panel = NSSavePanel()
-                panel.nameFieldStringValue = core.chatFileSaveName(place: place, hash: hash)
-                panel.canCreateDirectories = true
-                guard panel.runModal() == .OK, let url = panel.url else { return }
-                _ = try core.chatFileDownload(place: place, hash: hash, to: url.path)
-            case .showInFolder:
-                if let path = card.path { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)]) }
-            case .open:
-                let open = try core.chatFileOpen(place: place, hash: hash)
-                if let ask = open.confirm, !ChatFileCardView.confirm(ask) { return }
-                NSWorkspace.shared.open(URL(fileURLWithPath: open.path))
-            case .download, .retry, .cancel, .stopSharing:
-                _ = try ChatFileCardView.press(kind, core: core, place: place, hash: hash)
-            }
-        } catch {
+        // The core's calls run off the main thread; a failure is told in an alert.
+        func failed(_ error: Error) {
             let a = NSAlert()
             a.messageText = SyncText.message(error)
             a.runModal()
         }
+        switch kind {
+        case .saveAs:
+            let panel = NSSavePanel()
+            panel.nameFieldStringValue = core.chatFileSaveName(place: place, hash: hash)
+            panel.canCreateDirectories = true
+            guard panel.runModal() == .OK, let url = panel.url else { return }
+            Task { if case .failure(let e) = await catching({ try await core.chatFileDownload(place: place, hash: hash, to: url.path) }) { failed(e) } }
+        case .showInFolder:
+            if let path = card.path { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)]) }
+        case .open:
+            Task {
+                switch await catching({ try await core.chatFileOpen(place: place, hash: hash) }) {
+                case .failure(let e): failed(e)
+                case .success(let open):
+                    if let ask = open.confirm, !ChatFileCardView.confirm(ask) { return }
+                    NSWorkspace.shared.open(URL(fileURLWithPath: open.path))
+                }
+            }
+        case .download, .retry, .cancel, .stopSharing:
+            Task { if case .failure(let e) = await catching({ try await ChatFileCardView.press(kind, core: core, place: place, hash: hash) }) { failed(e) } }
+        }
     }
 
     /// The buttons that call the core and nothing else (also the QA command `chatfile`): the card as it stands after.
-    static func press(_ kind: ChatFileActionKind, core: Core, place: String, hash: String) throws -> ChatFileCard? {
+    nonisolated static func press(_ kind: ChatFileActionKind, core: Core, place: String, hash: String) async throws -> ChatFileCard? {
         switch kind {
-        case .download, .retry: return try core.chatFileDownload(place: place, hash: hash, to: nil)
-        case .cancel: return try core.chatFileCancel(place: place, hash: hash)
-        case .stopSharing: return try core.chatFileStopSharing(place: place, hash: hash)
+        case .download, .retry: return try await core.chatFileDownload(place: place, hash: hash, to: nil)
+        case .cancel: return try await core.chatFileCancel(place: place, hash: hash)
+        case .stopSharing: return try await core.chatFileStopSharing(place: place, hash: hash)
         case .saveAs, .showInFolder, .open: return nil
         }
     }

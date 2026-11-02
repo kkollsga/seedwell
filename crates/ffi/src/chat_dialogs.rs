@@ -398,26 +398,7 @@ pub fn chat_new_window(form: ChatNewForm) -> ChatNewWindowModel {
     }
 }
 
-#[uniffi::export]
 impl Core {
-    /// The New Channel window's form as it opens: New Channel, or Join with `prefill` (a link that opened the app, or
-    /// the pasteboard's when [`chat_looks_like_link`]) read already.
-    pub fn chat_new_form(&self, prefill: Option<String>) -> ChatNewForm {
-        let form = new_form(self.sync_follow_line_new(true));
-        match prefill {
-            Some(text) => ChatNewForm { mode: ChatNewMode::Join, ..self.chat_new_set_link(form, text) },
-            None => form,
-        }
-    }
-
-    /// The form with `text` typed or pasted as its link: read by the core (what it is, or why it is not a link this
-    /// computer can join).
-    pub fn chat_new_set_link(&self, form: ChatNewForm, text: String) -> ChatNewForm {
-        let t = text.trim();
-        let info = if t.is_empty() { None } else { self.chat_parse_link(t.to_owned()) };
-        with_link(form, text, info)
-    }
-
     /// Start: makes the channel (named as typed, trimmed, Agents as chosen; on all the user's devices when that is
     /// chosen and shown) or joins the linked one. Slow (the network): call it off the main thread. Then the host shows
     /// the channel, and for a new one its Share dialog: the next step is sharing it.
@@ -443,6 +424,28 @@ impl Core {
             ChatNewMode::Join => self.chat_join(form.link.trim().to_owned()),
         }
     }
+}
+
+#[uniffi::export]
+impl Core {
+    /// The New Channel window's form as it opens: New Channel, or Join with `prefill` (a link that opened the app, or
+    /// the pasteboard's when [`chat_looks_like_link`]) read already.
+    pub fn chat_new_form(&self, prefill: Option<String>) -> ChatNewForm {
+        let form = new_form(self.sync_follow_line_new(true));
+        match prefill {
+            Some(text) => ChatNewForm { mode: ChatNewMode::Join, ..self.chat_new_set_link(form, text) },
+            None => form,
+        }
+    }
+
+    /// The form with `text` typed or pasted as its link: read by the core (what it is, or why it is not a link this
+    /// computer can join).
+    pub fn chat_new_set_link(&self, form: ChatNewForm, text: String) -> ChatNewForm {
+        let t = text.trim();
+        let info = if t.is_empty() { None } else { self.chat_parse_link(t.to_owned()) };
+        with_link(form, text, info)
+    }
+
 }
 
 #[cfg(test)]

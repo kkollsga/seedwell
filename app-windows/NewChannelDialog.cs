@@ -25,6 +25,8 @@ sealed class NewChannelDialog
     ChatNewForm form;
     ChatNewWindowModel model;
     bool starting;
+    // What runs once the dialog has closed (only one ContentDialog may be open): the new channel's Share dialog.
+    Action? next;
 
     NewChannelDialog(App app, XamlRoot root, ChatNewForm form)
     {
@@ -88,6 +90,7 @@ sealed class NewChannelDialog
         {
             Open = null;
         }
+        d.next?.Invoke();
     }
 
     void Change(ChatNewForm next)
@@ -239,9 +242,14 @@ sealed class NewChannelDialog
             return false;
         }
         AppLog.Write($"new channel: started {channel.Name} ({channel.Id})");
-        // The channel's page. A new channel's next step is its Share dialog, which Windows does not have yet.
+        // The channel's page; a new channel's next step is its Share dialog (the Mac's), once this one has closed.
         app.Library.SelectPlace(new LibraryPlace.Chat(channel.Id, null));
         app.LibraryWindowIfCreated?.Pane.Refresh();
+        if (form.Mode == ChatNewMode.New)
+        {
+            var id = channel.Id;
+            next = () => ShareDialog.Show(app, id);
+        }
         return true;
     }
 

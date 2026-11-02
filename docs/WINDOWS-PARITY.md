@@ -32,19 +32,35 @@ C# (bundles in `Seedwell Sync/builds`, patches in `from-pc/`, messages in "Seedw
    - The page buttons, the role menu, Remove from Folder…, conflicts, gone and re-share prompts.
    - "On all my devices".
    - The page model (`sync_page_model`).
-4. **Notifications (M):** the Notifier texts, bursts, silencing and chat notices move to Rust; then Windows App notifications with click routing; the settings problems banner; the location-move and add-request prompts.
+4. **Notifications (M)** — Rust side ready (build 42): `notify.rs`, `prompts.rs`. See `docs/build-42-notify-ffi.md`.
+   - Windows App notifications from `Notices` (`event` per listener event, `chat` every `chat_poll_ms`), the click
+     through `notice_route`.
+   - The settings problems banner (`settings_banner`), the add request, location move and backlog prompts.
 5. **Settings (L, Rust first):** a Rust settings view model (groups, rows, labels, hints, choices) and parsers (rate, port, time, size, goal), with one generic C# renderer.
    - First: the Cloudflare RendezvousSection (FFI ready) and Agents (permission, activity).
    - Last: the Rules and Trackers editors.
-6. **Chat conversation page (L, Rust first):** the chat view model (markdown, runs, mail header, tags, members, toolbar).
+6. **Chat conversation page (L)** — Rust side ready (build 41): `chat_page.rs`, `chat_markdown.rs`; `Core::chat_page_read`,
+   `chat_page_model` (toolbar and ⋯ menu, message cards with Markdown runs, mail banners, tags, images and files, the
+   members panel, the composer). See `docs/build-41-ffi.md`.
 7. **File list, chooser and starting notifier (L, Rust first):** the file list's data (`FileTreeModel`) is FFI, but about
    25 of its texts and its selection and polling rules are still Swift (FileTreeViews.swift, FilesStore.swift): a file-list view
    model first; the chooser and the countdown models move to Rust too.
-8. **Tracker Info page and favorite editing (M, Rust page model first).**
-9. **Play (M):** Windows player discovery (App Paths), Automatic and the setting in Rust, `stream_url`.
+8. **Tracker Info page and favorite editing (M)** — Rust side ready (build 42): `tracker_page.rs`, `favorite_editor.rs`;
+   `Core::tracker_info_read`, `FavoriteEditor` (its `tracker_info_page` and `tracker_info_run`), `tracker_header_model`.
+   See `docs/build-42-tracker-play-ffi.md`.
+9. **Play (M)** — Rust side ready (build 42): `trs_platform::players` (Windows: App Paths, registered handlers, `PATH`;
+   unverified until Windows CI and the PC run it), `player.rs`: `Core::play` → `PlayStart`, `play_offer`, `play_players`,
+   `play_with_choices`.
 10. **Platform (L–XL):**
-    - A DPAPI / Credential Manager vault (today `FileSecrets`): first a one-time FileSecrets → vault move in Rust, and a rule
-      for a failing vault; passing a vault without it would lose the PC's folder and channel keys.
+    - The key vault: done in Rust (build 42). Without a vault passed, `secret_store` uses DPAPI-sealed files in
+      `<state>/sync/vault` (`trs_sync_net::secrets::open`, `trs_platform::secrets::Dpapi`) and copies the 0600 file
+      `sync/secrets` into it (each key put, read back and compared; a key the vault holds keeps the vault's value,
+      a different plain one is kept aside). The plain file is erased only once all match and this release has
+      started fine before (`launch-ok`), so an older build the installer goes back to still has its keys. When DPAPI
+      or the copy fails it keeps the plain file first with the vault under it and says so in
+      `Core::settings_problems`. DPAPI files rather than the Credential Manager: a credential holds at most 2,560
+      bytes and is one list per user, while the files stay in their state folder (a QA run never sees the user's
+      keys). The Windows app passes no `SecretVault`. Verified by Windows CI only.
     - An Explorer Share verb.
     - Cloud Files on-demand folders (CfRegisterSyncRoot; `sync_ondemand.rs` is host-neutral) and their states.
     - Overlays.
@@ -64,8 +80,8 @@ C# (bundles in `Seedwell Sync/builds`, patches in `from-pc/`, messages in "Seedw
 | Starting notifier | Missing | Swift | StartingModel.swift → Rust |
 | Add a Download sheet / Add Torrent File… / drag and drop | Partial / Missing | FFI `add_source`, `add_link_source`, `Core::app_commands` | LibraryPane.cs:585, 623 |
 | Move To…, custom seeding goal | Missing | FFI / Data only | Commands.swift texts |
-| Play / Play With | Missing | FFI `play_commands`, `stream_url` | No player discovery on Windows |
-| Tracker Info page, favorite editing | Placeholder | Data only | LibraryPane.cs:652, 459 |
+| Play / Play With | Missing | FFI `play_commands`, `Core::play`, `play_offer` | Discovery in Rust (build 42); start `PlayLaunch::Run` |
+| Tracker Info page, favorite editing | Placeholder | FFI `tracker_info_page`, `FavoriteEditor` | LibraryPane.cs:652, 459 |
 | Pause All, Resume All, Limit Speed | Missing | FFI `Core::app_commands` | Titles, shortcuts, enabled, check mark |
 | Move To… failure | Missing | FFI `move_failed`, `move_error` | |
 | Commands without a window | Placeholder | FFI `HostWindow`, `row_commands(…, host)`, `Library::set_host_windows` | Pass the windows Windows has |
@@ -92,8 +108,8 @@ C# (bundles in `Seedwell Sync/builds`, patches in `from-pc/`, messages in "Seedw
 | Feature | Windows | Rust ready? | Notes |
 |---|---|---|---|
 | Sidebar (channels, topics, private, unread, agents) | Done | FFI | |
-| Conversation page | Placeholder | Data only | Chat view model, markdown in Swift |
-| Mail, tags, members, toolbar | Missing | FFI / Data only | |
+| Conversation page | Placeholder | FFI `Core::chat_page_read`, `chat_page_model` | Markdown as runs (`chat_blocks`); links say Open or Route |
+| Mail, tags, members, toolbar | Missing | FFI `ChatPageModel` | Members read with `Core::sync_members` when the panel opens |
 | New Channel / Join, New Topic | Placeholder | FFI `Core::chat_new_form`, `chat_new_set_link`, `chat_new_window`, `chat_new_start`; `chat_new_topic_dialog` | |
 | Mute, Agents Yes/No | Placeholder | FFI | `chat_agents_menu` (with `failure_title`), `chat_agents_dialog` |
 | Rename, Leave, Wake Command, Delete Conversation, Share | Missing / Placeholder | FFI `chat_*_dialog`, `chat_dialog_check` | Share: FFI |
@@ -107,13 +123,13 @@ C# (bundles in `Seedwell Sync/builds`, patches in `from-pc/`, messages in "Seedw
 | Folder Sync › Cloudflare (Rendezvous) | Missing | FFI (`RendezvousView`, `sync_rendezvous_*`) |
 | Agents (allow, permission, activity, notify); command-line tool and skill | Missing | Data only / Swift |
 | Advanced (cache, verify, diagnostics, developer mode, tracker log, state folder) | Missing | Data only |
-| Problems banner, rejected settings | Missing | FFI `settings_problems` (App.xaml.cs:252) |
+| Problems banner, rejected settings | Missing | FFI `settings_banner` with `settings_problems` (App.xaml.cs:252) |
 
 ### Notifications and prompts
 | Feature | Windows | Rust ready? |
 |---|---|---|
-| Finished, error, goal, choice, added, duplicate, agent activity, chat banners, click routing | Missing (Listener.cs stubs) | Swift |
-| Add request (watch folder "Ask first"), location move, backlog offer | Missing | Swift / Data only / FFI |
+| Finished, error, goal, choice, added, duplicate, agent activity, chat banners, click routing | Missing (Listener.cs stubs) | FFI `Notices`, `notice_route` |
+| Add request (watch folder "Ask first"), location move, backlog offer | Missing | FFI `add_request_prompt`, `location_move_prompt`, `location_move_result`, `Core::backlog_prompt` |
 
 ### Platform-only
 | Mac | Windows | Size |
@@ -121,6 +137,6 @@ C# (bundles in `Seedwell Sync/builds`, patches in `from-pc/`, messages in "Seedw
 | File Provider on-demand folders | Cloud Files API | L–XL |
 | Finder badges | Cloud Files states; overlays | L |
 | Share extension, "Show in Seedwell" | Explorer verb | M |
-| Keychain | DPAPI / Credential Manager | S–M |
-| Player discovery | App Paths / registry | M |
+| Keychain | DPAPI-sealed key files in the state folder (Rust, build 42) | Done |
+| Player discovery | App Paths / registry (Rust, build 42) | M |
 | FSEvents | ReadDirectoryChangesW | Done (`crates/fswatch/src/windows.rs`) |

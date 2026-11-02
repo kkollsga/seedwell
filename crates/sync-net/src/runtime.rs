@@ -18,7 +18,7 @@ use trs_sync::folder::FolderCore;
 use trs_sync::fs::{Fs, StdFs};
 use trs_sync::global::Need;
 use trs_sync::pull::PullReport;
-use trs_sync::scan::{ScanError, ScanReport};
+use trs_sync::scan::{ScanError, ScanJob, ScanReport};
 use trs_sync_proto::ids::ShortId;
 
 use crate::shared::{Ctx, FolderShared, PENDING_SAMPLE, lock};
@@ -37,6 +37,10 @@ const RETRY_MAX: Duration = Duration::from_secs(300);
 const PULL_WINDOW: u64 = 64 << 20;
 /// Pull rounds in one go (each round re-plans; a round that does nothing ends it).
 const MAX_ROUNDS: usize = 64;
+/// A scan step holds the folder's core about this long at most (plus the one file it is on), then commits and lets go.
+const SCAN_STEP: Duration = Duration::from_millis(100);
+/// Files this big and bigger are hashed with the core let go (a few ms of reading and more).
+const HASH_APART: u64 = 4 << 20;
 
 fn now_s() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
@@ -92,6 +96,8 @@ pub async fn run(ctx: Arc<Ctx>, f: Arc<FolderShared>, mut stop: watch::Receiver<
     let mut next_full = Instant::now() + jitter(FULL_SCAN, seed);
     let mut retry: Option<(Instant, Duration)> = None;
 
+    let f2 = f.clone();
+    let _ = tokio::task::spawn_blocking(move || lock(&f2.live).ignore_file = has_ignore_file(&f2)).await;
     // A stop while starting (a folder renamed right after it was added) is noticed between the steps.
     scan(&ctx, &f, "").await;
     if *stop.borrow() {
@@ -131,7 +137,9 @@ pub async fn run(ctx: Arc<Ctx>, f: Arc<FolderShared>, mut stop: watch::Receiver<
                 pull(&ctx, &f, &mut retry).await;
             }
             _ = f.rescan.notified() => {
-                lock(&f.core).retry_unsupported();
+                // (Off the async workers: a pull or a scan step may hold the core.)
+                let f2 = f.clone();
+                let _ = tokio::task::spawn_blocking(move || lock(&f2.core).retry_unsupported()).await;
                 scan(&ctx, &f, "").await;
                 pull(&ctx, &f, &mut retry).await;
             }
@@ -201,34 +209,76 @@ async fn scan(ctx: &Arc<Ctx>, f: &Arc<FolderShared>, scope: &str) -> bool {
         return false;
     }
     set_state(f, FolderState::Scanning);
-    let (f2, scope) = (f.clone(), scope.to_string());
-    let res = tokio::task::spawn_blocking(move || {
-        let mut core = lock(&f2.core);
-        let r = core.scan(&scope);
-        let seq = core.index_state().map(|(_, s)| s).unwrap_or(0);
-        (r, seq)
-    })
-    .await;
-    let _ = ctx;
+    // In steps, the core let go between them (SPEC §7G.2, *Scanning in steps*): the app, the file provider and pulls
+    // never wait for a whole scan of a big folder, and each step's records go to the peers at once, so a sibling sees
+    // the list grow while the first scan still hashes.
+    let mut job = ScanJob::stepped(scope, SCAN_STEP, HASH_APART);
+    let mut announced = *f.local_seq.borrow();
+    let res = loop {
+        // Stopping (a move, a removal, a switch) or paused: the core is let go at once; what was recorded stays, and
+        // the next scan goes on from there (unchanged files are not read again).
+        if *f.stopped.borrow() || f.paused.load(Ordering::Relaxed) {
+            return false;
+        }
+        let f2 = f.clone();
+        let step = tokio::task::spawn_blocking(move || {
+            let mut core = lock(&f2.core);
+            let r = core.scan_step(&mut job);
+            let seq = core.index_state().map(|(_, s)| s).unwrap_or(0);
+            let local = core.local_totals().ok();
+            let fs = core.fs();
+            drop(core);
+            if let Some(local) = local {
+                lock(&f2.live).local = local;
+            }
+            // Big files are read with the core free; the next step records them.
+            if matches!(r, Ok(false)) {
+                let mut hashed = Vec::new();
+                for t in job.take_to_hash() {
+                    if *f2.stopped.borrow() {
+                        break;
+                    }
+                    hashed.push(t.run(&*fs));
+                }
+                job.hashed(hashed);
+            }
+            (r, seq, job)
+        })
+        .await;
+        let (r, seq, back) = match step {
+            Ok(x) => x,
+            Err(e) => {
+                set_error(f, format!("scan: {e}"));
+                return false;
+            }
+        };
+        job = back;
+        if seq != announced {
+            announced = seq;
+            f.local_seq.send_replace(seq);
+        }
+        match r {
+            Ok(true) => break Ok(job.into_report()),
+            Ok(false) => {}
+            Err(e) => break Err(e),
+        }
+        let wait = *lock(&ctx.scan_step_wait);
+        if !wait.is_zero() {
+            tokio::time::sleep(wait).await;
+        }
+    };
     match res {
-        Ok((Ok(report), seq)) => {
+        Ok(report) => {
             record_issues(f, &report);
             let changed = report.changed + report.deleted > 0;
-            if changed {
-                f.local_seq.send_replace(seq);
-            }
             settle(f).await;
             changed
         }
-        Ok((Err(ScanError::FolderMissing), _)) => {
+        Err(ScanError::FolderMissing) => {
             set_state(f, FolderState::Missing);
             false
         }
-        Ok((Err(ScanError::Io(e)), _)) => {
-            set_error(f, format!("scan: {e}"));
-            false
-        }
-        Err(e) => {
+        Err(ScanError::Io(e)) => {
             set_error(f, format!("scan: {e}"));
             false
         }
@@ -257,22 +307,30 @@ async fn pull(ctx: &Arc<Ctx>, f: &Arc<FolderShared>, retry: &mut Option<(Instant
                     .or_else(|| ctx2.registry.peers().into_iter().find(|p| p.device.short() == id).map(|p| p.name.clone()))
                     .unwrap_or_else(|| if id == ctx2.me.short() { lock(&ctx2.device_name).clone() } else { "another device".into() })
             };
-            let mut core = lock(&f2.core);
-            lock(&f2.live).pending = sample_pending(&core);
+            lock(&f2.live).pending = sample_pending(&lock(&f2.core));
             let mut total = PullReport::default();
             for _ in 0..MAX_ROUNDS {
+                // The core is held for one round at a time (each round's records are committed at its end): a peer's
+                // index batches, the file provider's changes and a scan step get their turn between rounds.
+                let mut core = lock(&f2.core);
                 let r = core.pull(&source, &names, PULL_WINDOW)?;
                 let done = r.done;
                 merge(&mut total, r);
                 // After each round, so the other devices hear "receiving" while big files still come.
                 if done > 0 {
                     pass_status(&ctx2, &f2.root, &core);
+                    // And what arrived is announced as it arrives.
+                    if let Ok((_, seq)) = core.index_state() {
+                        f2.local_seq.send_replace(seq);
+                    }
                 }
                 lock(&f2.live).pending = sample_pending(&core);
-                if done == 0 {
+                drop(core);
+                if done == 0 || *f2.stopped.borrow() {
                     break;
                 }
             }
+            let core = lock(&f2.core);
             let seq = core.index_state().map(|(_, s)| s).unwrap_or(0);
             // Issues of earlier pulls whose paths need nothing any more: they are settled.
             let earlier: Vec<String> = lock(&f2.live).pull_issues.keys().cloned().collect();
@@ -392,6 +450,11 @@ fn record_issues(f: &FolderShared, r: &ScanReport) {
     live.issues.truncate(1000);
 }
 
+/// Whether the folder has its own `.seedwellignore` (a stat of its disk: on a blocking thread only).
+fn has_ignore_file(f: &FolderShared) -> bool {
+    f.root.join(".seedwellignore").exists()
+}
+
 /// After a scan or a pull: up to date, or waiting for devices, from what is still needed.
 async fn settle(f: &Arc<FolderShared>) {
     let f2 = f.clone();
@@ -400,14 +463,16 @@ async fn settle(f: &Arc<FolderShared>) {
         // Copies resolved since (here, or on another device and synced): a few lstats.
         let fs = StdFs::new(f2.root.clone());
         let gone: Vec<String> = copies.into_iter().filter(|c| matches!(fs.lstat(c), Ok(None))).collect();
+        let ignore_file = has_ignore_file(&f2);
         let core = lock(&f2.core);
         // Worked out before the needs: what no device can give is not needed (counted apart).
         let unavailable = core.unavailable().map_or(0, |u| u.len() as u64);
-        (core.need_totals().unwrap_or((0, 0)), core.local_totals().unwrap_or((0, 0)), gone, sample_pending(&core), unavailable)
+        (core.need_totals().unwrap_or((0, 0)), core.local_totals().unwrap_or((0, 0)), gone, sample_pending(&core), unavailable, ignore_file)
     })
     .await;
-    let Ok((need, local, gone, pending, unavailable)) = totals else { return };
+    let Ok((need, local, gone, pending, unavailable, ignore_file)) = totals else { return };
     let mut live = lock(&f.live);
+    live.ignore_file = ignore_file;
     live.need = need;
     live.unavailable = unavailable;
     live.pending = pending;

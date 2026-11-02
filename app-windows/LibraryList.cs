@@ -167,7 +167,8 @@ sealed class LibraryList
             {
                 if (action.Command == ListCommand.ClearRecent)
                 {
-                    app.Core.ClearRecent();
+                    CoreCalls.InOrder("clear recent", app.Core.ClearRecent, refresh);
+                    return;
                 }
                 refresh();
             };
@@ -465,8 +466,7 @@ sealed class LibraryList
             var id = r.Id;
             b.Click += (_, _) =>
             {
-                if (look.Paused) app.Core.Resume([id]); else app.Core.Pause([id]);
-                refresh();
+                CoreCalls.InOrder("row pause or resume", look.Paused ? () => app.Core.Resume([id]) : () => app.Core.Pause([id]), refresh);
             };
         }
         else if (c.Title is string title)

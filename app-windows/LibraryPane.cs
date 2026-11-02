@@ -32,6 +32,7 @@ sealed class LibraryPane
     string sidebarKey = "";
     LibraryList? list;
     FolderSyncPage? syncPage;
+    ChatPage? chatPage;
     // Get Info: the card shown, the row it is for, and the border it lies in.
     InfoCard? info;
     string? infoRow;
@@ -327,8 +328,9 @@ sealed class LibraryPane
         }
         else
         {
-            // The Folder Sync page follows the core's sync state on every refresh.
+            // The Folder Sync page follows the core's sync state on every refresh, a conversation its messages.
             syncPage?.Update();
+            chatPage?.Update();
         }
     }
 
@@ -573,6 +575,9 @@ sealed class LibraryPane
         var c = Channel(place);
         switch (command)
         {
+            case SidebarCommand.ShareChannel when c is not null:
+                ShareDialog.Show(app, c.Id);
+                break;
             case SidebarCommand.TrackerInfo:
                 library.SelectPlace(place);
                 library.SetTrackerInfo(true);
@@ -581,8 +586,7 @@ sealed class LibraryPane
                 app.Core.ChatSetMuted(c.Id, command is SidebarCommand.Mute);
                 break;
             case SidebarCommand.SetFollow follow when c is not null:
-                try { app.Core.SyncSetFollow(c.Id, follow.On); }
-                catch (CoreException e) { app.Alert(new SyncAlert(TrsFfiMethods.CoreErrorMessage(e), "")); }
+                CoreCalls.InOrder("set follow", () => app.Core.SyncSetFollow(c.Id, follow.On), Refresh, e => app.Alert(new SyncAlert(e, "")));
                 break;
             case SidebarCommand.NewTopic when c is not null:
                 app.ChatDialogs.Show(TrsFfiMethods.ChatNewTopicDialog(c), c);
@@ -783,6 +787,7 @@ sealed class LibraryPane
 
     /// <summary>The Folder Sync page while shown (QA).</summary>
     internal FolderSyncPage? SyncPage => syncPage;
+    internal ChatPage? ChatPageShown => chatPage;
 
     /// <summary>The Settings page last made (QA reaches its sections).</summary>
     internal SettingsPage? SettingsPageShown { get; private set; }
@@ -794,6 +799,11 @@ sealed class LibraryPane
 
     UIElement Page(LibraryViewModel m)
     {
+        // A conversation's page reads (and marks read) only while it is shown.
+        if (m.Page != LibraryPage.Conversation)
+        {
+            chatPage = null;
+        }
         if (m.Page == LibraryPage.List && m.List is ListModel l)
         {
             listSignature = l.Signature;
@@ -810,7 +820,16 @@ sealed class LibraryPane
             syncPage = new FolderSyncPage(app);
             return syncPage.Root;
         }
-        // NEED: Tracker Info and conversations pages (later stages): the page's title for now.
+        if (m.Page == LibraryPage.Conversation)
+        {
+            // The same conversation keeps its page (the draft, the reply, the attachments) when the sidebar changes.
+            if (chatPage is null || !Equals(chatPage.Place, m.Place))
+            {
+                chatPage = new ChatPage(app, m.Place);
+            }
+            return chatPage.Root;
+        }
+        // NEED: Tracker Info (a later stage): the page's title for now.
         return Quiet(m.Page == LibraryPage.Missing ? m.Missing ?? "" : m.Title);
     }
 

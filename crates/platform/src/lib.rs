@@ -8,7 +8,10 @@ pub mod dirs;
 pub mod fs;
 pub mod ipc;
 pub mod net;
+pub mod players;
 pub mod proc;
+pub mod running;
+pub mod secrets;
 pub mod signal;
 pub mod update;
 

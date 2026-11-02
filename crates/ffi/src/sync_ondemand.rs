@@ -653,7 +653,6 @@ impl MockSync {
 /// On-demand folders (SPEC §7G.11): what the File Provider extension (through the app) and Settings call. Items are
 /// named by their identifier (`root` is the folder). Calls that change something block (a fetch waits up to
 /// `wait_ms`): call them off the main thread.
-#[uniffi::export]
 impl Core {
     /// Makes a folder on demand (its files become this computer's cache, all of them downloaded) or full again (every
     /// file is fetched; `path`, or the folder's place, must be free).
@@ -668,6 +667,14 @@ impl Core {
         self.backend.sync().add_folder_on_demand(&path)
     }
 
+    /// Joins a folder on demand: nothing is downloaded until asked for; `place` is where the host shows it.
+    pub fn sync_join_on_demand(&self, link: String, place: String) -> Result<SyncFolder, CoreError> {
+        self.backend.sync().join_on_demand(&link, &place)
+    }
+}
+
+#[uniffi::export]
+impl Core {
     /// The Add modal's note for `path` made on demand: said differently when the folder is on another disk than
     /// Seedwell's storage (its files are copied there first).
     pub fn sync_on_demand_add_note(&self, path: String) -> String {
@@ -683,11 +690,6 @@ impl Core {
             false
         };
         crate::sync_text::on_demand_add_note(other)
-    }
-
-    /// Joins a folder on demand: nothing is downloaded until asked for; `place` is where the host shows it.
-    pub fn sync_join_on_demand(&self, link: String, place: String) -> Result<SyncFolder, CoreError> {
-        self.backend.sync().join_on_demand(&link, &place)
     }
 
     /// One item, or `None` when the identifier names nothing (any more).

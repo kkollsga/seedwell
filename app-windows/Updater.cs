@@ -46,6 +46,9 @@ sealed class Updater
 
     public Updates Updates { get; }
 
+    /// <summary>The repository releases come from (SEEDWELL_UPDATE_REPO for tests).</summary>
+    internal static string Repo => Environment.GetEnvironmentVariable("SEEDWELL_UPDATE_REPO") is { Length: > 0 } r ? r : RepoUrl;
+
     /// <summary>The model changed (a check ended, an install started): the views that show it ask again.</summary>
     public event Action? Changed;
 
@@ -53,7 +56,7 @@ sealed class Updater
     {
         this.app = app;
         ui = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread();
-        var repo = Environment.GetEnvironmentVariable("SEEDWELL_UPDATE_REPO") is { Length: > 0 } r ? r : RepoUrl;
+        var repo = Repo;
         var v = Environment.OSVersion.Version;
         // Development builds (SPEC 12A): the core installs them with the installer next to the exe (install.ps1 keeps
         // this app to go back to and waits for the new one to start fine); a copy without one installs no builds.
@@ -119,9 +122,9 @@ sealed class Updater
         }
         checking = true;
         Changed?.Invoke();
-        _ = Task.Run(() =>
+        _ = Task.Run(async () =>
         {
-            try { Updates.Check(silent, App.Now()); } catch (Exception e) { AppLog.Write($"update check failed: {e.Message}"); }
+            try { await Updates.Check(silent, App.Now()); } catch (Exception e) { AppLog.Write($"update check failed: {e.Message}"); }
             ui.TryEnqueue(() =>
             {
                 checking = false;
@@ -143,10 +146,13 @@ sealed class Updater
     }
 
     /// <summary>Starts the core's installer command into the folder that holds this app; it quits and reopens the app.</summary>
-    public void Install()
+    public async void Install()
     {
         var dir = InstallDir;
-        if (Updates.Install(dir, App.Now()) is not InstallCommand cmd)
+        InstallCommand? cmd;
+        try { cmd = await Updates.Install(dir, App.Now()); }
+        catch (Exception e) { AppLog.Write($"update install failed: {e.Message}"); return; }
+        if (cmd is null)
         {
             return;
         }

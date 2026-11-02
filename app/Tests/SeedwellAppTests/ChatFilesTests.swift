@@ -18,8 +18,8 @@ import Testing
                                 actions: [ChatFileAction(kind: .download, label: "Download")])
         var m = ChatTests.message("")
         m.files = [film]
-        #expect(ChatText.preview(m) == "Film.mov · 1.2 GB")
+        #expect(chatMessagePreview(message: m, limit: 120) == "Film.mov · 1.2 GB")
         m.body = "the cut"
-        #expect(ChatText.preview(m) == "the cut", "a caption is the preview")
+        #expect(chatMessagePreview(message: m, limit: 120) == "the cut", "a caption is the preview")
     }
 }

@@ -571,7 +571,13 @@ impl GetInfoCard {
     ) -> Arc<Self> {
         // No Play line without a player.
         let play = play.filter(|_| has(&host, Some(HostWindow::Player))).map(|offer| play_commands(row.clone(), offer)).unwrap_or_default();
-        let read = Mutex::new(Read { info: backend.info(&row.id).ok(), shown_ms: None });
+        // The card opens on the host's UI thread: the torrent is read within a few milliseconds or not yet (the card
+        // shows the row's own facts meanwhile, and its first reload has the rest).
+        let (b, id) = (backend.clone(), row.id.clone());
+        let info = crate::calls::within(crate::calls::UI_WAIT, move || b.info(&id).ok()).flatten();
+        // Not read yet: due at once.
+        let shown_ms = if info.is_none() { Some(0) } else { None };
+        let read = Mutex::new(Read { info, shown_ms });
         Arc::new(Self { backend, clock, row_id: row.id.clone(), chooser_available, play, host, read })
     }
 
@@ -621,7 +627,16 @@ impl GetInfoCard {
     }
 
     /// Reads the torrent again: after a command of the card (a goal set, a tracker asked), and while it is open when
-    /// [`InfoCardModel::reload_due_ms`] says so (a slow read: off the main thread).
+    /// [`InfoCardModel::reload_due_ms`] says so. Returns at once; the read runs off the caller's thread, and the host
+    /// asks for the `model` again when it is done.
+    #[uniffi::method(name = "reload")]
+    pub async fn reload_async(self: Arc<Self>) {
+        crate::calls::apart(move || self.reload()).await
+    }
+}
+
+impl GetInfoCard {
+    /// Reads the torrent again, on this thread ([`GetInfoCard::reload_async`] for the hosts).
     pub fn reload(&self) {
         let info = self.backend.info(&self.row_id).ok();
         *self.read.lock().unwrap_or_else(|e| e.into_inner()) = Read { info, shown_ms: None };

@@ -1,82 +1,85 @@
 import SwiftUI
 
-/// Choose what to download (concept 10, SPEC §7A.6): structure groups with tri-state checkboxes,
-/// "In library" badges, quick picks, a footer with size and free space, and a primary button that
-/// names the choice. Nothing is downloaded or announced before it is confirmed.
+/// Choose what to download (concept 10, SPEC §7A.6), as the core lays it out (`Chooser.view`): structure groups with
+/// tri-state checkboxes, "In library" badges, quick picks, a footer with size and free space, and Cancel and Start.
+/// Nothing is downloaded or announced before it is confirmed. Every tick goes to the shared chooser in the core.
 struct ChooserView: View {
-    @Bindable var model: ChooserModel
+    let chooser: Chooser
+    /// Cancel would move a `.torrent` file to the Trash, so ⇧ has something to keep.
+    var hasSourceFile = false
     var confirm: () -> Void = {}
     /// The flag is ⇧-Cancel: keep the `.torrent` file (SPEC 7A.6).
     var cancel: (_ keepFile: Bool) -> Void = { _ in }
-    /// Cancel would move a `.torrent` file to the Trash, so ⇧ has something to keep.
-    var hasSourceFile = false
     var changeCategory: (Category) -> Void = { _ in }
 
     var body: some View {
+        // Read again whenever a chooser changed (here, in the notifier or in the window's list).
+        let _ = ChoiceStore.shared.revision
+        let page = chooser.view(hasSourceFile: hasSourceFile)
         VStack(alignment: .leading, spacing: 0) {
-            header
-            categoryCard.padding(.top, 14)
-            ruleCard.padding(.top, 8)
-            if let notice = model.notice {
+            header(page)
+            categoryCard(page).padding(.top, 14)
+            ruleCard(page).padding(.top, 8)
+            if let notice = page.notice {
                 Label {
                     Text(notice).font(.system(size: 13)).fixedSize(horizontal: false, vertical: true)
                 } icon: {
-                    Image(systemName: model.unsure ? "questionmark.circle.fill" : "checkmark.circle.fill")
-                        .foregroundStyle(model.unsure ? Color.orange : Color.green)
+                    Image(systemName: page.unsure ? "questionmark.circle.fill" : "checkmark.circle.fill")
+                        .foregroundStyle(page.unsure ? Color.orange : Color.green)
                 }
                 .padding(.top, 12)
             }
-            if model.quickPicks.count > 1 { quickPicks.padding(.top, 12) }
-            list.padding(.top, 10)
-            footer.padding(.top, 12)
+            if !page.picks.isEmpty { quickPicks(page).padding(.top, 12) }
+            list(page).padding(.top, 10)
+            footer(page).padding(.top, 12)
         }
         .padding(22)
         .frame(width: 640)
         .background(.background)
     }
 
-    private var header: some View {
+    private func edit(_ body: (Chooser) -> Void) {
+        ChoiceStore.shared.edit { body(chooser) }
+    }
+
+    private func header(_ page: ChooserPage) -> some View {
         VStack(alignment: .leading, spacing: 3) {
-            Text(model.origin.uppercased()).font(.system(size: 11, weight: .semibold)).tracking(0.5).foregroundStyle(.secondary)
-            Text(model.name).font(.system(size: 17, weight: .semibold)).lineLimit(2)
-            Text(model.summary).font(.system(size: 13)).foregroundStyle(.secondary)
+            Text(page.origin.uppercased()).font(.system(size: 11, weight: .semibold)).tracking(0.5).foregroundStyle(.secondary)
+            Text(page.name).font(.system(size: 17, weight: .semibold)).lineLimit(2)
+            Text(page.summary).font(.system(size: 13)).foregroundStyle(.secondary)
         }
     }
 
-    private var categoryCard: some View {
+    private func categoryCard(_ page: ChooserPage) -> some View {
         HStack(spacing: 12) {
-            Image(systemName: model.categorySymbol)
+            Image(systemName: page.category.symbol)
                 .font(.system(size: 20)).frame(width: 46, height: 46)
                 .background(RoundedRectangle(cornerRadius: 10).fill(.primary.opacity(0.08)))
             VStack(alignment: .leading, spacing: 2) {
-                Text(model.categoryTitle).font(.system(size: 14, weight: .semibold)).lineLimit(1)
-                Text(model.categoryDetail).font(.system(size: 12)).foregroundStyle(.secondary)
+                Text(page.categoryTitle).font(.system(size: 14, weight: .semibold)).lineLimit(1)
+                Text(page.categoryDetail).font(.system(size: 12)).foregroundStyle(.secondary)
             }
             Spacer()
-            Menu("Change") {
-                ForEach(Category.all, id: \.self) { c in
-                    Toggle(c.label, isOn: Binding(get: { c == model.category }, set: { _ in changeCategory(c) }))
+            Menu(page.changeTitle) {
+                ForEach(page.categories, id: \.title) { c in
+                    Toggle(c.title, isOn: Binding(get: { c.checked }, set: { _ in changeCategory(c.category) }))
                 }
             }
             .menuStyle(.button).fixedSize()
-            .help("Change what kind of content this is")
+            .help(page.changeHelp)
         }
         .padding(10)
-        .background(RoundedRectangle(cornerRadius: 12).fill((model.unsure ? Color.orange : Color.accentColor).opacity(0.14)))
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke((model.unsure ? Color.orange : Color.accentColor).opacity(0.35), lineWidth: model.unsure ? 1 : 0.5))
+        .background(RoundedRectangle(cornerRadius: 12).fill((page.unsure ? Color.orange : Color.accentColor).opacity(0.14)))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke((page.unsure ? Color.orange : Color.accentColor).opacity(0.35), lineWidth: page.unsure ? 1 : 0.5))
     }
 
     /// Concept 6: which rule applies, where the files go, what happens after.
-    @ViewBuilder private var ruleCard: some View {
-        if !model.ruleName.isEmpty || !model.destination.isEmpty {
+    @ViewBuilder private func ruleCard(_ page: ChooserPage) -> some View {
+        if !page.ruleLines.isEmpty {
             VStack(alignment: .leading, spacing: 3) {
-                if !model.ruleName.isEmpty {
-                    (Text("Rule ").foregroundStyle(.secondary) + Text(model.ruleName).fontWeight(.semibold))
-                }
-                (Text("Saves to ").foregroundStyle(.secondary) + Text(model.destination))
-                    .lineLimit(1).truncationMode(.middle)
-                if !model.thenLine.isEmpty {
-                    (Text("Then ").foregroundStyle(.secondary) + Text(model.thenLine))
+                ForEach(page.ruleLines, id: \.label) { line in
+                    (Text(line.label).foregroundStyle(.secondary) + Text(line.value).fontWeight(line.emphasized ? .semibold : nil))
+                        .lineLimit(line.emphasized ? nil : 1).truncationMode(.middle)
                 }
             }
             .font(.system(size: 13))
@@ -88,110 +91,107 @@ struct ChooserView: View {
         }
     }
 
-    private var quickPicks: some View {
+    private func quickPicks(_ page: ChooserPage) -> some View {
         HStack(spacing: 2) {
-            ForEach(model.quickPicks) { p in
-                Button { model.apply(p) } label: {
-                    Text(p.rawValue).font(.system(size: 13))
+            ForEach(page.picks, id: \.title) { p in
+                Button { edit { $0.applyPick(pick: p.pick) } } label: {
+                    Text(p.title).font(.system(size: 13))
                         .padding(.horizontal, 12).padding(.vertical, 5)
-                        .background(RoundedRectangle(cornerRadius: 7).fill(model.pick == p ? Color.primary.opacity(0.16) : .clear))
-                        .foregroundStyle(model.pick == p ? .primary : .secondary)
+                        .background(RoundedRectangle(cornerRadius: 7).fill(p.selected ? Color.primary.opacity(0.16) : .clear))
+                        .foregroundStyle(p.selected ? .primary : .secondary)
                 }
                 .buttonStyle(.plain)
-                .help("Use the \(p.rawValue) preset for what to download")
+                .help(p.help)
             }
         }
         .padding(2)
         .background(RoundedRectangle(cornerRadius: 9).fill(.primary.opacity(0.06)))
     }
 
-    private var list: some View {
+    private func list(_ page: ChooserPage) -> some View {
         ScrollView {
             VStack(spacing: 0) {
-                ForEach(Array(model.items.enumerated()), id: \.element.id) { n, item in
-                    if n > 0 { Divider().opacity(0.5) }
-                    row(item, level: 0)
-                    if model.expanded.contains(item.id) {
-                        ForEach(item.children) { child in row(child, level: 1) }
-                    }
+                ForEach(Array(page.rows.enumerated()), id: \.element.id) { n, item in
+                    if n > 0, item.level == 0 { Divider().opacity(0.5) }
+                    row(item)
                 }
             }
         }
-        .frame(height: listHeight)
+        .frame(height: listHeight(page))
         .background(RoundedRectangle(cornerRadius: 12).fill(.primary.opacity(0.05)))
         .clipShape(RoundedRectangle(cornerRadius: 12))
     }
 
     /// A ScrollView has no height of its own: size it to its rows, at most ~7 of them.
-    private var listHeight: CGFloat {
-        let h = model.items.reduce(CGFloat(0)) { $0 + 41 + (model.expanded.contains($1.id) ? CGFloat($1.children.count) * 34 : 0) }
+    private func listHeight(_ page: ChooserPage) -> CGFloat {
+        let h = page.rows.reduce(CGFloat(0)) { $0 + ($1.level == 0 ? 41 : 34) }
         return min(330, h + 4)
     }
 
-    private func row(_ item: ChoiceItem, level: Int) -> some View {
-        let state = model.state(item)
-        let dim = item.inLibrary && state == .off
-        return HStack(spacing: 10) {
-            if level == 0 {
-                FoldChevron(open: model.expanded.contains(item.id), size: 10, width: 28, height: 28,
-                            help: model.expanded.contains(item.id) ? "Hide the contents" : "Show the contents") {
-                    model.toggleExpanded(item)
+    private func row(_ item: ChooserRow) -> some View {
+        HStack(spacing: 10) {
+            if item.level == 0 {
+                FoldChevron(open: item.open, size: 10, width: 28, height: 28, help: item.foldHelp, label: item.foldLabel) {
+                    edit { $0.toggleFolded(id: item.id) }
                 }
-                .opacity(item.children.isEmpty ? 0 : 1).allowsHitTesting(!item.children.isEmpty)
+                .opacity(item.foldable ? 1 : 0).allowsHitTesting(item.foldable)
             } else {
                 Spacer().frame(width: 44)
             }
-            TriCheck(state: state) { model.toggle(item) }
+            TriCheck(state: item.check, help: item.checkHelp, value: item.checkValue) { edit { $0.toggle(id: item.id) } }
             // Only the title area ticks the row: the chevron and the box have their own buttons, and
             // a click that misses their glyphs must not fall through to this tap.
             HStack(spacing: 10) {
                 Text(item.title).font(.system(size: 14))
-                    .foregroundStyle(dim || item.isExtras ? .secondary : .primary)
+                    .foregroundStyle(item.dimmed ? .secondary : .primary)
                 if !item.detail.isEmpty {
                     Text(item.detail).font(.system(size: 13)).foregroundStyle(.secondary)
                 }
-                if item.inLibrary {
-                    Text(item.badge).font(.system(size: 12)).foregroundStyle(Color.green)
+                if let badge = item.badge {
+                    Text(badge).font(.system(size: 12)).foregroundStyle(Color.green)
                         .padding(.horizontal, 8).padding(.vertical, 2)
                         .background(Capsule().fill(Color.green.opacity(0.16)))
                 }
                 Spacer()
-                Text(Fmt.bytes(item.size)).font(.system(size: 13)).foregroundStyle(.secondary).monospacedDigit()
+                Text(item.size).font(.system(size: 13)).foregroundStyle(.secondary).monospacedDigit()
             }
             .frame(maxHeight: .infinity)
             .contentShape(Rectangle())
-            .onTapGesture { model.toggle(item) }
+            .onTapGesture { edit { $0.toggle(id: item.id) } }
         }
-        .padding(.horizontal, 12).padding(.vertical, level == 0 ? 6 : 6)
-        .frame(minHeight: level == 0 ? 40 : 34)
+        .padding(.horizontal, 12).padding(.vertical, 6)
+        .frame(minHeight: item.level == 0 ? 40 : 34)
     }
 
-    private var footer: some View {
+    private func footer(_ page: ChooserPage) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text(model.totalsLine)
-                    .font(.system(size: 13)).foregroundStyle(model.notEnoughSpace ? Color.orange : .secondary).monospacedDigit()
-                if model.notEnoughSpace { Text("Not enough space").font(.system(size: 12)).foregroundStyle(Color.orange) }
+                Text(page.totalsLine)
+                    .font(.system(size: 13)).foregroundStyle(page.notEnoughSpace ? Color.orange : .secondary).monospacedDigit()
+                if page.notEnoughSpace { Text(page.spaceWarning).font(.system(size: 12)).foregroundStyle(Color.orange) }
                 Spacer()
-                if model.awaiting {
-                    HeldButtons(hasSourceFile: hasSourceFile, canStart: model.canConfirm,
-                                startHelp: "Start downloading the ticked files", cancel: cancel, start: confirm)
+                if page.awaiting {
+                    HeldButtons(actions: page.buttons, cancel: cancel, start: confirm)
                         .fixedSize()
                 } else {
-                    Button("Cancel", role: .cancel) { cancel(false) }.keyboardShortcut(.cancelAction)
-                        .help("Close without changing anything")
-                    Button(model.primaryTitle, action: confirm)
-                        .buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction).disabled(!model.canConfirm)
-                        .help("Download the files ticked now")
+                    Button(page.buttons.cancel.title, role: .cancel) { cancel(false) }.keyboardShortcut(.cancelAction)
+                        .help(page.buttons.cancel.help)
+                    if let primary = page.buttons.start {
+                        Button(primary.title, action: confirm)
+                            .buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction).disabled(!primary.enabled)
+                            .help(primary.help)
+                    }
                 }
             }
         }
     }
 }
 
-/// A checkbox that can also be partly on (some episodes of a season).
+/// A checkbox that can also be partly on (some episodes of a season), with the core's tooltip and screen reader value.
 struct TriCheck: View {
-    let state: TriState
+    let state: FileCheck
+    var help = ""
+    var value = ""
     let action: () -> Void
 
     var body: some View {
@@ -215,8 +215,8 @@ struct TriCheck: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .help(state == .on ? "Skip this" : "Download this")
-        .accessibilityValue(state == .on ? "checked" : state == .mixed ? "partly checked" : "unchecked")
+        .help(help)
+        .accessibilityValue(value)
         .accessibilityAddTraits(.isButton)
     }
 }
@@ -237,47 +237,56 @@ struct TriCheck: View {
     func show(id: String, commands: Commands?, reopen: Bool = false) {
         guard let commands else { return }
         if let w = windows[id] { NSApp.activate(); w.makeKeyAndOrderFront(nil); return }
-        // The model is the notifier popover's too (SPEC 8.6): ticks made in one show in the other.
-        guard let model = ChoiceStore.shared.model(for: id, reopen: reopen || !isAwaiting(id, commands)) else {
-            commands.showMain(nil, id)
-            return
+        // The chooser is the notifier popover's too (SPEC 8.6): ticks made in one show in the other. The engine works it
+        // out (a look at the library, the free space) off the main thread; the window opens when it is there.
+        let reopen = reopen || !isAwaiting(id, commands)
+        Task { [weak self] in
+            let hasSource = await ChoiceStore.shared.hasSourceFile(id)
+            guard let self, windows[id] == nil else { return }
+            guard let chooser = await ChoiceStore.shared.load(id, reopen: reopen) else {
+                commands.showMain(nil, id)
+                return
+            }
+            guard windows[id] == nil else { return }
+            present(chooser, id: id, commands: commands, hasSource: hasSource)
         }
-        present(model, id: id, commands: commands)
     }
 
     private func isAwaiting(_ id: String, _ commands: Commands) -> Bool {
         commands.core.snapshot().allDownloading.first { $0.id == id }?.awaitingChoice ?? false
     }
 
-    func present(_ model: ChooserModel, id: String, commands: Commands) {
-        // The pill's menu in the popover does the same: the engine re-plans, the shared model is rebuilt.
-        let change: (Category) -> Void = { c in ChoiceStore.shared.changeCategory(id, to: c) }
+    func present(_ chooser: Chooser, id: String, commands: Commands, hasSource: Bool? = nil) {
+        let store = ChoiceStore.shared
+        // The pill's menu in the popover does the same: the engine re-plans, the shared chooser is rebuilt.
+        let change: (Category) -> Void = { c in store.changeCategory(id, to: c) }
         changers[id] = change
+        let awaiting = chooser.awaiting()
         let view = ChooserView(
-            model: model,
-            confirm: { [weak self] in
-                do {
-                    try ChoiceStore.shared.confirm(id)
-                    self?.close(id)
-                } catch { commands.alert("Couldn't start", "\(error)") }
+            chooser: chooser,
+            hasSourceFile: awaiting && (hasSource ?? store.hasSource(id)),
+            confirm: {
+                // The window closes once the engine took the ticks (`didResolve`); a start it refused is said in an alert
+                // and the window stays.
+                store.confirm(id) { error in commands.alert("Couldn't start", "\(error)") }
             },
             cancel: { [weak self] keepFile in
-                if model.awaiting {
-                    let q = cancelQuestion(name: model.name, hasSourceFile: ChoiceStore.shared.hasSource(id), keepFile: keepFile)
+                if chooser.awaiting() {
+                    let name = chooser.view(hasSourceFile: false).name
+                    let q = cancelQuestion(name: name, hasSourceFile: store.hasSource(id), keepFile: keepFile)
                     let a = NSAlert()
                     a.messageText = q.title
                     a.informativeText = q.text
                     a.addButton(withTitle: q.removeTitle)
                     a.addButton(withTitle: q.keepTitle)
                     if a.runModal() == .alertFirstButtonReturn {
-                        ChoiceStore.shared.cancel(id, keepFile: keepFile)
+                        store.cancel(id, keepFile: keepFile)
                         self?.close(id)
                     }
                 } else {
                     self?.close(id)
                 }
             },
-            hasSourceFile: model.awaiting && ChoiceStore.shared.hasSource(id),
             changeCategory: change)
         let host = NSHostingController(rootView: view)
         let w = NSWindow(contentViewController: host)
@@ -305,7 +314,7 @@ struct TriCheck: View {
         MemoryRelief.schedule()
     }
 
-    private func isShared(_ id: String) -> Bool { ChoiceStore.shared.models[id]?.awaiting == true }
+    private func isShared(_ id: String) -> Bool { ChoiceStore.shared.loaded(id)?.awaiting() == true }
 
     func windowWillClose(_ notification: Notification) {
         guard let w = notification.object as? NSWindow, let id = w.identifier?.rawValue else { return }
@@ -318,13 +327,19 @@ struct TriCheck: View {
 
     /// A watch folder in "Ask first" mode found a torrent: ask before adding it.
     func showAddRequest(_ r: AddRequestInfo, commands: Commands) {
-        let a = NSAlert()
-        a.messageText = "Add “\(r.name)”?"
-        a.informativeText = "\(r.category.label) · \(Fmt.bytes(r.totalBytes))" + (r.tracker.isEmpty ? "" : " · \(r.tracker)")
-        a.addButton(withTitle: "Add")
-        a.addButton(withTitle: "Don't Add")
+        let p = addRequestPrompt(request: r)
+        let a = Self.addRequestAlert(p)
         NSApp.activate()
-        if a.runModal() == .alertFirstButtonReturn { commands.add(r.path) }
+        if a.runModal() == .alertFirstButtonReturn { commands.add(p.path) }
+    }
+
+    static func addRequestAlert(_ p: AddRequestPrompt) -> NSAlert {
+        let a = NSAlert()
+        a.messageText = p.title
+        a.informativeText = p.text
+        a.addButton(withTitle: p.addTitle)
+        a.addButton(withTitle: p.dontAddTitle)
+        return a
     }
 
     func closeAll() {
@@ -342,6 +357,8 @@ struct FoldChevron: View {
     var width: CGFloat = 28
     var height: CGFloat = 28
     var help = ""
+    /// What a screen reader calls it ("Collapse" / "Expand", the core's words).
+    let label: String
     let action: () -> Void
 
     var body: some View {
@@ -354,6 +371,6 @@ struct FoldChevron: View {
         }
         .buttonStyle(.plain)
         .help(help)
-        .accessibilityLabel(open ? "Collapse" : "Expand")
+        .accessibilityLabel(label)
     }
 }

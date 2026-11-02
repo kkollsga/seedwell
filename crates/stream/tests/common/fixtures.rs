@@ -42,7 +42,9 @@ pub fn fixture(kind: Fx, secs: u32) -> Option<PathBuf> {
     if path.exists() {
         return Some(path);
     }
-    let tmp = dir.join(format!("{name}-{secs}s.partial.{ext}"));
+    // Each test process makes its own (nextest runs tests in separate processes, which `LOCK` does not cover): two
+    // writing one partial file made ffmpeg fail to re-open it for the faststart move. The rename is atomic.
+    let tmp = dir.join(format!("{name}-{secs}s.partial-{}.{ext}", std::process::id()));
     let st = Command::new(FFMPEG)
         .args(["-y", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc2=size=1920x1080:rate=30", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000"])
         .args(["-t", &secs.to_string(), "-c:v", "libx264", "-preset", "ultrafast", "-b:v", "4M", "-pix_fmt", "yuv420p", "-g", "60", "-c:a", "aac", "-b:a", "128k"])

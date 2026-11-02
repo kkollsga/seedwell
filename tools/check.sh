@@ -97,6 +97,10 @@ if [ -z "$(find "$stamp" -mtime -1 2>/dev/null)" ]; then
     echo "check: install cargo-sweep (cargo install cargo-sweep) so old build artifacts are removed as you go"
   fi
 fi
+# FFI names the Windows app's C# bindings cannot compile (Swift does not mind, so only Windows CI would find them).
+if [[ " $affected " == *" trs-ffi "* ]]; then
+  python3 -I tools/ffi-names.py
+fi
 if [ ${#args[@]} -gt 0 ]; then
   cargo clippy "${args[@]}" --all-targets --locked -q -- -D warnings
   cargo nextest run "${args[@]}" --locked --status-level fail --final-status-level slow ${extra[@]+"${extra[@]}"}

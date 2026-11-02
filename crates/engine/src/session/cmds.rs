@@ -210,6 +210,7 @@ impl Session {
                 let _ = reply.send(dht);
             }
             Cmd::SetExtraMappedPort(port) => self.set_extra_mapped_port(port),
+            Cmd::TestStall(d) => std::thread::sleep(d),
         }
     }
 

@@ -11,6 +11,8 @@ import os
     private(set) var settings: SettingsModel!
     private var statusMenu: StatusMenuController?
     private(set) var startingNotifier: StartingNotifier?
+    /// Which core events and chat messages become notifications, and their words (the core's).
+    private(set) var notices: Notices!
     private var mainWindow: MainWindowController?
     var mainWindowController: MainWindowController? { mainWindow }
     var statusMenuController: StatusMenuController? { statusMenu }
@@ -23,8 +25,8 @@ import os
     private var finderStatus: FinderStatusWriter?
     /// On-demand folders' File Provider domains and the extension's server (the user's own app only).
     private var fileProvider: FileProviderHost?
-    /// This build may keep folder sync's keys in the Keychain (asked once, for the app's own state only).
-    private lazy var keychainUsable = KeychainVault.available()
+    /// Files and links the system asked to open before the core had started (it starts off the main thread).
+    private var openBeforeStart: [URL] = []
     var qaChooserWindow: NSWindow? { chooserWindows.qaWindow }
     private var qa: QAControl?
     private let realHome: String
@@ -51,6 +53,8 @@ import os
     private(set) var power: PowerWatcher?
     /// The OS network path and sleep/wake, told to the engine (SPEC 7C.4c).
     private(set) var networkWatcher: NetworkWatcher?
+    /// Notices a main thread that stops answering (the app never hangs).
+    private var watchdog: HangWatchdog?
 
     init(options: LaunchOptions) {
         self.options = options
@@ -69,6 +73,7 @@ import os
         term.resume()
         termSource = term
         if let problem = options.configurationError { return fatal("Cannot start", problem) }
+        startWatchdog()
         let launchedByUser = Self.isUserLaunch(notification)
         log.notice("launch: by user \(launchedByUser), background \(self.options.background)")
         userLaunch = launchedByUser && !options.background && options.stateDir == nil && options.qaControl == nil
@@ -100,24 +105,39 @@ import os
 
     /// The previous run may still be quitting (it lingers until trackers have heard `stopped`, up to
     /// 120 s) and holds the state until then: wait for it quietly instead of failing.
+    ///
+    /// The core starts off the main thread (it opens the state, loads every torrent and reads the library once, which
+    /// takes a while for a big library): the main thread never waits for it.
     private func startCore(waitedSecs: Int) {
         let dir = options.resolvedStateDir()
-        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
-        do {
-            let coreOptions = CoreOptions(
-                configDir: dir,
-                mock: options.mock,
-                allowLoopbackTrackers: options.allowLoopbackTrackers,
-                forbiddenRoot: options.isolated ? realHome : nil)
-            // Folder sync's keys go in the Keychain for the app's own state, when this build may use it (a keychain
-            // entitlement; see KeychainVault). An ad-hoc build, a mock, QA or other isolated run keeps them in a
-            // 0600 file in its state folder, and the latter never touch the user's Keychain.
-            if options.mock || options.stateDir != nil || !keychainUsable {
-                core = try Core(options: coreOptions)
-            } else {
-                core = try Core.withSecretVault(options: coreOptions, vault: KeychainVault())
+        let coreOptions = CoreOptions(
+            configDir: dir,
+            mock: options.mock,
+            allowLoopbackTrackers: options.allowLoopbackTrackers,
+            forbiddenRoot: options.isolated ? realHome : nil)
+        // Folder sync's keys go in the Keychain for the app's own state, when this build may use it (a keychain
+        // entitlement, probed once; see KeychainVault). An ad-hoc build, a mock, QA or other isolated run keeps them in
+        // a 0600 file in its state folder, and the latter never touch the user's Keychain.
+        let mayUseKeychain = !options.mock && options.stateDir == nil
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let started = Result<Core, Error> {
+                try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+                let core = mayUseKeychain && KeychainVault.available()
+                    ? try Core.withSecretVault(options: coreOptions, vault: KeychainVault())
+                    : try Core(options: coreOptions)
+                // The first library read, which may wait for the engine: done here, so the main thread's reads show it.
+                _ = core.snapshot()
+                return core
             }
-        } catch {
+            await MainActor.run { self?.coreStarted(started, waitedSecs: waitedSecs) }
+        }
+    }
+
+    private func coreStarted(_ started: Result<Core, Error>, waitedSecs: Int) {
+        switch started {
+        case .success(let c):
+            core = c
+        case .failure(let error):
             // The control socket says "another instance"; the state database, opened first, says it is locked.
             let busy = ["another instance", "Database already open", "Cannot acquire lock"].contains { "\(error)".contains($0) }
             if busy, waitedSecs < 150 {
@@ -196,9 +216,10 @@ import os
         let chat = commands.chat
         chat.show = { place in main.show(section: place) }
         // A quiet QA run is never the active app; its window counts as seen.
-        chat.isShowing = { place in (NSApp.isActive || QuietRun.on) && main.isOpen && main.libraryModel?.section == place }
+        chat.noticeView = { NoticeView(inFront: NSApp.isActive || QuietRun.on, windowPlace: main.isOpen ? main.libraryModel?.section : nil) }
         chat.noteDirectName = { device, name in main.libraryModel?.noteDirectName(device, name) }
-        chat.start()
+        notices = Notices(core: core)
+        chat.start(notices)
         sync.showChat = { [chat] id in chat.showChannel(id) }
         sync.showFolder = { id, ask in main.show(section: .folderSync); main.libraryModel?.showSyncFolder(id, askRemove: ask) }
         FinderSetup.show = { [weak self] in self?.syncWindows.showFinderSetup() }
@@ -216,19 +237,15 @@ import os
             fileProvider = fp
             sync.fileProvider = fp
         }
-        ChoiceStore.shared.engine = ChoiceEngine(
-            load: { [core = self.core] id, reopen in try core.choice(id: id, reopen: reopen) },
-            confirm: { [core = self.core] id, files in try core.confirmChoice(id: id, files: files) },
-            cancel: { [core = self.core] id, keepFile in core.cancelHeld(id: id, keepFile: keepFile) },
-            hasSource: { [core = self.core] id in core.hasHeldSourceFile(id: id) },
-            setCategory: { [core = self.core] id, c in core.setCategory(ids: [id], category: c) })
+        let choices = Choices(core: core)
+        ChoiceStore.shared.choices = choices
         ChoiceStore.shared.didResolve = { [weak self] id in
             self?.commands.arrivals.userReselected(id)  // a running torrent's files chosen again
             self?.chooserWindows.close(id)
         }
         FilesStore.shared.onTicked = { [weak self] id in self?.commands.arrivals.userReselected(id) }
         statusMenu = StatusMenuController(core: core, commands: commands, settings: settings)
-        let notifier = StartingNotifier(commands: commands) { [weak self] in self?.statusMenu?.statusButton }
+        let notifier = StartingNotifier(commands: commands, choices: choices) { [weak self] in self?.statusMenu?.statusButton }
         startingNotifier = notifier
         statusMenu?.onWillOpen = { [weak notifier] in notifier?.stepAside() }
         commands.arrivals.onArrival = { [weak main] id in main?.newDownload(id) }
@@ -278,6 +295,9 @@ import os
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in MainActor.assumeIsolated { self?.startingNotifier?.refresh(launch: true) } }
         if options.showWindow || userLaunch { main.show() }
         if let tab = options.showSettings { main.show(settings: SettingsTab(rawValue: tab), openSettings: true) }
+        let early = openBeforeStart
+        openBeforeStart = []
+        if !early.isEmpty { application(NSApp, open: early) }
         // Opened from its disk image or Downloads: offer the move to Applications. Only in the user's own runs, never
         // in tests, QA or a --state-dir run.
         if options.stateDir == nil, !options.mock, options.qaControl == nil, !QuietRun.on {
@@ -287,46 +307,79 @@ import os
         }
     }
 
+    /// A stall of the main thread over a second is noted (the developer log's `ui-stall`, with its length and the last UI
+    /// action; stderr in debug builds and test runs). A snapshot render or QA run that hangs for two seconds fails.
+    private func startWatchdog() {
+        let testRun = options.renderSnapshots != nil || options.qaControl != nil
+        let log = self.log
+        let wd = HangWatchdog(failing: testRun) { [weak self] ms, action in
+            // On the main thread (the late beat itself).
+            MainActor.assumeIsolated {
+                let core: Core? = self?.core
+                let line = core?.uiStall(stalledMs: ms, lastAction: action) ?? uiStallLine(stalledMs: ms, lastAction: action, failing: false)
+                log.error("hang: \(line, privacy: .public)")
+                #if DEBUG
+                let toStderr = true
+                #else
+                let toStderr = testRun
+                #endif
+                if toStderr { FileHandle.standardError.write(Data("seedwell: \(line)\n".utf8)) }
+            }
+        }
+        wd.start()
+        watchdog = wd
+    }
+
     /// Seedwell in Finder (badges and the Share menu) is offered once ever, when there is a synced folder and either
     /// extension is off (macOS lets only the user switch them on). Later, Settings › Folder Sync has the way in. Not
     /// for mock, QA or other isolated runs.
     private func offerFinderBadges() {
         let marker = URL(fileURLWithPath: core.stateDir()).appendingPathComponent("finder-badges-offered")
-        guard !options.mock, options.stateDir == nil, !FileManager.default.fileExists(atPath: marker.path),
-              !(FinderStatusWriter.extensionEnabled && ShareMenu.enabled) else { return }
-        try? "offered".write(to: marker, atomically: true, encoding: .utf8)
-        syncWindows.showFinderSetup()
+        guard !options.mock, options.stateDir == nil, !FileManager.default.fileExists(atPath: marker.path) else { return }
+        // Whether the Finder extension is on is asked off the main thread: the system can take long to answer.
+        Task.detached(priority: .utility) { [weak self] in
+            let on = FinderStatusWriter.extensionEnabled
+            await MainActor.run {
+                guard let self, !(on && ShareMenu.enabled) else { return }
+                try? "offered".write(to: marker, atomically: true, encoding: .utf8)
+                self.syncWindows.showFinderSetup()
+            }
+        }
     }
 
-    /// Watch folders pick up only new files. The `.torrent` files that were already there when a
-    /// folder joined the list are offered once: "Add 5 existing torrents from Downloads?"
+    /// The `.torrent` files that were already in a watch folder when it joined the list, offered once ever (the core
+    /// decides when, and words it).
     private func offerBacklog() {
-        let marker = URL(fileURLWithPath: core.stateDir()).appendingPathComponent("backlog-offered")
-        guard !options.mock, !FileManager.default.fileExists(atPath: marker.path) else { return }
-        var offers: [(folder: WatchFolderSetting, files: [String])] = []
-        for w in settings.app.folders.watch where w.enabled {
-            let files = core.watchBacklog(folder: w.path)
-            if !files.isEmpty { offers.append((w, files)) }
+        let core = self.core!
+        // The core reads the watch folders off the main thread.
+        CoreCalls.run({ await core.backlogPrompt() }) { [weak self] p in
+            guard let self, let p else { return }
+            let a = Self.backlogAlert(p.offer)
+            NSApp.activate()
+            if a.runModal() == .alertFirstButtonReturn { for f in p.files { commands.add(f) } }
         }
-        try? "offered".write(to: marker, atomically: true, encoding: .utf8)
-        guard let offer = offers.first else { return }
-        let o = backlogOffer(count: UInt32(offer.files.count), folderPath: offer.folder.path, afterAdd: offer.folder.afterAdd)
+    }
+
+    static func backlogAlert(_ o: BacklogOffer) -> NSAlert {
         let a = NSAlert()
         a.messageText = o.title
         a.informativeText = o.text
         a.addButton(withTitle: o.addTitle)
         a.addButton(withTitle: o.laterTitle)
-        NSApp.activate()
-        if a.runModal() == .alertFirstButtonReturn { for f in offer.files { commands.add(f) } }
+        return a
     }
 
     /// Settings the shell implements itself.
     private func apply(_ s: AppSettings) {
         if Bundle.main.bundleIdentifier != nil, Bundle.main.bundlePath.hasSuffix(".app"), options.stateDir == nil {
-            let service = SMAppService.mainApp
             let want = s.general.launchAtLogin
-            if want, service.status != .enabled { try? service.register() }
-            if !want, service.status == .enabled { try? service.unregister() }
+            // The login item's status and its registration ask a system service, which can take long: off the main
+            // thread.
+            Task.detached(priority: .utility) {
+                let service = SMAppService.mainApp
+                if want, service.status != .enabled { try? service.register() }
+                if !want, service.status == .enabled { try? service.unregister() }
+            }
         }
         sleepAssertion.enabled = s.general.preventSleepWhileDownloading
         agentsAssertion.enabled = s.general.keepAwakeForAgents
@@ -335,47 +388,35 @@ import os
     }
 
     private func handle(_ event: CoreEvent) {
-        let g = settings.app.general
-        let trackers = core.snapshot().trackers
-        let silenced = { (tracker: String?, kind: HiddenNotices.Kind) in HiddenNotices.silenced(tracker, kind, in: trackers) }
         switch event {
         case .finished(let row):
-            if g.notifyFinished, !silenced(row.trackerId, .download) { Notifier.finished(row) }
+            notice(.finished(row: row))
             statusMenu?.refreshIcon()
         case .error(let id, let message):
             log.error("core error \(id ?? "-", privacy: .public): \(message, privacy: .public)")
-            let snap = core.snapshot()
-            let downloading = id.map { id in (snap.allDownloading + snap.allQueued).contains { $0.id == id } } ?? false
-            if g.notifyErrors, !silenced(id.flatMap { core.trackerOf(id: $0) }, downloading ? .download : .sharing) {
-                let name = id.flatMap { id in snap.allDownloading.first { $0.id == id }?.displayName } ?? "a transfer"
-                Notifier.failed(name, message: message, id: id)
-            }
+            notice(.error(id: id, message: message))
             statusMenu?.refreshIcon()
         case .goalReached(let row):
-            if g.notifyGoal, !silenced(row.trackerId, .sharing) { Notifier.goalReached(row.displayName) }
+            notice(.goalReached(row: row))
         case .needsChoice(let row):
-            // "Choose Files…" on a magnet link asked for this chooser: open it, no notification.
-            // The notifier popover is the notice, and holds the checklist (SPEC 8.6).
+            // The starting notifier is refreshed first: when it shows, it is the notice and holds the checklist (SPEC 8.6).
             let requested = startingNotifier?.consumeChooserRequest(row.id) == true
             startingNotifier?.refresh()
-            if startingNotifier?.isShown != true {
-                if requested { commands.showChooser(row.id) } else if !silenced(row.trackerId, .download) { Notifier.needsChoice(row) }
-            }
+            notice(.needsChoice(row: row, chooserRequested: requested, startingShown: startingNotifier?.isShown == true))
             statusMenu?.refreshIcon()
         case .autoAdded(let a):
-            // The notifier is the notification of a torrent that waits to start.
-            if core.snapshot().allDownloading.first(where: { $0.id == a.id })?.pending == nil, !silenced(core.trackerOf(id: a.id), .download) { Notifier.autoAdded(a) }
+            notice(.autoAdded(added: a))
             statusMenu?.refreshIcon()
         case .pending:
             startingNotifier?.refresh()
             statusMenu?.refreshIcon()
         case .duplicate(let name, let added):
-            Notifier.duplicate(name, trackersAdded: added)
+            notice(.duplicate(name: name, trackersAdded: UInt32(clamping: added)))
         case .addRequest(let r):
             chooserWindows.showAddRequest(r, commands: commands)
         case .agent(let a):
             settings.reloadActivity()
-            if settings.app.agents.notifyChanges { Notifier.agent(a) }
+            notice(.agent(activity: a))
         case .settingsChanged(_, let warnings, let restart):
             qaConfigReloads += 1
             settings.noteReloaded(warnings: warnings, restart: restart)
@@ -389,31 +430,52 @@ import os
         }
     }
 
-    /// SPEC §7A.5: after a finished location changed, "Move the N existing torrents (X GB) to the new location?"
+    /// What the core says about an event: post a notification, or open something.
+    private func notice(_ event: NoticeEvent) {
+        switch notices.event(event: event) {
+        case .nothing: break
+        case .post(let n): Notifier.post(n)
+        case .open(let route): open(route)
+        }
+    }
+
+    /// Opens what a notification's route names.
+    func open(_ route: NoticeRoute) {
+        switch route {
+        case .window: commands.showMain(nil, nil)
+        case .transfer(let id): commands.showMain(nil, id)
+        case .chooser(let id): commands.showChooser(id)
+        case .place(let place): commands.chat.show(place)
+        }
+    }
+
+    /// SPEC §7A.5: after a finished location changed, "Move the N existing torrents (X GB) to the new location?" One
+    /// question at a time.
     private func askToMove(count: UInt32, bytes: UInt64) {
         guard count > 0, !askingToMove else { return }
         askingToMove = true
-        defer { askingToMove = false }
-        let proposal = core.locationMoves()
-        let n = proposal.items.count
-        guard n > 0 else { return }
+        let core = self.core!
+        // What would move is worked out by the engine, off the main thread; so is the move.
+        CoreCalls.run({ await core.locationMoves() }) { [weak self] proposal in
+            guard let self else { return }
+            guard let p = locationMovePrompt(proposal: proposal) else { askingToMove = false; return }
+            let a = Self.locationMoveAlert(p)
+            NSApp.activate()
+            guard a.runModal() == .alertFirstButtonReturn else { askingToMove = false; return }
+            CoreCalls.inOrder({ await core.moveTorrents(ids: p.ids) }) { [weak self] r in
+                self?.askingToMove = false
+                if let problem = locationMoveResult(result: r) { self?.commands.alert(problem.title, problem.text) }
+            }
+        }
+    }
+
+    static func locationMoveAlert(_ p: LocationMovePrompt) -> NSAlert {
         let a = NSAlert()
-        let size = proposal.totalBytes > 0 ? " (\(Fmt.bytes(proposal.totalBytes)))" : ""
-        a.messageText = "Move the \(n) existing torrent\(n == 1 ? "" : "s")\(size) to the new location?"
-        var detail = "They keep seeding while they move."
-        if proposal.crossVolume > 0 {
-            detail += " \(proposal.crossVolume) on another disk, so their files are copied and checked first; the rest move instantly."
-        } else {
-            detail += " Same disk: the files move instantly, nothing is copied."
-        }
-        a.informativeText = detail
-        a.addButton(withTitle: "Move")
-        a.addButton(withTitle: "Don't Move")
-        NSApp.activate()
-        if a.runModal() == .alertFirstButtonReturn {
-            let r = core.moveTorrents(ids: proposal.items.map(\.id))
-            if !r.refused.isEmpty { commands.alert("Some torrents were not moved", r.refused.prefix(3).joined(separator: "\n")) }
-        }
+        a.messageText = p.title
+        a.informativeText = p.text
+        a.addButton(withTitle: p.moveTitle)
+        a.addButton(withTitle: p.dontMoveTitle)
+        return a
     }
 
     // MARK: URLs, notification clicks
@@ -421,28 +483,15 @@ import os
     /// Double-clicked .torrent files, clicked magnet: links and `seedwell://` links (invitations, the Finder and Share
     /// extensions' links) all arrive here. A file is added; a link goes where the core routes it (SPEC 7G.5).
     func application(_ application: NSApplication, open urls: [URL]) {
+        guard commands != nil else { openBeforeStart += urls; return }
         for url in urls {
             if url.isFileURL { commands.add(url.path) } else { commands.open(core.routeLink(url: url.absoluteString)) }
         }
     }
 
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
-        let id = response.notification.request.content.userInfo["transfer"] as? String
-        let info = response.notification.request.content.userInfo
-        let channel = info["channel"] as? String, topic = (info["topic"] as? String).flatMap { $0.isEmpty ? nil : $0 }
-        let direct = info["direct"] as? String
-        let isChoice = response.notification.request.identifier.hasPrefix("choice-")
-        await MainActor.run {
-            if let channel {
-                commands.chat.show(.chat(channelId: channel, topicId: topic))
-            } else if let direct {
-                commands.chat.show(.direct(deviceId: direct))
-            } else if let id, isChoice {
-                commands.showChooser(id)
-            } else {
-                commands.showMain(nil, id)
-            }
-        }
+        let click = response.notification.request.content.userInfo[Notifier.clickKey] as? String ?? ""
+        await MainActor.run { open(noticeRoute(click: click)) }
     }
 
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification) async -> UNNotificationPresentationOptions {
@@ -553,11 +602,14 @@ import os
             return .terminateCancel
         }
         quitting = true
+        // From here the main thread waits for the engine's shutdown on purpose (a modal wait of AppKit's).
+        watchdog?.stop()
         // A clean quit: this launch does not count toward a crash loop (SPEC 12A).
         UpdateCenter.shared.quitting()
         finderStatus?.stop()
         fileProvider?.stop()
-        settings.save()
+        // Saved by the shutdown thread, before the engine stops: the main thread does not wait for the file.
+        let unsaved = settings.takeUnsaved()
         startingNotifier?.close()
         statusMenu?.hide()
         mainWindow?.closeForQuit()
@@ -566,19 +618,54 @@ import os
         NSApp.setActivationPolicy(.prohibited)
         let secs: UInt32 = powerOff ? 3 : (options.mock ? 1 : 120)
         let core = self.core!
-        DispatchQueue.global(qos: .utility).async {
-            let r = core.shutdown(deadlineSecs: secs)
-            os_log("shutdown: confirmed %d, abandoned %d, finished %d", r.confirmed, r.abandoned, r.finished ? 1 : 0)
-            // The run loop waits for this reply in a modal mode, where plain GCD blocks do not run.
+        // The run loop waits for this reply in a modal mode, where plain GCD blocks do not run. Whichever comes first
+        // replies: the shutdown, or the deadline (the engine's own deadline and a margin) if the shutdown hangs.
+        let reply: @Sendable () -> Void = {
             RunLoop.main.perform(inModes: [.common, .default, .modalPanel, .eventTracking]) {
                 MainActor.assumeIsolated {
+                    guard !self.replied else { return }
+                    self.replied = true
                     // Never for an isolated (QA/dev) run: a plain relaunch would open the real state.
                     if self.reopenAfterQuit, self.options.stateDir == nil { Self.relaunchWhenGone() }
                     NSApp.reply(toApplicationShouldTerminate: true)
                 }
             }
         }
+        // Threads of their own, not the system's shared worker threads: those can all be busy (a render's animations
+        // once took every one of them, and a shutdown waiting for one never ran).
+        Self.thread("seedwell-shutdown") {
+            if let unsaved { Self.waitFor(seconds: 3) { _ = await catching { try await core.settingsSave(settings: unsaved) } } }
+            let r = core.shutdown(deadlineSecs: secs)
+            os_log("shutdown: confirmed %d, abandoned %d, finished %d", r.confirmed, r.abandoned, r.finished ? 1 : 0)
+            reply()
+        }
+        Self.thread("seedwell-shutdown-deadline") {
+            Thread.sleep(forTimeInterval: Double(secs) + 10)
+            os_log("shutdown: no answer within its deadline; quitting anyway")
+            reply()
+        }
         return .terminateLater
+    }
+
+    /// The quit has been answered (by the shutdown or its deadline).
+    private var replied = false
+
+    /// Starts `body` on a thread of its own.
+    nonisolated static func thread(_ name: String, _ body: @escaping @Sendable () -> Void) {
+        let t = Thread(block: body)
+        t.name = name
+        t.qualityOfService = .userInitiated
+        t.start()
+    }
+
+    /// Waits on this (background) thread, at most `seconds`, for `work` to finish.
+    nonisolated static func waitFor(seconds: Double, _ work: @escaping @Sendable () async -> Void) {
+        let done = DispatchSemaphore(value: 0)
+        Task.detached(priority: .userInitiated) {
+            await work()
+            done.signal()
+        }
+        _ = done.wait(timeout: .now() + seconds)
     }
 }
 
@@ -624,9 +711,9 @@ import os
         switch c.command {
         case .addTorrentFile: commands.chooseTorrentFile()
         case .addLink: commands.showAddLink()
-        case .pauseAll: commands.core.pauseAll()
-        case .resumeAll: commands.core.resumeAll()
-        case .setLimitSpeed(let on): commands.core.setAltSpeed(on: on)
+        case .pauseAll: let core = commands.core; CoreCalls.inOrder { await core.pauseAll() }
+        case .resumeAll: let core = commands.core; CoreCalls.inOrder { await core.resumeAll() }
+        case .setLimitSpeed(let on): let core = commands.core; CoreCalls.inOrder { await core.setAltSpeed(on: on) }
         }
     }
 }

@@ -400,8 +400,8 @@ import os
     private func toggleRunning(_ id: String) {
         guard let m = models[id], let running = m.running else { return }
         if m.countdown { commands.pendingCountdown(id, pause: running) }
-        else if running { core.pause(ids: [id]) }
-        else { core.resume(ids: [id]) }
+        else if running { commands.pause([id]) }
+        else { commands.resume([id]) }
         // The row follows at once; the next refresh confirms it from the engine.
         (rowItems[id]?.view as? MenuTorrentRow)?.running = !running
         models[id]?.running = !running

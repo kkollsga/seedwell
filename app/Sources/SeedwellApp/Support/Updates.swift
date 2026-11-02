@@ -98,15 +98,17 @@ import Sparkle
         panel.allowedContentTypes = [.zip]
         panel.allowsMultipleSelection = false
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        do {
-            _ = try updates.installBuild(zip: url.path, sha256: nil, nowMs: Self.nowMs)
-        } catch {
-            let a = NSAlert()
-            a.messageText = "The build was not installed"
-            a.informativeText = "\(error)"
-            a.runModal()
+        // The core reads the zip's checksum and starts the installer off the main thread.
+        let now = Self.nowMs
+        Task {
+            if case .failure(let error) = await catching({ try await updates.installBuild(zip: url.path, sha256: nil, nowMs: now) }) {
+                let a = NSAlert()
+                a.messageText = "The build was not installed"
+                a.informativeText = "\(error)"
+                a.runModal()
+            }
+            refresh()
         }
-        refresh()
     }
 
     /// The app quits the proper way: the core stops counting this launch toward a crash loop.
@@ -195,7 +197,7 @@ import Sparkle
     private func check(silent: Bool) async {
         guard let updates else { return }
         let now = Self.nowMs
-        let run = Task.detached { updates.check(silent: silent, nowMs: now) }
+        let run = Task { await updates.check(silent: silent, nowMs: now) }
         try? await Task.sleep(for: .milliseconds(50))
         refresh()
         await run.value
@@ -219,15 +221,19 @@ import Sparkle
     /// Starts the installer the core names, in a shell of its own session; it quits this app, replaces the bundle and
     /// reopens it. The core reports a failure (it could not start, or the app still runs after 90 s).
     func install() {
-        guard let updates, let c = updates.install(installDir: Bundle.main.bundleURL.deletingLastPathComponent().path, nowMs: Self.nowMs) else { return }
-        let log = URL(fileURLWithPath: c.log)
-        do {
-            try FileManager.default.createDirectory(at: log.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try Spawn.detached(argv: c.argv, env: c.env.map { ($0.name, $0.value) }, log: log)
-        } catch {
-            updates.installFailed()
+        guard let updates else { return }
+        let (dir, now) = (Bundle.main.bundleURL.deletingLastPathComponent().path, Self.nowMs)
+        Task {
+            guard let c = await updates.install(installDir: dir, nowMs: now) else { return }
+            let log = URL(fileURLWithPath: c.log)
+            do {
+                try FileManager.default.createDirectory(at: log.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try Spawn.detached(argv: c.argv, env: c.env.map { ($0.name, $0.value) }, log: log)
+            } catch {
+                updates.installFailed()
+            }
+            refresh()
         }
-        refresh()
     }
 
     func revealLog() {

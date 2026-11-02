@@ -42,6 +42,13 @@ release procedure.
   draws:** user-visible text, formatting, ordering, state machines, validation and polling policy belong in Rust and
   reach the app as ready view models. Swift keeps drawing and OS services only; a rule moved to Rust is deleted in
   Swift. Nothing outside a platform seam names an operating system.
+- **Edit `app-windows/` files with tools that keep their line endings** (CRLF in the PC's checkout): the editor's own
+  edit tool, or PowerShell. Never `sed -i` (or another tool that writes the file anew): it changes every line ending
+  and the whole file shows as changed.
+- **Commands for a person on Windows come in both forms**: help, skill text, docs and chat messages that give a
+  command to type on Windows give the PowerShell form and the bash form (Git Bash, which agents on the PC run), or
+  only the bash form when it is for an agent. Example: `app-windows\dev-build.ps1 -To <folder>` in PowerShell is
+  `powershell.exe -NoProfile -ExecutionPolicy Bypass -File app-windows/dev-build.ps1 -To <folder>` from bash.
 
 ## Bugs
 
@@ -82,7 +89,10 @@ release procedure.
   side) or one the user set to Yes, tagged "agents" in the user's app, where the user reads every message. Never
   start a channel or daemon the user can't see. Seedwell development talk goes in the channel **Seedwell
   Development** only (follow it with `seedwell chat watch "Seedwell Development"` in the background); the old
-  OneDrive files (mac*.md, windows.md), `BRIDGE.txt` notes and the old "Bridge" channel are retired. Files (builds,
+  OneDrive files (mac*.md, windows.md), `BRIDGE.txt` notes and the old "Bridge" channel are retired. Run every
+  `seedwell chat watch` (and `mail watch`) as the harness's background task and read its output when it ends; never
+  detach it (`&`, nohup) or throw its output away: what it printed is no longer unread, so an agent that does not
+  read it loses those messages. One `watch --unread` per agent name and place: a second is refused while one runs. Files (builds,
   patches) go through the shared Seedwell Sync folder.
 - **Agents manage the user's app through the `seedwell` CLI**: they may switch Settings › General › Updates ›
   Allow development builds on and off (`seedwell update dev-builds on|off`) and install development builds (SPEC
@@ -91,7 +101,8 @@ release procedure.
   (its own agent) runs `seedwell update watch "<Seedwell Sync folder>/builds"` once, and
   `tools/sysguard/heavy.sh tools/dev-build.sh --to "<Seedwell Sync folder>/builds"` puts the Mac's build there signed
   with the build key (the Mac's Keychain). For Windows the PC's agent runs `app-windows\dev-build.ps1 -To <that
-  folder>` and posts the zip's name and SHA-256 in the agent channel; the Mac's agent signs it in with
+  folder>` (from bash: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File app-windows/dev-build.ps1 -To <that
+  folder>`) and posts the zip's name and SHA-256 in the agent channel; the Mac's agent signs it in with
   `tools/sysguard/heavy.sh tools/build-sign.sh add <folder> <zip> --sha256 <HEX>` (only a checksum its builder
   posted). Devices install only builds signed with the build key (and on a Mac, Developer ID signed). After a
   release is published, switch development builds off on every device so each goes back to the release. Never

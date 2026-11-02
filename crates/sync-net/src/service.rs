@@ -480,6 +480,7 @@ impl SyncHandle {
             chat_events: tokio::sync::broadcast::channel(1024).0,
             direct,
             hold_wait: Mutex::new(Duration::from_secs(10)),
+            scan_step_wait: Mutex::new(Duration::ZERO),
             silent_ondemand: AtomicBool::new(false),
             folder_gen: std::sync::atomic::AtomicU64::new(0),
             file_hooks: crate::files::Hooks::default(),
@@ -1667,8 +1668,10 @@ impl SyncHandle {
     pub fn activity(&self, id: &FolderId) -> Result<Activity, SyncError> {
         let f = self.inner.ctx.registry.folder(id).ok_or(SyncError::NotFound)?;
         let local = lock(&self.inner.cfg).folders.iter().any(|e| e.id == id.to_string() && !e.ignore.is_empty());
-        let own_ignores = local || f.root.join(".seedwellignore").exists();
+        // (The file is looked for by the folder's runtime: the folder's disk may be slow or gone, and this is asked
+        // every few seconds from the app's main thread.)
         let live = lock(&f.live);
+        let own_ignores = local || live.ignore_file;
         Ok(Activity {
             pending: live.pending.0.clone(),
             pending_more: live.pending.1,
@@ -2801,6 +2804,12 @@ impl SyncHandle {
     #[doc(hidden)]
     pub fn test_hold_wait(&self, wait: Duration) {
         *lock(&self.inner.ctx.hold_wait) = wait;
+    }
+
+    /// **Tests only:** each scan step is followed by a pause this long, the folder's core let go (a long first scan).
+    #[doc(hidden)]
+    pub fn test_scan_step_wait(&self, wait: Duration) {
+        *lock(&self.inner.ctx.scan_step_wait) = wait;
     }
 
     /// **Tests only:** files of a folder with a free in progress here.

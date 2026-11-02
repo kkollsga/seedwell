@@ -2,207 +2,752 @@ using Microsoft.UI;
 using Microsoft.UI.Text;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Media;
 using uniffi.trs_ffi;
 
 namespace Seedwell;
 
 /// <summary>
-/// The library window's Folder Sync page, a first version until the Mac's page model lands (its steps 2-6): the folders
-/// on the left (the Folder Sync menu's rows: badge, name, status), and the chosen folder on the right (name, path, the
-/// core's status line, this PC's role, its members with the core's member lines and roles, and its issues). Every text
-/// is the core's. NEED from Rust: the page model itself (selection, section titles "Members" / "Conflicts" / "Issues",
-/// the "(this PC)" marker, the member's display name, Share… / Edit… / Stop Syncing… and conflict actions).
+/// The library window's Folder Sync page (SPEC 7G.5, the Mac's SyncPage), drawn from the core's <c>sync_page_model</c>
+/// (trs-ffi sync_page.rs): the folders on the left with their context menus and Add Folder…, and the selected folder on
+/// the right: its header and buttons, where it is, its status, the devices gone and Share Again, the Stop Syncing
+/// question, and its Members, Conflicts and Issues. What is there, every word and what each item does are the core's;
+/// this draws it, reads the members (every 2 s) and conflicts (every 10 s) off the UI thread, and runs the
+/// <c>SyncPageCommand</c>s, asking an item's question first.
 /// </summary>
 sealed class FolderSyncPage
 {
     readonly App app;
-    readonly Grid root = new() { ColumnSpacing = 0 };
-    readonly StackPanel list = new() { Padding = new Thickness(12, 4, 12, 12), Spacing = 2 };
-    readonly StackPanel detail = new() { Padding = new Thickness(24, 8, 24, 24), Spacing = 6 };
-    string? chosen;
+    // The page's own Stop Syncing question, separate from the tray's.
+    readonly SyncRemoval removal = new();
+    readonly Grid root = new();
+    readonly DispatcherTimer timer = new() { Interval = TimeSpan.FromSeconds(1) };
+    string? selected;
+    SyncMember[] members = [];
+    SyncConflict[] conflicts = [];
+    SyncPageModel? model;
     string drawn = "";
+    // When the members and conflicts were last read (the page model's MembersRefreshMs / ConflictsRefreshMs pace them).
+    DateTime membersRead = DateTime.MinValue;
+    DateTime conflictsRead = DateTime.MinValue;
 
     public UIElement Root => root;
 
     public FolderSyncPage(App app)
     {
         this.app = app;
-        root.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(320) });
-        root.ColumnDefinitions.Add(new ColumnDefinition());
-        root.Children.Add(new ScrollViewer { Content = list });
-        var right = new ScrollViewer { Content = detail };
-        Grid.SetColumn(right, 1);
-        root.Children.Add(right);
-        Update();
-    }
-
-    /// <summary>Redraws from the core's sync snapshot when anything in it changed (asked on every model refresh).</summary>
-    public void Update()
-    {
-        SyncSnapshot snapshot;
-        try { snapshot = app.Core.SyncSnapshot(); } catch { return; }
-        // In the core's order (the Folder Sync menu's rows), not the snapshot's.
-        var order = TrsFfiMethods.SyncMenuModel(snapshot, app.SyncRemoval, App.HostWindows).Rows.Select((r, i) => (r.Id, i)).ToDictionary(x => x.Id, x => x.i);
-        var folders = snapshot.Folders.OrderBy(f => order.TryGetValue(f.Id, out var i) ? i : int.MaxValue).ToArray();
-        if (chosen is null || folders.All(f => f.Id != chosen))
+        timer.Tick += (_, _) =>
         {
-            chosen = folders.FirstOrDefault()?.Id;
-        }
-        FollowLine? follow = null;
-        if (chosen is string id)
-        {
-            try { follow = app.Core.SyncFollowLine(id); } catch (Exception e) { AppLog.Write($"follow line failed: {e.Message}"); }
-        }
-        var key = string.Join("|", folders.Select(f => $"{f.Id}:{TrsFfiMethods.SyncFolderSubtitle(f)}:{f.Connected}:{f.Members}")) + $"#{chosen}#{follow}";
-        if (key == drawn)
-        {
-            return;
-        }
-        drawn = key;
-        list.Children.Clear();
-        foreach (var f in folders)
-        {
-            list.Children.Add(FolderRow(f, f.Id == chosen));
-        }
-        detail.Children.Clear();
-        if (folders.FirstOrDefault(f => f.Id == chosen) is SyncFolder folder)
-        {
-            Detail(folder, snapshot, follow);
-        }
-    }
-
-    /// <summary>
-    /// "On all my devices" (SPEC §7G.1 "Your devices", the Mac's FollowToggle): the core's title, the line under it, its
-    /// help as the tooltip, and whether it may be switched.
-    /// </summary>
-    UIElement Follow(string id, FollowLine line)
-    {
-        var s = new StackPanel { Spacing = 2, Margin = new Thickness(0, 8, 0, 0) };
-        var toggle = new ToggleSwitch { Header = line.Title, IsOn = line.On, IsEnabled = line.Enabled };
-        if (line.Help.Length > 0)
-        {
-            ToolTipService.SetToolTip(toggle, line.Help);
-        }
-        toggle.Toggled += (_, _) => SetFollow(id, toggle.IsOn);
-        s.Children.Add(toggle);
-        if (line.Line.Length > 0)
-        {
-            s.Children.Add(new TextBlock { Text = line.Line, FontSize = 12, Opacity = 0.7, TextWrapping = TextWrapping.Wrap });
-        }
-        return s;
-    }
-
-    /// <summary>Puts the folder on all the user's devices, or stops that (nothing is deleted anywhere).</summary>
-    internal void SetFollow(string id, bool on)
-    {
-        try
-        {
-            app.Core.SyncSetFollow(id, on);
-        }
-        catch (CoreException e)
-        {
-            // The core's sentence as the alert's message, as the Mac's.
-            app.Alert(new SyncAlert(TrsFfiMethods.CoreErrorMessage(e), ""));
-        }
-        drawn = "";
+            // The core's pace, with the Mac's leeway of one refresh (200 ms).
+            if (model is not SyncPageModel m) return;
+            var now = DateTime.UtcNow;
+            if ((now - membersRead).TotalMilliseconds + 200 >= m.MembersRefreshMs) LoadMembers();
+            if ((now - conflictsRead).TotalMilliseconds + 200 >= m.ConflictsRefreshMs) LoadConflicts();
+        };
+        root.Loaded += (_, _) => timer.Start();
+        root.Unloaded += (_, _) => timer.Stop();
         Update();
     }
 
     /// <summary>The folder shown on the right (QA).</summary>
-    internal string? Chosen => chosen;
+    internal string? Chosen => model?.Selected;
 
-    /// <summary>Shows folder <paramref name="id"/> on the right (a seedwell://folder/ link), as a click on its row.</summary>
+    /// <summary>The model last drawn (QA).</summary>
+    internal SyncPageModel? Model => model;
+
+    /// <summary>Shows folder <paramref name="id"/> on the right (a click on its row, a seedwell://folder/ link).</summary>
     internal void Choose(string id)
     {
-        chosen = id;
+        if (selected == id)
+        {
+            return;
+        }
+        selected = id;
+        members = [];
+        conflicts = [];
+        Update();
+        LoadMembers();
+        LoadConflicts();
+    }
+
+    /// <summary>Asks the core for the page and redraws when its signature changed (on every model refresh).</summary>
+    public void Update()
+    {
+        SyncPageModel m;
+        try
+        {
+            var input = new SyncPageInput(app.Core.SyncSnapshot(), selected, members, conflicts, app.Core.ChatChannels(), false, (ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+            m = TrsFfiMethods.SyncPageModel(input, removal, new Clock(), App.HostWindows, App.HostFeatures);
+        }
+        catch (Exception e)
+        {
+            AppLog.Write($"sync page failed: {e.Message}");
+            return;
+        }
+        model = m;
+        if (m.Selected != selected)
+        {
+            // The core's choice (none asked, or gone): the first folder. Its members and conflicts are read for it.
+            selected = m.Selected;
+            members = [];
+            conflicts = [];
+            LoadMembers();
+            LoadConflicts();
+        }
+        if (m.Signature == drawn)
+        {
+            return;
+        }
+        drawn = m.Signature;
+        Draw(m);
+    }
+
+    void Redraw()
+    {
         drawn = "";
         Update();
     }
 
-    UIElement FolderRow(SyncFolder f, bool on)
+    void LoadMembers()
     {
-        var g = new Grid { ColumnSpacing = 10, Padding = new Thickness(10, 8, 10, 8), CornerRadius = new CornerRadius(6) };
-        g.Background = on ? (Brush)Application.Current.Resources["SubtleFillColorSecondaryBrush"] : new SolidColorBrush(Colors.Transparent);
-        g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(20) });
-        g.ColumnDefinitions.Add(new ColumnDefinition());
-        var badge = new Grid { Width = 16, Height = 16, VerticalAlignment = VerticalAlignment.Center };
-        FlyoutWindow.SetBadge(badge, TrsFfiMethods.SyncFolderBadge(f));
-        g.Children.Add(badge);
-        var text = new StackPanel();
-        text.Children.Add(new TextBlock { Text = f.Name, FontWeight = on ? FontWeights.SemiBold : FontWeights.Normal, TextTrimming = TextTrimming.CharacterEllipsis });
-        text.Children.Add(new TextBlock { Text = TrsFfiMethods.SyncFolderSubtitle(f), FontSize = 12, Opacity = 0.65, TextTrimming = TextTrimming.CharacterEllipsis });
-        Grid.SetColumn(text, 1);
-        g.Children.Add(text);
-        var id = f.Id;
-        g.Tapped += (_, _) => { chosen = id; drawn = ""; Update(); };
+        if (selected is not string id)
+        {
+            return;
+        }
+        membersRead = DateTime.UtcNow;
+        _ = Task.Run(() => app.Core.SyncMembers(id)).ContinueWith(t =>
+        {
+            if (t.IsCompletedSuccessfully) root.DispatcherQueue.TryEnqueue(() => { if (selected == id) { members = t.Result; Update(); } });
+        });
+    }
+
+    void LoadConflicts()
+    {
+        if (selected is not string id)
+        {
+            return;
+        }
+        conflictsRead = DateTime.UtcNow;
+        _ = Task.Run(() => app.Core.SyncConflicts(id)).ContinueWith(t =>
+        {
+            if (t.IsCompletedSuccessfully) root.DispatcherQueue.TryEnqueue(() => { if (selected == id) { conflicts = t.Result; Update(); } });
+        });
+    }
+
+    // ------------------------------------------------------------------------------------------------ drawing
+
+    static Brush Res(string key) => (Brush)Application.Current.Resources[key];
+
+    static TextBlock Faint(string text, double size = 12) => new() { Text = text, FontSize = size, Foreground = Res("TextFillColorSecondaryBrush"), TextWrapping = TextWrapping.Wrap };
+
+    void Draw(SyncPageModel m)
+    {
+        root.Children.Clear();
+        root.ColumnDefinitions.Clear();
+        if (m.Empty is SyncPageEmpty e)
+        {
+            var s = new StackPanel { Spacing = 10, HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 60, 0, 0) };
+            s.Children.Add(new TextBlock { Text = e.Text, FontSize = 13, Foreground = Res("TextFillColorSecondaryBrush"), HorizontalAlignment = HorizontalAlignment.Center });
+            if (e.Add is SyncMenuItem add)
+            {
+                var b = new Button { Content = add.Title, HorizontalAlignment = HorizontalAlignment.Center };
+                Help(b, add.Help);
+                b.Click += (_, _) => Run(new SyncPageCommand.AddFolder(), null);
+                s.Children.Add(b);
+            }
+            root.Children.Add(s);
+            return;
+        }
+        root.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(260) });
+        root.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        root.ColumnDefinitions.Add(new ColumnDefinition());
+        root.Children.Add(FolderList(m));
+        var divider = new Microsoft.UI.Xaml.Shapes.Rectangle { Width = 1, Fill = Res("DividerStrokeColorDefaultBrush") };
+        Grid.SetColumn(divider, 1);
+        root.Children.Add(divider);
+        if (m.Page is SyncFolderPage p)
+        {
+            var right = new ScrollViewer { Content = Page(p) };
+            Grid.SetColumn(right, 2);
+            root.Children.Add(right);
+        }
+    }
+
+    UIElement FolderList(SyncPageModel m)
+    {
+        var g = new Grid();
+        g.RowDefinitions.Add(new RowDefinition());
+        g.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        var list = new StackPanel { Padding = new Thickness(8, 10, 8, 10), Spacing = 2 };
+        foreach (var f in m.Folders)
+        {
+            list.Children.Add(FolderRow(f));
+        }
+        g.Children.Add(new ScrollViewer { Content = list });
+        if (m.Add is SyncMenuItem add)
+        {
+            var line = new StackPanel { BorderBrush = Res("DividerStrokeColorDefaultBrush"), BorderThickness = new Thickness(0, 1, 0, 0) };
+            var b = new HyperlinkButton { Margin = new Thickness(6, 4, 6, 4), Foreground = Res("TextFillColorSecondaryBrush") };
+            var label = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
+            label.Children.Add(new FontIcon { Glyph = "", FontSize = 12 });
+            label.Children.Add(new TextBlock { Text = add.Title, FontSize = 12.5 });
+            b.Content = label;
+            Help(b, add.Help);
+            b.Click += (_, _) => Run(new SyncPageCommand.AddFolder(), null);
+            line.Children.Add(b);
+            Grid.SetRow(line, 1);
+            g.Children.Add(line);
+        }
         return g;
     }
 
-    void Detail(SyncFolder f, SyncSnapshot snapshot, FollowLine? follow)
+    UIElement FolderRow(SyncPageFolderRow f)
     {
-        detail.Children.Add(new TextBlock { Text = f.Name, FontSize = 22, FontWeight = FontWeights.SemiBold });
-        // The path in the secondary colour, a magnifier after it that shows the folder in File Explorer (the Mac's).
-        var pathLine = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4 };
-        pathLine.Children.Add(new TextBlock { Text = f.Path, FontSize = 12, Foreground = (Brush)Application.Current.Resources["TextFillColorSecondaryBrush"], VerticalAlignment = VerticalAlignment.Center, IsTextSelectionEnabled = true });
+        var g = new Grid { ColumnSpacing = 9, Padding = new Thickness(8, 6, 8, 6), CornerRadius = new CornerRadius(6) };
+        g.Background = f.Selected ? Res("SubtleFillColorSecondaryBrush") : new SolidColorBrush(Colors.Transparent);
+        g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        g.ColumnDefinitions.Add(new ColumnDefinition());
+        var badge = new Grid { Width = 16, Height = 16, VerticalAlignment = VerticalAlignment.Center };
+        FlyoutWindow.SetBadge(badge, f.Badge);
+        g.Children.Add(badge);
+        var text = new StackPanel { Spacing = 1 };
+        text.Children.Add(new TextBlock { Text = f.Title, FontSize = 13, TextTrimming = TextTrimming.CharacterEllipsis });
+        text.Children.Add(new TextBlock { Text = f.Subtitle, FontSize = 11.5, Foreground = Res("TextFillColorSecondaryBrush"), TextTrimming = TextTrimming.CharacterEllipsis });
+        Grid.SetColumn(text, 1);
+        g.Children.Add(text);
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(g, f.AccessibilityLabel);
+        var id = f.Id;
+        g.Tapped += (_, _) => Choose(id);
+        if (f.Menu.Length > 0)
+        {
+            g.ContextFlyout = Menu(f.Menu, id);
+        }
+        return g;
+    }
+
+    UIElement Page(SyncFolderPage p)
+    {
+        var s = new StackPanel { Padding = new Thickness(26, 22, 26, 22) };
+        s.Children.Add(Header(p));
+        if (p.Gone.Length > 0 || p.Reshare is not null)
+        {
+            s.Children.Add(Away(p));
+        }
+        if (p.Removal is SyncMenuConfirm r)
+        {
+            s.Children.Add(RemoveStrip(r));
+        }
+        var members = Section(s, p.Members.Title);
+        if (p.Members.Empty is string none)
+        {
+            members.Children.Add(Faint(none, 13));
+        }
+        Rows(members, p.Members.Rows.Select(m => MemberRow(m, p.FolderId)));
+        if (p.Conflicts is SyncPageConflicts c)
+        {
+            var conflicts = Section(s, c.Title);
+            if (c.Empty is string noConflicts)
+            {
+                conflicts.Children.Add(Faint(noConflicts, 13));
+            }
+            Rows(conflicts, c.Rows.Select(row => ConflictRow(row, p.FolderId)));
+        }
+        if (p.Issues is SyncPageIssues issues)
+        {
+            var section = Section(s, issues.Title);
+            Rows(section, issues.Rows.Select(i =>
+            {
+                var line = new StackPanel { Spacing = 2, Padding = new Thickness(0, 6, 0, 6) };
+                // No path: the issue is the whole folder's (its reason alone).
+                if (i.Path is string path)
+                {
+                    line.Children.Add(new TextBlock { Text = path, FontSize = 13, TextTrimming = TextTrimming.CharacterEllipsis });
+                }
+                line.Children.Add(Faint(i.Reason, 11.5));
+                return (UIElement)line;
+            }));
+        }
+        return s;
+    }
+
+    UIElement Header(SyncFolderPage p)
+    {
+        var s = new StackPanel { Spacing = 4 };
+        var top = new Grid { ColumnSpacing = 8 };
+        top.ColumnDefinitions.Add(new ColumnDefinition());
+        top.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        top.Children.Add(new TextBlock { Text = p.Title, FontSize = 20, FontWeight = FontWeights.SemiBold, TextTrimming = TextTrimming.CharacterEllipsis, VerticalAlignment = VerticalAlignment.Center });
+        var buttons = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
+        foreach (var b in p.Buttons)
+        {
+            buttons.Children.Add(PageButton(b, p.FolderId));
+        }
+        Grid.SetColumn(buttons, 1);
+        top.Children.Add(buttons);
+        s.Children.Add(top);
+
+        // Where it is in the secondary colour, the magnifier beside it.
+        var place = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4 };
+        place.Children.Add(new TextBlock { Text = p.Place, FontSize = 12.5, Foreground = Res("TextFillColorSecondaryBrush"), TextTrimming = TextTrimming.CharacterEllipsis, VerticalAlignment = VerticalAlignment.Center, IsTextSelectionEnabled = true });
         var reveal = new Button { Content = new FontIcon { Glyph = "", FontSize = 12 }, Padding = new Thickness(4), Background = new SolidColorBrush(Colors.Transparent), BorderThickness = new Thickness(0), VerticalAlignment = VerticalAlignment.Center };
-        // NEED: the magnifier's help and name from Rust ("Show in File Explorer").
-        reveal.Click += (_, _) => System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("explorer.exe", $"\"{f.Path}\"") { UseShellExecute = true });
-        pathLine.Children.Add(reveal);
-        detail.Children.Add(pathLine);
-        detail.Children.Add(new TextBlock { Text = $"{TrsFfiMethods.SyncFolderSubtitle(f)} · {TrsFfiMethods.SyncRoleLabel(f.Role)}", Opacity = 0.75, TextWrapping = TextWrapping.Wrap });
-        if (f.Error is string error)
-        {
-            detail.Children.Add(new TextBlock { Text = error, Foreground = (Brush)Application.Current.Resources["SystemFillColorCriticalBrush"], TextWrapping = TextWrapping.Wrap });
-        }
-        if (follow is { Shown: true } fl)
-        {
-            detail.Children.Add(Follow(f.Id, fl));
-        }
+        Help(reveal, p.Reveal.Help.Length > 0 ? p.Reveal.Help : p.Reveal.Title);
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(reveal, p.Reveal.AccessibilityLabel ?? p.Reveal.Title);
+        reveal.Click += (_, _) => Press(p.Reveal, p.FolderId);
+        place.Children.Add(reveal);
+        s.Children.Add(place);
 
-        SyncMember[] members;
-        try { members = TrsFfiMethods.SyncMembersOrdered(app.Core.SyncMembers(f.Id)); } catch { members = []; }
-        if (members.Length > 0)
+        var status = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6, Margin = new Thickness(0, 2, 0, 0) };
+        var badge = new Grid { Width = 14, Height = 14, VerticalAlignment = VerticalAlignment.Center };
+        FlyoutWindow.SetBadge(badge, p.Badge);
+        status.Children.Add(badge);
+        status.Children.Add(new TextBlock { Text = p.Status, FontSize = 12.5, TextWrapping = TextWrapping.Wrap, VerticalAlignment = VerticalAlignment.Center });
+        s.Children.Add(status);
+        if (p.Error is string error)
         {
-            detail.Children.Add(new Microsoft.UI.Xaml.Shapes.Rectangle { Height = 1, Margin = new Thickness(0, 14, 0, 6), Fill = (Brush)Application.Current.Resources["DividerStrokeColorDefaultBrush"] });
+            s.Children.Add(new TextBlock { Text = error, FontSize = 12, Foreground = Res("SystemFillColorCriticalBrush"), TextWrapping = TextWrapping.Wrap });
         }
-        foreach (var m in members)
+        if (p.Note is string note)
         {
-            var device = snapshot.Devices.FirstOrDefault(d => d.Id == m.DeviceId);
-            var row = new Grid { ColumnSpacing = 12, Padding = new Thickness(0, 6, 0, 6) };
-            row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            row.ColumnDefinitions.Add(new ColumnDefinition());
-            row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            row.Children.Add(new FontIcon { Glyph = m.IsMe ? "" : m.Online ? "" : "", FontSize = 16, Opacity = m.Online || m.IsMe ? 1 : 0.5, VerticalAlignment = VerticalAlignment.Center });
-            var who = new StackPanel();
-            who.Children.Add(new TextBlock { Text = m.Name, FontWeight = m.IsMe ? FontWeights.SemiBold : FontWeights.Normal });
-            var line = TrsFfiMethods.SyncMemberLine(m, device, null);
-            if (line.Length > 0)
+            s.Children.Add(Faint(note));
+        }
+        if (p.OnDemandOff is SyncPageNotice off)
+        {
+            var line = new Grid { ColumnSpacing = 8, Margin = new Thickness(0, 2, 0, 0) };
+            line.ColumnDefinitions.Add(new ColumnDefinition());
+            line.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            line.Children.Add(new TextBlock { Text = off.Text, FontSize = 12, Foreground = Res("SystemFillColorCautionBrush"), TextWrapping = TextWrapping.Wrap });
+            if (off.Button is SyncPageButton ob)
             {
-                who.Children.Add(new TextBlock { Text = line, FontSize = 12, Opacity = 0.65 });
+                var b = PageButton(ob, p.FolderId);
+                Grid.SetColumn(b, 1);
+                line.Children.Add(b);
             }
-            Grid.SetColumn(who, 1);
-            row.Children.Add(who);
-            var role = new TextBlock { Text = TrsFfiMethods.SyncRoleLabel(m.Role), Opacity = 0.7, VerticalAlignment = VerticalAlignment.Center };
-            Grid.SetColumn(role, 2);
-            row.Children.Add(role);
-            detail.Children.Add(row);
+            s.Children.Add(line);
         }
+        return s;
+    }
 
-        if (f.Issues.Length > 0)
+    /// <summary>Devices gone from the folder, each with its Remove…, then Share Again: one quiet box.</summary>
+    UIElement Away(SyncFolderPage p)
+    {
+        var s = new StackPanel { Spacing = 8 };
+        foreach (var g in p.Gone)
         {
-            detail.Children.Add(new Microsoft.UI.Xaml.Shapes.Rectangle { Height = 1, Margin = new Thickness(0, 14, 0, 6), Fill = (Brush)Application.Current.Resources["DividerStrokeColorDefaultBrush"] });
+            s.Children.Add(BoxLine("", g.Line, PageButton(g.Button, p.FolderId)));
         }
-        foreach (var issue in f.Issues)
+        if (p.Reshare is SyncPageReshare r)
         {
-            var s = new StackPanel { Padding = new Thickness(0, 4, 0, 4) };
-            // An empty path: the issue is the whole folder's (its reason alone).
-            if (issue.Path.Length > 0)
+            s.Children.Add(BoxLine("", r.Note, PageButton(r.Button, p.FolderId)));
+        }
+        return Box(s);
+    }
+
+    /// <summary>The Stop Syncing question under the header: its question, the Trash option, Cancel and Remove.</summary>
+    UIElement RemoveStrip(SyncMenuConfirm r)
+    {
+        var text = new StackPanel { Spacing = 6 };
+        text.Children.Add(Faint(r.Question));
+        var trash = new CheckBox { Content = r.TrashLabel, IsChecked = r.Trash, FontSize = 12 };
+        trash.Click += (_, _) => { removal.SetTrash(trash.IsChecked == true); Redraw(); };
+        text.Children.Add(trash);
+        var buttons = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, VerticalAlignment = VerticalAlignment.Center };
+        // Windows order: the action first, Cancel after it.
+        var remove = new Button { Content = r.RemoveTitle, Foreground = Res("SystemFillColorCriticalBrush") };
+        Help(remove, r.RemoveHelp);
+        remove.Click += (_, _) => Run(new SyncPageCommand.Remove(), r.FolderId);
+        var cancel = new Button { Content = r.CancelTitle };
+        Help(cancel, r.CancelHelp);
+        cancel.Click += (_, _) => Run(new SyncPageCommand.CancelRemove(), r.FolderId);
+        buttons.Children.Add(remove);
+        buttons.Children.Add(cancel);
+        var g = new Grid { ColumnSpacing = 10 };
+        g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        g.ColumnDefinitions.Add(new ColumnDefinition());
+        g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        g.Children.Add(new FontIcon { Glyph = r.Trash ? "" : "", FontSize = 11, Foreground = Res("TextFillColorSecondaryBrush"), VerticalAlignment = VerticalAlignment.Top, Margin = new Thickness(0, 2, 0, 0) });
+        Grid.SetColumn(text, 1);
+        g.Children.Add(text);
+        Grid.SetColumn(buttons, 2);
+        g.Children.Add(buttons);
+        return Box(g);
+    }
+
+    static UIElement BoxLine(string glyph, string text, UIElement button)
+    {
+        var g = new Grid { ColumnSpacing = 10 };
+        g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        g.ColumnDefinitions.Add(new ColumnDefinition());
+        g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        g.Children.Add(new FontIcon { Glyph = glyph, FontSize = 11, Foreground = Res("TextFillColorSecondaryBrush"), VerticalAlignment = VerticalAlignment.Center });
+        var t = Faint(text);
+        t.VerticalAlignment = VerticalAlignment.Center;
+        Grid.SetColumn(t, 1);
+        g.Children.Add(t);
+        Grid.SetColumn((FrameworkElement)button, 2);
+        g.Children.Add(button);
+        return g;
+    }
+
+    static Border Box(UIElement content) => new()
+    {
+        Child = content,
+        Padding = new Thickness(12, 8, 12, 8),
+        Margin = new Thickness(0, 12, 0, 0),
+        CornerRadius = new CornerRadius(8),
+        Background = Res("SubtleFillColorSecondaryBrush"),
+    };
+
+    static StackPanel Section(StackPanel page, string title)
+    {
+        var s = new StackPanel { Spacing = 4, Margin = new Thickness(0, 26, 0, 0) };
+        s.Children.Add(new TextBlock { Text = title, FontSize = 12, FontWeight = FontWeights.SemiBold, Foreground = Res("TextFillColorSecondaryBrush"), Margin = new Thickness(0, 0, 0, 2) });
+        page.Children.Add(s);
+        return s;
+    }
+
+    /// <summary>Rows with a faint line between them.</summary>
+    static void Rows(StackPanel section, IEnumerable<UIElement> rows)
+    {
+        bool first = true;
+        foreach (var row in rows)
+        {
+            if (!first)
             {
-                s.Children.Add(new TextBlock { Text = issue.Path });
+                section.Children.Add(new Microsoft.UI.Xaml.Shapes.Rectangle { Height = 1, Opacity = 0.6, Fill = Res("DividerStrokeColorDefaultBrush") });
             }
-            s.Children.Add(new TextBlock { Text = issue.Reason, FontSize = 12, Opacity = 0.65, TextWrapping = TextWrapping.Wrap });
-            detail.Children.Add(s);
+            first = false;
+            section.Children.Add(row);
         }
+    }
+
+    static string ReachGlyph(SyncMemberReach r) => r switch
+    {
+        SyncMemberReach.ThisDevice => "",
+        SyncMemberReach.LocalNetwork => "",
+        SyncMemberReach.Relay => "",
+        SyncMemberReach.Internet => "",
+        _ => "",
+    };
+
+    UIElement MemberRow(SyncPageMember m, string folderId)
+    {
+        var g = new Grid { ColumnSpacing = 10, Padding = new Thickness(0, 6, 0, 6) };
+        g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(18) });
+        g.ColumnDefinitions.Add(new ColumnDefinition());
+        g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        g.Children.Add(new FontIcon { Glyph = ReachGlyph(m.Reach), FontSize = 12, Foreground = Res("TextFillColorSecondaryBrush"), VerticalAlignment = VerticalAlignment.Center });
+        var who = new StackPanel { Spacing = 1, VerticalAlignment = VerticalAlignment.Center };
+        who.Children.Add(new TextBlock { Text = m.Name, FontSize = 13, TextTrimming = TextTrimming.CharacterEllipsis });
+        if (m.Line.Length > 0)
+        {
+            who.Children.Add(Faint(m.Line, 11.5));
+        }
+        Grid.SetColumn(who, 1);
+        g.Children.Add(who);
+        if (m.Transfer is string transfer)
+        {
+            var t = new TextBlock { Text = transfer, FontSize = 12, Foreground = Res("TextFillColorSecondaryBrush"), VerticalAlignment = VerticalAlignment.Center };
+            Help(t, m.TransferHelp);
+            Grid.SetColumn(t, 2);
+            g.Children.Add(t);
+        }
+        FrameworkElement role;
+        if (m.RoleMenu is SyncPageMenu menu)
+        {
+            role = MenuButton(menu, folderId);
+        }
+        else
+        {
+            role = new TextBlock { Text = m.Role, FontSize = 12, Foreground = Res("TextFillColorSecondaryBrush"), VerticalAlignment = VerticalAlignment.Center };
+        }
+        Grid.SetColumn(role, 3);
+        g.Children.Add(role);
+        return g;
+    }
+
+    UIElement ConflictRow(SyncPageConflict c, string folderId)
+    {
+        var g = new Grid { ColumnSpacing = 10, Padding = new Thickness(0, 6, 0, 6) };
+        g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(18) });
+        g.ColumnDefinitions.Add(new ColumnDefinition());
+        g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        g.Children.Add(new FontIcon { Glyph = "", FontSize = 12, Foreground = Res("SystemFillColorCautionBrush"), VerticalAlignment = VerticalAlignment.Center });
+        var what = new StackPanel { Spacing = 1, VerticalAlignment = VerticalAlignment.Center };
+        what.Children.Add(new TextBlock { Text = c.Title, FontSize = 13, TextTrimming = TextTrimming.CharacterEllipsis });
+        what.Children.Add(Faint(c.Line, 11.5));
+        Grid.SetColumn(what, 1);
+        g.Children.Add(what);
+        var reveal = PageButton(c.Reveal, folderId);
+        Grid.SetColumn(reveal, 2);
+        g.Children.Add(reveal);
+        var keep = MenuButton(c.Keep, folderId);
+        Grid.SetColumn(keep, 3);
+        g.Children.Add(keep);
+        return g;
+    }
+
+    Button PageButton(SyncPageButton b, string folderId)
+    {
+        var button = new Button { Content = b.Title, VerticalAlignment = VerticalAlignment.Center };
+        Help(button, b.Help);
+        if (b.AccessibilityLabel is string label)
+        {
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(button, label);
+        }
+        button.Click += (_, _) => Press(b, folderId);
+        return button;
+    }
+
+    DropDownButton MenuButton(SyncPageMenu menu, string folderId)
+    {
+        var b = new DropDownButton { Content = menu.Title, VerticalAlignment = VerticalAlignment.Center, Flyout = Menu(menu.Entries, folderId) };
+        Help(b, menu.Help);
+        return b;
+    }
+
+    /// <summary>A menu of the page: items (checked, disabled, red, asking first) and separators.</summary>
+    MenuFlyout Menu(SyncPageMenuEntry[] entries, string folderId)
+    {
+        var flyout = new MenuFlyout();
+        foreach (var e in entries)
+        {
+            switch (e)
+            {
+                case SyncPageMenuEntry.Separator:
+                    flyout.Items.Add(new MenuFlyoutSeparator());
+                    break;
+                case SyncPageMenuEntry.Item it:
+                    MenuFlyoutItem item = it.Checked ? new ToggleMenuFlyoutItem { IsChecked = true } : new MenuFlyoutItem();
+                    item.Text = it.Title;
+                    item.IsEnabled = it.Enabled;
+                    if (it.Destructive)
+                    {
+                        item.Foreground = Res("SystemFillColorCriticalBrush");
+                    }
+                    item.Click += (_, _) => { if (it.Question is SyncQuestion q) Ask(q, it.Command, folderId); else Run(it.Command, folderId); };
+                    flyout.Items.Add(item);
+                    break;
+            }
+        }
+        return flyout;
+    }
+
+    static void Help(FrameworkElement e, string help)
+    {
+        if (help.Length > 0)
+        {
+            ToolTipService.SetToolTip(e, help);
+        }
+    }
+
+    // ----------------------------------------------------------------------------------------------- commands
+
+    void Press(SyncPageButton b, string folderId)
+    {
+        if (b.Question is SyncQuestion q) Ask(q, b.Command, folderId); else Run(b.Command, folderId);
+    }
+
+    /// <summary>An item's question (the Mac's confirmation dialog); its command runs on the confirming button.</summary>
+    async void Ask(SyncQuestion q, SyncPageCommand command, string folderId)
+    {
+        AppLog.Write($"sync page asks: {q.Title}");
+        if (Quiet.On || root.XamlRoot is not XamlRoot xr)
+        {
+            return;
+        }
+        var d = new ContentDialog
+        {
+            XamlRoot = xr,
+            Title = q.Title,
+            Content = new TextBlock { Text = q.Text, TextWrapping = TextWrapping.Wrap },
+            PrimaryButtonText = q.ConfirmTitle,
+            CloseButtonText = q.CancelTitle,
+            DefaultButton = ContentDialogButton.Primary,
+        };
+        if (q.Destructive)
+        {
+            RowCommands.Destructive(d);
+        }
+        try
+        {
+            if (await d.ShowAsync() == ContentDialogResult.Primary) Run(command, folderId);
+        }
+        catch (Exception e) { AppLog.Write($"sync question failed: {e.Message}"); }
+    }
+
+    SyncFolder? Folder(string? id) => id is null ? null : app.Core.SyncSnapshot().Folders.FirstOrDefault(f => f.Id == id);
+
+    /// <summary>
+    /// Runs a command of the page on folder <paramref name="id"/> (the page's own items: the folder shown; a list row's
+    /// menu: that row's folder). Failures are alerts with the core's <c>sync_*_failed</c> texts.
+    /// </summary>
+    internal void Run(SyncPageCommand command, string? id)
+    {
+        AppLog.Write($"sync page: {command.GetType().Name}");
+        var f = Folder(id);
+        switch (command)
+        {
+            case SyncPageCommand.Reveal:
+                if (f is null) break;
+                // The core decides: the folder selected in Explorer, or (missing) its page.
+                switch (TrsFfiMethods.SyncReveal(f, null))
+                {
+                    case SyncReveal.Show show: Explorer($"/select,\"{show.Path}\""); break;
+                    default: Choose(f.Id); break;
+                }
+                break;
+            case SyncPageCommand.Share:
+                if (id is not null) ShareDialog.Show(app, id);
+                break;
+            case SyncPageCommand.OpenChat chat:
+                app.ShowPlace(new LibraryPlace.Chat(chat.ChannelId, null));
+                break;
+            case SyncPageCommand.Edit:
+                if (id is not null) EditFolderDialog.Show(app, id);
+                break;
+            case SyncPageCommand.AskRemove:
+                if (id is null) break;
+                Choose(id);
+                // The question opens at once; how many files only this PC has follows when the core has counted them.
+                removal.Open(id, 0);
+                Redraw();
+                var asked = id;
+                _ = Task.Run(() => app.Core.SyncOnlyHere(asked)).ContinueWith(t => root.DispatcherQueue.TryEnqueue(() =>
+                {
+                    if (t.IsCompletedSuccessfully) { removal.SetOnlyHere(asked, t.Result); Redraw(); }
+                }));
+                break;
+            case SyncPageCommand.CancelRemove:
+                removal.Close();
+                Redraw();
+                break;
+            case SyncPageCommand.Remove:
+                if (f is null) break;
+                var trash = removal.Trash();
+                removal.Close();
+                Redraw();
+                Background(() => app.Core.SyncRemove(f.Id, trash), alert => alert, e => TrsFfiMethods.SyncRemoveFailed(f.Name, e));
+                break;
+            case SyncPageCommand.AddFolder:
+                AddFolderDialog.Show(app, null);
+                break;
+            case SyncPageCommand.AllowOnDemand:
+                // The Mac's File Provider settings; Windows has no on-demand folders yet (Cloud Files).
+                break;
+            case SyncPageCommand.SetRole sr:
+                if (f is null) break;
+                var who = members.FirstOrDefault(m => m.DeviceId == sr.DeviceId)?.Name ?? "";
+                Background(async () => { await app.Core.SyncSetRole(f.Id, sr.DeviceId, sr.Role); return null; }, _ => null, e => TrsFfiMethods.SyncSetRoleFailed(who, e), LoadMembers);
+                break;
+            case SyncPageCommand.RemoveDevice rd:
+                if (f is null) break;
+                var name = members.FirstOrDefault(m => m.DeviceId == rd.DeviceId)?.Name ?? f.Gone.FirstOrDefault(g => g.DeviceId == rd.DeviceId)?.Name ?? "";
+                Background(async () => { await app.Core.SyncRemoveDevice(f.Id, rd.DeviceId); return null; }, _ => null, e => TrsFfiMethods.SyncRemoveDeviceFailed(name, f.Name, e), LoadMembers);
+                break;
+            case SyncPageCommand.Reshare:
+                if (f is null) break;
+                _ = Task.Run(() => app.Core.SyncReshare(f.Id)).ContinueWith(t => root.DispatcherQueue.TryEnqueue(() =>
+                {
+                    if (t.IsCompletedSuccessfully)
+                    {
+                        // The new folder's page, then its Share dialog.
+                        Choose(t.Result.Id);
+                        ShareDialog.Show(app, t.Result.Id);
+                    }
+                    else
+                    {
+                        app.Alert(TrsFfiMethods.SyncReshareFailed(f.Name, Message(t.Exception)));
+                    }
+                }));
+                break;
+            case SyncPageCommand.RevealConflict rc:
+                Explorer($"/select,\"{rc.Path}\"");
+                break;
+            case SyncPageCommand.Resolve rs:
+                if (f is null) break;
+                var original = conflicts.FirstOrDefault(c => c.Copy == rs.Copy)?.Original ?? rs.Copy;
+                Background(async () => { await app.Core.SyncResolveConflict(f.Id, rs.Copy, rs.Keep); return null; }, _ => null, e => TrsFfiMethods.SyncResolveFailed(original, e), LoadConflicts);
+                break;
+        }
+    }
+
+    /// <summary>
+    /// Runs a core call off the UI thread; back on it, an alert for what it returned (<paramref name="ok"/>) or for its
+    /// error (<paramref name="failed"/>, given the core's sentence), then <paramref name="done"/> either way.
+    /// </summary>
+    void Background(Func<Task<SyncAlert?>> work, Func<SyncAlert?, SyncAlert?> ok, Func<string, SyncAlert> failed, Action? done = null)
+    {
+        _ = Task.Run(work).ContinueWith(t => root.DispatcherQueue.TryEnqueue(() =>
+        {
+            var alert = t.IsCompletedSuccessfully ? ok(t.Result) : failed(Message(t.Exception));
+            if (alert is not null) app.Alert(alert);
+            done?.Invoke();
+            Redraw();
+        }));
+    }
+
+    static string Message(AggregateException? e) => e?.InnerException is CoreException ce ? TrsFfiMethods.CoreErrorMessage(ce) : e?.InnerException?.Message ?? "";
+
+    static void Explorer(string args)
+    {
+        if (Quiet.On)
+        {
+            AppLog.Write($"explorer {args}");
+            return;
+        }
+        System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("explorer.exe", args) { UseShellExecute = true });
+    }
+
+    // --------------------------------------------------------------------------------------------------- QA
+
+    /// <summary>QA: what a click on the page's button, or a list row's menu item, titled <paramref name="title"/> would run (the question confirmed).</summary>
+    internal string QaPress(string title, string? rowId = null)
+    {
+        if (model is null) return "no model";
+        if (rowId is not null)
+        {
+            var row = model.Folders.FirstOrDefault(r => r.Id == rowId || r.Title == rowId);
+            if (row?.Menu.OfType<SyncPageMenuEntry.Item>().FirstOrDefault(i => i.Title.StartsWith(title)) is not SyncPageMenuEntry.Item it) return "no such item";
+            Run(it.Command, row.Id);
+            return $"ran {it.Command.GetType().Name}{(it.Question is null ? "" : " (asked)")}";
+        }
+        if (model.Page is not SyncFolderPage p) return "no page";
+        if (model.Add is SyncMenuItem add && add.Title.StartsWith(title))
+        {
+            Run(new SyncPageCommand.AddFolder(), null);
+            return "ran AddFolder";
+        }
+        var b = p.Buttons.Concat([p.Reveal]).Concat(p.Gone.Select(g => g.Button)).Concat(p.Reshare is null ? [] : [p.Reshare.Button]).FirstOrDefault(x => x.Title.StartsWith(title));
+        if (b is null)
+        {
+            if (p.Removal is SyncMenuConfirm r && (r.RemoveTitle.StartsWith(title) || r.CancelTitle.StartsWith(title)))
+            {
+                Run(r.RemoveTitle.StartsWith(title) ? new SyncPageCommand.Remove() : new SyncPageCommand.CancelRemove(), p.FolderId);
+                return $"ran {(r.RemoveTitle.StartsWith(title) ? "Remove" : "CancelRemove")}";
+            }
+            return "no such button";
+        }
+        Run(b.Command, p.FolderId);
+        return $"ran {b.Command.GetType().Name}{(b.Question is null ? "" : " (asked)")}";
+    }
+
+    /// <summary>QA: the Stop Syncing question's Trash box.</summary>
+    internal void QaTrash(bool on)
+    {
+        removal.SetTrash(on);
+        Redraw();
+    }
+
+    /// <summary>QA: a line per part of the page as drawn.</summary>
+    internal string QaDescribe()
+    {
+        if (model is null) return "no model";
+        if (model.Empty is SyncPageEmpty e) return $"empty \"{e.Text}\", add {(e.Add is null ? "none" : $"\"{e.Add.Title}\"")}";
+        var p = model.Page;
+        return $"folders [{string.Join(", ", model.Folders.Select(f => f.Title))}], add {(model.Add is null ? "none" : $"\"{model.Add.Title}\"")}, selected {model.Selected}"
+            + (p is null ? "" : $", title \"{p.Title}\", buttons [{string.Join(", ", p.Buttons.Select(b => b.Title))}], status \"{p.Status}\", members {p.Members.Rows.Length} \"{p.Members.Title}\", removal {(p.Removal is null ? "none" : $"\"{p.Removal.Question}\" trash {p.Removal.Trash}")}");
     }
 }

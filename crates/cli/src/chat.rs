@@ -48,8 +48,8 @@ pub enum Cmd {
     Send { channel: String, topic: Option<String>, project: Option<String>, agent: Option<String>, reply: Option<String>, json: bool, body: String, attach: Vec<String> },
     /// `chat attachment <channel> <hash> [--out PATH] [--png] [--no-wait]`, `chat dm attachment <device> <hash> …`
     Attachment { channel: String, device: Option<String>, hash: String, out: Option<String>, png: bool, wait: bool },
-    /// `chat read <channel> [--project P | --topic T] [--since ID | [--unread] [--last N]] [--as NAME] [--lean]`
-    Read { channel: String, topic: Option<String>, project: Option<String>, since: Option<String>, last: Option<u32>, agent: Option<String>, unread: bool, lean: bool },
+    /// `chat read <channel> [--project P | --topic T] [--since ID | [--unread [--peek]] [--last N]] [--as NAME] [--lean]`
+    Read { channel: String, topic: Option<String>, project: Option<String>, since: Option<String>, last: Option<u32>, agent: Option<String>, unread: bool, peek: bool, lean: bool },
     /// `chat watch [<channel>…] [--project P | --topic T] [--as NAME] [--all] [--count N]`
     Watch { channels: Vec<String>, topic: Option<String>, project: Option<String>, agent: Option<String>, all: bool, count: Option<u64>, unread: bool, lean: bool, timeout: Option<u64>, batch: bool },
     /// `chat topics <channel>`
@@ -91,9 +91,9 @@ const MAX_AGENT: usize = 64;
 const MAX_TITLE: usize = 200;
 
 /// The one-line usage.
-pub const USAGE: &str = "usage: seedwell chat list | new <name> | join <link>|- | share <channel> [--role read_write|read_only|admin|owner] [--uses N|unlimited] [--days N|never] | members <channel> | role <channel> <device> owner|admin|read_write|read_only | remove-device <channel> <device> | share-until <channel> <days>|never [--extend] | topics <channel> | topic <channel> <title> [--as NAME] | send <channel> [--project P | --topic T] [--as NAME] [--reply ID] [--as-json] [--attach FILE]... [-|<text>] | attachment <channel> <hash> [--out PATH] [--png] [--no-wait] | read <channel> [--project P | --topic T] [--since ID | [--unread] [--last N]] [--as NAME] [--lean] | watch [<channel>...] [--project P | --topic T] [--as NAME] [--unread] [--all] [--count N] [--batch] [--timeout S] [--lean] | dm list | dm send <device> [--as NAME] [--reply ID] [--as-json] [--attach FILE]... [-|<text>] | dm attachment <device> <hash> [--out PATH] [--no-wait] | dm read <device> [--before ID] [--last N] | dm watch [<device>...] [--count N] | dm delete <device> | address <channel> <host:port> | mute <channel> [on|off] | wake <channel> <command>|off | agents <channel> no | tag <channel> <id> [TAG...] [--remove TAG]... [--clear] [--as NAME] | leave <channel>";
+pub const USAGE: &str = "usage: seedwell chat list | new <name> | join <link>|- | share <channel> [--role read_write|read_only|admin|owner] [--uses N|unlimited] [--days N|never] | members <channel> | role <channel> <device> owner|admin|read_write|read_only | remove-device <channel> <device> | share-until <channel> <days>|never [--extend] | topics <channel> | topic <channel> <title> [--as NAME] | send <channel> [--project P | --topic T] [--as NAME] [--reply ID] [--as-json] [--attach FILE]... [-|<text>] | attachment <channel> <hash> [--out PATH] [--png] [--no-wait] | read <channel> [--project P | --topic T] [--since ID | [--unread [--peek]] [--last N]] [--as NAME] [--lean] | watch [<channel>...] [--project P | --topic T] [--as NAME] [--unread] [--all] [--count N] [--batch] [--timeout S] [--lean] | dm list | dm send <device> [--as NAME] [--reply ID] [--as-json] [--attach FILE]... [-|<text>] | dm attachment <device> <hash> [--out PATH] [--no-wait] | dm read <device> [--before ID] [--last N] | dm watch [<device>...] [--count N] | dm delete <device> | address <channel> <host:port> | mute <channel> [on|off] | wake <channel> <command>|off | agents <channel> no | tag <channel> <id> [TAG...] [--remove TAG]... [--clear] [--as NAME] | leave <channel>";
 
-const READ_USAGE: &str = "read <channel> [--project P | --topic T] [--since ID | [--unread] [--last N]] [--as NAME] [--lean]";
+const READ_USAGE: &str = "read <channel> [--project P | --topic T] [--since ID | [--unread [--peek]] [--last N]] [--as NAME] [--lean]";
 
 const DM_USAGE: &str = "usage: seedwell chat dm list | send <device> [--as NAME] [--reply ID] [--as-json] [--attach FILE]... [-|<text>] | attachment <device> <hash> [--out PATH] [--no-wait] | read <device> [--before ID] [--last N] | watch [<device>...] [--count N] | delete <device>";
 
@@ -299,11 +299,15 @@ pub fn parse(args_in: Vec<String>) -> Result<Cmd, Usage> {
             let last = o.number::<u32>(&["--last", "-n"])?;
             let agent = given_as.clone();
             let unread = o.flag(&["--unread"]);
+            let peek = o.flag(&["--peek"]);
             let lean = o.flag(&["--lean"]);
             if since.is_some() && (last.is_some() || unread) {
                 return Err(Usage("chat read takes --since, or --last (with --unread or not), not both".into()));
             }
-            Cmd::Read { channel: one(o, READ_USAGE)?, topic, project, since, last, agent, unread, lean }
+            if peek && !unread {
+                return Err(Usage("chat read --peek goes with --unread: it shows what --unread would give without moving your place".into()));
+            }
+            Cmd::Read { channel: one(o, READ_USAGE)?, topic, project, since, last, agent, unread, peek, lean }
         }
         "watch" | "follow" => {
             let (topic, project) = place(&mut o)?;
@@ -534,7 +538,7 @@ pub async fn run(cmd: Cmd, g: &Global) -> R {
             let what = if d.rendered { "drawn as PNG" } else { a.kind.as_str() };
             show(g, &raw, || format!("{} ({what}, {}×{}, {}) written to {}", a.name, a.width, a.height, size_text(bytes.len() as u64), path.display()));
         }
-        Cmd::Read { channel, topic, project, since, last, agent, unread, lean } => {
+        Cmd::Read { channel, topic, project, since, last, agent, unread, peek, lean } => {
             let unread_for = unread.then(|| label(g, &agent, &project));
             let topic = match &project {
                 None => topic,
@@ -557,7 +561,7 @@ pub async fn run(cmd: Cmd, g: &Global) -> R {
                     }
                 },
             };
-            let (raw, mut l): (_, ChatMessagesDto) = ask(&mut c, Request::ChatRead(ChatReadParams { channel, since, last, topic, unread_for, peek: false })).await?;
+            let (raw, mut l): (_, ChatMessagesDto) = ask(&mut c, Request::ChatRead(ChatReadParams { channel, since, last, topic, unread_for, peek })).await?;
             // What an agent reads: no seen receipts or hook notices (`mail` keeps the books).
             if lean || unread {
                 l.messages.retain(|m| !crate::mail::is_note(m));
@@ -568,6 +572,9 @@ pub async fn run(cmd: Cmd, g: &Global) -> R {
                 println!("Nothing new in {}.", l.name);
             } else {
                 show(g, &raw, || messages(&l));
+            }
+            if peek && !g.json && !lean && !l.messages.is_empty() {
+                eprintln!("(--peek: your place did not move; `chat read --unread` or your watch gives these)");
             }
         }
         Cmd::Topics { channel } => {
@@ -666,6 +673,7 @@ pub async fn run(cmd: Cmd, g: &Global) -> R {
                 topic: topic.clone().map(|t| t.unwrap_or_else(|| "general".into())),
                 project: project.clone(),
                 agent: me.clone(),
+                shown: channels.first().cloned().unwrap_or_default(),
             });
             let follow = Follow { count, lean, multi: wanted.len() != 1, unread, timeout: timeout.map(Duration::from_secs), batch };
             watch(c, g, follow, what, |m| {
@@ -741,6 +749,72 @@ pub(crate) struct Unread {
     pub(crate) topic: Option<String>,
     pub(crate) project: Option<String>,
     pub(crate) agent: String,
+    /// The channel as it was named, for messages.
+    pub(crate) shown: String,
+}
+
+impl Unread {
+    /// What a watch of this place holds alone ([`EventsSubscribeParams::hold`]): the agent, the channel and the thread.
+    fn hold(&self) -> Hold {
+        let thread = match (&self.project, &self.topic) {
+            (Some(p), _) => format!("project {p}"),
+            (None, Some(t)) => format!("topic {t}"),
+            (None, None) => "every topic".into(),
+        };
+        let what = match (&self.project, &self.topic) {
+            (Some(p), _) => format!("{} › {p}", self.shown),
+            (None, Some(t)) if t == "general" => format!("{} › General", self.shown),
+            (None, Some(_)) => format!("a topic of {}", self.shown),
+            (None, None) => self.shown.clone(),
+        };
+        Hold { key: format!("chat.unread\u{1f}{}\u{1f}{}\u{1f}{thread}", self.agent, self.channel), what, agent: self.agent.clone() }
+    }
+}
+
+/// The place a watch moves, held alone: its key, and how to name it (where, and as whom) when it is taken.
+pub(crate) struct Hold {
+    pub(crate) key: String,
+    pub(crate) what: String,
+    pub(crate) agent: String,
+}
+
+/// Subscribes this connection to chat messages; with `hold`, as the only watch of that place. A watch that has just
+/// died may hold it a moment longer (its connection is not seen closed yet): asked again for up to 3 s, then refused
+/// with what holds it. An older Seedwell, which knows no holds, is subscribed without one.
+pub(crate) async fn subscribe_chat(c: &mut trs_control::client::Client, hold: Option<&Hold>) -> R {
+    let kinds = Some(vec!["chat.message".to_string()]);
+    let Some(h) = hold else {
+        c.call(&Request::EventsSubscribe(EventsSubscribeParams { kinds, hold: None })).await?;
+        return Ok(());
+    };
+    let started = tokio::time::Instant::now();
+    loop {
+        let e = match c.call(&Request::EventsSubscribe(EventsSubscribeParams { kinds: kinds.clone(), hold: Some(h.key.clone()) })).await {
+            Ok(_) => return Ok(()),
+            Err(trs_control::client::ClientError::Api(a)) => a,
+            Err(e) => return Err(e.into()),
+        };
+        match e.code {
+            ErrorCode::InvalidParams => {
+                c.call(&Request::EventsSubscribe(EventsSubscribeParams { kinds, hold: None })).await?;
+                return Ok(());
+            }
+            ErrorCode::Duplicate if started.elapsed() < Duration::from_secs(3) => tokio::time::sleep(Duration::from_millis(200)).await,
+            ErrorCode::Duplicate => return Err(held_elsewhere(h, e.data)),
+            _ => return Err(trs_control::client::ClientError::Api(e).into()),
+        }
+    }
+}
+
+/// The refusal of a second watch of one place: which one runs, and what to do.
+fn held_elsewhere(h: &Hold, data: Option<Value>) -> CliError {
+    let client = data.as_ref().and_then(|d| d["client"].as_str()).filter(|c| !c.is_empty()).unwrap_or("another client");
+    let since = data.as_ref().and_then(|d| d["since"].as_u64()).map(|t| format!(" since {}", time_s(t))).unwrap_or_default();
+    let message = format!(
+        "another watch already follows {} as {} ({client}{since}). Two watches of one place take messages from each other, so neither sees them all: this one stops. Keep the one that runs (it should be your harness's background task, its output read), or stop it first; to follow as someone else, give --as NAME.",
+        h.what, h.agent
+    );
+    CliError { code: 1, message, api_code: Some(ErrorCode::Duplicate), data }
 }
 
 /// Follows new messages until `count`, printing those `keep` wants. A lost connection (Seedwell restarted, say) is
@@ -754,9 +828,11 @@ pub(crate) async fn watch(mut c: trs_control::client::Client, g: &Global, f: Fol
     let timed_out = || CliError::plain(6, "timed out: no new message came in time");
     let mut out = Out { g, f: &f, seen: 0, shown: std::collections::VecDeque::new(), last: std::collections::HashMap::new() };
     let mut first = true;
+    // --unread moves the agent's place: one watch of it at a time (a second would take messages from the first).
+    let hold = f.unread.as_ref().map(Unread::hold);
     loop {
         let run = async {
-            c.call(&Request::EventsSubscribe(EventsSubscribeParams { kinds: Some(vec!["chat.message".into()]) })).await?;
+            subscribe_chat(&mut c, hold.as_ref()).await?;
             if let Some(u) = &f.unread {
                 // What came before the watch (or while it was away) first.
                 if out.unread(&mut c, u).await? || (f.batch && out.seen > 0) {
@@ -802,7 +878,7 @@ pub(crate) async fn watch(mut c: trs_control::client::Client, g: &Global, f: Fol
         };
         match run.await {
             Ok(_) => return Ok(()),
-            Err(e) if !lost(&e) => return Err(e),
+            Err(e) if !lost(&e) || e.api_code == Some(ErrorCode::Duplicate) => return Err(e),
             Err(_) => {}
         }
         first = false;
@@ -1394,7 +1470,7 @@ mod tests {
         assert_eq!(parse(w("send Plans --topic May -")).unwrap(), send(o("May"), None, None, None, false, "-"));
         assert_eq!(parse(w("send Plans --project Seedwell --as-json -")).unwrap(), send(None, o("Seedwell"), None, None, true, "-"));
         assert_eq!(parse(w("send Plans --project Seedwell --as TorrentRS -")).unwrap(), send(None, o("Seedwell"), o("TorrentRS"), None, false, "-"));
-        let read = |topic, project, last| Cmd::Read { channel: "Plans".into(), topic, project, since: None, last, agent: None, unread: false, lean: false };
+        let read = |topic, project, last| Cmd::Read { channel: "Plans".into(), topic, project, since: None, last, agent: None, unread: false, peek: false, lean: false };
         assert_eq!(parse(w("read Plans --last 5")).unwrap(), read(None, None, Some(5)));
         assert_eq!(parse(w("read Plans --topic general")).unwrap(), read(o("general"), None, None));
         assert_eq!(parse(w("read Plans --project Seedwell --last 20")).unwrap(), read(None, o("Seedwell"), Some(20)));
@@ -1419,7 +1495,8 @@ mod tests {
         assert!(matches!(parse(w("watch Plans --unread --lean --timeout 8m --batch")).unwrap(), Cmd::Watch { timeout: Some(480), batch: true, .. }));
         assert!(matches!(parse(w("watch Plans --timeout 90")).unwrap(), Cmd::Watch { timeout: Some(90), batch: false, .. }));
         assert!(parse(w("watch Plans --timeout soon")).is_err());
-        for bad in ["read Plans --unread --since ab12cd34", "watch --unread", "watch A B --unread", "watch Plans --unread --all"] {
+        assert!(matches!(parse(w("read Plans --unread --peek --lean")).unwrap(), Cmd::Read { unread: true, peek: true, .. }));
+        for bad in ["read Plans --unread --since ab12cd34", "read Plans --peek", "watch --unread", "watch A B --unread", "watch Plans --unread --all"] {
             assert!(parse(w(bad)).is_err(), "{bad}");
         }
         assert!(parse(w("rename Plans")).is_err());

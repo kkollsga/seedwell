@@ -10,11 +10,18 @@ import SwiftUI
     private(set) var badges: Bool
     private(set) var shareMenu: Bool
     @ObservationIgnored private var timer: Timer?
-    @ObservationIgnored private let check: () -> (badges: Bool, shareMenu: Bool)
+    /// Snapshots and tests: fixed answers. `nil`: the system's (the Finder extension asked off the main thread).
+    @ObservationIgnored private let check: (() -> (badges: Bool, shareMenu: Bool))?
+    @ObservationIgnored private var asking = false
 
-    init(check: @escaping () -> (badges: Bool, shareMenu: Bool) = { (FinderStatusWriter.extensionEnabled, ShareMenu.enabled) }) {
+    init(check: (() -> (badges: Bool, shareMenu: Bool))? = nil) {
         self.check = check
-        (badges, shareMenu) = check()
+        if let check {
+            (badges, shareMenu) = check()
+        } else {
+            (badges, shareMenu) = (false, ShareMenu.enabled)
+            refresh()
+        }
     }
 
     var allOn: Bool { badges && shareMenu }
@@ -33,9 +40,25 @@ import SwiftUI
     }
 
     func refresh() {
-        let now = check()
-        if now.badges != badges { badges = now.badges }
-        if now.shareMenu != shareMenu { shareMenu = now.shareMenu }
+        if let check {
+            let now = check()
+            if now.badges != badges { badges = now.badges }
+            if now.shareMenu != shareMenu { shareMenu = now.shareMenu }
+            return
+        }
+        let share = ShareMenu.enabled
+        if share != shareMenu { shareMenu = share }
+        // Whether the Finder extension is on can take the system long to say: asked off the main thread, one at a time.
+        guard !asking else { return }
+        asking = true
+        Task.detached(priority: .utility) { [weak self] in
+            let on = FinderStatusWriter.extensionEnabled
+            await MainActor.run {
+                guard let self else { return }
+                self.asking = false
+                if on != self.badges { self.badges = on }
+            }
+        }
     }
 }
 

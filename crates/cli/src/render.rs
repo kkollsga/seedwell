@@ -48,6 +48,9 @@ pub fn status(s: &StatusDto) -> String {
     } else {
         let _ = write!(o, "{} transfers: {}", s.total, s.summary.rsplit("; ").next().unwrap_or(""));
     }
+    if let Some(others) = &s.others {
+        let _ = write!(o, "\nwarning: {others}");
+    }
     o
 }
 

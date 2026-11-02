@@ -759,7 +759,7 @@ fn render_rules(v: &Value) -> String {
 
 async fn watch(g: &Global, kinds: Option<Vec<String>>, count: Option<u64>, for_secs: Option<u64>) -> R {
     let mut c = connect(g).await?;
-    let sub = c.call(&Request::EventsSubscribe(EventsSubscribeParams { kinds })).await?;
+    let sub = c.call(&Request::EventsSubscribe(EventsSubscribeParams { kinds, hold: None })).await?;
     if !g.json {
         eprintln!("watching events (cursor {}); Ctrl-C to stop", sub["cursor"]);
     }

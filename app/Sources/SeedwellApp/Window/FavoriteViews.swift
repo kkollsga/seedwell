@@ -5,7 +5,7 @@ import SwiftUI
 /// and losing the focus commits too (Finder-style).
 struct InlineField: View {
     let editing: FavoriteEditing
-    let target: FavoriteEditing.Target
+    let target: FavoriteTarget
     var prompt = ""
     var font: Font = .system(size: 13)
     @FocusState private var focused: Bool
@@ -39,8 +39,8 @@ struct TrackerRow: View {
             Image(systemName: SidebarSymbols.symbol(item.icon))
                 .frame(width: 20)
                 .foregroundStyle(item.icon == .favoriteTracker ? Color.accentColor.opacity(0.85) : Color.secondary)
-            if editing.target == .sidebarName(id) {
-                InlineField(editing: editing, target: .sidebarName(id))
+            if editing.target == .sidebarName(trackerId: id) {
+                InlineField(editing: editing, target: .sidebarName(trackerId: id))
             } else {
                 Text(item.title).lineLimit(1)
             }
@@ -59,9 +59,9 @@ extension SidebarItem {
     }
 }
 
-/// "Remove “X” from Favorites? 2 rules use it." One quiet line and two small buttons.
+/// "Remove “X” from Favorites? 2 rules use it." One quiet line and two small buttons (the core's words).
 struct FavoriteRemoveStrip: View {
-    let question: FavoriteEditing.Removal
+    let question: FavoriteRemoval
     let confirm: () -> Void
     let cancel: () -> Void
 
@@ -70,11 +70,11 @@ struct FavoriteRemoveStrip: View {
             Image(systemName: "star.slash").font(.system(size: 11)).foregroundStyle(.secondary)
             Text(question.message).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(2)
             Spacer(minLength: 8)
-            Button("Cancel", action: cancel).controlSize(.small).keyboardShortcut(.cancelAction)
-                .help("Keep it as a favorite")
-            Button(role: .destructive, action: confirm) { Text("Remove").foregroundStyle(.red) }
+            Button(question.cancelTitle, action: cancel).controlSize(.small).keyboardShortcut(.cancelAction)
+                .help(question.cancelHelp)
+            Button(role: .destructive, action: confirm) { Text(question.confirmTitle).foregroundStyle(.red) }
                 .controlSize(.small)
-                .help("The torrents stay; the tracker goes back to the automatic list")
+                .help(question.confirmHelp)
         }
         .padding(.horizontal, 10).padding(.vertical, 6)
         .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.05)))

@@ -459,9 +459,11 @@ pub(crate) async fn own_join(ctx: &Ctx, folders: &[FolderId], exporter: &[u8; 32
             continue;
         }
         let f2 = f.clone();
+        // From the index's read-only view: a Join never waits for a scan or a pull that holds the core.
         let state = tokio::task::spawn_blocking(move || {
-            let core = lock(&f2.core);
-            (core.index_state().ok(), core.peer_state(peer.short()).ok())
+            let view = f2.index.view();
+            let theirs = trs_sync::index::IndexStore::peer(&view, peer.short()).map(Option::unwrap_or_default);
+            (f2.index_state().ok(), theirs.ok())
         })
         .await
         .ok();
@@ -612,7 +614,7 @@ async fn send_index(f: &Arc<FolderShared>, peer: &Arc<PeerHandle>, their: JoinFo
         return Ok(());
     }
     let f2 = f.clone();
-    let (index_id, _) = tokio::task::spawn_blocking(move || lock(&f2.core).index_state()).await.map_err(io::Error::other)??;
+    let (index_id, _) = tokio::task::spawn_blocking(move || f2.index_state()).await.map_err(io::Error::other)??;
 
     // What the peer holds of our index decides between changes only and a full send.
     let (mut full, mut sent) = if their.your_index_id == index_id { (false, their.your_max_seq) } else { (true, 0) };
@@ -624,7 +626,7 @@ async fn send_index(f: &Arc<FolderShared>, peer: &Arc<PeerHandle>, their: JoinFo
         }
         loop {
             let f2 = f.clone();
-            let batch = tokio::task::spawn_blocking(move || lock(&f2.core).announce_since(sent, MAX_INDEX_ENTRIES))
+            let batch = tokio::task::spawn_blocking(move || f2.announce_since(sent, MAX_INDEX_ENTRIES))
                 .await
                 .map_err(io::Error::other)??;
             let last_batch = batch.len() < MAX_INDEX_ENTRIES;

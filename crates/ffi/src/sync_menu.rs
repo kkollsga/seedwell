@@ -101,6 +101,16 @@ impl SyncRemoval {
         lock(&self.state).trash = on;
     }
 
+    /// The count of `id`'s files only this computer holds, once `Core::sync_only_here` has read it (it reads the
+    /// folder's whole index, so the host opens the question with 0 and asks off its UI thread). Nothing changes when
+    /// another question is open by then.
+    pub fn set_only_here(&self, id: String, only_here: u64) {
+        let mut r = lock(&self.state);
+        if r.open.as_deref() == Some(id.as_str()) {
+            r.only_here = only_here;
+        }
+    }
+
     /// Opens the question of `id` (Stop Syncing… on the Folder Sync page): without the Trash option, and closing
     /// another one; one open for `id` already stays as it is.
     pub fn open(&self, id: String, only_here: u64) {

@@ -363,8 +363,9 @@ extension NSView {
 
 private final class FlippedView: NSView { override var isFlipped: Bool { true } }
 
-/// The expanded list under a row: the scrolling checklist and the footer (no Select All / None here:
-/// the menu stays a quick list; the window's file list and the chooser have them).
+/// The expanded list under a row: the scrolling checklist and the footer, as the core lays them out
+/// (`FileLists.menuView`). No Select All / None here: the menu stays a quick list; the window's file list and the
+/// chooser have them.
 @MainActor final class MenuFilesPanel: NSView {
     private let header = NSView()
     private let scroll = NSScrollView()
@@ -376,22 +377,17 @@ private final class FlippedView: NSView { override var isFlipped: Bool { true } 
     private static let rowHeight: CGFloat = 20
     /// Visible height of the list: about seven rows, so an open list never takes over the menu.
     static let maxList: CGFloat = 144
-    private(set) var open: Set<UInt32>
     private(set) var rows: [MenuCheckRow] = []
-    private let state: () -> FileTreeModel?
-    private let toggleNode: (UInt32) -> Void
-    private let setAll: (Bool) -> Void
+    private let id: String
+    private let store: FilesStore
     private let more: () -> Void
     private let play: (UInt32) -> Void
     /// The rows moved under the pointer (a scroll, a rebuild): the controller looks at the hover again.
     var onMoved: (() -> Void)?
 
-    init(tree: FileTreeModel, width: CGFloat, state: @escaping () -> FileTreeModel?, toggleNode: @escaping (UInt32) -> Void,
-         setAll: @escaping (Bool) -> Void, more: @escaping () -> Void, play: @escaping (UInt32) -> Void) {
-        open = Set(tree.menuInitiallyOpen(limit: 14))
-        self.state = state; self.toggleNode = toggleNode; self.setAll = setAll; self.more = more; self.play = play
-        let n = min(Int(tree.nodeCount()), Int(fileMenuCap()) + 1)
-        let list = min(Self.maxList, CGFloat(n) * Self.rowHeight + 4)
+    init(id: String, view: FileMenuView, store: FilesStore, width: CGFloat, more: @escaping () -> Void, play: @escaping (UInt32) -> Void) {
+        self.id = id; self.store = store; self.more = more; self.play = play
+        let list = min(Self.maxList, CGFloat(view.heightRows) * Self.rowHeight + 4)
         super.init(frame: NSRect(x: 0, y: 0, width: width, height: headerHeight + list + footerHeight))
         autoresizingMask = .width
         header.frame = NSRect(x: 0, y: bounds.height - headerHeight, width: width, height: headerHeight)
@@ -429,14 +425,13 @@ private final class FlippedView: NSView { override var isFlipped: Bool { true } 
     required init?(coder: NSCoder) { fatalError("not used") }
 
     func toggleFolder(_ node: UInt32) {
-        if open.contains(node) { open.remove(node) } else { open.insert(node) }
+        store.toggleFolder(id, node)
         rebuild()
     }
 
-    /// All rows again (a folder opened or closed, or the list changed shape).
+    /// All rows again (a folder opened or closed, a tick, or the list changed shape).
     func rebuild() {
-        guard let tree = state() else { return }
-        let list = tree.menuRows(open: Array(open), cap: fileMenuCap())
+        guard let view = store.lists.menuView(torrent: id) else { return }
         // Replacing the rows must not send the list back to its top: keep where the clip view was.
         let keptY = scroll.contentView.bounds.origin.y
         doc.subviews.forEach { $0.removeFromSuperview() }
@@ -445,9 +440,8 @@ private final class FlippedView: NSView { override var isFlipped: Bool { true } 
         // The document has its final width before rows go in: its autoresizing would stretch them otherwise.
         doc.frame.size.width = w
         var y: CGFloat = 2
-        let reservesPlay = list.rows.contains(where: \.isVideo)
-        for e in list.rows {
-            let row = MenuCheckRow(content: Self.content(e, reservesPlay: reservesPlay), width: w) { [toggleNode] in toggleNode(e.id) }
+        for e in view.rows {
+            let row = MenuCheckRow(content: Self.content(e, reservesPlay: view.reservesPlay), width: w) { [store, id] in store.toggleCheck(id, e.id) }
             row.onDisclosure = { [weak self] in self?.toggleFolder(e.id) }
             row.onPlay = { [play] in play(e.id) }
             row.frame = NSRect(x: 0, y: y, width: w, height: Self.rowHeight)
@@ -457,8 +451,8 @@ private final class FlippedView: NSView { override var isFlipped: Bool { true } 
             rows.append(row)
             y += Self.rowHeight
         }
-        if list.hidden > 0 {
-            let row = MenuCheckRow(content: .init(title: "Show All in \(AppInfo.name)… (\(list.hidden) more)"), width: w) { [more] in more() }
+        if let title = view.more {
+            let row = MenuCheckRow(content: .init(title: title), width: w) { [more] in more() }
             row.frame = NSRect(x: 0, y: y, width: w, height: Self.rowHeight)
             doc.addSubview(row)
             y += Self.rowHeight
@@ -468,7 +462,7 @@ private final class FlippedView: NSView { override var isFlipped: Bool { true } 
         let maxY = max(0, doc.frame.height - scroll.contentView.bounds.height)
         scroll.contentView.scroll(to: NSPoint(x: 0, y: min(keptY, maxY)))
         scroll.reflectScrolledClipView(scroll.contentView)
-        footer.stringValue = tree.totals().menuFooter
+        footer.stringValue = view.footer
         DispatchQueue.main.async { [weak self] in self?.onMoved?() }
     }
 
@@ -477,23 +471,20 @@ private final class FlippedView: NSView { override var isFlipped: Bool { true } 
               playable: e.isVideo, reservesPlay: reservesPlay, iconExt: e.isFolder ? "" : e.ext)
     }
 
-    /// A tick changed (an edit, the engine's answer): checks and footer follow the tree.
+    /// A tick changed (an edit, the engine's answer): checks and footer follow the core.
     func refreshChecks() {
-        guard let tree = state() else { return }
+        guard let view = store.lists.menuView(torrent: id) else { return }
+        let checks = Dictionary(view.rows.map { ($0.id, $0.check) }, uniquingKeysWith: { a, _ in a })
         for r in rows {
-            guard let id = r.identifier.flatMap({ UInt32($0.rawValue) }), let f = tree.row(id: id) else { continue }
-            r.content.check = f.check
+            guard let node = r.identifier.flatMap({ UInt32($0.rawValue) }), let c = checks[node] else { continue }
+            r.content.check = c
         }
-        footer.stringValue = tree.totals().menuFooter
+        footer.stringValue = view.footer
     }
 
-    /// QA: the row of a file or folder by (part of) its name, or the Select All / Select None command.
+    /// QA: the row of a file or folder by (part of) its name.
     func qaRow(_ name: String) -> MenuCheckRow? {
-        if name == "all" || name == "none" {
-            let want = name == "all" ? "Select All" : "Select None"
-            return header.subviews.compactMap { $0 as? MenuCheckRow }.first { $0.content.title == want }
-        }
-        return rows.first { $0.content.title.localizedCaseInsensitiveContains(name) }
+        rows.first { $0.content.title.localizedCaseInsensitiveContains(name) }
     }
     var qaFooter: String { footer.stringValue }
     /// QA: frames of the panel, its window, the scroll view, the document and the first rows.
@@ -506,14 +497,12 @@ private final class FlippedView: NSView { override var isFlipped: Bool { true } 
 
 // MARK: Controller
 
-/// Owns the inline lists of the menu bar menu. One instance; at most one list is open at a time. It has a
-/// private `FilesStore` (never the window's), so the window's own lists are not touched, and the edits go
-/// through the window's `FileTreeState` (check at once, one engine call after a quiet moment).
+/// Owns the inline lists of the menu bar menu. One instance; the core keeps at most one list open (`FileLists` of the
+/// menu place, never the window's), so the window's own lists are not touched. Edits show at once and go to the
+/// engine after the core's quiet moment; a list closed with edits on their way keeps them until they are sent.
 @MainActor final class MenuFiles {
     private let commands: Commands
-    private let store = FilesStore()
-    private var flushTimer: Timer?
-    private var cleanup: Task<Void, Never>?
+    private let store = FilesStore(place: .menu)
     /// The torrent whose list is open.
     private(set) var expanded: String?
     private var panelItem: NSMenuItem?
@@ -529,7 +518,7 @@ private final class FlippedView: NSView { override var isFlipped: Bool { true } 
         self.commands = commands
         store.core = core
         store.onTicked = { [weak commands] id in _ = commands?.arrivals.userReselected(id) }
-        store.onEdited = { [weak self] in self?.panel?.refreshChecks() }
+        store.onChange = { [weak self] id in if self?.expanded == id { self?.panel?.refreshChecks() } }
     }
 
     /// A list is open: the menu is not rebuilt under it (the 1 s refresh only updates texts).
@@ -560,18 +549,13 @@ private final class FlippedView: NSView { override var isFlipped: Bool { true } 
         if expanded == id { collapse(); return }
         collapse()
         guard let menu = item.menu else { return }
-        let st = state(for: id)
-        guard let tree = st.tree else { return }
+        // Read now (the menu is about to show it); a list with edits still on their way keeps its tree.
+        if store.lists.expand(torrent: id) || !store.lists.hasPending(torrent: id) { store.loadNow(id) }
+        guard let view = store.lists.menuView(torrent: id) else { store.collapse(id); return }
         // An open menu does not grow wider: the list takes the menu's width as it is now, so the size
         // column is never drawn past its edge.
         let width = min(max(item.view?.frame.width ?? 340, 340), menu.size.width)
-        let panel = MenuFilesPanel(tree: tree, width: width,
-                                   state: { [weak self] in self?.store.states[id]?.tree },
-                                   toggleNode: { [weak self] node in self?.store.states[id]?.toggle([node]) },
-                                   setAll: { [weak self] on in
-                                       guard let st = self?.store.states[id], let t = st.tree else { return }
-                                       st.setWanted([t.menuStart()], on)
-                                   },
+        let panel = MenuFilesPanel(id: id, view: view, store: store, width: width,
                                    more: { [weak self] in
                                        let section: LibraryModel.Section = sharing ? .sharing : .downloads
                                        self?.commands.showMain(section, nil)  // a tab switch closes every list: open this one after it
@@ -579,7 +563,7 @@ private final class FlippedView: NSView { override var isFlipped: Bool { true } 
                                        menu.cancelTracking()
                                    },
                                    play: { [weak self] node in
-                                       guard let self, let file = self.store.states[id]?.tree?.torrentFile(id: node) else { return }
+                                       guard let self, let file = self.store.lists.file(torrent: id, node: node) else { return }
                                        menu.cancelTracking()
                                        let commands = self.commands
                                        DispatchQueue.main.async { MainActor.assumeIsolated { commands.play(row, file: file) } }
@@ -592,61 +576,24 @@ private final class FlippedView: NSView { override var isFlipped: Bool { true } 
         panelItem = pi
         expanded = id
         (item.view as? MenuTorrentRow)?.expanded = true
-        cleanup?.cancel()
         DispatchQueue.main.async { [weak self] in self?.onMoved?() }
     }
 
     func collapse() {
-        if let id = expanded { rowViews[id]?.view?.expanded = false }
+        if let id = expanded {
+            rowViews[id]?.view?.expanded = false
+            store.collapse(id)
+        }
         if let pi = panelItem, let m = pi.menu { m.removeItem(pi) }
         panel = nil; panelItem = nil; expanded = nil
-        scheduleCleanup()
         DispatchQueue.main.async { [weak self] in self?.onMoved?() }
     }
 
-    /// The whole menu closed: the list goes, its data a moment later.
+    /// The whole menu closed: the list goes (the core keeps one with unsent edits until they are sent).
     func menuClosed() {
+        if let id = expanded { store.collapse(id) }
         panel = nil; panelItem = nil; expanded = nil
         rowViews = [:]
-        scheduleCleanup()
-    }
-
-    /// The list of a torrent, fetched now. A list with edits still on their way to the engine is kept.
-    private func state(for torrent: String) -> FileTreeState {
-        if let st = store.states[torrent] {
-            if !st.hasPending { st.loadNow() }
-            return st
-        }
-        let st = FileTreeState(id: torrent, store: store)
-        st.onChange = { [weak self, weak st] in
-            self?.panel?.refreshChecks()
-            self?.scheduleFlush(st)
-        }
-        store.adopt(st)
-        st.loadNow()
-        return st
-    }
-
-    /// The window's debounce (250 ms of quiet, then one engine call) on a timer that also runs while the menu tracks.
-    private func scheduleFlush(_ st: FileTreeState?) {
-        guard let st, st.hasPending else { return }
-        flushTimer?.invalidate()
-        let t = Timer(timeInterval: 0.25, repeats: false) { [weak st] _ in MainActor.assumeIsolated { st?.flushNow() } }
-        RunLoop.main.add(t, forMode: .common)
-        flushTimer = t
-    }
-
-    /// Frees the lists a moment after they closed, but keeps one with unsent edits until they are sent.
-    private func scheduleCleanup() {
-        cleanup?.cancel()
-        cleanup = Task { [weak self] in
-            while let self, !Task.isCancelled {
-                try? await Task.sleep(for: .milliseconds(400))
-                if Task.isCancelled || expanded != nil { return }
-                for (id, st) in store.states where !st.hasPending { store.drop(id) }
-                if store.states.isEmpty { return }
-            }
-        }
     }
 
     // MARK: QA
@@ -658,7 +605,7 @@ private final class FlippedView: NSView { override var isFlipped: Bool { true } 
         return true
     }
 
-    /// QA: clicks a row of the open list (`all`, `none`, or a name), or its fold chevron (`fold`).
+    /// QA: clicks a row of the open list by name, or its fold chevron (`fold`).
     func qaPress(_ name: String, fold: Bool) -> Bool {
         guard let row = panel?.qaRow(name) else { return false }
         if fold { row.onDisclosure() } else { row.run() }
@@ -671,7 +618,7 @@ private final class FlippedView: NSView { override var isFlipped: Bool { true } 
 
     /// QA: "wanted/total" of the torrent as the engine has it.
     func qaEngineWanted(_ id: String, core: Core) -> String {
-        guard let files = try? core.files(id: id) else { return "?" }
+        guard let files = core.filesShown(id: id) else { return "?" }
         return "\(files.filter { $0.priority != .skip }.count)/\(files.count)"
     }
 }

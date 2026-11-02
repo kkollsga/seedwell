@@ -1,131 +1,110 @@
 import Foundation
 import Observation
 
-/// What the choice store needs from the core: the chooser data of a held torrent, its answer, its removal.
-struct ChoiceEngine {
-    var load: (_ id: String, _ reopen: Bool) throws -> ChoiceInfo
-    var confirm: (_ id: String, _ files: [Bool]) throws -> Void
-    /// Cancel, all of it in the core (`cancel_held`): the torrent is removed and its `.torrent` file goes to the Trash
-    /// unless `keepFile`. A note to show when the file could not be moved.
-    var cancel: (_ id: String, _ keepFile: Bool) -> CancelNote?
-    /// Whether Cancel would move a `.torrent` file to the Trash (cheap, for the button's Shift variant).
-    var hasSource: (_ id: String) -> Bool = { _ in false }
-    /// Changes the category of a torrent: the engine re-plans destination, rule, title and structure.
-    var setCategory: ((_ id: String, _ category: Category) -> Void)?
-}
-
-/// The one `ChooserModel` per torrent that the notifier popover and the main-window chooser share
-/// (SPEC 7A.6): both edit the same ticks, so a change in one shows in the other, and either one's
-/// OK or Cancel resolves the torrent for both.
+/// The one chooser per torrent that the notifier, the chooser window and the list under a held row share (SPEC
+/// 7A.6), as the core keeps them (`Choices`): its ticks, Start, Cancel and a category change are the core's. This
+/// class only tells SwiftUI that a chooser changed (`revision`), shows Cancel's quiet note and tells the app that a
+/// torrent was resolved.
 @MainActor @Observable final class ChoiceStore {
     static let shared = ChoiceStore()
 
-    @ObservationIgnored var engine: ChoiceEngine?
-    /// Told when OK or Cancel resolved a torrent here, so a chooser window open for it can close.
+    @ObservationIgnored var choices: Choices?
+    /// Told when Start or Cancel resolved a torrent here, so a chooser window open for it can close.
     @ObservationIgnored var didResolve: (String) -> Void = { _ in }
-    private(set) var models: [String: ChooserModel] = [:]
     /// A quiet note (a notification, never an alert).
-    @ObservationIgnored var note: (CancelNote) -> Void
+    @ObservationIgnored var note: (CancelNote) -> Void = { Notifier.post(title: $0.title, body: $0.body) }
+    /// Bumped after every change, so whatever draws a chooser reads it again.
+    private(set) var revision = 0
 
-    init(engine: ChoiceEngine? = nil, note: @escaping (CancelNote) -> Void = { Notifier.post(title: $0.title, body: $0.body) }) {
-        self.engine = engine
-        self.note = note
+    /// The shared chooser of `id`, loaded from the core the first time (`reopen`: a running torrent's Files…). Nil
+    /// while the core cannot say (yet).
+    func chooser(for id: String, reopen: Bool = false) -> Chooser? {
+        let had = choices?.loaded(id: id) != nil
+        let c = choices?.chooser(id: id, reopen: reopen)
+        if !had, c != nil { changed() }
+        return c
+    }
+
+    /// The shared chooser of `id`, loaded from the core when there is none yet: the engine is waited for off the main
+    /// thread (a chooser window about to open, the list under a held row).
+    func load(_ id: String, reopen: Bool = false) async -> Chooser? {
+        guard let choices else { return nil }
+        let had = choices.loaded(id: id) != nil
+        let c = await choices.load(id: id, reopen: reopen)
+        if !had, c != nil { changed() }
+        return c
+    }
+
+    /// Whether Cancel would move a `.torrent` file to the Trash, looked at now off the main thread (`hasSource` answers
+    /// at once with what was last seen).
+    func hasSourceFile(_ id: String) async -> Bool {
+        guard let choices else { return false }
+        return await choices.hasSourceFile(id: id)
+    }
+
+    /// The chooser of `id` when one is loaded (never loads).
+    func loaded(_ id: String) -> Chooser? {
+        _ = revision
+        return choices?.loaded(id: id)
+    }
+
+    /// The chooser of `id` as drawn now (read again after every change).
+    func page(_ id: String) -> ChooserPage? {
+        guard let c = loaded(id) else { return nil }
+        return c.view(hasSourceFile: hasSource(id))
     }
 
     /// Cancel would move a `.torrent` file to the Trash (so ⇧ has something to keep).
-    func hasSource(_ id: String) -> Bool { engine?.hasSource(id) ?? false }
+    func hasSource(_ id: String) -> Bool { choices?.hasSource(id: id) ?? false }
 
-    /// The shared model of `id`, loaded from the core the first time. `reopen` is for a running
-    /// torrent (Get Info ▸ Files); a held one is asked as it is. Nil when the core cannot say (yet).
-    func model(for id: String, reopen: Bool = false) -> ChooserModel? {
-        if let m = models[id] { return m }
-        guard let engine, let info = try? engine.load(id, reopen) else { return nil }
-        let m = ChooserModel(info: info, origin: info.awaiting ? "Choose what to download" : "Choose files")
-        // Start on a torrent that waits takes everything except the Extras unless the user ticks otherwise (SPEC 7A.6):
-        // the list shows exactly what Start does.
-        if info.awaiting { m.applyHeldDefault(choiceDefaultFiles(info: info)) }
-        models[id] = m
-        return m
+    /// A click in a chooser: `body` changes it in the core; everything that shows it draws again.
+    func edit(_ body: () -> Void) {
+        body()
+        changed()
     }
 
-    /// OK: apply the ticks and let the torrent start through the normal path (no countdown).
-    func confirm(_ id: String) throws {
-        guard let engine, let m = models[id] else { return }
-        try engine.confirm(id, m.fileFlags())
-        models[id] = nil
-        didResolve(id)
+    /// Start: the ticks go to the engine and the torrent starts (no countdown). Returns at once; what shows the chooser
+    /// closes once the engine took it, or `failed` says why it could not start.
+    func confirm(_ id: String, failed: @escaping @MainActor (Error) -> Void = { _ in }) {
+        guard let choices else { return }
+        CoreCalls.inOrder({ await catching { try await choices.confirm(id: id) } }) { [weak self] r in
+            guard let self else { return }
+            changed()
+            if case .failure(let error) = r { return failed(error) }
+            didResolve(id)
+        }
     }
 
-    /// Cancel: remove the held torrent (SPEC 7A.6), and its `.torrent` file goes to the Trash unless `keepFile`
-    /// (⇧-Cancel). The core does all of it; a file that could not be moved never stops the removal, and its note is
-    /// shown quietly.
+    /// Cancel: the held torrent is removed and its `.torrent` file goes to the Trash unless `keepFile` (⇧-Cancel). A
+    /// file that could not be moved never stops the removal; its note is shown quietly.
     func cancel(_ id: String, keepFile: Bool = false) {
-        guard let engine else { return }
-        let failed = engine.cancel(id, keepFile)
-        models[id] = nil
+        guard let choices else { return }
+        CoreCalls.inOrder({ await choices.cancel(id: id, keepFile: keepFile) }) { [weak self] failed in
+            guard let self else { return }
+            changed()
+            didResolve(id)
+            if let failed { note(failed) }
+        }
+    }
+
+    /// The pill's menu and the chooser's Change: the core plans the torrent again and rebuilds the shared chooser.
+    func changeCategory(_ id: String, to c: Category) {
+        guard let choices else { return }
+        CoreCalls.inOrder({ await choices.changeCategory(id: id, category: c) }) { [weak self] in self?.changed() }
+    }
+
+    /// Start or Cancel resolved `id` elsewhere (the notifier, through the core's `Starting`): what showed it closes,
+    /// and a Cancel's note is shown quietly.
+    func resolved(_ id: String, note failed: CancelNote? = nil) {
+        changed()
         didResolve(id)
         if let failed { note(failed) }
     }
 
-    /// The pill's menu, and the chooser's Change: the engine re-plans the torrent and the shared model is rebuilt from
-    /// it (new destination, rule, structure, quick picks). A torrent that waits keeps the user's ticks where the same
-    /// files are still there; one they never touched gets the default again (everything but Extras). A countdown
-    /// keeps counting; nothing starts or stops.
-    func changeCategory(_ id: String, to c: Category) {
-        guard let engine, let set = engine.setCategory else { return }
-        guard let m = models[id] else { return set(id, c) }
-        guard m.category != c else { return }
-        let before = m.fileFlags()
-        let edited = m.edited
-        set(id, c)
-        guard let info = try? engine.load(id, !m.awaiting) else { return }
-        let fresh = ChooserModel(info: info, origin: m.origin)
-        if info.awaiting {
-            if edited {
-                fresh.checked = Set(fresh.leafItems.filter { leaf in
-                    !leaf.files.isEmpty && leaf.files.allSatisfy { before.indices.contains($0) && before[$0] }
-                }.map(\.id))
-                fresh.edited = true
-            } else {
-                fresh.applyHeldDefault(choiceDefaultFiles(info: info))
-            }
-        }
-        m.adopt(fresh)
+    func drop(_ id: String) {
+        choices?.forget(id: id)
+        changed()
     }
 
-    func drop(_ id: String) { models[id] = nil }
-
-    /// Forgets the models of torrents that do not wait for a choice any more.
-    func prune(keeping ids: Set<String>) {
-        for id in models.keys where !ids.contains(id) { models[id] = nil }
-    }
-}
-
-extension ChooserModel {
-    /// Every file-level tick of the chooser, in order.
-    private var allLeafIDs: [String] { items.flatMap(\.leafIDs) }
-
-    var totalBytes: UInt64 {
-        items.reduce(0) { $0 + $1.size }
-    }
-
-    /// All ticked, none ticked, or in between: what the "Select all / none" toggle shows.
-    var allState: TriState {
-        let leaves = allLeafIDs
-        let n = leaves.filter(checked.contains).count
-        return n == 0 ? .off : n == leaves.count ? .on : .mixed
-    }
-
-    func selectAll() { checked = Set(allLeafIDs); pick = nil }
-    func selectNone() { checked = []; pick = nil }
-
-    /// Everything ticked turns into nothing ticked; anything else turns into everything.
-    func toggleAll() { if allState == .on { selectNone() } else { selectAll() } }
-
-    /// The rows the compact checklist shows, in order: each group, then its children when open.
-    var visibleRows: [(item: ChoiceItem, level: Int)] {
-        items.flatMap { top -> [(ChoiceItem, Int)] in
-            [(top, 0)] + (expanded.contains(top.id) ? top.children.map { ($0, 1) } : [])
-        }
-    }
+    func changed() { revision &+= 1 }
 }

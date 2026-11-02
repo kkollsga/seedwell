@@ -196,6 +196,8 @@ pub(crate) enum Cmd {
     PublicDht(oneshot::Sender<Option<trs_dht::DhtHandle>>),
     /// Map one more port (TCP and UDP) with the listen port's mapper (folder sync's port), or stop mapping it.
     SetExtraMappedPort(Option<u16>),
+    /// Tests only: the actor does nothing else for this long (as a slow commit or a stat of a hung disk would).
+    TestStall(std::time::Duration),
 }
 
 /// Timed work. Ordered so a `BTreeSet<(Instant, Job)>` is the scheduler.

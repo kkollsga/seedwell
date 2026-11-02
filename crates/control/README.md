@@ -105,7 +105,7 @@ Ids in params are the 40-hex transfer id or any unique prefix of at least 6 hex 
 | `tracker_stats` | read_only | no | `tracker?` (profile id, `public`, `other-private`, `all`), `days?` (30, max 400) | `today`, `this_week`, `this_month`, `all_time` (bytes up/down, ratio, completed...), daily `series[]`, `summary` |
 | `rules` | read_only | no | - | the contents of `rules.toml` (`default`, `rule[]`) |
 | `settings_get` | full | no | `keys?` (dotted, allow-listed) | `settings` map |
-| `events_subscribe` | read_only | no | `kinds?` | `{subscribed, cursor}`, then pushed events |
+| `events_subscribe` | read_only | no | `kinds?`, `hold?` (a name this connection holds alone while open: `duplicate` while another holds it) | `{subscribed, cursor}`, then pushed events |
 | `events_unsubscribe` | read_only | no | - | `{subscribed:false}` |
 | `events` | read_only | no | `since?` (cursor), `limit?` (100, max 500), `kinds?` | `events[]`, `cursor`, `oldest_available` (ring of the last 1024 events) |
 | `wait_for` | read_only | no | `ids`, `mode?` (`all`/`any`), `timeout_secs?` (60, max 300) | `done`, `timed_out`, `transfers[]`. Blocks this connection until done |

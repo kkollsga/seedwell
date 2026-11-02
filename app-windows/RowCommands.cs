@@ -211,35 +211,38 @@ static class RowCommands
     {
         var ids = rows.Select(r => r.Id).ToArray();
         var first = rows[0];
+        // The engine's commands: in order, off the UI thread, the window drawn again once each returned.
+        void InOrder(Func<Task> work) => CoreCalls.InOrder($"row command {command.GetType().Name}", work, () => App.Current?.Refreshed());
         try
         {
             switch (command)
             {
-                case RowCommand.Pause: core.Pause(ids); break;
-                case RowCommand.Resume: core.Resume(ids); break;
-                case RowCommand.StartNow: core.PendingStartNow(first.Id); break;
+                case RowCommand.Pause: InOrder(() => core.Pause(ids)); break;
+                case RowCommand.Resume: InOrder(() => core.Resume(ids)); break;
+                case RowCommand.StartNow: InOrder(() => core.PendingStartNow(first.Id)); break;
                 // Start of a torrent that waits for a choice: the core's default selection (everything but the Extras).
-                case RowCommand.ConfirmChoice: core.ConfirmChoiceDefault(first.Id); break;
+                case RowCommand.ConfirmChoice: InOrder(() => core.ConfirmChoiceDefault(first.Id)); break;
                 // Removed, and its .torrent file to the Recycle Bin unless Shift is down (SPEC 7A.6); a file that could not
                 // go is a quiet notification.
                 case RowCommand.CancelHeld:
                     var keep = Microsoft.UI.Input.InputKeyboardSource.GetKeyStateForCurrentThread(Windows.System.VirtualKey.Shift)
                         .HasFlag(Windows.UI.Core.CoreVirtualKeyStates.Down);
-                    if (core.CancelHeld(first.Id, keep) is CancelNote note)
+                    CoreCalls.InOrder("cancel held", () => core.CancelHeld(first.Id, keep), note =>
                     {
-                        App.Current?.Notify(note.Title, note.Body);
-                    }
+                        if (note is CancelNote n) App.Current?.Notify(n.Title, n.Body);
+                        App.Current?.Refreshed();
+                    });
                     break;
-                case RowCommand.StopSharing: core.StopSharing(ids); break;
-                case RowCommand.MoveToTop: core.MoveToTop(first.Id); break;
-                case RowCommand.Verify: core.Verify(ids); break;
-                case RowCommand.AskTrackerAgain a: core.AskTrackerAgain(a.Ids); break;
-                case RowCommand.SetSeedingGoal g: core.SetSeedingGoal(ids, g.Goal); break;
-                case RowCommand.SetPriority p: core.SetPriority(ids, p.Priority); break;
-                case RowCommand.SetCategory c: core.SetCategory(ids, c.Category); break;
-                case RowCommand.SetRule r: core.SetRule(ids, r.RuleId); break;
-                case RowCommand.Remove: core.Remove(ids, false); break;
-                case RowCommand.RemoveAndDeleteFiles: core.Remove(ids, true); break;
+                case RowCommand.StopSharing: InOrder(() => core.StopSharing(ids)); break;
+                case RowCommand.MoveToTop: InOrder(() => core.MoveToTop(first.Id)); break;
+                case RowCommand.Verify: InOrder(() => core.Verify(ids)); break;
+                case RowCommand.AskTrackerAgain a: InOrder(() => core.AskTrackerAgain(a.Ids)); break;
+                case RowCommand.SetSeedingGoal g: InOrder(() => core.SetSeedingGoal(ids, g.Goal)); break;
+                case RowCommand.SetPriority p: InOrder(() => core.SetPriority(ids, p.Priority)); break;
+                case RowCommand.SetCategory c: InOrder(() => core.SetCategory(ids, c.Category)); break;
+                case RowCommand.SetRule r: InOrder(() => core.SetRule(ids, r.RuleId)); break;
+                case RowCommand.Remove: InOrder(() => core.Remove(ids, false)); break;
+                case RowCommand.RemoveAndDeleteFiles: InOrder(() => core.Remove(ids, true)); break;
                 case RowCommand.Reveal: Reveal(rows); break;
                 case RowCommand.GetInfo: App.Current?.OpenInfo(first.Id); break;
                 case RowCommand.CopyMagnet:
@@ -271,7 +274,7 @@ static class RowCommands
         }
         try
         {
-            var r = core.MoveTo(ids, folder);
+            var r = await core.MoveTo(ids, folder);
             AppLog.Write($"move to {folder}: {r.Queued} queued, {r.Refused.Length} refused");
             foreach (var reason in r.Refused)
             {
@@ -287,6 +290,7 @@ static class RowCommands
             AppLog.Write($"move failed: {TrsFfiMethods.CoreErrorMessage(e)}");
             app.Alert(TrsFfiMethods.MoveError(e));
         }
+        app.Refreshed();
     }
 
     /// <summary>

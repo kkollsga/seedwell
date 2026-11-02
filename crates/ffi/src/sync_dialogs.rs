@@ -12,6 +12,7 @@ use std::path::Path;
 use trs_platform::{computer, dirs};
 
 use crate::devices_text::FollowLine;
+use crate::host::{has, HostFeature, HostWindow};
 use crate::sync::{SyncFolder, SyncState};
 use crate::sync_text::{
     key_usable, link_line, role, subtitle, suggested_name, sync_add_can_start, sync_add_set_key, sync_can_share, sync_edit_share_note,
@@ -96,9 +97,10 @@ pub struct SyncAddWindowModel {
     pub location_note: Option<String>,
     pub location_picker: SyncFolderPicker,
     // Both sides
-    /// "Files on demand", its tooltip, and what it means (while it is on).
-    pub on_demand_label: String,
-    pub on_demand_help: String,
+    /// "Files on demand", its tooltip, and what it means (while it is on). All `None` on a host without on-demand
+    /// folders (`HostFeature::OnDemandFolders`): no switch.
+    pub on_demand_label: Option<String>,
+    pub on_demand_help: Option<String>,
     pub on_demand_note: Option<String>,
     /// "On all my devices" (a folder of this computer, while this computer is paired); `on` is the form's choice.
     pub follow: Option<FollowLine>,
@@ -134,7 +136,7 @@ fn location_start(form: &SyncAddForm) -> Option<String> {
     (!parent.as_os_str().is_empty() && parent.is_dir()).then(|| parent.display().to_string())
 }
 
-fn add_window(form: &SyncAddForm, local_on_demand_note: String) -> SyncAddWindowModel {
+fn add_window(form: &SyncAddForm, local_on_demand_note: String, on_demand: bool) -> SyncAddWindowModel {
     let local = form.mode == SyncAddMode::Local;
     let usable = key_usable(form);
     SyncAddWindowModel {
@@ -172,9 +174,10 @@ fn add_window(form: &SyncAddForm, local_on_demand_note: String) -> SyncAddWindow
             message: "Choose where the shared folder goes".into(),
             start: location_start(form),
         },
-        on_demand_label: sync_on_demand_label(),
-        on_demand_help: sync_on_demand_help(),
-        on_demand_note: form.on_demand.then(|| if local { local_on_demand_note } else { sync_on_demand_note(SyncOnDemandChange::Join, String::new()) }),
+        on_demand_label: on_demand.then(sync_on_demand_label),
+        on_demand_help: on_demand.then(sync_on_demand_help),
+        on_demand_note: (on_demand && form.on_demand)
+            .then(|| if local { local_on_demand_note } else { sync_on_demand_note(SyncOnDemandChange::Join, String::new()) }),
         follow: (local && form.follow.shown).then(|| FollowLine { on: form.all_devices, ..form.follow.clone() }),
         cancel_title: CANCEL.into(),
         cancel_help: CANCEL_HELP.into(),
@@ -229,9 +232,11 @@ pub struct SyncEditWindowModel {
     pub move_help: String,
     pub move_enabled: bool,
     pub move_picker: SyncFolderPicker,
-    pub on_demand_label: String,
-    pub on_demand_help: String,
-    /// What Files on demand means as it is set now (`None` for a full folder that stays full).
+    /// "Files on demand" and its tooltip (`None` on a host without on-demand folders, `HostFeature::OnDemandFolders`:
+    /// no switch).
+    pub on_demand_label: Option<String>,
+    pub on_demand_help: Option<String>,
+    /// What Files on demand means as it is set now (`None` for a full folder that stays full, and without the switch).
     pub on_demand_note: Option<String>,
     /// "On all my devices" while it is shown; `on` is the form's choice.
     pub follow: Option<FollowLine>,
@@ -293,11 +298,15 @@ pub fn sync_edit_choose_parent(form: SyncEditForm, parent: String) -> SyncEditFo
     SyncEditForm { new_parent: Some(parent), ..form }
 }
 
-/// The Edit dialog drawn from `form`. `share`: the host has the folder's Share dialog (`HostWindow::FolderShare`).
+/// The Edit dialog drawn from `form`. `host`: the windows the host has (`host_windows_all()` on the Mac): Share…
+/// needs `FolderShare`. `features`: what else it has (`host_features_all()` on the Mac): the Files on demand switch
+/// needs `OnDemandFolders`.
 #[uniffi::export]
-pub fn sync_edit_window(form: SyncEditForm, share: bool) -> SyncEditWindowModel {
+pub fn sync_edit_window(form: SyncEditForm, host: Vec<HostWindow>, features: Vec<HostFeature>) -> SyncEditWindowModel {
+    let share = has(&host, Some(HostWindow::FolderShare));
+    let on_demand = features.contains(&HostFeature::OnDemandFolders);
     let f = form.folder.as_ref();
-    let on_demand_note = f.and_then(|f| {
+    let on_demand_note = f.filter(|_| on_demand).and_then(|f| {
         let change = match (form.on_demand, f.on_demand) {
             (true, true) => Some(SyncOnDemandChange::Stays),
             (true, false) => Some(SyncOnDemandChange::TurnOn),
@@ -326,8 +335,8 @@ pub fn sync_edit_window(form: SyncEditForm, share: bool) -> SyncEditWindowModel 
             message: format!("Choose where “{}” goes. It keeps its name.", form.name),
             start: Path::new(&parent).is_dir().then(|| parent.clone()),
         },
-        on_demand_label: sync_on_demand_label(),
-        on_demand_help: sync_on_demand_help(),
+        on_demand_label: on_demand.then(sync_on_demand_label),
+        on_demand_help: on_demand.then(sync_on_demand_help),
         on_demand_note,
         follow: form.follow.shown.then(|| FollowLine { on: form.all_devices, ..form.follow.clone() }),
         share_caption: "Share".into(),
@@ -351,39 +360,7 @@ pub fn sync_edit_window(form: SyncEditForm, share: bool) -> SyncEditWindowModel 
     }
 }
 
-#[uniffi::export]
 impl Core {
-    /// The Add Folder dialog's form as it opens: From this computer, or Shared with me with `prefill` (a link that
-    /// opened the app, or the pasteboard's when `sync_looks_like_link`) read already.
-    pub fn sync_add_form(&self, prefill: Option<String>) -> SyncAddForm {
-        let form = SyncAddForm { follow: self.sync_follow_line_new(false), ..crate::sync_text::sync_add_form_new() };
-        let form = SyncAddForm { all_devices: form.follow.on, ..form };
-        match prefill {
-            Some(text) => SyncAddForm { mode: SyncAddMode::Shared, ..self.sync_add_set_link(form, text) },
-            None => form,
-        }
-    }
-
-    /// The form with `text` typed or pasted as its link: what it is (or why it cannot be joined), its default place
-    /// (the location follows it unless the user chose one) and a folder of that name already there.
-    pub fn sync_add_set_link(&self, form: SyncAddForm, text: String) -> SyncAddForm {
-        let t = text.trim();
-        let info = if t.is_empty() { None } else { self.sync_parse_link(t.to_owned()) };
-        let default_location = info.as_ref().and_then(|_| self.sync_join_path(t.to_owned()));
-        let existing_folder = info.as_ref().and_then(|i| {
-            let synced = self.sync_snapshot().folders.into_iter().map(|f| f.path).collect();
-            default_location.clone().and_then(|next| sync_existing_folder(suggested_name(i), next, synced))
-        });
-        let problem = if info.is_none() && !t.is_empty() { self.sync_link_problem(t.to_owned()) } else { None };
-        SyncAddForm { existing_folder, ..sync_add_set_key(form, text, info, default_location, problem) }
-    }
-
-    /// The Add Folder dialog drawn from `form` (it reads whether a folder made on demand is on another disk).
-    pub fn sync_add_window(&self, form: SyncAddForm) -> SyncAddWindowModel {
-        let note = if form.mode == SyncAddMode::Local && form.on_demand { self.sync_on_demand_add_note(form.folder.clone()) } else { String::new() };
-        add_window(&form, note)
-    }
-
     /// Start: syncs the chosen folder from this computer (on demand when chosen; on all the user's devices when that
     /// is chosen and shown), or joins the linked one into the location. Slow (the disk, the network): call it off the
     /// main thread. Then the host closes the dialog; for an on-demand folder it adds the folder to the file manager,
@@ -413,24 +390,6 @@ impl Core {
             let _ = self.sync_set_follow(f.id.clone(), true);
         }
         Ok(f)
-    }
-
-    /// The Edit dialog's form for folder `id` as it is now (read again after a failed Save).
-    pub fn sync_edit_form(&self, id: String) -> SyncEditForm {
-        let folder = self.sync_snapshot().folders.into_iter().find(|f| f.id == id);
-        let follow = self.sync_follow_line(id.clone());
-        SyncEditForm {
-            name: folder.as_ref().map(|f| f.name.clone()).unwrap_or_default(),
-            new_parent: None,
-            paused: folder.as_ref().is_some_and(|f| f.state == SyncState::Paused),
-            lan_only: folder.as_ref().is_some_and(|f| f.lan_only),
-            on_demand: folder.as_ref().is_some_and(|f| f.on_demand),
-            all_devices: follow.on,
-            follow,
-            options_open: false,
-            folder,
-            folder_id: id,
-        }
     }
 
     /// Save: applies what changed, in an order that works (back to full first, so the place is an ordinary folder
@@ -473,6 +432,66 @@ impl Core {
         }
         Ok(self.sync_snapshot().folders.into_iter().find(|x| x.id == id).unwrap_or(f))
     }
+}
+
+#[uniffi::export]
+impl Core {
+    /// The Add Folder dialog's form as it opens: From this computer, or Shared with me with `prefill` (a link that
+    /// opened the app, or the pasteboard's when `sync_looks_like_link`) read already.
+    pub fn sync_add_form(&self, prefill: Option<String>) -> SyncAddForm {
+        let form = SyncAddForm { follow: self.sync_follow_line_new(false), ..crate::sync_text::sync_add_form_new() };
+        let form = SyncAddForm { all_devices: form.follow.on, ..form };
+        match prefill {
+            Some(text) => SyncAddForm { mode: SyncAddMode::Shared, ..self.sync_add_set_link(form, text) },
+            None => form,
+        }
+    }
+
+    /// The form with `text` typed or pasted as its link: what it is (or why it cannot be joined), its default place
+    /// (the location follows it unless the user chose one) and a folder of that name already there.
+    pub fn sync_add_set_link(&self, form: SyncAddForm, text: String) -> SyncAddForm {
+        let t = text.trim();
+        let info = if t.is_empty() { None } else { self.sync_parse_link(t.to_owned()) };
+        let default_location = info.as_ref().and_then(|_| self.sync_join_path(t.to_owned()));
+        let existing_folder = info.as_ref().and_then(|i| {
+            let synced = self.sync_snapshot().folders.into_iter().map(|f| f.path).collect();
+            default_location.clone().and_then(|next| sync_existing_folder(suggested_name(i), next, synced))
+        });
+        let problem = if info.is_none() && !t.is_empty() { self.sync_link_problem(t.to_owned()) } else { None };
+        SyncAddForm { existing_folder, ..sync_add_set_key(form, text, info, default_location, problem) }
+    }
+
+    /// The Add Folder dialog drawn from `form` (it reads whether a folder made on demand is on another disk).
+    /// `features`: what the host has (`host_features_all()` on the Mac): the Files on demand switch needs
+    /// `OnDemandFolders`.
+    pub fn sync_add_window(&self, form: SyncAddForm, features: Vec<HostFeature>) -> SyncAddWindowModel {
+        let on_demand = features.contains(&HostFeature::OnDemandFolders);
+        let note = if on_demand && form.mode == SyncAddMode::Local && form.on_demand {
+            self.sync_on_demand_add_note(form.folder.clone())
+        } else {
+            String::new()
+        };
+        add_window(&form, note, on_demand)
+    }
+
+    /// The Edit dialog's form for folder `id` as it is now (read again after a failed Save).
+    pub fn sync_edit_form(&self, id: String) -> SyncEditForm {
+        let folder = self.sync_snapshot().folders.into_iter().find(|f| f.id == id);
+        let follow = self.sync_follow_line(id.clone());
+        SyncEditForm {
+            name: folder.as_ref().map(|f| f.name.clone()).unwrap_or_default(),
+            new_parent: None,
+            paused: folder.as_ref().is_some_and(|f| f.state == SyncState::Paused),
+            lan_only: folder.as_ref().is_some_and(|f| f.lan_only),
+            on_demand: folder.as_ref().is_some_and(|f| f.on_demand),
+            all_devices: follow.on,
+            follow,
+            options_open: false,
+            folder,
+            folder_id: id,
+        }
+    }
+
 }
 
 #[cfg(test)]

@@ -1,284 +1,231 @@
 import Foundation
 import Observation
 
-/// The open file lists of the main window (the tree under a torrent row). Which torrents are expanded
-/// is remembered while the app runs; the files themselves are fetched when a row is expanded, kept up
-/// to date once a second while the window is open, and dropped when it closes.
+/// The open file lists of a place, as the core keeps them (`FileLists`: which are open, the trees, folders, filters,
+/// the selection, the edits on their way and when to read again). This class only runs what the core asks for, off
+/// the main thread where it reads the engine, and keeps the drawn lists for SwiftUI: the window's (`shared`) and the
+/// menu bar's own (`MenuFiles`).
 @MainActor @Observable final class FilesStore {
-    static let shared = FilesStore()
+    static let shared = FilesStore(place: .window)
 
-    /// Torrent ids with their file list open.
-    private(set) var expanded: Set<String> = []
-    private(set) var states: [String: FileTreeState] = [:]
-    /// The selected rows of one open list (Space toggles them, ← → fold folders).
-    private(set) var selectedTorrent: String?
-    private(set) var selectedNodes: Set<UInt32> = []
-    @ObservationIgnored private var anchor: UInt32?
+    @ObservationIgnored let lists: FileLists
     @ObservationIgnored var core: Core?
+    /// The window's lists as drawn, by torrent.
+    private(set) var views: [String: FileListView] = [:]
+    /// Torrents with their list open, and the selected file rows (both as the core has them).
+    private(set) var expanded: [String] = []
+    private(set) var selection: FileSelection?
+    /// "Show All": the window's lists grow to their full height instead of scrolling inside (one choice for every
+    /// torrent, the held torrent's list included), remembered.
+    var showAll = UserDefaults.standard.bool(forKey: FileLayout.showAllKey) {
+        didSet {
+            UserDefaults.standard.set(showAll, forKey: FileLayout.showAllKey)
+            redraw()
+        }
+    }
     /// Told after an edit reached the engine, so the list's rows pick up the new wanted sizes.
     @ObservationIgnored var onEdited: () -> Void = {}
     /// Told before files of a torrent are ticked (a finished torrent may become a download again, SPEC 8.3).
     @ObservationIgnored var onTicked: (String) -> Void = { _ in }
+    /// The menu bar's list redraws when its tree changed (an edit, the engine's answer, a reload).
+    @ObservationIgnored var onChange: (String) -> Void = { _ in }
+    @ObservationIgnored private var flushTimers: [String: Timer] = [:]
+
+    init(place: FileListPlace) {
+        lists = FileLists(place: place)
+    }
+
+    var selectedTorrent: String? { selection?.torrentId }
+    var selectedNodes: Set<UInt32> { Set(selection?.nodes ?? []) }
 
     func isExpanded(_ id: String) -> Bool { expanded.contains(id) }
 
-    func toggle(_ id: String) { isExpanded(id) ? collapse(id) : expand(id) }
+    func toggle(_ id: String) {
+        if lists.toggle(torrent: id) { load(id) }
+        redraw()
+    }
 
     func expand(_ id: String) {
-        expanded.insert(id)
-        guard states[id] == nil else { return }
-        let st = FileTreeState(id: id, store: self)
-        states[id] = st
-        st.load()
+        if lists.expand(torrent: id) { load(id) }
+        redraw()
     }
 
     func collapse(_ id: String) {
-        expanded.remove(id)
-        states[id] = nil
-        if selectedTorrent == id { clearSelection() }
+        lists.collapse(torrent: id)
+        redraw()
     }
 
     /// A tab switch: every torrent opens closed again (the group folds are a separate, remembered setting).
     func collapseAll() {
-        for id in expanded { states[id] = nil }
-        expanded = []
-        clearSelection()
+        lists.collapseAll()
+        redraw()
     }
 
-    /// The menu bar's own store: lists it fetched itself (`FileTreeState.loadNow`) and frees when its submenu closes.
-    func adopt(_ st: FileTreeState) { states[st.id] = st }
-    func drop(_ id: String) { states[id] = nil }
-
-    /// The window opened again: lists that were open reload.
+    /// The window opened again: lists that were open are read again.
     func resume() {
-        for id in expanded where states[id] == nil {
-            let st = FileTreeState(id: id, store: self)
-            states[id] = st
-            st.load()
+        for id in lists.resume() { load(id) }
+        redraw()
+    }
+
+    /// The window closed: nothing is read until it opens again.
+    func suspend() {
+        lists.suspend()
+        redraw()
+    }
+
+    /// From the window's own timer: the lists the core says are due are read again.
+    func tick() {
+        for id in lists.due(nowMs: Date().unixMs) { read(id) }
+    }
+
+    // MARK: Reading
+
+    /// Reads the files and builds the tree off the main thread (5,000 files take a moment to sort).
+    func load(_ id: String) {
+        guard let core else { return }
+        let lists = lists
+        Task { [weak self] in
+            let files = try? await core.files(id: id)
+            await Task.detached { lists.loaded(torrent: id, files: files, nowMs: Date().unixMs) }.value
+            self?.changed(id)
         }
     }
 
-    /// The window closed: nothing is fetched until it opens again.
-    func suspend() {
-        states = [:]
-        clearSelection()
+    /// The menu bar's version of `load`: the list is in place when this returns (the menu is about to show it), as the
+    /// core has it within a few milliseconds (a busy engine: as last read, or not yet).
+    func loadNow(_ id: String) {
+        lists.loaded(torrent: id, files: core?.filesShown(id: id), nowMs: Date().unixMs)
+        changed(id)
     }
 
-    /// Once a second from the window's own timer; only open lists are asked.
-    func tick() {
-        for st in states.values { st.refresh() }
+    private func read(_ id: String) {
+        guard let core else { return }
+        let lists = lists
+        Task { [weak self] in
+            let files = try? await core.files(id: id)
+            let moved = await Task.detached { lists.read(torrent: id, files: files, nowMs: Date().unixMs) }.value
+            if moved { self?.changed(id) }
+        }
     }
 
     // MARK: Selection
 
-    func clearSelection() { selectedTorrent = nil; selectedNodes = []; anchor = nil }
+    func clearSelection() {
+        lists.clearSelection()
+        redraw()
+    }
 
+    /// A click on a file or folder row.
     func select(torrent: String, node: UInt32, command: Bool, shift: Bool) {
-        guard let st = states[torrent] else { return }
-        if selectedTorrent != torrent { selectedNodes = []; anchor = nil }
-        selectedTorrent = torrent
-        if shift, let a = anchor, let ia = st.rows.firstIndex(where: { $0.id == a }), let ib = st.rows.firstIndex(where: { $0.id == node }) {
-            selectedNodes = Set(st.rows[min(ia, ib)...max(ia, ib)].map(\.id))
-        } else if command {
-            if selectedNodes.contains(node) { selectedNodes.remove(node) } else { selectedNodes.insert(node) }
-            anchor = node
-        } else {
-            selectedNodes = [node]
-            anchor = node
-        }
+        lists.click(torrent: torrent, node: node, command: command, shift: shift)
+        redraw()
     }
 
-    func isSelected(torrent: String, node: UInt32) -> Bool { selectedTorrent == torrent && selectedNodes.contains(node) }
-
-    /// The rows an action on `node` covers: the whole selection when `node` is in it, else just `node`.
-    func targets(torrent: String, node: UInt32) -> [UInt32] {
-        isSelected(torrent: torrent, node: node) ? Array(selectedNodes) : [node]
-    }
+    func isSelected(torrent: String, node: UInt32) -> Bool { selection?.torrentId == torrent && selection?.nodes.contains(node) == true }
 
     /// Space: check what is unchecked, else skip.
     func toggleSelected() {
-        guard let id = selectedTorrent, let st = states[id], !selectedNodes.isEmpty else { return }
-        st.toggle(Array(selectedNodes))
+        if let id = lists.space() { edited(id) }
     }
 
     /// → on the selected row: opens a folder.
-    func openSelected() -> Bool {
-        guard let id = selectedTorrent, let st = states[id], let node = selectedNodes.first, selectedNodes.count == 1 else { return false }
-        st.setFolder(node, open: true)
-        return true
+    @discardableResult func openSelected() -> Bool {
+        let done = lists.right()
+        redraw()
+        return done
     }
 
     /// ← on the selected row: closes a folder, else selects the folder it is in (or the torrent row).
-    /// Returns the torrent id to select when the selection moves to its row.
-    func closeSelected() -> (handled: Bool, selectTorrent: String?) {
-        guard let id = selectedTorrent, let st = states[id], let node = selectedNodes.first, selectedNodes.count == 1,
-              let row = st.rows.first(where: { $0.id == node }) else { return (false, nil) }
-        if row.isFolder, st.expandedFolders.contains(node) { st.setFolder(node, open: false); return (true, nil) }
-        let parent = row.parent
-        if parent > 0 { selectedNodes = [parent]; anchor = parent; return (true, nil) }
-        clearSelection()
-        return (true, id)
-    }
-}
-
-/// One torrent's open list: the tree (the core's `FileTreeModel`), which folders are open, the filter, the rows the
-/// core lays out from them, and the edits on their way to the engine.
-@MainActor @Observable final class FileTreeState {
-    let id: String
-    private(set) var tree: FileTreeModel?
-    private(set) var expandedFolders: Set<UInt32> = []
-    var filter = "" { didSet { if filter != oldValue { reflow() } } }
-    /// The rows to draw, in order, with everything each shows.
-    private(set) var rows: [FileRow] = []
-    private(set) var totals: FileTotals?
-    private(set) var failed = false
-    @ObservationIgnored private unowned let store: FilesStore
-    @ObservationIgnored private var refreshing = false
-    @ObservationIgnored private var lastRefresh = Date.distantPast
-    @ObservationIgnored private var pending: [UInt32: FilePriority] = [:]
-    @ObservationIgnored private var inflight = 0
-    @ObservationIgnored private var flushTask: Task<Void, Never>?
-    /// The menu bar's file submenu redraws its rows when the tree changed (edit, failed send, reload).
-    @ObservationIgnored var onChange: (() -> Void)?
-
-    init(id: String, store: FilesStore) {
-        self.id = id
-        self.store = store
+    func closeSelected() -> FileLeft {
+        let out = lists.left()
+        redraw()
+        return out
     }
 
-    /// Fetches the list and builds the tree (off the main thread: 5,000 files take a moment to sort).
-    func load() {
-        guard let core = store.core else { return }
-        let id = id
-        Task { [weak self] in
-            let built: FileTreeModel? = await Task.detached { (try? core.files(id: id)).map { FileTreeModel(files: $0) } }.value
-            guard let self else { return }
-            guard let built else { failed = true; return }
-            failed = false
-            tree = built
-            expandedFolders = Set(built.initiallyExpanded())
-            reflow()
-            onChange?()
-        }
+    // MARK: Folders and edits
+
+    func toggleFolder(_ id: String, _ node: UInt32) {
+        lists.toggleFolder(torrent: id, node: node)
+        changed(id)
     }
 
-    /// The menu bar's version of `load`: the list is in place when this returns (the submenu is about to show).
-    @discardableResult func loadNow() -> Bool {
-        guard let core = store.core, let files = try? core.files(id: id) else { failed = true; return false }
-        failed = false
-        tree = FileTreeModel(files: files)
-        reflow()
-        return true
+    func setFolder(_ id: String, _ node: UInt32, open: Bool) {
+        lists.setFolder(torrent: id, node: node, open: open)
+        changed(id)
     }
 
-    var hasPending: Bool { !pending.isEmpty || inflight > 0 }
-
-    /// Progress (and priorities someone else changed) once a second.
-    func refresh() {
-        guard let core = store.core, tree != nil, !refreshing, !hasPending, Date().timeIntervalSince(lastRefresh) >= 0.9 else { return }
-        refreshing = true
-        lastRefresh = Date()
-        let id = id
-        Task { [weak self] in
-            let files: [TorrentFile]? = await Task.detached { try? core.files(id: id) }.value
-            guard let self else { return }
-            refreshing = false
-            guard let files, let t = tree, !hasPending else { return }
-            switch t.refresh(files: files, keepPriorities: false, nowMs: UInt64(Date().timeIntervalSince1970 * 1000)) {
-            case .same: break
-            case .changed: reflow()
-            case .rebuild:
-                // The list changed shape: build it again.
-                tree = FileTreeModel(files: files)
-                reflow()
-            }
-        }
+    func openAllFolders(_ id: String) {
+        lists.openAllFolders(torrent: id)
+        changed(id)
     }
 
-    // MARK: Folders
-
-    func setFolder(_ node: UInt32, open: Bool) {
-        guard tree != nil else { return }
-        if open { expandedFolders.insert(node) } else { expandedFolders.remove(node) }
-        reflow()
+    func setFilter(_ id: String, _ text: String) {
+        lists.setFilter(torrent: id, text: text)
+        changed(id)
     }
 
-    func toggleFolder(_ node: UInt32) { setFolder(node, open: !expandedFolders.contains(node)) }
-
-    private func reflow() {
-        guard let t = tree else { rows = []; totals = nil; return }
-        rows = t.rows(expanded: Array(expandedFolders), filter: filter)
-        totals = t.totals()
+    /// The check of a row (and of the selection it is in).
+    func toggleCheck(_ id: String, _ node: UInt32) {
+        if lists.toggleCheck(torrent: id, node: node) { edited(id) }
     }
 
-    // MARK: Edits
-
-    /// The checkbox of these rows.
-    func toggle(_ nodes: [UInt32]) {
-        guard let t = tree else { return }
-        edit(t.toggleChanges(nodes: nodes))
-    }
-
-    func setPriority(_ nodes: [UInt32], _ p: FilePriority) {
-        guard let t = tree else { return }
-        edit(t.priorityChanges(nodes: nodes, priority: p))
+    func setPriority(_ id: String, _ node: UInt32, _ p: FilePriority) {
+        if lists.setPriority(torrent: id, node: node, priority: p) { edited(id) }
     }
 
     /// Select All / Select None on what the filter shows (everything without one).
-    func selectAll(_ on: Bool) {
-        guard let t = tree else { return }
-        edit(t.wantChanges(nodes: filter.isEmpty ? t.top() : rows.map(\.id), on: on))
+    func selectAll(_ id: String, _ on: Bool) {
+        if lists.selectAll(torrent: id, on: on) { edited(id) }
     }
 
-    /// Check (`on`) or skip every file under these rows (the menu bar's Select All / None for a folder).
-    func setWanted(_ nodes: [UInt32], _ on: Bool) {
-        guard let t = tree else { return }
-        edit(t.wantChanges(nodes: nodes, on: on))
+    /// Shown at once; sent to the engine after the quiet moment the core says, on a timer that also runs while a menu
+    /// tracks (a menu's run loop mode does not serve tasks), so a run of clicks is one change.
+    private func edited(_ id: String) {
+        changed(id)
+        flushTimers[id]?.invalidate()
+        let delay = Double(views[id]?.flushMs ?? lists.menuView(torrent: id)?.flushMs ?? 250) / 1000
+        let t = Timer(timeInterval: delay, repeats: false) { [weak self] _ in MainActor.assumeIsolated { self?.flush(id) } }
+        RunLoop.main.add(t, forMode: .common)
+        flushTimers[id] = t
     }
 
-    /// Applied at once on screen; sent to the engine as one call after a quiet moment, so a run of
-    /// clicks is one change.
-    private func edit(_ changes: [FilePriorityChange]) {
-        guard !changes.isEmpty, let t = tree else { return }
-        t.apply(changes: changes)
-        reflow()
-        for c in changes { pending[c.index] = c.priority }
-        onChange?()
-        flushTask?.cancel()
-        flushTask = Task { [weak self] in
-            try? await Task.sleep(for: .milliseconds(250))
-            guard !Task.isCancelled else { return }
-            self?.flush()
+    /// Sends the edits now (the engine call starts at once, off the main actor).
+    func flush(_ id: String) {
+        flushTimers[id]?.invalidate()
+        flushTimers[id] = nil
+        guard let core, let edits = lists.takeEdits(torrent: id) else { return }
+        if edits.ticked { onTicked(id) }
+        Task { [weak self] in
+            let ok = (try? await core.setFilePriorities(id: id, changes: edits.changes)) != nil
+            self?.sent(id, ok)
         }
     }
 
-    /// Sends the edits now. The menu bar drives its own debounce with a timer that runs while the menu
-    /// tracks (a menu's run loop mode does not serve the tasks `edit` sleeps in).
-    func flushNow() { flushTask?.cancel(); flush() }
-
-    private func flush() {
-        guard let core = store.core, !pending.isEmpty else { return }
-        let sending = pending.map { FilePriorityChange(index: $0.key, priority: $0.value) }
-        pending = [:]
-        inflight += 1
-        let id = id
-        if sending.contains(where: { $0.priority != .skip }) { store.onTicked(id) }
-        // The engine call starts at once, off the main actor (a menu's run loop mode does not serve main-actor tasks).
-        Task.detached { [weak self] in
-            let ok = (try? core.setFilePriorities(id: id, changes: sending)) != nil
-            await self?.sent(ok)
+    private func sent(_ id: String, _ ok: Bool) {
+        let next = lists.sent(torrent: id, ok: ok)
+        onEdited()
+        switch next {
+        case .reload: load(id)
+        case .read: read(id)
+        case .nothing: changed(id)
         }
     }
 
-    private func sent(_ ok: Bool) {
-        inflight -= 1
-        store.onEdited()
-        if !ok {
-            // The engine refused: show what it really has.
-            pending = [:]
-            load()
-        } else if !hasPending {
-            refresh()
-        }
+    // MARK: Drawing
+
+    private func changed(_ id: String) {
+        redraw()
+        onChange(id)
+    }
+
+    /// Everything drawn, again from the core.
+    private func redraw() {
+        let open = lists.expanded()
+        if open != expanded { expanded = open }
+        let sel = lists.selection()
+        if sel != selection { selection = sel }
+        var next: [String: FileListView] = [:]
+        for id in open { next[id] = lists.view(torrent: id, showAll: showAll) }
+        if next != views { views = next }
     }
 }

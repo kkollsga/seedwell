@@ -49,7 +49,7 @@ sealed class SnapshotRenderer(App app, FlyoutWindow flyout, string dir, string t
         // Stop syncing's inline question, on the first folder.
         if (app.Core.SyncSnapshot().Folders.FirstOrDefault() is SyncFolder folder)
         {
-            app.SyncRemoval.Toggle(folder.Id, app.Core.SyncOnlyHere(folder.Id));
+            app.SyncRemoval.Toggle(folder.Id, await app.Core.SyncOnlyHere(folder.Id));
             flyout.OpenPinned(withSync: true);
             await Settle();
             await Save(root, "menu-sync-confirm");
@@ -83,6 +83,7 @@ sealed class SnapshotRenderer(App app, FlyoutWindow flyout, string dir, string t
         }
 
         await RenderLibrary();
+        await RenderChatFiles();
         await RenderFileIcons();
 
         // The tray icon in its looks, at the tray's sizes (drawn for the taskbar's current theme).
@@ -185,6 +186,65 @@ sealed class SnapshotRenderer(App app, FlyoutWindow flyout, string dir, string t
             nc.QaCancel();
             await PopupsClosed(window.Content.XamlRoot);
         }
+        // Folder Sync (W3): the page's Stop Syncing question, Add Folder on both sides, a folder's Edit and its Share.
+        if (app.Core.SyncSnapshot().Folders.FirstOrDefault() is SyncFolder folder)
+        {
+            app.Library.SelectPlace(new LibraryPlace.FolderSync());
+            pane.Refresh();
+            if (pane.SyncPage is FolderSyncPage page)
+            {
+                page.Choose(folder.Id);
+                page.Run(new SyncPageCommand.AskRemove(), folder.Id);
+                await Settle();
+                await Save(window.Content, "foldersync-remove");
+                page.Run(new SyncPageCommand.CancelRemove(), folder.Id);
+            }
+            AddFolderDialog.Show(app, null);
+            await PopupOpened(window.Content.XamlRoot);
+            if (AddFolderDialog.Open is AddFolderDialog af)
+            {
+                await SavePopups(window.Content.XamlRoot, "add-folder");
+                af.QaMode(SyncAddMode.Shared);
+                af.QaLink("seedwell://sync/not-a-real-link");
+                await Settle();
+                await SavePopups(window.Content.XamlRoot, "add-folder-shared");
+                af.QaCancel();
+                await PopupsClosed(window.Content.XamlRoot);
+            }
+            EditFolderDialog.Show(app, folder.Id);
+            await PopupOpened(window.Content.XamlRoot);
+            if (EditFolderDialog.Open is EditFolderDialog ef)
+            {
+                ef.QaOptions(true);
+                await Settle();
+                await SavePopups(window.Content.XamlRoot, "edit-folder");
+                ef.QaCancel();
+                await PopupsClosed(window.Content.XamlRoot);
+            }
+            ShareDialog.Show(app, folder.Id);
+            await PopupOpened(window.Content.XamlRoot);
+            if (ShareDialog.Open is ShareDialog sd)
+            {
+                await Settle();
+                await SavePopups(window.Content.XamlRoot, "share");
+                sd.QaCancel();
+                await PopupsClosed(window.Content.XamlRoot);
+            }
+        }
+        // The conversation page (W6): the mock's first channel with its ⋯ menu, and its private conversation (the mock's
+        // channels have no members to draw: QA checks the members flyout on a real channel).
+        if (app.Core.ChatChannels().FirstOrDefault() is SyncChannel chatChannel)
+        {
+            await Place(new LibraryPlace.Chat(chatChannel.Id, null), "library-chat");
+            if (pane.ChatPageShown is ChatPage chat)
+            {
+                await Menu(chat.RenderMenu(), "chat-menu");
+            }
+        }
+        if (pane.Model?.Sidebar.Directs?.Items.FirstOrDefault() is SidebarItem chatDirect)
+        {
+            await Place(chatDirect.Place, "library-direct");
+        }
         if (pane.Model?.Sidebar.Trackers?.Items.FirstOrDefault() is SidebarItem tracker)
         {
             await Place(tracker.Place, "library-tracker");
@@ -234,6 +294,47 @@ sealed class SnapshotRenderer(App app, FlyoutWindow flyout, string dir, string t
             await Place(new LibraryPlace.Downloads(), "library-folded");
             app.Library.ToggleFold(fold.Key);
         }
+    }
+
+    /// <summary>
+    /// A file card in every state the core has a sample of (chat_file_samples), the pending sends, and the question
+    /// before opening an app, on one sheet.
+    /// </summary>
+    async Task RenderChatFiles()
+    {
+        var samples = TrsFfiMethods.ChatFileSamples();
+        var attachments = new ChatAttachments(app);
+        var sheet = new StackPanel { Padding = new Thickness(16), Spacing = 10, Background = new SolidColorBrush(Base), Width = 900 };
+        var grid = new Grid { ColumnSpacing = 16, RowSpacing = 10 };
+        grid.ColumnDefinitions.Add(new ColumnDefinition());
+        grid.ColumnDefinitions.Add(new ColumnDefinition());
+        for (int i = 0; i < samples.Cards.Length; i++)
+        {
+            if (i % 2 == 0) grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            var cell = new StackPanel { Spacing = 4 };
+            cell.Children.Add(new TextBlock { Text = samples.Cards[i].Label, FontSize = 11, Opacity = 0.6 });
+            cell.Children.Add(attachments.File("", samples.Cards[i].Card, () => { }));
+            Grid.SetRow(cell, i / 2);
+            Grid.SetColumn(cell, i % 2);
+            grid.Children.Add(cell);
+        }
+        sheet.Children.Add(grid);
+        sheet.Children.Add(attachments.Pending("", samples.Pending, () => { }));
+        var ask = new StackPanel { Spacing = 6, Padding = new Thickness(12), Background = (Brush)Application.Current.Resources["SubtleFillColorSecondaryBrush"], CornerRadius = new CornerRadius(8) };
+        ask.Children.Add(new TextBlock { Text = samples.Confirm.Title, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold });
+        ask.Children.Add(new TextBlock { Text = samples.Confirm.Message, TextWrapping = TextWrapping.Wrap });
+        var buttons = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
+        buttons.Children.Add(new Button { Content = samples.Confirm.Open });
+        buttons.Children.Add(new Button { Content = samples.Confirm.Cancel, Style = (Style)Application.Current.Resources["AccentButtonStyle"] });
+        ask.Children.Add(buttons);
+        sheet.Children.Add(ask);
+        var window = app.LibraryWindow;
+        var before = window.Content;
+        window.Content = sheet;
+        await Settle();
+        await Save(sheet, "chat-files");
+        window.Content = before;
+        await Settle();
     }
 
     /// <summary>
@@ -309,6 +410,11 @@ sealed class SnapshotRenderer(App app, FlyoutWindow flyout, string dir, string t
         var rtb = new RenderTargetBitmap();
         await rtb.RenderAsync(element);
         var pixels = (await rtb.GetPixelsAsync()).ToArray();
+        // Nothing drawn (a popup with nothing in it yet, a light-dismiss layer): no picture, rather than an empty file.
+        if (rtb.PixelWidth == 0 || rtb.PixelHeight == 0 || pixels.Length == 0)
+        {
+            return;
+        }
         // Acrylic (a menu's background) and the dialog's smoke come out transparent: lay the picture on the base colour.
         for (int i = 0; i < pixels.Length; i += 4)
         {

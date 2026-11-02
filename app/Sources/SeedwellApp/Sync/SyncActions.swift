@@ -25,27 +25,26 @@ import os
 
     func snapshot() -> SyncSnapshot { core.syncSnapshot() }
 
-    /// Reveals the folder in Finder; a missing one shows its page instead (there is nothing to reveal). An on-demand
-    /// folder is where the Finder shows it (its File Provider domain).
+    /// Reveal: what the core's `syncReveal` says, the folder in Finder or its page. An on-demand folder is where the
+    /// Finder shows it (its File Provider domain's root, when it has one).
     func reveal(_ f: SyncFolder) {
-        if f.onDemand {
-            Task {
-                if let url = await fileProvider?.rootURL(f.id) {
-                    NSWorkspace.shared.activateFileViewerSelecting([url])
-                } else {
-                    showFolder(f.id, false)
-                }
-            }
-        } else if FileManager.default.fileExists(atPath: f.path) {
-            NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: f.path)])
-        } else {
-            showFolder(f.id, false)
+        guard f.onDemand else { return reveal(f, syncReveal(folder: f, onDemandPlace: nil)) }
+        Task {
+            let place = await fileProvider?.rootURL(f.id)?.path
+            reveal(f, syncReveal(folder: f, onDemandPlace: place))
         }
     }
 
-    /// Runs a blocking core call off the main thread.
-    nonisolated func run<T: Sendable>(_ work: @escaping @Sendable () throws -> T) async -> Result<T, Error> {
-        await Task.detached(priority: .userInitiated) { Result { try work() } }.value
+    private func reveal(_ f: SyncFolder, _ r: SyncReveal) {
+        switch r {
+        case .show(let path): NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
+        case .page: showFolder(f.id, false)
+        }
+    }
+
+    /// Runs one of the core's calls (an `async` one: off the main thread) for its result.
+    nonisolated func run<T: Sendable>(_ work: @escaping @Sendable () async throws -> T) async -> Result<T, Error> {
+        await catching(work)
     }
 
     /// Stops syncing on this Mac; with `trash`, the core then moves the folder to the Trash (it refuses one that cannot
@@ -55,7 +54,7 @@ import os
         Task {
             let core = self.core
             let id = f.id
-            let r = await run({ try core.syncRemove(id: id, trashFiles: trash) })
+            let r = await run({ try await core.syncRemove(id: id, trashFiles: trash) })
             switch r {
             case .failure(let e):
                 alert(syncRemoveFailed(name: f.name, error: SyncText.message(e)))
@@ -72,7 +71,7 @@ import os
         Task {
             let core = self.core
             let id = folder.id
-            if case .failure(let e) = await run({ try core.syncResolveConflict(id: id, copy: copy, keep: keep) }) {
+            if case .failure(let e) = await run({ try await core.syncResolveConflict(id: id, copy: copy, keep: keep) }) {
                 alert(syncResolveFailed(original: original, error: SyncText.message(e)))
             }
             done()
@@ -82,7 +81,18 @@ import os
     /// The system Share menu shared `path`: the Share dialog of the synced folder it is in (or why this Mac may not
     /// share it), else the Share dialog of that folder (or the file's folder) as a new one: Copy Link adds it and makes the link.
     func share(path: String) {
-        let real = FinderStatusWriter.realPath(path)
+        // The path is looked at (its real name, whether it is a folder) off the main thread: it may be on a slow disk.
+        Task {
+            let (real, isDir) = await Task.detached(priority: .userInitiated) { () -> (String, Bool) in
+                let real = FinderStatusWriter.realPath(path)
+                var dir: ObjCBool = false
+                return (real, FileManager.default.fileExists(atPath: real, isDirectory: &dir) && dir.boolValue)
+            }.value
+            share(real: real, isDir: isDir)
+        }
+    }
+
+    private func share(real: String, isDir: Bool) {
         let f = syncFolderContaining(folders: snapshot().folders, path: real)
         let refusal = f.flatMap { syncShareRefusal(folder: $0) }
         // Like the Finder extension's "menu" lines: what the Share menu was used on, and what it opened.
@@ -92,8 +102,6 @@ import os
             if let refusal { alert(refusal) } else { showShare(f.id) }
             return
         }
-        var dir: ObjCBool = false
-        let isDir = FileManager.default.fileExists(atPath: real, isDirectory: &dir) && dir.boolValue
         showShareNew(isDir ? real : (real as NSString).deletingLastPathComponent)
     }
 
@@ -106,7 +114,7 @@ import os
     func setRole(_ id: String, device: String, deviceName: String, _ role: SyncRole, done: @escaping () -> Void) {
         Task {
             let core = self.core
-            if case .failure(let e) = await run({ try core.syncSetRole(id: id, deviceId: device, role: role) }) {
+            if case .failure(let e) = await run({ try await core.syncSetRole(id: id, deviceId: device, role: role) }) {
                 alert(syncSetRoleFailed(device: deviceName, error: SyncText.message(e)))
             }
             done()
@@ -127,7 +135,7 @@ import os
     func removeDevice(_ id: String, name: String, device: String, deviceName: String, done: @escaping () -> Void) {
         Task {
             let core = self.core
-            if case .failure(let e) = await run({ try core.syncRemoveDevice(id: id, deviceId: device) }) {
+            if case .failure(let e) = await run({ try await core.syncRemoveDevice(id: id, deviceId: device) }) {
                 alert(syncRemoveDeviceFailed(device: deviceName, name: name, error: SyncText.message(e)))
             }
             done()
@@ -141,7 +149,7 @@ import os
         Task {
             let core = self.core
             let id = f.id
-            switch await run({ try core.syncReshare(id: id) }) {
+            switch await run({ try await core.syncReshare(id: id) }) {
             case .failure(let e):
                 alert(syncReshareFailed(name: f.name, error: SyncText.message(e)))
             case .success(let new):

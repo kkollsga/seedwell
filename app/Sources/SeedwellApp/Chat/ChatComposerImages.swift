@@ -26,9 +26,10 @@ struct ChatComposerImage: Identifiable {
         let taken = Array(inputs.prefix(max(room, 0)))
         guard !taken.isEmpty else { return }
         Task {
-            let checked = await Task.detached(priority: .userInitiated) {
-                taken.map { input in Result { (input, try core.chatImageCheck(image: input)) } }
-            }.value
+            var checked: [Result<(ChatImageInput, ChatImageDraft), Error>] = []
+            for input in taken {
+                checked.append(await catching { (input, try await core.chatImageCheck(image: input)) })
+            }
             var problems: [String] = []
             for r in checked {
                 switch r {
@@ -93,12 +94,10 @@ struct ChatComposerImage: Identifiable {
     /// the person at this Mac. The core reads the files after this returns; the conversation shows them meanwhile.
     func send(core: Core, place: String, topic: String?, text: String, replyTo: String?, done: @escaping (Bool) -> Void) {
         let inputs = items.map(\.input)
-        let body = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let body = chatComposerBody(draft: text) ?? ""
         items = []
         Task {
-            let r = await Task.detached(priority: .userInitiated) {
-                Result { try core.chatSendAttachments(place: place, topic: topic, body: body, replyTo: replyTo, inputs: inputs) }
-            }.value
+            let r = await catching { try await core.chatSendAttachments(place: place, topic: topic, body: body, replyTo: replyTo, inputs: inputs) }
             if case .failure(let e) = r {
                 alert(SyncText.message(e))
                 if items.isEmpty { add(inputs, core: core) }

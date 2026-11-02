@@ -11,9 +11,10 @@
 //! that cannot be read (permissions, a cloud placeholder) is never turned into a delete.
 
 use std::io;
+use std::time::{Duration, Instant};
 
 use trs_sync_proto::ids::ShortId;
-use trs_sync_proto::model::{FileInfo, FileKind, STATE_DIR, SignedFile, Version};
+use trs_sync_proto::model::{ChunkRef, FileInfo, FileKind, STATE_DIR, SignedFile, Version};
 
 use crate::chunk::{self, Tier};
 use crate::fs::{Fs, Meta};
@@ -233,20 +234,220 @@ fn same_for_sync(a: &FileInfo, b: &FileInfo) -> bool {
     a.same_content(b)
 }
 
+/// A scan in steps (SPEC §7G.2, *Scanning in steps*): each [`Scanner::step`] commits what it found and returns, so
+/// whoever drives it can let go of the folder between steps (the app, a peer asking for the index and the file provider
+/// never wait for a whole first scan of a big folder). A step ends after a batch of changes, after [`ScanJob::stepped`]'s time budget,
+/// or with big files to hash: those are read off the folder's lock ([`ScanJob::take_to_hash`], [`HashTask::run`]) and
+/// recorded by the next step, as long as they did not change meanwhile.
+#[derive(Debug)]
+pub struct ScanJob {
+    scope: String,
+    report: ScanReport,
+    /// Pass 1's paths still to visit (popped from the end, so in path order).
+    stack: Vec<String>,
+    /// Pass 1 is still on (pass 2 follows).
+    walking: bool,
+    /// Pass 2: the last path looked at.
+    after: Option<String>,
+    done: bool,
+    /// A step ends after about this long (`None`: after a full batch only).
+    budget: Option<Duration>,
+    /// Files of at least this many bytes are hashed apart (`None`: in the step).
+    hash_apart_from: Option<u64>,
+    to_hash: Vec<HashTask>,
+    hashed: Vec<Hashed>,
+}
+
+/// Files hashed apart in one go at most: this many, or this many bytes (a step ends when either is reached).
+const APART_FILES: usize = 256;
+const APART_BYTES: u64 = 1 << 30;
+
+impl ScanJob {
+    /// A scan of `scope` whose steps each run to the end of a batch.
+    pub fn new(scope: &str) -> Self {
+        ScanJob {
+            scope: scope.to_string(),
+            report: ScanReport::default(),
+            stack: vec![scope.to_string()],
+            walking: true,
+            after: None,
+            done: false,
+            budget: None,
+            hash_apart_from: None,
+            to_hash: Vec::new(),
+            hashed: Vec::new(),
+        }
+    }
+
+    /// A scan of `scope` whose steps end after about `budget`, with files of `hash_apart_from` bytes and more left to
+    /// be hashed apart.
+    pub fn stepped(scope: &str, budget: Duration, hash_apart_from: u64) -> Self {
+        ScanJob { budget: Some(budget), hash_apart_from: Some(hash_apart_from), ..ScanJob::new(scope) }
+    }
+
+    /// The files the next step needs hashed (each with [`HashTask::run`], then [`Self::hashed`]).
+    pub fn take_to_hash(&mut self) -> Vec<HashTask> {
+        std::mem::take(&mut self.to_hash)
+    }
+
+    /// The files of [`Self::take_to_hash`], hashed: the next step records them.
+    pub fn hashed(&mut self, done: Vec<Hashed>) {
+        self.hashed.extend(done);
+    }
+
+    /// What the scan did so far.
+    pub fn report(&self) -> &ScanReport {
+        &self.report
+    }
+
+    /// What the scan did.
+    pub fn into_report(self) -> ScanReport {
+        self.report
+    }
+
+    /// Nothing more to do.
+    pub fn is_done(&self) -> bool {
+        self.done
+    }
+}
+
+/// A file a step found changed and left to be hashed apart: what it was then.
+#[derive(Clone, Debug)]
+pub struct HashTask {
+    rel: String,
+    stamp: Stamp,
+    size: u64,
+    tier: Tier,
+    chosen_at: u64,
+}
+
+/// A [`HashTask`] done.
+#[derive(Debug)]
+pub struct Hashed {
+    rel: String,
+    stamp: Stamp,
+    tier: Tier,
+    chosen_at: u64,
+    /// The chunks; `Ok(None)` when the file changed while it was read; or why it could not be read.
+    chunks: Result<Option<Vec<ChunkRef>>, String>,
+}
+
+impl HashTask {
+    /// The file's size.
+    pub fn size(&self) -> u64 {
+        self.size
+    }
+
+    /// Reads and hashes the file (no lock needed: only the disk is read).
+    pub fn run(&self, fs: &dyn Fs) -> Hashed {
+        let read = fs.open_read(&self.rel).and_then(|fh| chunk::chunk_file(&*fh, self.size, self.tier, 1 << 20));
+        let chunks = match read {
+            // Changed while we read it: the hash is of no particular version.
+            Ok(c) => Ok(matches!(fs.lstat(&self.rel), Ok(Some(after)) if stamp_of(&after) == self.stamp).then_some(c)),
+            Err(e) => Err(e.to_string()),
+        };
+        Hashed { rel: self.rel.clone(), stamp: self.stamp, tier: self.tier, chosen_at: self.chosen_at, chunks }
+    }
+}
+
 impl Scanner<'_> {
     /// Scans `scope` (a wire path, `""` = the whole folder) into `store`.
     pub fn scan(&self, store: &mut dyn IndexStore, scope: &str) -> Result<ScanReport, ScanError> {
+        let mut job = ScanJob::new(scope);
+        while !self.step(store, &mut job)? {
+            let tasks = job.take_to_hash();
+            job.hashed(tasks.iter().map(|t| t.run(self.fs)).collect());
+        }
+        Ok(job.into_report())
+    }
+
+    /// One step of `job`: true when the scan is done. Every step commits what it recorded.
+    pub fn step(&self, store: &mut dyn IndexStore, job: &mut ScanJob) -> Result<bool, ScanError> {
+        if job.done {
+            return Ok(true);
+        }
+        // Looked at in every step: a disk unmounted between two must not read as "everything deleted".
         match self.fs.lstat(STATE_DIR)? {
             Some(m) if m.kind == FileKind::Dir => {}
             _ => return Err(ScanError::FolderMissing),
         }
-        let mut report = ScanReport::default();
-        let mut batch = Batch::new(&*store, self.me)?;
+        let started = Instant::now();
+        let budget = job.budget;
+        let out_of_time = || budget.is_some_and(|b| started.elapsed() >= b);
+        if job.walking {
+            self.walk(store, job, &out_of_time)?;
+            if job.stack.is_empty() && job.to_hash.is_empty() && job.hashed.is_empty() {
+                job.walking = false;
+            }
+            return Ok(false);
+        }
 
-        // Pass 1: the disk. An explicit stack keeps deep trees off the call stack.
-        let mut stack = vec![scope.to_string()];
+        // Pass 2: the index. Records under the scope that are gone from disk become tombstones.
+        let page = store.local_paths(&job.scope, job.after.as_deref(), 1000)?;
+        if page.is_empty() {
+            job.done = true;
+            return Ok(true);
+        }
+        let mut batch = Batch::new(&*store, self.me)?;
+        let mut listing = None;
+        for p in &page {
+            job.after = Some(p.clone());
+            if let Some(rec) = batch.local(p)? {
+                // A read-only device's local delete keeps the received version (invalid, no stamp):
+                // already recorded, so not recorded again (a new sequence on every scan, forever). Its
+                // local file over a received delete (invalid, stamped) is a change that can go, though.
+                let recorded = rec.dataless || if rec.invalid { rec.stamp.is_none() } else { rec.file.info.deleted };
+                if !recorded && !self.ignore.is_ignored(p, rec.file.info.kind == FileKind::Dir) {
+                    // Still there (pass 1 handled it), or not readable now: never a delete.
+                    let gone = match self.fs.lstat(p) {
+                        Ok(None) => true,
+                        Ok(Some(_)) if self.case_insensitive => !self.listed(p, &mut listing),
+                        _ => false,
+                    };
+                    if let (true, Some(pinned)) = (gone, self.on_demand) {
+                        // Gone from the cache: the content is no longer here. A file becomes online only (one kept
+                        // on this device is fetched again); a directory or link holds no content and stays as it is
+                        // (the puller makes it again).
+                        if rec.file.info.kind == FileKind::File && !rec.file.info.deleted {
+                            let want = pinned(p);
+                            batch.put_local(LocalRecord { invalid: true, stamp: None, tier: None, dataless: true, want, ..rec });
+                        }
+                    } else if gone {
+                        self.record_delete(&mut batch, rec);
+                        job.report.deleted += 1;
+                    }
+                }
+            }
+            if out_of_time() {
+                break;
+            }
+        }
+        let ops = batch.finish()?;
+        store.apply(ops)?;
+        Ok(false)
+    }
+
+    /// Pass 1, the disk, up to the end of a batch (or of the step's time, or with files to hash apart). An explicit
+    /// stack keeps deep trees off the call stack.
+    fn walk(&self, store: &mut dyn IndexStore, job: &mut ScanJob, out_of_time: &dyn Fn() -> bool) -> Result<(), ScanError> {
+        let mut batch = Batch::new(&*store, self.me)?;
+        let report = &mut job.report;
+        // Files hashed apart since the last step first, each as it is now.
+        for h in std::mem::take(&mut job.hashed) {
+            let rel = h.rel.clone();
+            match self.fs.lstat(&rel) {
+                // Gone meanwhile: pass 2 says so.
+                Ok(None) => {}
+                Ok(Some(meta)) => {
+                    self.visit(&mut batch, &rel, &meta, report, job.hash_apart_from, Some(h))?;
+                }
+                Err(e) => report.issues.push(Issue { path: rel, kind: IssueKind::Io(e.to_string()) }),
+            }
+        }
+        let mut apart: u64 = 0;
+        let scope = job.scope.as_str();
         // A scope that is not on disk is handled by pass 2 (it was deleted).
-        while let Some(rel) = stack.pop() {
+        while let Some(rel) = job.stack.pop() {
             let Some(meta) = (match self.fs.lstat(&rel) {
                 Ok(m) => m,
                 Err(e) => {
@@ -266,7 +467,10 @@ impl Scanner<'_> {
                 if rel == scope && self.case_insensitive && !self.listed(&rel, &mut None) {
                     continue;
                 }
-                self.visit(&mut batch, &rel, &meta, &mut report)?;
+                if let Some(task) = self.visit(&mut batch, &rel, &meta, report, job.hash_apart_from, None)? {
+                    apart += task.size;
+                    job.to_hash.push(task);
+                }
             }
             if meta.kind == FileKind::Dir && !meta.other {
                 let listing = match self.fs.read_dir(&rel) {
@@ -296,58 +500,16 @@ impl Scanner<'_> {
                         report.issues.push(Issue { path: join(&rel, &name), kind: IssueKind::NotNfc });
                         continue;
                     }
-                    stack.push(join(&rel, &path::wire_name(&name)));
+                    job.stack.push(join(&rel, &path::wire_name(&name)));
                 }
             }
-            if batch.len() >= self.batch_size {
-                let ops = batch.finish()?;
-                store.apply(ops)?;
-                batch = Batch::new(&*store, self.me)?;
+            if batch.len() >= self.batch_size || job.to_hash.len() >= APART_FILES || apart >= APART_BYTES || out_of_time() {
+                break;
             }
         }
         let ops = batch.finish()?;
         store.apply(ops)?;
-
-        // Pass 2: the index. Records under the scope that are gone from disk become tombstones.
-        let mut after: Option<String> = None;
-        loop {
-            let page = store.local_paths(scope, after.as_deref(), 1000)?;
-            let Some(last) = page.last().cloned() else { break };
-            let mut batch = Batch::new(&*store, self.me)?;
-            let mut listing = None;
-            for p in &page {
-                let Some(rec) = batch.local(p)? else { continue };
-                // A read-only device's local delete keeps the received version (invalid, no stamp):
-                // already recorded, so not recorded again (a new sequence on every scan, forever). Its
-                // local file over a received delete (invalid, stamped) is a change that can go, though.
-                let recorded = rec.dataless || if rec.invalid { rec.stamp.is_none() } else { rec.file.info.deleted };
-                if recorded || self.ignore.is_ignored(p, rec.file.info.kind == FileKind::Dir) {
-                    continue;
-                }
-                // Still there (pass 1 handled it), or not readable now: never a delete.
-                let gone = match self.fs.lstat(p) {
-                    Ok(None) => true,
-                    Ok(Some(_)) if self.case_insensitive => !self.listed(p, &mut listing),
-                    _ => false,
-                };
-                if let (true, Some(pinned)) = (gone, self.on_demand) {
-                    // Gone from the cache: the content is no longer here. A file becomes online only (one kept on
-                    // this device is fetched again); a directory or link holds no content and stays as it is (the
-                    // puller makes it again).
-                    if rec.file.info.kind == FileKind::File && !rec.file.info.deleted {
-                        let want = pinned(p);
-                        batch.put_local(LocalRecord { invalid: true, stamp: None, tier: None, dataless: true, want, ..rec });
-                    }
-                } else if gone {
-                    self.record_delete(&mut batch, rec);
-                    report.deleted += 1;
-                }
-            }
-            let ops = batch.finish()?;
-            store.apply(ops)?;
-            after = Some(last);
-        }
-        Ok(report)
+        Ok(())
     }
 
     /// Is `p` in its directory's listing under exactly this name (wire form)? `cache` keeps the last
@@ -371,18 +533,20 @@ impl Scanner<'_> {
         rel: &str,
         meta: &Meta,
         report: &mut ScanReport,
-    ) -> io::Result<()> {
+        hash_apart_from: Option<u64>,
+        pre: Option<Hashed>,
+    ) -> io::Result<Option<HashTask>> {
         if trs_sync_proto::model::validate_path(rel).is_err() {
             report.issues.push(Issue { path: rel.to_string(), kind: IssueKind::BadName });
-            return Ok(());
+            return Ok(None);
         }
         if meta.other {
             report.issues.push(Issue { path: rel.to_string(), kind: IssueKind::Unsupported });
-            return Ok(());
+            return Ok(None);
         }
         if meta.dataless {
             report.issues.push(Issue { path: rel.to_string(), kind: IssueKind::Dataless });
-            return Ok(());
+            return Ok(None);
         }
         let old = batch.local(rel)?;
         let stamp = stamp_of(meta);
@@ -404,7 +568,7 @@ impl Scanner<'_> {
                 }
             };
             if unchanged {
-                return Ok(());
+                return Ok(None);
             }
         }
 
@@ -413,36 +577,58 @@ impl Scanner<'_> {
             FileKind::File => {
                 let (tier, chosen_at) =
                     chunk::choose_tier(meta.size, tier_memo.map(|t| (Tier { avg: t.avg }, t.chosen_at)));
-                let fh = match self.fs.open_read(rel) {
-                    Ok(f) => f,
-                    Err(e) => {
-                        report.issues.push(Issue { path: rel.to_string(), kind: IssueKind::Io(e.to_string()) });
-                        return Ok(());
+                let (chunks, tier, chosen_at) = match pre.filter(|h| h.rel == rel) {
+                    // Hashed apart: what was read is this version only when the file has not moved since.
+                    Some(h) => match h.chunks {
+                        Ok(Some(c)) if h.stamp == stamp => (c, h.tier, h.chosen_at),
+                        Err(e) if h.stamp == stamp => {
+                            report.issues.push(Issue { path: rel.to_string(), kind: IssueKind::Io(e) });
+                            return Ok(None);
+                        }
+                        _ => {
+                            report.hashed_bytes += meta.size;
+                            report.busy.push(rel.to_string());
+                            return Ok(None);
+                        }
+                    },
+                    None if hash_apart_from.is_some_and(|min| meta.size >= min) => {
+                        return Ok(Some(HashTask { rel: rel.to_string(), stamp, size: meta.size, tier, chosen_at }));
                     }
-                };
-                let chunks = match chunk::chunk_file(&*fh, meta.size, tier, 1 << 20) {
-                    Ok(c) => c,
-                    Err(e) => {
-                        report.issues.push(Issue { path: rel.to_string(), kind: IssueKind::Io(e.to_string()) });
-                        return Ok(());
+                    None => {
+                        let fh = match self.fs.open_read(rel) {
+                            Ok(f) => f,
+                            Err(e) => {
+                                report.issues.push(Issue { path: rel.to_string(), kind: IssueKind::Io(e.to_string()) });
+                                return Ok(None);
+                            }
+                        };
+                        let chunks = match chunk::chunk_file(&*fh, meta.size, tier, 1 << 20) {
+                            Ok(c) => c,
+                            Err(e) => {
+                                report.issues.push(Issue { path: rel.to_string(), kind: IssueKind::Io(e.to_string()) });
+                                return Ok(None);
+                            }
+                        };
+                        // Changed while we read it: the hash is of no particular version. Try again later.
+                        match self.fs.lstat(rel)? {
+                            Some(after) if stamp_of(&after) == stamp => {}
+                            _ => {
+                                report.hashed_bytes += meta.size;
+                                report.busy.push(rel.to_string());
+                                return Ok(None);
+                            }
+                        }
+                        (chunks, tier, chosen_at)
                     }
                 };
                 report.hashed_bytes += meta.size;
-                // Changed while we read it: the hash is of no particular version. Try again later.
-                match self.fs.lstat(rel)? {
-                    Some(after) if stamp_of(&after) == stamp => {}
-                    _ => {
-                        report.busy.push(rel.to_string());
-                        return Ok(());
-                    }
-                }
                 (chunks, meta.size, Some(TierMemo { avg: tier.avg, chosen_at }), String::new())
             }
             FileKind::Symlink => match self.fs.read_link(rel) {
                 Ok(t) => (Vec::new(), 0, None, t),
                 Err(e) => {
                     report.issues.push(Issue { path: rel.to_string(), kind: IssueKind::Io(e.to_string()) });
-                    return Ok(());
+                    return Ok(None);
                 }
             },
             FileKind::Dir => (Vec::new(), 0, None, String::new()),
@@ -477,7 +663,7 @@ impl Scanner<'_> {
             } else {
                 batch.restamp_local(LocalRecord { stamp: Some(stamp), tier, ..o.clone() });
             }
-            return Ok(());
+            return Ok(None);
         }
         // The same content as the version this device is about to take (a crash between the puller
         // writing it and recording it): take that version instead of making a concurrent one.
@@ -489,14 +675,14 @@ impl Scanner<'_> {
             let file = adopt(self.signer, self.me, old.as_ref(), n.file, &others);
             batch.put_local(LocalRecord { file, sequence: 0, invalid: false, stamp: Some(stamp), tier, dataless: false, want: false });
             report.changed += 1;
-            return Ok(());
+            return Ok(None);
         }
 
         if self.on_demand.is_some() && !self.host_write && old.as_ref().is_some_and(|o| o.dataless) {
             // Something put content at an online-only path behind the host's back: it is kept, never a version that
             // could beat another device's newer one.
             self.archive_stray(rel)?;
-            return Ok(());
+            return Ok(None);
         }
 
         match self.signer {
@@ -516,7 +702,7 @@ impl Scanner<'_> {
             }
         }
         report.changed += 1;
-        Ok(())
+        Ok(None)
     }
 
     /// A record whose path is gone from disk.

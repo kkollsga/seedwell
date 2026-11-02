@@ -192,7 +192,7 @@ import Testing
             folders = core.syncSnapshot().folders
             if folders.isEmpty { try await Task.sleep(nanoseconds: 50_000_000) }
         }
-        let f = try core.syncSetOnDemand(id: try #require(folders.first).id, onDemand: true, path: nil)
+        let f = try await core.syncSetOnDemand(id: try #require(folders.first).id, onDemand: true, path: nil)
         let host = FileProviderHost(core: core, domains: fake)
         let full = try #require(folders.dropFirst().first)
         await fake.set([FileProviderDomainState(id: f.id, name: f.name, enabled: true), FileProviderDomainState(id: "gone", name: "Old", enabled: true),
@@ -330,7 +330,7 @@ import Testing
         m.onDemand = true
         #expect(m.changed && m.onDemandNote?.contains("Remove Download") == true)
         // An on-demand folder switched back: everything is downloaded, into its place.
-        _ = try core.syncSetOnDemand(id: f.id, onDemand: true, path: nil)
+        _ = try await core.syncSetOnDemand(id: f.id, onDemand: true, path: nil)
         let back = SyncEditModel(core: core, id: f.id)
         #expect(back.onDemand && back.onDemandNote?.contains("Every file is listed") == true)
         back.onDemand = false
@@ -347,7 +347,7 @@ import Testing
             folders = core.syncSnapshot().folders
             if folders.isEmpty { try await Task.sleep(nanoseconds: 50_000_000) }
         }
-        let f = try core.syncSetOnDemand(id: try #require(folders.first).id, onDemand: true, path: nil)
+        let f = try await core.syncSetOnDemand(id: try #require(folders.first).id, onDemand: true, path: nil)
         // The server, in a temporary folder (no domain is registered: the domains are fake).
         let dir = try FakeApp.tempDir()
         defer { core.syncHostStop(); try? FileManager.default.removeItem(at: dir) }

@@ -17,7 +17,7 @@ use trs_control::display as d;
 use trs_platform::{computer, file_manager};
 
 use crate::chat_text::named;
-use crate::host::{has, HostWindow};
+use crate::host::{has, HostFeature, HostWindow};
 use crate::library::{local_day, LocalClock};
 use crate::sync::{SyncChannel, SyncConflict, SyncDevice, SyncFolder, SyncKeep, SyncMember, SyncRole, SyncSnapshot, SyncState};
 use crate::sync_menu::{add_folder_item, SyncMenuConfirm, SyncMenuItem, SyncRemoval};
@@ -29,6 +29,10 @@ use crate::sync_text::{
 
 const REVEAL: &str = concat!("Show in ", file_manager!());
 const CANCEL: &str = "Cancel";
+/// The members change as devices come and go (the core keeps them apart from the folder's index: a cheap read).
+const MEMBERS_REFRESH_MS: u32 = 2_000;
+/// Reading the conflict copies reads the folder's whole index.
+const CONFLICTS_REFRESH_MS: u32 = 10_000;
 
 // MARK: The records
 
@@ -37,8 +41,8 @@ const CANCEL: &str = "Cancel";
 /// model again; a failed call is told in an alert (the `sync_*_failed` texts).
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum SyncPageCommand {
-    /// Shows the folder in the file manager (an on-demand folder where the file manager shows it; a missing one: its
-    /// page, as there is nothing to reveal).
+    /// Shows the folder in the file manager: the host does what [`sync_reveal`] says (a missing folder: its page, as
+    /// there is nothing to reveal).
     Reveal,
     /// Its Share dialog (`HostWindow::FolderShare`).
     Share,
@@ -57,7 +61,7 @@ pub enum SyncPageCommand {
     /// The Add Folder dialog (`HostWindow::AddFolder`).
     AddFolder,
     /// Opens the system's list where on-demand folders are allowed in the file manager (the Mac: System Settings ›
-    /// File Providers).
+    /// File Providers). Only on a host with `HostFeature::OnDemandFolders`.
     AllowOnDemand,
     /// Gives a member another role: `Core::sync_set_role` (`sync_set_role_failed`).
     SetRole { device_id: String, role: SyncRole },
@@ -249,7 +253,7 @@ pub struct SyncFolderPage {
     pub error: Option<String>,
     /// A quiet note under the status (the folder or its disk is missing).
     pub note: Option<String>,
-    /// An on-demand folder the system keeps out of the file manager.
+    /// An on-demand folder the system keeps out of the file manager (only with `HostFeature::OnDemandFolders`).
     pub on_demand_off: Option<SyncPageNotice>,
     /// The box under the header: devices gone, then the Share Again prompt. Drawn while either is there.
     pub gone: Vec<SyncPageGone>,
@@ -285,8 +289,22 @@ pub struct SyncPageModel {
     /// The folder shown: the one asked for, else (none, or gone) the first. The host keeps it as its selection.
     pub selected: Option<String>,
     pub page: Option<SyncFolderPage>,
+    /// How often the host reads the selected folder's members (`Core::sync_members`) and its conflict copies
+    /// (`Core::sync_conflicts`) again while the page is shown, besides when the selection changes and after a change.
+    pub members_refresh_ms: u32,
+    pub conflicts_refresh_ms: u32,
     /// Changes whenever anything above does: the host may skip redrawing a page it has drawn.
     pub signature: String,
+}
+
+/// What Reveal does with a folder ([`sync_reveal`]).
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum SyncReveal {
+    /// Shows `path` in the file manager, selected in the folder it is in.
+    Show { path: String },
+    /// Nothing to reveal (the folder or its disk is not there, or an on-demand folder the file manager does not have):
+    /// the folder's page instead, where it says why.
+    Page,
 }
 
 /// What the page is built from: the host's reads.
@@ -465,7 +483,7 @@ fn conflict(c: &SyncConflict) -> SyncPageConflict {
     }
 }
 
-fn page(i: &SyncPageInput, f: &SyncFolder, removal: Option<SyncMenuConfirm>, clock: &dyn LocalClock, host: &[HostWindow]) -> SyncFolderPage {
+fn page(i: &SyncPageInput, f: &SyncFolder, removal: Option<SyncMenuConfirm>, clock: &dyn LocalClock, host: &[HostWindow], on_demand: bool) -> SyncFolderPage {
     let now_s = i.now_unix_s;
     let devices: Vec<&SyncDevice> = i.snapshot.devices.iter().filter(|d| d.folders.contains(&f.id)).collect();
     let members = sync_members_ordered(i.members.clone())
@@ -514,7 +532,7 @@ fn page(i: &SyncPageInput, f: &SyncFolder, removal: Option<SyncMenuConfirm>, clo
             button: SyncPageButton { question: Some(question(p.title, p.text, &p.confirm, false)), ..button(p.button, p.help, SyncPageCommand::Reshare) },
         }
     });
-    let on_demand_off = (f.on_demand && i.on_demand_off).then(|| {
+    let on_demand_off = (on_demand && f.on_demand && i.on_demand_off).then(|| {
         let n = sync_on_demand_notice(false);
         SyncPageNotice { text: sync_on_demand_off_line(), button: n.button.map(|b| button(b, n.help, SyncPageCommand::AllowOnDemand)) }
     });
@@ -557,8 +575,17 @@ fn removal_strip(f: &SyncFolder, r: &Arc<SyncRemoval>) -> Option<SyncMenuConfirm
 /// The Folder Sync page for `input`, with the Stop Syncing question `removal` has open (the page's own
 /// [`SyncRemoval`]: it closes when another folder is selected or its folder goes). `host`: the windows the host has
 /// (`host_windows_all()` on the Mac): Share… needs `FolderShare`, Edit… `FolderEditor`, Add Folder… `AddFolder`.
+/// `features`: what else it has (`host_features_all()` on the Mac): the notice of an on-demand folder kept out of the
+/// file manager needs `OnDemandFolders`.
 #[uniffi::export]
-pub fn sync_page_model(input: SyncPageInput, removal: Arc<SyncRemoval>, clock: Arc<dyn LocalClock>, host: Vec<HostWindow>) -> SyncPageModel {
+pub fn sync_page_model(
+    input: SyncPageInput,
+    removal: Arc<SyncRemoval>,
+    clock: Arc<dyn LocalClock>,
+    host: Vec<HostWindow>,
+    features: Vec<HostFeature>,
+) -> SyncPageModel {
+    let on_demand = features.contains(&HostFeature::OnDemandFolders);
     let s = &input.snapshot;
     let selected = input.selected.as_ref().filter(|id| s.folders.iter().any(|f| &&f.id == id)).or_else(|| s.folders.first().map(|f| &f.id)).cloned();
     // The question goes with its folder: another one selected, or the folder removed.
@@ -587,12 +614,30 @@ pub fn sync_page_model(input: SyncPageInput, removal: Arc<SyncRemoval>, clock: A
     let page = selected
         .as_ref()
         .and_then(|id| s.folders.iter().find(|f| &f.id == id))
-        .map(|f| page(&input, f, removal_strip(f, &removal), clock.as_ref(), &host));
-    let mut m = SyncPageModel { empty, folders, add, selected, page, signature: String::new() };
+        .map(|f| page(&input, f, removal_strip(f, &removal), clock.as_ref(), &host, on_demand));
+    let mut m = SyncPageModel {
+        empty,
+        folders,
+        add,
+        selected,
+        page,
+        members_refresh_ms: MEMBERS_REFRESH_MS,
+        conflicts_refresh_ms: CONFLICTS_REFRESH_MS,
+        signature: String::new(),
+    };
     let mut h = std::collections::hash_map::DefaultHasher::new();
     format!("{m:?}").hash(&mut h);
     m.signature = format!("{:016x}", h.finish());
     m
+}
+
+/// What Reveal does with folder `folder` (the page's, a list row's or the menu's): show its place in the file manager,
+/// or its page when there is nothing to show. `on_demand_place`: for an on-demand folder, where the file manager has
+/// it (the Mac: its File Provider domain's root), `None` when it has none.
+#[uniffi::export]
+pub fn sync_reveal(folder: SyncFolder, on_demand_place: Option<String>) -> SyncReveal {
+    let path = if folder.on_demand { on_demand_place } else { Path::new(&folder.path).exists().then_some(folder.path) };
+    path.map_or(SyncReveal::Page, |path| SyncReveal::Show { path })
 }
 
 impl SyncRemoval {

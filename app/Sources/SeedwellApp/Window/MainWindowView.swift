@@ -256,15 +256,11 @@ struct DetailView: View {
         case .missing:
             EmptyListNote(text: v.missing ?? "")
         case .conversation:
-            if model.directID != nil {
-                // Only while the two Macs are connected directly (a conversation just started from a channel's members
-                // is not listed yet: the core says why if it cannot be written to).
-                ChatConversationView(model: model, place: model.section, name: model.directName, canPost: model.direct?.online ?? true,
-                                     cannotPost: model.core.chatDirectOfflineText(),
-                                     empty: "No messages yet. Only you and \(model.directName) can read what you write here.", actions: commands.chat)
-            } else if let c = model.chat {
-                ChatConversationView(model: model, place: model.section, name: model.chatTopic?.title ?? c.name, canPost: c.role != .readOnly,
-                                     actions: commands.chat)
+            // The core's page (`chatPageModel`); a private conversation and a channel are drawn alike.
+            if model.directID != nil, let page = model.chatPage {
+                ChatConversationView(model: model, page: page, actions: commands.chat)
+            } else if model.chat != nil, let page = model.chatPage {
+                ChatConversationView(model: model, page: page, actions: commands.chat)
             }
         case .trackerInfo:
             if let t = model.tracker { TrackerInfoPage(model: model, tracker: t, commands: commands) }
@@ -301,8 +297,9 @@ struct ChatToolbarItem: ToolbarContent {
     }
 
     @ViewBuilder private var controls: some View {
-        if let c = model.chat { ChatToolbarControls(model: model, channel: c, actions: actions) }
-        else if let d = model.directID { ChatDirectToolbarControls(actions: actions, device: d, name: model.directName) }
+        if model.chatID != nil || model.directID != nil, let page = model.chatPage {
+            ChatToolbarControls(model: model, page: page, actions: actions)
+        }
     }
 }
 

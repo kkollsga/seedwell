@@ -9,8 +9,8 @@ namespace Seedwell;
 /// <c>DevicesView</c> (trs-ffi devices_text.rs, as the Mac's Settings tab): the list with Remove…, a device asking to
 /// pair (its id, Refuse and Pair), Pair a Device… (the link, Copy, the countdown), Pair with a Link… and Leave or
 /// Start Over, each in a dialog. Read again every second. Only the user's clicks reach these calls; agents never.
-/// "On all my devices" is on the Folder Sync page (<see cref="FolderSyncPage"/>). NEED: it in the folder editor and the
-/// channel menu (the core's sync_follow_line and sync_set_follow are there for them).
+/// "On all my devices" is in a folder's Add Folder and Edit dialogs (<see cref="EditFolderDialog"/>), New Channel and
+/// the channel menu.
 /// </summary>
 sealed class DevicesSection
 {
@@ -142,13 +142,9 @@ sealed class DevicesSection
     }
 
     /// <summary>Runs a call; a failure is shown in an alert. The view is read again either way.</summary>
-    void Run(Action work)
+    void Run(Func<Task> work)
     {
-        try { work(); }
-        catch (CoreException e) { Say(TrsFfiMethods.CoreErrorMessage(e)); }
-        catch (Exception e) { Say(e.Message); }
-        drawn = "";
-        Update();
+        CoreCalls.InOrder("devices", work, () => { drawn = ""; Update(); }, Say);
     }
 
     void Say(string text)
@@ -167,8 +163,8 @@ sealed class DevicesSection
             return;
         }
         PairLinkView l;
-        try { l = app.Core.DevicesCurrentLink() ?? app.Core.DevicesPairLink(); }
-        catch (CoreException e) { Say(TrsFfiMethods.CoreErrorMessage(e)); return; }
+        try { l = app.Core.DevicesCurrentLink() ?? await app.Core.DevicesPairLink(); }
+        catch (Exception e) { Say(CoreCalls.Message(e)); return; }
         link = l;
         var content = new StackPanel { Spacing = 10, MaxWidth = 460 };
         content.Children.Add(new TextBlock { Text = l.Text, TextWrapping = TextWrapping.Wrap, Opacity = 0.8 });
@@ -238,8 +234,8 @@ sealed class DevicesSection
             return;
         }
         RemoveDeviceView v;
-        try { v = app.Core.DevicesRemoveView(id); }
-        catch (CoreException e) { Say(TrsFfiMethods.CoreErrorMessage(e)); return; }
+        try { v = await app.Core.DevicesRemoveView(id); }
+        catch (Exception e) { Say(CoreCalls.Message(e)); return; }
         var content = new StackPanel { Spacing = 8, MaxWidth = 460 };
         content.Children.Add(new TextBlock { Text = v.Text, TextWrapping = TextWrapping.Wrap, Opacity = 0.8 });
         var ticks = new List<(string Id, CheckBox Box)>();
@@ -286,10 +282,7 @@ sealed class DevicesSection
         if (await d.ShowAsync() == ContentDialogResult.Primary)
         {
             var startOver = v.Kind == DevicesKind.Removed;
-            Run(() =>
-            {
-                if (startOver) { app.Core.DevicesStartOver(); } else { app.Core.DevicesLeave(); }
-            });
+            Run(() => startOver ? app.Core.DevicesStartOver() : app.Core.DevicesLeave());
         }
     }
 }

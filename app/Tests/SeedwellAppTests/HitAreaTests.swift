@@ -39,8 +39,8 @@ import Testing
 
     static let square = NSSize(width: 60, height: 60)
 
-    @Test(arguments: [TriState.off, .on, .mixed])
-    func theBoxTakesClicksOnItsWholeFrame(state: TriState) {
+    @Test(arguments: [FileCheck.off, .on, .mixed])
+    func theBoxTakesClicksOnItsWholeFrame(state: FileCheck) {
         // The chooser and the checklists draw it 22 x 22 (the popover scales it, the hit area with it).
         let got = Self.hits(TriCheck(state: state) {}, size: Self.square, at: Self.spots(22, 22))
         #expect(got.allSatisfy { $0.hasPrefix("AXButton") }, "\(got)")
@@ -51,7 +51,7 @@ import Testing
     /// The fold chevrons at the sizes they are used: the chooser (28 x 28), the checklist (26 x 28), a popover block's header (24 x 28).
     @Test(arguments: [(28.0, 28.0), (26.0, 28.0), (24.0, 28.0)])
     func theFoldChevronTakesClicksOnItsWholeFrame(size: (CGFloat, CGFloat)) {
-        let view = FoldChevron(open: false, size: 10, width: size.0, height: size.1) {}
+        let view = FoldChevron(open: false, size: 10, width: size.0, height: size.1, label: "Expand") {}
         let got = Self.hits(view, size: Self.square, at: Self.spots(size.0, size.1))
         #expect(got.allSatisfy { $0 == "AXButton Expand" }, "\(got)")
     }

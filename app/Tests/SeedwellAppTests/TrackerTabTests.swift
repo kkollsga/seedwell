@@ -7,13 +7,6 @@ import Testing
 
 @MainActor @Suite("Tracker tab")
 struct TrackerTabTests {
-    @Test func lastWeekCoversTodayAndSixDaysBefore() {
-        let d = (0..<30).map { DailyStat(daysAgo: UInt32($0), downBytes: 10, upBytes: 20) }
-        let w = TrackerHeader.lastWeek(d)
-        #expect(w.up == 140 && w.down == 70 && w.ratio == 2)
-        #expect(TrackerHeader.lastWeek([]).ratio == 0)
-    }
-
     @MainActor @Test func theCategoryPillFiltersAndClears() throws {
         let m = try #require(Self.model())
         m.select(.downloads)

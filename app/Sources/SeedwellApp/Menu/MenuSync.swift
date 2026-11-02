@@ -366,8 +366,19 @@ private final class FlippedPanel: NSView { override var isFlipped: Bool { true }
 
     /// The trash button: the confirmation slides out under this row (another one closes), or closes again.
     func toggleConfirm(_ id: String) {
-        // Opening it reads how many files only this Mac has (the folder's whole index, once).
-        removal.toggle(id: id, onlyHere: removal.isOpen(id: id) ? 0 : actions.core.syncOnlyHere(id: id))
+        // Opening it reads how many files only this Mac has (the folder's whole index, once): off the main thread, and the
+        // question says it once it is there.
+        removal.toggle(id: id, onlyHere: 0)
+        if removal.isOpen(id: id) {
+            let core = actions.core
+            Task { [weak self] in
+                let n = await core.syncOnlyHere(id: id)
+                // None: the question as it was opened says it already.
+                guard n > 0, let self, removal.isOpen(id: id) else { return }
+                removal.setOnlyHere(id: id, onlyHere: n)
+                refreshConfirm(id)
+            }
+        }
         if let ci = confirmItem, ci.menu === menu { menu.removeItem(ci) }
         confirmItem = nil
         guard let s = snapshot else { return }
@@ -379,6 +390,14 @@ private final class FlippedPanel: NSView { override var isFlipped: Bool { true }
         else { refreshHover(); return }
         menu.insertItem(makeConfirm(c), at: menu.index(of: rowItem) + 1)
         DispatchQueue.main.async { [weak self] in self?.refreshHover() }
+    }
+
+    /// The question's count of files only this Mac has arrived: its panel is made again in place.
+    private func refreshConfirm(_ id: String) {
+        guard let s = snapshot, let ci = confirmItem, ci.menu === menu, let c = model(s).confirm, c.folderId == id else { return }
+        let index = menu.index(of: ci)
+        menu.removeItem(ci)
+        menu.insertItem(makeConfirm(c), at: index)
     }
 
     private func closeConfirm() {

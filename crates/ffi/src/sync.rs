@@ -14,7 +14,7 @@ use std::time::Instant;
 use trs_control::sync::{SyncSlot, default_join_path, folder_path, start_sync_with};
 use trs_engine::EngineHandle;
 use trs_sync_net::chat::{AgentAccess, ChannelStatus, MessageInfo, MessageKind};
-use trs_sync_net::secrets::{FileSecrets, SecretStore};
+use trs_sync_net::secrets::SecretStore;
 use trs_sync_net::status::{FolderState, FolderStatus};
 use trs_sync_net::{Keep, SyncError, SyncHandle};
 use trs_sync_proto::ids::FolderId;
@@ -465,13 +465,29 @@ impl SecretStore for VaultStore {
     }
 }
 
-/// The store sync uses: the vault the app passed, else a 0600 file in the state folder (tests, `--mock`,
-/// isolated QA runs, which must never touch the user's Keychain).
+/// The store sync uses: the vault the app passed (the Mac's Keychain), else the state folder's own
+/// (`trs_sync_net::secrets::open`): on Windows a vault of DPAPI-sealed files in `sync/vault`, into which the 0600 file
+/// `sync/secrets` is moved once; elsewhere that file (tests, `--mock`, isolated QA runs, which must never touch the
+/// user's Keychain). Both live in the state folder, so a run with its own state folder never sees the user's keys.
 pub fn secret_store(vault: Option<Arc<dyn SecretVault>>, state_dir: &Path) -> Arc<dyn SecretStore> {
+    secret_store_checked(vault, state_dir).0
+}
+
+/// [`secret_store`], and why its vault is not used when it failed (the keys then stay in the plain file: nothing is
+/// lost): a problem for Settings ([`crate::Core::settings_problems`]).
+pub fn secret_store_checked(vault: Option<Arc<dyn SecretVault>>, state_dir: &Path) -> (Arc<dyn SecretStore>, Option<String>) {
     match vault {
-        Some(v) => Arc::new(VaultStore(v)),
-        None => Arc::new(FileSecrets::new(state_dir.join("sync").join("secrets"))),
+        Some(v) => (Arc::new(VaultStore(v)), None),
+        None => trs_sync_net::secrets::open(&state_dir.join("sync"), started_here_before(state_dir)),
     }
+}
+
+/// This release has started fine in `state_dir` before (`launch-ok`, written by `Updates::started`): the plain key
+/// file may go once it is in the vault. Until then an older version the installer goes back to (the new one did not
+/// start) still finds its keys there.
+fn started_here_before(state_dir: &Path) -> bool {
+    let v = env!("CARGO_PKG_VERSION");
+    std::fs::read_to_string(state_dir.join("launch-ok")).ok().and_then(|t| t.lines().next().map(str::to_owned)).is_some_and(|l| l == v || l.starts_with(&format!("{v}.")))
 }
 
 #[path = "sync_ondemand.rs"]
@@ -485,6 +501,10 @@ pub trait SyncBackend: Send + Sync {
     /// The running service and its runtime, for the calls that work on it directly ([`crate::chat_images`]). `None`:
     /// not running, or not a real service (the mock).
     fn chat_service(&self) -> Option<(SyncHandle, tokio::runtime::Handle)> {
+        None
+    }
+    /// Why the folder and channel keys are not in the system's vault, when it failed (they stay in the plain file).
+    fn secrets_problem(&self) -> Option<String> {
         None
     }
     fn snapshot(&self) -> SyncSnapshot;
@@ -641,7 +661,7 @@ pub trait SyncBackend: Send + Sync {
 }
 
 /// Why a private message cannot be written now (`SyncDirect::online` is false).
-const DIRECT_OFFLINE: &str =
+pub(crate) const DIRECT_OFFLINE: &str =
     "Private messages go only over a direct connection between the two devices, never through another device. You can write once both are online and can reach each other.";
 
 /// A sentence for people: the service's lowercase reasons get a capital and a full stop.
@@ -922,6 +942,8 @@ pub struct RealSync {
     od_host: trs_sync_net::OnDemandHostCell,
     /// The rendezvous section's last action ([`crate::sync_rendezvous`]).
     rendezvous: crate::sync_rendezvous::Jobs,
+    /// Why the keys are not in the vault ([`secret_store_checked`]).
+    secrets_problem: Option<String>,
 }
 
 fn is_test_run() -> bool {
@@ -944,6 +966,10 @@ impl RealSync {
         let problem = Arc::new(Mutex::new(None));
         let default_name = trs_control::sync::default_device_name();
         let od_host: trs_sync_net::OnDemandHostCell = Arc::new(Mutex::new(None));
+        let (secrets, secrets_problem) = secret_store_checked(vault, dir);
+        if let Some(p) = &secrets_problem {
+            eprintln!("seedwell: {p}");
+        }
         let me = Arc::new(RealSync {
             rt: rt.clone(),
             slot: slot.clone(),
@@ -952,8 +978,8 @@ impl RealSync {
             default_name: default_name.clone(),
             od_host: od_host.clone(),
             rendezvous: Default::default(),
+            secrets_problem,
         });
-        let secrets = secret_store(vault, dir);
         let (engine, dir) = (engine.clone(), dir.to_path_buf());
         // The same start again when the port changes (`SyncSlot::move_port`).
         let starter: trs_control::sync::Starter = Arc::new(move || {
@@ -1031,6 +1057,9 @@ impl RealSync {
 impl SyncBackend for RealSync {
     fn service(&self) -> Option<(SyncHandle, tokio::runtime::Handle)> {
         self.slot.get().map(|h| (h, self.rt.clone()))
+    }
+    fn secrets_problem(&self) -> Option<String> {
+        self.secrets_problem.clone()
     }
     fn set_on_demand(&self, id: &str, on: bool, path: Option<&str>) -> Result<SyncFolder, CoreError> {
         self.od_set_mode(id, on, path)
@@ -1781,10 +1810,22 @@ fn mock_members(mine: SyncRole, others: &[(&str, SyncRole, bool)], share_until_s
         expires_s: ends(mine),
     }];
     for (i, (name, role, online)) in others.iter().enumerate() {
-        let groups = ["MFZWI3D-BONSGYC-YLTMRWG-QKZ4XNA", "P2RFOJE-HTU7WQB-MFZWI3D-BONSGYC", "QKZ4XNA-YLTMRWG-P2RFOJE-HTU7WQB"];
-        out.push(SyncMember { device_id: groups[i % 3].into(), name: (*name).into(), user: mock_user(name), role: *role, online: *online, is_me: false, expires_s: ends(*role) });
+        out.push(SyncMember { device_id: MOCK_DEVICES[i % MOCK_DEVICES.len()].into(), name: (*name).into(), user: mock_user(name), role: *role, online: *online, is_me: false, expires_s: ends(*role) });
     }
     out
+}
+
+/// The other mock devices' ids, by their place in a folder's member list.
+const MOCK_DEVICES: [&str; 4] = ["MFZWI3D-BONSGYC-YLTMRWG-QKZ4XNA", "P2RFOJE-HTU7WQB-MFZWI3D-BONSGYC", "QKZ4XNA-YLTMRWG-P2RFOJE-HTU7WQB", "BONSGYC-P2RFOJE-QKZ4XNA-MFZWI3D"];
+
+/// A member away for days (`days`), as an owner sees it: offered for removal (SPEC §7G.5). The last of `members`.
+fn mock_gone(members: &[SyncMember], days: u64) -> Vec<SyncGoneDevice> {
+    members
+        .last()
+        .filter(|m| !m.online && !m.is_me)
+        .map(|m| SyncGoneDevice { device_id: m.device_id.clone(), name: m.name.clone(), last_seen_s: Some(now_s().saturating_sub(days * 86_400)) })
+        .into_iter()
+        .collect()
 }
 
 impl MockSync {
@@ -1822,7 +1863,7 @@ impl MockSync {
             can_reshare: false,
             removes_everywhere: false,
         };
-        let mut photos = mk(1, "Photos", SyncAccess::ReadWrite, SyncState::UpToDate, 3, 3);
+        let mut photos = mk(1, "Photos", SyncAccess::ReadWrite, SyncState::UpToDate, 4, 3);
         photos.role = SyncRole::Owner;
         // A folder with a chat: the Family channel goes with it.
         photos.channel_id = Some(mock_id(11));
@@ -1845,7 +1886,12 @@ impl MockSync {
         archive.path = "/Volumes/Backup/Archive".into();
         archive.role = SyncRole::ReadWrite;
         let members = [
-            mock_members(SyncRole::Owner, &[("Studio iMac", SyncRole::Owner, true), ("Kristian's iPhone", SyncRole::ReadWrite, true), ("Office Mac mini", SyncRole::ReadOnly, true)], None),
+            // An old iPad, away for nine days: the owner may remove it.
+            mock_members(
+                SyncRole::Owner,
+                &[("Studio iMac", SyncRole::Owner, true), ("Kristian's iPhone", SyncRole::ReadWrite, true), ("Office Mac mini", SyncRole::ReadOnly, true), ("Old iPad", SyncRole::ReadOnly, false)],
+                None,
+            ),
             mock_members(SyncRole::Owner, &[("Studio iMac", SyncRole::Admin, true), ("Kristian's iPhone", SyncRole::ReadWrite, true)], docs_end),
             mock_members(SyncRole::Admin, &[("Studio iMac", SyncRole::Owner, true), ("Ola's MacBook Air", SyncRole::ReadWrite, false)], None),
             mock_members(SyncRole::ReadOnly, &[("Family iPad", SyncRole::Owner, false)], None),
@@ -1855,8 +1901,11 @@ impl MockSync {
             .into_iter()
             .zip(members)
             .enumerate()
-            .map(|(i, (f, members))| {
+            .map(|(i, (mut f, members))| {
                 let n = i as u32 + 1;
+                if f.role == SyncRole::Owner && f.name == "Photos" {
+                    f.gone = mock_gone(&members, 9);
+                }
                 let invites = if matches!(f.role, SyncRole::Owner | SyncRole::Admin) {
                     let mut used = mock_invite(n, 1, &f.name, SyncRole::ReadWrite, 1, 7, false);
                     used.uses = 1;
@@ -1934,7 +1983,7 @@ impl MockSync {
         };
         let (kari, studio) = ("MFZWI3D-BONSGYC-YLTMRWG-QKZ4XNA", "P2RFOJE-HTU7WQB-MFZWI3D-BONSGYC");
         let mut out = Vec::new();
-        let mut family = mk(11, "Family", SyncAccess::ReadWrite, SyncState::UpToDate, 3, 2);
+        let mut family = mk(11, "Family", SyncAccess::ReadWrite, SyncState::UpToDate, 4, 2);
         family.role = SyncRole::Owner;
         let fid = family.id.clone();
         // General, and a topic with an agent's answer and a reply to it.
@@ -1967,7 +2016,13 @@ impl MockSync {
             unread: 0,
             messages: 0,
         }];
-        let members = mock_members(SyncRole::Owner, &[("Kari's iPhone", SyncRole::ReadWrite, true), ("Studio iMac", SyncRole::Admin, false)], None);
+        // Roles of every kind, one member offline and one away for twelve days (the owner may remove it).
+        let members = mock_members(
+            SyncRole::Owner,
+            &[("Kari's iPhone", SyncRole::ReadWrite, true), ("Studio iMac", SyncRole::Admin, false), ("Office Mac mini", SyncRole::ReadOnly, true), ("Old iPad", SyncRole::ReadWrite, false)],
+            None,
+        );
+        family.gone = mock_gone(&members, 12);
         out.push(MockFolder {
             n: 11,
             f: family,
@@ -2061,7 +2116,7 @@ impl MockSync {
             progress: None,
             problem: None,
             waiting: None,
-            gone: Vec::new(),
+            gone: m.f.gone.clone(),
         })
     }
 
@@ -2459,6 +2514,10 @@ impl SyncBackend for MockSync {
                 f
             })
             .collect();
+        // The folders and channels a device is connected for: where it is a member online.
+        let online_in = |device: &str| -> Vec<String> {
+            s.folders.iter().chain(&s.channels).filter(|m| m.members.iter().any(|d| d.device_id == device && d.online)).map(|m| m.f.id.clone()).collect()
+        };
         let devices = vec![
             SyncDevice {
                 id: "MFZWI3D-BONSGYC-YLTMRWG-QKZ4XNA".into(),
@@ -2466,7 +2525,7 @@ impl SyncBackend for MockSync {
                 client: "Seedwell 0.1.5".into(),
                 address: "192.168.68.20:22100".into(),
                 via: "LAN".into(),
-                folders: folders.iter().filter(|f| f.connected > 0).map(|f| f.id.clone()).collect(),
+                folders: online_in("MFZWI3D-BONSGYC-YLTMRWG-QKZ4XNA"),
                 rx_bytes: 8_400_000_000,
                 tx_bytes: 1_250_000_000,
             },
@@ -2476,7 +2535,7 @@ impl SyncBackend for MockSync {
                 client: "Seedwell 0.1.5".into(),
                 address: "84.212.33.10:41200".into(),
                 via: "Internet".into(),
-                folders: folders.iter().filter(|f| f.connected > 1).map(|f| f.id.clone()).collect(),
+                folders: online_in("P2RFOJE-HTU7WQB-MFZWI3D-BONSGYC"),
                 rx_bytes: 120_000_000,
                 tx_bytes: 3_900_000_000,
             },
@@ -2486,7 +2545,7 @@ impl SyncBackend for MockSync {
                 client: "Seedwell 0.1.5".into(),
                 address: "relay".into(),
                 via: "Relay".into(),
-                folders: folders.iter().filter(|f| f.connected > 2).map(|f| f.id.clone()).collect(),
+                folders: online_in("QKZ4XNA-YLTMRWG-P2RFOJE-HTU7WQB"),
                 rx_bytes: 0,
                 tx_bytes: 52_000_000,
             },
@@ -2761,20 +2820,7 @@ impl SyncBackend for MockSync {
 
 // ------------------------------------------------------------------------------------------ Core
 
-#[uniffi::export]
 impl Core {
-    /// Opens the core with the Keychain for folder sync's keys (the app's own run). `Core::new` keeps
-    /// them in a 0600 file in the state folder instead (tests, `--mock`, isolated QA runs).
-    #[uniffi::constructor]
-    pub fn with_secret_vault(options: crate::CoreOptions, vault: Arc<dyn SecretVault>) -> Result<Arc<Self>, CoreError> {
-        Core::open(options, Some(vault))
-    }
-
-    /// Every folder and connected device. Cheap; the menu and the window call it once a second while open.
-    pub fn sync_snapshot(&self) -> SyncSnapshot {
-        self.backend.sync().snapshot()
-    }
-
     /// Starts sharing a folder on this Mac (this Mac becomes its owner).
     pub fn sync_add_folder(&self, path: String) -> Result<SyncFolder, CoreError> {
         self.backend.sync().add_folder(&path)
@@ -2784,32 +2830,6 @@ impl Core {
     /// missing. The folder waits until one of its owners or admins is online and admits this Mac.
     pub fn sync_join(&self, key_or_link: String, path: String) -> Result<SyncFolder, CoreError> {
         self.backend.sync().join(&key_or_link, &path)
-    }
-
-    /// What a pasted text is: an invitation link (its role, name hint and expiry), or `None` (also for bare
-    /// keys of the test builds).
-    pub fn sync_parse_link(&self, text: String) -> Option<SyncLinkInfo> {
-        let (mut info, _) = parse_link(&text)?;
-        info.already_synced = self.backend.sync().snapshot().folders.iter().any(|f| f.id == info.folder_id);
-        if let Some(cid) = bundled_channel(&text) {
-            info.channel_joined = self.backend.sync().chat_channels().iter().any(|c| c.id == cid);
-        }
-        Some(info)
-    }
-
-    /// Why a pasted text is not a link this Mac can use, as a sentence for the add modal ("This link was made by a
-    /// newer Seedwell: update Seedwell to use it."); `None` when [`Core::sync_parse_link`] reads it, or the text
-    /// is empty.
-    pub fn sync_link_problem(&self, text: String) -> Option<String> {
-        if text.trim().is_empty() {
-            return None;
-        }
-        InviteLink::parse_bundle(&text).err().map(|e| readable(&e.to_string()))
-    }
-
-    /// Every channel, by name. Cheap; called once a second.
-    pub fn chat_channels(&self) -> Vec<SyncChannel> {
-        self.backend.sync().chat_channels()
     }
 
     /// Makes a channel (this Mac is its owner). `agents`: Agents: Yes (open to agents on every member device), else
@@ -2823,48 +2843,15 @@ impl Core {
         self.backend.sync().chat_join(&link)
     }
 
-    /// What a pasted channel link is (`folder_id` is the channel's id), or `None`.
-    pub fn chat_parse_link(&self, text: String) -> Option<SyncLinkInfo> {
-        let mut info = parse_chat_link(&text)?;
-        info.already_synced = self.backend.sync().chat_channels().iter().any(|c| c.id == info.folder_id);
-        Some(info)
-    }
-
-    /// A page of a channel's messages in `topic` (`None`: General), oldest first: the `limit` newest before
-    /// `before` (a message id), or the newest. Cheap; called on scroll.
-    pub fn chat_messages(&self, id: String, topic: Option<String>, before: Option<String>, limit: u32) -> Vec<SyncMessage> {
-        self.backend.sync().chat_messages(&id, topic.as_deref(), before.as_deref(), limit)
-    }
-
     /// Posts a text message in `topic` (`None`: General) as the person at this Mac (Owner, Admin and Read & write
     /// members post).
     pub fn chat_send(&self, id: String, topic: Option<String>, body: String, reply_to: Option<String>) -> Result<SyncMessage, CoreError> {
         self.backend.sync().chat_send(&id, topic.as_deref(), &body, reply_to.as_deref())
     }
 
-    /// Every message of the channel's `topic` (`None`: General) is read.
-    pub fn chat_mark_read(&self, id: String, topic: Option<String>) {
-        self.backend.sync().chat_mark_read(&id, topic.as_deref())
-    }
-
-    /// The channel's topics, newest activity first (General is not listed). Cheap.
-    pub fn chat_topics(&self, channel_id: String) -> Vec<SyncTopic> {
-        self.backend.sync().chat_topics(&channel_id)
-    }
-
     /// Makes a topic in the channel (anyone who may post).
     pub fn chat_new_topic(&self, channel_id: String, title: String) -> Result<SyncTopic, CoreError> {
         self.backend.sync().chat_new_topic(&channel_id, &title)
-    }
-
-    /// Every device this Mac has private messages with, newest first. Cheap.
-    pub fn chat_directs(&self) -> Vec<SyncDirect> {
-        self.backend.sync().chat_directs()
-    }
-
-    /// The private messages with a device, oldest first (`channel_id` is empty).
-    pub fn chat_direct_messages(&self, device_id: String, before: Option<String>, limit: u32) -> Vec<SyncMessage> {
-        self.backend.sync().chat_direct_messages(&device_id, before.as_deref(), limit)
     }
 
     /// Writes a private message (end-to-end encrypted) to a device this Mac has a conversation with or shares a
@@ -2874,68 +2861,15 @@ impl Core {
         self.backend.sync().chat_send_direct(&device_id, &body, reply_to.as_deref())
     }
 
-    /// Every private message from the device is read.
-    pub fn chat_mark_direct_read(&self, device_id: String) {
-        self.backend.sync().chat_mark_direct_read(&device_id)
-    }
-
     /// Deletes the private conversation with a device on this Mac: its messages and all this Mac knows of the
     /// device through it (the other device keeps its copy).
     pub fn chat_delete_direct(&self, device_id: String) -> Result<(), CoreError> {
         self.backend.sync().chat_delete_direct(&device_id)
     }
 
-    /// The line a private conversation's page shows instead of the message field while the other device is not
-    /// connected directly.
-    pub fn chat_direct_offline_text(&self) -> String {
-        DIRECT_OFFLINE.into()
-    }
-
-    /// What agents on this Mac may do with private messages.
-    pub fn chat_direct_agents(&self) -> SyncAgentAccess {
-        self.backend.sync().chat_direct_agents()
-    }
-
-    /// Sets what agents on this Mac may do with private messages.
-    pub fn chat_set_direct_agents(&self, access: SyncAgentAccess) {
-        self.backend.sync().chat_set_direct_agents(access)
-    }
-
-    /// No notifications for the channel (an @mention still notifies: the app's rule).
-    pub fn chat_set_muted(&self, id: String, muted: bool) {
-        self.backend.sync().chat_set_muted(&id, muted)
-    }
-
-    /// The channel's Agents: Yes/No, for every member device (owners and admins: `chat_agents_menu` says whether
-    /// this Mac may).
-    pub fn chat_set_agents(&self, id: String, open: bool) -> Result<(), CoreError> {
-        self.backend.sync().chat_set_agents(&id, open)
-    }
-
-    /// The command run for each message from another device while agents may read the channel (the message as
-    /// JSON on its standard input); `None` or empty: none.
-    pub fn chat_set_wake_command(&self, id: String, command: Option<String>) -> Result<(), CoreError> {
-        self.backend.sync().chat_set_wake_command(&id, command.as_deref())
-    }
-
-    /// The channel's name on this Mac (each device names its channels, as folders).
-    pub fn chat_rename(&self, id: String, name: String) -> Result<(), CoreError> {
-        self.backend.sync().chat_rename(&id, &name)
-    }
-
     /// Leaves the channel on this Mac: its messages here go (other members keep theirs).
     pub fn chat_leave(&self, id: String) -> Result<(), CoreError> {
         self.backend.sync().chat_leave(&id)
-    }
-
-    /// Where a joined folder goes by default: `<default location>/<name>`, numbered when taken.
-    pub fn sync_join_path(&self, key_or_link: String) -> Option<String> {
-        self.backend.sync().join_path(&key_or_link)
-    }
-
-    /// The folder's devices and their roles (this Mac first). Never waits for the folder's core.
-    pub fn sync_members(&self, id: String) -> Vec<SyncMember> {
-        self.backend.sync().members(&id)
     }
 
     /// Changes a device's role (owners only; a folder keeps at least one owner).
@@ -2974,11 +2908,6 @@ impl Core {
     /// Sets the channel that goes with a folder on this Mac (`None`: none). A channel that is not here is refused.
     pub fn sync_set_channel(&self, id: String, channel_id: Option<String>) -> Result<(), CoreError> {
         self.backend.sync().set_channel(&id, channel_id.as_deref())
-    }
-
-    /// The folder's invitations, newest first (links for those this Mac made). Never waits for the core.
-    pub fn sync_invites(&self, id: String) -> Vec<SyncInvite> {
-        self.backend.sync().invites(&id)
     }
 
     /// Revokes an invitation: it admits nobody from now on.
@@ -3026,11 +2955,6 @@ impl Core {
         self.backend.sync().conflicts(&id)
     }
 
-    /// Which paths of a folder are busy, for Finder's badges ([`SyncActivity`]).
-    pub fn sync_activity(&self, id: String) -> SyncActivity {
-        self.backend.sync().activity(&id)
-    }
-
     /// Resolves a conflict (`copy` from [`SyncConflict::copy`]). Nothing is deleted: the version not
     /// kept goes to the folder's archive.
     pub fn sync_resolve_conflict(&self, id: String, copy: String, keep: SyncKeep) -> Result<(), CoreError> {
@@ -3040,6 +2964,143 @@ impl Core {
     /// Only sync a folder with devices on the local network (or with every device again).
     pub fn sync_set_lan_only(&self, id: String, lan_only: bool) -> Result<(), CoreError> {
         self.backend.sync().set_lan_only(&id, lan_only)
+    }
+}
+
+#[uniffi::export]
+impl Core {
+    /// Opens the core with the Keychain for folder sync's keys (the app's own run). `Core::new` keeps
+    /// them in a 0600 file in the state folder instead (tests, `--mock`, isolated QA runs).
+    #[uniffi::constructor]
+    pub fn with_secret_vault(options: crate::CoreOptions, vault: Arc<dyn SecretVault>) -> Result<Arc<Self>, CoreError> {
+        Core::open(options, Some(vault))
+    }
+
+    /// Every folder and connected device. Cheap; the menu and the window call it once a second while open.
+    pub fn sync_snapshot(&self) -> SyncSnapshot {
+        self.backend.sync().snapshot()
+    }
+
+    /// What a pasted text is: an invitation link (its role, name hint and expiry), or `None` (also for bare
+    /// keys of the test builds).
+    pub fn sync_parse_link(&self, text: String) -> Option<SyncLinkInfo> {
+        let (mut info, _) = parse_link(&text)?;
+        info.already_synced = self.backend.sync().snapshot().folders.iter().any(|f| f.id == info.folder_id);
+        if let Some(cid) = bundled_channel(&text) {
+            info.channel_joined = self.backend.sync().chat_channels().iter().any(|c| c.id == cid);
+        }
+        Some(info)
+    }
+
+    /// Why a pasted text is not a link this Mac can use, as a sentence for the add modal ("This link was made by a
+    /// newer Seedwell: update Seedwell to use it."); `None` when [`Core::sync_parse_link`] reads it, or the text
+    /// is empty.
+    pub fn sync_link_problem(&self, text: String) -> Option<String> {
+        if text.trim().is_empty() {
+            return None;
+        }
+        InviteLink::parse_bundle(&text).err().map(|e| readable(&e.to_string()))
+    }
+
+    /// Every channel, by name. Cheap; called once a second.
+    pub fn chat_channels(&self) -> Vec<SyncChannel> {
+        self.backend.sync().chat_channels()
+    }
+
+    /// What a pasted channel link is (`folder_id` is the channel's id), or `None`.
+    pub fn chat_parse_link(&self, text: String) -> Option<SyncLinkInfo> {
+        let mut info = parse_chat_link(&text)?;
+        info.already_synced = self.backend.sync().chat_channels().iter().any(|c| c.id == info.folder_id);
+        Some(info)
+    }
+
+    /// A page of a channel's messages in `topic` (`None`: General), oldest first: the `limit` newest before
+    /// `before` (a message id), or the newest. Cheap; called on scroll.
+    pub fn chat_messages(&self, id: String, topic: Option<String>, before: Option<String>, limit: u32) -> Vec<SyncMessage> {
+        self.backend.sync().chat_messages(&id, topic.as_deref(), before.as_deref(), limit)
+    }
+
+    /// Every message of the channel's `topic` (`None`: General) is read.
+    pub fn chat_mark_read(&self, id: String, topic: Option<String>) {
+        self.backend.sync().chat_mark_read(&id, topic.as_deref())
+    }
+
+    /// The channel's topics, newest activity first (General is not listed). Cheap.
+    pub fn chat_topics(&self, channel_id: String) -> Vec<SyncTopic> {
+        self.backend.sync().chat_topics(&channel_id)
+    }
+
+    /// Every device this Mac has private messages with, newest first. Cheap.
+    pub fn chat_directs(&self) -> Vec<SyncDirect> {
+        self.backend.sync().chat_directs()
+    }
+
+    /// The private messages with a device, oldest first (`channel_id` is empty).
+    pub fn chat_direct_messages(&self, device_id: String, before: Option<String>, limit: u32) -> Vec<SyncMessage> {
+        self.backend.sync().chat_direct_messages(&device_id, before.as_deref(), limit)
+    }
+
+    /// Every private message from the device is read.
+    pub fn chat_mark_direct_read(&self, device_id: String) {
+        self.backend.sync().chat_mark_direct_read(&device_id)
+    }
+
+    /// The line a private conversation's page shows instead of the message field while the other device is not
+    /// connected directly.
+    pub fn chat_direct_offline_text(&self) -> String {
+        DIRECT_OFFLINE.into()
+    }
+
+    /// What agents on this Mac may do with private messages.
+    pub fn chat_direct_agents(&self) -> SyncAgentAccess {
+        self.backend.sync().chat_direct_agents()
+    }
+
+    /// Sets what agents on this Mac may do with private messages.
+    pub fn chat_set_direct_agents(&self, access: SyncAgentAccess) {
+        self.backend.sync().chat_set_direct_agents(access)
+    }
+
+    /// No notifications for the channel (an @mention still notifies: the app's rule).
+    pub fn chat_set_muted(&self, id: String, muted: bool) {
+        self.backend.sync().chat_set_muted(&id, muted)
+    }
+
+    /// The channel's Agents: Yes/No, for every member device (owners and admins: `chat_agents_menu` says whether
+    /// this Mac may).
+    pub fn chat_set_agents(&self, id: String, open: bool) -> Result<(), CoreError> {
+        self.backend.sync().chat_set_agents(&id, open)
+    }
+
+    /// The command run for each message from another device while agents may read the channel (the message as
+    /// JSON on its standard input); `None` or empty: none.
+    pub fn chat_set_wake_command(&self, id: String, command: Option<String>) -> Result<(), CoreError> {
+        self.backend.sync().chat_set_wake_command(&id, command.as_deref())
+    }
+
+    /// The channel's name on this Mac (each device names its channels, as folders).
+    pub fn chat_rename(&self, id: String, name: String) -> Result<(), CoreError> {
+        self.backend.sync().chat_rename(&id, &name)
+    }
+
+    /// Where a joined folder goes by default: `<default location>/<name>`, numbered when taken.
+    pub fn sync_join_path(&self, key_or_link: String) -> Option<String> {
+        self.backend.sync().join_path(&key_or_link)
+    }
+
+    /// The folder's devices and their roles (this Mac first). Never waits for the folder's core.
+    pub fn sync_members(&self, id: String) -> Vec<SyncMember> {
+        self.backend.sync().members(&id)
+    }
+
+    /// The folder's invitations, newest first (links for those this Mac made). Never waits for the core.
+    pub fn sync_invites(&self, id: String) -> Vec<SyncInvite> {
+        self.backend.sync().invites(&id)
+    }
+
+    /// Which paths of a folder are busy, for Finder's badges ([`SyncActivity`]).
+    pub fn sync_activity(&self, id: String) -> SyncActivity {
+        self.backend.sync().activity(&id)
     }
 
     pub fn sync_settings(&self) -> SyncSettings {
@@ -3119,11 +3180,14 @@ mod tests {
         let e = s.put("", b"x").unwrap_err();
         assert!(e.to_string().contains("Keychain: no name"), "{e}");
         assert!(!dir.path().join("sync").exists(), "nothing written to disk");
-        // Without a vault: the 0600 file (in `sync/`, which the service makes).
+        // Without a vault: the state folder's own (in `sync/`, which the service makes): on Windows DPAPI-sealed files
+        // in `sync/vault`, elsewhere the 0600 file.
         std::fs::create_dir_all(dir.path().join("sync")).unwrap();
-        let f = secret_store(None, dir.path());
+        let (f, problem) = secret_store_checked(None, dir.path());
+        assert_eq!(problem, None);
         f.put("device", b"k").unwrap();
-        assert!(dir.path().join("sync/secrets").exists());
+        assert_eq!(f.get("device").unwrap(), Some(b"k".to_vec()));
+        assert_eq!((dir.path().join("sync/vault").is_dir(), dir.path().join("sync/secrets").exists()), (cfg!(windows), !cfg!(windows)));
     }
 
     fn mock_core() -> (Arc<Core>, tempfile::TempDir) {
@@ -3157,6 +3221,41 @@ mod tests {
         assert_eq!(c.len(), 1);
         assert!(c[0].path.contains("(conflict, "));
         assert!(core.sync_conflicts(s.folders[0].id.clone()).is_empty());
+    }
+
+    /// The mock gives both hosts' renders a members panel to draw: roles of every kind, an owner's role menus, each
+    /// way of reaching a device, and a member away for days on a folder and on a channel.
+    #[test]
+    fn the_mock_has_members_with_roles_reach_and_one_gone() {
+        use crate::sync_page::{SyncMemberReach, SyncPageInput, sync_page_model};
+        let (core, _d) = mock_core();
+        let s = core.sync_snapshot();
+        let photos = s.folders.iter().find(|f| f.name == "Photos").unwrap().clone();
+        assert_eq!(photos.gone.iter().map(|g| g.name.as_str()).collect::<Vec<_>>(), ["Old iPad"]);
+        let input = SyncPageInput {
+            snapshot: s.clone(),
+            selected: Some(photos.id.clone()),
+            members: core.sync_members(photos.id.clone()),
+            conflicts: Vec::new(),
+            channels: core.chat_channels(),
+            on_demand_off: false,
+            now_unix_s: now_s(),
+        };
+        let page = sync_page_model(input, crate::sync_menu::SyncRemoval::new(), Arc::new(crate::library::tests::Clock), crate::host::host_windows_all(), Vec::new()).page.unwrap();
+        let reach: Vec<SyncMemberReach> = page.members.rows.iter().map(|r| r.reach).collect();
+        for want in [SyncMemberReach::ThisDevice, SyncMemberReach::LocalNetwork, SyncMemberReach::Internet, SyncMemberReach::Relay, SyncMemberReach::Away] {
+            assert!(reach.contains(&want), "{want:?} in {reach:?}");
+        }
+        assert!(page.members.rows.iter().filter(|r| !r.name.contains("(this")).all(|r| r.role_menu.is_some()), "an owner gets every other member's menu");
+        assert_eq!(page.gone.len(), 1);
+
+        let family = core.chat_channels().into_iter().find(|c| c.name == "Family").unwrap();
+        assert_eq!((family.members, family.gone.len()), (5, 1));
+        let members = core.sync_members(family.id.clone());
+        for role in [SyncRole::Owner, SyncRole::Admin, SyncRole::ReadWrite, SyncRole::ReadOnly] {
+            assert!(members.iter().any(|m| m.role == role), "{role:?}: a member of every role");
+        }
+        assert!(members.iter().any(|m| m.online && !m.is_me) && members.iter().any(|m| !m.online));
     }
 
     /// A mock folder where this Mac has `role`.
@@ -3255,7 +3354,7 @@ mod tests {
         core.chat_set_wake_command(fam.id.clone(), Some("~/bin/wake".into())).unwrap();
         let fam2 = core.chat_channels().into_iter().find(|c| c.id == fam.id).unwrap();
         assert_eq!((fam2.unread, fam2.agents, fam2.muted, fam2.wake_command.as_deref()), (0, true, true, Some("~/bin/wake")));
-        assert_eq!(core.sync_members(fam.id.clone()).len(), 3, "membership calls take a channel's id");
+        assert_eq!(core.sync_members(fam.id.clone()).len(), 5, "membership calls take a channel's id");
         let chat_link = core.sync_create_invite(fam.id.clone(), SyncRole::ReadWrite, 1, 7, None).unwrap().link;
         assert!(chat_link.starts_with("seedwell://chat/"), "{chat_link}");
         assert!(core.sync_parse_link(chat_link.clone()).is_none() && core.chat_parse_link(chat_link.clone()).is_some());

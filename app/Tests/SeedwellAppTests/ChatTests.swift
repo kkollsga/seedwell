@@ -2,7 +2,9 @@ import Foundation
 import Testing
 @testable import SeedwellApp
 
-/// Channels (SPEC 7G.7): the words of the Chats page, its runs of messages, and its notifications.
+/// Channels (SPEC 7G.7): the conversation page is the core's (crates/ffi/src/chat_page.rs, chat_markdown.rs, with their
+/// own tests); these check what the app does with it: the runs draw as Foundation's Markdown drew them, the page and
+/// banners carry the core's words, and the dialogs' checks.
 @Suite struct ChatTests {
     static func channel(_ name: String = "Team", unread: UInt32 = 0, members: UInt32 = 3, online: UInt32 = 2, muted: Bool = false,
                         agents: Bool = false, role: SyncRole = .owner) -> SyncChannel {
@@ -12,7 +14,7 @@ import Testing
 
     static func message(_ body: String, by device: String = "D1", name: String = "Studio iMac", user: String = "", at: UInt64 = 1_800_000_000,
                         me: Bool = false, agent: String? = nil, reply: String? = nil, kind: SyncMessageKind = .text) -> SyncMessage {
-        SyncMessage(id: "M-\(at)-\(body.count)", channelId: "C-Team", authorDevice: device, authorName: name, authorUser: user, isMe: me, agent: agent,
+        SyncMessage(id: "M-\(at)-\(body.count)-0000", channelId: "C-Team", authorDevice: device, authorName: name, authorUser: user, isMe: me, agent: agent,
                     atS: at, replyTo: reply, topic: nil, kind: kind, body: body)
     }
 
@@ -21,66 +23,89 @@ import Testing
                   lastMessageS: nil, unread: unread, messages: messages)
     }
 
-    @Test func agentsAccessIsSaidInWords() {
-        // The sidebar's and the title bar's lines are the core's (crates/ffi/src/chat_text.rs); private messages keep
-        // their levels.
-        #expect(ChatText.agents(.readPost) == "Read and post")
+    static func page(_ c: SyncChannel, _ messages: [SyncMessage], host: [HostWindow] = hostWindowsAll()) -> ChatPageModel? {
+        let read = ChatPageRead(messages: messages, pending: [], follow: nil, directAgents: .off)
+        let input = ChatPageInput(place: .chat(channelId: c.id, topicId: nil), title: c.name, channel: c, topic: nil, direct: nil, read: read,
+                                  members: [], nowUnixS: 1_800_000_000)
+        return chatPageModel(input: input, clock: MacClock(), host: host)
     }
 
-    @Test func aChannelOpenToAgentsIsTaggedAndAClosedOneIsNot() {
-        // The tag the sidebar row and the channel's toolbar draw (the core's words and rule).
-        #expect(ChatText.agentTag(Self.channel("Family")) == nil)
-        let tag = ChatText.agentTag(Self.channel("Bridge", agents: true))
-        #expect(tag?.text == "agents")
-        #expect(tag?.help.contains("read and post") == true)
+    /// An attributed string as its runs: text, presentation intents and link, as the window's `Text` reads them.
+    static func describe(_ a: AttributedString) -> [String] {
+        a.runs.map { r in
+            let i = r.inlinePresentationIntent ?? []
+            let flags = [(InlinePresentationIntent.stronglyEmphasized, "B"), (.emphasized, "I"), (.code, "C"), (.strikethrough, "S")]
+                .filter { i.contains($0.0) }.map(\.1).joined()
+            return "[\(flags)\(r.link.map { " \($0.absoluteString)" } ?? "")]\(String(a[r.range].characters))"
+        }
     }
 
-    @Test func theAgentsMenuIsYesOrNoAndOnlyOwnersAndAdminsChangeIt() {
-        // The channel's ⋯ ▸ Agents submenu draws the core's menu.
-        let open = ChatText.agentsMenu(Self.channel("Bridge", agents: true))
-        #expect(open.title == "Agents: Yes" && open.canChange)
-        #expect(open.choices.map(\.title) == ["Yes", "No"] && open.choices.map(\.checked) == [true, false])
-        let reader = ChatText.agentsMenu(Self.channel("Family", role: .readWrite))
-        #expect(reader.title == "Agents: No" && !reader.canChange)
-        #expect(reader.note == "Only the channel's owners and admins can change this.")
-        #expect(chatNewAgentsNote(open: false).hasPrefix("Agents can never read"))
+    @Test func runsDrawAsFoundationsMarkdownDid() throws {
+        // The inline Markdown the Mac parsed with Foundation before the core read it: the same text, styles and links.
+        let texts = [
+            "plain text",
+            "**bold** and *italic* and _under_ and __strong__",
+            "`code` and ``co`de`` and `unclosed",
+            "~~strike~~ and ~single~",
+            "[link](https://example.com) and <https://auto.example> and bare https://bare.example.com/x?y=1.",
+            "www.example.com and mail me@example.com",
+            "**unclosed and [broken](",
+            "***both*** and **bold *nested italic* bold**",
+            "a\\*not\\* and \\`x\\` and \\\\ backslash",
+            "[seed](seedwell://chat/ABC?name=Team)",
+            "snake_case_word and 2*3*4 and * spaced *",
+            "url (https://example.com/path_(x)) end",
+            "Two lines\nstay two",
+            "Takk! 🙌 Kan dere sjekke **lørdag** før ~~fredag~~? Se [planen](https://example.com/plan) og `~/Shared/Middag.pdf`.",
+            "Ninth with `code`, **bold** and a [link](https://example.com)",
+            "*foo**bar**baz* and foo***bar***baz and __init__",
+            "&amp; &copy; &#128512;",
+        ]
+        for t in texts {
+            guard case .paragraph(let runs)? = chatBlocks(text: t).first else { Issue.record("no paragraph: \(t)"); continue }
+            let foundation = try AttributedString(markdown: t, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))
+            #expect(Self.describe(ChatRuns.attributed(runs)) == Self.describe(foundation), "\(t)")
+        }
     }
 
-    @Test func authorsAndAgentsAreNamed() {
-        #expect(ChatText.author(Self.message("hi")) == "Studio iMac")
-        #expect(ChatText.author(Self.message("hi", me: true)) == "You")
-        #expect(ChatText.author(Self.message("hi", agent: "Seedwell")) == "Seedwell on Studio iMac")
-        #expect(ChatText.author(Self.message("hi", me: true, agent: "Seedwell")) == "Seedwell on Studio iMac", "an agent on this Mac names the Mac too")
-        #expect(ChatText.author(Self.message("hi", name: "")) == "Unnamed device")
-        // A person's name with the device's, as every member sees them; an agent keeps its own name.
-        #expect(ChatText.author(Self.message("hi", user: "Kari")) == "Kari (Studio iMac)")
-        #expect(ChatText.author(Self.message("hi", user: "Kari", me: true)) == "You")
-        #expect(ChatText.author(Self.message("hi", user: "Kari", agent: "Seedwell")) == "Seedwell on Studio iMac")
-        #expect(ChatText.named("", user: "Kari") == "Kari (Unnamed device)")
+    @Test func linksThatOpenNothingAreText() {
+        // Foundation made links of these; the core does not (a peer's file: or javascript: link never opens).
+        guard case .paragraph(let runs)? = chatBlocks(text: "[a](file:///etc/hosts) [b](javascript:x)").first else { Issue.record("no paragraph"); return }
+        #expect(runs.allSatisfy { $0.link == nil })
+        guard case .paragraph(let seed)? = chatBlocks(text: "[join](seedwell://chat/X)").first else { Issue.record("no paragraph"); return }
+        #expect(seed.first?.link?.target == .route)
     }
 
-    @Test func previewsAreOneShortLine() {
-        #expect(ChatText.preview(Self.message("line one\nline two")) == "line one line two")
-        #expect(ChatText.preview(Self.message("## Plan\n\n1. **Build** it\n- `ship`")) == "Plan 1. Build it • ship", "without its Markdown")
-        #expect(ChatText.preview(Self.message(String(repeating: "x", count: 300)), limit: 10) == "xxxxxxxxx…")
-        #expect(ChatText.preview(Self.message("{}", kind: .json)) == "JSON message")
-        #expect(ChatText.preview(Self.message("?", kind: .other)) == "A message this version cannot show")
+    @Test func thePageCarriesTheCoresWords() throws {
+        let p = try #require(Self.page(Self.channel("Bridge", agents: true), [Self.message("hi", user: "Kari")]))
+        #expect(p.toolbar.tag?.text == "agents")
+        #expect(p.toolbar.share?.title == "Share…")
+        #expect(p.composer.placeholder == "Message Bridge" && p.composer.canPost)
+        #expect(p.messages.first?.author?.name == "Kari" && p.messages.first?.author?.computer == "Studio iMac")
+        // The Windows app's windows: no Share dialog yet.
+        let w = try #require(Self.page(Self.channel("Bridge"), [], host: [.getInfo, .moveTo, .newChannel, .chatDialogs]))
+        #expect(w.toolbar.share == nil)
+        #expect(w.empty == "No messages yet.")
+        // The snapshot's sample conversation: every card has its author, the bug mail its tags.
+        let cards = SnapshotRenderer.sampleCards()
+        #expect(cards.count == 8 && cards.allSatisfy { $0.author != nil })
+        #expect(cards[6].tags.map(\.text) == ["kglite: Seen, Backlog", "You: Needs triage"])
     }
 
-    @Test func aRunOfMessagesShowsItsAuthorOnce() {
-        let a = Self.message("one", at: 1_000)
-        #expect(ChatText.startsRun(a, after: nil))
-        #expect(!ChatText.startsRun(Self.message("two", at: 1_100), after: a), "same author, within five minutes")
-        #expect(ChatText.startsRun(Self.message("later", at: 1_400), after: a))
-        #expect(ChatText.startsRun(Self.message("other", by: "D2", at: 1_050), after: a))
-        #expect(ChatText.startsRun(Self.message("agent", at: 1_050, agent: "bot"), after: a), "an agent's message is its own run")
-        #expect(ChatText.startsRun(Self.message("re", at: 1_050, reply: a.id), after: a), "a reply shows what it answers")
+    @Test func returnSendsAndShiftOrOptionReturnStartsALine() {
+        #expect(chatComposerKey(shift: false, alt: false) == .send)
+        #expect(chatComposerKey(shift: true, alt: false) == .newLine)
+        #expect(chatComposerKey(shift: false, alt: true) == .newLine)
+        #expect(!chatComposerCanSend(draft: " \n", attachments: 0) && chatComposerCanSend(draft: " \n", attachments: 1))
+        #expect(chatComposerBody(draft: "  hi \n") == "hi")
     }
 
     @Test func notificationsAndNames() {
-        let n = ChatText.notification(ChatText.place(Self.channel(), nil), Self.message("Build is ready", agent: "ci"))
+        let n = chatNotificationText(placeTitle: chatPlaceTitle(channel: Self.channel(), topic: nil), message: Self.message("Build is ready", agent: "ci"))
         #expect(n.title == "Team" && n.body == "ci on Studio iMac: Build is ready")
-        #expect(ChatText.place(Self.channel(), Self.topic()) == "Team › Dinner")
+        #expect(chatPlaceTitle(channel: Self.channel(), topic: Self.topic()) == "Team › Dinner")
+        #expect(chatMessageAuthor(message: Self.message("hi", me: true)) == "You")
+        #expect(chatMessagePreview(message: Self.message("## Plan\n\n1. **Build** it"), limit: 120) == "Plan 1. Build it")
         #expect(chatLooksLikeLink(text: " seedwell://chat/ABC?name=Team "))
         #expect(!chatLooksLikeLink(text: "seedwell://sync/ABC"))
     }
@@ -96,154 +121,20 @@ import Testing
         #expect(chatDialogCheck(dialog: rename, input: "  Family \n") == .ready(value: "Family"))
         // The channel counts every unread message; General shows what its topics don't.
         let topics = [Self.topic(unread: 2), Self.topic("Trip", unread: 1)]
-        #expect(ChatText.generalUnread(Self.channel(unread: 5), topics) == 2)
-        #expect(ChatText.generalUnread(Self.channel(unread: 1), topics) == 0, "never below zero while the counts catch up")
+        #expect(chatGeneralUnread(channel: Self.channel(unread: 5), topics: topics) == 2)
+        #expect(chatGeneralUnread(channel: Self.channel(unread: 1), topics: topics) == 0, "never below zero while the counts catch up")
     }
 
-    @Test func messagesAreMarkdownBlocks() {
-        typealias B = ChatMarkdown.Block
-        let text = """
-        # Status ##
-        Built and tested.
-        Two lines stay two.
-
-        1. Install it
-        2) Check Finder
-          with a second line
-        - one
-          - nested
-        > a quote
-        ---
-        ```sh
-        seedwell chat send Team -
-        # not a heading
-
-        ```
-        ## C#
-        """
-        #expect(ChatMarkdown.blocks(text) == [
-            B.heading(level: 1, text: "Status"),
-            .paragraph("Built and tested.\nTwo lines stay two."),
-            .item(marker: "1.", depth: 0, text: "Install it"),
-            .item(marker: "2.", depth: 0, text: "Check Finder\nwith a second line"),
-            .item(marker: "•", depth: 0, text: "one"),
-            .item(marker: "•", depth: 1, text: "nested"),
-            .quote("a quote"),
-            .rule,
-            .code(language: "sh", text: "seedwell chat send Team -\n# not a heading\n"),
-            .heading(level: 2, text: "C#"),
-        ])
-        #expect(ChatMarkdown.blocks("#hashtag and 3.5 apples") == [.paragraph("#hashtag and 3.5 apples")], "not a heading, not a list")
-        #expect(ChatMarkdown.blocks("```\nunclosed") == [.code(language: "", text: "unclosed")])
-        #expect(ChatMarkdown.blocks("- [ ] screenshot\n- [x] changelog") == [.item(marker: "☐", depth: 0, text: "screenshot"), .item(marker: "☑", depth: 0, text: "changelog")])
-        #expect(ChatMarkdown.plain("Use **bold** and `code`.\n\n```\nx = 1\n```") == "Use bold and code.\nx = 1")
-    }
-
-    @Test func complexMessagesParseIntoTheirBlocks() {
-        typealias B = ChatMarkdown.Block
-        let report = ChatMarkdown.blocks(ChatSamples.report)
-        #expect(report.first == .heading(level: 1, text: "Build report for 0.1.7"))
-        #expect(report.contains(.paragraph("All **283** Rust tests and *292* Swift tests passed.\nDetails are in `target/nextest/report.xml`.")))
-        #expect(report.contains(.item(marker: "2.", depth: 0, text: "Ran the checks:")))
-        #expect(report.contains(.item(marker: "•", depth: 1, text: "the Xcode build with Swift 6.3.3")))
-        #expect(report.contains(.item(marker: "☑", depth: 0, text: "CI green")) && report.contains(.item(marker: "☐", depth: 0, text: "Tag `v0.1.7`")))
-        #expect(report.contains(.quote("The daylight saving change today moved the times by one hour.\n**Check** the stamps in older logs.")))
-        #expect(report.contains(.rule))
-        #expect(report.last == .code(language: "rust", text: "fn time(at: u64) -> String {\n    clock(at, offset_at(at)) // local, with the offset of that moment\n}"))
-
-        let table = ChatMarkdown.blocks(ChatSamples.table)
-        #expect(table == [
-            B.heading(level: 2, text: "Download page"),
-            .table(header: ["Build", "Size", "SHA-256", "Notes"], rows: [
-                ["0.1.6", "13.4 MB", "`113c97b5…`", "published"],
-                ["0.1.7", "13.6 MB", "`pending`", "**draft**"],
-                ["0.1.5", "12.9 MB", "", "old | kept"],
-            ]),
-            .paragraph("The table is in `site/download.md`."),
-        ])
-        // A short row is padded, a long one cut, to the header's width; a pipe line without its rule is a paragraph.
-        #expect(ChatMarkdown.blocks("| a | b |\n|---|---|\n| 1 |\n| 1 | 2 | 3 |") == [.table(header: ["a", "b"], rows: [["1", ""], ["1", "2"]])])
-        #expect(ChatMarkdown.blocks("| not | a table |") == [.paragraph("| not | a table |")])
-        #expect(ChatMarkdown.blocks("| a \\* b |\n|-|\n| x |") == [.table(header: ["a \\* b"], rows: [["x"]])], "other escapes stay for the inline Markdown")
-
-        let code = ChatMarkdown.blocks(ChatSamples.code)
-        #expect(code.count == 4)
-        if case .code(let language, let text) = code[1] {
-            #expect(language == "sh")
-            #expect(text.hasSuffix("```not a fence end```"), "a ``` line inside a ~~~ fence is code")
-            #expect(text.contains("compact \\\n  --predicate"))
-        } else { Issue.record("no code block: \(code)") }
-        if case .code(let language, let text) = code[3] { #expect(language.isEmpty && !text.contains("\n")) } else { Issue.record("no second code block") }
-
-        let nested = ChatMarkdown.blocks(ChatSamples.nested)
-        #expect(nested == [
-            B.item(marker: "7.", depth: 0, text: "Seventh, numbered as written"),
-            .item(marker: "8.", depth: 0, text: "Eighth\ncontinued on an indented line"),
-            .item(marker: "•", depth: 1, text: "a point under it"),
-            .item(marker: "•", depth: 2, text: "and one deeper"),
-            .item(marker: "•", depth: 3, text: "and the deepest"),
-            .item(marker: "9.", depth: 0, text: "Ninth with `code`, **bold** and a [link](https://example.com)"),
-            .paragraph("#hashtag, 3.5 apples and a lone 1. are plain text."),
-        ])
-    }
-
-    @Test func everySampleHasAPlainPreviewWithoutMarkdown() {
-        for s in ChatSamples.messages {
-            let plain = ChatMarkdown.plain(s.body)
-            #expect(!plain.isEmpty)
-            for mark in ["**", "](", "~~", "|---"] { #expect(!plain.contains(mark), "\(mark) in \(plain)") }
-        }
-        #expect(ChatMarkdown.plain(ChatSamples.table).contains("0.1.7 · 13.6 MB · pending · draft"))
-        #expect(ChatMarkdown.plain(ChatSamples.messages[2].body).hasPrefix("Takk! 🙌 Kan dere sjekke lørdag før fredag? Se planen og ~/Shared/Middag.pdf."))
-    }
-
-    @Test func oddMessagesStillRender() {
-        #expect(ChatMarkdown.blocks("").isEmpty)
-        #expect(ChatMarkdown.blocks(" \n\n \t ").isEmpty)
-        #expect(ChatMarkdown.blocks("a\r\nb") == [.paragraph("a\nb")], "Windows line ends")
-        #expect(ChatMarkdown.blocks("```") == [.code(language: "", text: "")])
-        #expect(ChatMarkdown.blocks("####### seven") == [.paragraph("####### seven")])
-        #expect(ChatMarkdown.blocks("#") == [.paragraph("#")])
-        #expect(ChatMarkdown.blocks("- ") == [.paragraph("-")], "a dash alone is text")
-        #expect(ChatMarkdown.blocks("1234567890. too long a number") == [.paragraph("1234567890. too long a number")])
-        #expect(ChatMarkdown.inline("**unclosed and [broken](").characters.count > 0)
-        // The largest text message (16 KiB) of every kind of block parses quickly.
-        let big = String(repeating: ChatSamples.report + "\n\n", count: 16 * 1024 / ChatSamples.report.utf8.count + 1).prefix(16 * 1024)
-        let start = Date()
-        let blocks = ChatMarkdown.blocks(String(big))
-        #expect(blocks.count > 100)
-        #expect(Date().timeIntervalSince(start) < 0.5)
-    }
-
-    @Test func mailsShowTheirHeaderAsALine() {
-        let bug = chatMail(text: ChatSamples.bugMail)
-        #expect(bug?.to == "kglite" && bug?.kind == "bug" && bug?.typeLabel == "Bug" && bug?.isStatus == false)
-        #expect(bug?.summary == "The open-source graph serves the wrong repo after a switch")
-        #expect(bug?.body.hasPrefix("After `repo_management") == true, "the header is not text")
-        #expect(bug?.line == "Bug: The open-source graph serves the wrong repo after a switch")
-        let status = chatMail(text: ChatSamples.statusMail)
-        #expect(status?.isStatus == true && status?.re == "7f1b588c" && status?.state == "done")
-        #expect(status?.line.hasPrefix("Done: Fixed in 0.17.13") == true)
-        #expect(chatMail(text: "---\nnot a mail\n---\nhi") == nil, "a rule, not a mail header")
-        #expect(chatMail(text: "plain text") == nil)
-        #expect(chatMail(text: "---\nmail: 1\nsummary: Only a header\n---")?.body == "")
-        #expect(chatMail(text: "---\r\nmail: 1\r\ntype: request\r\n---\r\nPlease")?.body == "Please")
-        // Previews and banners use the line.
-        #expect(ChatText.preview(Self.message(ChatSamples.bugMail)) == "Bug: The open-source graph serves the wrong repo after a switch")
-    }
-
-    @Test func tagsAreALineOnTheirMessageByOwnerNotCards() {
-        let bug = Self.message(ChatSamples.bugMail, agent: "mcp-servers")
-        let re = String(bug.id.prefix(8)).lowercased()
-        let receipt = Self.message("---\nmail: 1\ntype: seen\nre: \(re)\n---\n", by: "D2", name: "Laptop", at: 1_800_000_060, agent: "kglite")
+    @Test func tagsAreALineOnTheirMessageByOwnerNotCards() throws {
+        let bug = Self.message("---\nmail: 1\ntype: bug\nsummary: Wrong repo\n---\nSteps", agent: "mcp-servers")
         let kglite = Self.message(chatTagNote(messageId: bug.id, tags: ["seen", "backlog"]), by: "D2", name: "Laptop", at: 1_800_000_120, agent: "KGLite")
         let mine = Self.message(chatTagNote(messageId: bug.id, tags: ["needs-triage"]), by: "D0", name: "Mac mini", at: 1_800_000_180, me: true)
-        let cleared = Self.message(chatTagNote(messageId: bug.id, tags: []), by: "D3", name: "Air", at: 1_800_000_240, agent: "codingest")
-        let (cards, tags) = ChatMail.cards([bug, receipt, kglite, mine, cleared])
-        #expect(cards.map(\.id) == [bug.id], "tag notes are no cards")
-        #expect(tags[re] == [ChatTagOwner(owner: "kglite", isYou: false, tags: ["seen", "backlog"]), ChatTagOwner(owner: "You", isYou: true, tags: ["needs-triage"])],
-                "one entry per owner, its newest set; an empty set is none")
-        #expect(chatMail(text: kglite.body)?.line == "Tagged Seen, Backlog")
-        #expect(chatTagLabel(tag: "needs-triage") == "Needs triage")
+        let p = try #require(Self.page(Self.channel(), [bug, kglite, mine]))
+        #expect(p.messages.map(\.id) == [bug.id], "tag notes are no cards")
+        #expect(p.messages[0].tags.map(\.text) == ["KGLite: Seen, Backlog", "You: Needs triage"])
+        guard case .mail(let banner, _) = p.messages[0].body, case .mail(let chip, let tint, _, _, let summary) = banner else {
+            Issue.record("no mail: \(p.messages[0].body)"); return
+        }
+        #expect(chip == "Bug" && tint == .red && summary == "Wrong repo")
     }
 }

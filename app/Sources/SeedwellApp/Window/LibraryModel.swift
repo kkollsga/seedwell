@@ -9,8 +9,8 @@ import SwiftUI
 /// after every change, and runs what the core leaves to it: the file lists under the rows. It is dropped (with its
 /// timer) when the window closes (SPEC §2, §8.3); the `Library` lives on with the app.
 ///
-/// Still here for now: the pages' own reads (Folder Sync's folder, a conversation's messages and members, a tracker's
-/// statistics).
+/// Still here for now: the pages' own reads (Folder Sync's folder, a conversation's members, a tracker's statistics). A
+/// conversation's page is the core's (`chatPageRead`, `chatPageModel`).
 @MainActor @Observable final class LibraryModel {
     /// A channel's page is its General (`topicId: nil`) or one of its topics; `direct` is a private conversation with a
     /// device (SPEC 7G.7).
@@ -33,24 +33,28 @@ import SwiftUI
     private(set) var sync: SyncSnapshot
     /// The folder whose page is shown on Folder Sync.
     var syncSelection: String? { didSet { if syncSelection != oldValue { syncMembers = []; loadConflicts(); loadMembers() } } }
-    /// The conflict copies of the selected folder (read when it is selected, then every 10 s, off the main
-    /// thread: the core reads the folder's whole index).
+    /// The conflict copies of the selected folder (read when it is selected, then as often as the page model says,
+    /// off the main thread: the core reads the folder's whole index).
     private(set) var syncConflicts: [SyncConflict] = []
-    /// The selected folder's members with their roles (read every 2 s, off the main thread; the core keeps them
-    /// apart from the folder's index, so this never waits for a pull).
+    /// The selected folder's members with their roles (read as often as the page model says, off the main thread; the
+    /// core keeps them apart from the folder's index, so this never waits for a pull).
     private(set) var syncMembers: [SyncMember] = []
-    /// Channels (SPEC 7G.7), read with each refresh of a conversation or Folder Sync, and the shown one's messages (newest
-    /// last) and members. Shown messages count as read.
+    /// When the members and the conflict copies were last read.
+    @ObservationIgnored private var syncMembersRead = Date.distantPast
+    @ObservationIgnored private var syncConflictsRead = Date.distantPast
+    /// Channels (SPEC 7G.7), read with each refresh of a conversation or Folder Sync.
     private(set) var chats: [SyncChannel] = []
     /// The shown channel's topics, newest activity first (its General is not one).
     private(set) var chatTopics: [String: [SyncTopic]] = [:]
     /// The devices this Mac has private conversations with (read on a private conversation's page).
     private(set) var directs: [SyncDirect] = []
-    private(set) var chatMessages: [SyncMessage] = []
-    /// The shown conversation's sends whose files are being read, or that failed (the core's words).
-    private(set) var chatPending: [ChatPendingSend] = []
+    /// The shown conversation's page as the core lays it out (its messages read with each refresh: shown messages count
+    /// as read), and the members of its channel (read when the members panel opens and after a change of them).
+    private(set) var chatPage: ChatPageModel?
     private(set) var chatMembers: [SyncMember] = []
-    /// The conversation `chatMessages` and `chatMembers` are of.
+    /// What `chatPage` was made from (it is made again only when that changes).
+    @ObservationIgnored private var chatInput: ChatPageInput?
+    /// The conversation `chatPage` and `chatMembers` are of.
     private var chatLoaded: Section?
     /// The "Stop syncing" question under the Folder Sync page's header (its own, not the menu's: the core closes it
     /// when another folder is selected), and a count that changes with it (the page reads it to redraw).
@@ -126,21 +130,27 @@ import SwiftUI
         ticks += 1
         if view.page == .folderSync {
             // The folder shown is the core's choice (the one picked, else the first).
-            let shown = folderSyncPage(onDemandOff: { _ in false }).selected
-            if shown != syncSelection { syncSelection = shown }
+            let page = folderSyncPage(onDemandOff: { _ in false })
+            if page.selected != syncSelection { syncSelection = page.selected }
             else {
-                if ticks % 10 == 0 { loadConflicts() }
-                if ticks % 2 == 0 { loadMembers() }
+                if due(syncConflictsRead, page.conflictsRefreshMs) { loadConflicts() }
+                if due(syncMembersRead, page.membersRefreshMs) { loadMembers() }
             }
         }
-        if chatID != nil || directID != nil { loadChatMessages() }
+        if chatID != nil || directID != nil { loadChatMessages() } else if chatLoaded != nil { forgetChat() }
         FilesStore.shared.tick()
         if let id = trackerID {
             // Lifetime totals change slowly and reading them forces a database flush: every 5 s.
             if statsFor != id || ticks % 5 == 0 {
-                trackerStats = core.trackerStats(trackerId: id)
-                daily = core.trackerDaily(trackerId: id, days: 30)  // the header's last 7 days move with today
+                // Read off the main thread (a database read); shown when it is there.
                 statsFor = id
+                let core = self.core
+                Task {
+                    let (stats, days) = (await core.trackerStats(trackerId: id), await core.trackerDaily(trackerId: id, days: 30))
+                    guard trackerID == id else { return }
+                    if trackerStats != stats { trackerStats = stats }
+                    if daily != days { daily = days }  // the header's last 7 days move with today
+                }
             }
         } else {
             statsFor = nil
@@ -210,9 +220,6 @@ import SwiftUI
 
     var direct: SyncDirect? { directID.flatMap { id in directs.first { $0.deviceId == id } } }
 
-    /// The name of the device of the shown private conversation (the page's title).
-    var directName: String { directID == nil ? "" : view.title }
-
     /// Opens or closes a channel in the sidebar (its topics under it).
     func setChannelOpen(_ place: Section, _ open: Bool) {
         guard case .chat(let id, _) = place else { return }
@@ -223,30 +230,34 @@ import SwiftUI
     /// A private conversation was just started with this device (no message yet): its name until the core lists it.
     func noteDirectName(_ device: String, _ name: String) { library.noteDirectName(deviceId: device, name: name) }
 
-    /// Reads the shown conversation's latest messages, and marks them read (the page is on screen when this runs).
+    /// Reads the shown conversation's latest messages, and marks them read (the page is on screen when this runs), and
+    /// lays out its page.
     func loadChatMessages() {
         let place = section
-        if chatLoaded != place { chatLoaded = place; chatMessages = []; chatMembers = [] }
-        let list: [SyncMessage]
-        switch place {
-        case .chat(let id, let topic):
-            guard chat != nil else { return }
-            list = core.chatMessages(id: id, topic: topic, before: nil, limit: 300)
-            let unread = topic == nil ? chat.map { ChatText.generalUnread($0, chatTopics[id] ?? []) } ?? 0 : (chatTopic?.unread ?? 0)
-            if unread > 0 { core.chatMarkRead(id: id, topic: topic) }
-        case .direct(let id):
-            list = core.chatDirectMessages(deviceId: id, before: nil, limit: 300)
-            if direct?.unread ?? 0 > 0 { core.chatMarkDirectRead(deviceId: id) }
-        default:
-            list = []
-        }
-        if list != chatMessages { chatMessages = list }
-        let pending: [ChatPendingSend] = switch place {
-        case .chat(let id, _): core.chatPendingSends(place: id)
-        case .direct(let id): core.chatPendingSends(place: "dm:\(id)")
-        default: []
-        }
-        if pending != chatPending { chatPending = pending }
+        if chatLoaded != place { forgetChat(); chatLoaded = place }
+        // A channel that is gone keeps no page (the library says why).
+        if chatID != nil, chat == nil { chatPage = nil; return }
+        layOutChat(core.chatPageRead(place: place))
+    }
+
+    /// The page made again from `read` (or the last read) with the channel, topic, device and members as they are now.
+    private func layOutChat(_ read: ChatPageRead? = nil) {
+        guard let read = read ?? chatInput?.read else { return }
+        // To the minute: the times on the cards change with the day, not the second.
+        let now = UInt64(max(0, Date().timeIntervalSince1970)) / 60 * 60
+        let input = ChatPageInput(place: section, title: view.title, channel: chat, topic: chatTopic, direct: direct, read: read,
+                                  members: chatMembers, nowUnixS: now)
+        guard input != chatInput else { return }
+        chatInput = input
+        let page = chatPageModel(input: input, clock: MacClock(), host: hostWindowsAll())
+        if page?.signature != chatPage?.signature { chatPage = page }
+    }
+
+    private func forgetChat() {
+        chatLoaded = nil
+        chatInput = nil
+        chatPage = nil
+        chatMembers = []
     }
 
     func loadChatMembers() {
@@ -254,12 +265,21 @@ import SwiftUI
         let core = self.core
         Task {
             let list = await Task.detached(priority: .utility) { core.syncMembers(id: id) }.value
-            if chatID == id { chatMembers = list }
+            if chatID == id {
+                chatMembers = list
+                layOutChat()
+            }
         }
+    }
+
+    /// `ms` have passed since `last` (a refresh up to its leeway early counts: it does not wait a whole refresh more).
+    private func due(_ last: Date, _ ms: UInt32) -> Bool {
+        Date().timeIntervalSince(last) * 1000 + Double(view.refreshLeewayMs) >= Double(ms)
     }
 
     func loadMembers() {
         guard let id = syncSelection else { syncMembers = []; return }
+        syncMembersRead = Date()
         let core = self.core
         Task {
             let list = await Task.detached(priority: .utility) { core.syncMembers(id: id) }.value
@@ -269,9 +289,10 @@ import SwiftUI
 
     func loadConflicts() {
         guard let id = syncSelection else { syncConflicts = []; return }
+        syncConflictsRead = Date()
         let core = self.core
         Task {
-            let list = await Task.detached(priority: .utility) { core.syncConflicts(id: id) }.value
+            let list = await core.syncConflicts(id: id)
             if syncSelection == id { syncConflicts = list }
         }
     }
@@ -289,13 +310,21 @@ import SwiftUI
         _ = syncRemovalRevision
         let input = SyncPageInput(snapshot: sync, selected: syncSelection, members: syncMembers, conflicts: syncConflicts, channels: chats,
                                   onDemandOff: syncSelection.map(onDemandOff) ?? false, nowUnixS: UInt64(max(0, Date().timeIntervalSince1970)))
-        return syncPageModel(input: input, removal: syncRemoval, clock: MacClock(), host: hostWindowsAll())
+        return syncPageModel(input: input, removal: syncRemoval, clock: MacClock(), host: hostWindowsAll(), features: hostFeaturesAll())
     }
 
     /// Stop Syncing… on folder `id`: its question opens under the header (reading how many files only this Mac has).
     func askSyncRemove(_ id: String) {
-        syncRemoval.open(id: id, onlyHere: core.syncOnlyHere(id: id))
+        syncRemoval.open(id: id, onlyHere: 0)
         syncRemovalRevision += 1
+        // The count reads the folder's whole index: off the main thread, and the question says it when it is there.
+        let core = self.core
+        Task {
+            let n = await core.syncOnlyHere(id: id)
+            guard n > 0 else { return }
+            syncRemoval.setOnlyHere(id: id, onlyHere: n)
+            syncRemovalRevision += 1
+        }
     }
 
     func cancelSyncRemove() {

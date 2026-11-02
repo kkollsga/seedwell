@@ -917,13 +917,22 @@ baseline every later version must still sync with:
   entry, and every chunk against the hashes in signed entries. A dishonest member can pass data on but cannot change
   it.
 - **Secrets:** the folder secret `S` (owners only), unused invite secrets and the device key are kept in one of
-  two places.
+  three places.
   - **The Keychain:** a build with a keychain entitlement uses the data protection keychain. The app probes this
     with a write, because without the entitlement a read only answers "not found".
   - **A 0600 file in the state folder:** used by builds without that entitlement (every release so far, ad hoc and
     Developer ID signed alike: the entitlement needs a provisioning profile they do not carry), isolated runs and
     the Linux daemon. The login keychain is not used: it ties an item to the exact build, so macOS would ask for
     the password after every update.
+  - **Windows (build 42):** a vault of files sealed with DPAPI for the current user, in the state folder
+    (`sync/vault`), never the Credential Manager (a credential holds at most 2,560 bytes and is one list per user; the
+    files stay with their state folder, so a run with its own state folder never sees the user's keys). The 0600 file
+    is copied in once: each key put, read back and compared; a key the vault already holds keeps the vault's value
+    and a different plain one is kept aside (never lost). The plain file is erased only when all of them match and
+    the release has started fine before (`launch-ok`), so an older app the installer goes back to still finds its
+    keys. When DPAPI or the copy fails, the plain file stays in use with the vault under it, and Settings shows why;
+    the next start tries again. A vault whose keys cannot be opened answers with an error, never "no such key", so
+    no key is made anew.
   - Either way, the keys are never written into the synced folder, never logged, and returned through the agent
     interface only with Full permission (logged). The user key of *Your devices* (below) is the exception: never
     returned through the agent interface, not even at Full.
@@ -1064,6 +1073,14 @@ baseline every later version must still sync with:
   Moving or renaming a folder waits (a minute at most) until its index is closed; a folder still busy is not moved
   (its files stay, it starts again where it is, and the user is told to try again). An unchanged file (size, mtime, inode,
   ctime) is never hashed again.
+- **Scanning in steps:** a scan holds the folder's index for about 0.1 s at a time (at most a thousand changes), commits
+  what it found and lets go; files of 4 MiB and more are read and hashed with the index let go, and recorded by the
+  next step only if they did not change meanwhile (otherwise they are scanned again). Each step's records are announced
+  at once, so the other devices see a big folder's first scan grow and fetch its files while the rest is still hashed.
+  Peers are sent the index from a read-only view of it, and the app reads a folder's status from what the folder keeps
+  for it: neither waits for a scan or a pull. A pull, too, holds the index one round at a time. A folder that is
+  stopped (moved, removed, switched) or paused ends its scan at the next step; what was recorded stays, and the next
+  scan goes on from there.
 
 ### 7G.3 Finding and reaching devices
 
@@ -1642,6 +1659,16 @@ without it reads mail as ordinary Markdown messages, and the protocol does not c
   new message, then print all that are new and exit); a topic being made does not count as a message for `--count`
   or `--unread`; lean times have seconds; `@name` in a text reaches the agent named (`"mentions"` in lean output,
   and `watch --project P` shows messages that mention P); a post prints its short id.
+- **One watch per place (build 42):** an agent lost messages to a second `chat watch --unread` it had started and
+  not read. A `watch --unread` (and `mail watch`) holds the agent's place alone while its connection is open
+  (`events_subscribe` with `hold`): a second one for the same agent name, channel and thread is refused (exit 1,
+  naming the one that runs); one that died is no obstacle (its connection closed; a just-closed one is waited for
+  3 s). `chat read --unread --peek` shows what `--unread` would give without moving the place. The help and the
+  skill say to run a watch as the harness's background task and read its output, never detached or thrown away.
+- **Another Seedwell (build 42):** `seedwell status` (when it talks to the user's app) and Settings › Advanced
+  (`Core::other_seedwells`) warn when another Seedwell app or daemon runs on this computer with a state folder of
+  its own (read from the process list: its `--state-dir`, else the default for an app; "unknown" when its arguments
+  cannot be read). Nothing is stopped.
 
 - **Who is around, and what came with a mail** (seventh blind round, 0.1.8): `mail projects` gives each project's
   last own activity ("last active": its posts and tags, never others' posts in its thread) and whether each of its
@@ -2145,7 +2172,7 @@ Settings > Advanced > **Developer mode** (`advanced.developer_mode`, off by defa
 ## 9. macOS integration
 - `LSUIElement` app (no Dock icon). Launch at login via `SMAppService`.
 - Default handler for `.torrent` UTI and the `magnet:` URL scheme.
-- `UserNotifications`: download finished, errors. Optional "seeding goal reached".
+- `UserNotifications`: download finished, errors. Optional "seeding goal reached". Which events notify, their words, the burst (more than three finished within ten seconds become one "N downloads finished") and what a click opens are the core's (`Notices`, `notice_route`); the host posts them.
 - `IOPMAssertion` blocks idle sleep while downloading (setting, on by default), and while an agent works (§9A.7, setting "Keep awake while agents work", on by default). Both are `PreventUserIdleSystemSleep`: the display still sleeps and the screen still locks. Seeding alone never keeps the Mac awake. While peers are connected or data flows the app holds an activity that keeps App Nap away (it would throttle timers and disk and network work) but allows idle sleep; the core decides both (`power_needs`).
 - Logging through `os_log` (Console.app); no log files by default.
 - Distribution: Developer ID signed and notarized (Team ID `6GND8Z2C7Z`, from 0.1.11; earlier releases were signed ad hoc), as a disk image (`Seedwell.dmg`: the app, a link to Applications, a background with an arrow) and as a zip for `install.sh` and the updater (updates: §12A). `install.sh` installs a release from GitHub only when it is signed by that team and Gatekeeper accepts it (a `--zip` test build and a local test server excepted; a release from before signing only when pinned with `--version`). Not sandboxed and not on the App Store, because the sandbox makes arbitrary download folders painful.
@@ -2397,7 +2424,9 @@ when the user asks.
    did not start, crashed, or is stuck), the installer quits it, puts the kept app back and opens it. That app's
    launch finds the install pending for another version and says "0.1.10.4 didn't start; back on 0.1.10.3" (Show
    Log); a development build that failed is remembered in `updates.json` and never installed from a watched folder
-   again (a newer one is).
+   again (a newer one is). An app of another version that starts while the installer still runs (its process is
+   alive and it started less than 5 minutes ago; a release install the host started, by the time alone) says
+   "Installing 0.1.10.4…" and decides nothing: the pending install stays for the new version to report.
 4. **Crash loop.** Before the core starts, the host calls `trs_ffi::launch_guard(state_dir, version, …)`: each launch
    counts; `started` and a clean quit (the app's own quit path, SIGTERM included: `Updates::quitting`) clear the
    count. The third launch in a row that ended neither way, of a development build with a kept app, starts the

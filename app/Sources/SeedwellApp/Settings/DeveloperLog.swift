@@ -2,51 +2,9 @@ import AppKit
 import Observation
 import SwiftUI
 
-// Developer mode (SPEC 8.7): Settings > Advanced > Developer. The switch, three buttons and the viewer
-// sheet. The log itself is written by the engine, with every secret already masked; nothing here sees
+// Developer mode (SPEC 8.7): Settings > Advanced > Developer (its rows are the settings model's): the tracker log
+// viewer sheet. The log itself is written by the engine, with every secret already masked; nothing here sees
 // a passkey.
-
-/// The Developer group of Settings > Advanced.
-struct DeveloperGroup: View {
-    @Bindable var model: SettingsModel
-    @Bindable var nav: SettingsNavigation
-
-    var body: some View {
-        let on = $model.app.advanced.developerMode
-        SettingsGroup(title: "Developer") {
-            HStack(alignment: .center, spacing: 12) {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("Developer mode")
-                    Text("Logs every tracker request and answer to a file. Passkeys are never written.")
-                        .font(.system(size: 11.5)).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                Spacer(minLength: 12)
-                sw(on)
-                    .accessibilityLabel("Developer mode")
-                    .onChange(of: model.app.advanced.developerMode) { _, _ in model.save() }
-            }
-            .font(.system(size: 13))
-            .padding(.horizontal, 14).padding(.vertical, 9)
-            .frame(minHeight: 40)
-            if model.app.advanced.developerMode {
-                SettingsRow(label: "Tracker log") {
-                    HStack(spacing: 8) {
-                        Button("View Log…") { nav.showTrackerLog = true }
-                            .help("Open the tracker log viewer with live updates and filters")
-                        Button("Show Log in Finder") { TrackerLogFiles.revealInFinder(core: model.core) }
-                            .help("Reveal the tracker log files in Finder")
-                        Button("Clear Log") { model.core.trackerLogClear() }
-                            .help("Delete all recorded tracker log entries")
-                    }
-                }
-            }
-        }
-        .sheet(isPresented: $nav.showTrackerLog) {
-            TrackerLogView(model: nav.logModel(core: model.core), core: model.core, isPresented: $nav.showTrackerLog)
-        }
-    }
-}
 
 enum TrackerLogFiles {
     /// Reveals `trackers.log`; before the first exchange there is no file, so the folder (or the state
@@ -120,10 +78,13 @@ struct TrackerLogItem: Identifiable, Equatable {
     }
 
     func clear() {
-        core.trackerLogClear()
         items = []
         expanded = []
-        Task { await refresh() }
+        let core = self.core
+        Task {
+            await core.trackerLogClear()
+            await refresh()
+        }
     }
 
     func toggle(_ id: String) {

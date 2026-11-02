@@ -1226,6 +1226,13 @@ impl EngineHandle {
         self.send(Cmd::SetExtraMappedPort(port));
     }
 
+    /// **Tests only:** the session's actor is busy for `d` (blocking its thread, as a slow commit or a stat of a hung
+    /// network disk does), so a test can show what waits for it and what does not.
+    #[doc(hidden)]
+    pub fn test_stall(&self, d: Duration) {
+        self.send(Cmd::TestStall(d));
+    }
+
     /// Write pending state to the store now (tests, "quit soon").
     pub async fn flush(&self) -> Result<(), EngineError> {
         self.call(Cmd::Flush).await

@@ -10,6 +10,8 @@
 //!   way) and [`Core::chat_image_view`] (the picture at a size).
 //! * Actions: [`Core::chat_image_fetch`] (Download), [`Core::chat_image_save`] (Save As…), [`Core::chat_image_open_path`]
 //!   (a file for Quick Look or the default viewer), [`Core::chat_image_texts`] (every label).
+//! * Snapshots: [`chat_image_samples`], an image in every state with the pictures the real calls give, and the
+//!   composer's chips.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -234,6 +236,132 @@ fn bytes_of(i: &ChatImageInput) -> Result<Option<Vec<u8>>, CoreError> {
     }
 }
 
+/// A file's chip: it goes as a file of `size` bytes, under its own name.
+fn file_draft(name: &str, size: u64) -> ChatImageDraft {
+    let name = trs_sync_proto::attach::safe_name(&shown(name));
+    ChatImageDraft {
+        caption: format!("{name} · {}", trs_media::size_text(size)),
+        icon: crate::chat_files::icon_of(&name),
+        name,
+        file: true,
+        kind: ChatImageKind::Other,
+        width: 0,
+        height: 0,
+        size,
+        preview_png: Vec::new(),
+    }
+}
+
+/// See [`Core::chat_image_check`].
+fn check(image: &ChatImageInput) -> Result<ChatImageDraft, CoreError> {
+    let as_file = |path: &str| -> Result<ChatImageDraft, CoreError> {
+        let size = std::fs::metadata(path).map_err(|e| failed(format!("{}: {e}", shown(&image.name))))?.len();
+        Ok(file_draft(&image.name, size))
+    };
+    let Some(bytes) = bytes_of(image)? else { return as_file(image.path.as_deref().unwrap_or_default()) };
+    let p = match (trs_media::prepare(&image.name, &bytes), image.path.as_deref()) {
+        (Ok(p), _) => p,
+        // A file that is no image (or none this version sends as one) goes as a file.
+        (Err(_), Some(path)) => return as_file(path),
+        (Err(e), None) => return Err(failed(format!("{}: {e}", shown(&image.name)))),
+    };
+    let preview_png = trs_media::thumb_png(&p.thumb).map(|v| v.bytes).unwrap_or_default();
+    Ok(ChatImageDraft {
+        caption: caption(&p.name, p.width, p.height, p.bytes.len() as u64),
+        icon: ChatFileIcon::Image,
+        file: false,
+        name: p.name,
+        kind: kind_of(Some(p.kind)),
+        width: p.width,
+        height: p.height,
+        size: p.bytes.len() as u64,
+        preview_png,
+    })
+}
+
+// MARK: Samples
+
+/// An image of a message in one state, with the pictures the real calls give for it: for snapshots and previews only
+/// (no chat state is read).
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct ChatImageSample {
+    /// The state it shows: `available`, `downloading`, `waiting`, `not-downloaded`, `too-large`, `failed`, `newer`.
+    pub label: String,
+    pub image: ChatImage,
+    /// What [`Core::chat_image_preview`] gives for it (`None`: its message carries no preview).
+    pub preview: Option<ChatImageView>,
+    /// What [`Core::chat_image_view`] gives for it at the size asked (`None` while it is not here).
+    pub view: Option<ChatImageView>,
+}
+
+/// Fixture images in every state, the composer's chips (an image and a file) and every label, made by the same code
+/// as the real ones from a made-up picture.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct ChatImageSamples {
+    pub images: Vec<ChatImageSample>,
+    pub drafts: Vec<ChatImageDraft>,
+    pub texts: ChatImageTexts,
+}
+
+/// The made-up picture: a fjord at dusk, 1200 × 800.
+const SAMPLE_SVG: &str = concat!(
+    r##"<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="800" viewBox="0 0 1200 800">"##,
+    r##"<defs><linearGradient id="sky" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#1d2b64"/><stop offset="0.6" stop-color="#f8a170"/><stop offset="1" stop-color="#fcd9a8"/></linearGradient>"##,
+    r##"<linearGradient id="sea" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#3b6e8f"/><stop offset="1" stop-color="#14324a"/></linearGradient></defs>"##,
+    r##"<rect width="1200" height="800" fill="url(#sky)"/><circle cx="840" cy="430" r="70" fill="#ffe3b0"/>"##,
+    r##"<path d="M0 520 L180 300 L330 470 L470 250 L640 520 Z" fill="#2c3e50"/><path d="M560 520 L780 330 L930 450 L1060 280 L1200 400 L1200 520 Z" fill="#34495e"/>"##,
+    r##"<rect y="520" width="1200" height="280" fill="url(#sea)"/><path d="M0 600 Q300 580 600 610 T1200 600" stroke="#ffe3b0" stroke-opacity="0.35" stroke-width="6" fill="none"/>"##,
+    r##"</svg>"##
+);
+
+/// See [`ChatImageSamples`]; the pictures at most `max_side` pixels on their longest side, as the host asks
+/// [`Core::chat_image_view`] for them (0: as large as they are, up to 4096).
+#[uniffi::export]
+pub fn chat_image_samples(max_side: u32) -> ChatImageSamples {
+    let picture = trs_media::prepare("Fjord.svg", SAMPLE_SVG.as_bytes()).ok();
+    let preview = picture.as_ref().and_then(|p| trs_media::thumb_png(&p.thumb).ok()).map(view_of);
+    let view = picture.as_ref().and_then(|p| trs_media::render(p.kind, &p.bytes, max_side).ok()).map(view_of);
+    let thumb = picture.as_ref().map(|p| p.thumb.clone()).unwrap_or_default();
+    let info = |name: &str, kind: &str, size: u64, state: &str, problem: Option<&str>, thumb: &[u8]| AttachmentInfo {
+        hash: trs_sync_proto::members::hex(&trs_sync_net::blobs::sha256(format!("{name}/{state}").as_bytes())),
+        kind: kind.into(),
+        name: name.into(),
+        size,
+        width: 1200,
+        height: 800,
+        state: state.into(),
+        problem: problem.map(String::from),
+        done: 0,
+        rate: 0,
+        path: None,
+        thumb: thumb.to_vec(),
+    };
+    let mb = 1_000_000;
+    let images = [
+        ("available", info("Fjord.svg", "svg", SAMPLE_SVG.len() as u64, "available", None, &thumb), false),
+        ("downloading", info("Fjord.png", "png", 3 * mb, "fetching", None, &thumb), false),
+        ("waiting", info("Fjord.png", "png", 3 * mb, "fetching", None, &thumb), true),
+        ("not-downloaded", info("Holiday.jpg", "jpeg", 4 * mb, "not_downloaded", None, &thumb), false),
+        ("too-large", info("Panorama.png", "png", 48 * mb, "too_large", None, &thumb), false),
+        ("failed", info("Fjord.webp", "webp", 2 * mb, "failed", Some("it is damaged"), &thumb), false),
+        ("newer", info("Fjord.heic", "heic", 2 * mb, "failed", None, &[]), false),
+    ]
+    .into_iter()
+    .map(|(label, a, waiting)| {
+        let image = image_of(&a, waiting);
+        ChatImageSample {
+            label: label.into(),
+            view: (image.state == ChatImageState::Available).then(|| view.clone()).flatten(),
+            preview: image.has_preview.then(|| preview.clone()).flatten(),
+            image,
+        }
+    })
+    .collect();
+    let picked = ChatImageInput { name: "Fjord.svg".into(), path: None, bytes: Some(SAMPLE_SVG.as_bytes().to_vec()) };
+    let drafts = [check(&picked).ok(), Some(file_draft("Film.mov", 1_234_000_000))].into_iter().flatten().collect();
+    ChatImageSamples { images, drafts, texts: texts() }
+}
+
 fn view_of(v: trs_media::View) -> ChatImageView {
     ChatImageView { bytes: v.bytes, mime: v.mime.into(), width: v.width, height: v.height }
 }
@@ -276,52 +404,13 @@ fn sync_failed(e: trs_sync_net::SyncError) -> CoreError {
     failed(trs_control::redact::scrub_keys(&e.to_string()))
 }
 
-#[uniffi::export]
 impl Core {
-    /// Every label of images in chat.
-    pub fn chat_image_texts(&self) -> ChatImageTexts {
-        texts()
-    }
-
     /// Checks what is attached in the composer (pasted, dropped or picked): its chip, or why it cannot be sent. An
     /// image within the caps is an image (its format found from its bytes; it must decode); any other file, or an
     /// image over the caps, goes as a file of any size; a folder and pasted bytes that are no image are refused. The
     /// same checks run again when it is sent.
     pub fn chat_image_check(&self, image: ChatImageInput) -> Result<ChatImageDraft, CoreError> {
-        let as_file = |path: &str| -> Result<ChatImageDraft, CoreError> {
-            let size = std::fs::metadata(path).map_err(|e| failed(format!("{}: {e}", shown(&image.name))))?.len();
-            let name = trs_sync_proto::attach::safe_name(&shown(&image.name));
-            Ok(ChatImageDraft {
-                caption: format!("{name} · {}", trs_media::size_text(size)),
-                icon: crate::chat_files::icon_of(&name),
-                name,
-                file: true,
-                kind: ChatImageKind::Other,
-                width: 0,
-                height: 0,
-                size,
-                preview_png: Vec::new(),
-            })
-        };
-        let Some(bytes) = bytes_of(&image)? else { return as_file(image.path.as_deref().unwrap_or_default()) };
-        let p = match (trs_media::prepare(&image.name, &bytes), image.path.as_deref()) {
-            (Ok(p), _) => p,
-            // A file that is no image (or none this version sends as one) goes as a file.
-            (Err(_), Some(path)) => return as_file(path),
-            (Err(e), None) => return Err(failed(format!("{}: {e}", shown(&image.name)))),
-        };
-        let preview_png = trs_media::thumb_png(&p.thumb).map(|v| v.bytes).unwrap_or_default();
-        Ok(ChatImageDraft {
-            caption: caption(&p.name, p.width, p.height, p.bytes.len() as u64),
-            icon: ChatFileIcon::Image,
-            file: false,
-            name: p.name,
-            kind: kind_of(Some(p.kind)),
-            width: p.width,
-            height: p.height,
-            size: p.bytes.len() as u64,
-            preview_png,
-        })
+        check(&image)
     }
 
     /// The small preview a message carries for an image, checked and made a PNG: what its placeholder shows while the
@@ -355,16 +444,6 @@ impl Core {
         Ok(())
     }
 
-    /// The name *Save As…* suggests: the image's, or for `as_png` its name with `.png`.
-    pub fn chat_image_save_name(&self, channel_id: String, hash: String, as_png: bool) -> String {
-        let name = self
-            .chat_service()
-            .ok()
-            .and_then(|(h, _)| h.chat_attachment(channel(&channel_id).ok()?, &hash).ok())
-            .map_or_else(|| "image".to_string(), |(i, _)| i.name);
-        if as_png { format!("{}.png", name.rsplit_once('.').map_or(name.as_str(), |(s, _)| s)) } else { name }
-    }
-
     /// *Save As…*: writes the image as it was sent to `path` (metadata already stripped), or for `as_png` an SVG drawn
     /// as PNG.
     pub fn chat_image_save(&self, channel_id: String, hash: String, path: String, as_png: bool) -> Result<(), CoreError> {
@@ -392,6 +471,25 @@ impl Core {
         std::fs::write(&path, &v.bytes).map_err(|e| failed(e.to_string()))?;
         Ok(path.display().to_string())
     }
+}
+
+#[uniffi::export]
+impl Core {
+    /// Every label of images in chat.
+    pub fn chat_image_texts(&self) -> ChatImageTexts {
+        texts()
+    }
+
+    /// The name *Save As…* suggests: the image's, or for `as_png` its name with `.png`.
+    pub fn chat_image_save_name(&self, channel_id: String, hash: String, as_png: bool) -> String {
+        let name = self
+            .chat_service()
+            .ok()
+            .and_then(|(h, _)| h.chat_attachment(channel(&channel_id).ok()?, &hash).ok())
+            .map_or_else(|| "image".to_string(), |(i, _)| i.name);
+        if as_png { format!("{}.png", name.rsplit_once('.').map_or(name.as_str(), |(s, _)| s)) } else { name }
+    }
+
 }
 
 #[cfg(test)]
@@ -428,6 +526,33 @@ mod tests {
         assert_eq!((later.kind, later.status.as_str()), (ChatImageKind::Other, "This image needs a newer Seedwell"));
         let t = texts();
         assert_eq!((t.max_images, t.too_many.as_str(), t.extensions.len()), (10, "A message can have at most 10 attachments.", 0));
+    }
+
+    #[test]
+    fn the_samples_cover_every_state_with_the_pictures_the_real_calls_give() {
+        let s = chat_image_samples(420);
+        let labels: Vec<&str> = s.images.iter().map(|i| i.label.as_str()).collect();
+        assert_eq!(labels, ["available", "downloading", "waiting", "not-downloaded", "too-large", "failed", "newer"]);
+        use ChatImageState::*;
+        let states: Vec<ChatImageState> = s.images.iter().map(|i| i.image.state).collect();
+        assert_eq!(states, [Available, Fetching, Fetching, NotDownloaded, TooLarge, Failed, Failed]);
+        let v = s.images[0].view.clone().expect("the available one is drawn");
+        assert_eq!((v.mime.as_str(), v.width, v.height), ("image/png", 420, 280));
+        assert!(v.bytes.starts_with(b"\x89PNG"));
+        for i in &s.images[1..] {
+            assert!(i.view.is_none() && !i.image.status.is_empty(), "{}: not here, and its placeholder says why", i.label);
+        }
+        for i in &s.images[..6] {
+            let p = i.preview.as_ref().unwrap_or_else(|| panic!("{} has a preview", i.label));
+            assert!(p.bytes.starts_with(b"\x89PNG") && p.width <= trs_media::THUMB_SIDE * 2, "{}", i.label);
+        }
+        assert_eq!((s.images[6].preview.as_ref(), s.images[6].image.status.as_str()), (None, "This image needs a newer Seedwell"));
+        assert_eq!(s.images[2].image.status, "Waiting for a device that has this image to come online");
+        assert_eq!(s.images[4].image.status, "Too large to show (48 MB)");
+        let chips: Vec<(bool, &str)> = s.drafts.iter().map(|d| (d.file, d.caption.as_str())).collect();
+        assert_eq!(chips, [(false, format!("Fjord.svg · 1200 × 800 · {}", trs_media::size_text(SAMPLE_SVG.len() as u64)).as_str()), (true, "Film.mov · 1.2 GB")]);
+        assert!(s.drafts[0].preview_png.starts_with(b"\x89PNG"));
+        assert_eq!(s.texts, texts());
     }
 
     #[test]

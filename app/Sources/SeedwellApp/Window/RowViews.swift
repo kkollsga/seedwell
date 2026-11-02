@@ -224,7 +224,7 @@ struct TransferRowView: View {
         case .pauseRing:
             let ring = c.ring ?? RingLook(fraction: 0, paused: false, retry: false)
             PauseRing(fraction: ring.fraction, paused: ring.paused, retry: ring.retry, help: c.help) {
-                if ring.paused { commands.core.resume(ids: [t.id]) } else { commands.core.pause(ids: [t.id]) }
+                if ring.paused { commands.resume([t.id]) } else { commands.pause([t.id]) }
             }
         case .reveal:
             Button { commands.reveal([t]) } label: {
@@ -246,7 +246,7 @@ struct TransferRowView: View {
             Button(c.title ?? "") { commands.confirmRemove([t], deleteFiles: false) }.controlSize(.small)
                 .help(c.help)
         case .resumeSharing:
-            Button { commands.core.resume(ids: [t.id]) } label: {
+            Button { commands.resume([t.id]) } label: {
                 Image(systemName: "play.circle").font(.system(size: 18, weight: .light)).foregroundStyle(Color.accentColor)
             }
             .buttonStyle(.plain)

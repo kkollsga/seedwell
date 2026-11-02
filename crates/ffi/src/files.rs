@@ -99,7 +99,7 @@ pub fn file_menu_cap() -> u32 {
 }
 
 #[derive(Clone, Debug, Default)]
-struct Node {
+pub(crate) struct Node {
     name: String,
     path: String,
     disk: String,
@@ -133,9 +133,9 @@ impl Node {
 }
 
 #[derive(Clone, Debug)]
-struct Tree {
+pub(crate) struct Tree {
     /// Node 0 is the invisible root; a parent always has a smaller id than its children.
-    nodes: Vec<Node>,
+    pub(crate) nodes: Vec<Node>,
     /// File list index to node id.
     of_file: HashMap<u32, usize>,
     /// When the numbers were last read, ms (the rates are changes per second between two reads).
@@ -222,7 +222,7 @@ pub fn priority_label(p: Option<FilePriority>) -> String {
 }
 
 impl Tree {
-    fn new(files: &[TorrentFile], now_ms: u64) -> Tree {
+    pub(crate) fn new(files: &[TorrentFile], now_ms: u64) -> Tree {
         let mut nodes = vec![Node { parent: usize::MAX, ..Default::default() }];
         let mut folders: HashMap<String, usize> = HashMap::new();
         let mut of_file = HashMap::with_capacity(files.len());
@@ -420,7 +420,7 @@ impl Tree {
         out
     }
 
-    fn toggle_changes(&self, ids: &[usize]) -> Vec<FilePriorityChange> {
+    pub(crate) fn toggle_changes(&self, ids: &[usize]) -> Vec<FilePriorityChange> {
         let files = self.file_nodes(ids);
         let all_on = !files.is_empty() && files.iter().all(|&i| self.nodes[i].prio() != FilePriority::Skip);
         files
@@ -437,7 +437,7 @@ impl Tree {
             .collect()
     }
 
-    fn priority_changes(&self, ids: &[usize], p: FilePriority) -> Vec<FilePriorityChange> {
+    pub(crate) fn priority_changes(&self, ids: &[usize], p: FilePriority) -> Vec<FilePriorityChange> {
         let files = self.file_nodes(ids);
         let wanted: Vec<usize> = files.iter().copied().filter(|&i| self.nodes[i].prio() != FilePriority::Skip).collect();
         let pick = if wanted.is_empty() { files } else { wanted };
@@ -449,7 +449,7 @@ impl Tree {
             .collect()
     }
 
-    fn want_changes(&self, ids: &[usize], on: bool) -> Vec<FilePriorityChange> {
+    pub(crate) fn want_changes(&self, ids: &[usize], on: bool) -> Vec<FilePriorityChange> {
         self.file_nodes(ids)
             .iter()
             .filter_map(|&i| {
@@ -460,7 +460,7 @@ impl Tree {
             .collect()
     }
 
-    fn apply(&mut self, changes: &[FilePriorityChange]) {
+    pub(crate) fn apply(&mut self, changes: &[FilePriorityChange]) {
         if changes.is_empty() {
             return;
         }
@@ -480,7 +480,7 @@ impl Tree {
             .collect()
     }
 
-    fn refresh(&mut self, files: &[TorrentFile], keep_priorities: bool, now_ms: u64) -> FileRefresh {
+    pub(crate) fn refresh(&mut self, files: &[TorrentFile], keep_priorities: bool, now_ms: u64) -> FileRefresh {
         let dt = self.sampled_ms.map(|t| now_ms.saturating_sub(t) as f64 / 1000.0);
         let mut seen = 0;
         let before = self.signature();
@@ -510,11 +510,11 @@ impl Tree {
         if self.signature() == before { FileRefresh::Same } else { FileRefresh::Changed }
     }
 
-    fn top(&self) -> &[usize] {
+    pub(crate) fn top(&self) -> &[usize] {
         &self.nodes[0].children
     }
 
-    fn rows(&self, expanded: &HashSet<usize>, filter: &str) -> Vec<FileRow> {
+    pub(crate) fn rows(&self, expanded: &HashSet<usize>, filter: &str) -> Vec<FileRow> {
         let needle = filter.trim().to_lowercase();
         let mut out = Vec::new();
         if needle.is_empty() {
@@ -559,7 +559,7 @@ impl Tree {
         n
     }
 
-    fn menu_rows(&self, open: &HashSet<usize>, cap: u32) -> FileMenuRows {
+    pub(crate) fn menu_rows(&self, open: &HashSet<usize>, cap: u32) -> FileMenuRows {
         let mut rows = Vec::new();
         let mut hidden = 0;
         let mut stack: Vec<(usize, u32)> = self.nodes[self.menu_start()].children.iter().rev().map(|&c| (c, 0)).collect();
@@ -577,7 +577,7 @@ impl Tree {
         FileMenuRows { rows, hidden }
     }
 
-    fn totals(&self) -> FileTotals {
+    pub(crate) fn totals(&self) -> FileTotals {
         let r = &self.nodes[0];
         let s = &self.nodes[self.menu_start()];
         FileTotals {
@@ -603,11 +603,48 @@ impl Tree {
         }
     }
 
-    fn folder_ids(&self) -> Vec<usize> {
+    pub(crate) fn folder_ids(&self) -> Vec<usize> {
         (1..self.nodes.len()).filter(|&i| self.nodes[i].is_folder()).collect()
     }
 
-    fn torrent_file(&self, id: usize) -> Option<TorrentFile> {
+    /// One row as `rows` would draw it, at the top level and closed (`None` for a node the tree does not have).
+    pub(crate) fn row_of(&self, id: usize) -> Option<FileRow> {
+        (id > 0 && id < self.nodes.len()).then(|| self.row(id, 0, false))
+    }
+
+    /// Folders that start open in the window: a single top folder (Season 1/…).
+    pub(crate) fn initially_expanded(&self) -> Vec<usize> {
+        match self.top() {
+            [only] if self.nodes[*only].is_folder() => vec![*only],
+            _ => Vec::new(),
+        }
+    }
+
+    /// Folders that start open in the menu: every one when the whole torrent has at most `limit` rows, else none.
+    pub(crate) fn menu_initially_open(&self, limit: u32) -> Vec<usize> {
+        if self.nodes.len() - 1 <= limit as usize { self.folder_ids() } else { Vec::new() }
+    }
+
+    /// Where a node is on disk: a file's own path; a folder's own place, worked out from a file inside it (the file's
+    /// folder when the two do not line up, as for files placed into the library). `None` when unknown.
+    pub(crate) fn disk_location(&self, id: usize) -> Option<String> {
+        let n = self.nodes.get(id)?;
+        if !n.is_folder() {
+            return Some(n.disk.clone()).filter(|d| !d.is_empty());
+        }
+        let f = &self.nodes[*self.file_nodes(&[id]).first()?];
+        // The file's path below the folder ("/" in the torrent) against its disk path (this system's separators),
+        // part by part.
+        let below = f.path.strip_prefix(&n.path).and_then(|r| r.strip_prefix('/'));
+        let disk = std::path::Path::new(&f.disk);
+        let at = match below {
+            Some(rest) if disk.ends_with(rest) => disk.ancestors().nth(rest.split('/').count()),
+            _ => disk.parent(),
+        };
+        Some(at?.to_string_lossy().into_owned()).filter(|d| !d.is_empty())
+    }
+
+    pub(crate) fn torrent_file(&self, id: usize) -> Option<TorrentFile> {
         let n = self.nodes.get(id)?;
         Some(TorrentFile {
             index: n.file?,
@@ -674,9 +711,7 @@ impl FileTreeModel {
 
     /// One row, as `rows` would draw it (`None` for a node the tree does not have).
     pub fn row(&self, id: u32) -> Option<FileRow> {
-        let t = self.lock();
-        let i = id as usize;
-        (i > 0 && i < t.nodes.len()).then(|| t.row(i, 0, false))
+        self.lock().row_of(id as usize)
     }
 
     pub fn totals(&self) -> FileTotals {
@@ -685,17 +720,12 @@ impl FileTreeModel {
 
     /// Folders that start open in the window: a single top folder (Season 1/…).
     pub fn initially_expanded(&self) -> Vec<u32> {
-        let t = self.lock();
-        match t.top() {
-            [only] if t.nodes[*only].is_folder() => vec![*only as u32],
-            _ => Vec::new(),
-        }
+        self.lock().initially_expanded().into_iter().map(|i| i as u32).collect()
     }
 
     /// Folders that start open in the menu: every one when the whole torrent has at most `limit` rows, else none.
     pub fn menu_initially_open(&self, limit: u32) -> Vec<u32> {
-        let t = self.lock();
-        if t.nodes.len() - 1 <= limit as usize { t.folder_ids().into_iter().map(|i| i as u32).collect() } else { Vec::new() }
+        self.lock().menu_initially_open(limit).into_iter().map(|i| i as u32).collect()
     }
 
     /// The node the menu starts at (its Select All / None covers it).
@@ -747,21 +777,7 @@ impl FileTreeModel {
     /// Where a node is on disk: a file's own path; a folder's own place, worked out from a file inside it (the
     /// file's folder when the two do not line up, as for files placed into the library). `None` when unknown.
     pub fn disk_location(&self, id: u32) -> Option<String> {
-        let t = self.lock();
-        let n = t.nodes.get(id as usize)?;
-        if !n.is_folder() {
-            return Some(n.disk.clone()).filter(|d| !d.is_empty());
-        }
-        let f = &t.nodes[*t.file_nodes(&[id as usize]).first()?];
-        // The file's path below the folder ("/" in the torrent) against its disk path (this system's
-        // separators), part by part.
-        let below = f.path.strip_prefix(&n.path).and_then(|r| r.strip_prefix('/'));
-        let disk = std::path::Path::new(&f.disk);
-        let at = match below {
-            Some(rest) if disk.ends_with(rest) => disk.ancestors().nth(rest.split('/').count()),
-            _ => disk.parent(),
-        };
-        Some(at?.to_string_lossy().into_owned()).filter(|d| !d.is_empty())
+        self.lock().disk_location(id as usize)
     }
 }
 

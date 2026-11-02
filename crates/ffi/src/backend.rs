@@ -169,4 +169,11 @@ pub trait Backend: Send + Sync {
     fn sync(&self) -> Arc<dyn crate::sync::SyncBackend> {
         Arc::new(crate::sync::NoSync)
     }
+    /// A decision of the app's worth a line in the developer log (`Decision`, `event`): a stall of the host's UI thread.
+    /// Never blocks.
+    fn note_decision(&self, _event: &'static str, _note: String) {}
+
+    /// Tests only: the engine's actor is busy for `d` (as a slow commit or a hung disk would make it).
+    #[cfg(test)]
+    fn test_stall_engine(&self, _d: std::time::Duration) {}
 }

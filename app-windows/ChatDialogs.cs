@@ -116,42 +116,42 @@ sealed class ChatDialogs
             AppLog.Write($"chat dialog {d.Kind}: {(input is ChatDialogInput.Unchanged ? "unchanged" : "refused")}");
             return;
         }
-        try
+        var core = app.Core;
+        var value = ready.Value;
+        // What the action calls (in order, off the UI thread), and what follows once it returned.
+        Action? after = null;
+        Func<Task>? work = d.Kind switch
         {
-            var core = app.Core;
-            switch (d.Kind)
+            ChatDialogKind.NewTopic when channel is not null => async () =>
             {
-                case ChatDialogKind.NewTopic when channel is not null:
-                    var topic = core.ChatNewTopic(channel.Id, ready.Value ?? "");
-                    app.Library.SelectPlace(new LibraryPlace.Chat(channel.Id, topic.Id));
-                    break;
-                case ChatDialogKind.RenameChannel when channel is not null:
-                    core.ChatRename(channel.Id, ready.Value ?? "");
-                    break;
-                case ChatDialogKind.WakeCommand when channel is not null:
-                    core.ChatSetWakeCommand(channel.Id, ready.Value);
-                    break;
-                case ChatDialogKind.LeaveChannel when channel is not null:
-                    core.ChatLeave(channel.Id);
-                    break;
-                case ChatDialogKind.DeleteConversation when deviceId is not null:
-                    core.ChatDeleteDirect(deviceId);
-                    app.Library.SelectPlace(new LibraryPlace.FolderSync());
-                    break;
-                case ChatDialogKind.ChannelAgents when channel is not null:
-                    core.ChatSetAgents(channel.Id, !channel.Agents);
-                    break;
-                default:
-                    AppLog.Write($"chat dialog {d.Kind}: nothing to act on");
-                    return;
-            }
-            AppLog.Write($"chat dialog {d.Kind}: done");
-        }
-        catch (CoreException e)
+                var topic = await core.ChatNewTopic(channel.Id, value ?? "");
+                after = () => app.Library.SelectPlace(new LibraryPlace.Chat(channel.Id, topic.Id));
+            },
+            ChatDialogKind.RenameChannel when channel is not null => () => { core.ChatRename(channel.Id, value ?? ""); return Task.CompletedTask; },
+            ChatDialogKind.WakeCommand when channel is not null => () => { core.ChatSetWakeCommand(channel.Id, value); return Task.CompletedTask; },
+            ChatDialogKind.LeaveChannel when channel is not null => () => core.ChatLeave(channel.Id),
+            ChatDialogKind.DeleteConversation when deviceId is not null => async () =>
+            {
+                await core.ChatDeleteDirect(deviceId);
+                after = () => app.Library.SelectPlace(new LibraryPlace.FolderSync());
+            },
+            ChatDialogKind.ChannelAgents when channel is not null => () => { core.ChatSetAgents(channel.Id, !channel.Agents); return Task.CompletedTask; },
+            _ => null,
+        };
+        if (work is null)
         {
-            app.Alert(new SyncAlert(d.FailureTitle, TrsFfiMethods.CoreErrorMessage(e)));
+            AppLog.Write($"chat dialog {d.Kind}: nothing to act on");
+            return;
         }
-        app.LibraryWindowIfCreated?.Pane.Refresh();
+        bool done = true;
+        CoreCalls.InOrder($"chat dialog {d.Kind}", work,
+            () =>
+            {
+                if (done) AppLog.Write($"chat dialog {d.Kind}: done");
+                after?.Invoke();
+                app.LibraryWindowIfCreated?.Pane.Refresh();
+            },
+            e => { done = false; app.Alert(new SyncAlert(d.FailureTitle, e)); });
     }
 
     /// <summary>QA: types into the open dialog's field.</summary>

@@ -54,7 +54,7 @@ indirect enum MenuEntry {
         self.core = core
         sync = SyncActions(core: core)
         chat = ChatActions(core: core, sync: sync)
-        favorites = FavoriteEditing(store: core)
+        favorites = FavoriteEditing(core: core)
         favorites.openTab = { [weak self] id in self?.showMain(.tracker(trackerId: id), nil) }
         favorites.openInfo = { [weak self] id in self?.showTrackerInfo(id) }
     }
@@ -62,9 +62,12 @@ indirect enum MenuEntry {
     // MARK: Adding
 
     func add(_ source: String) {
-        do { _ = try core.addSource(source: source) } catch {
-            let a = addFailed(error: SyncText.message(error))
-            alert(a.title, a.text)
+        let core = self.core
+        CoreCalls.inOrder({ await catching { try await core.addSource(source: source) } }) { [weak self] r in
+            if case .failure(let error) = r {
+                let a = addFailed(error: SyncText.message(error))
+                self?.alert(a.title, a.text)
+            }
         }
     }
 
@@ -99,16 +102,18 @@ indirect enum MenuEntry {
 
     /// Pause or resume the countdown of a torrent that waits to start. The torrent stays held, silent.
     func pendingCountdown(_ id: String, pause: Bool) {
-        do { if pause { try core.pendingPause(id: id) } else { try core.pendingResume(id: id) } } catch { log.error("countdown: \(error)") }
+        let (core, log) = (self.core, self.log)
+        CoreCalls.inOrder {
+            do { if pause { try await core.pendingPause(id: id) } else { try await core.pendingResume(id: id) } } catch { log.error("countdown: \(error)") }
+        }
     }
 
     /// Start on a held torrent, from a row or a menu: one that waits for a choice takes the ticks of its shared list
     /// (everything unless changed); a countdown ends now.
     func startHeld(_ id: String, awaiting: Bool) {
         guard awaiting else { return pendingStartNow(id) }
-        let store = ChoiceStore.shared
-        _ = store.model(for: id)
-        do { try store.confirm(id) } catch { alert("Couldn't start", "\(error)") }
+        // The core loads the list first when none showed it, and starts with its default ticks.
+        ChoiceStore.shared.confirm(id) { [weak self] error in self?.alert("Couldn't start", "\(error)") }
     }
 
     /// Cancel on a held torrent: removed, its `.torrent` file to the Trash, or kept when Shift is down (SPEC 7A.6).
@@ -119,25 +124,38 @@ indirect enum MenuEntry {
     }
 
     func pendingStartNow(_ id: String) {
-        do { try core.pendingStartNow(id: id) } catch { log.error("start now: \(error)") }
+        let (core, log) = (self.core, self.log)
+        CoreCalls.inOrder { do { try await core.pendingStartNow(id: id) } catch { log.error("start now: \(error)") } }
     }
 
     /// "Choose Files…": ends the countdown, keeps the torrent held and opens the chooser. A magnet link
-    /// has no file list yet: its metadata is fetched now and the chooser follows (`afterMetadata`).
-    @discardableResult func pendingChoose(_ id: String, openWindow: Bool = true) -> ChooseResult {
-        do {
-            if try core.pendingChoose(id: id) {
-                if openWindow { showChooser(id) }
-                return .open
+    /// has no file list yet: its metadata is fetched now and the chooser follows (`afterMetadata`). `done` gets the
+    /// outcome once the engine answered.
+    func pendingChoose(_ id: String, openWindow: Bool = true, done: @escaping @MainActor (ChooseResult) -> Void = { _ in }) {
+        let (core, log) = (self.core, self.log)
+        CoreCalls.inOrder({ await catching { try await core.pendingChoose(id: id) } }) { [weak self] r in
+            switch r {
+            case .success(true):
+                if openWindow { self?.showChooser(id) }
+                done(.open)
+            case .success(false):
+                done(.afterMetadata)
+            case .failure(let error):
+                log.error("choose files: \(error)")
+                done(.failed)
             }
-            return .afterMetadata
-        } catch {
-            log.error("choose files: \(error)")
-            return .failed
         }
     }
 
     // MARK: Row actions
+
+    /// Pause and Resume of a row's own buttons (the core's commands, in order, off the main thread).
+    func pause(_ ids: [String]) { let core = self.core; CoreCalls.inOrder { await core.pause(ids: ids) } }
+
+    func resume(_ ids: [String]) { let core = self.core; CoreCalls.inOrder { await core.resume(ids: ids) } }
+
+    /// Forgets the Recent list (the finished torrents keep seeding).
+    func clearRecent() { let core = self.core; CoreCalls.inOrder { await core.clearRecent() } }
 
     func reveal(_ rows: [TransferRow]) {
         NSWorkspace.shared.activateFileViewerSelecting(rows.map(\.url))
@@ -145,28 +163,35 @@ indirect enum MenuEntry {
 
     /// Get Info's "Copy URL": the real announce URL (passkey included) goes to the pasteboard and nowhere else.
     func copyTrackerURL(id: String, index: UInt32) {
-        guard let url = try? core.trackerUrl(id: id, index: index) else { return }
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(url, forType: .string)
+        let core = self.core
+        CoreCalls.run({ try? await core.trackerUrl(id: id, index: index) }) { url in
+            guard let url else { return }
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(url, forType: .string)
+        }
     }
 
     /// "Ask Tracker Again": a manual re-announce. The answer says whether it went out or when it may.
     func askTrackerAgain(_ rows: [TransferRow]) {
-        let out = core.askTrackerAgain(ids: rows.map(\.id))
-        if out.sent > 0 {
-            playNote("Asked the tracker again.", symbol: "arrow.clockwise")
-        } else if let w = out.waitSecs {
-            playNote("The tracker can be asked again in \(Fmt.until(w)).", symbol: "clock")
+        let (core, ids) = (self.core, rows.map(\.id))
+        CoreCalls.inOrder({ await core.askTrackerAgain(ids: ids) }) { [weak self] out in
+            if out.sent > 0 {
+                self?.playNote("Asked the tracker again.", symbol: "arrow.clockwise")
+            } else if let w = out.waitSecs {
+                self?.playNote("The tracker can be asked again in \(Fmt.until(w)).", symbol: "clock")
+            }
         }
     }
 
     /// "Announce anyway": also past the tracker's minimum interval (the engine allows one per tracker per 5 minutes).
     func announceAnyway(_ rows: [TransferRow]) {
-        let out = core.announceAnyway(ids: rows.map(\.id))
-        if out.sent > 0 {
-            playNote("Asked the tracker again.", symbol: "arrow.clockwise")
-        } else if let w = out.waitSecs {
-            playNote("Announcing anyway is limited to once in 5 minutes; try again in \(Fmt.until(w)).", symbol: "clock")
+        let (core, ids) = (self.core, rows.map(\.id))
+        CoreCalls.inOrder({ await core.announceAnyway(ids: ids) }) { [weak self] out in
+            if out.sent > 0 {
+                self?.playNote("Asked the tracker again.", symbol: "arrow.clockwise")
+            } else if let w = out.waitSecs {
+                self?.playNote("Announcing anyway is limited to once in 5 minutes; try again in \(Fmt.until(w)).", symbol: "clock")
+            }
         }
     }
 
@@ -194,7 +219,8 @@ indirect enum MenuEntry {
         a.addButton(withTitle: "Cancel")
         NSApp.activate()
         if a.runModal() == .alertFirstButtonReturn, let ratio = Double(field.stringValue.replacingOccurrences(of: ",", with: ".")) {
-            core.setSeedingGoal(ids: rows.map(\.id), goal: .ratio(ratio: ratio))
+            let (core, ids) = (self.core, rows.map(\.id))
+            CoreCalls.inOrder { await core.setSeedingGoal(ids: ids, goal: .ratio(ratio: ratio)) }
         }
     }
 
@@ -209,10 +235,15 @@ indirect enum MenuEntry {
     /// "Move to…": below a folder the user picks, pinned there (SPEC §7A.5).
     func moveTo(_ rows: [TransferRow]) {
         guard let picked = FolderPicker.choose(start: rows.first?.savePath ?? "~") else { return }
-        do {
-            let r = try core.moveTo(ids: rows.map(\.id), path: core.expandPath(path: picked))
-            if let a = moveFailed(result: r) { alert(a.title, a.text) }
-        } catch { let a = moveError(error: (error as? CoreError) ?? .Failed(message: "\(error)")); alert(a.title, a.text) }
+        let (core, ids, path) = (self.core, rows.map(\.id), self.core.expandPath(path: picked))
+        CoreCalls.inOrder({ await catching { try await core.moveTo(ids: ids, path: path) } }) { [weak self] r in
+            switch r {
+            case .success(let r): if let a = moveFailed(result: r) { self?.alert(a.title, a.text) }
+            case .failure(let error):
+                let a = moveError(error: (error as? CoreError) ?? .Failed(message: "\(error)"))
+                self?.alert(a.title, a.text)
+            }
+        }
     }
 
     // MARK: Menu model (SPEC §8.5): the list is the core's (`rowCommands`); the app draws it and runs its commands.
@@ -221,6 +252,8 @@ indirect enum MenuEntry {
     func entries(for rows: [TransferRow], inMenuBar: Bool = false) -> [MenuEntry] {
         guard let first = rows.first else { return [] }
         let single = rows.count == 1
+        // Both read within a few milliseconds or as last read (the core's `info`, `play_offer`): a busy engine never
+        // holds the menu up.
         let info = single ? try? core.info(id: first.id) : nil
         let play = single ? playOffer(first) : nil
         let list = rowCommands(rows: rows, info: info, rules: core.rulesLoad().rules, play: play,
@@ -253,7 +286,9 @@ indirect enum MenuEntry {
     /// What each command does here: a core call, Finder, the pasteboard, a window or a dialog.
     func run(_ command: RowCommand, rows: [TransferRow], videos: [TorrentFile], inMenuBar: Bool) {
         guard let first = rows.first else { return }
+        UIAction.mark("row command \(command)")
         let ids = rows.map(\.id)
+        let core = self.core
         switch command {
         case let .askTrackerAgain(asked): askTrackerAgain(rows.filter { asked.contains($0.id) })
         case .confirmChoice: startHeld(first.id, awaiting: true)
@@ -261,29 +296,25 @@ indirect enum MenuEntry {
         case .cancelHeld: cancelHeld(first.id)
         case .openChooser: showChooser(first.id)
         case .chooseFiles: pendingChoose(first.id)
-        case .resume: core.resume(ids: ids)
-        case .pause: core.pause(ids: ids)
-        case .stopSharing: core.stopSharing(ids: ids)
-        case .moveToTop: core.moveToTop(id: first.id)
+        case .resume: CoreCalls.inOrder { await core.resume(ids: ids) }
+        case .pause: CoreCalls.inOrder { await core.pause(ids: ids) }
+        case .stopSharing: CoreCalls.inOrder { await core.stopSharing(ids: ids) }
+        case .moveToTop: CoreCalls.inOrder { await core.moveToTop(id: first.id) }
         case .reveal: reveal(rows)
         case .getInfo: showMain(nil, first.id)
         case .moveTo: moveTo(rows)
-        case let .setSeedingGoal(goal): core.setSeedingGoal(ids: ids, goal: goal)
+        case let .setSeedingGoal(goal): CoreCalls.inOrder { await core.setSeedingGoal(ids: ids, goal: goal) }
         case .customGoal: customGoal(rows)
-        case let .setPriority(priority): core.setPriority(ids: ids, priority: priority)
-        case let .setCategory(category): core.setCategory(ids: ids, category: category)
-        case let .setRule(ruleId): core.setRule(ids: ids, rule: ruleId)
+        case let .setPriority(priority): CoreCalls.inOrder { await core.setPriority(ids: ids, priority: priority) }
+        case let .setCategory(category): CoreCalls.inOrder { await core.setCategory(ids: ids, category: category) }
+        case let .setRule(ruleId): CoreCalls.inOrder { await core.setRule(ids: ids, rule: ruleId) }
         case .editRules: showSettings(.rules)
-        case .verify: core.verify(ids: ids)
+        case .verify: CoreCalls.inOrder { await core.verify(ids: ids) }
         case .copyMagnet: copyMagnet(first)
         case .remove: confirmRemove(rows, deleteFiles: false, openWindow: inMenuBar)
         case .removeAndDeleteFiles: confirmRemove(rows, deleteFiles: true, openWindow: inMenuBar)
         case .playRow: playButtonPressed(first)
-        case let .play(fileIndex, playerId):
-            let player = playerId.flatMap { id in PlayerDirectory.shared.installed().first { $0.id == id } }
-            guard let fileIndex else { return playLocal(first, with: player) }
-            guard let file = videos.first(where: { $0.index == fileIndex }) else { return }
-            play(first, file: file, with: player)
+        case let .play(fileIndex, playerId): play(first, fileIndex: fileIndex, playerId: playerId)
         }
     }
 }

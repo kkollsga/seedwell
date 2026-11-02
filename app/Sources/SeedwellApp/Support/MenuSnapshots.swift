@@ -67,8 +67,9 @@ extension SnapshotRenderer {
     }
 
     /// The picture of the panels with the caption under them, written as `<name>.png`.
-    private func capture(_ name: String, dark: Bool, panels: [(MenuPanel, NSPoint)], caption: String,
-                         prepare: () -> Void) async {
+    func capture(_ name: String, dark: Bool, panels: [(MenuPanel, NSPoint)], caption: String,
+                 prepare: () -> Void) async {
+        UIAction.mark("render \(name)")
         guard let rep = await MenuPicture.image(panels: panels, caption: caption, appearance: NSAppearance(named: dark ? .darkAqua : .aqua),
                                                 prepare: prepare),
               let png = rep.representation(using: .png, properties: [:]) else { return }

@@ -60,6 +60,10 @@ pub struct ServerOptions {
     pub keeps_awake: bool,
     /// The app's updater (`update.*`); a daemon leaves it empty.
     pub builds: crate::builds::BuildsSlot,
+    /// Looks for other Seedwells on this computer for `status` (`others`), given this one's state folder: the user's
+    /// app sets it (`crate::others::line_now`); a daemon and an isolated (test) run leave it out, so a test never
+    /// reports the user's own app.
+    pub others: Option<fn(&Path) -> Option<String>>,
 }
 
 impl Default for ServerOptions {
@@ -76,6 +80,7 @@ impl Default for ServerOptions {
             max_strikes: 8,
             keeps_awake: false,
             builds: crate::builds::BuildsSlot::new(),
+            others: None,
         }
     }
 }
@@ -179,6 +184,10 @@ struct Ctx<B> {
     connections: AtomicUsize,
     calls: AtomicU64,
     stop: watch::Receiver<bool>,
+    /// What open connections hold alone ([`EventsSubscribeParams::hold`]): by name, the connection and who holds it.
+    holds: Mutex<std::collections::HashMap<String, Holder>>,
+    /// Numbers the connections (for `holds`).
+    conn_ids: AtomicU64,
     /// Receivers of the sync service's channel messages for the chat pump, each made before the request that made it
     /// answers ([`chat_methods::tap`]), so an agent that subscribed misses no message posted after.
     #[cfg(feature = "sync")]
@@ -277,6 +286,8 @@ pub async fn serve_backend<B: Backend>(
         connections: AtomicUsize::new(0),
         calls: AtomicU64::new(0),
         stop: stop_rx.clone(),
+        holds: Mutex::new(std::collections::HashMap::new()),
+        conn_ids: AtomicU64::new(0),
         #[cfg(feature = "sync")]
         chat_taps,
         opts,
@@ -374,10 +385,34 @@ struct Sub {
 
 #[derive(Default)]
 struct Conn {
+    id: u64,
     client: Option<String>,
     sub: Option<Sub>,
     strikes: u32,
     close: bool,
+}
+
+/// A connection that holds a name ([`EventsSubscribeParams::hold`]).
+struct Holder {
+    conn: u64,
+    client: String,
+    since_s: u64,
+}
+
+/// Takes `name` for connection `conn` (again: fine); `Err` names the other open connection that holds it.
+fn take_hold(holds: &Mutex<std::collections::HashMap<String, Holder>>, name: &str, conn: u64, client: &str, now_s: u64) -> Result<(), ApiError> {
+    let mut h = holds.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some(other) = h.get(name).filter(|o| o.conn != conn) {
+        return Err(ApiError::new(ErrorCode::Duplicate, format!("another connection ({}) holds this since {}", other.client, other.since_s))
+            .with_data(json!({ "client": other.client, "since": other.since_s })));
+    }
+    h.insert(name.to_owned(), Holder { conn, client: client.to_owned(), since_s: now_s });
+    Ok(())
+}
+
+/// Lets go of everything connection `conn` holds (it closed).
+fn release_holds(holds: &Mutex<std::collections::HashMap<String, Holder>>, conn: u64) {
+    holds.lock().unwrap_or_else(|p| p.into_inner()).retain(|_, h| h.conn != conn);
 }
 
 async fn next_event(sub: &mut Option<Sub>) -> Result<Arc<EventDto>, broadcast::error::RecvError> {
@@ -410,7 +445,7 @@ async fn serve_conn<B: Backend>(ctx: &Arc<Ctx<B>>, stream: transport::Conn) {
         return;
     }
     let mut limiter = RateLimiter::new(ctx.opts.rate_per_sec, ctx.opts.burst, Instant::now());
-    let mut conn = Conn::default();
+    let mut conn = Conn { id: ctx.conn_ids.fetch_add(1, Ordering::Relaxed) + 1, ..Conn::default() };
     let mut buf: Vec<u8> = Vec::with_capacity(1024);
     let mut stop = ctx.stop.clone();
     loop {
@@ -454,6 +489,7 @@ async fn serve_conn<B: Backend>(ctx: &Arc<Ctx<B>>, stream: transport::Conn) {
             }
         }
     }
+    release_holds(&ctx.holds, conn.id);
 }
 
 /// A successful handler result.
@@ -702,8 +738,16 @@ async fn dispatch<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &mut Conn, req: Request) 
                 ops::state_summary(&counts)
             );
             let reachability = b.reachability().await;
+            let others = match ctx.opts.others {
+                Some(look) => {
+                    let dir = ctx.state.dir().to_path_buf();
+                    blocking(move || look(&dir)).await?
+                }
+                None => None,
+            };
             reply(&StatusDto {
                 reachability,
+                others,
                 server: ctx.opts.server_name.clone(),
                 protocol: PROTOCOL_VERSION,
                 permission: ctx.perm.get().as_str().to_owned(),
@@ -764,6 +808,10 @@ async fn dispatch<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &mut Conn, req: Request) 
             reply(&SettingsDto { settings: map, changed: vec![], note: String::new() })
         }
         Request::EventsSubscribe(p) => {
+            if let Some(name) = p.hold.as_deref() {
+                let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
+                take_hold(&ctx.holds, name, conn.id, conn.client.as_deref().unwrap_or("unknown"), now)?;
+            }
             let kinds = p.kinds.map(|k| k.into_iter().take(32).collect::<HashSet<_>>());
             #[cfg(feature = "sync")]
             chat_methods::tap(ctx);
@@ -772,6 +820,7 @@ async fn dispatch<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &mut Conn, req: Request) 
         }
         Request::EventsUnsubscribe(_) => {
             conn.sub = None;
+            release_holds(&ctx.holds, conn.id);
             reply(&json!({ "subscribed": false }))
         }
         Request::Events(p) => {

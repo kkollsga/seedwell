@@ -8,18 +8,6 @@ extension ProfileRecord {
         incompleteDir != nil || finishedDir != nil || categories.contains { $0.incompleteDir != nil || $0.finishedDir != nil }
     }
 
-    /// Same folders (tracker-wide and per content type), whatever else differs.
-    func sameFolders(as o: ProfileRecord) -> Bool {
-        incompleteDir == o.incompleteDir && finishedDir == o.finishedDir
-            && Category.all.allSatisfy { folders(for: $0) == o.folders(for: $0) }
-    }
-
-    mutating func copyFolders(from o: ProfileRecord) {
-        incompleteDir = o.incompleteDir
-        finishedDir = o.finishedDir
-        categories = o.categories
-    }
-
     /// The tracker's folders for one content type (both `nil` when it sets none).
     func folders(for category: Category) -> CategoryLocationSetting {
         categories.first { $0.category == category } ?? CategoryLocationSetting(category: category, incompleteDir: nil, finishedDir: nil)
@@ -45,7 +33,7 @@ struct TrackerLocationEditor: View {
         VStack(alignment: .leading, spacing: 6) {
             row("Incomplete", $record.incompleteDir)
             row("Finished", $record.finishedDir)
-            if warnings.contains(where: { $0.category == nil }) { DifferentDisksWarning().padding(.horizontal, -14) }
+            if warnings.contains(where: { $0.category == nil }) { DifferentDisksWarning(text: settingsDifferentDisks(brief: false)).padding(.horizontal, -14) }
             Text("Torrents of this tracker use these folders instead of the ones in Settings → Folders; a rule's own Finished folder still comes first.")
                 .font(.system(size: 11)).foregroundStyle(.tertiary).fixedSize(horizontal: false, vertical: true)
             DisclosureGroup(isExpanded: $showTypes) {
@@ -79,7 +67,7 @@ struct TrackerLocationEditor: View {
                 }
                 if warnings.contains(where: { $0.category == cat }) {
                     Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Color.orange)
-                        .help("On different disks: finishing a download copies the files")
+                        .help(settingsDifferentDisks(brief: true))
                 }
             }
             row("Incomplete", binding.incompleteDir)

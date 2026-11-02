@@ -24,9 +24,28 @@ use trs_sync_proto::msg::{Message, Request, Response};
 
 /// Locks a std mutex, also after a panic elsewhere (the data is still consistent: every critical
 /// section here is a plain read or replace).
+#[track_caller]
 pub fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    // Debug builds say where a lock was waited for long: nothing the app's main thread calls may wait behind long work.
+    if cfg!(debug_assertions) {
+        match m.try_lock() {
+            Ok(g) => return g,
+            Err(std::sync::TryLockError::Poisoned(e)) => return e.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => {}
+        }
+        let at = std::time::Instant::now();
+        let g = m.lock().unwrap_or_else(|e| e.into_inner());
+        let waited = at.elapsed();
+        if waited >= LONG_LOCK_WAIT {
+            eprintln!("seedwell sync: waited {} ms for a lock at {}", waited.as_millis(), std::panic::Location::caller());
+        }
+        return g;
+    }
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
+
+/// Debug builds: a wait for a lock this long is reported ([`lock`]).
+const LONG_LOCK_WAIT: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// A folder or a channel.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -284,6 +303,20 @@ impl Drop for Closed {
     }
 }
 
+impl FolderShared {
+    /// Our index id and the last sequence given out, from the index's read-only view (never waits for the core).
+    pub fn index_state(&self) -> std::io::Result<(u64, u64)> {
+        let m = trs_sync::index::IndexStore::meta(&self.index.view())?;
+        Ok((m.index_id, m.sequence))
+    }
+
+    /// Our entries above `after` for a peer ([`trs_sync::folder::announce_since`]), from the read-only view: a peer is
+    /// sent what each scan step committed while the scan still runs.
+    pub fn announce_since(&self, after: u64, limit: usize) -> std::io::Result<Vec<trs_sync_proto::model::IndexEntry>> {
+        trs_sync::folder::announce_since(&self.index.view(), self.on_demand, after, limit)
+    }
+}
+
 impl std::ops::Deref for FolderShared {
     type Target = Space;
 
@@ -321,6 +354,9 @@ pub struct Live {
     pub local: (u64, u64),
     /// Bytes fetched and served, for rates.
     pub fetched: u64,
+    /// The folder has its own `.seedwellignore` (looked at off the caller's thread, at start and on settling: the
+    /// folder may be on a slow or missing disk).
+    pub ignore_file: bool,
 }
 
 impl Default for Live {
@@ -337,6 +373,7 @@ impl Default for Live {
             pending: (Vec::new(), false),
             local: (0, 0),
             fetched: 0,
+            ignore_file: false,
         }
     }
 }
@@ -833,6 +870,8 @@ pub struct Ctx {
     pub direct: crate::direct::Direct,
     /// How long a device asked whether it holds files may take to answer (SPEC §7G.11).
     pub hold_wait: Mutex<std::time::Duration>,
+    /// **Tests:** a pause after each scan step, the core let go (a big first scan, slowed down to watch it).
+    pub scan_step_wait: Mutex<std::time::Duration>,
     /// **Tests:** hold queries and rename requests go unanswered, as an earlier Seedwell leaves them.
     pub silent_ondemand: std::sync::atomic::AtomicBool,
     /// Bumped (SeqCst) whenever a folder opens or closes here (pause, resume, stop, reopen, LAN-only, removal,

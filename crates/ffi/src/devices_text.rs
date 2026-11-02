@@ -381,44 +381,13 @@ impl Core {
 }
 
 /// The app's own calls for the user's devices (never reachable by agents).
-#[uniffi::export]
 impl Core {
-    /// Settings › Devices. Cheap; called once a second while the tab is open.
-    pub fn devices_view(&self) -> DevicesView {
-        let status = self.backend.sync().service().map(|(h, _)| h.devices_status());
-        match status {
-            Some(s) => devices_view_of(&s, now_s()),
-            None => devices_view_of(
-                &DevicesStatus { state: DevicesState::None, me: DeviceId([0; 32]), devices: Vec::new(), requests: Vec::new(), link: None, progress: None, problem: None, maker: None },
-                now_s(),
-            ),
-        }
-    }
-
     /// Pair a Device…: a one-use link for 15 minutes (the group is made now if there is none). The link is shown to the
     /// user only.
     pub fn devices_pair_link(&self) -> Result<PairLinkView, CoreError> {
         let (h, rt) = self.devices_service()?;
         let (link, expires) = rt.block_on(h.devices_pair_link()).map_err(devices_err)?;
         Ok(pair_link_view(link, expires))
-    }
-
-    /// The pairing link this Mac made that still admits, to show again (`None`: make a new one).
-    pub fn devices_current_link(&self) -> Option<PairLinkView> {
-        let (h, _) = self.backend.sync().service()?;
-        h.devices_status().link.map(|(l, e)| pair_link_view(l, e))
-    }
-
-    /// Why a pasted text is not a pairing link, as a sentence (`None`: it is one, or the field is empty).
-    pub fn devices_link_problem(&self, text: String) -> Option<String> {
-        if text.trim().is_empty() {
-            return None;
-        }
-        match InviteLink::parse_devices(&text) {
-            Ok(l) if l.invite.expired(now_s()) => Some("This link has expired: make a new one on the other device.".into()),
-            Ok(_) => None,
-            Err(e) => Some(readable(&e.to_string())),
-        }
     }
 
     /// Pair with a Link…: joins the devices of the device that made `link`; its user confirms there.
@@ -467,6 +436,46 @@ impl Core {
         Ok(devices_view_of(&s, now_s()))
     }
 
+    /// Turns "On all my devices" on or off for folder or channel `id`.
+    pub fn sync_set_follow(&self, id: String, on: bool) -> Result<(), CoreError> {
+        let (h, rt) = self.devices_service()?;
+        let fid: FolderId = id.parse().map_err(|_| CoreError::Failed { message: concat!("This folder is no longer synced on this ", computer!(), ".").into() })?;
+        rt.block_on(h.set_follow(&fid, on)).map_err(devices_err)
+    }
+}
+
+#[uniffi::export]
+impl Core {
+    /// Settings › Devices. Cheap; called once a second while the tab is open.
+    pub fn devices_view(&self) -> DevicesView {
+        let status = self.backend.sync().service().map(|(h, _)| h.devices_status());
+        match status {
+            Some(s) => devices_view_of(&s, now_s()),
+            None => devices_view_of(
+                &DevicesStatus { state: DevicesState::None, me: DeviceId([0; 32]), devices: Vec::new(), requests: Vec::new(), link: None, progress: None, problem: None, maker: None },
+                now_s(),
+            ),
+        }
+    }
+
+    /// The pairing link this Mac made that still admits, to show again (`None`: make a new one).
+    pub fn devices_current_link(&self) -> Option<PairLinkView> {
+        let (h, _) = self.backend.sync().service()?;
+        h.devices_status().link.map(|(l, e)| pair_link_view(l, e))
+    }
+
+    /// Why a pasted text is not a pairing link, as a sentence (`None`: it is one, or the field is empty).
+    pub fn devices_link_problem(&self, text: String) -> Option<String> {
+        if text.trim().is_empty() {
+            return None;
+        }
+        match InviteLink::parse_devices(&text) {
+            Ok(l) if l.invite.expired(now_s()) => Some("This link has expired: make a new one on the other device.".into()),
+            Ok(_) => None,
+            Err(e) => Some(readable(&e.to_string())),
+        }
+    }
+
     /// The "On all my devices" toggle of folder or channel `id` (hidden while this Mac is not paired).
     pub fn sync_follow_line(&self, id: String) -> FollowLine {
         follow_line_for(self.backend.as_ref(), &id)
@@ -485,12 +494,6 @@ impl Core {
         follow_line_new(&others, channel)
     }
 
-    /// Turns "On all my devices" on or off for folder or channel `id`.
-    pub fn sync_set_follow(&self, id: String, on: bool) -> Result<(), CoreError> {
-        let (h, rt) = self.devices_service()?;
-        let fid: FolderId = id.parse().map_err(|_| CoreError::Failed { message: concat!("This folder is no longer synced on this ", computer!(), ".").into() })?;
-        rt.block_on(h.set_follow(&fid, on)).map_err(devices_err)
-    }
 }
 
 #[cfg(test)]
