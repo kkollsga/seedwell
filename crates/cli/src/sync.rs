@@ -296,7 +296,7 @@ fn key_from_stdin() -> R<String> {
     }
     let mut line = String::new();
     std::io::stdin().lock().read_line(&mut line).map_err(|e| CliError::plain(1, format!("cannot read the link: {e}")))?;
-    let k = line.trim().to_owned();
+    let k = crate::chat::without_bom(line.trim()).trim().to_owned();
     if k.is_empty() {
         return Err(CliError::plain(2, "no link given on standard input"));
     }

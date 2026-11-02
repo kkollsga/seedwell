@@ -411,6 +411,9 @@ pub struct PeerHandle {
     pub data: mpsc::Sender<Message>,
     next_id: AtomicU32,
     pending: Mutex<HashMap<u32, oneshot::Sender<Response>>>,
+    /// The session stopped reading for now (the frames it has to apply wait for a folder's core): our requests are
+    /// not made meanwhile ([`Self::hold_reading`]).
+    reading_held: AtomicBool,
     /// The folders and channels shared over this connection, with the access the peer proved.
     pub folders: RwLock<BTreeMap<FolderId, Access>>,
     /// Bytes of our requests not answered yet (to spread requests over peers).
@@ -485,6 +488,7 @@ impl PeerHandle {
             data,
             next_id: AtomicU32::new(1),
             pending: Mutex::new(HashMap::new()),
+            reading_held: AtomicBool::new(false),
             folders: RwLock::new(BTreeMap::new()),
             inflight: AtomicU64::new(0),
             rx_bytes: AtomicU64::new(0),
@@ -546,11 +550,31 @@ impl PeerHandle {
         req.id = id;
         let (tx, rx) = oneshot::channel();
         lock(&self.pending).insert(id, tx);
+        // Its answer could not be read before the session reads again (after the insert: a hold that starts now
+        // either finds this request waiting and answers it, or is seen here).
+        if self.reading_held.load(Ordering::SeqCst) {
+            lock(&self.pending).remove(&id);
+            return None;
+        }
         if self.control.send(Message::Request(req)).await.is_err() {
             lock(&self.pending).remove(&id);
             return None;
         }
         Some(rx)
+    }
+
+    /// The session stops reading (`held`) until the frames it has to apply are taken, or reads again. While it does
+    /// not, no answer to our requests can arrive (they come behind those frames), and the one who waits for them may
+    /// be a pull that holds the very folder core the frames wait for. So the requests waiting are answered busy now
+    /// (the puller asks another device, or again in its next round) and new ones are not made until it reads again.
+    pub fn hold_reading(&self, held: bool) {
+        self.reading_held.store(held, Ordering::SeqCst);
+        if held {
+            let waiting: Vec<_> = lock(&self.pending).drain().collect();
+            for (id, tx) in waiting {
+                let _ = tx.send(Response { id, code: trs_sync_proto::msg::ResponseCode::Busy, data: vec![] });
+            }
+        }
     }
 
     /// A response arrived.
@@ -872,6 +896,9 @@ pub struct Ctx {
     pub hold_wait: Mutex<std::time::Duration>,
     /// **Tests:** a pause after each scan step, the core let go (a big first scan, slowed down to watch it).
     pub scan_step_wait: Mutex<std::time::Duration>,
+    /// **Tests:** a pause at the start of each fetch of a pull, before it asks, the folder's core held (a slow disk
+    /// under a pull: a round that takes long).
+    pub fetch_wait: Mutex<std::time::Duration>,
     /// **Tests:** hold queries and rename requests go unanswered, as an earlier Seedwell leaves them.
     pub silent_ondemand: std::sync::atomic::AtomicBool,
     /// Bumped (SeqCst) whenever a folder opens or closes here (pause, resume, stop, reopen, LAN-only, removal,

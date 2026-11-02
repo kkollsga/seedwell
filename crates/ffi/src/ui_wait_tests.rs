@@ -14,8 +14,27 @@ use crate::chat_images::ChatImageInput;
 use crate::settings::SettingsStore;
 use crate::*;
 
-/// What one call may take. The work it must not wait for lasts seconds; a call that waited shows as that.
+/// What one call may take, measured around the call alone. A call waits at most `UI_WAIT` (40 ms) for a fresh read
+/// and then shows the last one; the rest is room for the system to wake the waiting thread (its waits are made of short
+/// slices, so a runner that coalesces timers adds little: `calls::wait_until`). The work a call must not wait for lasts
+/// seconds here, so a call that waited for it shows as that.
 const BOUND: Duration = Duration::from_millis(100);
+
+/// How late this process's timers fire: the latest of a few plain 40 ms waits that nothing ends early. Said when a
+/// call was slow, so that a runner that delays timers shows as one.
+fn timer_lateness() -> Duration {
+    let (m, cv) = (std::sync::Mutex::new(()), std::sync::Condvar::new());
+    let wait = Duration::from_millis(40);
+    (0..5)
+        .map(|_| {
+            let at = Instant::now();
+            let g = m.lock().unwrap();
+            drop(cv.wait_timeout(g, wait).unwrap());
+            at.elapsed().saturating_sub(wait)
+        })
+        .max()
+        .unwrap_or_default()
+}
 
 struct Clock;
 
@@ -184,7 +203,12 @@ impl Calls {
     fn assert_quick(&self, what: &str) {
         assert!(self.rounds >= 5, "{what}: only {} rounds", self.rounds);
         let slow: Vec<_> = self.slowest.iter().filter(|(_, d)| **d > BOUND).collect();
-        assert!(slow.is_empty(), "{what}: calls of the app's main thread waited: {slow:?} (all: {:?})", self.slowest);
+        assert!(
+            slow.is_empty(),
+            "{what}: calls of the app's main thread waited: {slow:?} (all: {:?}; a plain 40 ms timer fires up to {:?} late here)",
+            self.slowest,
+            timer_lateness()
+        );
     }
 }
 
@@ -236,6 +260,25 @@ fn the_apps_calls_never_wait_for_a_first_scan_a_held_folder_a_rescan_or_a_busy_e
     core.sync_rescan(id.clone()).unwrap();
     calls.rounds_while(Duration::from_secs(20), Some(&id), None, |c| folder_state(c, &id).is_some_and(|f| f.state != SyncState::Scanning && f.files >= 4000));
     calls.assert_quick("during a rescan");
+    core.shutdown(5);
+}
+
+/// The engine busy from the start: the app's first library read waits for it (there is nothing to show meanwhile),
+/// but once that wait ran out, the calls after it do not wait again while that read is still under way.
+#[test]
+fn a_first_library_read_that_ran_out_is_not_waited_for_again() {
+    let (core, _work, _tmp) = real_core();
+    core.backend.test_stall_engine(Duration::from_secs(7));
+    std::thread::sleep(Duration::from_millis(50));
+    let at = Instant::now();
+    core.snapshot();
+    let first = at.elapsed();
+    assert!(first >= Duration::from_secs(1), "the first read waited {first:?}: a read was made before it (this test needs none)");
+    let mut calls = Calls::new(&core);
+    for _ in 0..5 {
+        calls.round(None, None);
+    }
+    calls.assert_quick("after a first read that ran out");
     core.shutdown(5);
 }
 

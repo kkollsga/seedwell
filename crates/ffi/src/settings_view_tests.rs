@@ -451,7 +451,8 @@ fn reachability_is_one_word_per_state() {
 #[test]
 fn folder_sync_has_names_port_discovery_rendezvous_and_the_finder_on_a_mac() {
     let m = mac(input(SettingsTab::FolderSync, state(), live()));
-    assert_eq!(titles(&m), ["This Mac", "Finding devices", "Relaying", "Speed", "Folders", "Finder"]);
+    // What this system calls the computer ("This PC" in a build for Windows).
+    assert_eq!(titles(&m), [concat!("This ", trs_platform::computer!()), "Finding devices", "Relaying", "Speed", "Folders", "Finder"]);
     assert!(m.blocks.contains(&SettingsBlock::Rendezvous));
     assert_eq!(m.refresh_ms, 1_000);
     let SettingsControl::Field { placeholder, .. } = &find(&m, "sync.device-name").controls[0] else { panic!() };

@@ -81,6 +81,17 @@ fn messages_are_markdown_blocks() {
     );
 }
 
+/// A byte order mark before the text (Windows PowerShell puts one before what it pipes into `seedwell chat send -`)
+/// is not part of the message: its heading is a heading, and the plain text has no mark. Only a leading one goes.
+#[test]
+fn a_byte_order_mark_before_the_message_is_not_part_of_it() {
+    let text = "\u{feff}## Status\r\n- one\r\n- two";
+    assert_eq!(raw_blocks(text), vec![h(2, "Status"), item("•", 0, "one"), item("•", 0, "two")]);
+    assert_eq!(blocks(text), chat_blocks("## Status\n- one\n- two"));
+    assert_eq!(chat_plain(text), "Status\n• one\n• two");
+    assert_eq!(raw_blocks("a\u{feff}b"), vec![p("a\u{feff}b")], "a mark inside the text stays");
+}
+
 #[test]
 fn complex_messages_parse_into_their_blocks() {
     let report = raw_blocks(samples::REPORT);

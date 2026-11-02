@@ -371,12 +371,37 @@ pub fn parse(args_in: Vec<String>) -> Result<Cmd, Usage> {
     })
 }
 
+/// Text a command reads (a message on standard input): UTF-8, or UTF-16 that starts with its byte order mark (what
+/// Windows PowerShell pipes when its output encoding is Unicode). A byte order mark before the text is not part of it:
+/// Windows PowerShell puts one before what it pipes into a program.
+pub(crate) fn input_text(bytes: Vec<u8>) -> Result<String, String> {
+    let utf16 = |b: &[u8], unit: fn([u8; 2]) -> u16| {
+        let (units, rest) = b.as_chunks::<2>();
+        if !rest.is_empty() {
+            return Err("it is UTF-16 cut in the middle of a character".to_string());
+        }
+        String::from_utf16(&units.iter().map(|&c| unit(c)).collect::<Vec<u16>>()).map_err(|_| "it is not valid UTF-16".to_string())
+    };
+    let text = match bytes.as_slice() {
+        [0xFF, 0xFE, rest @ ..] => utf16(rest, u16::from_le_bytes)?,
+        [0xFE, 0xFF, rest @ ..] => utf16(rest, u16::from_be_bytes)?,
+        _ => String::from_utf8(bytes).map_err(|_| "it is not UTF-8 text".to_string())?,
+    };
+    Ok(without_bom(&text).to_owned())
+}
+
+/// `text` without a byte order mark before it ([`input_text`]).
+pub(crate) fn without_bom(text: &str) -> &str {
+    text.strip_prefix('\u{feff}').unwrap_or(text)
+}
+
 pub(crate) fn stdin_text(what: &str) -> R<String> {
     if std::io::stdin().is_terminal() {
         eprintln!("{what} (end with Ctrl-D):");
     }
-    let mut s = String::new();
-    std::io::stdin().read_to_string(&mut s).map_err(|e| CliError::plain(1, format!("cannot read standard input: {e}")))?;
+    let mut bytes = Vec::new();
+    std::io::stdin().read_to_end(&mut bytes).map_err(|e| CliError::plain(1, format!("cannot read standard input: {e}")))?;
+    let s = input_text(bytes).map_err(|why| CliError::plain(1, format!("cannot read standard input: {why}")))?;
     let s = s.trim_end_matches(['\n', '\r']).to_owned();
     if s.trim().is_empty() {
         return Err(CliError::plain(2, "nothing on standard input"));
@@ -1456,6 +1481,22 @@ mod tests {
 
     fn w(s: &str) -> Vec<String> {
         s.split_whitespace().map(str::to_owned).collect()
+    }
+
+    /// What Windows PowerShell pipes into `seedwell chat send -`: a byte order mark first (UTF-8), or UTF-16 with its
+    /// mark. The message is the text after the mark; a mark inside it stays.
+    #[test]
+    fn text_on_standard_input_loses_its_byte_order_mark() {
+        let text = "## Status\r\n- one ✓";
+        assert_eq!(input_text(text.as_bytes().to_vec()).as_deref(), Ok(text));
+        assert_eq!(input_text([&[0xEF, 0xBB, 0xBF][..], text.as_bytes()].concat()).as_deref(), Ok(text));
+        let le: Vec<u8> = [0xFF, 0xFE].into_iter().chain(text.encode_utf16().flat_map(u16::to_le_bytes)).collect();
+        let be: Vec<u8> = [0xFE, 0xFF].into_iter().chain(text.encode_utf16().flat_map(u16::to_be_bytes)).collect();
+        assert_eq!((input_text(le.clone()).as_deref(), input_text(be).as_deref()), (Ok(text), Ok(text)));
+        assert!(input_text(le[..le.len() - 1].to_vec()).is_err(), "UTF-16 cut short");
+        assert!(input_text(vec![0xC3, 0x28]).is_err(), "not UTF-8");
+        assert_eq!(input_text("a\u{feff}b".into()).as_deref(), Ok("a\u{feff}b"));
+        assert_eq!(without_bom("\u{feff}seedwell://chat/x"), "seedwell://chat/x");
     }
 
     #[test]

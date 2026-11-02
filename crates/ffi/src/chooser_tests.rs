@@ -92,6 +92,12 @@ fn chooser(info: &ChoiceInfo) -> Arc<Chooser> {
     Chooser::with(info, "", Some("/Users/me"))
 }
 
+/// `rest`, in the test's home folder (`/Users/me`), as the core writes it for the user: `~/rest` on Unix systems, the
+/// full path on Windows, where `~` means nothing (`shown_in`, as `trs_platform::dirs::shown`).
+pub(crate) fn at_home(rest: &str) -> String {
+    if cfg!(unix) { format!("~/{rest}") } else { format!("/Users/me/{rest}") }
+}
+
 fn row<'a>(v: &'a ChooserPage, title: &str) -> &'a ChooserRow {
     v.rows.iter().find(|r| r.title == title).unwrap_or_else(|| panic!("no row {title}"))
 }
@@ -297,7 +303,7 @@ fn the_place_the_count_and_the_space_follow_the_info() {
     assert_eq!(v.rule_lines[0], ChooserLine { label: "Saves to ".into(), value: "the download folder".into(), emphasized: false });
     assert_eq!(v.summary, "1.1 KB · 1 file · tracker-y.net");
     assert!(chooser(&i).destination().is_none(), "no place of its own");
-    assert_eq!(chooser(&info("t1")).destination().as_deref(), Some("~/Media/TV"));
+    assert_eq!(chooser(&info("t1")).destination(), Some(at_home("Media/TV")));
 }
 
 #[test]
@@ -363,11 +369,11 @@ fn the_cursor_moves_with_the_arrows_and_space_ticks_its_row() {
 fn a_category_change_rebuilds_the_shared_chooser_and_keeps_the_users_ticks() {
     let (store, fake) = choices();
     let c = store.chooser("t1".into(), false).unwrap();
-    assert_eq!((c.category(), c.destination().as_deref()), (Category::Tv, Some("~/Media/TV")));
+    assert_eq!((c.category(), c.destination()), (Category::Tv, Some(at_home("Media/TV"))));
     // Untouched: the new plan's default again.
     store.change_category("t1".into(), Category::Other);
     assert!(Arc::ptr_eq(&store.loaded("t1".into()).unwrap(), &c), "the same chooser, rebuilt in place");
-    assert_eq!((c.category(), c.destination().as_deref()), (Category::Other, Some("~/Media/Other")));
+    assert_eq!((c.category(), c.destination()), (Category::Other, Some(at_home("Media/Other"))));
     assert_eq!(c.file_flags(), [true, true, false]);
     // Changed ticks stay where the same files are still there.
     c.toggle("g0i0".into());
@@ -419,6 +425,8 @@ fn paths_in_the_home_folder_are_written_with_a_tilde() {
         assert_eq!(shown_in("/Users/me/Media/TV", Some("/Users/me")), "~/Media/TV");
         assert_eq!(shown_in("/Users/me", Some("/Users/me/")), "~");
         assert_eq!(shown_in("/Users/meg/x", Some("/Users/me")), "/Users/meg/x");
+    } else {
+        assert_eq!(shown_in(r"C:\Users\me\Media\TV", Some(r"C:\Users\me")), r"C:\Users\me\Media\TV", "Windows writes the full path");
     }
     assert_eq!(shown_in("/Volumes/Big", Some("/Users/me")), "/Volumes/Big");
     assert_eq!(shown_in("/x", None), "/x");

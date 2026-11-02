@@ -481,6 +481,7 @@ impl SyncHandle {
             direct,
             hold_wait: Mutex::new(Duration::from_secs(10)),
             scan_step_wait: Mutex::new(Duration::ZERO),
+            fetch_wait: Mutex::new(Duration::ZERO),
             silent_ondemand: AtomicBool::new(false),
             folder_gen: std::sync::atomic::AtomicU64::new(0),
             file_hooks: crate::files::Hooks::default(),
@@ -2810,6 +2811,13 @@ impl SyncHandle {
     #[doc(hidden)]
     pub fn test_scan_step_wait(&self, wait: Duration) {
         *lock(&self.inner.ctx.scan_step_wait) = wait;
+    }
+
+    /// **Tests only:** each fetch of a pull starts with a pause this long, the folder's core held (a round that takes
+    /// long, as on a slow disk).
+    #[doc(hidden)]
+    pub fn test_fetch_wait(&self, wait: Duration) {
+        *lock(&self.inner.ctx.fetch_wait) = wait;
     }
 
     /// **Tests only:** files of a folder with a free in progress here.

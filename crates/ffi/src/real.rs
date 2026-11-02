@@ -663,10 +663,11 @@ impl RealBackend {
         let Some((target, stuck)) = self.ask_read() else { return self.read_now() };
         let fallback = lock(&self.last).clone();
         let wait = match &fallback {
-            None => FIRST_WAIT,
             // A read this side already gave up on is still under way: the engine is busy, nothing is waited for again
-            // (a refresh that reads the library several times waits once).
-            Some(_) if stuck => Duration::ZERO,
+            // (a refresh that reads the library several times waits once). Also before the first read is in: a first
+            // read that ran out is not waited for again by every later call.
+            _ if stuck => Duration::ZERO,
+            None => FIRST_WAIT,
             Some(_) if self.after_command.swap(false, Ordering::SeqCst) => COMMAND_WAIT,
             Some(_) => UI_WAIT,
         };
@@ -714,7 +715,7 @@ impl RealBackend {
             if now >= end || st.closed {
                 return false;
             }
-            st = self.refresh.cv.wait_timeout(st, end - now).unwrap_or_else(PoisonError::into_inner).0;
+            st = crate::calls::wait_until(&self.refresh.cv, st, end);
         }
         true
     }

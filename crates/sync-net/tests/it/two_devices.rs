@@ -613,3 +613,39 @@ async fn a_sibling_receives_files_while_the_first_scan_still_runs() {
     a.h.shutdown().await;
     b.h.shutdown().await;
 }
+
+/// A pull holds its folder's core while it waits for a device's answers, and applying that device's index waits for
+/// the core. When the index frames pile up behind it, the session stops reading, and the answers (behind those frames
+/// on the connection) cannot arrive: the requests to that device are given up at once and asked again once the frames
+/// are in. They are not waited for a minute each while the folder stands still (CI on Windows, 0.1.16, where a slow
+/// disk made a round long: three minutes).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_pull_never_waits_for_answers_held_up_behind_the_index_it_holds_up() {
+    let (a, b) = (device("Alpha").await, device("Beta").await);
+    let (fa, fb) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    std::fs::write(fa.path().join("first.txt"), b"first").unwrap();
+    let st = a.h.add_folder(fa.path().to_path_buf()).await.unwrap();
+    let id: FolderId = st.id.parse().unwrap();
+    let key = a.h.create_invite(&id, Role::ReadWrite, 1, 1).unwrap().link;
+    let dest = fb.path().join("Shared");
+    b.h.join_folder(&key, dest.clone()).await.unwrap();
+    b.h.add_address(&id, addr(&a)).unwrap();
+    until(20, "B has A's first file", || read(&dest.join("first.txt")).is_some()).await;
+
+    // B's next pull waits three seconds before it asks, its core held (a long round). Meanwhile A changes the folder a
+    // dozen times, each change announced in a frame of its own: more than B takes in while its core is held.
+    b.h.test_fetch_wait(Duration::from_secs(3));
+    std::fs::write(fa.path().join("x00.txt"), "0").unwrap();
+    a.h.rescan(&id).unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    for i in 1..=12 {
+        std::fs::write(fa.path().join(format!("x{i:02}.txt")), format!("{i}")).unwrap();
+        a.h.rescan(&id).unwrap();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+    b.h.test_fetch_wait(Duration::ZERO);
+    // Well within the minute a request waits for its answer at most: nothing waited for one that could not come.
+    until(30, "B has all of A's files", || (0..=12).all(|i| dest.join(format!("x{i:02}.txt")).exists())).await;
+    a.h.shutdown().await;
+    b.h.shutdown().await;
+}

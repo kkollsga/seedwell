@@ -6,13 +6,14 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use tokio::runtime::Handle;
+use tokio::time::Instant;
 use trs_sync::pull::{ChunkRequest, ChunkSource, FetchError};
 use trs_sync_proto::ids::FolderId;
 use trs_sync_proto::msg::{Request, ResponseCode};
 
 use crate::shared::{Ctx, PeerHandle};
 
-/// A request not answered in this time is given up (and asked of another device next round).
+/// Requests not answered in this time are given up (and asked of another device, or again next round).
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Fetches chunks of one folder from connected peers. Used on a blocking thread.
@@ -46,37 +47,50 @@ impl NetSource {
 impl ChunkSource for NetSource {
     fn fetch(&self, reqs: &[ChunkRequest]) -> Vec<Result<Vec<u8>, FetchError>> {
         self.rt.block_on(async {
-            // Send everything first (pipelined), then collect.
+            let wait = *crate::shared::lock(&self.ctx.fetch_wait);
+            if !wait.is_zero() {
+                tokio::time::sleep(wait).await;
+            }
+            // Everything is asked first (pipelined), then collected. One deadline for all (they went out together): a
+            // device that answers none holds the pull up a minute at most, not a minute per request.
             let mut waiting = Vec::with_capacity(reqs.len());
             for r in reqs {
                 waiting.push(self.ask(r, None).await);
             }
-            let mut out = Vec::with_capacity(reqs.len());
+            let deadline = Instant::now() + REQUEST_TIMEOUT;
+            let mut got: Vec<Got> = Vec::with_capacity(reqs.len());
             for (r, w) in reqs.iter().zip(waiting) {
-                let first = match w {
-                    Some((peer, rx)) => Some((peer.clone(), collect(&peer, r, rx).await)),
-                    None => None,
-                };
-                let res = match first {
-                    None => Err(FetchError::Unavailable),
-                    Some((_, Ok(data))) => {
-                        if let Some(f) = self.ctx.registry.folder(&self.folder) {
-                            f.fetched.add(data.len() as u64);
-                        }
-                        Ok(data)
-                    }
-                    // One more try with another holder.
-                    Some((peer, Err(e))) => match self.ask(r, Some(&peer)).await {
-                        Some((p2, rx)) => collect(&p2, r, rx).await,
-                        None => Err(e),
-                    },
-                };
-                out.push(res);
+                got.push(match w {
+                    None => Err((None, FetchError::Unavailable)),
+                    Some((peer, rx)) => collect(&peer, r, rx, deadline).await.map_err(|e| (Some(peer), e)),
+                });
             }
-            out
+            // One more try with another holder for each that failed, again all asked first.
+            let mut again = Vec::new();
+            for (i, res) in got.iter().enumerate() {
+                if let Err((Some(peer), _)) = res
+                    && let Some(p) = self.ask(&reqs[i], Some(peer)).await
+                {
+                    again.push((i, p));
+                }
+            }
+            let deadline = Instant::now() + REQUEST_TIMEOUT;
+            for (i, (p2, rx)) in again {
+                got[i] = collect(&p2, &reqs[i], rx, deadline).await.map_err(|e| (None, e));
+            }
+            let fetched: usize = got.iter().filter_map(|r| r.as_ref().ok()).map(Vec::len).sum();
+            if fetched > 0
+                && let Some(f) = self.ctx.registry.folder(&self.folder)
+            {
+                f.fetched.add(fetched as u64);
+            }
+            got.into_iter().map(|r| r.map_err(|(_, e)| e)).collect()
         })
     }
 }
+
+/// A request's data, or why not and the device that failed it (to ask another; `None`: asked of no other).
+type Got = Result<Vec<u8>, (Option<Arc<PeerHandle>>, FetchError)>;
 
 type Pending = (Arc<PeerHandle>, tokio::sync::oneshot::Receiver<trs_sync_proto::msg::Response>);
 
@@ -109,8 +123,9 @@ async fn collect(
     peer: &PeerHandle,
     r: &ChunkRequest,
     rx: tokio::sync::oneshot::Receiver<trs_sync_proto::msg::Response>,
+    deadline: Instant,
 ) -> Result<Vec<u8>, FetchError> {
-    let got = tokio::time::timeout(REQUEST_TIMEOUT, rx).await;
+    let got = tokio::time::timeout_at(deadline, rx).await;
     peer.inflight.fetch_sub(u64::from(r.len), Ordering::Relaxed);
     match got {
         Err(_) => Err(FetchError::Failed(format!("{} did not answer in time", peer.name))),

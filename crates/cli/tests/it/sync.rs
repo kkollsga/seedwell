@@ -196,7 +196,8 @@ fn chat_watch_streams_another_devices_messages_as_untrusted_data() {
     assert_eq!((ch["role"].as_str(), ch["agents"].as_str()), (Some("owner"), Some("yes")), "{ch}");
     let link = a.json(&["chat", "share", "Plans"])["link"].as_str().unwrap().to_owned();
     assert!(link.starts_with("seedwell://chat/") && link.contains("&agents=yes"), "{link}");
-    let j = cli_stdin(&b, &["chat", "join", "-"], &link);
+    // As Windows PowerShell pipes it: a byte order mark before the link.
+    let j = cli_stdin(&b, &["chat", "join", "-"], &format!("\u{feff}{link}"));
     assert_eq!(j.code, 0, "{}", j.stderr);
     let port = a.json(&["sync", "list"])["port"].as_u64().unwrap();
     b.json(&["chat", "address", "Plans", &format!("127.0.0.1:{port}")]);
@@ -235,13 +236,14 @@ fn chat_watch_streams_another_devices_messages_as_untrusted_data() {
     // A topic: B makes one and posts in it, naming it by its title; A finds it by an id prefix.
     let t = b.json(&["chat", "topic", "Plans", "Trip in May"]);
     let tid = t["id"].as_str().unwrap().to_owned();
-    let o = cli_stdin(&b, &["chat", "send", "Plans", "--topic", "trip in may", "-"], "Bergen?");
+    let o = cli_stdin(&b, &["chat", "send", "Plans", "--topic", "trip in may", "-"], "\u{feff}Bergen?");
     assert_eq!(o.code, 0, "{}", o.stderr);
     let r = wait_until(30, "the topic's message at A", || {
         let r = a.json(&["chat", "read", "Plans", "--topic", &tid[..8]]);
         (r["messages"].as_array()?.len() == 1).then_some(r)
     });
     assert_eq!((r["messages"][0]["topic"].as_str(), r["messages"][0]["topic_title"].as_str()), (Some(tid.as_str()), Some("Trip in May")), "{r}");
+    assert_eq!(r["messages"][0]["body"].as_str(), Some("Bergen?"), "sent without the byte order mark before it: {r}");
     let topics = a.json(&["chat", "topics", "Plans"]);
     assert_eq!((topics["topics"][0]["title"].as_str(), topics["topics"][0]["unread"].as_u64()), (Some("Trip in May"), Some(1)), "{topics}");
     let general = a.json(&["chat", "read", "Plans", "--topic", "general"]);

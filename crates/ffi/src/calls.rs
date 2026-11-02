@@ -105,6 +105,20 @@ pub(crate) fn apart<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -
 /// busy engine (a commit, a stat of a slow disk) never holds the UI up.
 pub(crate) const UI_WAIT: Duration = Duration::from_millis(40);
 
+/// The longest single timed wait of a bounded wait ([`wait_until`]).
+const WAIT_SLICE: Duration = Duration::from_millis(4);
+
+/// Waits on `cv` until it is notified or `end` comes, whichever is first (a spurious wake-up returns early too: the
+/// caller looks at its condition again). Never in one long timed wait: the system may wake a thread's timer late by
+/// a share of its length (macOS coalesces the timers of a thread below the user-interactive QoS: on CI's runner a 40 ms
+/// wait woke after 150 to 180 ms, as it does with `taskpolicy -c utility` on the tests), so the wait is made of short
+/// slices, each late by a little at most. A notification still ends it at once; a wait that runs out costs a few
+/// wake-ups.
+pub(crate) fn wait_until<'a, T>(cv: &Condvar, guard: MutexGuard<'a, T>, end: Instant) -> MutexGuard<'a, T> {
+    let slice = end.saturating_duration_since(Instant::now()).min(WAIT_SLICE);
+    cv.wait_timeout(guard, slice).unwrap_or_else(PoisonError::into_inner).0
+}
+
 /// Runs `f` on a thread of its own and waits at most `wait` for it: `None` when it took longer (it goes on, and its
 /// result is dropped).
 pub(crate) fn within<T: Send + 'static>(wait: Duration, f: impl FnOnce() -> T + Send + 'static) -> Option<T> {
@@ -115,7 +129,15 @@ pub(crate) fn within<T: Send + 'static>(wait: Duration, f: impl FnOnce() -> T + 
             let _ = tx.send(f());
         })
         .ok()?;
-    rx.recv_timeout(wait).ok()
+    // In short slices, as [`wait_until`] waits.
+    let end = Instant::now() + wait;
+    loop {
+        match rx.recv_timeout(end.saturating_duration_since(Instant::now()).min(WAIT_SLICE)) {
+            Ok(v) => return Some(v),
+            Err(mpsc::RecvTimeoutError::Timeout) if Instant::now() < end => {}
+            Err(_) => return None,
+        }
+    }
 }
 
 // MARK: Polls that stay synchronous
@@ -217,7 +239,7 @@ impl<K: Eq + Hash + Clone + Send + 'static, V: Clone + Send + 'static> Polled<K,
                     if now >= end {
                         return e.value.as_ref().map(|(v, _)| v.clone());
                     }
-                    m = cv.wait_timeout(m, end - now).unwrap_or_else(PoisonError::into_inner).0;
+                    m = wait_until(cv, m, end);
                 }
             }
         }

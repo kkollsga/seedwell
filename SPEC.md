@@ -1078,7 +1078,12 @@ baseline every later version must still sync with:
   next step only if they did not change meanwhile (otherwise they are scanned again). Each step's records are announced
   at once, so the other devices see a big folder's first scan grow and fetch its files while the rest is still hashed.
   Peers are sent the index from a read-only view of it, and the app reads a folder's status from what the folder keeps
-  for it: neither waits for a scan or a pull. A pull, too, holds the index one round at a time. A folder that is
+  for it: neither waits for a scan or a pull. A pull, too, holds the index one round at a time. A device's index
+  changes that arrive while a pull holds the index wait for it, a few frames at most; beyond that the session stops
+  reading until one is applied, and since the answers to the pull's requests come behind them on the connection, the
+  requests to that device are given up at once (asked of another device, or again next round) rather than waited for:
+  a round never waits for answers it holds up itself. Requests that went out together are waited for a minute in
+  all, not a minute each. A folder that is
   stopped (moved, removed, switched) or paused ends its scan at the next step; what was recorded stays, and the next
   scan goes on from there.
 

@@ -4,7 +4,7 @@
 use std::sync::atomic::Ordering;
 
 use super::*;
-use crate::chooser::tests::{choices, Fake};
+use crate::chooser::tests::{at_home, choices, Fake};
 use crate::chooser::HeldKey;
 use crate::row_text::tests::row as plain_row;
 use crate::types::{PendingStart, TransferState};
@@ -72,7 +72,7 @@ fn each_torrent_counts_down_to_its_own_deadline() {
     assert_eq!(starting_tick(countdown(&p.blocks[0]), T0 + 3_000).line, "Starting in 7 s");
     assert_eq!(starting_tick(countdown(&p.blocks[1]), T0 + 3_000).line, "Starting in 4 s", "each torrent counts to its own deadline");
     assert_eq!(p.blocks[0].line, "Starting in 10 s");
-    assert_eq!(p.blocks[0].detail, "Movie · 1.0 GB · ~/Media/Movies");
+    assert_eq!(p.blocks[0].detail, format!("Movie · 1.0 GB · {}", at_home("Media/Movies")));
     assert_eq!(p.blocks[0].open_help, "Open in Seedwell");
     assert_eq!(p.show, StartingShow::Show { stays: false }, "a countdown alone can be clicked away");
     assert!(p.compact && p.close_help.is_none());
@@ -161,11 +161,11 @@ fn a_torrent_that_waits_for_a_choice_stays_until_it_is_decided_and_its_checklist
     assert_eq!(b.actions.start.as_ref().map(|a| a.help.as_str()), Some("Start downloading every file. Open the list to choose"));
     assert!(b.active, "a lone block owns the keys");
     assert_eq!(fake.loads.load(Ordering::SeqCst), 1, "the checklist is loaded with the first look");
-    assert_eq!(b.detail, "Movie · 1.0 GB · ~/Media/Movies");
+    assert_eq!(b.detail, format!("Movie · 1.0 GB · {}", at_home("Media/Movies")));
     let p = s.refresh(vec![row("t1", None, true)], T0 + 1_000, false);
     assert_eq!(fake.loads.load(Ordering::SeqCst), 1, "and kept");
     // Once loaded, the chooser's own place stands in the line (it follows a category change at once).
-    assert_eq!(p.blocks[0].detail, "Movie · 1.0 GB · ~/Media/TV");
+    assert_eq!(p.blocks[0].detail, format!("Movie · 1.0 GB · {}", at_home("Media/TV")));
     s.toggle_expanded("t1".into());
     let b = &s.page_now(T0).blocks[0];
     assert_eq!(b.state, StartingBlockState::Choice { expanded: true });
@@ -220,7 +220,7 @@ fn a_magnet_link_fetches_its_file_list_then_shows_the_checklist() {
     let p = s.refresh(vec![magnet("t1")], T0 + 1_000, false);
     let b = &p.blocks[0];
     assert_eq!(b.state, StartingBlockState::Fetching { line: "Fetching file list…".into() });
-    assert_eq!((b.detail.as_str(), b.category.is_none(), b.chevron.is_none()), ("Magnet link · ~/Downloads", true, true));
+    assert_eq!((b.detail.as_str(), b.category.is_none(), b.chevron.is_none()), (format!("Magnet link · {}", at_home("Downloads")).as_str(), true, true));
     assert!(b.actions.start.is_none() && b.actions.keep_file.is_none(), "Cancel only");
     assert_eq!(b.actions.cancel.keys, [HeldKey::Escape]);
     assert_eq!(p.show, StartingShow::Show { stays: true }, "the notifier stays while the list is coming");
@@ -282,6 +282,8 @@ fn the_folder_is_where_the_files_go_written_from_home() {
     if cfg!(unix) {
         assert_eq!(folder_of("/Users/me/Media/Movies/X", home).as_deref(), Some("~/Media/Movies"));
         assert_eq!(folder_of("/Users/me/X", home).as_deref(), Some("~"));
+    } else {
+        assert_eq!(folder_of(r"C:\Users\me\Media\Movies\X", Some(r"C:\Users\me")).as_deref(), Some(r"C:\Users\me\Media\Movies"));
     }
     assert_eq!(folder_of("/Volumes/Big/Movies/X", home).as_deref(), Some("/Volumes/Big/Movies"));
     assert_eq!(folder_of("", home), None);

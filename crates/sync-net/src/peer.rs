@@ -743,17 +743,17 @@ async fn read_loop(
         match msg {
             Message::Members(m) => {
                 let Some(f) = shared_space(ctx, peer, &m.folder_id) else { continue };
-                apply.send(Apply::Members(f, m.statements)).await.map_err(|_| applier_gone())?;
+                to_apply(&apply, peer, Apply::Members(f, m.statements)).await.map_err(|_| applier_gone())?;
             }
             Message::OwnerKey(k) => {
                 // In order with the membership that makes this device an owner.
                 let Some(f) = shared_space(ctx, peer, &k.folder_id) else { continue };
-                apply.send(Apply::OwnerKey(f, peer.device_pk, k.secret)).await.map_err(|_| applier_gone())?;
+                to_apply(&apply, peer, Apply::OwnerKey(f, peer.device_pk, k.secret)).await.map_err(|_| applier_gone())?;
             }
             Message::ChatMessages(m) if peer.chat() => {
                 // In order with the membership that says who may post.
                 let Some(c) = shared_channel(ctx, peer, &m.channel_id) else { continue };
-                apply.send(Apply::Chat(c, m.messages)).await.map_err(|_| applier_gone())?;
+                to_apply(&apply, peer, Apply::Chat(c, m.messages)).await.map_err(|_| applier_gone())?;
             }
             Message::ChatHave(h) if peer.chat() => {
                 let Some(c) = shared_channel(ctx, peer, &h.channel_id) else { continue };
@@ -768,7 +768,7 @@ async fn read_loop(
             }
             Message::DirectMessages(m) if peer.chat() => {
                 // In order with the membership that says who shares a channel.
-                apply.send(Apply::Direct(m.messages)).await.map_err(|_| applier_gone())?;
+                to_apply(&apply, peer, Apply::Direct(m.messages)).await.map_err(|_| applier_gone())?;
             }
             Message::ChatJoin(j) if peer.chat() => {
                 // A channel joined while connected.
@@ -816,7 +816,7 @@ async fn read_loop(
                 // (Nothing of a folder stale on this session: it is sent again on the next one.)
                 let Some(f) = shared_folder(ctx, peer, &idx.folder_id) else { continue };
                 let ri = RemoteIndex { index_id: idx.index_id, full: idx.full, done: idx.done, entries: idx.entries };
-                apply.send(Apply::Index(f, ri)).await.map_err(|_| applier_gone())?;
+                to_apply(&apply, peer, Apply::Index(f, ri)).await.map_err(|_| applier_gone())?;
             }
             Message::Request(req) => {
                 let Some(f) = shared_folder(ctx, peer, &req.folder_id) else {
@@ -1035,6 +1035,22 @@ enum Apply {
     Index(Arc<FolderShared>, RemoteIndex),
     Chat(Arc<crate::chat::ChannelShared>, Vec<trs_sync_proto::chat::ChatMessage>),
     Direct(Vec<trs_sync_proto::direct::DirectMessage>),
+}
+
+/// Hands a frame to the applier. When its queue is full the session stops reading until the applier takes one, and
+/// the answers to our requests (behind this frame on the connection) cannot arrive meanwhile. The applier may be
+/// waiting for a folder's core that a pull holds while it waits for those very answers: so they are given up for the
+/// time being ([`PeerHandle::hold_reading`]), the pull ends its round and lets the core go, and asks again after.
+async fn to_apply(apply: &mpsc::Sender<Apply>, peer: &PeerHandle, a: Apply) -> Result<(), ()> {
+    let a = match apply.try_send(a) {
+        Ok(()) => return Ok(()),
+        Err(mpsc::error::TrySendError::Closed(_)) => return Err(()),
+        Err(mpsc::error::TrySendError::Full(a)) => a,
+    };
+    peer.hold_reading(true);
+    let sent = apply.send(a).await;
+    peer.hold_reading(false);
+    sent.map_err(|_| ())
 }
 
 /// Applies the peer's membership and index in the order they came, off the read loop: applying waits for the

@@ -3433,8 +3433,15 @@ mod tests {
         }
         let s = core.sync_snapshot();
         assert!(s.port > 0 && !s.device_id.is_empty() && s.folders.is_empty());
-        // Keys are in the state folder's 0600 file without a vault, never in sync.toml.
-        assert!(dir.join("sync/secrets").exists());
+        // Keys are in the state folder's own store without a vault, never in sync.toml: on Windows DPAPI-sealed files
+        // in `sync/vault` (the plain file is not made), elsewhere the 0600 file.
+        let (vault, plain) = (dir.join("sync/vault"), dir.join("sync/secrets"));
+        if cfg!(windows) {
+            assert!(std::fs::read_dir(&vault).is_ok_and(|mut d| d.next().is_some()), "the keys are sealed in sync/vault");
+            assert!(!plain.exists(), "no plain file next to the vault");
+        } else {
+            assert!(plain.exists() && !vault.exists(), "the keys are in the 0600 file");
+        }
 
         let docs = work.path().join("Docs");
         std::fs::create_dir_all(&docs).unwrap();

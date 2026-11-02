@@ -157,7 +157,9 @@ fn flush(out: &mut Vec<Raw>, paragraph: &mut Vec<String>, quote: &mut Vec<String
 }
 
 pub(crate) fn raw_blocks(text: &str) -> Vec<Raw> {
-    let text = text.replace("\r\n", "\n");
+    // A byte order mark a Windows tool put before the text (PowerShell piping into `seedwell chat send -`) is not part
+    // of the message: messages sent so with an older CLI read as they were meant.
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text).replace("\r\n", "\n");
     let lines: Vec<&str> = text.split('\n').collect();
     let mut out: Vec<Raw> = Vec::new();
     let mut paragraph: Vec<String> = Vec::new();
