@@ -829,10 +829,22 @@ mod tests {
         assert!(!f.on_demand);
         let f = c.sync_set_on_demand(f.id.clone(), true, None).unwrap();
         assert!(f.on_demand && !docs.exists());
-        let root = c.sync_children(f.id.clone(), ROOT_ID.into(), None, 100).unwrap().items;
-        let sub = root.iter().find(|i| i.name == "sub").unwrap().clone();
+        // The switch reopens the folder, which scans its files again in steps (SPEC §7G.2): its items appear as each
+        // step commits, so wait for them (a slow machine takes longer than the switch itself).
+        let listed = |parent: &str, name: Option<&str>| {
+            let end = std::time::Instant::now() + std::time::Duration::from_secs(20);
+            loop {
+                let items = c.sync_children(f.id.clone(), parent.into(), None, 100).unwrap().items;
+                if let Some(i) = items.iter().find(|i| name.is_none_or(|n| i.name == n)) {
+                    return i.clone();
+                }
+                assert!(std::time::Instant::now() < end, "{name:?} is not listed under {parent} after 20 s");
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        };
+        let sub = listed(ROOT_ID, Some("sub"));
         assert_eq!(sub.kind, SyncItemKind::Dir);
-        let a = c.sync_children(f.id.clone(), sub.id.clone(), None, 100).unwrap().items[0].clone();
+        let a = listed(&sub.id, None);
         assert_eq!((a.size, a.state), (5, SyncItemState::ModifiedHere));
         let got = c.sync_fetch(f.id.clone(), a.id.clone(), 1000).unwrap();
         assert_eq!(std::fs::read(got.local_path.unwrap()).unwrap(), b"hello");
