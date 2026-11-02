@@ -64,6 +64,12 @@ extension TransferRow {
         qaFit()
     }
 
+    /// A notice about this held torrent was clicked (it was added again): the notifier shows it, even when put away.
+    func reveal(_ id: String) {
+        starting.reveal(id: id)
+        refresh()
+    }
+
     /// The menu bar menu opens on the same spot: the popover steps aside for it and stays put for these torrents.
     func stepAside() {
         guard isShown else { return }

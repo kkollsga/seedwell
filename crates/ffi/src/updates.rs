@@ -896,6 +896,11 @@ impl trs_control::Builds for Hook {
         let u = self.0.upgrade().ok_or("Seedwell is quitting")?;
         u.set_dev_builds(on, unix_ms())
     }
+
+    fn update_now(&self) -> Result<String, String> {
+        let u = self.0.upgrade().ok_or("Seedwell is quitting")?;
+        u.update_now(unix_ms())
+    }
 }
 
 impl Updates {
@@ -903,7 +908,7 @@ impl Updates {
         if self.prefs().dev_builds {
             Ok(())
         } else {
-            Err("development builds are off: turn on Settings › General › Updates › Allow development builds (or, when the user asks, `seedwell update dev-builds on`)".into())
+            Err("development builds are off: turn on Settings › General › Updates › Allow development builds (or, when the user asks, `seedwell update dev-builds on`); ask the user with `seedwell agents request dev-builds --why \"<what for>\"`".into())
         }
     }
 
@@ -1064,6 +1069,16 @@ impl Updates {
     /// 90 s, the model says it failed.
     pub fn install(&self, install_dir: String, now_ms: u64) -> Option<InstallCommand> {
         let mut st = self.lock();
+        let (_, c) = self.release_install(&mut st, &install_dir, now_ms)?;
+        // The host starts it: its process is not known here, so only the installer's time says whether it may run.
+        st.saved.pending_pid = None;
+        self.save(&st.saved);
+        Some(command(c, &log_in(&self.core.dir)))
+    }
+
+    /// The installer of the release on offer (its version and command), noted as started; `None` when nothing is on
+    /// offer or it is a watched folder's build (the core installs those).
+    fn release_install(&self, st: &mut St, install_dir: &str, now_ms: u64) -> Option<(String, os::Command)> {
         let Status::Available { version, .. } = &st.status else { return None };
         if st.folder_build.is_some() {
             return None;
@@ -1071,15 +1086,56 @@ impl Updates {
         let version = version.clone();
         let installer = format!("{}/releases/download/v{version}/{}", base(&self.repo), os::INSTALLER);
         let (state_dir, relaunch) = self.place();
-        let i = os::Install { install_dir: &install_dir, state_dir: &state_dir, relaunch: &relaunch };
+        let i = os::Install { install_dir, state_dir: &state_dir, relaunch: &relaunch };
         let c = os::installer_command(&installer, Some(&version), base(&self.repo), &i);
         st.saved.pending = Some(version.clone());
         st.saved.pending_since_ms = Some(now_ms);
-        // The host starts it: its process is not known here, so only the installer's time says whether it may run.
-        st.saved.pending_pid = None;
-        st.status = Status::Installing { version, since_ms: now_ms, here: true };
-        self.save(&st.saved);
-        Some(command(c, &log_in(&self.core.dir)))
+        st.status = Status::Installing { version: version.clone(), since_ms: now_ms, here: true };
+        Some((version, c))
+    }
+
+    /// `update.now` (an agent at permission full): one check, as Check Now (with development builds allowed and a
+    /// folder watched: that folder, whose newer build the check installs), then the install of the release on offer,
+    /// as Install, the core starting the installer itself. Development builds off while one runs: the way back to the
+    /// latest release, as the switch does. Blocks for the check (up to 15 s). A sentence for the agent: what happens,
+    /// or why nothing does.
+    fn update_now(&self, now_ms: u64) -> Result<String, String> {
+        {
+            let st = self.lock();
+            if let Status::Installing { version, .. } = &st.status {
+                return Ok(format!("Installing {} already", shown(version)));
+            }
+        }
+        self.check(false, now_ms);
+        let mut st = self.lock();
+        let text = self.status_text(&st, now_ms);
+        if let Status::CheckFailed(why) = &st.status {
+            return Err(format!("the check failed: {why}"));
+        }
+        if !matches!(st.status, Status::Available { .. }) || st.folder_build.is_some() {
+            // Up to date, nothing published, or a watched folder's build the check started installing.
+            return Ok(text);
+        }
+        let install_dir = self.install_dir.clone();
+        let Some((version, c)) = self.release_install(&mut st, &install_dir, now_ms) else { return Ok(text) };
+        match os::spawn(&c, &log_in(&self.core.dir)) {
+            Ok(pid) => {
+                st.saved.pending_pid = Some(pid);
+                self.save(&st.saved);
+                Ok(format!(
+                    "Installing {}: {APP_NAME} quits, is replaced and reopens (log: {})",
+                    shown(&version),
+                    log_in(&self.core.dir).display()
+                ))
+            }
+            Err(e) => {
+                st.saved.pending = None;
+                st.saved.pending_since_ms = None;
+                st.status = Status::InstallFailed(version);
+                self.save(&st.saved);
+                Err(format!("the installer did not start: {e}"))
+            }
+        }
     }
 
     /// Install the build in `zip` (the host's Install Build…), checked against `sha256` when given: the core starts
@@ -1156,6 +1212,7 @@ impl Updates {
             }
         }
         u.core.builds.set(Arc::new(Hook(Arc::downgrade(&u))));
+        u.core.host_facts.set_running(&u.current);
         u.sync_watch();
         u
     }
@@ -1348,6 +1405,29 @@ pub fn launch_guard(state_dir: String, version: String, install_dir: String, rel
         let i = os::Install { install_dir: &install_dir, state_dir: &state_dir, relaunch: &relaunch };
         command(os::rollback_command(&installer.display().to_string(), &i), &log_in(&dir))
     })
+}
+
+/// The words of the window that says the app cannot start (the core failed, so there is no core to ask): its title and
+/// Quit, before the recovery actions (`recovery_actions`); the core's error is its text.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct StartFailureTexts {
+    /// "Seedwell could not start"
+    pub title: String,
+    pub quit_title: String,
+    pub quit_help: String,
+    /// The title when the app was started with arguments it refuses (a development or QA run), before any core.
+    pub refused_title: String,
+}
+
+/// The texts of the start failure window. Needs no core: it is what the host shows when the core failed.
+#[uniffi::export]
+pub fn start_failure_texts() -> StartFailureTexts {
+    StartFailureTexts {
+        title: format!("{APP_NAME} could not start"),
+        quit_title: "Quit".into(),
+        quit_help: format!("Quit {APP_NAME}; nothing is changed"),
+        refused_title: "Cannot start".into(),
+    }
 }
 
 /// The recovery window's ways out when the core cannot start (any reason), besides Quit: **Go Back to <kept

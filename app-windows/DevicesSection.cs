@@ -30,6 +30,7 @@ sealed class DevicesSection
         timer = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread().CreateTimer();
         timer.Interval = TimeSpan.FromSeconds(1);
         timer.Tick += (_, _) => Update();
+        // The core's pace (DevicesView.RefreshMs) from the first read on.
         // Read only while shown (the page is made anew each time it opens).
         panel.Loaded += (_, _) => timer.Start();
         panel.Unloaded += (_, _) => timer.Stop();
@@ -51,6 +52,7 @@ sealed class DevicesSection
             AppLog.Write($"devices view failed: {e.Message}");
             return;
         }
+        timer.Interval = TimeSpan.FromMilliseconds(Math.Max(250, v.RefreshMs));
         var key = Key(v);
         if (key != drawn)
         {

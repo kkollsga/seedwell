@@ -242,6 +242,10 @@ impl Core {
         view(b.rendezvous_status().as_ref(), &b.rendezvous_job(), now)
     }
 
+}
+
+/// The actions, `async` for the hosts (`async_calls`).
+impl Core {
     /// Sets up (or updates) the rendezvous on the user's Cloudflare account with an API token, in the background
     /// (`sync_rendezvous` shows the progress and the result). The token is used for the setup only: never stored or
     /// logged. The user's action in Settings, never an agent's.

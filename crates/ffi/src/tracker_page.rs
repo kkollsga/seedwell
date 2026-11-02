@@ -583,8 +583,19 @@ impl FavoriteEditor {
         }
     }
 
+    /// Runs a command of `tracker_id`'s Info page (all but `Back`, which is the host's), after the saves started
+    /// before it; a command that saves (peer exchange, an address removed, the folders, a removal) saves off the
+    /// caller's thread.
+    #[uniffi::method(name = "tracker_info_run")]
+    pub async fn tracker_info_run_async(self: std::sync::Arc<Self>, tracker_id: String, command: TrackerInfoCommand) -> FavoriteEffect {
+        let me = self.clone();
+        self.in_order(move |_| me.tracker_info_run(tracker_id, command)).await
+    }
+}
+
+impl FavoriteEditor {
     /// Runs a command of `tracker_id`'s Info page (all but `Back`, which is the host's).
-    pub fn tracker_info_run(&self, tracker_id: String, command: TrackerInfoCommand) -> FavoriteEffect {
+    pub(crate) fn tracker_info_run(&self, tracker_id: String, command: TrackerInfoCommand) -> FavoriteEffect {
         match command {
             TrackerInfoCommand::Back => FavoriteEffect::default(),
             TrackerInfoCommand::SetPex { allow } => {

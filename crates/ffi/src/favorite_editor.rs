@@ -5,12 +5,15 @@
 //! from Favorites, asks first.
 //!
 //! - [`FavoriteEditor`]: the one edit in progress, its red hint and quiet note, the folders being changed, and the
-//!   removal question. Each change answers with a [`FavoriteEffect`] for the host.
+//!   removal question. Each change answers with a [`FavoriteEffect`] for the host. The changes that save (a commit,
+//!   limits, folders, a removal, Save as Favorite) are `async` for the host: they run one after another on the
+//!   editor's own thread, and the editor's state is never locked while the core saves, so its view stays at hand.
 //! - The Info page built on it: `tracker_page.rs`.
 
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
+use crate::calls::Lane;
 use crate::favorites::{check_url, UrlCheck};
 use crate::settings::{CategoryLocationSetting, ProfileRecord, VolumeWarning};
 use crate::types::Category;
@@ -247,12 +250,20 @@ impl EditorState {
 pub struct FavoriteEditor {
     pub(crate) store: Arc<dyn FavoriteStore>,
     pub(crate) state: Mutex<EditorState>,
+    /// The saves the host starts, one after another in the order they came.
+    saves: Lane,
 }
 
 impl FavoriteEditor {
     pub(crate) fn with_store(store: Arc<dyn FavoriteStore>) -> Self {
         let records = store.load();
-        Self { store, state: Mutex::new(EditorState { records, ..EditorState::default() }) }
+        Self { store, state: Mutex::new(EditorState { records, ..EditorState::default() }), saves: Lane::new("seedwell-favorites") }
+    }
+
+    /// Runs `f` on the editor's lane, after every save started before it.
+    pub(crate) fn in_order<T: Send + 'static>(self: &Arc<Self>, f: impl FnOnce(&FavoriteEditor) -> T + Send + 'static) -> impl std::future::Future<Output = T> + Send + 'static {
+        let me = self.clone();
+        self.saves.run(move || f(&me))
     }
 
     pub(crate) fn lock(&self) -> MutexGuard<'_, EditorState> {
@@ -263,12 +274,15 @@ impl FavoriteEditor {
         st.records = self.store.load();
     }
 
-    /// Stores `r` in place of the saved favorite of its id; `false` (with the hint) when the core refused.
-    fn save_replacing(&self, st: &mut EditorState, r: ProfileRecord) -> bool {
+    /// Stores `r` in place of the saved favorite of its id; `false` (with the hint) when the core refused. The state is
+    /// not locked while the core saves.
+    fn save_replacing(&self, r: ProfileRecord) -> bool {
         let mut all = self.store.load();
         let Some(i) = all.iter().position(|p| p.id == r.id) else { return false };
         all[i] = r;
-        match self.store.save(all) {
+        let saved = self.store.save(all);
+        let mut st = self.lock();
+        match saved {
             Ok(saved) => {
                 st.records = saved;
                 st.hint = None;
@@ -367,73 +381,6 @@ impl FavoriteEditor {
         self.lock().cancel();
     }
 
-    // MARK: Finishing it
-
-    /// Return, or the field losing focus: saves the name or the address, or leaves the field with a red hint.
-    pub fn commit(&self) -> FavoriteEffect {
-        let mut st = self.lock();
-        let Some(target) = st.target.clone() else { return FavoriteEffect::default() };
-        match target {
-            FavoriteTarget::SidebarName { tracker_id } => {
-                let name = st.text.trim().to_string();
-                let Some(mut r) = st.record(&tracker_id).cloned().filter(|r| !name.is_empty() && name != r.name) else {
-                    st.cancel();
-                    return FavoriteEffect::default();
-                };
-                r.name = name.chars().take(NAME_LIMIT).collect();
-                let saved = self.save_replacing(&mut st, r);
-                if saved {
-                    st.cancel();
-                }
-                Self::changed(saved)
-            }
-            FavoriteTarget::Url { tracker_id, index } => {
-                let Some(mut r) = st.record(&tracker_id).cloned() else {
-                    st.cancel();
-                    return FavoriteEffect::default();
-                };
-                match commit_url(&r.urls, index.map(|i| i as usize), &st.text, |raw| self.store.check(raw)) {
-                    UrlCommit::Unchanged => {
-                        st.cancel();
-                        FavoriteEffect::default()
-                    }
-                    UrlCommit::Invalid(why) => {
-                        st.hint = Some(why);
-                        FavoriteEffect::default()
-                    }
-                    UrlCommit::Duplicate => {
-                        st.hint = Some(ALREADY_LISTED.into());
-                        FavoriteEffect::default()
-                    }
-                    UrlCommit::Saved(next, passkey_removed) => {
-                        r.urls = next;
-                        let saved = self.save_replacing(&mut st, r);
-                        if saved {
-                            st.cancel();
-                            if passkey_removed {
-                                st.note = Some((PASSKEY_NOTE.into(), Instant::now()));
-                            }
-                        }
-                        Self::changed(saved)
-                    }
-                }
-            }
-        }
-    }
-
-    /// The favorite's shared speed caps (bytes/s; 0 = unlimited), applied live by the engine.
-    pub fn set_limits(&self, id: String, down: u64, up: u64) -> FavoriteEffect {
-        let mut st = self.lock();
-        let Some(mut r) = st.record(&id).cloned() else { return FavoriteEffect::default() };
-        let (d, u) = ((down > 0).then_some(down), (up > 0).then_some(up));
-        if r.down_limit == d && r.up_limit == u {
-            return FavoriteEffect::default();
-        }
-        r.down_limit = d;
-        r.up_limit = u;
-        Self::changed(self.save_replacing(&mut st, r))
-    }
-
     /// The folders as the user changes them on the Info page (the host's folder editor edits a whole record).
     pub fn set_folder_draft(&self, id: String, record: ProfileRecord) {
         self.lock().folders = Some((id, record));
@@ -442,35 +389,6 @@ impl FavoriteEditor {
     /// Revert: the saved folders again.
     pub fn revert_folders(&self) {
         self.lock().folders = None;
-    }
-
-    /// Save: the drafted folders on the saved favorite, everything else of it (limits, name) as it is.
-    pub fn save_folders(&self, id: String) -> FavoriteEffect {
-        let mut st = self.lock();
-        let Some((_, draft)) = st.folders.take().filter(|(d, _)| *d == id) else { return FavoriteEffect::default() };
-        self.reload_locked(&mut st);
-        let Some(mut r) = st.record(&id).cloned() else { return FavoriteEffect::default() };
-        copy_folders(&mut r, &draft);
-        Self::changed(self.save_replacing(&mut st, r))
-    }
-
-    // MARK: Removing
-
-    /// The x of an address. The last one asks first (it would remove the favorite).
-    pub fn remove_url(&self, id: String, index: u32) -> FavoriteEffect {
-        let mut st = self.lock();
-        self.reload_locked(&mut st);
-        let Some(mut r) = st.record(&id).cloned() else { return FavoriteEffect::default() };
-        match removing_url(&r.urls, index as usize) {
-            Some(next) => {
-                r.urls = next;
-                Self::changed(self.save_replacing(&mut st, r))
-            }
-            None => {
-                drop(st);
-                self.ask(id, true)
-            }
-        }
     }
 
     /// Remove from Favorites…: the question, on the favorite's tab.
@@ -483,12 +401,152 @@ impl FavoriteEditor {
         self.lock().removal = None;
     }
 
+    // MARK: The saves, `async` for the host (each on the editor's lane, in the order they came)
+
+    /// Return, or the field losing focus: saves the name or the address, or leaves the field with a red hint.
+    #[uniffi::method(name = "commit")]
+    pub async fn commit_async(self: Arc<Self>) -> FavoriteEffect {
+        self.in_order(|e| e.commit()).await
+    }
+
+    /// The favorite's shared speed caps (bytes/s; 0 = unlimited), applied live by the engine.
+    #[uniffi::method(name = "set_limits")]
+    pub async fn set_limits_async(self: Arc<Self>, id: String, down: u64, up: u64) -> FavoriteEffect {
+        self.in_order(move |e| e.set_limits(id, down, up)).await
+    }
+
+    /// Save: the drafted folders on the saved favorite.
+    #[uniffi::method(name = "save_folders")]
+    pub async fn save_folders_async(self: Arc<Self>, id: String) -> FavoriteEffect {
+        self.in_order(move |e| e.save_folders(id)).await
+    }
+
+    /// The x of an address. The last one asks first (it would remove the favorite).
+    #[uniffi::method(name = "remove_url")]
+    pub async fn remove_url_async(self: Arc<Self>, id: String, index: u32) -> FavoriteEffect {
+        self.in_order(move |e| e.remove_url(id, index)).await
+    }
+
     /// The question's Remove: the favorite goes (its torrents stay; the tracker is automatic again).
-    pub fn confirm_removal(&self) -> FavoriteEffect {
-        let mut st = self.lock();
-        let Some(q) = st.removal.take() else { return FavoriteEffect::default() };
+    #[uniffi::method(name = "confirm_removal")]
+    pub async fn confirm_removal_async(self: Arc<Self>) -> FavoriteEffect {
+        self.in_order(|e| e.confirm_removal()).await
+    }
+
+    /// "Save as Favorite" on an automatic tracker: its favorite's tab opens.
+    #[uniffi::method(name = "save_as_favorite")]
+    pub async fn save_as_favorite_async(self: Arc<Self>, group_id: String) -> FavoriteEffect {
+        self.in_order(move |e| e.save_as_favorite(group_id)).await
+    }
+}
+
+impl FavoriteEditor {
+    // MARK: Finishing it
+
+    /// Return, or the field losing focus: saves the name or the address, or leaves the field with a red hint.
+    pub(crate) fn commit(&self) -> FavoriteEffect {
+        let (target, text, record) = {
+            let st = self.lock();
+            let Some(target) = st.target.clone() else { return FavoriteEffect::default() };
+            let id = match &target {
+                FavoriteTarget::SidebarName { tracker_id } | FavoriteTarget::Url { tracker_id, .. } => tracker_id.clone(),
+            };
+            (target, st.text.clone(), st.record(&id).cloned())
+        };
+        // The edit is over once saved, unless another one began meanwhile.
+        let done = |me: &Self, note: Option<&str>| {
+            let mut st = me.lock();
+            if st.target.as_ref() == Some(&target) {
+                st.cancel();
+            }
+            if let Some(n) = note {
+                st.note = Some((n.into(), Instant::now()));
+            }
+        };
+        let Some(mut r) = record else {
+            done(self, None);
+            return FavoriteEffect::default();
+        };
+        match &target {
+            FavoriteTarget::SidebarName { .. } => {
+                let name = text.trim().to_string();
+                if name.is_empty() || name == r.name {
+                    done(self, None);
+                    return FavoriteEffect::default();
+                }
+                r.name = name.chars().take(NAME_LIMIT).collect();
+                let saved = self.save_replacing(r);
+                if saved {
+                    done(self, None);
+                }
+                Self::changed(saved)
+            }
+            FavoriteTarget::Url { index, .. } => match commit_url(&r.urls, index.map(|i| i as usize), &text, |raw| self.store.check(raw)) {
+                UrlCommit::Unchanged => {
+                    done(self, None);
+                    FavoriteEffect::default()
+                }
+                UrlCommit::Invalid(why) => {
+                    self.lock().hint = Some(why);
+                    FavoriteEffect::default()
+                }
+                UrlCommit::Duplicate => {
+                    self.lock().hint = Some(ALREADY_LISTED.into());
+                    FavoriteEffect::default()
+                }
+                UrlCommit::Saved(next, passkey_removed) => {
+                    r.urls = next;
+                    let saved = self.save_replacing(r);
+                    if saved {
+                        done(self, passkey_removed.then_some(PASSKEY_NOTE));
+                    }
+                    Self::changed(saved)
+                }
+            },
+        }
+    }
+
+    /// The favorite's shared speed caps (bytes/s; 0 = unlimited), applied live by the engine.
+    pub(crate) fn set_limits(&self, id: String, down: u64, up: u64) -> FavoriteEffect {
+        let Some(mut r) = self.lock().record(&id).cloned() else { return FavoriteEffect::default() };
+        let (d, u) = ((down > 0).then_some(down), (up > 0).then_some(up));
+        if r.down_limit == d && r.up_limit == u {
+            return FavoriteEffect::default();
+        }
+        r.down_limit = d;
+        r.up_limit = u;
+        Self::changed(self.save_replacing(r))
+    }
+
+    /// Save: the drafted folders on the saved favorite, everything else of it (limits, name) as it is.
+    pub(crate) fn save_folders(&self, id: String) -> FavoriteEffect {
+        let Some((_, draft)) = self.lock().folders.take().filter(|(d, _)| *d == id) else { return FavoriteEffect::default() };
+        let Some(mut r) = self.store.load().into_iter().find(|p| p.id == id) else { return FavoriteEffect::default() };
+        copy_folders(&mut r, &draft);
+        Self::changed(self.save_replacing(r))
+    }
+
+    // MARK: Removing
+
+    /// The x of an address. The last one asks first (it would remove the favorite).
+    pub(crate) fn remove_url(&self, id: String, index: u32) -> FavoriteEffect {
+        let Some(mut r) = self.store.load().into_iter().find(|p| p.id == id) else { return FavoriteEffect::default() };
+        match removing_url(&r.urls, index as usize) {
+            Some(next) => {
+                r.urls = next;
+                Self::changed(self.save_replacing(r))
+            }
+            None => self.ask(id, true),
+        }
+    }
+
+    /// The question's Remove: the favorite goes (its torrents stay; the tracker is automatic again).
+    pub(crate) fn confirm_removal(&self) -> FavoriteEffect {
+        let Some(q) = self.lock().removal.take() else { return FavoriteEffect::default() };
         let rest: Vec<ProfileRecord> = self.store.load().into_iter().filter(|p| p.id != q.id).collect();
-        match self.store.save(rest) {
+        let saved = self.store.save(rest);
+        let mut st = self.lock();
+        match saved {
             Ok(saved) => {
                 st.records = saved;
                 FavoriteEffect { open_tab: None, changed: true, gone: Some(q.id) }
@@ -501,7 +559,7 @@ impl FavoriteEditor {
     }
 
     /// "Save as Favorite" on an automatic tracker: its favorite's tab opens.
-    pub fn save_as_favorite(&self, group_id: String) -> FavoriteEffect {
+    pub(crate) fn save_as_favorite(&self, group_id: String) -> FavoriteEffect {
         match self.store.add(&group_id) {
             Ok(r) => {
                 self.reload();
@@ -513,9 +571,7 @@ impl FavoriteEditor {
             }
         }
     }
-}
 
-impl FavoriteEditor {
     fn ask(&self, id: String, last_address: bool) -> FavoriteEffect {
         let mut st = self.lock();
         self.reload_locked(&mut st);

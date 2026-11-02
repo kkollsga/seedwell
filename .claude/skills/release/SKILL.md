@@ -13,8 +13,14 @@ Read `AGENTS.md` and `docs/RELEASING.md` first. Their rules win over anything he
 - Never touch the installed `/Applications/Seedwell.app` or its data. Do not run `tools/install-local.sh` unless the
   user asks.
 
-The gate is CI (Mac and Windows) and the release workflow. Never wait for a Windows PC or a manual acceptance run
-(docs/RELEASING.md).
+The gate for the tag is CI (Mac and Windows) and the release workflow. Before the public commit the PC runs
+`qa\run.ps1 all` and `qa\rust-tests.ps1` on the exact source bundle when it can (step 4), to find Windows failures
+before a CI round; it never blocks a release, and no other manual acceptance run is waited for. The rules behind this are docs/RELEASING.md's "Release discipline":
+
+- **Scope is fixed once the release has started.** Anything the user asks for after that goes to the next release,
+  unless the user decides otherwise when asked ("Add it to X.Y.Z, or the next release?").
+- **Windows work goes to the PC as one checklist** (the `windows-bridge` skill): compile, follow-ups and platform
+  checks in one message with the bundle, never one item at a time.
 
 Invoking `/release` is the user's go-ahead for the whole release, publishing included: merging Dependabot pull
 requests, pushing `main`, pushing the tag and publishing the draft. Anything the steps below say to ask about
@@ -24,8 +30,8 @@ it. If the release is withdrawn or the user says to hold, stop where you are.
 **Called mid-flight.** If `/release` arrives while work the user asked for is still open (a worker running, edits
 not yet built, tested or committed, follow-ups the user just raised), it is a pre-authorization, not an interrupt:
 finish that work first, to the usual standard (built, tested, reviewed, committed), then run the steps below without
-asking again. Requests the user adds before the release is published join it. Tell the user in one line that the
-release will follow once the work is done.
+asking again. The work open at that moment is the release's scope; a request the user adds later joins it only when
+the user says so when asked. Tell the user in one line that the release will follow once the work is done.
 
 ## 1. Version
 
@@ -91,19 +97,26 @@ gh pr list --state open --json number,title,author,headRefName,statusCheckRollup
    ```sh
    tools/check.sh --base public
    ```
-4. **Build the public commit.** Its message becomes the release notes, so write what changed for users: a title
+   It includes the timing tests at utility priority (as CI's slower Mac) and the test-portability scan; both must
+   pass, neither is skipped.
+4. **The PC on the exact source.** Make the bundle of master as it is now (`windows-bridge` skill), send it with the
+   one checklist of everything Windows still needs for this release, and wait for the PC's report: `qa\run.ps1 all`
+   and `qa\rust-tests.ps1` both PASS on that bundle's ref. A failure is fixed on master (Rust here, `app-windows`
+   through the PC's patch), and the bundle and both runs are made again. A commit after the bundle means a new
+   bundle. If the PC is busy, off or does not answer within the time CI would take, go on: CI stays the gate.
+5. **Build the public commit.** Its message becomes the release notes, so write what changed for users: a title
    plus a short bullet list.
    ```sh
    c=$(git commit-tree 'master^{tree}' -p public -m "Seedwell X.Y.Z: <summary>" -m "- change one
    - change two")
    ```
-5. **Verify it before pushing:**
+6. **Verify it before pushing:**
    ```sh
    git ls-tree -r --name-only "$c" | wc -l        # equals: git ls-files | wc -l
    git ls-tree -r -l "$c" | awk '{s+=$4} END {print s/1048576 " MB"}'      # tens of MB, never GB
    git ls-tree -r --name-only "$c" | grep -E '(^|/)target/|\.build/|Generated/|local\.env'   # prints nothing
    ```
-6. **Push and move the ref:**
+7. **Push and move the ref:**
    ```sh
    git push origin "${c}:refs/heads/main"
    git fetch origin main:public

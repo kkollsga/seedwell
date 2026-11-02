@@ -18,7 +18,7 @@ use crate::archive::{self, Archived, Retention};
 use crate::clock::Clock;
 use crate::fs::Fs;
 use crate::ignore::Ignore;
-use crate::index::{Batch, IndexStore, LocalRecord, NeedRecord, PeerState};
+use crate::index::{Batch, IndexStore, LocalRecord, NeedRecord, Op, PeerState};
 use crate::ondemand::{self, ChangePage, Deleted, Evicted, Item, Items, Page};
 use crate::pull::{ChunkSource, PullReport, Puller, Unsupported};
 use crate::scan::{ScanError, ScanJob, ScanReport, Scanner, Signer};
@@ -29,6 +29,14 @@ use crate::scan::{ScanError, ScanJob, ScanReport, Scanner, Signer};
 fn restamped(old: Option<crate::index::Stamp>, m: &crate::fs::Meta) -> Option<crate::index::Stamp> {
     old.filter(|o| o.size == m.size && o.mtime_ns == m.mtime_ns && o.inode == m.inode)
         .map(|_| crate::index::Stamp { size: m.size, mtime_ns: m.mtime_ns, ctime_ns: m.ctime_ns, inode: m.inode })
+}
+
+/// The folder's `.seedwellignore` as the core follows it ([`FolderCore::follow_ignore_file`]).
+struct IgnoreFile {
+    /// This device's own patterns, after the file's.
+    local: String,
+    /// The file's stamp when it was last read (`Some(None)`: there was none); `None` before the first read.
+    read: Option<Option<crate::index::Stamp>>,
 }
 
 /// A digest of records' paths and versions, added in the index's order (the same on every device).
@@ -154,13 +162,26 @@ pub struct FolderCore {
     signer: Option<DeviceSigner>,
     clock: Arc<dyn Clock>,
     new_file_id: Arc<dyn Fn() -> [u8; 16] + Send + Sync>,
-    ignore: Ignore,
+    /// What this device does not sync, as it is now (shared with the driver, which reads the index without the core).
+    ignore: crate::ignore::Current,
+    /// The folder's `.seedwellignore` is followed ([`Self::follow_ignore_file`]): the local-only patterns, and the
+    /// file as it was when last read.
+    ignore_file: Option<IgnoreFile>,
+    /// The patterns changed since [`Self::take_ignore_changed`] was last asked.
+    ignore_changed: bool,
+    /// Live files of ours that are ignored now, and their bytes (left out of [`Self::local_totals`]).
+    ignored_totals: (u64, u64),
     /// Peers whose full send is in progress, with the index id it is of (their old entries were
     /// dropped at its start).
     receiving_full: BTreeMap<ShortId, u64>,
     /// Needed paths this system cannot make at the version they were tried at (see
-    /// [`Puller::unsupported`]); kept until the folder restarts or [`Self::retry_unsupported`].
+    /// [`Puller::unsupported`]); kept until the folder restarts, [`Self::retry_unsupported`], or a scan of something there.
     unsupported: BTreeMap<String, Unsupported>,
+    /// Unsupported steps a scan let go of ([`Self::take_retry_due`]): the next pull tries them again, and until it has,
+    /// they still count as unsupported (not needed, not waited for).
+    retrying: BTreeMap<String, Unsupported>,
+    /// A scan found something where an unsupported path is: [`Self::take_retry_due`].
+    retry_due: bool,
     /// Joining with write access, not admitted yet (see [`FolderCore::set_awaiting_write`]).
     awaiting_write: bool,
     /// On demand: the folders (and files) kept on this device, `""` for all of it.
@@ -197,6 +218,8 @@ impl FolderCore {
         let me = cfg.me.short();
         let mut store = store;
         store.set_feeds_host(cfg.on_demand);
+        let ignore = Arc::new(ignore);
+        store.set_ignore(Some(ignore.clone()));
         let mut core = FolderCore {
             signer: None,
             device_key,
@@ -207,9 +230,14 @@ impl FolderCore {
             writers,
             clock,
             new_file_id,
-            ignore,
+            ignore: crate::ignore::Current::new(ignore.clone()),
+            ignore_file: None,
+            ignore_changed: false,
+            ignored_totals: (0, 0),
             receiving_full: BTreeMap::new(),
             unsupported: BTreeMap::new(),
+            retrying: BTreeMap::new(),
+            retry_due: false,
             awaiting_write: false,
             pins: BTreeSet::new(),
             items: None,
@@ -223,6 +251,14 @@ impl FolderCore {
             let mut keys: Vec<[u8; 32]> = core.writers.iter().map(|w| w.device_pk).collect();
             keys.push(*key.public_key());
             core.set_membership(&keys, Access::Write)?;
+        }
+        // The stored needs were worked out with other patterns (they changed while the folder was closed, or the index
+        // is from before needs left ignored paths out): what the change touches is worked out again.
+        let applied = core.store.ignore_applied()?;
+        if applied.as_deref() != Some(ignore.identity().as_str()) {
+            core.reconcile_ignore(&Ignore::from_identity(applied.as_deref().unwrap_or("")), &ignore)?;
+        } else {
+            core.count_ignored()?;
         }
         // An on-demand folder knows which of its items no device can give before any batch is applied (its host
         // lists them from the start).
@@ -252,10 +288,152 @@ impl FolderCore {
         self.cfg.access
     }
 
-    /// Replaces the ignore patterns (the `.seedwellignore` file changed). Paths that are no longer
-    /// ignored are picked up by the next scan.
-    pub fn set_ignore(&mut self, ignore: Ignore) {
-        self.ignore = ignore;
+    /// Replaces the ignore patterns (the `.seedwellignore` file changed). Paths that are no longer ignored are picked
+    /// up by the next scan ([`Self::take_ignore_changed`] says one is due).
+    pub fn set_ignore(&mut self, ignore: Ignore) -> io::Result<()> {
+        let old = self.ignore.get();
+        if ignore.identity() == old.identity() {
+            return Ok(());
+        }
+        let new = Arc::new(ignore);
+        self.ignore.set(new.clone());
+        self.store.set_ignore(Some(new.clone()));
+        self.ignore_changed = true;
+        self.reconcile_ignore(&old, &new)
+    }
+
+    /// The patterns changed from `old` to `new`: every path the index knows (ours or announced) whose verdict changed
+    /// has its need worked out again: ignored now, it needs nothing; ignored no longer, it may need something again.
+    /// Our own records there are announced again (SPEC §7G.2, *newly ignored*, as Syncthing): ignored now, as invalid
+    /// (this device has the path but does not sync it, so no device fetches it from here or waits for it); ignored no
+    /// longer, as before. Nothing on disk changes. A delete of ours stays announced as it was.
+    fn reconcile_ignore(&mut self, old: &Ignore, new: &Ignore) -> io::Result<()> {
+        if old.identity() != new.identity() {
+            let changed = |p: &str| [false, true].into_iter().any(|dir| old.is_ignored(p, dir) != new.is_ignored(p, dir));
+            let mut paths = BTreeSet::new();
+            let mut after: Option<String> = None;
+            loop {
+                let page = self.store.local_paths("", after.as_deref(), 1000)?;
+                let Some(last) = page.last().cloned() else { break };
+                paths.extend(page.into_iter().filter(|p| changed(p)));
+                after = Some(last);
+            }
+            for peer in self.store.peer_ids()? {
+                let mut after: Option<String> = None;
+                loop {
+                    let page = self.store.remote_paths(peer, after.as_deref(), 1000)?;
+                    let Some(last) = page.last().cloned() else { break };
+                    paths.extend(page.into_iter().filter(|p| changed(p)));
+                    after = Some(last);
+                }
+            }
+            let paths: Vec<String> = paths.into_iter().collect();
+            for chunk in paths.chunks(1000) {
+                let mut batch = Batch::new(&*self.store, self.me)?;
+                for p in chunk {
+                    let flipped = batch.local(p)?.filter(|r| {
+                        let dir = r.file.info.kind == FileKind::Dir;
+                        !r.file.info.deleted && old.is_ignored(p, dir) != new.is_ignored(p, dir)
+                    });
+                    match flipped {
+                        // A new sequence: announced again, with the verdict it has now (`announce_since`).
+                        Some(r) => batch.put_local(r),
+                        None => batch.touch(p),
+                    }
+                }
+                let ops = batch.finish()?;
+                self.store.apply(ops)?;
+            }
+            self.follow_availability(&paths)?;
+        }
+        self.store.apply(vec![Op::IgnoreApplied(new.identity())])?;
+        self.count_ignored()
+    }
+
+    /// Works out [`Self::ignored_totals`]: the live files of ours that are ignored now. They stay as they are while they
+    /// are ignored (no scan or pull touches them), so this is done when the patterns change, at open and after every
+    /// full scan.
+    fn count_ignored(&mut self) -> io::Result<()> {
+        let ignore = self.ignore.get();
+        let mut totals = (0, 0);
+        // (The defaults count too: an earlier build may have indexed what a later list of them ignores.)
+        let mut after: Option<String> = None;
+        loop {
+            let page = self.store.local_paths("", after.as_deref(), 1000)?;
+            let Some(last) = page.last().cloned() else { break };
+            for p in page.iter().filter(|p| ignore.is_ignored(p, false) || ignore.is_ignored(p, true)) {
+                if let Some(r) = self.store.local(p)?
+                    && ignore.is_ignored(p, r.file.info.kind == FileKind::Dir)
+                    && let Some(size) = crate::index::counted(&r)
+                {
+                    totals = (totals.0 + 1, totals.1 + size);
+                }
+            }
+            after = Some(last);
+        }
+        self.ignored_totals = totals;
+        Ok(())
+    }
+
+    /// The ignore patterns as they are now, kept up to date by the core (for reads of the index without it).
+    pub fn ignore(&self) -> crate::ignore::Current {
+        self.ignore.clone()
+    }
+
+    /// The patterns come from the folder's `.seedwellignore` (SPEC §7G.2), then `local` (this device's own): the file
+    /// is read now, and again whenever it changed, before every scan step and after every pull round. So a rules file
+    /// that arrives or changes while the folder runs applies to the next path scanned, whatever finds it (a full scan,
+    /// a watcher event, a directory made later), and to what the next pull round fetches.
+    pub fn follow_ignore_file(&mut self, local: &[String]) -> io::Result<()> {
+        self.ignore_file = Some(IgnoreFile { local: local.join("\n"), read: None });
+        self.refresh_ignore()
+    }
+
+    /// This device's own patterns changed (the folder's settings): they apply at once, as a changed `.seedwellignore`
+    /// does (after the file's, when it is followed). [`Self::take_ignore_changed`] then says a full scan is due.
+    pub fn set_local_ignore(&mut self, local: &[String]) -> io::Result<()> {
+        match self.ignore_file.as_mut() {
+            Some(f) => {
+                f.local = local.join("\n");
+                // Read the file again too: the patterns are made from both.
+                f.read = None;
+                self.refresh_ignore()
+            }
+            None => self.set_ignore(Ignore::parse_all(&[&local.join("\n")]).0),
+        }
+    }
+
+    /// Reads the `.seedwellignore` again if it changed since it was last read ([`Self::follow_ignore_file`]).
+    fn refresh_ignore(&mut self) -> io::Result<()> {
+        let Some(file) = &self.ignore_file else { return Ok(()) };
+        let meta = match self.fs.lstat(crate::ignore::FILE) {
+            Ok(m) => m.filter(|m| m.kind == FileKind::File),
+            // Not readable now (the disk went away): the patterns stay as they are.
+            Err(_) => return Ok(()),
+        };
+        let stamp = meta.as_ref().map(|m| crate::index::Stamp { size: m.size, mtime_ns: m.mtime_ns, ctime_ns: m.ctime_ns, inode: m.inode });
+        if file.read == Some(stamp) {
+            return Ok(());
+        }
+        let text = match meta {
+            Some(_) => match crate::fs::read_all(&*self.fs, crate::ignore::FILE) {
+                Ok(b) => String::from_utf8(b).unwrap_or_default(),
+                // Gone or not readable between the two calls: tried again next time.
+                Err(_) => return Ok(()),
+            },
+            None => String::new(),
+        };
+        let local = file.local.clone();
+        if let Some(f) = self.ignore_file.as_mut() {
+            f.read = Some(stamp);
+        }
+        self.set_ignore(Ignore::parse_all(&[&text, &local]).0)
+    }
+
+    /// Whether the ignore patterns changed since this was last asked: a full scan is then due (paths no longer ignored
+    /// were never scanned).
+    pub fn take_ignore_changed(&mut self) -> bool {
+        std::mem::take(&mut self.ignore_changed)
     }
 
     /// Scans `scope` (`""` = everything).
@@ -266,7 +444,33 @@ impl FolderCore {
     /// One step of a scan in steps ([`ScanJob`]): true when it is done. Between steps the caller may let go of the core
     /// (and hash [`ScanJob::take_to_hash`] with [`Self::fs`] meanwhile).
     pub fn scan_step(&mut self, job: &mut ScanJob) -> Result<bool, ScanError> {
-        self.with_scanner(false, |s, store| s.step(store, job))
+        self.refresh_ignore()?;
+        let done = self.with_scanner(false, |s, store| s.step(store, job))?;
+        if done {
+            self.scanned(job.scope())?;
+        }
+        Ok(done)
+    }
+
+    /// A scan of `scope` is done: what the folder works out from the whole index, and the unsupported steps there are
+    /// tried again (someone may have removed what kept a directory another device deleted).
+    fn scanned(&mut self, scope: &str) -> io::Result<()> {
+        if scope.is_empty() {
+            self.count_ignored()?;
+        }
+        let (retry, keep) = std::mem::take(&mut self.unsupported)
+            .into_iter()
+            .partition(|(p, _)| crate::index::under(p, scope) || crate::index::under(scope, p));
+        self.unsupported = keep;
+        let retry: BTreeMap<String, Unsupported> = retry;
+        self.retry_due |= !retry.is_empty();
+        self.retrying.extend(retry);
+        Ok(())
+    }
+
+    /// Whether a scan let go of unsupported steps since this was last asked: a pull is due to try them again.
+    pub fn take_retry_due(&mut self) -> bool {
+        std::mem::take(&mut self.retry_due)
     }
 
     /// The folder on disk, for work done off the core (hashing a scan's big files).
@@ -275,18 +479,22 @@ impl FolderCore {
     }
 
     fn scan_with(&mut self, scope: &str, host_write: bool) -> Result<ScanReport, ScanError> {
-        self.with_scanner(host_write, |s, store| s.scan(store, scope))
+        self.refresh_ignore()?;
+        let report = self.with_scanner(host_write, |s, store| s.scan(store, scope))?;
+        self.scanned(scope)?;
+        Ok(report)
     }
 
     fn with_scanner<T>(&mut self, host_write: bool, f: impl FnOnce(&Scanner<'_>, &mut dyn IndexStore) -> T) -> T {
         let new_id = self.new_file_id.clone();
         let pins = &self.pins;
         let pinned = |p: &str| ondemand::pinned(pins, p);
+        let ignore = self.ignore.get();
         let scanner = Scanner {
             fs: &*self.fs,
             me: self.me,
             signer: self.signer.as_ref().map(|s| s as &dyn Signer),
-            ignore: &self.ignore,
+            ignore: &ignore,
             byte_exact_names: self.cfg.byte_exact_names,
             case_insensitive: self.cfg.case_insensitive,
             exec_bits: self.cfg.exec_bits,
@@ -303,6 +511,7 @@ impl FolderCore {
     pub fn pull(&mut self, source: &dyn ChunkSource, device_name: &dyn Fn(ShortId) -> String, window: u64) -> io::Result<PullReport> {
         let pins = &self.pins;
         let wanted = |p: &str| ondemand::pinned(pins, p);
+        let ignore = self.ignore.get();
         let puller = Puller {
             fs: &*self.fs,
             me: self.me,
@@ -319,6 +528,7 @@ impl FolderCore {
             on_demand: self.cfg.on_demand.then_some(&wanted as &dyn Fn(&str) -> bool),
             online_only: Some(&self.online_only),
             not_members: &self.not_members,
+            ignore: &ignore,
             round: Default::default(),
         };
         let report = puller.pull(&mut *self.store)?;
@@ -327,23 +537,28 @@ impl FolderCore {
             self.prune_feed()?;
         }
         self.unsupported = report.unsupported.iter().map(|u| (u.path.clone(), u.clone())).collect();
+        self.retrying.clear();
+        // A `.seedwellignore` that arrived (the round ends after it) applies to the next round.
+        self.refresh_ignore()?;
         Ok(report)
     }
 
     /// The next pull tries the unsupported paths again (a rescan was asked for).
     pub fn retry_unsupported(&mut self) {
         self.unsupported.clear();
+        self.retrying.clear();
     }
 
     /// The need at `path` is one this system cannot make (it is not waited for).
     pub fn is_unsupported(&self, path: &str, need: &NeedRecord) -> bool {
-        self.unsupported.get(path).is_some_and(|u| u.version == need.file.info.version)
+        self.unsupported.get(path).or_else(|| self.retrying.get(path)).is_some_and(|u| u.version == need.file.info.version)
     }
 
     /// Our entries with a sequence above `after`, at most `limit`, for a peer. A read-only device's
-    /// own new files (never signed) are left out; its changed copies go out marked invalid.
+    /// own new files (never signed) are left out; its changed copies, and what this device ignores, go out marked
+    /// invalid.
     pub fn announce_since(&self, after: u64, limit: usize) -> io::Result<Vec<IndexEntry>> {
-        announce_since(&*self.store, self.cfg.on_demand, after, limit)
+        announce_since(&*self.store, self.cfg.on_demand, &self.ignore, after, limit)
     }
 
     /// Our index id and the last sequence we gave out.
@@ -569,7 +784,7 @@ impl FolderCore {
     /// can give (counted apart: [`Self::unavailable`], worked out once it was asked for).
     pub fn need_totals(&self) -> io::Result<(u64, u64)> {
         let (mut paths, mut bytes) = self.store.need_totals()?;
-        for p in self.unsupported.keys() {
+        for p in self.unsupported.keys().chain(self.retrying.keys()) {
             if let Some(n) = self.store.need(p)?
                 && self.is_unsupported(p, &n)
             {
@@ -578,7 +793,7 @@ impl FolderCore {
             }
         }
         for (p, _) in self.store.unavailable()? {
-            if let Some(n) = self.store.need(&p)?.filter(|n| n.need != crate::global::Need::Nothing && !self.unsupported.contains_key(&p)) {
+            if let Some(n) = self.store.need(&p)?.filter(|n| n.need != crate::global::Need::Nothing && !self.unsupported.contains_key(&p) && !self.retrying.contains_key(&p)) {
                 paths = paths.saturating_sub(1);
                 bytes = bytes.saturating_sub(n.file.info.size);
             }
@@ -586,9 +801,10 @@ impl FolderCore {
         Ok((paths, bytes))
     }
 
-    /// The live files this device holds: (files, bytes). O(1).
+    /// The live files this device holds and syncs: (files, bytes), ignored ones left out. O(1).
     pub fn local_totals(&self) -> io::Result<(u64, u64)> {
-        self.store.local_totals()
+        let (files, bytes) = self.store.local_totals()?;
+        Ok((files.saturating_sub(self.ignored_totals.0), bytes.saturating_sub(self.ignored_totals.1)))
     }
 
     /// Deletes the archived versions that [`archive::prune`] says go (age, staggering, and the size
@@ -616,7 +832,7 @@ impl FolderCore {
                 }
             }
         }
-        let (_, folder_bytes) = self.store.local_totals()?;
+        let (_, folder_bytes) = self.local_totals()?;
         let gone = archive::prune(&items, folder_bytes, now_ns, retention);
         for p in &gone {
             self.fs.remove_file(p)?;
@@ -647,13 +863,27 @@ impl FolderCore {
 }
 
 /// [`FolderCore::announce_since`] from any handle on the folder's index (a read-only view, so a peer's index is sent
-/// without waiting for the core): `on_demand` is the folder's mode.
-pub fn announce_since(store: &dyn IndexStore, on_demand: bool, after: u64, limit: usize) -> io::Result<Vec<IndexEntry>> {
-    Ok(store
-        .local_since(after, limit)?
+/// without waiting for the core): `on_demand` is the folder's mode, `ignore` its patterns now. A path this device
+/// ignores goes out invalid (SPEC §7G.2, *newly ignored*): it has the path but does not sync it, so no device fetches
+/// it from here or waits for it. Its own delete there goes out as it is.
+pub fn announce_since(
+    store: &dyn IndexStore,
+    on_demand: bool,
+    ignore: &crate::ignore::Current,
+    after: u64,
+    limit: usize,
+) -> io::Result<Vec<IndexEntry>> {
+    let records = store.local_since(after, limit)?;
+    // Read after the records: one announced again because the patterns changed was written after they changed.
+    let ignore = ignore.get();
+    Ok(records
         .into_iter()
         .filter(|r| !(r.invalid && r.file.info.version.is_empty()))
-        .map(|r| IndexEntry { sequence: r.sequence, invalid: r.invalid, dataless: r.dataless, on_demand: on_demand && !r.dataless, file: r.file })
+        .map(|r| {
+            let i = &r.file.info;
+            let ignored = !i.deleted && ignore.is_ignored(&i.path, i.kind == FileKind::Dir);
+            IndexEntry { sequence: r.sequence, invalid: r.invalid || ignored, dataless: r.dataless, on_demand: on_demand && !r.dataless, file: r.file }
+        })
         .collect())
 }
 
@@ -1191,6 +1421,7 @@ impl FolderCore {
     /// its record (as the scanner reads it), or for a file this device is letting go of itself right now. The driver
     /// answers no for a folder that is not running (paused, missing).
     pub fn holds(&self, asker: ShortId, files: &[HeldFile], freeing: &dyn Fn(&str) -> bool) -> Vec<bool> {
+        let ignore = self.ignore.get();
         let holder = ondemand::Holder {
             store: &*self.store,
             fs: &*self.fs,
@@ -1198,7 +1429,7 @@ impl FolderCore {
             writer: self.signer.is_some(),
             on_demand: self.cfg.on_demand,
             freeing,
-            ignore: &self.ignore,
+            ignore: &ignore,
         };
         holder.answer(asker, files)
     }

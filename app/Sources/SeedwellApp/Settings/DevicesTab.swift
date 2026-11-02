@@ -36,11 +36,11 @@ import SwiftUI
         view = core.devicesView()
     }
 
-    /// While the tab is open: the list, requests and the countdown, every second.
+    /// While the tab is open: the list, requests and the countdown, as often as the view says.
     func watch() async {
         while !Task.isCancelled {
             reload()
-            try? await Task.sleep(for: .seconds(1))
+            try? await Task.sleep(for: .milliseconds(Int(view.refreshMs)))
         }
     }
 

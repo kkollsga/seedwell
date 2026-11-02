@@ -870,6 +870,44 @@ pub struct UpdateDevBuildsParams {
     pub on: bool,
 }
 
+/// `agents.request`: ask the user for access this agent lacks (SPEC 9A.3 *Asking for access*). It grants nothing: the
+/// user answers in the app (its notification, Settings › Agents, the menu) or with a reply in chat.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentsRequestParams {
+    /// `control` or `full` (an agent permission level), `channel-agents` (open a channel to agents),
+    /// `dm-agents` (private messages for agents) or `dev-builds` (Allow development builds).
+    pub what: String,
+    /// `channel-agents`: the channel (its id, a prefix of it, or its name). `dm-agents`: `read` (the default) or
+    /// `post`.
+    #[serde(default)]
+    pub target: Option<String>,
+    /// Why, for the user (at most 300 characters).
+    #[serde(default)]
+    pub why: Option<String>,
+    /// The agent's name, as `chat.send` takes it (else the client's).
+    #[serde(default)]
+    pub agent: Option<String>,
+    /// Announce the request in this channel (one open to agents), so the user can answer with a reply there.
+    #[serde(default)]
+    pub channel: Option<String>,
+    /// The channel's topic to announce it in (id, prefix or title).
+    #[serde(default)]
+    pub topic: Option<String>,
+    /// The message the announcement answers (the agent's thread).
+    #[serde(default)]
+    pub reply_to: Option<String>,
+}
+
+/// `agents.requests`: the requests for access.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentsRequestsParams {
+    /// Also those answered or expired in the last day (else only the pending ones).
+    #[serde(default)]
+    pub all: bool,
+}
+
 /// `tracker_log`: the newest developer-mode tracker log entries (developer mode must be on to
 /// have any). Passkeys and other secrets are masked in the file itself.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -1664,6 +1702,12 @@ methods! {
     UpdateWatch(UpdateWatchParams) = "update.watch", Control, true;
     /// Turn "Allow development builds" on or off, as its switch in Settings does; off while a development build runs installs the latest release.
     UpdateDevBuilds(UpdateDevBuildsParams) = "update.dev_builds", Full, true;
+    /// Check for the latest release now and install it when it is newer (Settings' Check Now, then Install); with development builds allowed and a folder watched, that folder's newest build.
+    UpdateNow(Empty) = "update.now", Full, true;
+    /// Ask the user for access this agent lacks (a level, a channel opened to agents, private messages, development builds). It grants nothing; only the user answers, in the app or with a reply in chat. Logged.
+    AgentsRequest(AgentsRequestParams) = "agents.request", ReadOnly, true;
+    /// The requests for access and what became of them.
+    AgentsRequests(AgentsRequestsParams) = "agents.requests", ReadOnly, false;
     /// The structure and preselection of a torrent that is held (or running).
     Choice(ChoiceParams) = "choice", ReadOnly, false;
     /// Answer a held torrent's chooser: choose the files; it starts.
@@ -1976,9 +2020,10 @@ mod tests {
             assert_eq!(Method::from_name(m.name()), Some(*m));
         }
         assert!(Method::ALL.len() >= 28);
-        // Everything that changes state needs at least Control.
+        // Everything that changes state needs at least Control; asking the user for access is logged but changes
+        // nothing by itself, so any agent may ask.
         for m in Method::ALL {
-            if m.mutating() {
+            if m.mutating() && *m != Method::AgentsRequest {
                 assert!(m.required() >= Permission::Control, "{}", m.name());
             }
         }

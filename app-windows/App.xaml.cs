@@ -33,6 +33,10 @@ public partial class App : Application
     internal static HostFeature[] HostFeatures { get; } = [];
 
     internal static HostWindow[] HostWindows { get; } = [HostWindow.GetInfo, HostWindow.MoveTo, HostWindow.NewChannel, HostWindow.ChatDialogs, HostWindow.AddFolder, HostWindow.FolderEditor, HostWindow.FolderShare, HostWindow.ChannelShare];
+    /// <summary>Notifications (the core's Notices), the core's questions, and the settings banner.</summary>
+    internal Notifier? Notifier { get; private set; }
+    internal Prompts Prompts { get; private set; } = null!;
+    internal SettingsBannerView Banner { get; } = new();
     /// <summary>The small chat dialogs (New Topic…, Rename…, Leave…, ...).</summary>
     internal ChatDialogs ChatDialogs { get; private set; } = null!;
     readonly SleepGuard sleep = new();
@@ -164,6 +168,9 @@ public partial class App : Application
         Core = t.Result;
         started = true;
         AppLog.Write($"launch: core ready after {ms} ms");
+        Notifier = new Notifier(this, Core, ui);
+        Prompts = new Prompts(this);
+        Banner.Changed += () => LibraryWindowIfCreated?.Pane.Refresh();
         Core.SetListener(new Listener(this));
         PowerWatch.Start(Core);
         NetWatch.Start(Core);
@@ -200,6 +207,23 @@ public partial class App : Application
         {
             Open(Program.Routes);
         }
+        // Started by a click on a notification while the app was not running: what it opens.
+        if (Program.NoticeClick is string click)
+        {
+            Notifier.Clicked(click);
+        }
+        // The files already in the watch folders, offered once ever.
+        Prompts.Backlog();
+    }
+
+    /// <summary>The window on a transfer: its place, the row selected, Get Info on it (a notice's click, the Mac's showMain(nil, id)).</summary>
+    internal void ShowTransfer(string id)
+    {
+        if (!Ready(() => ShowTransfer(id))) return;
+        ShowMainWindow();
+        Library.RevealRow(id);
+        LibraryWindow.Pane.Refresh();
+        OpenInfo(id);
     }
 
     /// <summary>
@@ -210,6 +234,8 @@ public partial class App : Application
     /// </summary>
     void Fatal(string dir, string error)
     {
+        // The window's words need no core (it is what failed).
+        var texts = TrsFfiMethods.StartFailureTexts();
         AppLog.Write($"launch refused: {error}");
         RecoveryAction[] actions;
         try { actions = TrsFfiMethods.RecoveryActions(dir, Updater.InstallDir, Updater.Repo, Updater.RelaunchArgs); }
@@ -217,18 +243,18 @@ public partial class App : Application
         AppLog.Write($"launch: recovery offered: {(actions.Length == 0 ? "none" : string.Join(", ", actions.Select(a => a.Title)))}");
         if (Program.StateDir is not null)
         {
-            Console.Error.WriteLine($"Seedwell could not start: {error}");
+            Console.Error.WriteLine($"{texts.Title}: {error}");
             Environment.Exit(2);
         }
         tray?.Dispose();
         tray = null;
-        // NEED: the title and Quit from Rust (the Mac's are Swift too: "<app> could not start", "Quit").
-        var w = new Window { Title = "Seedwell could not start" };
+        var w = new Window { Title = texts.Title };
         var panel = new StackPanel { Margin = new Thickness(24), Spacing = 12, MaxWidth = 520 };
-        panel.Children.Add(new TextBlock { Text = "Seedwell could not start", FontSize = 18, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, TextWrapping = TextWrapping.Wrap });
+        panel.Children.Add(new TextBlock { Text = texts.Title, FontSize = 18, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, TextWrapping = TextWrapping.Wrap });
         panel.Children.Add(new TextBlock { Text = error, TextWrapping = TextWrapping.Wrap, IsTextSelectionEnabled = true });
         var buttons = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, HorizontalAlignment = HorizontalAlignment.Right };
-        var quit = new Button { Content = "Quit", MinWidth = 80, Style = (Style)Resources["AccentButtonStyle"] };
+        var quit = new Button { Content = texts.QuitTitle, MinWidth = 80, Style = (Style)Resources["AccentButtonStyle"] };
+        ToolTipService.SetToolTip(quit, texts.QuitHelp);
         quit.Click += (_, _) => Environment.Exit(1);
         buttons.Children.Add(quit);
         foreach (var a in actions)
@@ -294,6 +320,8 @@ public partial class App : Application
                 case LinkRoute.PairDevice p:
                     // Settings › Devices, Pair with a Link… filled in.
                     ShowPlace(new LibraryPlace.Settings());
+                    // On the Devices tab, where its section is.
+                    LibraryWindow.Pane.SettingsPageShown?.Show(SettingsTab.Devices);
                     LibraryWindow.Pane.SettingsPageShown?.Devices.ShowPaste(p.Link);
                     break;
                 case LinkRoute.ShowFolder f:
@@ -437,13 +465,15 @@ public partial class App : Application
     /// </summary>
     void ApplySettings()
     {
-        // A value the core could not use took its backup or safe value: say which (NEED: the host showing them).
+        // A value the core could not use took its backup or safe value: the banner says which.
         try
         {
-            foreach (var problem in Core.SettingsProblems())
+            var notes = Core.SettingsProblems();
+            foreach (var problem in notes)
             {
                 AppLog.Write($"settings problem: {problem}");
             }
+            Banner.Notes(notes);
         }
         catch { }
         var general = Core.SettingsLoad().General;
@@ -458,7 +488,12 @@ public partial class App : Application
     }
 
     /// <summary>config.toml changed (the app, an agent, the CLI or a hand edit): apply its settings again.</summary>
-    internal void SettingsChanged() => ui.TryEnqueue(ApplySettings);
+    internal void SettingsChanged() => ui.TryEnqueue(() =>
+    {
+        ApplySettings();
+        // Settings open: read again (an agent, the CLI or a hand edit changed a value).
+        LibraryWindowIfCreated?.Pane.SettingsPageShown?.Reload();
+    });
 
     void CreateTray()
     {
@@ -1057,6 +1092,54 @@ public partial class App : Application
                         result += $"; new channel {open.Form.Mode}, can start {open.Model.CanStart}, link line \"{open.Model.LinkLine}\"";
                     }
                     break;
+                // Settings: tab <General|Transfers|Folders|Network|FolderSync|Devices|Agents|Advanced> | rows | row <id> |
+                // set <row id> <value> [unit] (a switch on|off, an option id, a field's text, a button's title) | describe.
+                case "settings":
+                    if (pane.Model?.Page != LibraryPage.Settings) { Library.SelectPlace(new LibraryPlace.Settings()); pane.Refresh(); }
+                    if (pane.SettingsPageShown is not SettingsPage sp2) { result = "no settings page"; break; }
+                    switch (Arg(1))
+                    {
+                        case "tab": if (Enum.TryParse<SettingsTab>(Arg(2), true, out var st)) sp2.Show(st); else result = "no such tab; "; break;
+                        case "rows": result = sp2.QaRows() + "; "; break;
+                        case "row": result = sp2.QaRow(Arg(2)) + "; "; break;
+                        case "set": result = sp2.QaSet(Arg(2), w.Skip(3).ToArray()) + "; "; await Task.Delay(700); await CoreCalls.Idle(); break;
+                    }
+                    await Quiet.Settle(LibraryWindow.Content);
+                    result += sp2.QaDescribe();
+                    break;
+                // Notifications (a QA run posts none: it keeps them): notices (the last ones posted) | notice-click <click>
+                // (what a click on a notice with that route string opens).
+                case "notices":
+                    result = Notifier is null ? "no notifier" : string.Join(" || ", Notifier.Posted.TakeLast(5).Select(n => $"{n.Kind}: {n.Title} | {n.Body} [{n.Key ?? "-"}] {{{n.Click}}}"));
+                    if (result.Length == 0) result = "none";
+                    break;
+                case "notice-click":
+                    Notifier?.Clicked(string.Join(' ', w.Skip(1)));
+                    await Quiet.Settle(LibraryWindow.Content);
+                    break;
+                // A click on a notice's button: notice-action <action id> (the last notice that has buttons).
+                case "notice-action":
+                    if (Notifier?.Posted.LastOrDefault(n => n.Actions.Length > 0) is not Notice withButtons) { result = "no notice with buttons; "; break; }
+                    Notifier.Clicked(withButtons.Click, Arg(1));
+                    await Task.Delay(500);
+                    await CoreCalls.Idle();
+                    result = $"clicked {Arg(1)} on \"{withButtons.Title}\" [{string.Join(", ", withButtons.Actions.Select(a => a.Id))}]";
+                    break;
+                // Agents waiting for access: requests (the tray's line and the rows, as the core gives them).
+                case "requests":
+                    var rq = Core.AgentRequests(Now());
+                    result = $"line \"{rq.Line ?? ""}\", rows {rq.Rows.Length} [{string.Join(" | ", rq.Rows.Select(r => r.Title))}]";
+                    break;
+                // The question the core asks, in a QA run waiting for its answer: prompt status | yes | no.
+                case "prompt":
+                    if (Arg(1) is "yes" or "no") result = Prompts.QaAnswer(Arg(1) == "yes") ? "answered; " : "nothing asked; ";
+                    await Task.Delay(500);
+                    result += $"waiting \"{Prompts.Waiting ?? ""}\"";
+                    break;
+                // The settings banner as the core gives it, outside Settings.
+                case "banner":
+                    result = Banner.QaText(false);
+                    break;
                 // The players the core found on this PC (Windows: the registry and PATH), each with what Automatic plays.
                 case "play-players":
                     result = string.Join(" | ", Core.PlayPlayersReport());
@@ -1231,9 +1314,9 @@ public partial class App : Application
                     if (pane.SettingsPageShown?.Rendezvous is not RendezvousSection rs) { result = "no settings page"; break; }
                     switch (Arg(1))
                     {
-                        case "use": rs.QaAddress(string.Join(' ', w.Skip(2))); rs.UseAddress(); break;
-                        case "test": Core.SyncRendezvousTest(); break;
-                        case "off": Core.SyncRendezvousTurnOff(); break;
+                        case "use": rs.QaAddress(string.Join(' ', w.Skip(2))); await rs.UseAddress(); break;
+                        case "test": await rs.Run(() => Core.SyncRendezvousTest()); break;
+                        case "off": await rs.Run(() => Core.SyncRendezvousTurnOff()); break;
                     }
                     var rv = Core.SyncRendezvous();
                     result = $"rendezvous {rv.State}, refused \"{rs.Refused}\", result \"{rv.Result}\", problem {rv.ResultIsProblem}";

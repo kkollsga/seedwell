@@ -75,3 +75,25 @@ Session, torrent tiers (Cold/Warm/Hot, SPEC §5), peers, picker, choker, rate li
 - Use only legal public torrents for network tests: official Linux distro torrents (Ubuntu, Debian, Fedora, Arch, etc.).
 - Downloads go to `bench/downloads/`. Never point anything at a private tracker.
 - Network tests are `#[ignore]` by default and run explicitly (`cargo test -- --ignored`).
+
+## 5. Tests that hold on CI's machines
+CI runs every test on a GitHub macOS runner and on Windows, both slower than a developer's Mac. `tools/check.sh`
+imitates them, so a test fails here first:
+- **Timing tests run twice on macOS.** A test with a wall-clock bound (an `elapsed() <` assert of a few seconds or less,
+  a rate, a call that must return "at once") runs again under `taskpolicy -c utility`. At that priority macOS delays
+  the timers of the test's threads by a share of their length, as it does on the CI runner (a 40 ms wait woke 100 to
+  140 ms late there: f20ed77). The tests are the ones `tools/timing-tests.txt` selects (nextest filtersets):
+  - a test whose name says it does not wait joins by itself: `…never_waits…`, `…without_waiting…`, `…never_blocks…`;
+  - any other one gets a line there: its module (`ui_wait_tests::`) or its full name, with `package(…)` when the name
+    is not unique.
+  The second pass takes seconds; keep it so (list the tight bounds, not every test that measures time). Run it alone:
+  `taskpolicy -c utility cargo nextest run -p <crate> -E "<the line>"`.
+- **No test assumes the Mac.** `tools/test-portability.py` reads the tests of the affected crates for what failed on
+  Windows CI before: a `~/…` path the core made (Windows writes it in full), "This Mac", "Finder" or "Trash" in an
+  expected text (`computer!()`, `file_manager!()`, `trash!()`), a path joined with `/` and compared as text
+  (`.join("a").join("b")`, or compare `Path`s), a `/tmp/a/b` or `/Users/…` path the code built, a link path without a
+  drive, and a helper only `#[cfg(unix)]` tests use without that cfg itself (dead code fails Windows clippy).
+  Code under `#[cfg(unix)]`, `#[cfg(not(windows))]`, `if cfg!(unix) { … }` and any line naming `cfg!(` is left alone.
+  When a hit holds on every system, say why on it: `// portable: <why>` before the statement (or at the end of its
+  line). What it cannot see (a platform default, a parser that wants an absolute path) the PC's
+  `app-windows\qa\rust-tests.ps1` run finds before CI does.

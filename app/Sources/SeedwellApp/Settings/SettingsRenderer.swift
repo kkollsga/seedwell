@@ -64,7 +64,7 @@ struct SettingsBlocksView: View {
                 }
             case .rendezvous:
                 if let r = model.syncRendezvous {
-                    RendezvousSection(view: r) { model.rendezvous($0) }
+                    RendezvousSection(view: r) { await model.rendezvous($0) }
                 }
             case .devices, .rulesEditor:
                 EmptyView()

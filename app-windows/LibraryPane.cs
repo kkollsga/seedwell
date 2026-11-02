@@ -48,6 +48,7 @@ sealed class LibraryPane
     };
     string listSignature = "";
     string removalKey = "";
+    readonly ContentControl banner = new() { HorizontalContentAlignment = HorizontalAlignment.Stretch };
     readonly ContentControl titleQuestion = new() { HorizontalContentAlignment = HorizontalAlignment.Stretch, Margin = new Thickness(0, 0, 16, 0) };
     ContentDialog? addSheet;
 
@@ -91,8 +92,12 @@ sealed class LibraryPane
         // SPEC 8.3 "Toolbar": the title and one grey line, nothing else: no search field, no add or pause buttons
         // (set_search stays for the CLI and QA).
         main.Children.Add(header);
-        Grid.SetRow(titleQuestion, 1);
-        main.Children.Add(titleQuestion);
+        // Under the title: the settings banner (outside Settings), then a Remove question for the whole page.
+        var under = new StackPanel();
+        under.Children.Add(banner);
+        under.Children.Add(titleQuestion);
+        Grid.SetRow(under, 1);
+        main.Children.Add(under);
         Grid.SetRow(page, 2);
         main.Children.Add(page);
         // Get Info lies over the page, at its top right, with the theme's card colours and a shadow.
@@ -314,6 +319,8 @@ sealed class LibraryPane
         bool removalChanged = removal != removalKey;
         removalKey = removal;
         titleQuestion.Content = m.Removal is { RowId: null } rq ? LibraryList.Question(rq.Question, library, Refresh) : null;
+        // Settings draws the banner itself (without Open Settings).
+        banner.Content = m.Page == LibraryPage.Settings ? null : app.Banner.Draw(false, () => app.ShowPlace(new LibraryPlace.Settings()));
         if (m.Signature != signature || (removalChanged && m.Page == LibraryPage.List))
         {
             signature = m.Signature;
@@ -583,8 +590,9 @@ sealed class LibraryPane
                 library.SetTrackerInfo(true);
                 break;
             case SidebarCommand.Mute or SidebarCommand.Unmute when c is not null:
-                app.Core.ChatSetMuted(c.Id, command is SidebarCommand.Mute);
-                break;
+                var muted = command is SidebarCommand.Mute;
+                CoreCalls.InOrder("chat mute", () => app.Core.ChatSetMuted(c.Id, muted), Refresh);
+                return;
             case SidebarCommand.SetFollow follow when c is not null:
                 CoreCalls.InOrder("set follow", () => app.Core.SyncSetFollow(c.Id, follow.On), Refresh, e => app.Alert(new SyncAlert(e, "")));
                 break;

@@ -12,6 +12,9 @@
 # the Swift tests only when app/ or trs-ffi is affected (the rendezvous Worker's node tests with trs-rendezvous, when
 # Node is installed). A change to Cargo.toml, Cargo.lock, the
 # toolchain or the nextest config means everything. Documentation-only changes run nothing.
+# Two steps catch before CI what only CI would find: tools/test-portability.py reads the affected crates' tests for
+# Mac assumptions (Windows CI), and on macOS the timing tests (tools/timing-tests.txt) run a second time at utility
+# priority, where the system delays timers as on CI's Mac runner.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 export TRS_FORBID_REAL_HOME=1
@@ -26,7 +29,7 @@ while [ $# -gt 0 ]; do
     --no-app) app=0; shift ;;
     -p) pkgs+=("$2"); shift 2 ;;
     --) shift; extra=("$@"); break ;;
-    -h|--help) sed -n '2,14p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,17p' "$0"; exit 0 ;;
     *) echo "check: unknown option $1" >&2; exit 2 ;;
   esac
 done
@@ -50,10 +53,11 @@ root = meta["workspace_root"]
 crates = {p["name"]: (os.path.relpath(os.path.dirname(p["manifest_path"]), root),
                       {d["name"] for d in p["dependencies"]}) for p in meta["packages"]}
 full, wanted, files = sys.argv[1] == "1", set(sys.argv[2].split()), sys.argv[3].split("\n")
-app = False
+app, scan_all = False, False
 if not full and not wanted:
     for f in files:
         if f.startswith("app/"): app = True
+        if f == "tools/test-portability.py": scan_all = True
         # The rendezvous Worker is embedded in trs-rendezvous (include_str!).
         if f.startswith("tools/rendezvous-worker/") and not f.endswith(".md"): wanted.add("trs-rendezvous")
         for name, (d, _) in crates.items():
@@ -65,13 +69,26 @@ while grow:
     for name, (_, deps) in crates.items():
         if name not in wanted and deps & wanted: wanted.add(name); grow = True
 app = app or full or "trs-ffi" in wanted
-print(" ".join(sorted(wanted)) + "|" + ("1" if app else "0"))
+# The folders tools/test-portability.py reads: those of the affected crates (all when the scan itself changed).
+scan = sorted(d for d, _ in crates.values() if d.startswith("crates/")) if scan_all else sorted(crates[n][0] for n in wanted)
+print(" ".join(sorted(wanted)) + "|" + ("1" if app else "0") + "|" + " ".join(scan))
 ' "$full" "${pkgs[*]:-}" "${files:-}")
-affected=${plan%|*}
-[ "$app" = auto ] && app=${plan#*|}
+affected=${plan%%|*}
+scan_dirs=${plan##*|}
+if [ "$app" = auto ]; then app=${plan#*|}; app=${app%%|*}; fi
 
-if [ -z "$affected" ] && [ "$app" = 0 ]; then echo "check: only documentation changed"; exit 0; fi
+if [ -z "$affected" ] && [ "$app" = 0 ] && [ -z "$scan_dirs" ]; then echo "check: only documentation changed"; exit 0; fi
 echo "check: crates: ${affected:-none}; app: $([ "$app" = 1 ] && echo yes || echo no)"
+
+# Tests that assume the Mac (a ~/ path, "This Mac", a /-joined path, a Unix-only helper without its cfg), which only
+# Windows CI would find. Not heavy: before the heavy job, and only once.
+if [ -z "${CHECK_INNER:-}" ] && [ -n "$scan_dirs" ]; then
+  s0=$(perl -MTime::HiRes=time -e 'printf "%.1f", time')
+  # shellcheck disable=SC2086
+  python3 -I tools/test-portability.py $scan_dirs
+  echo "check: no test assumes the Mac ($(perl -MTime::HiRes=time -e "printf '%.1f', time - $s0") s, tools/test-portability.py)"
+fi
+[ -n "$affected" ] || [ "$app" = 1 ] || exit 0
 
 args=()
 if [ $full -eq 1 ]; then args=(--workspace); else for p in $affected; do args+=(-p "$p"); done; fi
@@ -104,6 +121,16 @@ fi
 if [ ${#args[@]} -gt 0 ]; then
   cargo clippy "${args[@]}" --all-targets --locked -q -- -D warnings
   cargo nextest run "${args[@]}" --locked --status-level fail --final-status-level slow ${extra[@]+"${extra[@]}"}
+fi
+# The timing tests again at utility priority: macOS then delays the timers of the test threads as it does on GitHub's
+# macOS runner (f20ed77), so a bound that holds only on a quiet Mac fails here, not on CI. Which tests:
+# tools/timing-tests.txt (docs/ENGINEERING.md §5). Skipped when extra nextest arguments narrow the run.
+if [ ${#args[@]} -gt 0 ] && [ ${#extra[@]} -eq 0 ] && [ "$(uname)" = Darwin ]; then
+  timing=$(python3 -I -c 'import sys; print(" | ".join("(%s)" % l.strip() for l in open(sys.argv[1]) if l.strip() and not l.lstrip().startswith("#")))' tools/timing-tests.txt)
+  t0=$(date +%s)
+  taskpolicy -c utility cargo nextest run "${args[@]}" --locked --no-tests pass --status-level fail \
+    --final-status-level slow -E "$timing"
+  echo "check: the timing tests pass at utility priority, as on CI's Mac ($(( $(date +%s) - t0 )) s)"
 fi
 # The rendezvous Worker's own tests (worker.js against a local fake of the Workers runtime), when Node is here.
 if [[ " $affected " == *" trs-rendezvous "* ]] && [ ${#extra[@]} -eq 0 ]; then

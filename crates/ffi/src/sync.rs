@@ -2872,6 +2872,39 @@ impl Core {
         self.backend.sync().chat_leave(&id)
     }
 
+    /// No notifications for the channel (an @mention still notifies: the app's rule).
+    pub fn chat_set_muted(&self, id: String, muted: bool) {
+        self.backend.sync().chat_set_muted(&id, muted)
+    }
+
+    /// The channel's Agents: Yes/No, for every member device (owners and admins: `chat_agents_menu` says whether
+    /// this Mac may).
+    pub fn chat_set_agents(&self, id: String, open: bool) -> Result<(), CoreError> {
+        self.backend.sync().chat_set_agents(&id, open)
+    }
+
+    /// The command run for each message from another device while agents may read the channel (the message as
+    /// JSON on its standard input); `None` or empty: none.
+    pub fn chat_set_wake_command(&self, id: String, command: Option<String>) -> Result<(), CoreError> {
+        self.backend.sync().chat_set_wake_command(&id, command.as_deref())
+    }
+
+    /// The channel's name on this Mac (each device names its channels, as folders).
+    pub fn chat_rename(&self, id: String, name: String) -> Result<(), CoreError> {
+        self.backend.sync().chat_rename(&id, &name)
+    }
+
+    /// Saves the device-wide settings. The device name applies at once; LAN discovery at the next start.
+    pub fn set_sync_settings(&self, settings: SyncSettings) -> Result<(), CoreError> {
+        self.backend.sync().set_settings(&settings)
+    }
+
+    /// Moves folder sync to `port` (1024-65535) now: refused at once when another app has it; otherwise sync
+    /// starts again on it in the background, and `sync_settings().port` shows it a few seconds later.
+    pub fn set_sync_port(&self, port: u16) -> Result<(), CoreError> {
+        self.backend.sync().set_port(port)
+    }
+
     /// Changes a device's role (owners only; a folder keeps at least one owner).
     pub fn sync_set_role(&self, id: String, device_id: String, role: SyncRole) -> Result<(), CoreError> {
         self.backend.sync().set_role(&id, &device_id, role)
@@ -3061,28 +3094,6 @@ impl Core {
         self.backend.sync().chat_set_direct_agents(access)
     }
 
-    /// No notifications for the channel (an @mention still notifies: the app's rule).
-    pub fn chat_set_muted(&self, id: String, muted: bool) {
-        self.backend.sync().chat_set_muted(&id, muted)
-    }
-
-    /// The channel's Agents: Yes/No, for every member device (owners and admins: `chat_agents_menu` says whether
-    /// this Mac may).
-    pub fn chat_set_agents(&self, id: String, open: bool) -> Result<(), CoreError> {
-        self.backend.sync().chat_set_agents(&id, open)
-    }
-
-    /// The command run for each message from another device while agents may read the channel (the message as
-    /// JSON on its standard input); `None` or empty: none.
-    pub fn chat_set_wake_command(&self, id: String, command: Option<String>) -> Result<(), CoreError> {
-        self.backend.sync().chat_set_wake_command(&id, command.as_deref())
-    }
-
-    /// The channel's name on this Mac (each device names its channels, as folders).
-    pub fn chat_rename(&self, id: String, name: String) -> Result<(), CoreError> {
-        self.backend.sync().chat_rename(&id, &name)
-    }
-
     /// Where a joined folder goes by default: `<default location>/<name>`, numbered when taken.
     pub fn sync_join_path(&self, key_or_link: String) -> Option<String> {
         self.backend.sync().join_path(&key_or_link)
@@ -3105,17 +3116,6 @@ impl Core {
 
     pub fn sync_settings(&self) -> SyncSettings {
         self.backend.sync().settings()
-    }
-
-    /// Saves the device-wide settings. The device name applies at once; LAN discovery at the next start.
-    pub fn set_sync_settings(&self, settings: SyncSettings) -> Result<(), CoreError> {
-        self.backend.sync().set_settings(&settings)
-    }
-
-    /// Moves folder sync to `port` (1024-65535) now: refused at once when another app has it; otherwise sync
-    /// starts again on it in the background, and `sync_settings().port` shows it a few seconds later.
-    pub fn set_sync_port(&self, port: u16) -> Result<(), CoreError> {
-        self.backend.sync().set_port(port)
     }
 
     /// Whether the router opened the sync port (`None` while sync is not running).
@@ -3388,7 +3388,7 @@ mod tests {
         assert!(core.sync_create_invite(reader, SyncRole::ReadOnly, 1, 7, None).is_err(), "a reader cannot share");
         assert!(matches!(core.sync_join("nope".into(), String::new()), Err(CoreError::Failed { .. })));
         let r = core.sync_rename(f.id.clone(), "Notebook".into()).unwrap();
-        assert_eq!(r.path, "/tmp/seedwell-mock/Notebook");
+        assert_eq!(r.path, "/tmp/seedwell-mock/Notebook"); // portable: the mock renames with "/" on every system
         assert!(core.sync_rename(f.id.clone(), ".hidden".into()).is_err());
         let m = core.sync_move(f.id.clone(), "/tmp/elsewhere/Notebook".into()).unwrap();
         assert_eq!(m.path, "/tmp/elsewhere/Notebook");

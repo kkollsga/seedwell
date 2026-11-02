@@ -69,6 +69,7 @@ static class Registration
 
     public static void Unregister()
     {
+        Notifier.Unregister();
         Registry.CurrentUser.DeleteSubKeyTree($@"{Classes}\{ProgId}", false);
         using (var ext = Registry.CurrentUser.OpenSubKey($@"{Classes}\.torrent\OpenWithProgids", true))
         {

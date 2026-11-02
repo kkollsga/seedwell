@@ -127,15 +127,15 @@ sealed class ChatDialogs
                 var topic = await core.ChatNewTopic(channel.Id, value ?? "");
                 after = () => app.Library.SelectPlace(new LibraryPlace.Chat(channel.Id, topic.Id));
             },
-            ChatDialogKind.RenameChannel when channel is not null => () => { core.ChatRename(channel.Id, value ?? ""); return Task.CompletedTask; },
-            ChatDialogKind.WakeCommand when channel is not null => () => { core.ChatSetWakeCommand(channel.Id, value); return Task.CompletedTask; },
+            ChatDialogKind.RenameChannel when channel is not null => () => core.ChatRename(channel.Id, value ?? ""),
+            ChatDialogKind.WakeCommand when channel is not null => () => core.ChatSetWakeCommand(channel.Id, value),
             ChatDialogKind.LeaveChannel when channel is not null => () => core.ChatLeave(channel.Id),
             ChatDialogKind.DeleteConversation when deviceId is not null => async () =>
             {
                 await core.ChatDeleteDirect(deviceId);
                 after = () => app.Library.SelectPlace(new LibraryPlace.FolderSync());
             },
-            ChatDialogKind.ChannelAgents when channel is not null => () => { core.ChatSetAgents(channel.Id, !channel.Agents); return Task.CompletedTask; },
+            ChatDialogKind.ChannelAgents when channel is not null => () => core.ChatSetAgents(channel.Id, !channel.Agents),
             _ => null,
         };
         if (work is null)

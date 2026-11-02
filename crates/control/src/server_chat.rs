@@ -147,7 +147,9 @@ fn channel_reply(h: &SyncHandle, id: &FolderId, what: &str) -> Result<Reply, Api
 
 /// How a channel's owner or admin opens it to agents, as the app names it.
 fn how_to_open(name: &str) -> String {
-    format!("its owner or an admin sets Agents: Yes in Seedwell: Chats ▸ {name} ▸ ⋯ ▸ Agents")
+    format!(
+        "its owner or an admin sets Agents: Yes in Seedwell: Chats ▸ {name} ▸ ⋯ ▸ Agents; ask the user with `seedwell agents request channel-agents {name} --why \"<what for>\"`"
+    )
 }
 
 /// A channel an agent just joined that is closed to agents (Agents: No, or a link that does not say Yes): only what
@@ -195,16 +197,18 @@ fn direct_allow(h: &SyncHandle, need: AgentAccess, what: &str) -> Result<(), Api
     if h.chat_direct_agents() >= need {
         return Ok(());
     }
-    let (how, choice) = if need == AgentAccess::ReadPost { ("read and post", "Read and post") } else { ("read", "Read (or Read and post)") };
+    let (how, choice, ask) =
+        if need == AgentAccess::ReadPost { ("read and post", "Read and post", "dm-agents post") } else { ("read", "Read (or Read and post)", "dm-agents") };
     Err(ApiError::new(
         ErrorCode::PermissionDenied,
         format!(
-            concat!("agents on this ", trs_platform::computer!(), " may not {how} private messages yet; the user can allow it in Seedwell: Chats ▸ a private conversation ▸ ⋯ ▸ Agents on This ", trs_platform::computer!(), " ▸ {choice} (one switch for every private conversation). Settings › Agents does not open up chats"),
+            concat!("agents on this ", trs_platform::computer!(), " may not {how} private messages yet; the user can allow it in Seedwell: Chats ▸ a private conversation ▸ ⋯ ▸ Agents on This ", trs_platform::computer!(), " ▸ {choice} (one switch for every private conversation; Settings › Agents does not open up chats). Ask the user with `seedwell agents request {ask} --why \"<what for>\"`"),
             how = how,
-            choice = choice
+            choice = choice,
+            ask = ask
         ),
     )
-    .with_data(json!({ "agents": h.chat_direct_agents().name(), "method": what })))
+    .with_data(json!({ "agents": h.chat_direct_agents().name(), "method": what, "ask": format!("seedwell agents request {ask}") })))
 }
 
 /// A device named by a caller: its id, a prefix of it, or its name, among the members of the channels open to
@@ -574,18 +578,30 @@ pub(super) async fn pump<B: Backend>(ctx: Arc<Ctx<B>>, mut taps: tokio::sync::mp
                 look = tokio::time::Instant::now() + if rx.is_some() { LOOK_RUNNING } else { LOOK_IDLE };
             }
             Some(e) = async { Some(rx.as_mut()?.recv().await) } => match e {
-                Ok(e) if e.agents => ctx.hub.publish_with(
-                    EventDto {
-                        kind: "chat.message".into(),
-                        // A private message: the other device, so a stream can be filtered by conversation.
-                        id: Some(e.message.peer_device.clone().unwrap_or_else(|| e.message.channel_id.clone())),
-                        name: Some(if e.message.direct { e.message.author_name.clone() } else { e.message.channel_name.clone() }),
-                        data: serde_json::to_value(message_dto(&e.message)).unwrap_or_default(),
-                        ..Default::default()
-                    },
-                    false,
-                ),
-                Ok(_) => {}
+                // A reply to a request's announcement: the desk sees whether the user answered (off this task: it may
+                // change settings).
+                Ok(e) => {
+                    if e.message.reply_to.as_deref().is_some_and(|r| ctx.desk.announced_by(&e.message.channel_id, r).is_some()) {
+                        let (desk, h, m) = (ctx.desk.clone(), ctx.backend.sync(), e.message.clone());
+                        tokio::task::spawn_blocking(move || {
+                            let paired = h.map(|h| paired_devices(&h)).unwrap_or_default();
+                            let _ = desk.on_message(&facts(&m), &paired);
+                        });
+                    }
+                    if e.agents {
+                        ctx.hub.publish_with(
+                            EventDto {
+                                kind: "chat.message".into(),
+                                // A private message: the other device, so a stream can be filtered by conversation.
+                                id: Some(e.message.peer_device.clone().unwrap_or_else(|| e.message.channel_id.clone())),
+                                name: Some(if e.message.direct { e.message.author_name.clone() } else { e.message.channel_name.clone() }),
+                                data: serde_json::to_value(message_dto(&e.message)).unwrap_or_default(),
+                                ..Default::default()
+                            },
+                            false,
+                        );
+                    }
+                }
                 // Not how many: the count would take in the channels closed to agents.
                 Err(broadcast::error::RecvError::Lagged(_)) => ctx.hub.publish(EventDto {
                     kind: "lagged".into(),
@@ -599,5 +615,126 @@ pub(super) async fn pump<B: Backend>(ctx: Arc<Ctx<B>>, mut taps: tokio::sync::mp
                 }
             },
         }
+    }
+}
+
+// MARK: Requests for access (`agents.request`)
+
+/// The user's other devices (*Your devices*, paired in the app): a post of the user's in the app there approves a
+/// request here too. None while this device is not paired.
+fn paired_devices(h: &SyncHandle) -> Vec<String> {
+    let d = h.devices_status();
+    if d.state != trs_sync_net::devices::DevicesState::Paired {
+        return Vec::new();
+    }
+    d.devices.iter().filter(|x| !x.is_me).map(|x| x.id.to_string()).collect()
+}
+
+/// What the desk reads of a message.
+fn facts(m: &trs_sync_net::chat::MessageInfo) -> crate::access::MessageFacts<'_> {
+    crate::access::MessageFacts {
+        channel: &m.channel_id,
+        direct: m.direct,
+        kind: &m.kind,
+        reply_to: m.reply_to.as_deref(),
+        body: &m.body,
+        trust: &m.trust,
+        agent: m.agent.as_deref(),
+        me: m.me,
+        author_device: &m.author_device,
+        author_name: &m.author_name,
+    }
+}
+
+/// Where a request is announced: a channel open to agents (and its topic).
+pub(super) struct AnnouncePlace {
+    id: FolderId,
+    topic: Option<String>,
+}
+
+/// The channel `channel` names for an announcement, among those open to agents.
+pub(super) fn announce_place<B: Backend>(ctx: &Ctx<B>, channel: &str, topic: Option<&str>) -> Result<AnnouncePlace, ApiError> {
+    let h = ctx.backend.sync().ok_or_else(s::not_running)?;
+    let (_, id) = pick(&h, channel)?;
+    Ok(AnnouncePlace { id, topic: topic.map(str::to_owned) })
+}
+
+/// The announcement's text: who asks what on which device, why (the agent's words, quoted), and how to answer.
+pub fn announcement_text(e: &crate::access::Entry, device: &str) -> String {
+    let device = if device.trim().is_empty() { concat!("this ", trs_platform::computer!()) } else { device.trim() };
+    let mut t = format!("**{} asks for {} on {device}.**\n", e.who(), e.want.text());
+    if let Some(w) = &e.why {
+        t.push_str(&format!("\n> {}\n", w.replace('\n', " ")));
+    }
+    t.push_str(&format!(
+        "\nReply to this message with **yes** to allow it, or **no** to refuse. Only your own reply in Seedwell counts; an agent's never does. You can also answer in Seedwell on {device} (its notification, or Settings › Agents). Unanswered, it expires in a day."
+    ));
+    t
+}
+
+/// Posts request `e`'s announcement (under [`crate::access::ANNOUNCER`]): the channel's id and the message's.
+pub(super) async fn announce<B: Backend>(ctx: &Ctx<B>, place: &AnnouncePlace, e: &crate::access::Entry, reply_to: Option<&str>) -> Result<(String, String), ApiError> {
+    let h = ctx.backend.sync().ok_or_else(s::not_running)?;
+    let body = announcement_text(e, &h.settings().device_name);
+    let m = h.chat_send(&place.id, place.topic.as_deref(), MessageKind::Text, &body, reply_to, Some(crate::access::ANNOUNCER)).await.map_err(chat_err)?;
+    Ok((place.id.to_string(), m.id))
+}
+
+/// Folder sync's part of answering requests: channels and private messages.
+pub(super) struct SyncApplier<B> {
+    backend: Arc<B>,
+}
+
+impl<B> SyncApplier<B> {
+    pub(super) fn new(backend: Arc<B>) -> Self {
+        Self { backend }
+    }
+}
+
+impl<B: Backend> SyncApplier<B> {
+    /// The one channel `name` names among all on this device (closed ones too); `None` when none or several.
+    fn channel(&self, name: &str) -> Option<(SyncHandle, ChannelStatus)> {
+        let h = self.backend.sync()?;
+        let all = h.chat_channels();
+        let c = resolve_channel(&all, name).ok()?.clone();
+        Some((h, c))
+    }
+}
+
+impl<B: Backend> crate::access::Applier for SyncApplier<B> {
+    fn open_channel(&self, name: &str) -> Result<String, String> {
+        let (h, c) = self.channel(name).ok_or_else(|| format!("there is no channel “{}” on this {}", clip(name, 80), trs_platform::computer!()))?;
+        if c.agents {
+            return Ok(format!("the channel “{}” is open to agents already", c.name));
+        }
+        if !c.role.is_some_and(Role::admits) {
+            return Err(format!("only the owners and admins of “{}” can open it to agents; answer on one of their devices", c.name));
+        }
+        let id: FolderId = c.id.parse().map_err(|_| "the channel's id is malformed".to_owned())?;
+        h.chat_set_agents(&id, true).map_err(|e| e.to_string())?;
+        Ok(format!("the channel “{}” is open to agents now (Agents: Yes, on every device)", c.name))
+    }
+
+    fn dm_agents(&self, post: bool) -> Result<String, String> {
+        let h = self.backend.sync().ok_or("private messages are not running")?;
+        let want = if post { AgentAccess::ReadPost } else { AgentAccess::Read };
+        if h.chat_direct_agents() >= want {
+            return Ok("agents have that access to private messages already".into());
+        }
+        h.chat_set_direct_agents(want).map_err(|e| e.to_string())?;
+        Ok(if post { "agents may read and post private messages now" } else { "agents may read private messages now" }.into())
+    }
+
+    fn channel_askable(&self, name: &str) -> bool {
+        self.channel(name).is_some_and(|(_, c)| !c.agents && c.role.is_some_and(Role::admits))
+    }
+
+    fn channel_open(&self, name: &str) -> bool {
+        self.channel(name).is_some_and(|(_, c)| c.agents)
+    }
+
+    fn dm_has(&self, post: bool) -> Option<bool> {
+        let h = self.backend.sync()?;
+        Some(h.chat_direct_agents() >= if post { AgentAccess::ReadPost } else { AgentAccess::Read })
     }
 }

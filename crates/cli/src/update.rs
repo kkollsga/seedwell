@@ -1,4 +1,5 @@
-//! `seedwell update`: what this Seedwell runs, and installing development builds (SPEC 12A). A build is handed over
+//! `seedwell update`: what this Seedwell runs, `update now` (check for the latest release and install it, as Check Now
+//! and Install do; permission full), and installing development builds (SPEC 12A). A build is handed over
 //! as its zip (`update install`), or the app follows a folder and installs each newer build signed into the folder's
 //! `build.json` with a trusted build key (`update watch`). Both need "Allow development builds" on (Settings › General › Updates, or `update dev-builds on`, which
 //! sets that switch; off while a development build runs goes back to the latest release); the app decides, this only
@@ -24,9 +25,11 @@ pub enum Cmd {
     Watch(Option<PathBuf>),
     /// "Allow development builds" on or off.
     DevBuilds(bool),
+    /// Check for the latest release now and install it.
+    Now,
 }
 
-const USAGE: &str = "usage: seedwell update [status] | install <Seedwell-X.Y.Z.N.zip> [--sha256 HEX] | watch <folder> | watch --off | dev-builds on|off";
+const USAGE: &str = "usage: seedwell update [status] | now | install <Seedwell-X.Y.Z.N.zip> [--sha256 HEX] | watch <folder> | watch --off | dev-builds on|off";
 
 /// A path as the app needs it: absolute (the app may run in another folder).
 fn absolute(p: &str) -> PathBuf {
@@ -48,6 +51,7 @@ pub fn parse(args: Vec<String>) -> Result<Cmd, Usage> {
         (["watch"], None, true) => Cmd::Watch(None),
         (["dev-builds", "on"], None, false) => Cmd::DevBuilds(true),
         (["dev-builds", "off"], None, false) => Cmd::DevBuilds(false),
+        (["now"], None, false) => Cmd::Now,
         _ => return Err(Usage(USAGE.into())),
     })
 }
@@ -60,6 +64,7 @@ pub async fn run(cmd: Cmd, g: &Global) -> R {
         Cmd::Install { zip, sha256 } => Request::UpdateInstall(UpdateInstallParams { path: zip.display().to_string(), sha256 }),
         Cmd::Watch(folder) => Request::UpdateWatch(UpdateWatchParams { folder: folder.map(|f| f.display().to_string()) }),
         Cmd::DevBuilds(on) => Request::UpdateDevBuilds(UpdateDevBuildsParams { on }),
+        Cmd::Now => Request::UpdateNow(Empty {}),
     };
     let (raw, d): (_, UpdateStatusDto) = ask(&mut c, req).await?;
     show(g, &raw, || words(&d));
@@ -112,7 +117,8 @@ mod tests {
         assert_eq!(p("watch --off").unwrap(), Cmd::Watch(None));
         assert_eq!(p("dev-builds on").unwrap(), Cmd::DevBuilds(true));
         assert_eq!(p("dev-builds off").unwrap(), Cmd::DevBuilds(false));
-        for bad in ["install", "watch", "watch /b --off", "status --sha256 x", "now", "install a b", "dev-builds", "dev-builds maybe", "dev-builds on --off", "dev-builds on off"] {
+        assert_eq!(p("now").unwrap(), Cmd::Now);
+        for bad in ["install", "watch", "watch /b --off", "status --sha256 x", "now --off", "now please", "install a b", "dev-builds", "dev-builds maybe", "dev-builds on --off", "dev-builds on off"] {
             assert!(p(bad).is_err(), "{bad}");
         }
     }

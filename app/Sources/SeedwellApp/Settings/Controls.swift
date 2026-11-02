@@ -4,39 +4,40 @@ import SwiftUI
 // Controls still drawn outside the settings model (a tracker's folders and Info page). The speed limit's field, its units
 // and how typed text is read are the core's (`settingsRateControl`, `settingsFieldRead`).
 
-/// A folder path that may be unset (`nil`), with "Choose…" and a button back to the default. `placeholder` is shown
-/// for an unset value.
+/// A folder path that may be unset (`nil`), with "Choose…" and a button back to the default; the field's prompt is
+/// shown for an unset value. Each change goes to `set`.
 struct OptionalPathField: View {
-    @Binding var path: String?
-    var placeholder = "Default"
+    /// The core's field (`TrackerFolderRow`): its folder, prompt and helps.
+    let row: TrackerFolderRow
     var width: CGFloat = 230
+    let set: (String?) -> Void
 
     var body: some View {
         HStack(spacing: 8) {
-            TextField(placeholder, text: Binding(get: { path ?? "" }, set: { path = $0.isEmpty ? nil : $0 }))
+            TextField(row.placeholder, text: Binding(get: { row.path ?? "" }, set: { set($0.isEmpty ? nil : $0) }))
                 .textFieldStyle(.roundedBorder).frame(width: width)
-                .help("A folder for this content type, or empty for the default")
-            Button("Choose…") { if let p = FolderPicker.choose(start: path ?? "") { path = p } }.fixedSize()
-                .help("Pick a folder")
-            if path != nil {
-                Button { path = nil } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }
-                    .buttonStyle(.plain).help("Use the default")
+                .help(row.help)
+            Button(row.chooseTitle) { Task { if let p = await FolderPicker.choose(start: row.path ?? "") { set(p) } } }.fixedSize()
+                .help(row.chooseHelp)
+            if row.path != nil {
+                Button { set(nil) } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }
+                    .buttonStyle(.plain).help(row.clearHelp)
             }
         }
     }
 }
 
 @MainActor enum FolderPicker {
-    static func choose(start: String) -> String? {
+    /// Asks for a folder, opening at `start` (or the nearest folder of it that exists: the core looks at the disk off
+    /// the main thread and gives up on one that does not answer).
+    static func choose(start: String) async -> String? {
+        let folder = start.isEmpty ? nil : await folderPickerStart(path: start)
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.canCreateDirectories = true
         panel.prompt = "Choose"
-        if !start.isEmpty {
-            let expanded = (start as NSString).expandingTildeInPath
-            if FileManager.default.fileExists(atPath: expanded) { panel.directoryURL = URL(fileURLWithPath: expanded) }
-        }
+        if let folder { panel.directoryURL = URL(fileURLWithPath: folder) }
         guard panel.runModal() == .OK, let url = panel.url else { return nil }
         return Notifier.abbreviate(url.path)
     }

@@ -654,9 +654,9 @@ pub trait CoreListener: Send + Sync {
     /// A torrent is held until the user chooses what to download.
     fn on_needs_choice(&self, row: TransferRow);
     fn on_auto_added(&self, added: AutoAdded);
-    /// The torrent was already added. `trackers_added` is how many announce URLs of the new
-    /// source were merged into it (public torrents only; 0 = none).
-    fn on_duplicate(&self, name: String, trackers_added: u32);
+    /// The torrent `id` was already added (running, or held: counting down or waiting for a choice). `trackers_added`
+    /// is how many announce URLs of the new source were merged into it (public torrents only; 0 = none).
+    fn on_duplicate(&self, id: String, name: String, trackers_added: u32);
     fn on_add_request(&self, request: AddRequestInfo);
     /// An agent did something (also written to the activity log).
     fn on_agent_activity(&self, activity: AgentActivity);

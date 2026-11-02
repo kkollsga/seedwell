@@ -2,8 +2,9 @@
 //! for the core).
 //!
 //! Each call here returns a future at once and does its work elsewhere ([`crate::calls`]): the user's commands to the
-//! engine on the core's command lane, one after another in the order they were given; reads, folder sync, chat,
-//! updates and Play on a thread of their own. The host awaits them (Swift: `try await core.pause(ids:)` from a `Task`;
+//! engine on the core's command lane, one after another in the order they were given; the user's changes to folder
+//! sync's and chat's settings likewise on a lane of their own; reads, folder sync, chat, updates and Play on a thread
+//! of their own. The host awaits them (Swift: `try await core.pause(ids:)` from a `Task`;
 //! C#: `await core.Pause(ids)`). Under the FFI's name of each call there is a synchronous Rust function of the same
 //! name (not exported) that does the work; Rust callers and tests use those.
 //!
@@ -77,6 +78,15 @@ impl Core {
         self.commands.run(move || f(&me))
     }
 
+    /// Runs `f` on the core's lane of folder sync and chat settings, after every such change given before it.
+    pub(crate) fn in_sync_order<T: Send + 'static>(
+        self: &Arc<Self>,
+        f: impl FnOnce(&Core) -> T + Send + 'static,
+    ) -> impl std::future::Future<Output = T> + Send + 'static {
+        let me = self.clone();
+        self.sync_commands.run(move || f(&me))
+    }
+
     /// Runs `f` on a thread of its own: a read or a long job that holds nothing else up.
     pub(crate) fn apart<T: Send + 'static>(
         self: &Arc<Self>,
@@ -87,7 +97,7 @@ impl Core {
     }
 }
 
-/// `<lane|apart> fn <async name> = <sync name> "<FFI name>" (<args>) -> <result>;`: an exported `async` method of
+/// `<in_order|in_sync_order|apart> fn <async name> = <sync name> "<FFI name>" (<args>) -> <result>;`: an exported `async` method of
 /// [`Core`] named `<FFI name>` for the hosts, which runs the synchronous `<sync name>` on the lane or apart.
 macro_rules! core_async {
     ($( $(#[$m:meta])* $how:ident fn $name:ident = $sync:ident $ffi:tt ( $($arg:ident : $ty:ty),* $(,)? ) $(-> $ret:ty)? ; )*) => {
@@ -164,6 +174,10 @@ core_async! {
 
     // ------------------------------------------------------------ reads and round trips, each on its own thread
 
+    /// The user's Approve or Deny of an agent's request for access (a button, the menu, a notification's action): the
+    /// change is made (a setting saved, a channel's switch, ...), and what happened is said.
+    apart fn agent_request_decide_async = agent_request_decide "agent_request_decide" (id: String, approve: bool) -> AgentRequestAnswer;
+
     /// "Ask Tracker Again": a manual re-announce.
     apart fn ask_tracker_again_async = ask_tracker_again "ask_tracker_again" (ids: Vec<String>) -> AskAgainOutcome;
     /// "Announce anyway": also past the tracker's minimum interval.
@@ -178,6 +192,8 @@ core_async! {
     apart fn volume_warnings_async = volume_warnings "volume_warnings" () -> Vec<VolumeWarning>;
     /// The different-disk warnings of a favorite's own folders.
     apart fn tracker_volume_warnings_async = tracker_volume_warnings "tracker_volume_warnings" (profile: ProfileRecord) -> Vec<VolumeWarning>;
+    /// What Settings shows of this computer's agent tools, looked at again (`settings_view_host`).
+    apart fn refresh_settings_host_facts_async = refresh_settings_host_facts "refresh_settings_host_facts" () -> crate::settings_view_host::SettingsHostFacts;
     /// The torrents a change of locations leaves elsewhere than the settings say (nothing moves).
     apart fn location_moves_async = location_moves "location_moves" () -> MoveProposalInfo;
     /// The chooser of a torrent that waits for a choice (or, with `reopen`, of a running one).
@@ -274,4 +290,28 @@ core_async! {
     apart fn chat_image_fetch_async = chat_image_fetch "chat_image_fetch" (channel_id: String, hash: String) -> Result<(), CoreError>;
     apart fn chat_image_save_async = chat_image_save "chat_image_save" (channel_id: String, hash: String, path: String, as_png: bool) -> Result<(), CoreError>;
     apart fn chat_image_open_path_async = chat_image_open_path "chat_image_open_path" (channel_id: String, hash: String) -> Result<String, CoreError>;
+
+    // ------------------------------------------------------------ folder sync's and chat's settings, in order
+
+    /// No notifications for the channel (an @mention still notifies: the app's rule).
+    in_sync_order fn chat_set_muted_async = chat_set_muted "chat_set_muted" (id: String, muted: bool);
+    /// The channel's Agents: Yes/No, for every member device (owners and admins).
+    in_sync_order fn chat_set_agents_async = chat_set_agents "chat_set_agents" (id: String, open: bool) -> Result<(), CoreError>;
+    /// The command run for each message from another device while agents may read the channel; `None` or empty: none.
+    in_sync_order fn chat_set_wake_command_async = chat_set_wake_command "chat_set_wake_command" (id: String, command: Option<String>) -> Result<(), CoreError>;
+    /// The channel's name on this device.
+    in_sync_order fn chat_rename_async = chat_rename "chat_rename" (id: String, name: String) -> Result<(), CoreError>;
+    /// Saves the device-wide settings of folder sync.
+    in_sync_order fn set_sync_settings_async = set_sync_settings "set_sync_settings" (settings: SyncSettings) -> Result<(), CoreError>;
+    /// Moves folder sync to `port`: refused when another app has it; otherwise sync starts again on it in the
+    /// background (`sync_settings().port` shows it a few seconds later).
+    in_sync_order fn set_sync_port_async = set_sync_port "set_sync_port" (port: u16) -> Result<(), CoreError>;
+    /// Sets up the rendezvous with a Cloudflare API token, in the background (`sync_rendezvous` shows how it goes).
+    in_sync_order fn sync_rendezvous_set_up_async = sync_rendezvous_set_up "sync_rendezvous_set_up" (token: String) -> Result<(), CoreError>;
+    /// Uses a rendezvous address the user already has, after testing it, in the background.
+    in_sync_order fn sync_rendezvous_use_async = sync_rendezvous_use "sync_rendezvous_use" (url: String) -> Result<(), CoreError>;
+    /// Tests the rendezvous in use, in the background.
+    in_sync_order fn sync_rendezvous_test_async = sync_rendezvous_test "sync_rendezvous_test" () -> Result<(), CoreError>;
+    /// Stops using the rendezvous, in the background.
+    in_sync_order fn sync_rendezvous_turn_off_async = sync_rendezvous_turn_off "sync_rendezvous_turn_off" () -> Result<(), CoreError>;
 }

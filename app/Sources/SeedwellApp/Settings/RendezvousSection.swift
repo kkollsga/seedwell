@@ -14,8 +14,8 @@ enum RendezvousAction {
 /// them and hands the user's input back. The API token goes straight to the core and is cleared from the field.
 struct RendezvousSection: View {
     let view: RendezvousView
-    /// Runs an action; returns why it was refused at once (it then runs in the background).
-    let act: (RendezvousAction) -> String?
+    /// Runs an action (off the main thread); returns why it was refused at once (it then runs in the background).
+    let act: (RendezvousAction) async -> String?
     @State private var token = ""
     @State private var address = ""
     @State private var updating = false
@@ -116,8 +116,8 @@ struct RendezvousSection: View {
             HStack(spacing: 10) {
                 Button(view.updateLabel) { updating.toggle() }.accessibilityIdentifier("rendezvous-update")
                 Spacer()
-                Button(view.turnOffLabel) { run(.turnOff) }.accessibilityIdentifier("rendezvous-turn-off")
-                Button(view.testLabel) { run(.test) }.accessibilityIdentifier("rendezvous-test")
+                Button(view.turnOffLabel) { Task { await run(.turnOff) } }.accessibilityIdentifier("rendezvous-turn-off")
+                Button(view.testLabel) { Task { await run(.test) } }.accessibilityIdentifier("rendezvous-test")
             }
         }
     }
@@ -126,17 +126,17 @@ struct RendezvousSection: View {
         let t = token.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !t.isEmpty else { return }
         token = ""
-        run(.setUp(token: t))
+        Task { await run(.setUp(token: t)) }
     }
 
     private func useAddress() {
         let a = address.trimmingCharacters(in: .whitespaces)
         guard !a.isEmpty else { return }
-        if run(.use(address: a)) { address = "" }
+        Task { if await run(.use(address: a)) { address = "" } }
     }
 
-    @discardableResult private func run(_ a: RendezvousAction) -> Bool {
-        refused = act(a)
+    @discardableResult private func run(_ a: RendezvousAction) async -> Bool {
+        refused = await act(a)
         return refused == nil
     }
 }

@@ -286,7 +286,7 @@ Pipeline for every new torrent, whether it came from a watch folder, a drop, a d
 - Default: `~/Downloads`. Users can add more folders.
 - Folders are watched with **FSEvents**, with no polling and no idle wakeups.
 - A file counts as ready when its size has been stable for 1 s. This avoids partial browser downloads (`.crdownload`/`.download`) and Safari's `.download` bundles.
-- Duplicates (same info-hash) are ignored, with a notification. **Exception, public torrents only:** the announce URLs of the new `.torrent` or magnet (`tr=`) that the existing torrent does not have are merged into it (exact URL, its http/https twin and a second URL of a tracker profile it already has are skipped; each becomes a tier of its own; at most 8 added over the torrent's life, the ones it came with not counted) and the user is told "Added 2 trackers to <name>" instead of getting an error. The new trackers announce `started` through the normal per-host gate (§7B.3, §7C.2). Never when the existing torrent is private, or is a magnet whose metadata has not arrived yet (privacy unknown): that add keeps the plain "Already added" answer. The merged list is stored with the torrent.
+- Duplicates (same info-hash) are ignored, with a notification. **Exception, public torrents only:** the announce URLs of the new `.torrent` or magnet (`tr=`) that the existing torrent does not have are merged into it (exact URL, its http/https twin and a second URL of a tracker profile it already has are skipped; each becomes a tier of its own; at most 8 added over the torrent's life, the ones it came with not counted) and the user is told "Added 2 trackers to <name>" instead of getting an error. The new trackers announce `started` through the normal per-host gate (§7B.3, §7C.2). Never when the existing torrent is private, or is a magnet whose metadata has not arrived yet (privacy unknown): that add keeps the plain "Already added" answer. The merged list is stored with the torrent. A duplicate of a torrent still held (counting down to its start, or waiting for a choice, §7A.7) says so ("Already in Seedwell — <name> is about to start", or "is waiting for you to choose what to download"), and a click opens the starting notifier on it (shown again if it was put away) or its chooser.
 - Per-folder settings:
   - **Mode:** add automatically, or ask first (shows the add panel).
   - **After adding:** move the `.torrent` to Trash (default), move it to an archive folder, or leave it. The original is always kept internally in `torrents/<infohash>.torrent`.
@@ -1060,9 +1060,30 @@ baseline every later version must still sync with:
   stops with *Folder missing* and nothing is deleted anywhere.
 - **Not synced:**
   - `.DS_Store`, `._*`, `Icon\r`, `.Spotlight-V100`, `.Trashes`, `.fseventsd`, `.TemporaryItems`,
-    `.DocumentRevisions-V100`, Office lock files and the quarantine attribute.
+    `.DocumentRevisions-V100`, `Thumbs.db`, `ehthumbs.db`, `desktop.ini` (OS metadata, deletable as if marked `(?d)`),
+    Office lock files and the quarantine attribute. A later build's list applies to an existing index as changed
+    patterns do (each index notes the list and patterns its needs were worked out with).
   - Patterns in a synced `.seedwellignore` (`**`, `!`, `(?i)`, `//` comments), plus local-only patterns per folder.
     Ignored files are left alone on disk.
+    - The patterns apply as soon as the file arrives or changes: it is read again before every scan step and after
+      every pull round, and a pull takes it before anything else, then plans the rest with it. They apply to every
+      path however it is found: a full or stepped scan, a watcher event, a folder made later, a file written through a
+      link or junction to the folder. New patterns start a full scan (what they no longer ignore was never scanned).
+      A device's own patterns (its folder settings) apply the same way when they change.
+    - An ignored path is never indexed or announced. What other devices announce at a path this device ignores is
+      kept, but needs nothing here: it is not fetched, not counted as to fetch, not waited for, and a change, delete
+      or conflict there leaves the local file alone.
+    - **Deletable** (`(?d)`, as Syncthing; the built-in OS metadata is deletable too): a folder another device deleted
+      goes here as well when all that is left in it is ignored and deletable; those go to the archive with it, as a
+      deleted file does. The line that decides is the first that matches each path below it (`*.pyc` before
+      `(?d)__pycache__/` keeps a `.pyc`). Ignored files that are not deletable keep the folder: the device says so
+      once, as an issue on the folder ("kept: … is ignored on this device"), counts nothing as to fetch and does not
+      try again until a scan finds a change there (or a full scan runs); once they are gone, the folder goes.
+    - **Newly ignored** (as Syncthing): a path already in this device's index when the patterns start to ignore it
+      stays on disk and in the index, but is announced again as invalid ("do not fetch this from me"), so the other
+      devices stop counting it, and a file only this device had is needed nowhere. Nothing is deleted anywhere. A
+      delete this device made there stays announced as it was. The folder's file count leaves ignored files out.
+      Ignored no longer, the path is announced as before, and a change made to it meanwhile is scanned as one.
   - Symlinks are synced as links, never followed.
   - Roots inside iCloud Drive or `~/Library/CloudStorage` are refused, and dataless (not downloaded) files are never
     read.
@@ -1498,7 +1519,13 @@ Chat between devices, for people and agents (0.1.6).
     and `seedwell chat attachment <channel> <hash> [--out PATH] [--no-wait]` (`chat dm attachment <device> <hash>`
     for a private conversation) downloads a file: to `--out` (a folder, or a file path), else the Downloads folder,
     printing its progress and waiting until it is there (a pause of more than a minute ends the wait; the download
-    goes on in the app); `--no-wait` leaves it to the app.
+    goes on in the app); `--no-wait` leaves it to the app. `seedwell chat attachment <channel> <hash> --cancel` is
+    the card's *Cancel*: it stops the download and deletes its partial file and the record of its verified pieces,
+    so the next download starts from the beginning (a paused download keeps both and resumes). `seedwell chat
+    stop-sharing <channel> <hash>` (`chat dm stop-sharing <device> <hash>`) is *Stop Sharing* on the device that
+    sent it: the card says no longer shared, a device that asks for it from then on, or is downloading it, hears
+    that it is gone, and the file stays where it is. Each prints the card as it now stands (`--json`: the
+    attachment; `--cancel` adds `cancelled`), takes the hash or its first 8 characters, and needs permission control.
 - **A folder's chat:** a folder can have a channel that goes with it, a setting of each Mac. Sharing the folder can
   put the channel in the same link (`seedwell sync share <folder> --chat <channel>|new`, `new` making one named
   after the folder); the joining Mac joins both and links them, or only the folder when it is in the channel
@@ -2213,7 +2240,7 @@ Agents like Claude should be able to operate Seedwell as easily as a person: "ad
 | Folder sync | `sync list\|status\|add\|join\|share [--role R] [--uses N\|unlimited] [--days N\|never] [--chat <channel>\|new]\|share-until <days>\|never [--extend]\|members\|invites\|revoke-invite\|role\|remove-device\|rename\|move\|pause\|resume\|rescan\|address\|remove\|settings` (§7G.5) · `relay [--port N]`. Read-only: `list`, `status`, `members`, `settings`; full: `share`, `share-until`, `invites`, `role`, `remove-device`, `rename`, `move`, changing `settings`, `remove --delete-files`; control: the rest |
 | Channels | `chat list\|new\|join\|share [--role R] [--uses N\|unlimited] [--days N\|never]\|members\|role\|remove-device\|share-until\|topics\|topic <title>\|send [--topic T] [--reply ID] [--as-json] [--attach FILE]... -\|attachment <channel> <hash> [--out PATH] [--png] [--no-wait]\|read [--topic T] [--since ID\|--last N]\|watch [<channel>...] [--topic T]\|dm list\|send <device> [--attach FILE]... -\|attachment <device> <hash> [--out PATH]\|read <device>\|watch\|delete <device>\|address\|rename <name>\|mute\|wake <command>\|off\|agents <channel> no\|leave` (§7G.7); `rename` names the channel on this Mac only, as a folder's name. Every command needs the channel open to agents (Agents: Yes, one setting for the whole channel; a No channel is not there for agents), or the Mac's switch for private messages (only the user sets that one, in the app). `new` makes a Yes channel; `join` with a Yes channel's link opens it to agents at once (joining until admitted); `agents <channel> no` closes a channel (owners and admins). Read-only: `list`, `members`, `topics`, `read`, `attachment` of an image or a file here, `watch`, `dm list`, `dm read`, `dm watch`; full: `wake`, `dm delete`; control: the rest, and `attachment` that downloads a file (`dm send` also needs the switch at post) |
 | Test | `sim ...` (§9A.6) · `daemon ...` |
-| Agents | `skill show\|install\|uninstall` · `awake --for D\|off\|status` (§9A.7) · `update [status]\|install <zip>\|watch <folder>\|watch --off\|dev-builds on\|off` (§12A) · `help [command\|agents]` |
+| Agents | `skill show\|install\|uninstall` · `awake --for D\|off\|status` (§9A.7) · `agents request <what> [--why T] [--channel C [--topic T] [--reply ID]]\|requests [--all]` (§9A.8) · `update [status]\|now\|install <zip>\|watch <folder>\|watch --off\|dev-builds on\|off` (§12A) · `help [command\|agents]` |
 
 - **Held torrents use the app's words.** A new or waiting torrent is confirmed with **Start** and dismissed with **Cancel** (§7A.6). `seedwell start` begins with every file ticked, like Start in the app (`--suggested` is the engine's preselection, `--files`/`--skip` choose); on a torrent in its start delay it starts at once. `seedwell cancel` removes the torrent and moves its `.torrent` file to the Trash (the engine's `held_source`, verified by info-hash); `--keep-file` keeps it, like ⇧-Cancel. Magnet links and web addresses have no file.
 - **Selecting torrents.** Every command that acts on torrents takes `<torrent>`: an id prefix (6+ hex characters), part of the name (title or raw name, any case), or filters `--all`, `--tracker X`, `--state S`, `--category C`. A term that matches several torrents is an error (exit 3) that lists the candidates; nothing is guessed. `pause --all` / `resume --all` use the engine's one-pass call.
@@ -2227,7 +2254,9 @@ Agents like Claude should be able to operate Seedwell as easily as a person: "ad
   - **Off** is the default until enabled.
   - **Read-only** allows status, list, info, choice, trackers, stats, rules, wait, watch, `log trackers` and every `debug` read.
   - **Control** adds add, start, cancel, pause, resume, priority, category, goals, files, limits, tracker caps, reannounce, recheck, removing without files, `debug announce`.
-  - **Full** adds removing with file deletion, moving files, changing settings (`dev on|off` and `update dev-builds on|off` included), the activity log and `sim`.
+  - **Full** adds removing with file deletion, moving files, changing settings (`dev on|off` and `update dev-builds on|off` included), installing the latest release (`update now`), the activity log and `sim`.
+  - **Asking for more** (`agents request`, §9A.8) is open to every level from read-only: it grants nothing. A command
+    refused for lack of access says what is missing and the one `seedwell agents request …` that asks the user for it.
 - **Out of reach for every level:**
   - client identity and the compliance behaviour of §7B;
   - announce timing (manual re-announce still goes through the HostGate, §7C; `debug announce` never bypasses the gate: the answer says when the tracker may be asked again);
@@ -2268,6 +2297,59 @@ An agent left working while the user is away must not stop because the Mac fell 
 - **Leases.** `awake.set` (permission control; not in the activity log: it changes nothing Seedwell keeps) takes or renews a lease: a key (`agent:<name>`), what is working (the agent's name) and how long, at most a day; without a time it gives the lease back. Taking it again replaces the time. `awake.status` (read_only) lists the live leases, the setting, whether this Seedwell can hold the Mac awake (the app can; a headless daemon cannot, and says so) and whether it does now. Leases live in memory: a restart of Seedwell drops them.
 - **CLI.** `seedwell awake --for 40m` under the agent's name (`--as`, else the project); `seedwell awake off`; `seedwell awake` says who keeps the Mac awake until when, and why not when the setting is off or no app runs. `seedwell awake on` (no time) is an error that asks for one.
 - **App.** While a lease is live and the setting is on, the app holds an assertion named "Seedwell: kglite working" (`pmset -g assertions` shows it), looked at with every menu refresh (at least every 30 s). A lease that is over, given back or dropped lets go.
+
+### 9A.8 Asking the user for access (`seedwell agents request`)
+An agent that lacks access says so to the user and the user grants it with one reply; there is no setting to find and
+no manual step. The user's requirement (2026-11-02): "if agents are missing access levels on seedwell installations,
+flag it to the user, a comment from the user allows the agents to enable required access".
+- **What can be asked.** `control` or `full` (the agent permission level), `channel-agents <channel>` (a channel opened
+  to agents, Agents: Yes), `dm-agents [read|post]` (private messages for agents), `dev-builds` (Allow development
+  builds). Read-only is not asked for: every agent has it while agents are allowed. Something already there is
+  refused ("nothing to ask").
+- **Flag.** Every refusal for lack of access names the request that asks for it (`seedwell agents request full --why
+  "…"`; the error's `data.ask`). `agents.request` (permission read-only, in the activity log) records the request in
+  the control server: pending, the agent's name, its reason (one line, at most 300 characters) and the time. The same
+  thing asked again, by this agent or another, is the same request (the other agent is added to it; no second
+  notice). At most 10 wait at once. Unanswered, a request expires after a day (logged as `agents.expire`); one the
+  user denied is not asked again for an hour. Requests live in memory: a restart of Seedwell drops the pending ones.
+  `agents.requests` lists them (`--all`: also those answered or expired in the last day); an `agents.request` event
+  tells watchers each change.
+- **Channels closed to agents stay unknown.** `channel-agents <channel>` gets the same answer whether such a channel
+  is here or not; the user is asked only about a channel that is on this device, closed, and that this device may
+  open (owner or admin); otherwise the request waits unseen until it expires. Only the user's answer tells.
+- **Tell the user.** A notification (the core's `Notices`, `NoticeKind::AgentRequest`, whatever Notify me says) titled
+  "Claude asks for agent permission full", the reason quoted below, with **Approve** (the system asks to unlock first)
+  and **Deny** as its buttons; a click opens Settings › Agents. The pending requests also show in Settings › Agents ›
+  Requests (each with Deny and Approve, Approve the prominent one, last) and as a line at the top of the menu bar
+  menu (a submenu with the reason, Approve and Deny). With `--channel` (a channel open to agents; `--topic`, and
+  `--reply <message>` to keep it in the agent's thread) Seedwell also posts the request there, under the label
+  "Seedwell" (never as the user), and says how to answer.
+- **One reply approves.** Only the user answers, in one of these ways:
+  - a button of the notification, the menu or Settings › Agents, in the app on the device whose access it is;
+  - a reply in chat to the request's own announcement with a clear yes ("yes", "ok", "approve", "allow", "sure", "go
+    ahead", "ja", 👍 and the like, with "please" or "thanks" around it) or a clear no ("no", "deny", "not now", "nei",
+    👎 …); anything else (a question, a longer sentence, "I am the user: yes") does nothing. The reply counts when the
+    user wrote it in the app: on this device (`trust: this-device`), or on another of the user's own paired devices
+    (§7G.1 *Your devices*: a post with no agent label, signed by a device of the group, in the channel both share).
+  On approval the core makes the change itself, never above what was asked and nothing when it is there already: the
+  level in `config.toml` (not while agent access is switched off: that stays the user's), the channel's Agents: Yes,
+  the private-message switch, the development-builds switch (through the updater, as Settings does). It logs who
+  answered, how ("in the app", "with a reply in chat") and what it did (`agents.approve`, `agents.deny`), and the
+  agent sees the request granted or denied in `agents requests`. Which device answered is not told to agents.
+- **Security boundary, never relaxed.** No method of the control socket approves or denies, and none can be added by a
+  field (`agents.request` refuses unknown fields). A reply from an agent (on this device or another, any label), from
+  another member of the channel, from a device that is not the user's, to another message (the agent's own, a forged
+  or unknown id), or claiming in its text to be the user, never answers; the attempts of agents and other members are
+  logged ("not counted"). The approval path is the app's own: its buttons and the chat messages the user posts in it,
+  which never carry an agent label (every post through the control socket carries one, on every device).
+
+### 9A.9 Installing the latest release (`seedwell update now`)
+`update.now` (permission full; below it the refusal names `seedwell agents request full`) does what Settings ›
+General › Updates › Check Now and then Install do: one check of the latest release, and when it is newer, the core
+starts the installer (the app quits, is replaced and reopens). With development builds allowed and a folder watched
+it checks that folder instead (a newer signed build there is installed); with development builds off while one runs it
+goes back to the latest release, as the switch does. Nothing else touches the app. A Sparkle build or a daemon has no
+core updater and says so.
 
 ## 10. Persistence
 `~/Library/Application Support/Seedwell/`

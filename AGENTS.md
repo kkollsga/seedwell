@@ -49,6 +49,14 @@ release procedure.
   command to type on Windows give the PowerShell form and the bash form (Git Bash, which agents on the PC run), or
   only the bash form when it is for an agent. Example: `app-windows\dev-build.ps1 -To <folder>` in PowerShell is
   `powershell.exe -NoProfile -ExecutionPolicy Bypass -File app-windows/dev-build.ps1 -To <folder>` from bash.
+- **The Mac and the PC work together as the `windows-bridge` skill says** (`.claude/skills/windows-bridge/SKILL.md`):
+  git bundles from the Mac, patches from the PC, both as attachments in "Seedwell Development"; the Mac owns Rust and
+  merges, the PC owns `app-windows/` and never commits.
+- **The PC tests every bundle twice:** `app-windows\qa\run.ps1 all` (the app) and `app-windows\qa\rust-tests.ps1` (the
+  Rust tests exactly as CI's Windows job runs them, with a time limit and a summary to paste). From bash:
+  `powershell.exe -NoProfile -ExecutionPolicy Bypass -File app-windows/qa/run.ps1 all` and the same with
+  `app-windows/qa/rust-tests.ps1`. Every batch the PC sends reports both results, and a Mac bundle is not good until
+  the PC has run both on it.
 
 ## Bugs
 
@@ -63,6 +71,9 @@ release procedure.
 - **Check with `tools/check.sh`.** It runs clippy and the tests (cargo nextest) for the crates a change touches
   plus the crates that depend on them, and the app build and Swift tests only when `app/` or `trs-ffi` is affected.
   It takes the heavy lock itself (do not wrap it in `heavy.sh`).
+  - On macOS it runs the timing tests (`tools/timing-tests.txt`) a second time at utility priority, where timers
+    are late as on CI's Mac runner, and it scans the affected crates' tests for Mac assumptions
+    (`tools/test-portability.py`). docs/ENGINEERING.md §5 says how a test joins the one and passes the other.
   - While iterating, narrow it further: `tools/check.sh -p trs-tracker -- -E 'test(/host_recovery/)'`.
   - Run the plain `tools/check.sh` once when the work is done, before handing it back.
   - `tools/check.sh --full` is the whole workspace, which is what GitHub CI runs on every push to `main`. Do not run
@@ -92,21 +103,19 @@ release procedure.
   OneDrive files (mac*.md, windows.md), `BRIDGE.txt` notes and the old "Bridge" channel are retired. Run every
   `seedwell chat watch` (and `mail watch`) as the harness's background task and read its output when it ends; never
   detach it (`&`, nohup) or throw its output away: what it printed is no longer unread, so an agent that does not
-  read it loses those messages. One `watch --unread` per agent name and place: a second is refused while one runs. Files (builds,
-  patches) go through the shared Seedwell Sync folder.
+  read it loses those messages. One `watch --unread` per agent name and place: a second is refused while one runs. Files (bundles,
+  patches, screenshots) go as attachments in that channel; the shared Seedwell Sync folder is the fallback.
 - **Agents manage the user's app through the `seedwell` CLI**: they may switch Settings › General › Updates ›
   Allow development builds on and off (`seedwell update dev-builds on|off`) and install development builds (SPEC
   12A), the one way a build reaches the user's app: build with `tools/sysguard/heavy.sh tools/dev-build.sh`, then
   `seedwell update install <zip>`, or publish it to every device through the shared builds folder: each device
   (its own agent) runs `seedwell update watch "<Seedwell Sync folder>/builds"` once, and
   `tools/sysguard/heavy.sh tools/dev-build.sh --to "<Seedwell Sync folder>/builds"` puts the Mac's build there signed
-  with the build key (the Mac's Keychain). For Windows the PC's agent runs `app-windows\dev-build.ps1 -To <that
-  folder>` (from bash: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File app-windows/dev-build.ps1 -To <that
-  folder>`) and posts the zip's name and SHA-256 in the agent channel; the Mac's agent signs it in with
-  `tools/sysguard/heavy.sh tools/build-sign.sh add <folder> <zip> --sha256 <HEX>` (only a checksum its builder
-  posted). Devices install only builds signed with the build key (and on a Mac, Developer ID signed). After a
-  release is published, switch development builds off on every device so each goes back to the release. Never
-  replace, quit or signal the app any other way. `seedwell debug announce` is not read-only.
+  with the build key (the Mac's Keychain). A zip built on the PC is never signed or put there (the user's decision):
+  the PC tests its own builds with `seedwell update install <zip>` (`app-windows\dev-build.ps1`), and Windows builds
+  reach the devices through releases. Devices install only builds signed with the build key (and on a Mac, Developer
+  ID signed). After a release is published, switch development builds off on every device so each goes back to the
+  release. Never replace, quit or signal the app any other way. `seedwell debug announce` is not read-only.
 - **Chats are private unless the user opens them.** Agents see only channels set to Agents: Yes (one setting per
   channel, for every member device; the user picks it in the app, agents never turn a No into a Yes) and private
   messages only with the Mac's switch on, which only the user sets. Never work around them: no reading the state

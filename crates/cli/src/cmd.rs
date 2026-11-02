@@ -7,7 +7,7 @@ use trs_control::proto::{AtGoalParam, FilePriorityParam, KindFilter, ListFilter,
 
 use crate::args::{Opts, Usage, parse_duration, parse_index_list, parse_rate};
 use crate::select::{Selection, parse_state};
-use crate::{awake, chat, debug, mail, sim, skill, sync, update};
+use crate::{agents, awake, chat, debug, mail, sim, skill, sync, update};
 
 /// What `start` does with the files.
 #[derive(Clone, Debug, PartialEq)]
@@ -206,6 +206,8 @@ pub enum Cmd {
     Mail(mail::Mail),
     /// `awake …` (keep the Mac awake while an agent works)
     Awake(awake::Awake),
+    /// `agents …` (ask the user for access)
+    Agents(agents::Agents),
     /// `update …` (the running version, development builds)
     Update(update::Cmd),
     /// `relay [--port N] [--bind ADDR] [--key-file PATH]`
@@ -538,6 +540,7 @@ pub fn parse(args: Vec<String>) -> Result<Cmd, Usage> {
         "chat" => Cmd::Chat(chat::parse(rest)?),
         "mail" => Cmd::Mail(mail::parse(rest)?),
         "awake" => Cmd::Awake(awake::parse(rest)?),
+        "agents" => Cmd::Agents(agents::parse(rest)?),
         "update" => Cmd::Update(update::parse(rest)?),
         "relay" => Cmd::Relay(sync::parse_relay(rest)?),
         "help" => {

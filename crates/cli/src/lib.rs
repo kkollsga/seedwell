@@ -4,6 +4,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod agents;
 pub mod args;
 pub mod awake;
 pub mod update;

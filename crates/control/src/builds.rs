@@ -1,5 +1,6 @@
 //! Installing builds over the control socket (SPEC 12A, Development builds): `update.status`, `update.install` (a
-//! zip handed over), `update.watch` (a folder to follow) and `update.dev_builds` (the switch itself). The app's updater does the work and decides what is
+//! zip handed over), `update.watch` (a folder to follow), `update.dev_builds` (the switch itself) and `update.now` (check and install the
+//! latest release). The app's updater does the work and decides what is
 //! allowed (the "Allow development builds" switch); this is only where the server finds it, filled in once the
 //! updater runs. A daemon has none, and says so.
 
@@ -20,6 +21,10 @@ pub trait Builds: Send + Sync {
     /// Turn "Allow development builds" on or off, as its switch in Settings does (off while a development build
     /// runs: the way back to the latest release).
     fn set_dev_builds(&self, on: bool) -> Result<String, String>;
+    /// Check for the latest release now and start installing it when one is on offer, as Settings' Check Now and
+    /// Install do (with development builds allowed and a folder watched: that folder's newest build). Blocks for the
+    /// check (up to about 15 s).
+    fn update_now(&self) -> Result<String, String>;
 }
 
 /// Where the control server finds the updater (empty until the app's updater registers itself).

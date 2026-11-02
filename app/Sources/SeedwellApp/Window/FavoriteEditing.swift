@@ -35,15 +35,22 @@ import Observation
 
     func beginRename(_ id: String) { editor.beginRename(id: id); refresh() }
     func cancel() { editor.cancel(); refresh() }
-    func commit() { apply(editor.commit()) }
     func askRemove(_ id: String) { apply(editor.askRemove(id: id)) }
     func cancelRemoval() { editor.cancelRemoval(); refresh() }
-    func confirmRemoval() { apply(editor.confirmRemoval()) }
-    /// "Save as Favorite" on an automatic tracker.
-    func saveAsFavorite(_ groupID: String) { apply(editor.saveAsFavorite(groupId: groupID)) }
-    func setLimits(_ id: String, down: UInt64, up: UInt64) { apply(editor.setLimits(id: id, down: down, up: up)) }
     func setFolderDraft(_ id: String, _ record: ProfileRecord) { editor.setFolderDraft(id: id, record: record); refresh() }
-    func run(_ id: String, _ command: TrackerInfoCommand) { apply(editor.trackerInfoRun(trackerId: id, command: command)) }
+
+    // The saves: off the main thread, in the order given; the window follows when each is done.
+    func commit() { save { await $0.commit() } }
+    func confirmRemoval() { save { await $0.confirmRemoval() } }
+    /// "Save as Favorite" on an automatic tracker.
+    func saveAsFavorite(_ groupID: String) { save { await $0.saveAsFavorite(groupId: groupID) } }
+    func setLimits(_ id: String, down: UInt64, up: UInt64) { save { await $0.setLimits(id: id, down: down, up: up) } }
+    func run(_ id: String, _ command: TrackerInfoCommand) { save { await $0.trackerInfoRun(trackerId: id, command: command) } }
+
+    private func save(_ work: @escaping @Sendable (FavoriteEditor) async -> FavoriteEffect) {
+        let editor = self.editor
+        CoreCalls.inOrder({ await work(editor) }) { [weak self] effect in self?.apply(effect) }
+    }
 
     /// Does what a change asks, then reads the view again.
     func apply(_ effect: FavoriteEffect) {

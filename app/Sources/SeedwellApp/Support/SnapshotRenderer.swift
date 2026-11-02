@@ -92,6 +92,7 @@ import SwiftUI
         let e = commands.favorites
         e.reload()
         e.setLimits(fav.id, down: 5_000_000, up: 0)
+        await CoreCalls.settled()
         func page(_ name: String, dark: Bool = true) async {
             await render(name, size: size, dark: dark, settings: true) {
                 TrackerInfoPage(model: model(.tracker(trackerId: "tracker-z.cc"), select: nil), tracker: t, commands: commands).background(.background)
@@ -99,12 +100,16 @@ import SwiftUI
         }
         await page("tracker-info-favorite-dark")
         e.run(fav.id, .addAddress)
+        await CoreCalls.settled()
         e.text = "https://tracker.example.org/a/0123456789abcdef0123456789abcdef/announce?passkey=XYZ"
         e.commit()
+        await CoreCalls.settled()
         await page("tracker-info-passkey-dark")
         e.run(fav.id, .editAddress(index: 0))
+        await CoreCalls.settled()
         e.text = "bad address!"
         e.commit()
+        await CoreCalls.settled()
         await page("tracker-info-editing-dark")
         e.cancel()
         e.askRemove(fav.id)

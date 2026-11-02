@@ -582,6 +582,16 @@ impl Starting {
         s.expanded = if s.expanded.as_deref() == Some(id.as_str()) { None } else { Some(id) };
     }
 
+    /// A notice about this held torrent was clicked (it was added again): the notifier shows it again, even when it was
+    /// put away, its checklist open when it waits for a choice. The host then refreshes.
+    pub fn reveal(&self, id: String) {
+        let mut s = self.lock();
+        s.dismissed.remove(&id);
+        if s.items.iter().any(|i| i.id == id && i.awaiting) {
+            s.expanded = Some(id);
+        }
+    }
+
     /// The user put the notifier away (its ×, a click elsewhere, the menu bar menu opening on its spot): it stays
     /// closed for these torrents and opens again only for a new one.
     pub fn dismiss_all(&self) {

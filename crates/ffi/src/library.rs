@@ -32,6 +32,8 @@ use crate::Core;
 /// How often a shown window asks for a new model, and how late the timer may fire.
 const REFRESH_MS: u32 = 1_000;
 const REFRESH_LEEWAY_MS: u32 = 200;
+/// How often a tracker's header reads its lifetime totals again (they change slowly, and a read flushes the database).
+const TRACKER_STATS_MS: u32 = 5_000;
 const DAY_S: i64 = 86_400;
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -155,6 +157,8 @@ pub struct LibraryViewModel {
     pub refresh_ms: Option<u32>,
     /// How late that timer may fire (lets the system coalesce wake-ups).
     pub refresh_leeway_ms: u32,
+    /// On a tracker's tab: read its header's totals (`tracker_stats`, `tracker_daily`) again this often.
+    pub tracker_stats_refresh_ms: u32,
     /// The place, the page, and the sidebar's and the list's structure: see [`ListModel::signature`].
     pub signature: String,
 }
@@ -478,6 +482,7 @@ pub(crate) fn build(i: &Inputs, st: &LibraryState, now_ms: u64, clock: &dyn Loca
         scroll_to: st.scroll.clone(),
         refresh_ms: st.visible.then_some(REFRESH_MS),
         refresh_leeway_ms: REFRESH_LEEWAY_MS,
+        tracker_stats_refresh_ms: TRACKER_STATS_MS,
         signature,
     }
 }

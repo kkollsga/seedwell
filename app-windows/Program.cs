@@ -26,6 +26,9 @@ public static class Program
     /// </summary>
     internal static string? StateDir { get; private set; }
 
+    /// <summary>The click of the notification that started this launch, if one did (the core's route string).</summary>
+    internal static string? NoticeClick { get; private set; }
+
     /// <summary>
     /// This instance was started with <c>--qa-control</c> and <c>--state-dir</c> (the Mac's --qa-control, which needs an
     /// isolated run too): only then are second launches' --qa
@@ -86,8 +89,27 @@ public static class Program
             // Nothing runs on this state folder to quit: end, never start one in its place (an installer waits on this).
             return 0;
         }
+        if (args.Contains("--qa"))
+        {
+            // A QA command for an instance that is not running (it ended, or never started): end, never start one in
+            // its place (it would run without --qa-control, refuse every later command and be left behind).
+            return 0;
+        }
+        // Started by a click on a notification (the app was not running): opened once the core is there.
+        if (AppInstance.GetCurrent().GetActivatedEventArgs() is { Kind: ExtendedActivationKind.AppNotification } started
+            && started.Data is Microsoft.Windows.AppNotifications.AppNotificationActivatedEventArgs n)
+        {
+            NoticeClick = n.Arguments.TryGetValue("click", out var c) ? c : "";
+        }
         main.Activated += (_, e) =>
         {
+            // A click on a notification that started a second process: its route, in the running app.
+            if (e.Kind == ExtendedActivationKind.AppNotification && e.Data is Microsoft.Windows.AppNotifications.AppNotificationActivatedEventArgs clicked)
+            {
+                var click = clicked.Arguments.TryGetValue("click", out var cl) ? cl : "";
+                App.Current?.Dispatch(() => App.Current?.Notifier?.Clicked(click));
+                return;
+            }
             // A second launch: its command line comes with the activation.
             var line = (e.Data as Windows.ApplicationModel.Activation.ILaunchActivatedEventArgs)?.Arguments ?? "";
             var words = Split(line);

@@ -1,0 +1,22 @@
+# Tests with a wall-clock bound (docs/ENGINEERING.md §5). On macOS tools/check.sh runs them a second time at utility
+# priority (`taskpolicy -c utility`), where the system delays the timers of a thread as it does on GitHub's macOS
+# runner: a bound that only holds on a quiet, fast Mac fails here instead of on CI.
+# One nextest filterset per line (each in parentheses, joined with |); a line that starts with # is a comment.
+
+# By name: a test that promises not to wait says so.
+test(/never_wait|without_waiting|never_block/)
+
+# The app's calls on its UI thread and the hang watchdog (ffi).
+test(/^ui_wait_tests::/)
+test(/^ui_watch::/)
+test(/^calls::tests::/)
+test(/^sync_host_tests::a_pipe_in_the_uploads_is_refused_at_once$/)
+
+# Bounds of a second or less, and rates.
+package(trs-sync-net) & test(/^ondemand::(holders_are_asked_together_and_a_paused_one_holds_nothing|a_change_sent_between_resume_and_the_new_session_arrives_by_the_new_one)$/)
+package(trs-stream) & test(/^protocol::client_disconnect_drops_urgency_at_once$/)
+package(trs-tracker) & test(/^dual_stack_transport::accept_then_blackhole_falls_back_after_the_address_timeout$/)
+package(trs-storage) & test(/^(pool::dropping_joins_the_running_workers_and_an_unused_pool_drops_at_once|relocate::cancel_mid_copy_cleans_parts_and_keeps_source|verify::tests::limiter_paces)$/)
+package(trs-cli) & test(/^sim::swarm::tests::limiter_paces$/)
+package(trs-portmap) & test(/^natpmp_loopback::shutdown_with_a_dead_gateway_returns_within_the_deadline$/)
+package(trs-http) & test(/^(get_small_gives_up_on_a_server_that_never_answers|global_rate_gate_limits_to_2_mb_per_s_within_10_percent|no_validator_means_restart_not_blind_append)$/)

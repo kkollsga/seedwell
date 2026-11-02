@@ -29,28 +29,9 @@ import Testing
         #expect((try? FileManager.default.destinationOfSymbolicLink(atPath: link)) == target)
     }
 
-    @Test func findsAnInstalledToolOnThePathOrInTheInstallFolders() throws {
-        let home = try temp()
-        defer { try? FileManager.default.removeItem(atPath: home) }
-        #expect(CommandLineTool.findInstalled(home: home, pathEnv: "/nonexistent") == nil)
-        let bin = home + "/.local/bin"
-        try FileManager.default.createDirectory(atPath: bin, withIntermediateDirectories: true)
-        FileManager.default.createFile(atPath: bin + "/seedwell", contents: Data("#!/bin/sh\n".utf8), attributes: [.posixPermissions: 0o755])
-        #expect(CommandLineTool.findInstalled(home: home, pathEnv: "/nonexistent") == bin + "/seedwell")
+    @Test func aLinkFolderIsOnThePathOrNot() {
+        let bin = "/Users/x/.local/bin"
         #expect(CommandLineTool.isOnPath(bin, pathEnv: "/usr/bin:" + bin))
         #expect(!CommandLineTool.isOnPath(bin, pathEnv: "/usr/bin"))
-    }
-
-    @Test func skillFolderIsUnderTheClaudeFolder() throws {
-        #expect(CommandLineTool.skillFolder(home: "/Users/x") == "/Users/x/.claude/skills/seedwell")
-        let home = try temp()
-        defer { try? FileManager.default.removeItem(atPath: home) }
-        #expect(!CommandLineTool.skillInstalled(home: home))
-        try FileManager.default.createDirectory(atPath: CommandLineTool.skillFolder(home: home), withIntermediateDirectories: true)
-        FileManager.default.createFile(atPath: CommandLineTool.skillFolder(home: home) + "/SKILL.md", contents: Data())
-        #expect(!CommandLineTool.skillInstalled(home: home), "the agents skill is missing (installed before 0.1.8)")
-        try FileManager.default.createDirectory(atPath: CommandLineTool.skillFolder(home: home) + "-agents", withIntermediateDirectories: true)
-        FileManager.default.createFile(atPath: CommandLineTool.skillFolder(home: home) + "-agents/SKILL.md", contents: Data())
-        #expect(CommandLineTool.skillInstalled(home: home))
     }
 }

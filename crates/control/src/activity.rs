@@ -225,6 +225,11 @@ pub fn describe(r: &Request) -> String {
         Request::ChatCancelDownload(p) => format!("cancel the download of file {} of {}", clip(&p.hash, 16), file_place(&p.channel, p.device.as_deref())),
         Request::ChatStopSharing(p) => format!("stop sharing file {} of {}", clip(&p.hash, 16), file_place(&p.channel, p.device.as_deref())),
         Request::UpdateDevBuilds(p) => format!("turn development builds {}", if p.on { "on" } else { "off" }),
+        Request::UpdateNow(_) => "check for the latest release and install it".into(),
+        Request::AgentsRequest(p) => match crate::access::Want::parse(&p.what, p.target.as_deref()) {
+            Ok(w) => format!("ask the user for {}", w.text()),
+            Err(_) => format!("ask the user for `{}`", clip(&p.what, 40)),
+        },
         other => other.method().name().to_owned(),
     };
     // A key pasted into any field (a name, a path) is masked too.

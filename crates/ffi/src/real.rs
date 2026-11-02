@@ -32,7 +32,9 @@ const UI_WAIT: Duration = Duration::from_millis(40);
 /// command). Well under what counts as a hang (the app's watchdog reports a main thread held for a second): an engine
 /// that is busy meanwhile is not waited for.
 const COMMAND_WAIT: Duration = Duration::from_millis(250);
-/// The first read has nothing to show meanwhile.
+/// The first read has nothing to show meanwhile: the first caller (the host's start, off its UI thread) waits this long
+/// for it. Every other caller before it is in waits [`UI_WAIT`] and gets an empty library: a menu or window opened
+/// meanwhile never waits for it.
 const FIRST_WAIT: Duration = Duration::from_secs(5);
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -273,6 +275,8 @@ pub struct RealBackend {
     /// The read (by [`Refresh`]'s count, plus one) a caller stopped waiting for: while it is still under way, no caller
     /// waits for the engine again.
     gave_up: std::sync::atomic::AtomicU64,
+    /// A caller has waited (or waits) [`FIRST_WAIT`] for the first read: no other one does.
+    first_claimed: AtomicBool,
     /// This backend, for its reading thread.
     me: std::sync::OnceLock<std::sync::Weak<RealBackend>>,
     listener: Arc<Mutex<Option<Arc<dyn CoreListener>>>>,
@@ -465,6 +469,7 @@ impl RealBackend {
             refresh: Arc::new(Refresh::default()),
             after_command: AtomicBool::new(false),
             gave_up: std::sync::atomic::AtomicU64::new(0),
+            first_claimed: AtomicBool::new(false),
             me: std::sync::OnceLock::new(),
             listener,
             server: Mutex::new(server),
@@ -590,9 +595,9 @@ impl RealBackend {
                             EngineEvent::ChoiceResolved { .. } | EngineEvent::FilesSelected { .. } => {
                                 pending.get_or_insert(tokio::time::Instant::now());
                             }
-                            EngineEvent::Duplicate { name, trackers_added, .. } => {
+                            EngineEvent::Duplicate { id, name, trackers_added } => {
                                 if let Some(l) = &l {
-                                    l.on_duplicate(name, trackers_added as u32);
+                                    l.on_duplicate(hex(&id), name, trackers_added as u32);
                                 }
                             }
                             EngineEvent::AddRequest(req) => {
@@ -667,7 +672,10 @@ impl RealBackend {
             // (a refresh that reads the library several times waits once). Also before the first read is in: a first
             // read that ran out is not waited for again by every later call.
             _ if stuck => Duration::ZERO,
-            None => FIRST_WAIT,
+            // Only one caller ever waits long for the first read: one that comes while it is still awaited (a menu
+            // opened meanwhile) is bounded as every later read is, and shows an empty library.
+            None if !self.first_claimed.swap(true, Ordering::SeqCst) => FIRST_WAIT,
+            None => UI_WAIT,
             Some(_) if self.after_command.swap(false, Ordering::SeqCst) => COMMAND_WAIT,
             Some(_) => UI_WAIT,
         };
@@ -1493,6 +1501,16 @@ impl Backend for RealBackend {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    fn agent_requests(&self) -> Vec<trs_control::access::Entry> {
+        let desk = lock(&self.server).as_ref().map(|s| s.access().clone());
+        desk.map(|d| d.for_user()).unwrap_or_default()
+    }
+
+    fn agent_request_decide(&self, id: &str, approve: bool) -> Result<String, String> {
+        let desk = lock(&self.server).as_ref().map(|s| s.access().clone()).ok_or("Agents are not connected to this Seedwell")?;
+        desk.decide(id, approve, trs_control::access::How::App)
     }
 
     fn agents_awake(&self) -> Option<crate::types::AgentsAwake> {

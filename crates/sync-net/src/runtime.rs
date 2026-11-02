@@ -224,6 +224,14 @@ async fn scan(ctx: &Arc<Ctx>, f: &Arc<FolderShared>, scope: &str) -> bool {
         let step = tokio::task::spawn_blocking(move || {
             let mut core = lock(&f2.core);
             let r = core.scan_step(&mut job);
+            // New ignore patterns: what they no longer ignore was never scanned (a whole scan follows).
+            if core.take_ignore_changed() {
+                f2.rescan.notify_one();
+            }
+            // Something changed where a step could not be done (a directory kept by ignored files): try it again.
+            if core.take_retry_due() {
+                f2.remote_changed.notify_one();
+            }
             let seq = core.index_state().map(|(_, s)| s).unwrap_or(0);
             let local = core.local_totals().ok();
             let fs = core.fs();
@@ -314,6 +322,10 @@ async fn pull(ctx: &Arc<Ctx>, f: &Arc<FolderShared>, retry: &mut Option<(Instant
                 // index batches, the file provider's changes and a scan step get their turn between rounds.
                 let mut core = lock(&f2.core);
                 let r = core.pull(&source, &names, PULL_WINDOW)?;
+                // A `.seedwellignore` arrived: what it no longer ignores was never scanned (a whole scan follows).
+                if core.take_ignore_changed() {
+                    f2.rescan.notify_one();
+                }
                 let done = r.done;
                 merge(&mut total, r);
                 // After each round, so the other devices hear "receiving" while big files still come.
@@ -630,6 +642,16 @@ mod tests {
         assert_eq!(wire(&Path::new("a").join("b c").join("d.txt")).as_deref(), Some("a/b c/d.txt"));
         #[cfg(windows)]
         assert_eq!(wire(Path::new(r"Pass\web\x.bin")).as_deref(), Some("Pass/web/x.bin"), "the watcher's own separators");
+        // What the folder's patterns are matched against: the same path the scanner finds, separators and all.
+        let ig = Ignore::parse("/synced/\n__pycache__/\n").0;
+        assert!(ig.is_ignored(&wire(&Path::new("synced").join("u1_u2").join("a.md")).unwrap(), false));
+        assert!(ig.is_ignored(&wire(&Path::new("tool").join("__pycache__").join("m.pyc")).unwrap(), false));
+        #[cfg(windows)]
+        {
+            assert!(ig.is_ignored(&wire(Path::new(r"synced\u1_u2\a.md")).unwrap(), false), "a path as ReadDirectoryChangesW gives it");
+            assert!(ig.is_ignored(&wire(Path::new(r"synced")).unwrap(), true));
+            assert!(!ig.is_ignored(&wire(Path::new(r"other\synced\a.md")).unwrap(), false), "anchored at the root");
+        }
         assert_eq!(wire(Path::new("a/../b")), None);
         assert_eq!(wire(Path::new("./a")), None);
         assert_eq!(wire(&std::env::temp_dir()), None, "absolute");

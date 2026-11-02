@@ -23,7 +23,7 @@ private func request(_ id: String) -> PairRequestRow {
 
 private func view(_ kind: DevicesKind, rows: [DeviceRow] = [], requests: [PairRequestRow] = []) -> DevicesView {
     DevicesView(kind: kind, intro: "", rows: rows, requests: requests, pairTitle: "Pair a Device…", pairEnabled: true, linkTitle: "Pair with a Link…",
-                linkEnabled: true, leaveTitle: nil, leaveQuestion: "", leaveAction: "Leave", joiningLine: nil, joiningProblem: nil, myIdLine: "", note: "")
+                linkEnabled: true, leaveTitle: nil, leaveQuestion: "", leaveAction: "Leave", joiningLine: nil, joiningProblem: nil, myIdLine: "", note: "", refreshMs: 1_000)
 }
 
 private let link = PairLinkView(link: "seedwell://devices/X", expiresS: 1_000 + 872, title: "Pair a Device", text: "", copyTitle: "Copy")

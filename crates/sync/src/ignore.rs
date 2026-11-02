@@ -29,7 +29,12 @@
 //! handled in the same pass: the start state is added again after every `/`, and the accepting state
 //! is checked before every `/` (an ancestor directory) and at the end.
 
+use std::sync::{Arc, RwLock};
+
 use crate::path::{fold_one, wire_name};
+
+/// The synced patterns file at a folder's root.
+pub const FILE: &str = ".seedwellignore";
 
 /// A line that could not be used.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -52,6 +57,10 @@ pub struct Match {
 /// A compiled ignore list: the defaults, then the patterns in file order.
 #[derive(Clone, Debug)]
 pub struct Ignore {
+    /// The version of the defaults it starts with ([`DEFAULTS`]).
+    defaults: usize,
+    /// The patterns as given (the texts one after the other), without the defaults.
+    source: String,
     rules: Vec<Rule>,
     /// Some line is negated: an ignored directory may still hold paths that are not.
     negations: bool,
@@ -69,35 +78,88 @@ struct Rule {
     dir_only: bool,
 }
 
-/// The default ignores (SPEC §7G.2), all case-insensitive: Finder and Spotlight files, AppleDouble
-/// files, Office and LibreOffice lock files, and Seedwell's own state folder and temp files. (The
-/// quarantine attribute is an extended attribute, not a path: the puller never writes it.)
-const DEFAULTS: &[(&str, bool)] = &[
-    (".DS_Store", false),
-    ("._*", false),
-    ("Icon\r", false),
-    (".Spotlight-V100", false),
-    (".Trashes", false),
-    (".fseventsd", false),
-    (".TemporaryItems", false),
-    (".DocumentRevisions-V100", false),
-    // Word, Excel and PowerPoint owner files, LibreOffice lock files.
-    ("~$*", false),
-    (".~lock.*#", false),
-    // The folder's own state (marker, archive) at the root, and temp files of the puller anywhere.
-    (".seedwell", true),
-    (".seedwell.*.tmp", false),
+/// One default ignore: the pattern, anchored at the root, deletable (pure OS metadata: it never keeps a directory
+/// another device deleted from being deleted here, as if its line had `(?d)`).
+type BuiltIn = (&'static str, bool, bool);
+
+/// The default ignores (SPEC §7G.2), all case-insensitive: Finder, Spotlight and Explorer files, AppleDouble files,
+/// Office and LibreOffice lock files, and Seedwell's own state folder and temp files. (The quarantine attribute is an
+/// extended attribute, not a path: the puller never writes it.) Every list a released build had is kept here, by its
+/// version: an index notes the version its needs were worked out with, and a folder opened by a build with another
+/// list works out again what the change touches ([`Ignore::identity`]).
+const DEFAULTS: &[&[BuiltIn]] = &[
+    // 1: up to 0.1.16.
+    &[
+        (".DS_Store", false, false),
+        ("._*", false, false),
+        ("Icon\r", false, false),
+        (".Spotlight-V100", false, false),
+        (".Trashes", false, false),
+        (".fseventsd", false, false),
+        (".TemporaryItems", false, false),
+        (".DocumentRevisions-V100", false, false),
+        ("~$*", false, false),
+        (".~lock.*#", false, false),
+        (".seedwell", true, false),
+        (".seedwell.*.tmp", false, false),
+    ],
+    // 2: the OS metadata is deletable; Windows Explorer's thumbnail caches and folder settings join it.
+    &[
+        (".DS_Store", false, true),
+        ("._*", false, true),
+        ("Icon\r", false, true),
+        (".Spotlight-V100", false, true),
+        (".Trashes", false, true),
+        (".fseventsd", false, true),
+        (".TemporaryItems", false, true),
+        (".DocumentRevisions-V100", false, true),
+        ("Thumbs.db", false, true),
+        ("ehthumbs.db", false, true),
+        ("desktop.ini", false, true),
+        // Word, Excel and PowerPoint owner files, LibreOffice lock files: a document is open, not deletable.
+        ("~$*", false, false),
+        (".~lock.*#", false, false),
+        // The folder's own state (marker, archive) at the root, and temp files of the puller anywhere.
+        (".seedwell", true, false),
+        (".seedwell.*.tmp", false, false),
+    ],
 ];
+
+/// The version of [`DEFAULTS`] this build uses (1-based).
+const DEFAULTS_NOW: usize = DEFAULTS.len();
 
 impl Ignore {
     /// The default ignores alone.
     pub fn defaults() -> Ignore {
-        let mut ig = Ignore { rules: Vec::new(), negations: false, max_states: 0 };
-        for &(pattern, anchored) in DEFAULTS {
+        Self::defaults_of(DEFAULTS_NOW)
+    }
+
+    /// The default ignores of version `v` ([`DEFAULTS`]); the latest for a version this build does not know.
+    fn defaults_of(v: usize) -> Ignore {
+        let v = if (1..=DEFAULTS_NOW).contains(&v) { v } else { DEFAULTS_NOW };
+        let mut ig = Ignore { defaults: v, source: String::new(), rules: Vec::new(), negations: false, max_states: 0 };
+        for &(pattern, anchored, deletable) in DEFAULTS[v - 1] {
             let nfa = Nfa::compile(pattern, true).expect("the defaults compile");
-            ig.push(Rule { nfa, negated: false, deletable: false, case_insensitive: true, anchored, dir_only: false });
+            ig.push(Rule { nfa, negated: false, deletable, case_insensitive: true, anchored, dir_only: false });
         }
         ig
+    }
+
+    /// What decides which paths this list ignores: the version of the defaults and the patterns, as one string (noted
+    /// in a folder's index with the needs worked out with it; [`Ignore::from_identity`] makes the list again).
+    pub fn identity(&self) -> String {
+        format!("\0defaults {}\n{}", self.defaults, self.source)
+    }
+
+    /// The list an [`Ignore::identity`] names. A note without the header (written before the defaults had versions)
+    /// names the first defaults and its text.
+    pub fn from_identity(id: &str) -> Ignore {
+        let (v, source) = id
+            .strip_prefix("\0defaults ")
+            .and_then(|rest| rest.split_once('\n'))
+            .and_then(|(v, source)| Some((v.parse().ok()?, source)))
+            .unwrap_or((1, id));
+        Self::with_defaults(Self::defaults_of(v), &[source]).0
     }
 
     /// The defaults, then the lines of a `.seedwellignore`.
@@ -108,9 +170,17 @@ impl Ignore {
     /// The defaults, then the lines of each text in order (say, the folder's local-only patterns, then
     /// the synced file). Line numbers in errors count from the start of each text.
     pub fn parse_all(texts: &[&str]) -> (Ignore, Vec<ParseError>) {
-        let mut ig = Self::defaults();
+        Self::with_defaults(Self::defaults(), texts)
+    }
+
+    fn with_defaults(defaults: Ignore, texts: &[&str]) -> (Ignore, Vec<ParseError>) {
+        let mut ig = defaults;
         let mut errors = Vec::new();
-        for text in texts {
+        for text in texts.iter().filter(|t| !t.is_empty()) {
+            if !ig.source.is_empty() {
+                ig.source.push('\n');
+            }
+            ig.source.push_str(text);
             for (i, line) in text.lines().enumerate() {
                 match parse_line(line) {
                     Ok(Some(rule)) => ig.push(rule),
@@ -120,6 +190,12 @@ impl Ignore {
             }
         }
         (ig, errors)
+    }
+
+    /// The patterns this list was made of, without the defaults (`""`: the defaults alone). Two lists with the same
+    /// source ignore the same paths, and `Ignore::parse(source)` makes the list again.
+    pub fn source(&self) -> &str {
+        &self.source
     }
 
     fn push(&mut self, rule: Rule) {
@@ -150,6 +226,33 @@ impl Ignore {
     /// line exists that could bring back something inside it.
     pub fn can_skip_dir(&self, wire_path: &str) -> bool {
         !self.negations && self.is_ignored(wire_path, true)
+    }
+}
+
+/// A folder's ignore patterns as they are now, shared by its core (which changes them when the `.seedwellignore` file
+/// changes) and whoever reads the folder's index without the core (a peer sent the index, a chunk served).
+#[derive(Clone, Debug)]
+pub struct Current(Arc<RwLock<Arc<Ignore>>>);
+
+impl Current {
+    /// Starts with `ignore`.
+    pub fn new(ignore: impl Into<Arc<Ignore>>) -> Self {
+        Current(Arc::new(RwLock::new(ignore.into())))
+    }
+
+    /// The patterns now.
+    pub fn get(&self) -> Arc<Ignore> {
+        self.0.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    pub(crate) fn set(&self, ignore: Arc<Ignore>) {
+        *self.0.write().unwrap_or_else(|e| e.into_inner()) = ignore;
+    }
+}
+
+impl Default for Current {
+    fn default() -> Self {
+        Current::new(Ignore::defaults())
     }
 }
 
@@ -490,6 +593,38 @@ mod tests {
         for p in ["a/.seedwell", "Icon", "photo.jpg", ".seedwellignore", "report~$", ".seedwell.tmp"] {
             assert!(!d.is_ignored(p, false), "{p:?}");
         }
+    }
+
+    #[test]
+    fn os_metadata_is_deletable_and_lock_files_and_state_are_not() {
+        let d = Ignore::defaults();
+        let deletable = |p: &str| d.matches(p, false).is_some_and(|m| m.ignored && m.deletable);
+        for p in [".DS_Store", "a/._x.jpg", "a/Icon\r", "Thumbs.db", "a/b/thumbs.db", "ehthumbs.db", "a/desktop.ini", "Desktop.ini", ".Trashes/501/x"] {
+            assert!(deletable(p), "{p:?}");
+        }
+        for p in ["Docs/~$Report.docx", "Docs/.~lock.Budget.ods#", ".seedwell", "a/.seedwell.x.tmp"] {
+            assert!(d.is_ignored(p, false) && !deletable(p), "{p:?}");
+        }
+        // A user's `(?d)` line, and the first line that matches decides: a plain `*.pyc` before it keeps a .pyc.
+        let i = ig("(?d)__pycache__/\n*.log\n");
+        assert_eq!(i.matches("s/__pycache__/m.pyc", false), Some(Match { ignored: true, deletable: true }));
+        let j = ig("*.pyc\n(?d)__pycache__/\n");
+        assert_eq!(j.matches("s/__pycache__/m.pyc", false), Some(Match { ignored: true, deletable: false }));
+    }
+
+    #[test]
+    fn the_identity_names_the_defaults_and_the_patterns() {
+        let i = ig("/synced/\n(?d).venv/");
+        let again = Ignore::from_identity(&i.identity());
+        assert_eq!(again.identity(), i.identity());
+        assert!(again.is_ignored("synced/x", false) && again.is_ignored("Thumbs.db", false));
+        // A note from before the defaults had versions: its text, with the first defaults (no Thumbs.db then).
+        let old = Ignore::from_identity("/synced/");
+        assert!(old.is_ignored("synced/x", false) && old.is_ignored(".DS_Store", false));
+        assert!(!old.is_ignored("Thumbs.db", false), "not in the first defaults");
+        assert_eq!(old.source(), "/synced/");
+        assert_ne!(old.identity(), Ignore::parse("/synced/").0.identity(), "the defaults changed since");
+        assert!(!Ignore::from_identity("").is_ignored("desktop.ini", false));
     }
 
     #[test]

@@ -34,6 +34,14 @@ extension SnapshotRenderer {
             }
             listing += ["status-menu-\(suffix).png (row 2 of Downloading hovered)"] + status.notes
 
+            // An agent's request for access (SPEC 9A.8): the line at the top of the menu, its submenu beside it.
+            if let item = controller.qaRequestsItem {
+                let panels = MenuPanel.withSubmenus([item], minWidth: 220)
+                await capture("agent-requests-menu-\(suffix)", dark: dark, panels: panels,
+                              caption: "An agent's request for access: the menu's line and its submenu (the reason, Approve, Deny). STAND-IN ONLY: NSMenu draws these; here their real items are drawn in the menu font.") {}
+                listing += ["agent-requests-menu-\(suffix).png"] + panels.flatMap { $0.0.notes }
+            }
+
             // The Folder Sync submenu, as MenuSync builds it: row 1 hovered, the confirmation open under row 2.
             let sync = MenuSync(actions: commands.sync)
             let snapshot = core.syncSnapshot()

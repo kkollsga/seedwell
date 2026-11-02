@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 use crate::calls::testing::{first_poll, wait};
 use crate::chat_images::ChatImageInput;
 use crate::settings::SettingsStore;
+use crate::tracker_page::TrackerInfoCommand;
 use crate::*;
 
 /// What one call may take, measured around the call alone. A call waits at most `UI_WAIT` (40 ms) for a fresh read
@@ -100,6 +101,7 @@ fn tree(at: &Path, small: usize, big: usize) {
 struct Calls {
     core: Arc<Core>,
     library: Arc<Library>,
+    favorites: Arc<FavoriteEditor>,
     slowest: BTreeMap<&'static str, Duration>,
     rounds: u32,
 }
@@ -107,7 +109,7 @@ struct Calls {
 impl Calls {
     fn new(core: &Arc<Core>) -> Self {
         let library = Library::new(core.clone(), Vec::new(), Arc::new(Clock));
-        Calls { core: core.clone(), library, slowest: BTreeMap::new(), rounds: 0 }
+        Calls { core: core.clone(), library, favorites: FavoriteEditor::new(core.clone()), slowest: BTreeMap::new(), rounds: 0 }
     }
 
     fn time<T>(&mut self, name: &'static str, f: impl FnOnce(&Core) -> T) -> T {
@@ -155,6 +157,19 @@ impl Calls {
         self.time_async("async has_held_source_file", |c| c.has_held_source_file_async(i.clone()));
         self.time_async("async choice", |c| c.choice_async(i.clone(), false));
         self.time_async("async files", |c| c.files_async(i.clone()));
+        // The settings of folder sync and chat, and a favorite's saves: the host awaits them too.
+        let settings = self.core.sync_settings();
+        let port = settings.port;
+        self.time_async("async set_sync_settings", |c| c.set_sync_settings_async(settings));
+        self.time_async("async set_sync_port", |c| c.set_sync_port_async(port));
+        self.time_async("async chat_set_muted", |c| c.chat_set_muted_async("00".repeat(16), true));
+        self.time_async("async chat_rename", |c| c.chat_rename_async("00".repeat(16), "Renamed".into()));
+        let f = self.favorites.clone();
+        self.time_async("async FavoriteEditor.set_limits", |_| f.set_limits_async("public".into(), 1_000_000, 0));
+        let f = self.favorites.clone();
+        self.time_async("async FavoriteEditor.tracker_info_run", |_| f.tracker_info_run_async("public".into(), TrackerInfoCommand::SaveFolders));
+        let f = self.favorites.clone();
+        self.time("FavoriteEditor.view", move |_| f.view());
     }
 
     /// One round of the app's polls (the menu, the library window, Finder's badges, the chat tick, Settings).
@@ -279,6 +294,33 @@ fn a_first_library_read_that_ran_out_is_not_waited_for_again() {
         calls.round(None, None);
     }
     calls.assert_quick("after a first read that ran out");
+    core.shutdown(5);
+}
+
+/// The host makes the first library read off its UI thread at start (it may wait for a busy engine). A menu or a window
+/// opened while that read is still awaited never waits for it: it is bounded as every later read is (an empty library
+/// meanwhile), and only the start's read waits.
+#[test]
+fn calls_made_while_the_first_library_read_is_awaited_do_not_wait_for_it() {
+    let (core, _work, _tmp) = real_core();
+    core.backend.test_stall_engine(Duration::from_secs(7));
+    std::thread::sleep(Duration::from_millis(50));
+    let c = core.clone();
+    let first = std::thread::spawn(move || {
+        let at = Instant::now();
+        c.snapshot();
+        at.elapsed()
+    });
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(!first.is_finished(), "the start's first read waits for the busy engine");
+    let mut calls = Calls::new(&core);
+    for _ in 0..5 {
+        calls.round(None, None);
+    }
+    calls.assert_quick("while the first read is awaited");
+    assert!(core.snapshot().downloading.is_empty(), "nothing read yet: an empty library");
+    let waited = first.join().unwrap();
+    assert!(waited >= Duration::from_secs(1), "the start's read waited {waited:?}");
     core.shutdown(5);
 }
 

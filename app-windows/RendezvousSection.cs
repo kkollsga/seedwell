@@ -32,12 +32,12 @@ sealed class RendezvousSection
     {
         this.app = app;
         token.KeyDown += (_, e) => { if (e.Key == Windows.System.VirtualKey.Enter) SetUp(); };
-        address.KeyDown += (_, e) => { if (e.Key == Windows.System.VirtualKey.Enter) UseAddress(); };
+        address.KeyDown += (_, e) => { if (e.Key == Windows.System.VirtualKey.Enter) _ = UseAddress(); };
         setUp.Style = (Style)Application.Current.Resources["AccentButtonStyle"];
         token.PasswordChanged += (_, _) => setUp.IsEnabled = token.Password.Trim().Length > 0;
         address.TextChanged += (_, _) => use.IsEnabled = address.Text.Trim().Length > 0;
         setUp.Click += (_, _) => SetUp();
-        use.Click += (_, _) => UseAddress();
+        use.Click += (_, _) => _ = UseAddress();
         timer = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread().CreateTimer();
         timer.Interval = TimeSpan.FromSeconds(1);
         timer.Tick += (_, _) => Update();
@@ -196,10 +196,10 @@ sealed class RendezvousSection
         buttons.Children.Add(update);
         var right = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
         var off = new Button { Content = v.TurnOffLabel };
-        off.Click += (_, _) => Run(() => app.Core.SyncRendezvousTurnOff());
+        off.Click += async (_, _) => await Run(() => app.Core.SyncRendezvousTurnOff());
         right.Children.Add(off);
         var test = new Button { Content = v.TestLabel };
-        test.Click += (_, _) => Run(() => app.Core.SyncRendezvousTest());
+        test.Click += async (_, _) => await Run(() => app.Core.SyncRendezvousTest());
         right.Children.Add(test);
         Grid.SetColumn(right, 2);
         buttons.Children.Add(right);
@@ -207,7 +207,7 @@ sealed class RendezvousSection
         return s;
     }
 
-    internal void SetUp()
+    internal async void SetUp()
     {
         var t = token.Password.Trim();
         if (t.Length == 0)
@@ -215,33 +215,33 @@ sealed class RendezvousSection
             return;
         }
         token.Password = "";
-        Run(() => app.Core.SyncRendezvousSetUp(t));
+        await Run(() => app.Core.SyncRendezvousSetUp(t));
     }
 
-    internal void UseAddress()
+    internal async Task UseAddress()
     {
         var a = address.Text.Trim();
         if (a.Length == 0)
         {
             return;
         }
-        if (Run(() => app.Core.SyncRendezvousUse(a)))
+        if (await Run(() => app.Core.SyncRendezvousUse(a)))
         {
             address.Text = "";
         }
     }
 
-    /// <summary>Starts an action (it runs in the background); false when the core refused it at once, which is shown.</summary>
-    bool Run(Action act)
+    /// <summary>An action, awaited off the UI thread (it runs on in the background); false when the core refused it, which is shown.</summary>
+    internal async Task<bool> Run(Func<Task> act)
     {
         try
         {
-            act();
+            await act();
             refused = null;
         }
-        catch (CoreException e)
+        catch (Exception e)
         {
-            refused = TrsFfiMethods.CoreErrorMessage(e);
+            refused = CoreCalls.Message(e);
         }
         drawn = "";
         Update();

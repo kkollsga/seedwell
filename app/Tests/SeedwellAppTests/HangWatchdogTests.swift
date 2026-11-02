@@ -81,7 +81,11 @@ struct HangWatchdogTests {
         try await Task.sleep(for: .milliseconds(700))
         let s = seen.all
         #expect(s.count == 1, "\(s)")
-        #expect((s.first?.ms ?? 0) >= 300 && s.first?.action == "test: hold the queue", "\(s)")
+        // A stall is measured from the ping that waited for it. The watch thread sleeps between pings, and the system
+        // may wake a background thread's timer late (it coalesces them: under load the ping went out 150 ms into the
+        // hold, and 252 ms of the 400 were measured), so the length is between the report limit and the hold.
+        let ms = s.first?.ms ?? 0
+        #expect(ms >= 150 && ms <= 600 && s.first?.action == "test: hold the queue", "\(s)")
     }
 
     /// A snapshot render or QA run: a stall that reaches the limit is told at once, from the watch thread, while the

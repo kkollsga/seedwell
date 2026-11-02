@@ -65,7 +65,7 @@ import SwiftUI
     @ObservationIgnored private var timer: Timer?
     @ObservationIgnored private var polling = false
     @ObservationIgnored private var statsFor: String?
-    @ObservationIgnored private var ticks = 0
+    @ObservationIgnored private var statsRead = Date.distantPast
 
     /// The group folds are remembered per Mac, a convenience only: lost defaults just mean everything opens unfolded.
     private static let foldsKey = "collapsedGroups"
@@ -127,7 +127,6 @@ import SwiftUI
         if view.place != shown { placeChanged() }
         readPages()
         onSnapshot(snapshot)
-        ticks += 1
         if view.page == .folderSync {
             // The folder shown is the core's choice (the one picked, else the first).
             let page = folderSyncPage(onDemandOff: { _ in false })
@@ -140,10 +139,11 @@ import SwiftUI
         if chatID != nil || directID != nil { loadChatMessages() } else if chatLoaded != nil { forgetChat() }
         FilesStore.shared.tick()
         if let id = trackerID {
-            // Lifetime totals change slowly and reading them forces a database flush: every 5 s.
-            if statsFor != id || ticks % 5 == 0 {
+            // Lifetime totals change slowly and reading them forces a database flush: as often as the model says.
+            if statsFor != id || due(statsRead, view.trackerStatsRefreshMs) {
                 // Read off the main thread (a database read); shown when it is there.
                 statsFor = id
+                statsRead = Date()
                 let core = self.core
                 Task {
                     let (stats, days) = (await core.trackerStats(trackerId: id), await core.trackerDaily(trackerId: id, days: 30))

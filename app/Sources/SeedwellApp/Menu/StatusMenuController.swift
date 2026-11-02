@@ -29,6 +29,11 @@ import os
     private var iconTimer: Timer?
     private var rightClickMonitor: Any?
     private var signature = ""
+    /// Agents' requests for access waiting for the user (SPEC 9A.3): a line at the top, Approve and Deny in its submenu.
+    private var requests: AgentRequestsModel?
+    private var requestsSignature = ""
+    /// QA (the visual QA run): the requests' line as last built.
+    private(set) var qaRequestsItem: NSMenuItem?
     private var rowItems: [String: NSMenuItem] = [:]
     /// The snapshot's rows, for the commands (right-click, reveal, Play, the file list).
     private var rows: [String: TransferRow] = [:]
@@ -193,8 +198,10 @@ import os
         let s = core.snapshot()
         let sync = core.syncSnapshot()
         let m = model(s, sync)
+        let r = core.agentRequests(nowMs: Date().unixMs)
+        requests = r
         // An open file list is not rebuilt under the pointer (ticking a file can move the row).
-        if m.signature != signature, !menuFiles.isOpen { rebuild(s, m) } else { update(s, m) }
+        if m.signature != signature || r.signature != requestsSignature, !menuFiles.isOpen { rebuild(s, m) } else { update(s, m) }
         menuSync.update(sync)
     }
 
@@ -226,6 +233,7 @@ import os
         let sync = core.syncSnapshot()
         menuSync.menuOpened(sync)
         let s = core.snapshot()
+        requests = core.agentRequests(nowMs: Date().unixMs)
         rebuild(s, model(s, sync))
         return menu.items
     }
@@ -262,6 +270,14 @@ import os
         clearHover()
         for r in s.downloading + s.queued + s.recent { rows[r.id] = r }
 
+        requestsSignature = requests?.signature ?? ""
+        qaRequestsItem = nil
+        if let r = requests, let line = r.line {
+            let item = requestsItem(r, line)
+            qaRequestsItem = item
+            menu.addItem(item)
+            menu.addItem(.separator())
+        }
         if let line = m.offline {
             let item = NSMenuItem(title: "", action: nil, keyEquivalent: "")
             item.attributedTitle = NSAttributedString(string: line, attributes: [.foregroundColor: NSColor.secondaryLabelColor, .font: NSFont.menuFont(ofSize: 0)])
@@ -325,6 +341,27 @@ import os
         update(s, m)
         // New rows under a pointer that has not moved: NSMenu says nothing until it does.
         DispatchQueue.main.async { [weak self] in self?.refreshHover() }
+    }
+
+    /// The line of agents' requests for access: who asks what; its submenu has each request's reason, Approve and Deny
+    /// (in a menu the positive item comes first). The core makes the change.
+    private func requestsItem(_ r: AgentRequestsModel, _ line: String) -> NSMenuItem {
+        let item = NSMenuItem(title: line, action: nil, keyEquivalent: "")
+        item.image = NSImage(systemSymbolName: "person.badge.key", accessibilityDescription: nil)
+        if r.rows.count == 1 { item.subtitle = r.rows[0].detail }
+        let sub = NSMenu()
+        let core = self.core
+        for (n, row) in r.rows.enumerated() {
+            if n > 0 { sub.addItem(.separator()) }
+            sub.addItem(.sectionHeader(title: row.title))
+            let detail = NSMenuItem(title: row.detail, action: nil, keyEquivalent: "")
+            detail.isEnabled = false
+            sub.addItem(detail)
+            sub.addItem(ActionItem(title: r.approveTitle) { AgentRequests.decide(core: core, id: row.id, approve: true, notify: false) })
+            sub.addItem(ActionItem(title: r.denyTitle) { AgentRequests.decide(core: core, id: row.id, approve: false, notify: false) })
+        }
+        item.submenu = sub
+        return item
     }
 
     /// Updates subtitles, marks and checks in place; no structural change, so the highlight stays put.

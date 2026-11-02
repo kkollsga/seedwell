@@ -9,7 +9,7 @@ enum CoreEvent: Sendable {
     case goalReached(TransferRow)
     case needsChoice(TransferRow)
     case autoAdded(AutoAdded)
-    case duplicate(String, trackersAdded: Int)
+    case duplicate(id: String, name: String, trackersAdded: Int)
     case addRequest(AddRequestInfo)
     case agent(AgentActivity)
     case settingsChanged(file: String, warnings: [String], restartRequired: [String])
@@ -29,7 +29,9 @@ final class CoreEvents: CoreListener, Sendable {
     func onGoalReached(row: TransferRow) { send(.goalReached(row)) }
     func onNeedsChoice(row: TransferRow) { send(.needsChoice(row)) }
     func onAutoAdded(added: AutoAdded) { send(.autoAdded(added)) }
-    func onDuplicate(name: String, trackersAdded: UInt32) { send(.duplicate(name, trackersAdded: Int(trackersAdded))) }
+    func onDuplicate(id: String, name: String, trackersAdded: UInt32) {
+        send(.duplicate(id: id, name: name, trackersAdded: Int(trackersAdded)))
+    }
     func onAddRequest(request: AddRequestInfo) { send(.addRequest(request)) }
     func onAgentActivity(activity: AgentActivity) { send(.agent(activity)) }
     func onSettingsChanged(file: String, warnings: [String], restartRequired: [String]) {
@@ -53,20 +55,36 @@ final class CoreEvents: CoreListener, Sendable {
     static func requestAuthorization() {
         guard available else { return }
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+        registerCategories()
+    }
+
+    /// The notifications with buttons (an agent's request: Approve, Deny), as the core lists them.
+    static func registerCategories() {
+        let categories = noticeCategories().map { c in
+            UNNotificationCategory(identifier: c.id, actions: c.actions.map { a in
+                var options: UNNotificationActionOptions = []
+                if a.destructive { options.insert(.destructive) }
+                if a.authenticate { options.insert(.authenticationRequired) }
+                return UNNotificationAction(identifier: a.id, title: a.title, options: options)
+            }, intentIdentifiers: [], options: [])
+        }
+        UNUserNotificationCenter.current().setNotificationCategories(Set(categories))
     }
 
     /// A notice of the core's; one with a `key` takes the place of the last one with that key.
     static func post(_ n: Notice) {
-        post(title: n.title, body: n.body, key: n.key ?? UUID().uuidString, click: n.click)
+        post(title: n.title, body: n.body, key: n.key ?? UUID().uuidString, click: n.click, category: n.category)
     }
 
-    /// A notification whose click opens the window, unless `click` (a `Notice.click`) says otherwise.
-    static func post(title: String, body: String, key: String = UUID().uuidString, click: String = "") {
+    /// A notification whose click opens the window, unless `click` (a `Notice.click`) says otherwise; `category`: its
+    /// buttons (`registerCategories`).
+    static func post(title: String, body: String, key: String = UUID().uuidString, click: String = "", category: String? = nil) {
         guard available else { log.notice("(notification) \(title, privacy: .public): \(body, privacy: .private)"); return }
         let content = UNMutableNotificationContent()
         content.title = title
         content.body = body
         content.userInfo = [clickKey: click]
+        if let category { content.categoryIdentifier = category }
         UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: key, content: content, trigger: nil))
     }
 

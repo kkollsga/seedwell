@@ -12,7 +12,7 @@
   the network either (no DHT, PEX, LSD, UPnP or NAT-PMP).
 
   Checks: render, handoff, separate, gate, selection, keys, removal, info, alert, trash, choice, move, add, chat,
-  dialogs, newchannel, links, tray, scheme, rendezvous, follow, folders, chatpage, platform, slowstart, damaged, notray, settings, quit (all of them: all, the default).
+  dialogs, newchannel, links, tray, scheme, rendezvous, follow, folders, chatpage, platform, slowstart, damaged, notices, settingspage, requests, notray, settings, quit (all of them: all, the default).
   -Build builds the app first (build.ps1; -CoreProfile Debug builds its core from the debug test build, as CI does).
   -Out keeps the pictures in <dir> (default: a temp folder, printed).
   Flyouts (menus, the members panel and its role menus) are drawn by the render run (SnapshotRenderer.cs, check
@@ -34,7 +34,7 @@ $Repo = Split-Path $App -Parent
 $Exe = Join-Path $App 'bin\x64\Release\net10.0-windows10.0.19041.0\win-x64\Seedwell.exe'
 $Cli = Join-Path $Repo 'target\debug\seedwell.exe'
 $Fixtures = Join-Path $Repo 'crates\metainfo\tests\fixtures'
-$All = @('render', 'handoff', 'separate', 'gate', 'selection', 'keys', 'removal', 'info', 'alert', 'trash', 'choice', 'move', 'add', 'chat', 'dialogs', 'newchannel', 'links', 'tray', 'scheme', 'rendezvous', 'follow', 'folders', 'chatpage', 'platform', 'slowstart', 'damaged', 'notray', 'settings', 'quit')
+$All = @('render', 'handoff', 'separate', 'gate', 'selection', 'keys', 'removal', 'info', 'alert', 'trash', 'choice', 'move', 'add', 'chat', 'dialogs', 'newchannel', 'links', 'tray', 'scheme', 'rendezvous', 'follow', 'folders', 'chatpage', 'platform', 'slowstart', 'damaged', 'notices', 'settingspage', 'requests', 'notray', 'settings', 'quit')
 
 if ($Build) {
   & powershell -NoProfile -File (Join-Path $App 'build.ps1') -CoreProfile $CoreProfile | Out-Host
@@ -182,7 +182,7 @@ $checks.render = {
     if ($front -gt 0) { Fail "the $theme render held the foreground ($front samples)" }
   }
   $pictures = @(Get-ChildItem $dir -Filter *.png | ForEach-Object FullName)
-  foreach ($must in 'menu-dark', 'menu-sync-confirm-light', 'row-menu-dark', 'remove-light', 'library-downloads-dark', 'library-info-light', 'library-removal-dark', 'library-foldersync-light', 'library-settings-dark', 'channel-menu-light', 'tray-menu-dark', 'new-channel-light', 'new-channel-join-dark', 'dialog-new-topic-dark', 'dialog-leave-light', 'dialog-agents-dark', 'library-foldersync-dark', 'foldersync-remove-light', 'add-folder-dark', 'add-folder-shared-light', 'edit-folder-dark', 'share-light', 'library-chat-dark', 'library-direct-light', 'chat-menu-dark', 'chat-files-light', 'file-icons-dark', 'tray-both-32') {
+  foreach ($must in 'menu-dark', 'menu-sync-confirm-light', 'row-menu-dark', 'remove-light', 'library-downloads-dark', 'library-info-light', 'library-removal-dark', 'library-foldersync-light', 'library-settings-dark', 'channel-menu-light', 'tray-menu-dark', 'new-channel-light', 'new-channel-join-dark', 'dialog-new-topic-dark', 'dialog-leave-light', 'dialog-agents-dark', 'library-foldersync-dark', 'foldersync-remove-light', 'add-folder-dark', 'add-folder-shared-light', 'edit-folder-dark', 'share-light', 'library-chat-dark', 'library-direct-light', 'chat-menu-dark', 'chat-files-light', 'prompt-add-request-dark', 'prompt-location-move-light', 'prompt-backlog-dark', 'settings-general-dark', 'settings-transfers-light', 'settings-folders-dark', 'settings-network-light', 'settings-agents-dark', 'settings-advanced-light', 'file-icons-dark', 'tray-both-32') {
     if (-not (Test-Path "$dir\$must.png")) { Fail "missing $must.png" }
   }
   $pictures
@@ -889,6 +889,116 @@ $checks.damaged = {
   @()
 }
 
+# Notifications and the core's questions (W4), on temp states (a QA run posts no Windows notification: it keeps each
+# notice, and a question waits for the QA command prompt):
+# - a watch folder ("ask first") that already holds a .torrent at start: the backlog offer; Add adds it;
+# - a new .torrent in it: the add request; Add adds it;
+# - the same torrent, started, added again: the core's duplicate notice; a click on it opens its route;
+# - a bad value in config.toml: the settings banner says which (its own state: the temp config check would refuse it).
+$checks.notices = {
+  $dir = New-State 'control'
+  New-Item -ItemType Directory -Force "$dir\watch" | Out-Null
+  Copy-Item $fixture.debian "$dir\watch\debian.torrent"
+  $cfg = "$dir\state\config.toml"
+  ((Get-Content $cfg -Raw) -replace "watch = \[\]\r?\n", '') + "`n[[folders.watch]]`npath = '$dir\watch'`nenabled = true`nmode = `"ask`"`nafter_add = `"leave`"`n" | Set-Content -NoNewline -Encoding utf8 $cfg
+  $p = Start-App $dir -QaControl
+  try {
+    $offer = WaitFor { $s = Qa $dir @('prompt', 'status'); if ($s -notmatch 'waiting ""') { $s } } 10000 'the backlog offer'
+    Qa $dir @('prompt', 'yes') | Out-Null
+    WaitFor { List $dir | Where-Object { $_ -match 'Debian' } } 10000 'the offered torrent to be added' | Out-Null
+    Copy-Item $fixture.ubuntu "$dir\watch\ubuntu.torrent"
+    $ask = WaitFor { $s = Qa $dir @('prompt', 'status'); if ($s -notmatch 'waiting ""') { $s } } 15000 'the add request'
+    Qa $dir @('prompt', 'yes') | Out-Null
+    WaitFor { List $dir | Where-Object { $_ -match 'Ubuntu' } } 10000 'the asked torrent to be added' | Out-Null
+    # Out of its countdown (an isolated run asks no real tracker), then added again: a duplicate (a held one is not).
+    & $Cli --socket "$dir\state\control.sock" start Debian 2>&1 | Out-Null
+    WaitFor { -not (List $dir | Where-Object { $_ -match 'pending' -and $_ -match 'Debian' }) } 10000 'Debian out of its countdown' | Out-Null
+    & $Cli --socket "$dir\state\control.sock" add $fixture.debian 2>&1 | Out-Null
+    $dup = WaitFor { $s = Qa $dir @('notices'); if ($s -match 'Duplicate') { $s } } 10000 'the duplicate notice'
+    if ($dup -notmatch 'Duplicate: [^\[]*\[[^\]]*\] \{([^}]*)\}') { Fail "the duplicate notice has no click: $dup" }
+    $opened = Qa $dir @('notice-click', $Matches[1])
+    if (-not (Log $dir | Where-Object { $_ -like '*notice route:*' })) { Fail "a click on the notice opened nothing: $opened" }
+  } finally { Stop-App $dir $p; Remove-Item -Recurse -Force $dir }
+
+  $dir = New-State
+  $cfg = "$dir\state\config.toml"
+  (Get-Content $cfg -Raw) -replace 'start_delay_secs = 600', 'start_delay_secs = "soon"' | Set-Content -NoNewline -Encoding utf8 $cfg
+  $p = Start-App $dir -QaControl
+  try {
+    $banner = WaitFor { $s = Qa $dir @('banner'); if ($s -notmatch 'banner: none') { $s } } 10000 'the settings banner'
+    if ($banner -notmatch 'Problem: ' -or $banner -notmatch '\[Open Settings\]') { Fail "the banner does not say the problem with Open Settings: $banner" }
+    Qa $dir @('window') | Out-Null
+    Qa $dir @('shot', 'settings-banner') | Out-Null
+    Copy-Item "$dir\state\qa\settings-banner.png" "$Out\settings-banner.png"
+  } finally {
+    # Not Stop-App: its check refuses a temp config with a problem, which this one has on purpose.
+    Launch $dir @('--quit') | Out-Null
+    if (-not $p.WaitForExit(30000)) { $p.Kill() }
+    Remove-Item -Recurse -Force $dir
+  }
+  @()
+}
+
+# Settings (W5), the core's model in one generic renderer, on a temp state: every tab draws (Devices as its section);
+# a switch, a speed field with its unit and folder sync's device name are saved (read back from the core after the
+# reload); a speed the core refuses changes nothing.
+$checks.settingspage = {
+  $dir = New-State 'control'
+  $p = Start-App $dir -QaControl
+  try {
+    WaitForSync $dir
+    Qa $dir @('window') | Out-Null
+    foreach ($t in 'General', 'Transfers', 'Folders', 'Network', 'FolderSync', 'Agents', 'Advanced') {
+      $d = Qa $dir @('settings', 'tab', $t)
+      if ($d -notmatch "tab $t," -or $d -match 'rows 0,') { Fail "Settings › $t did not draw its rows: $d" }
+    }
+    $dev = Qa $dir @('settings', 'tab', 'Devices')
+    if ($dev -notmatch 'blocks \[Devices\]') { Fail "Settings › Devices is not its section: $dev" }
+
+    Qa $dir @('settings', 'tab', 'General') | Out-Null
+    Qa $dir @('settings', 'set', 'notify.finished', 'off') | Out-Null
+    $off = WaitFor { $s = Qa $dir @('settings', 'row', 'notify.finished'); if ($s -match ': off;') { $s } } 10000 'the switch saved and read back'
+
+    Qa $dir @('settings', 'tab', 'Transfers') | Out-Null
+    Qa $dir @('settings', 'set', 'speed.down', '5', 'MB/s') | Out-Null
+    $down = WaitFor { $s = Qa $dir @('settings', 'row', 'speed.down'); if ($s -match '5 MB/s') { $s } } 10000 'the limit saved and read back'
+    Qa $dir @('settings', 'set', 'speed.down', 'lots', 'MB/s') | Out-Null
+    $still = Qa $dir @('settings', 'row', 'speed.down')
+    if ($still -notmatch '5 MB/s') { Fail "a refused limit changed it: $still" }
+
+    Qa $dir @('settings', 'tab', 'FolderSync') | Out-Null
+    Qa $dir @('settings', 'set', 'sync.device-name', 'QA-PC') | Out-Null
+    WaitFor { ((& $Cli --socket "$dir\state\control.sock" sync settings 2>&1) -join ' ') -match 'QA-PC' } 10000 'the device name in folder sync' | Out-Null
+    Qa $dir @('shot', 'settings-foldersync') | Out-Null
+    Copy-Item "$dir\state\qa\settings-foldersync.png" "$Out\settings-foldersync.png"
+  } finally { Stop-App $dir $p; Remove-Item -Recurse -Force $dir }
+  @("$Out\settings-foldersync.png")
+}
+
+# An agent asks for access (build 46, SPEC 9A.8), on a temp state: an agent at control runs `agents request full`; the
+# core's notice comes with Approve and Deny, the tray has its line and Settings › Agents its Requests row; Deny on the
+# notice answers it (the CLI's `agents requests --all` says denied) and the line goes.
+$checks.requests = {
+  $dir = New-State 'control'
+  $p = Start-App $dir -QaControl
+  try {
+    Qa $dir @('window') | Out-Null
+    & $Cli --socket "$dir\state\control.sock" agents request full --why 'QA check' 2>&1 | Out-Null
+    $notice = WaitFor { $s = Qa $dir @('notices'); if ($s -match 'AgentRequest: ') { $s } } 10000 "the request's notice"
+    $line = Qa $dir @('requests')
+    if ($line -notmatch 'line "[^"]+", rows 1') { Fail "no tray line and one request: $line" }
+    Qa $dir @('settings', 'tab', 'Agents') | Out-Null
+    $rows = Qa $dir @('settings', 'rows')
+    if ($rows -notmatch 'request') { Fail "Settings › Agents has no Requests row: $rows" }
+    $clicked = Qa $dir @('notice-action', 'deny')
+    if ($clicked -notmatch 'clicked deny .*\[approve, deny\]') { Fail "the notice has no Approve and Deny: $clicked" }
+    WaitFor { ((& $Cli --socket "$dir\state\control.sock" agents requests --all 2>&1) -join ' ') -match '(?i)denied' } 10000 'the request denied' | Out-Null
+    $after = Qa $dir @('requests')
+    if ($after -notmatch 'line "", rows 0') { Fail "the request is still waiting: $after" }
+  } finally { Stop-App $dir $p; Remove-Item -Recurse -Force $dir }
+  @()
+}
+
 $checks.settings = {
   $dir = New-State
   $p = Start-App $dir -QaControl
@@ -939,6 +1049,11 @@ $checks.quit = {
     if (-not $again.WaitForExit(15000)) { $again.Kill(); $again.WaitForExit(5000) | Out-Null; Fail '--quit with no app running did not end within 15 s' }
     $started = Log $dir | Select-Object -Skip $before | Where-Object { $_ -like '*launch:*' }
     if ($started) { Fail "--quit with no app running started one: $started" }
+    # A QA command for an app that is not running: it ends too, never starting an app without --qa-control.
+    $qa = Start-Process $Exe -ArgumentList @('--state-dir', "$dir\state", '--qa', 'window') -PassThru
+    if (-not $qa.WaitForExit(15000)) { $qa.Kill(); $qa.WaitForExit(5000) | Out-Null; Fail '--qa with no app running did not end within 15 s' }
+    $started = Log $dir | Select-Object -Skip $before | Where-Object { $_ -like '*launch:*' }
+    if ($started) { Fail "--qa with no app running started one: $started" }
   } finally { Stop-App $dir $p; Remove-Item -Recurse -Force $dir }
   @()
 }

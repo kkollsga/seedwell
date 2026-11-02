@@ -18,6 +18,7 @@ use tokio::io::{AsyncWriteExt, BufReader, WriteHalf};
 use tokio::sync::{Semaphore, broadcast, watch};
 use tokio::task::JoinSet;
 
+use crate::access::AccessDesk;
 use crate::activity::{ActivityLog, describe};
 use crate::awake::Awake;
 use crate::backend::{AddArgs, AddSource, Backend};
@@ -177,10 +178,12 @@ struct Ctx<B> {
     activity: ActivityLog,
     awake: Awake,
     confirms: Mutex<Confirmations>,
+    /// Agents' requests for access (`agents.request`); the app answers them.
+    desk: AccessDesk,
     /// `sync.remove` plans (their tokens never remove a torrent, and the other way round).
     #[cfg_attr(not(feature = "sync"), allow(dead_code))]
     sync_confirms: Mutex<Confirmations<SyncPlan>>,
-    hub: EventHub,
+    hub: Arc<EventHub>,
     connections: AtomicUsize,
     calls: AtomicU64,
     stop: watch::Receiver<bool>,
@@ -201,6 +204,7 @@ pub struct ServerHandle {
     warnings: Vec<String>,
     activity: ActivityLog,
     awake: Awake,
+    desk: AccessDesk,
     stop: watch::Sender<bool>,
     task: Option<tokio::task::JoinHandle<()>>,
     connections: Arc<dyn Fn() -> usize + Send + Sync>,
@@ -221,6 +225,11 @@ impl ServerHandle {
     /// Agents' leases on keeping the Mac awake (the app holds a power assertion while one is live).
     pub fn awake(&self) -> &Awake {
         &self.awake
+    }
+
+    /// Agents' requests for access: what the app shows and answers (no control method answers them).
+    pub fn access(&self) -> &AccessDesk {
+        &self.desk
     }
 
     /// Notes from startup (for example a loosely protected parent directory).
@@ -274,15 +283,23 @@ pub async fn serve_backend<B: Backend>(
     let awake = Awake::new();
     #[cfg(feature = "sync")]
     let (chat_taps, chat_taps_rx) = tokio::sync::mpsc::unbounded_channel();
+    let hub = Arc::new(EventHub::new());
+    let desk = {
+        let hub = hub.clone();
+        AccessDesk::new(activity.clone(), state.clone(), opts.builds.clone(), Arc::new(move |e| hub.publish(e)))
+    };
+    #[cfg(feature = "sync")]
+    desk.set_applier(Arc::new(chat_methods::SyncApplier::new(backend.clone())));
     let ctx = Arc::new(Ctx {
         backend,
         state,
         perm,
+        desk: desk.clone(),
         activity: activity.clone(),
         awake: awake.clone(),
         confirms: Mutex::new(Confirmations::new(opts.confirm_ttl)),
         sync_confirms: Mutex::new(Confirmations::new(opts.confirm_ttl)),
-        hub: EventHub::new(),
+        hub,
         connections: AtomicUsize::new(0),
         calls: AtomicU64::new(0),
         stop: stop_rx.clone(),
@@ -324,6 +341,7 @@ pub async fn serve_backend<B: Backend>(
         warnings: bound.warnings,
         activity,
         awake,
+        desk,
         stop: stop_tx,
         task: Some(task),
         connections: Arc::new(move || c1.connections.load(Ordering::Relaxed)),
@@ -637,15 +655,16 @@ fn authorize<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &Conn, method: Method) -> Resu
 }
 
 fn denied(method: &str, required: Permission, current: Permission) -> ApiError {
+    let ask = format!("seedwell agents request {}", crate::access::level_name(required));
     ApiError::new(
         ErrorCode::PermissionDenied,
         format!(
-            "`{method}` needs agent permission `{}` but the current level is `{}`; the user can raise it in Seedwell Settings -> Agents",
+            "`{method}` needs agent permission `{}` but the current level is `{}`; ask the user for it with `{ask} --why \"<what for>\"` (one click or a chat reply from the user grants it; `seedwell agents requests` shows the answer)",
             required.as_str(),
             current.as_str()
         ),
     )
-    .with_data(json!({ "required": required.as_str(), "current": current.as_str() }))
+    .with_data(json!({ "required": required.as_str(), "current": current.as_str(), "ask": ask }))
 }
 
 async fn rows<B: Backend>(ctx: &Ctx<B>) -> Result<(Vec<TransferDto>, TotalsDto), ApiError> {
@@ -885,6 +904,23 @@ async fn dispatch<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &mut Conn, req: Request) 
             })
             .await??;
             reply(&out)
+        }
+        Request::UpdateNow(_) => {
+            let b = updater(ctx)?;
+            let out = blocking(move || -> Result<UpdateStatusDto, ApiError> {
+                let note = b.update_now().map_err(ApiError::invalid)?;
+                Ok(UpdateStatusDto { note, ..b.status() })
+            })
+            .await??;
+            let mut r = reply(&out)?;
+            r.note = Some(out.note);
+            Ok(r)
+        }
+        Request::AgentsRequest(p) => agents_request(ctx, conn, p).await,
+        Request::AgentsRequests(p) => {
+            let desk = ctx.desk.clone();
+            let list = blocking(move || desk.list(p.all)).await?;
+            reply(&AccessRequestsDto { permission: ctx.perm.get().as_str().into(), requests: list.iter().map(|e| e.dto()).collect() })
         }
         Request::TrackerLog(p) => {
             let st = ctx.state.clone();
@@ -1286,6 +1322,75 @@ async fn chat_call<B: Backend>(_ctx: &Arc<Ctx<B>>, _conn: &Conn, _r: Request) ->
 #[cfg(not(feature = "sync"))]
 async fn sync_call<B: Backend>(_ctx: &Arc<Ctx<B>>, _conn: &Conn, _r: Request) -> Result<Reply, ApiError> {
     Err(ApiError::new(ErrorCode::Unsupported, "folder sync is not running (this build has no folder sync)"))
+}
+
+/// The name an agent's request goes under: the one it gives (its project's), else its client name.
+fn agent_label(conn: &Conn, given: Option<&str>) -> Result<String, ApiError> {
+    let raw = given.or(conn.client.as_deref()).unwrap_or("agent");
+    let name: String = raw.chars().filter(|c| !c.is_control()).collect();
+    let name = name.trim();
+    if name.is_empty() || name.chars().count() > 64 {
+        return Err(ApiError::params("`agent` is a name of 1 to 64 characters"));
+    }
+    Ok(name.to_owned())
+}
+
+/// `agents.request`: records the request (or finds the one pending for the same thing), announces it in a channel
+/// when asked to, and says what happens now. Nothing is granted here.
+async fn agents_request<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &Conn, p: AgentsRequestParams) -> Result<Reply, ApiError> {
+    use crate::access::Want;
+    let want = Want::parse(&p.what, p.target.as_deref())?;
+    let agent = agent_label(conn, p.agent.as_deref())?;
+    if p.channel.is_none() && (p.topic.is_some() || p.reply_to.is_some()) {
+        return Err(ApiError::params("`topic` and `reply_to` go with `channel`"));
+    }
+    // The channel to announce in first: a wrong one asks nothing.
+    #[cfg(feature = "sync")]
+    let place = match p.channel.as_deref() {
+        Some(c) => {
+            let place = chat_methods::announce_place(ctx, c, p.topic.as_deref())?;
+            // The replies to the announcement reach the desk through the pump: a receiver made now misses none (the
+            // pump finds a service that just started only a moment later).
+            chat_methods::tap(ctx);
+            Some(place)
+        }
+        None => None,
+    };
+    #[cfg(not(feature = "sync"))]
+    if p.channel.is_some() {
+        return Err(ApiError::new(ErrorCode::Unsupported, "channels are not available (this build has no folder sync)"));
+    }
+    let desk = ctx.desk.clone();
+    let why = p.why.clone();
+    let (who, w) = (agent.clone(), want.clone());
+    let (e, dup) = blocking(move || desk.ask(w, &who, why.as_deref())).await??;
+    #[cfg_attr(not(feature = "sync"), allow(unused_mut))]
+    let mut said = Vec::new();
+    #[cfg(feature = "sync")]
+    let mut e = e;
+    #[cfg(feature = "sync")]
+    if let Some(place) = place
+        && e.announced.is_none()
+    {
+        match chat_methods::announce(ctx, &place, &e, p.reply_to.as_deref()).await {
+            Ok((channel, message)) => {
+                ctx.desk.announced(&e.id, &channel, &message);
+                e.announced = Some(crate::access::Announcement { channel, message });
+                said.push("announced it in the channel: the user's reply \"yes\" or \"no\" there answers it too".to_owned());
+            }
+            Err(err) => said.push(format!("it could not be announced in the channel ({})", clip(&err.message, 200))),
+        }
+    }
+    let head = if dup {
+        format!("The user was already asked for {} ({}); you are added to that request", want.text(), e.who())
+    } else {
+        format!("Asked the user for {}", want.text())
+    };
+    let tail = "Nothing changes until the user answers in Seedwell (a notification with Approve and Deny, Settings › Agents) or with a reply in chat. `seedwell agents requests` shows the answer (also an `agents.request` event); unanswered, it expires in a day";
+    let note = std::iter::once(head).chain(said).chain(std::iter::once(tail.to_owned())).collect::<Vec<_>>().join("; ");
+    let mut r = reply(&AccessAskedDto { request: e.dto(), duplicate: dup, note })?;
+    r.note = Some(format!("request {}{}", e.id, if dup { " (asked already)" } else { "" }));
+    Ok(r)
 }
 
 async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> Result<T, ApiError> {

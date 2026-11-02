@@ -556,10 +556,10 @@ sealed class ChatPage
                 if (channel is not null) ShareDialog.Show(app, channel.Id);
                 break;
             case ChatPageCommand.SetMuted mute when channel is not null:
-                app.Core.ChatSetMuted(channel.Id, mute.Muted);
-                break;
+                Call(() => app.Core.ChatSetMuted(channel.Id, mute.Muted), e => new SyncAlert(e, ""));
+                return;
             case ChatPageCommand.SetAgents agents when channel is not null:
-                Call(() => { app.Core.ChatSetAgents(channel.Id, agents.Open); return Task.CompletedTask; }, e => new SyncAlert(TrsFfiMethods.ChatAgentsMenu(channel).FailureTitle, e));
+                Call(() => app.Core.ChatSetAgents(channel.Id, agents.Open), e => new SyncAlert(TrsFfiMethods.ChatAgentsMenu(channel).FailureTitle, e));
                 break;
             case ChatPageCommand.SetFollow follow when channel is not null:
                 Call(() => app.Core.SyncSetFollow(channel.Id, follow.On), e => new SyncAlert(e, ""));

@@ -31,14 +31,14 @@ async fn call(c: &mut trs_control::Client, method: &str, params: Value) -> Resul
     c.call(&r).await.map_err(api)
 }
 
-struct SyncRig {
-    rig: Rig,
-    h: SyncHandle,
-    root: tempfile::TempDir,
+pub(crate) struct SyncRig {
+    pub(crate) rig: Rig,
+    pub(crate) h: SyncHandle,
+    pub(crate) root: tempfile::TempDir,
 }
 
 impl SyncRig {
-    async fn new(level: Permission) -> SyncRig {
+    pub(crate) async fn new(level: Permission) -> SyncRig {
         let opts = ServerOptions { rate_per_sec: 500, burst: 500, ..ServerOptions::default() };
         let rig = Rig::with(level, opts, vec![]).await;
         let root = tempfile::tempdir().unwrap();
@@ -324,7 +324,7 @@ async fn removal_takes_two_steps_and_the_trash_is_the_configured_one() {
 }
 
 /// A second device on loopback (no control socket of its own).
-async fn other_device(root: &Path, name: &str) -> SyncHandle {
+pub(crate) async fn other_device(root: &Path, name: &str) -> SyncHandle {
     let state = root.join(name);
     std::fs::create_dir_all(&state).unwrap();
     let secrets = Arc::new(FileSecrets::new(state.join("secrets")));
@@ -338,7 +338,7 @@ async fn other_device(root: &Path, name: &str) -> SyncHandle {
     .unwrap()
 }
 
-async fn wait_until(secs: u64, what: &str, mut ok: impl FnMut() -> bool) {
+pub(crate) async fn wait_until(secs: u64, what: &str, mut ok: impl FnMut() -> bool) {
     let end = std::time::Instant::now() + std::time::Duration::from_secs(secs);
     while std::time::Instant::now() < end {
         if ok() {
@@ -634,7 +634,9 @@ async fn a_channel_closed_to_agents_does_not_exist_for_them() {
     let line = r#"{"v":1,"id":1,"method":"chat.dm_set_agents","params":{"agents":"post"}}"#;
     assert!(Method::from_name("chat.dm_set_agents").is_none());
     assert_eq!(decode_envelope(line.as_bytes()).unwrap_err().error.code, ErrorCode::UnknownMethod);
-    assert!(Method::ALL.iter().all(|m| !m.name().contains("agents") || m.name() == "chat.set_agents"), "no other method names a switch");
+    // Asking the user (`agents.request`) names one but changes nothing: only the user's answer, outside the socket, does.
+    let names_a_switch = |n: &str| n.contains("agents") && !["chat.set_agents", "agents.request", "agents.requests"].contains(&n);
+    assert!(Method::ALL.iter().all(|m| !names_a_switch(m.name())), "no other method names a switch");
     let closed: ChatChannelDto = serde_json::from_value(call(&mut c, "chat.set_agents", json!({"channel": "Open", "agents": "no"})).await.unwrap()).unwrap();
     assert_eq!((closed.name.as_str(), closed.agents.as_str()), ("Open", "no"));
     assert_eq!(call(&mut c, "chat.set_agents", json!({"channel": "Open", "agents": "yes"})).await.unwrap_err().code, ErrorCode::NotFound, "gone for agents");

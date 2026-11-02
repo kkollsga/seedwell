@@ -133,8 +133,8 @@ impl CoreListener for Listener {
     fn on_auto_added(&self, added: AutoAdded) {
         self.inner.on_auto_added(added);
     }
-    fn on_duplicate(&self, name: String, trackers_added: u32) {
-        self.inner.on_duplicate(name, trackers_added);
+    fn on_duplicate(&self, id: String, name: String, trackers_added: u32) {
+        self.inner.on_duplicate(id, name, trackers_added);
     }
     fn on_add_request(&self, request: AddRequestInfo) {
         self.inner.on_add_request(request);

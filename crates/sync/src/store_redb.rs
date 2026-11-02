@@ -105,6 +105,8 @@ const TOTALS_KEY: &str = "need_totals";
 const LOCAL_TOTALS_KEY: &str = "local_totals";
 /// [`IndexStore::feed_floor`] (absent: 0).
 const FEED_FLOOR_KEY: &str = "feed_floor";
+/// [`IndexStore::ignore_applied`] (absent: none noted; an earlier build ignores the key).
+const IGNORE_APPLIED_KEY: &str = "ignore_applied";
 
 /// Most holders one need record may list.
 const MAX_HOLDERS: usize = 1 << 16;
@@ -207,6 +209,8 @@ pub struct RedbStore {
     read_only: bool,
     /// [`IndexStore::feeds_host`].
     feeds_host: bool,
+    /// [`IndexStore::ignore`].
+    ignore: Option<Arc<crate::ignore::Ignore>>,
 }
 
 /// A read-only handle on an open index, for reads that must not wait for whoever holds the store: a device
@@ -238,6 +242,7 @@ impl RedbReader {
             report: OpenReport { created: false, migrated: None },
             read_only: true,
             feeds_host: false,
+            ignore: None,
         }
     }
 }
@@ -329,6 +334,7 @@ impl RedbStore {
                 unflushed: Arc::new(AtomicBool::new(false)),
                 read_only: false,
                 feeds_host: false,
+                ignore: None,
                 report: OpenReport { created, migrated },
             })
         })
@@ -926,6 +932,9 @@ impl<'t> Writing<'t> {
                 opened(self.txn, &mut self.retired, RETIRED)?.retain(|s, _| s > upto).map_err(dbe)?;
                 self.meta.insert(FEED_FLOOR_KEY, upto.to_le_bytes().as_slice()).map_err(dbe)?;
             }
+            Op::IgnoreApplied(source) => {
+                self.meta.insert(IGNORE_APPLIED_KEY, source.as_bytes()).map_err(dbe)?;
+            }
         }
         Ok(())
     }
@@ -1321,6 +1330,23 @@ impl IndexStore for RedbStore {
 
     fn set_feeds_host(&mut self, on: bool) {
         self.feeds_host = on;
+    }
+
+    fn ignore(&self) -> Option<Arc<crate::ignore::Ignore>> {
+        self.ignore.clone()
+    }
+
+    fn set_ignore(&mut self, ignore: Option<Arc<crate::ignore::Ignore>>) {
+        self.ignore = ignore;
+    }
+
+    fn ignore_applied(&self) -> io::Result<Option<String>> {
+        guard(&self.path, || {
+            let rtx = self.rtx()?;
+            let t = rtx.open_table(META).map_err(dbe)?;
+            let Some(v) = t.get(IGNORE_APPLIED_KEY).map_err(dbe)? else { return Ok(None) };
+            String::from_utf8(v.value().to_vec()).map(Some).map_err(|_| bad("meta", IGNORE_APPLIED_KEY, "not UTF-8"))
+        })
     }
 
     fn shown_at(&self, path: &str) -> io::Result<Option<u64>> {

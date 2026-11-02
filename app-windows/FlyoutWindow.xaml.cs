@@ -211,8 +211,10 @@ public sealed partial class FlyoutWindow : Window
             return;
         }
         SyncMenuModel? sync = syncOpen ? TrsFfiMethods.SyncMenuModel(lastSync, app.SyncRemoval, App.HostWindows) : null;
-        if (opening || model.Signature != signature || (sync?.Signature ?? "") != syncSignature)
+        try { requests = app.Core.AgentRequests(App.Now()); } catch { requests = null; }
+        if (opening || model.Signature != signature || (sync?.Signature ?? "") != syncSignature || (requests?.Signature ?? "") != requestsSignature)
         {
+            requestsSignature = requests?.Signature ?? "";
             Build(model, sync);
             if (IsOpen && !opening)
             {
@@ -229,6 +231,10 @@ public sealed partial class FlyoutWindow : Window
 
     // ------------------------------------------------------------------------------------------- building
 
+    // Agents waiting for access (the core's AgentRequestsModel), and what of them is drawn.
+    AgentRequestsModel? requests;
+    string requestsSignature = "";
+
     void Build(MenuModel m, SyncMenuModel? sync)
     {
         signature = m.Signature;
@@ -239,6 +245,27 @@ public sealed partial class FlyoutWindow : Window
         if (m.Offline is string offline)
         {
             Body.Children.Add(Text(offline, secondary: true, margin: new Thickness(10, 2, 10, 6)));
+        }
+        // An agent waiting for access: the core's line, each request's reason, Deny and Approve (the default).
+        if (requests?.Line is string asking)
+        {
+            Body.Children.Add(Text(asking, bold: true, margin: new Thickness(10, 6, 10, 2)));
+            foreach (var r in requests.Rows)
+            {
+                var p = new StackPanel { Spacing = 4, Margin = new Thickness(10, 2, 10, 6) };
+                p.Children.Add(Text(r.Detail, secondary: true, size: 12, wrap: true));
+                var buttons = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, HorizontalAlignment = HorizontalAlignment.Right };
+                var id = r.Id;
+                var deny = new Button { Content = requests.DenyTitle, MinWidth = 80, FontSize = 12, Padding = new Thickness(8, 3, 8, 4) };
+                deny.Click += (_, _) => app.Notifier?.Decide(id, false, () => Refresh(false));
+                var approve = new Button { Content = requests.ApproveTitle, MinWidth = 80, FontSize = 12, Padding = new Thickness(8, 3, 8, 4), Style = (Style)Application.Current.Resources["AccentButtonStyle"] };
+                approve.Click += (_, _) => app.Notifier?.Decide(id, true, () => Refresh(false));
+                buttons.Children.Add(deny);
+                buttons.Children.Add(approve);
+                p.Children.Add(buttons);
+                Body.Children.Add(p);
+            }
+            Body.Children.Add(Separator());
         }
         foreach (var s in m.Sections)
         {

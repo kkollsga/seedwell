@@ -5,6 +5,9 @@
 #[path = "../common/mod.rs"]
 mod common;
 
+mod access;
+#[cfg(feature = "sync")]
+mod access_chat;
 mod decoder;
 mod server;
 #[cfg(feature = "sync")]

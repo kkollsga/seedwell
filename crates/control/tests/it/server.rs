@@ -99,6 +99,7 @@ async fn permission_matrix_every_method_every_level() {
             Method::AwakeSet => json!({"key": "matrix", "secs": 60}),
             Method::UpdateInstall => json!({"path": "/tmp/Seedwell-0.0.1.1.zip"}),
             Method::UpdateDevBuilds => json!({"on": false}),
+            Method::AgentsRequest => json!({"what": "full", "why": "the matrix"}),
             Method::SyncStatus
             | Method::SyncShare
             | Method::SyncPause
@@ -1051,6 +1052,10 @@ impl trs_control::Builds for FakeBuilds {
         self.asked.lock().unwrap().push(format!("dev_builds {on}"));
         self.on.store(on, std::sync::atomic::Ordering::SeqCst);
         Ok(if on { "Development builds are allowed now" } else { "Development builds are off" }.into())
+    }
+    fn update_now(&self) -> Result<String, String> {
+        self.asked.lock().unwrap().push("update now".into());
+        Ok("Installing Seedwell 0.1.11".into())
     }
 }
 

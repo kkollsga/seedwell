@@ -142,6 +142,8 @@ import AppKit
 
     /// The commands' effects applied and laid out: SwiftUI applies a change on the next turns of the run loop.
     private func settle() async {
+        // The user's commands the QA commands started (saves, settings) are done first.
+        await CoreCalls.settled()
         for _ in 0..<2 {
             try? await Task.sleep(for: .milliseconds(20))
             for w in NSApp.windows where w.isVisible {
@@ -799,15 +801,17 @@ import AppKit
         case "event":
             model.event = rest == "all" ? "" : rest
         case "expand":
+            let rows = model.view.rows
             switch rest {
-            case "all": model.expanded = Set(model.items.map(\.id))
-            case "first": model.expanded = Set(model.items.first(where: { $0.row.kind == "announce" }).map(\.id).map { [$0] } ?? [])
-            case "last": model.expanded = Set(model.items.last(where: { $0.row.kind == "announce" }).map(\.id).map { [$0] } ?? [])
-            default: model.expanded = []
+            case "all": model.open(rows.map(\.id))
+            case "first": model.open(rows.first(where: { $0.kind == "announce" }).map { [$0.id] } ?? [])
+            case "last": model.open(rows.last(where: { $0.kind == "announce" }).map { [$0.id] } ?? [])
+            default: model.open([])
             }
         case "state":
             await model.refresh()
-            report("devlog: \(model.items.count) entries, \(model.items.filter { $0.row.error }.count) errors, dropped \(model.dropped), open \(nav.showTrackerLog), settings dev mode \(app.commands.core.settingsLoad().advanced.developerMode)")
+            let rows = model.view.rows
+            report("devlog: \(rows.count) entries, \(rows.filter(\.error).count) errors, \(model.view.countLine), open \(nav.showTrackerLog), settings dev mode \(app.commands.core.settingsLoad().advanced.developerMode)")
         default:
             report("devlog: unknown command \(arg)")
         }

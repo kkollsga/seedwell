@@ -31,6 +31,8 @@ import Observation
     /// Set when the configured listening port was taken at start and the engine listens elsewhere for now.
     private(set) var portFallback: PortFallbackInfo?
     private(set) var activity: [AgentActivity] = []
+    /// Agents' requests for access waiting for the user (Settings › Agents › Requests).
+    private(set) var requests: [AgentRequestRow] = []
     /// The port the engine listens on now: the manual one, or the random one picked at this start.
     private(set) var activePort: UInt16 = 0
     /// Whether peers on the Internet can reach the port: a peer that connected in, or the router's answer.
@@ -38,8 +40,8 @@ import Observation
     /// What General, Agents and Folder Sync show of this Mac: the players, the command-line tool and skill, the Finder
     /// extensions (read when their tab opens, and after a change).
     private(set) var playChoices: [PlayWithChoice] = []
-    private(set) var cliPath: String?
-    private(set) var skillInstalled = false
+    /// The command-line tool and the skill as the core found them, and the version line (`refreshSettingsHostFacts`, off the main thread).
+    private(set) var hostFacts: SettingsHostFacts
     private(set) var finderOn = false
     private(set) var shareMenuOn = false
     @ObservationIgnored private var portWatch: Task<Void, Never>?
@@ -60,6 +62,7 @@ import Observation
         rulesDoc = core.rulesLoad()
         profiles = core.profilesLoad()
         fileNotes = core.settingsProblems()
+        hostFacts = core.settingsHostFacts()
         refreshPort()
         refreshVolumeWarnings()
     }
@@ -107,10 +110,11 @@ import Observation
             syncReachability: syncReachability, syncPortMovingTo: syncPortMovingTo, rendezvous: syncRendezvous != nil,
             diagnostics: tab == .advanced ? core.diagnostics()
                 : DiagnosticsInfo(wakeups: 0, connections: 0, rechecks: 0, hashFailures: 0, peersBanned: 0, promotions: 0, demotions: 0),
-            activity: activity, updates: updates,
+            activity: activity, requests: requests, updates: updates,
             playWith: playChoices,
-            cli: SettingsCli(home: NSHomeDirectory(), installed: cliPath, bundled: CommandLineTool.bundledPath(), skillInstalled: skillInstalled),
-            finderOn: finderOn, shareMenuOn: shareMenuOn, stateDir: core.stateDir(), versionLine: AppInfo.versionLine)
+            cli: SettingsCli(home: NSHomeDirectory(), bundled: CommandLineTool.bundledPath()),
+            host: hostFacts,
+            finderOn: finderOn, shareMenuOn: shareMenuOn, stateDir: core.stateDir())
         return settingsViewModel(input: SettingsViewInput(tab: tab, state: state, live: live), host: hostWindowsAll(),
                                  features: hostFeaturesAll(), clock: clock)
     }
@@ -132,7 +136,7 @@ import Observation
         }
         if r.saves.contains(.rules) { saveRules(r.state.rules) }
         if r.saveNow { save() }
-        if let port = r.syncPort, let refused = setSyncPort(port) { apply(.syncPortRefused(message: refused)) }
+        if let port = r.syncPort { setSyncPort(port) }
         if let q = r.ask { ask(q) }
     }
 
@@ -145,9 +149,9 @@ import Observation
         case .rules(let change): rules(change)
         case .showTrackerTorrents: break // the window's navigation opens it (RulesTab)
         case let .chooseFolder(key, start):
-            if let p = FolderPicker.choose(start: start) { apply(.set(key: key, value: .typed(text: p))) }
+            Task { if let p = await FolderPicker.choose(start: start) { apply(.set(key: key, value: .typed(text: p))) } }
         case .chooseWatchFolder:
-            if let p = FolderPicker.choose(start: "~") { apply(.addWatchFolder(path: p)) }
+            Task { if let p = await FolderPicker.choose(start: "~") { apply(.addWatchFolder(path: p)) } }
         case .checkForUpdates: center.checkNow()
         case .installUpdate: center.install()
         case .showUpdateLog: center.revealLog()
@@ -193,6 +197,7 @@ import Observation
         case .manageFinderExtension: FIFinderSyncController.showExtensionManagementInterface()
         case .manageShareMenu: ShareMenu.openSettings()
         case .showFinderSetup: FinderSetup.show()
+        case let .decideAgentRequest(id, approve): AgentRequests.decide(core: core, id: id, approve: approve, notify: false)
         }
     }
 
@@ -263,10 +268,10 @@ import Observation
     /// A tab opened: what it shows of this Mac, read once.
     func opened(_ tab: SettingsTab) {
         switch tab {
-        case .general: playChoices = core.playWithChoices(selection: app.general.playWith)
+        case .general: playChoices = core.playWithChoices(selection: app.general.playWith); hostFacts = core.settingsHostFacts()
         case .network: refreshPort()
         case .folderSync: reloadSync(); refreshFinder()
-        case .agents: reloadActivity(); refreshCli()
+        case .agents: reloadActivity(); reloadRequests(); refreshCli()
         default: break
         }
     }
@@ -276,6 +281,7 @@ import Observation
         switch tab {
         case .network: reachability = core.reachability()
         case .folderSync: await refreshSync()
+        case .agents: reloadRequests()
         default: break
         }
     }
@@ -291,10 +297,12 @@ import Observation
         }
     }
 
+    /// What the core finds of the command-line tool and the skill, looked at off the main thread.
     private func refreshCli() {
-        let home = NSHomeDirectory()
-        cliPath = CommandLineTool.findInstalled(home: home, pathEnv: ProcessInfo.processInfo.environment["PATH"] ?? "")
-        skillInstalled = CommandLineTool.skillInstalled(home: home)
+        let core = self.core
+        CoreCalls.run({ await core.refreshSettingsHostFacts() }) { [weak self] f in
+            if self?.hostFacts != f { self?.hostFacts = f }
+        }
     }
 
     // MARK: Saving
@@ -366,6 +374,11 @@ import Observation
     }
 
     func reloadActivity() { activity = core.agentActivity(limit: 40) }
+
+    func reloadRequests() {
+        let rows = core.agentRequests(nowMs: Date().unixMs).rows
+        if rows != requests { requests = rows }
+    }
 
     func noteReloaded(warnings w: [String], restart: [String]) {
         warnings = w
@@ -448,15 +461,16 @@ import Observation
         loading = false
     }
 
-    /// Moves folder sync to `port` now. A port another app has is refused at once (the message is returned);
-    /// otherwise sync starts again on it and `refreshSync` sees it arrive.
-    func setSyncPort(_ port: UInt16) -> String? {
-        do {
-            try core.setSyncPort(port: port)
-            if port != sync?.port { syncPortMovingTo = port }
-            return nil
-        } catch {
-            return SyncText.message(error)
+    /// Moves folder sync to `port` now (off the main thread, after the changes given before it). A port another app
+    /// has is refused at once (the field says why); otherwise sync starts again on it and `refreshSync` sees it arrive.
+    func setSyncPort(_ port: UInt16) {
+        let core = self.core
+        CoreCalls.inOrder({ await catching { try await core.setSyncPort(port: port) } }) { [weak self] r in
+            guard let self else { return }
+            switch r {
+            case .success: if port != self.sync?.port { self.syncPortMovingTo = port }
+            case .failure(let error): self.apply(.syncPortRefused(message: SyncText.message(error)))
+            }
         }
     }
 
@@ -476,17 +490,21 @@ import Observation
 
     /// Starts a rendezvous action (it runs in the background; `syncRendezvous` shows how it goes). Returns why it was
     /// refused at once.
-    func rendezvous(_ action: RendezvousAction) -> String? {
-        do {
+    func rendezvous(_ action: RendezvousAction) async -> String? {
+        let core = self.core
+        let r = await catching {
             switch action {
-            case .setUp(let token): try core.syncRendezvousSetUp(token: token)
-            case .use(let address): try core.syncRendezvousUse(url: address)
-            case .test: try core.syncRendezvousTest()
-            case .turnOff: try core.syncRendezvousTurnOff()
+            case .setUp(let token): try await core.syncRendezvousSetUp(token: token)
+            case .use(let address): try await core.syncRendezvousUse(url: address)
+            case .test: try await core.syncRendezvousTest()
+            case .turnOff: try await core.syncRendezvousTurnOff()
             }
+        }
+        switch r {
+        case .success:
             syncRendezvous = core.syncRendezvous()
             return nil
-        } catch {
+        case .failure(let error):
             return SyncText.message(error)
         }
     }
@@ -496,10 +514,10 @@ import Observation
         syncSaveTask = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(450))
             guard !Task.isCancelled, let self, let s = self.sync else { return }
-            do {
-                try self.core.setSyncSettings(settings: s)
-                self.problems = []
-            } catch {
+            let core = self.core
+            switch await catching({ try await core.setSyncSettings(settings: s) }) {
+            case .success: self.problems = []
+            case .failure(let error):
                 self.problems = [SyncText.message(error)]
                 self.reloadSync()
             }

@@ -295,6 +295,11 @@ impl ScanJob {
         self.hashed.extend(done);
     }
 
+    /// What it scans (`""`: the whole folder).
+    pub fn scope(&self) -> &str {
+        &self.scope
+    }
+
     /// What the scan did so far.
     pub fn report(&self) -> &ScanReport {
         &self.report

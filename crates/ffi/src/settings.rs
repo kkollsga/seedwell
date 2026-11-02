@@ -1064,6 +1064,35 @@ pub fn expand_home(p: &str) -> PathBuf {
     PathBuf::from(p)
 }
 
+/// How long a folder picker's start is looked for: a disk that does not answer (a network share gone away) never holds
+/// the picker up.
+const PICKER_WAIT: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// The folder `path` names (`~` expanded), else its nearest parent that exists, short of the root; `None` for none.
+fn nearest_folder(path: &str) -> Option<String> {
+    if path.trim().is_empty() {
+        return None;
+    }
+    let p = expand_home(path.trim());
+    let mut at = Some(p.as_path());
+    while let Some(d) = at {
+        // The root says nothing about where the user meant: the picker's own default is better.
+        d.parent()?;
+        if d.is_dir() {
+            return Some(d.display().to_string());
+        }
+        at = d.parent();
+    }
+    None
+}
+
+/// Where a folder picker opens for `path` (a field's folder): the folder, else its nearest parent that exists. It
+/// looks at the disk on a thread of its own and gives up after a moment (`None`: the picker's own default).
+#[uniffi::export]
+pub async fn folder_picker_start(path: String) -> Option<String> {
+    crate::calls::apart(move || crate::calls::within(PICKER_WAIT, move || nearest_folder(&path)).flatten()).await
+}
+
 /// An incomplete and a finished location on different disks (SPEC §7A.4 warning).
 #[derive(Clone, Debug, PartialEq, uniffi::Record)]
 pub struct VolumeWarning {
@@ -1119,6 +1148,18 @@ fn record_locations(p: &ProfileRecord) -> (trs_state::config::LocationOverride, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_folder_picker_starts_at_the_folder_or_its_nearest_parent_that_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let movies = dir.path().join("Movies");
+        std::fs::create_dir(&movies).unwrap();
+        let start = |p: &std::path::Path| crate::calls::testing::wait(folder_picker_start(p.display().to_string()));
+        assert_eq!(start(&movies), Some(movies.display().to_string()));
+        assert_eq!(start(&movies.join("gone/deeper")), Some(movies.display().to_string()), "the nearest parent that exists");
+        assert_eq!(start(std::path::Path::new("/")), None, "not the root");
+        assert_eq!(crate::calls::testing::wait(folder_picker_start("  ".into())), None);
+    }
 
     #[test]
     fn settings_round_trip_keeps_unknown_fields() {

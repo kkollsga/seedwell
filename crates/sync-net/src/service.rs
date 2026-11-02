@@ -772,7 +772,7 @@ impl SyncHandle {
         let index = self.index_path(&id);
         let ctx = self.inner.ctx.clone();
         let entry = e.clone();
-        let core = tokio::task::spawn_blocking(move || -> Result<(FolderCore, RedbReader, Ignore), SyncError> {
+        let core = tokio::task::spawn_blocking(move || -> Result<(FolderCore, RedbReader, trs_sync::ignore::Current), SyncError> {
             let fs = StdFs::new(root.clone());
             let (case_insensitive, exec_bits) = match fs.lstat(STATE_DIR) {
                 Ok(Some(_)) => (
@@ -796,8 +796,11 @@ impl SyncHandle {
             };
             let ignore = load_ignore(&fs, &entry.ignore);
             let clock: Arc<dyn trs_sync::clock::Clock> = Arc::new(SystemClock);
-            let mut core = FolderCore::new(cfg, Box::new(store), Arc::new(fs), Some(ctx.key.clone()), clock, Arc::new(random_id), ignore.clone())
+            let mut core = FolderCore::new(cfg, Box::new(store), Arc::new(fs), Some(ctx.key.clone()), clock, Arc::new(random_id), ignore)
                 .map_err(|e| invalid(e.to_string()))?;
+            // A `.seedwellignore` that arrives or changes later applies at once (SPEC §7G.2).
+            core.follow_ignore_file(&entry.ignore)?;
+            let ignore = core.ignore();
             core.set_membership(&writers, access).map_err(|e| invalid(e.to_string()))?;
             core.set_awaiting_write(awaiting);
             // Who is no member any more is no source or holder (as `roles::changed` keeps it).
@@ -2267,6 +2270,29 @@ impl SyncHandle {
                 rt.spawn(async move { me.offer_folder(id).await });
             }
         }
+        Ok(())
+    }
+
+    /// This device's own ignore patterns for a folder (in addition to its `.seedwellignore`; Syncthing's syntax, one
+    /// per entry). Saved, and applied at once (SPEC §7G.2): paths they ignore now are no longer offered or needed, and
+    /// a full scan picks up what they no longer ignore.
+    pub async fn set_ignore_patterns(&self, id: &FolderId, patterns: Vec<String>) -> Result<(), SyncError> {
+        let f = self.inner.ctx.registry.folder(id).ok_or(SyncError::NotFound)?;
+        if let Some(e) = lock(&self.inner.cfg).folder_mut(&id.to_string()) {
+            e.ignore = patterns.clone();
+        }
+        self.save_config()?;
+        // (The core is locked only on a blocking thread.) The full scan that follows announces what changed.
+        tokio::task::spawn_blocking(move || -> io::Result<()> {
+            let mut core = lock(&f.core);
+            core.set_local_ignore(&patterns)?;
+            if core.take_ignore_changed() {
+                f.rescan.notify_one();
+            }
+            Ok(())
+        })
+        .await
+        .map_err(io::Error::other)??;
         Ok(())
     }
 

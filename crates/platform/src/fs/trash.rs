@@ -19,7 +19,8 @@
 //! call keeps every item on its own volume, so there the volume rule does not apply.
 //!
 //! Under test (a cargo test binary, or `TRS_FORBID_REAL_HOME`; `TRS_ALLOW_REAL_HOME=1` overrides), the Mac's own call
-//! is refused: it uses the user's real Trash whatever `HOME` says. Tests name a Trash folder.
+//! and Windows' Recycle Bin are refused: they are the user's real Trash whatever `HOME` (or `USERPROFILE`) says. Tests
+//! name a Trash folder.
 //!
 //! Every Windows volume has a Recycle Bin of its own, so the volume rule does not apply there. Instead, an item the
 //! Recycle Bin would delete outright instead of keeping (a drive without a Recycle Bin, such as a network or
@@ -155,6 +156,14 @@ pub fn move_to_trash(path: &Path, trash_dir: Option<&Path>, other: OtherVolume) 
         Some(TrashPlace::RecycleBin) => {
             #[cfg(windows)]
             {
+                // The Recycle Bin is the user's whatever HOME or USERPROFILE say: under test it is refused, as the Mac's.
+                if real_trash_forbidden() {
+                    return Err(TrashError::Io(io::Error::other(concat!(
+                        "refusing to use the real ",
+                        crate::trash!(),
+                        " while running under test (name a Trash folder; TRS_ALLOW_REAL_HOME=1 overrides)"
+                    ))));
+                }
                 recycle::recycle(path).map(|()| Trashed::RecycleBin)
             }
             #[cfg(not(windows))]
@@ -192,10 +201,11 @@ pub fn move_to_trash(path: &Path, trash_dir: Option<&Path>, other: OtherVolume) 
     }
 }
 
-/// Whether this process runs under test, where the Mac's own Trash call (always the user's real Trash) is refused: a
+/// Whether this process runs under test, where the system's own Trash (the Mac's Trash call, Windows' Recycle Bin: always
+/// the user's real one, whatever `HOME` says) is refused: a
 /// cargo test binary (it lives in a `deps` folder), or `TRS_FORBID_REAL_HOME` (a daemon a test started), unless
 /// `TRS_ALLOW_REAL_HOME` is set. The same rule as the engine's real-home guard.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 fn real_trash_forbidden() -> bool {
     let test_binary = std::env::current_exe().ok().and_then(|p| p.parent().and_then(|d| d.file_name()).map(|n| n == "deps")).unwrap_or(false);
     (cfg!(test) || test_binary || std::env::var_os("TRS_FORBID_REAL_HOME").is_some()) && std::env::var_os("TRS_ALLOW_REAL_HOME").is_none()

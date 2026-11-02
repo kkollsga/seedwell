@@ -781,6 +781,14 @@ fn started_marks_the_version_and_three_launches_without_it_go_back_to_the_kept_a
     assert_eq!(r.iter().map(|a| a.title.as_str()).collect::<Vec<_>>(), ["Install the Release"]);
 }
 
+/// The start failure window's own words, from a function that needs no core (the core is what failed).
+#[test]
+fn the_start_failure_window_says_the_app_could_not_start_and_offers_quit() {
+    let t = start_failure_texts();
+    assert_eq!((t.title.as_str(), t.quit_title.as_str(), t.refused_title.as_str()), ("Seedwell could not start", "Quit", "Cannot start"));
+    assert!(t.quit_help.starts_with("Quit Seedwell"), "{t:?}");
+}
+
 #[test]
 fn a_development_version_that_is_not_this_releases_build_is_ignored() {
     let (core, dir) = mock();
@@ -805,4 +813,51 @@ fn the_way_back_to_the_release_is_checked_at_once_then_backs_off_like_any_check(
     assert_eq!(u.next_due_ms(T0 + 1), Some(2 * HOUR), "failed since the switch: backed off");
     u.check(true, T0 + 2 * HOUR + 1);
     assert_eq!(u.next_due_ms(T0 + 2 * HOUR + 1), Some(4 * HOUR), "then doubling");
+}
+
+/// A loopback release: `latest.json` for `version`, and as its installer a script that only writes what it was given
+/// (written aside and renamed, so a reader never sees half of it) into `ran`.
+#[cfg(unix)]
+fn serve_release(version: &str, ran: &Path) -> String {
+    let r = ran.display().to_string();
+    let script = format!("printf '%s\\n' \"$@\" > '{r}.part' && mv '{r}.part' '{r}'\n");
+    let latest = latest(version);
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", l.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for s in l.incoming() {
+            let Ok(mut s) = s else { return };
+            let mut buf = [0u8; 4096];
+            let n = s.read(&mut buf).unwrap_or(0);
+            let line = String::from_utf8_lossy(&buf[..n]).lines().next().unwrap_or_default().to_owned();
+            let body = if line.contains(os::INSTALLER) { &script } else { &latest };
+            let _ = write!(s, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+        }
+    });
+    base
+}
+
+/// `update.now` (an agent at full, `seedwell update now`): Check Now, then Install, the core starting the release's
+/// installer itself; once only; up to date or a failed check says so and starts nothing.
+#[cfg(unix)]
+#[test]
+fn update_now_checks_and_starts_the_installer_as_check_now_and_install_do() {
+    let (core, dir) = mock();
+    let ran = dir.path().join("installer-ran");
+    let u = updates(&core, false, &serve_release(&newer(), &ran), T0);
+    let hook = core.builds.get().expect("the control server finds the updater");
+    let said = hook.update_now().unwrap();
+    assert!(said.starts_with(&format!("Installing {}: Seedwell quits, is replaced and reopens", newer())), "{said}");
+    assert_eq!(wait_for(&ran), format!("--version\n{}\n", newer()), "the release's own installer, for that version");
+    assert!(u.lock().saved.pending_pid.is_some(), "its process is known: the core started it");
+    assert_eq!(hook.update_now().unwrap(), format!("Installing {} already", newer()));
+
+    let (core, _dir) = mock();
+    let _u = updates(&core, false, &serve(200, latest(&current())), T0);
+    let said = core.builds.get().unwrap().update_now().unwrap();
+    assert!(said.contains("is up to date"), "{said}");
+    let (core, _dir) = mock();
+    let _u = updates(&core, false, &serve(503, String::new()), T0);
+    let e = core.builds.get().unwrap().update_now().unwrap_err();
+    assert!(e.starts_with("the check failed"), "{e}");
 }

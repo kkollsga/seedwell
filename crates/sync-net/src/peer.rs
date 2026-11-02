@@ -867,9 +867,9 @@ async fn read_loop(
                     let writer = f.as_ref().is_some_and(|f| f.role_of(ctx2.key.public_key()).is_some_and(|r| r.access() == Access::Write));
                     let held = match f {
                         Some(f) => tokio::task::spawn_blocking(move || {
-                            let (view, fs) = (f.index.view(), StdFs::new(f.root.clone()));
+                            let (view, fs, ignore) = (f.index.view(), StdFs::new(f.root.clone()), f.ignore.get());
                             let freeing = |p: &str| lock(&f.freeing).contains_key(p);
-                            let holder = trs_sync::ondemand::Holder { store: &view, fs: &fs, me, writer, on_demand: f.on_demand, freeing: &freeing, ignore: &f.ignore };
+                            let holder = trs_sync::ondemand::Holder { store: &view, fs: &fs, me, writer, on_demand: f.on_demand, freeing: &freeing, ignore: &ignore };
                             holder.answer(asker, &q.files)
                         })
                         .await
@@ -1210,7 +1210,8 @@ fn serve_chunk(f: &FolderShared, req: &Request) -> Response {
     let fail = |code| Response { id: req.id, code, data: vec![] };
     let Some(rec) = f.index.local(&req.path).ok().flatten() else { return fail(ResponseCode::NoSuchFile) };
     let info = &rec.file.info;
-    if rec.invalid || rec.dataless || info.deleted || info.kind != FileKind::File {
+    // (An ignored file is announced invalid: a device that asks anyway gets nothing, as for any file not synced.)
+    if rec.invalid || rec.dataless || info.deleted || info.kind != FileKind::File || f.ignore.get().is_ignored(&req.path, false) {
         return fail(ResponseCode::NoSuchFile);
     }
     let listed = trs_sync::index::offsets(&info.chunks).any(|(off, c)| off == req.offset && c.len == req.len && c.hash == req.hash);

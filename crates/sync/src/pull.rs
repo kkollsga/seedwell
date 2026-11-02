@@ -148,6 +148,9 @@ pub struct Puller<'a> {
     pub online_only: Option<&'a RefCell<OnlineOnly>>,
     /// Devices that are no members any more: no source (a need only they hold is reported holderless).
     pub not_members: &'a std::collections::BTreeSet<ShortId>,
+    /// What this device ignores: a directory another device deleted goes here too when all that is left in it is
+    /// ignored and deletable (`(?d)`, or OS metadata); other ignored files there keep it (said once, as unsupported).
+    pub ignore: &'a crate::ignore::Ignore,
     /// Records waiting for their directories to be durable (start with `Default::default()`).
     pub(crate) round: RefCell<Round>,
 }
@@ -158,6 +161,16 @@ pub(crate) struct Round {
     records: Vec<LocalRecord>,
     paths: BTreeSet<String>,
     dirs: BTreeSet<String>,
+}
+
+/// What is left on this device in a directory another device deleted ([`Puller::leftover`]).
+enum Leftover {
+    /// Only ignored paths whose deciding line says deletable: they go with the directory (path, is a directory).
+    Deletable(Vec<(String, bool)>),
+    /// Ignored paths, and this one of them is not deletable: the directory stays.
+    Ignored(String),
+    /// Something this device syncs, or has not scanned yet.
+    Other,
 }
 
 /// Steps whose records may wait before they are committed in one batch.
@@ -314,12 +327,28 @@ impl Puller<'_> {
             .filter(|(_, n)| n.holders.iter().all(|d| self.not_members.contains(d)) && n.file.info.kind == FileKind::File && !n.file.info.deleted && n.need != Need::Nothing)
             .map(|(p, _)| p.clone())
             .collect();
-        let steps = plan::plan(&needs, &|p| store.local(p).ok().flatten());
+        let mut steps = plan::plan(&needs, &|p| store.local(p).ok().flatten());
         let needs: BTreeMap<String, NeedRecord> = needs.into_iter().collect();
-        for step in steps {
-            let (path, other) = match &step {
-                Step::MkDir(p) | Step::Fetch(p) | Step::Delete(p) | Step::Absorb(p) => (p.clone(), None),
-                Step::Rename { from, to } => (to.clone(), Some(from.as_str())),
+        let target = |s: &Step| match s {
+            Step::MkDir(p) | Step::Fetch(p) | Step::Delete(p) | Step::Absorb(p) => p.clone(),
+            Step::Rename { to, .. } => to.clone(),
+        };
+        // The folder's ignore file first: once it is here, the round ends, and the folder reads it before the next
+        // one (`FolderCore::pull`), so what it ignores is never fetched, nor deleted or replaced here.
+        let rules = steps.iter().position(|s| target(s) == crate::ignore::FILE);
+        if let Some(i) = rules {
+            let s = steps.remove(i);
+            steps.insert(0, s);
+        }
+        let before = report.done;
+        for (i, step) in steps.into_iter().enumerate() {
+            if i == 1 && rules.is_some() && report.done > before {
+                break;
+            }
+            let path = target(&step);
+            let other = match &step {
+                Step::Rename { from, .. } => Some(from.as_str()),
+                _ => None,
             };
             let wanted = needs.get(&path).map(|n| &n.file.info.version);
             if let Some(u) = self.unsupported.get(&path).filter(|u| Some(&u.version) == wanted) {
@@ -818,34 +847,43 @@ impl Puller<'_> {
         }
         if let Some(m) = meta {
             if m.kind == FileKind::Dir {
-                // Only an empty directory goes; one with files we do not sync (ignored, unknown) stays.
+                // An empty directory goes, and one that holds only ignored paths that are deletable (`(?d)`, OS
+                // metadata: they go with it, to the archive as a replaced file goes). One with anything else stays.
                 let listing = self.fs.read_dir(p)?;
-                let left: Vec<&str> = listing
-                    .entries
-                    .iter()
-                    .map(|e| e.name.as_str())
-                    .filter(|n| !is_temp(n))
-                    .collect();
+                let (temps, left): (Vec<&str>, Vec<&str>) = listing.entries.iter().map(|e| e.name.as_str()).partition(|n| is_temp(n));
                 if !left.is_empty() || !listing.skipped.is_empty() {
-                    // On a read-only device, its own files keep the directory: it is recorded as a local
-                    // change (the received delete, invalid, stamped), so the need settles. Only when
-                    // every file left is its own (a synced one may still be on its way out).
-                    if self.signer.is_none() && listing.skipped.is_empty() {
-                        self.commit(store)?;
-                        let mut own = true;
-                        for name in &left {
-                            own &= store.local(&format!("{p}/{name}"))?.is_none_or(|r| r.own_change());
-                        }
-                        if own {
-                            let rec = LocalRecord { file: n.file, sequence: 0, invalid: true, stamp: Some(stamp_of(&m)), tier: None, dataless: false, want: false };
-                            self.queue(store, rec, false)?;
-                            return Ok(());
+                    let found = if listing.skipped.is_empty() { self.leftover(p, &left)? } else { Leftover::Other };
+                    match found {
+                        Leftover::Deletable(paths) => self.remove_deletable(paths)?,
+                        found => {
+                            // On a read-only device, its own files keep the directory: it is recorded as a local
+                            // change (the received delete, invalid, stamped), so the need settles. Only when
+                            // every file left is its own (a synced one may still be on its way out).
+                            if self.signer.is_none() && listing.skipped.is_empty() {
+                                self.commit(store)?;
+                                let mut own = true;
+                                for name in &left {
+                                    own &= store.local(&format!("{p}/{name}"))?.is_none_or(|r| r.own_change());
+                                }
+                                if own {
+                                    let rec = LocalRecord { file: n.file, sequence: 0, invalid: true, stamp: Some(stamp_of(&m)), tier: None, dataless: false, want: false };
+                                    self.queue(store, rec, false)?;
+                                    return Ok(());
+                                }
+                            }
+                            return Err(match found {
+                                // Only ignored files keep it: that stays so until someone removes them or marks their
+                                // line `(?d)`. Said once (an issue), not tried again until something there changes.
+                                Leftover::Ignored(q) => Skip::Unsupported(format!(
+                                    "kept: \"{q}\" is ignored on this device; a (?d) in front of its line in .seedwellignore lets it go with the folder"
+                                )),
+                                _ => Skip::Failed("the directory holds files that are not synced".into()),
+                            });
                         }
                     }
-                    return Err(Skip::Failed("the directory holds files that are not synced".into()));
                 }
-                for n in &listing.entries {
-                    self.fs.remove_file(&format!("{p}/{}", n.name))?;
+                for t in temps {
+                    self.fs.remove_file(&format!("{p}/{t}"))?;
                 }
                 self.fs.remove_dir(p)?;
             } else {
@@ -853,6 +891,55 @@ impl Puller<'_> {
             }
         }
         self.record(store, n.file, None)
+    }
+
+    /// What is left in the directory `p` (`names`, its listing without temps) that another device deleted: every path
+    /// below it is looked at, since the first line that matches decides (a plain `*.pyc` before `(?d)__pycache__/`
+    /// keeps a `.pyc` in it). Links are not followed.
+    fn leftover(&self, p: &str, names: &[&str]) -> io::Result<Leftover> {
+        let mut deletable = Vec::new();
+        let mut kept = None;
+        let mut stack: Vec<String> = names.iter().map(|n| format!("{p}/{}", crate::path::wire_name(n))).collect();
+        while let Some(q) = stack.pop() {
+            let Some(m) = self.fs.lstat(&q)? else { continue };
+            let dir = m.kind == FileKind::Dir && !m.other;
+            match self.ignore.matches(&q, dir) {
+                Some(crate::ignore::Match { ignored: true, deletable: true }) => {
+                    if dir {
+                        let l = self.fs.read_dir(&q)?;
+                        if !l.skipped.is_empty() {
+                            return Ok(Leftover::Other);
+                        }
+                        stack.extend(l.entries.iter().map(|e| format!("{q}/{}", crate::path::wire_name(&e.name))));
+                    }
+                    deletable.push((q, dir));
+                }
+                Some(crate::ignore::Match { ignored: true, deletable: false }) => {
+                    kept.get_or_insert(q);
+                }
+                // Synced here (on its way out, or not scanned yet), or kept in by a negated line.
+                _ => return Ok(Leftover::Other),
+            }
+        }
+        Ok(match kept {
+            Some(q) => Leftover::Ignored(q),
+            None => Leftover::Deletable(deletable),
+        })
+    }
+
+    /// Removes what [`Self::leftover`] found deletable: files and links to the archive (as a deleted file goes), then
+    /// the directories, deepest first.
+    fn remove_deletable(&self, mut paths: Vec<(String, bool)>) -> io::Result<()> {
+        paths.sort_by(|a, b| b.0.matches('/').count().cmp(&a.0.matches('/').count()).then_with(|| b.0.cmp(&a.0)));
+        for (q, dir) in paths {
+            if dir {
+                self.fs.remove_dir(&q)?;
+                self.changed_dir(&q);
+            } else {
+                self.archive_current(&q, false)?;
+            }
+        }
+        Ok(())
     }
 
     fn rename(

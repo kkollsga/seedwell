@@ -15,6 +15,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod access;
 pub mod activity;
 pub mod awake;
 pub mod b64;
@@ -44,6 +45,7 @@ mod engine_backend;
 #[cfg(feature = "sync")]
 pub mod sync;
 
+pub use access::AccessDesk;
 pub use activity::ActivityLog;
 pub use awake::Awake;
 pub use backend::{AddArgs, AddSource, Backend};

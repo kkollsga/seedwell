@@ -101,12 +101,13 @@ zip (hash, unzipped, the CLI's version, the unzipped app starts and draws a quie
 `latest.json` gains `"windows": {zip, sha256, minimum_windows}`, the Mac's fields unchanged; `install.sh` takes the Mac
 zip by its exact name). Review the draft as usual: both platforms are in it.
 
-**The gate is CI, never a person or a machine.** A release needs CI passing on the Mac and Windows (Rust tests,
-clippy, the app's QA checks on both) and the release workflow passing (both builds, and on Windows the installer test
-`app-windows\qa\install-test.ps1` against the built zip). A Windows PC with an agent on it speeds up Windows work and
-may test more by hand, but a release never waits for it: what it finds is fixed like any other bug, in the next
-release if this one is out. So the Windows app stays a thin shell over the core (Rust decides, the host draws), and
-a rule that matters is tested in Rust, where both CIs run it.
+**The gate for the tag is CI.** A release needs CI passing on the Mac and Windows (Rust tests, clippy, the app's QA
+checks on both) and the release workflow passing (both builds, and on Windows the installer test
+`app-windows\qa\install-test.ps1` against the built zip). Before that, the PC with its agent runs the same Windows
+tests on the exact source of the release ("Release discipline" below), because a CI round that fails costs an hour
+and the PC finds the same failures sooner. What the PC finds after a release is out is fixed like any other bug, in
+the next release. So the Windows app stays a thin shell over the core (Rust decides, the host draws), and a rule that
+matters is tested in Rust, where both CIs run it.
 
 Build it on a Windows PC (a check; it never creates a release): `app-windows\release-zip.ps1` (refuses a dirty tree; `-AllowDirty` for a test
 build) writes `app-windows\bin\release\` with the zip, `install.ps1`, `SHA256SUMS-windows` and `latest-windows.json`.
@@ -131,6 +132,25 @@ Later releases: commit on `master` as usual, then publish its tree on top of the
 
 Never use `git switch --orphan` here: it removes the tracked files from the working folder, and a following
 `git add -A` commits only the ignored build output (`target/`, hundreds of GB).
+
+## Release discipline
+
+0.1.16 took about 10 hours, 3 of them in CI rounds that failed on what the Mac or the PC could have found first, and
+more in Windows follow-ups asked one at a time and work added halfway. So:
+
+1. **Once a release has started, its scope is fixed.** It starts when `/release` runs its first step (or, called
+   while work is open, with the work open at that moment). New work goes to the next release, unless the user decides
+   otherwise when asked.
+2. **Windows work for a release goes to the PC as one checklist:** everything at once (compile, follow-ups, platform
+   checks), in one message with the bundle (`.claude/skills/windows-bridge`), not one item at a time.
+3. **Before the public commit, the PC runs both on the exact source bundle when it can:** `app-windows\qa\run.ps1 all`
+   and `app-windows\qa\rust-tests.ps1` (the Rust tests as CI's Windows job runs them), on the bundle whose ref is the
+   commit whose tree is published, so a Windows failure is found before a CI round, not in it. A change after that
+   bundle means a new bundle and both runs again. The PC never blocks a release: if it is busy, off or not answering,
+   go on; CI (Mac and Windows) stays the gate.
+4. **The local check includes the slow-priority pass and the portability scan:** `tools/check.sh --base public` runs
+   the timing tests a second time at utility priority (as CI's slower Mac) and `tools/test-portability.py` over the
+   tests (docs/ENGINEERING.md §5). Neither is skipped for a release.
 
 ## Version
 
@@ -223,17 +243,17 @@ configured; Sparkle, used only by a build that carries `SUPublicEDKey` and `SUFe
   bundle id. The cycle:
   1. Mac: `tools/sysguard/heavy.sh tools/dev-build.sh --to "<Seedwell Sync>/builds"`: the zip, then `build.json`
      signed with the key in this Mac's Keychain. Every Mac watching the folder installs it.
-  2. Windows (the PC's agent): `app-windows\dev-build.ps1 -To "<Seedwell Sync>\builds"`: the zip only. It posts
-     `Seedwell-X.Y.Z.N-windows-x64.zip sha256 HEX` in the agent channel.
-  3. Mac (its agent), once the zip has arrived: `tools/sysguard/heavy.sh tools/build-sign.sh add "<Seedwell
-     Sync>/builds" Seedwell-X.Y.Z.N-windows-x64.zip --sha256 HEX`. It refuses a zip with another checksum, and keeps
-     the Mac's entry. Windows devices install it. `tools/build-sign.sh verify <folder>` shows what is signed.
+  2. Windows: a zip built on the PC is **not** signed or put in the folder (the user's decision, 2026-11-02: the
+     build key vouches only for what the Mac or CI built, and the Mac cannot rebuild the PC's zip to compare). The PC
+     tests its own builds with `seedwell update install <zip>`, which needs no signature; Windows devices get new
+     versions from releases. (`tools/build-sign.sh add <folder> <zip> --sha256 HEX` can sign another platform's zip
+     by checksum, for a zip CI built; `tools/build-sign.sh verify <folder>` shows what is signed.)
 - **The build key.** Made once on the publishing Mac (`tools/sysguard/heavy.sh tools/build-sign.sh key new`), kept in
   its login Keychain (service "Seedwell build key"), never in the repository, an argument or a log. Its public key
   goes in `TRUSTED_KEYS` (`crates/buildsig/src/lib.rs`); devices trust it from the first release that carries it
   (before then they install nothing from a folder; `seedwell update install <zip>` still works). Replacing the key: add
   the new public key, release, sign with the new key, then drop the old one in a later release. The secret never
-  leaves that Mac: the Windows build is signed there, by checksum.
+  leaves that Mac: a zip of another platform is signed there, by checksum.
 - **The developer's own app follows this cycle**: agents switch development builds on when development starts and
   install builds there (there is no separate test copy); publishing a release ends with switching them off, which
   puts the developer's app on the release (`/release`, step 7).

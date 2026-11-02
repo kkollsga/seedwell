@@ -50,7 +50,7 @@ struct RulesTab: View {
         switch c {
         case let .apply(.set(key, value)): model.rules(.set(key: key, value: value))
         case let .chooseFolder(key, start):
-            if let p = FolderPicker.choose(start: start) { model.rules(.set(key: key, value: .typed(text: p))) }
+            Task { if let p = await FolderPicker.choose(start: start) { model.rules(.set(key: key, value: .typed(text: p))) } }
         case .showTrackerTorrents(let id): nav.openTracker(id)
         default: model.run(c)
         }

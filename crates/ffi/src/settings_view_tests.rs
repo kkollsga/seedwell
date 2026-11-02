@@ -69,6 +69,7 @@ pub(crate) fn live() -> SettingsLive {
         rendezvous: true,
         diagnostics: DiagnosticsInfo { wakeups: 12, connections: 40, rechecks: 1, hash_failures: 0, peers_banned: 0, promotions: 0, demotions: 0 },
         activity: Vec::new(),
+        requests: Vec::new(),
         updates: SettingsUpdates::Core {
             model: UpdatesModel {
                 check_label: "Check automatically".into(),
@@ -94,14 +95,16 @@ pub(crate) fn live() -> SettingsLive {
             },
         },
         play_with: vec![
-            PlayWithChoice { value: "auto".into(), title: "Automatic".into(), enabled: true },
-            PlayWithChoice { value: "iina".into(), title: "IINA".into(), enabled: true },
+            PlayWithChoice { value: "auto".into(), title: "Automatic".into(), enabled: true, mp4_only: false },
+            PlayWithChoice { value: "iina".into(), title: "IINA".into(), enabled: true, mp4_only: false },
+            PlayWithChoice { value: "org.videolan.vlc".into(), title: "VLC".into(), enabled: true, mp4_only: false },
+            PlayWithChoice { value: "com.apple.QuickTimePlayerX".into(), title: "QuickTime Player".into(), enabled: true, mp4_only: true },
         ],
-        cli: SettingsCli { home: "/Users/me".into(), installed: None, bundled: "/Applications/Seedwell.app/Contents/MacOS/seedwell".into(), skill_installed: false },
+        cli: SettingsCli { home: "/Users/me".into(), bundled: "/Applications/Seedwell.app/Contents/MacOS/seedwell".into() },
+        host: crate::settings_view_host::SettingsHostFacts { version_line: "Seedwell 0.1.15".into(), ..Default::default() },
         finder_on: false,
         share_menu_on: true,
         state_dir: "/Users/me/Library/Application Support/Seedwell".into(),
-        version_line: "Seedwell 0.1.15 (build 1202)".into(),
     }
 }
 
@@ -232,16 +235,16 @@ fn the_banner_says_what_is_wrong_and_what_needs_a_restart() {
 fn general_has_updates_startup_notifications_playback_and_power() {
     let m = mac(input(SettingsTab::General, state(), live()));
     assert_eq!(titles(&m), ["Updates", "Startup", "Notifications", "Playback", "Power"]);
-    assert_eq!(m.footer.as_deref(), Some("Seedwell 0.1.15 (build 1202)"));
+    assert_eq!(m.footer.as_deref(), Some("Seedwell 0.1.15"));
     assert_eq!(m.refresh_ms, 60_000, "the updates model's own pace");
     assert_eq!(find(&m, "updates.check").hint.as_deref(), Some("Once a day"));
     assert_eq!(buttons(find(&m, "updates.status")), ["Check Now"]);
     assert!(!has_row(&m, "updates.build"), "no build row while development builds are off");
     let p = find(&m, "playback.player");
-    assert_eq!(p.hint.as_deref(), Some("Automatic tries IINA, VLC, Infuse, then QuickTime Player (MP4 only)"));
+    assert_eq!(p.hint.as_deref(), Some("Automatic tries IINA, VLC, then QuickTime Player (MP4 only)"), "the players found, in Automatic's order");
     let SettingsControl::Choice { options, selected, .. } = &p.controls[0] else { panic!() };
     assert_eq!(selected, "auto");
-    assert_eq!(options.iter().map(|o| o.title.as_str()).collect::<Vec<_>>(), ["Automatic", "IINA"]);
+    assert_eq!(options.iter().map(|o| o.title.as_str()).collect::<Vec<_>>(), ["Automatic", "IINA", "VLC", "QuickTime Player"]);
     let SettingsControl::Choice { options, style, .. } = &find(&m, "power.battery").controls[0] else { panic!() };
     assert_eq!(*style, SettingsChoiceStyle::Segmented);
     assert_eq!(options.iter().map(|o| o.title.as_str()).collect::<Vec<_>>(), ["Keep going", "Limit Speed", "Pause downloads"]);
@@ -255,11 +258,17 @@ fn the_players_are_the_cores_choices() {
     let mut s = state();
     s.settings.general.play_with = "org.videolan.vlc".into();
     let mut l = live();
-    l.play_with.push(PlayWithChoice { value: "org.videolan.vlc".into(), title: "VLC (not installed)".into(), enabled: false });
+    l.play_with.truncate(2);
+    l.play_with.push(PlayWithChoice { value: "org.videolan.vlc".into(), title: "VLC (not installed)".into(), enabled: false, mp4_only: false });
     let m = mac(input(SettingsTab::General, s, l));
     let SettingsControl::Choice { options, selected, .. } = &find(&m, "playback.player").controls[0] else { panic!() };
     assert_eq!(selected, "org.videolan.vlc");
     assert_eq!(options.last().unwrap(), &SettingsOption { id: "org.videolan.vlc".into(), title: "VLC (not installed)".into(), enabled: false });
+    assert_eq!(find(&m, "playback.player").hint.as_deref(), Some("Automatic plays with IINA"), "one that is gone is not named");
+    let mut l = live();
+    l.play_with.truncate(1);
+    let m = mac(input(SettingsTab::General, state(), l));
+    assert!(find(&m, "playback.player").hint.as_deref().is_some_and(|h| h.starts_with("No player found. Install ")));
 }
 
 #[test]
@@ -477,6 +486,39 @@ fn folder_sync_has_names_port_discovery_rendezvous_and_the_finder_on_a_mac() {
 // MARK: Agents
 
 #[test]
+fn agents_requests_come_first_with_deny_and_approve() {
+    let mut l = live();
+    l.requests = vec![crate::agent_requests::AgentRequestRow {
+        id: "5eed0a11".into(),
+        title: "Claude asks for agent permission full".into(),
+        detail: "“to install the release” · 4 min ago".into(),
+    }];
+    let m = mac(input(SettingsTab::Agents, state(), l));
+    assert_eq!(titles(&m), ["Requests", "Agent access", "Command line", "Activity"]);
+    assert_eq!(m.refresh_ms, 2_000);
+    let r = find(&m, "agents.request.5eed0a11");
+    assert_eq!((r.label.as_str(), r.hint.as_deref()), ("Claude asks for agent permission full", Some("“to install the release” · 4 min ago")));
+    assert_eq!(buttons(r), ["Deny", "Approve"]);
+    let commands: Vec<(SettingsCommand, SettingsButtonStyle)> = r
+        .controls
+        .iter()
+        .filter_map(|c| match c {
+            SettingsControl::Button { action } => Some((action.command.clone(), action.style)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        commands,
+        [
+            (SettingsCommand::DecideAgentRequest { id: "5eed0a11".into(), approve: false }, SettingsButtonStyle::Normal),
+            (SettingsCommand::DecideAgentRequest { id: "5eed0a11".into(), approve: true }, SettingsButtonStyle::Prominent),
+        ]
+    );
+    // None waiting: no group.
+    assert_eq!(titles(&mac(input(SettingsTab::Agents, state(), live())))[0], "Agent access");
+}
+
+#[test]
 fn agents_has_access_the_command_line_and_activity() {
     let mut l = live();
     l.activity = (0..10)
@@ -501,8 +543,8 @@ fn agents_has_access_the_command_line_and_activity() {
     s.view.copied = true;
     s.view.cli_note = Some("Linked it.".into());
     let mut l = live();
-    l.cli.installed = Some("/usr/local/bin/seedwell".into());
-    l.cli.skill_installed = true;
+    l.host.cli = Some("/usr/local/bin/seedwell".into());
+    l.host.skill_installed = true;
     let w = windows(input(SettingsTab::Agents, s, l));
     let SettingsControl::Choice { enabled, .. } = &find(&w, "agents.permission").controls[0] else { panic!() };
     assert!(!enabled, "the permission waits for Allow agents");
@@ -776,5 +818,8 @@ fn the_command_line_and_skill_results_become_the_note() {
     assert_eq!(changed.state.view.cli_note, None);
     let copied = settings_apply(s, SettingsChange::Copied { on: true });
     assert!(copied.state.view.copied);
-    assert_eq!(skill_dir("/Users/me/"), "/Users/me/.claude/skills/seedwell");
+    // Each system's form: its home as it writes it, the rest joined with its separator.
+    let home = if cfg!(windows) { r"C:\Users\me\" } else { "/Users/me/" };
+    let want = if cfg!(windows) { r"C:\Users\me\.claude\skills\seedwell" } else { "/Users/me/.claude/skills/seedwell" };
+    assert_eq!(skill_dir(home), want);
 }

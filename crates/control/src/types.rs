@@ -1029,6 +1029,64 @@ pub struct UpdateStatusDto {
     pub note: String,
 }
 
+/// One request of an agent for access (`agents.request`, `agents.requests`; SPEC 9A.3 *Asking for access*).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct AccessRequestDto {
+    /// Its id (8 hex characters).
+    pub id: String,
+    /// What it asks for: `control`, `full`, `channel-agents`, `dm-agents` or `dev-builds`.
+    pub what: String,
+    /// The channel to open to agents (`channel-agents`, as the agent named it), or the level of private messages
+    /// (`dm-agents`: `read` or `post`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    /// What it asks for, as people read it ("agent permission full").
+    pub text: String,
+    /// The agents that asked (the first one first).
+    pub agents: Vec<String>,
+    /// Why, in the asking agent's words (untrusted).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub why: Option<String>,
+    /// When it was asked, Unix milliseconds.
+    pub at: u64,
+    /// When it expires unanswered, Unix milliseconds.
+    pub expires: u64,
+    /// `pending`, `granted`, `denied` or `expired`.
+    pub state: String,
+    /// When the user answered (or it expired), Unix milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decided_at: Option<u64>,
+    /// How the user answered: `app` (a button in the app or its notification) or `chat` (a reply in chat).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub how: Option<String>,
+    /// What the answer did ("agent permission is full now"), or why it could not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    /// The message that announced it in a channel (its id): the user approves with a reply to it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub announced: Option<String>,
+}
+
+/// `agents.request` result: the request (a new one, or the one already pending for the same thing).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct AccessAskedDto {
+    /// The request.
+    pub request: AccessRequestDto,
+    /// The same thing was asked already (by this agent or another): no second notice.
+    pub duplicate: bool,
+    /// What happens now, as a sentence.
+    pub note: String,
+}
+
+/// `agents.requests` result.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct AccessRequestsDto {
+    /// The agent permission level in force.
+    pub permission: String,
+    /// The requests, newest first: pending ones, and with `all` those answered or expired in the last day.
+    pub requests: Vec<AccessRequestDto>,
+}
+
 /// One entry of the agent activity log.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ActivityDto {

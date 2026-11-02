@@ -6,6 +6,7 @@ mod devices;
 mod direct;
 mod files;
 mod gone;
+mod ignored;
 mod images;
 mod isolation;
 mod lan;

@@ -85,6 +85,11 @@ pub trait Backend: Send + Sync {
     fn agent_activity(&self, limit: u32) -> Vec<AgentActivity>;
     /// Agents' live leases on keeping the Mac awake (`None`: no agent asked). Cheap.
     fn agents_awake(&self) -> Option<crate::types::AgentsAwake>;
+    /// Agents' pending requests for access the user is asked about, newest first (SPEC 9A.3). Cheap.
+    fn agent_requests(&self) -> Vec<trs_control::access::Entry>;
+    /// The user's answer to one, from the app (its notification, Settings › Agents, the menu): what happened, or why
+    /// nothing did. Only the app calls this; agents have no way to.
+    fn agent_request_decide(&self, id: &str, approve: bool) -> Result<String, String>;
     /// Path of the control socket agents connect to (`None` for the mock).
     fn control_socket(&self) -> Option<String>;
     /// Starts (once) and waits for the shutdown of the engine, at most `deadline_secs`.

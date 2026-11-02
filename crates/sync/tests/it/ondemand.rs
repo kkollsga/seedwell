@@ -1278,9 +1278,9 @@ fn only_a_writer_whose_folder_and_file_are_there_says_it_holds() {
     let q = [HeldFile { path: rec.path.clone(), version: rec.version.clone(), content: rec.content_digest() }];
     assert_eq!(c.core.holds(b.core.me(), &q, &|_| false), [true]);
     // Ignored here now: not this device's to keep (it may go any time, unsynced): no.
-    c.core.set_ignore(Ignore::parse_all(&["docs/b.txt"]).0);
+    c.core.set_ignore(Ignore::parse_all(&["docs/b.txt"]).0).unwrap();
     assert_eq!(c.core.holds(b.core.me(), &q, &|_| false), [false]);
-    c.core.set_ignore(Ignore::defaults());
+    c.core.set_ignore(Ignore::defaults()).unwrap();
     assert_eq!(c.core.holds(b.core.me(), &q, &|_| false), [true]);
     c.fs.remove_dir(".seedwell").unwrap();
     assert_eq!(c.core.holds(b.core.me(), &q, &|_| false), [false]);

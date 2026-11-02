@@ -7,12 +7,14 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
+use std::sync::Arc;
 
 use trs_sync_proto::ids::ShortId;
 use trs_sync_proto::model::{Causality, ChunkRef, FileKind, IndexEntry, SignedFile};
 use trs_sync_proto::sign::Writer;
 
 use crate::global::{self, Candidate, Need};
+use crate::ignore::Ignore;
 
 /// The disk state a local record was taken from: unchanged means the content is unchanged.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -127,6 +129,9 @@ pub enum Op {
     /// The version at this path is one no device can give right now (with its size), or no longer (`None`) (SPEC
     /// §7G.11). Decided by the folder, read by anyone (the host's items).
     Unavailable(String, Option<u64>),
+    /// The needs were worked out with these ignore patterns ([`Ignore::identity`]): a folder opened with other ones works
+    /// out again what the change touches ([`IndexStore::ignore_applied`]).
+    IgnoreApplied(String),
 }
 
 /// The storage behind an [`Index`]: reads, plus an atomic apply of [`Op`]s.
@@ -187,6 +192,18 @@ pub trait IndexStore: Send {
     }
     /// Sets [`Self::feeds_host`].
     fn set_feeds_host(&mut self, _on: bool) {}
+    /// What this device ignores (SPEC §7G.2): a path it ignores needs nothing, whatever other devices announce there.
+    /// Set by the folder; not stored.
+    fn ignore(&self) -> Option<Arc<Ignore>> {
+        None
+    }
+    /// Sets [`Self::ignore`].
+    fn set_ignore(&mut self, _ignore: Option<Arc<Ignore>>) {}
+    /// The ignore patterns the stored needs were worked out with ([`Op::IgnoreApplied`]); `None` in an index from
+    /// before they were noted (whose needs never left ignored paths out).
+    fn ignore_applied(&self) -> io::Result<Option<String>> {
+        Ok(None)
+    }
     /// Local files holding a chunk with this hash: (path, offset) pairs, at most `limit`.
     fn chunk_sources(&self, hash: &[u8; 32], limit: usize) -> io::Result<Vec<(String, u64)>>;
     /// Applies the ops in one transaction (all or nothing).
@@ -208,6 +225,8 @@ pub struct Batch<'a, S: IndexStore + ?Sized> {
     writer: bool,
     /// [`IndexStore::feeds_host`].
     retire: bool,
+    /// [`IndexStore::ignore`].
+    ignore: Option<Arc<Ignore>>,
     meta: Meta,
     local: BTreeMap<String, Option<LocalRecord>>,
     remote: BTreeMap<(String, ShortId), IndexEntry>,
@@ -224,6 +243,7 @@ impl<'a, S: IndexStore + ?Sized> Batch<'a, S> {
             me,
             writer: store.writers()?.iter().any(|(d, _)| *d == me),
             retire: store.feeds_host(),
+            ignore: store.ignore(),
             meta: store.meta()?,
             local: BTreeMap::new(),
             remote: BTreeMap::new(),
@@ -327,6 +347,11 @@ impl<'a, S: IndexStore + ?Sized> Batch<'a, S> {
         self.ops.push(Op::DropWriter(device));
     }
 
+    /// Works out the need of `path` again at [`Self::finish`] (the ignore patterns changed).
+    pub fn touch(&mut self, path: &str) {
+        self.touched.insert(path.to_string());
+    }
+
     /// Sets our index id (a reset database).
     pub fn set_index_id(&mut self, index_id: u64) {
         self.meta.index_id = index_id;
@@ -379,6 +404,14 @@ impl<'a, S: IndexStore + ?Sized> Batch<'a, S> {
     fn need_of(&self, path: &str) -> io::Result<Option<NeedRecord>> {
         let local = self.local(path)?;
         let remote = self.remote_at(path)?;
+        // A path this device ignores needs nothing (SPEC §7G.2): what others announce there is not fetched, not
+        // counted or waited for, and no change, delete or conflict there touches the file here.
+        if let Some(ig) = &self.ignore {
+            let dir = local.iter().map(|l| &l.file.info).chain(remote.iter().map(|(_, e)| &e.file.info)).any(|i| i.kind == FileKind::Dir);
+            if ig.is_ignored(path, dir) {
+                return Ok(None);
+            }
+        }
         let mut cands: Vec<Candidate<'_>> = remote
             .iter()
             .map(|(d, e)| Candidate { device: *d, file: &e.file, invalid: e.invalid })
@@ -455,6 +488,8 @@ pub struct MemStore {
     floor: u64,
     feeds_host: bool,
     unavailable: BTreeMap<String, u64>,
+    ignore: Option<Arc<Ignore>>,
+    ignore_applied: Option<String>,
 }
 
 /// What a record adds to [`IndexStore::local_totals`]: its size, if it is a live file we hold.
@@ -645,9 +680,22 @@ impl IndexStore for MemStore {
                         self.unavailable.remove(&p);
                     }
                 },
+                Op::IgnoreApplied(source) => self.ignore_applied = Some(source),
             }
         }
         Ok(())
+    }
+
+    fn ignore(&self) -> Option<Arc<Ignore>> {
+        self.ignore.clone()
+    }
+
+    fn set_ignore(&mut self, ignore: Option<Arc<Ignore>>) {
+        self.ignore = ignore;
+    }
+
+    fn ignore_applied(&self) -> io::Result<Option<String>> {
+        Ok(self.ignore_applied.clone())
     }
 
     fn shown_since(&self, after: u64, limit: usize) -> io::Result<Vec<(u64, String)>> {

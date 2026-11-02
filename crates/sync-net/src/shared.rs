@@ -257,8 +257,8 @@ pub struct FolderShared {
     /// On demand: files with a free in progress here, and how many frees hold each ([`Freeing`]): asked whether it
     /// holds them, this device says no (SPEC §7G.11).
     pub freeing: Mutex<BTreeMap<String, u32>>,
-    /// The ignore patterns the core was opened with (for answers given without it).
-    pub ignore: trs_sync::ignore::Ignore,
+    /// The ignore patterns as they are now (the core keeps them up to date), for answers given without the core.
+    pub ignore: trs_sync::ignore::Current,
     /// The core. Lock only on a blocking thread.
     pub core: Mutex<FolderCore>,
     /// Reads the core's index without its lock: requests from peers are answered while a pull holds the
@@ -313,7 +313,7 @@ impl FolderShared {
     /// Our entries above `after` for a peer ([`trs_sync::folder::announce_since`]), from the read-only view: a peer is
     /// sent what each scan step committed while the scan still runs.
     pub fn announce_since(&self, after: u64, limit: usize) -> std::io::Result<Vec<trs_sync_proto::model::IndexEntry>> {
-        trs_sync::folder::announce_since(&self.index.view(), self.on_demand, after, limit)
+        trs_sync::folder::announce_since(&self.index.view(), self.on_demand, &self.ignore, after, limit)
     }
 }
 

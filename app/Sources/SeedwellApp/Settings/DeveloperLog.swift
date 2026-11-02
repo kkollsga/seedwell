@@ -3,8 +3,8 @@ import Observation
 import SwiftUI
 
 // Developer mode (SPEC 8.7): Settings > Advanced > Developer (its rows are the settings model's): the tracker log
-// viewer sheet. The log itself is written by the engine, with every secret already masked; nothing here sees
-// a passkey.
+// viewer sheet. The viewer's lines, filters, words and pace are the core's `TrackerLog`; this draws its view. The log
+// itself is written by the engine, with every secret already masked; nothing here sees a passkey.
 
 enum TrackerLogFiles {
     /// Reveals `trackers.log`; before the first exchange there is no file, so the folder (or the state
@@ -22,35 +22,44 @@ enum TrackerLogFiles {
     }
 }
 
-/// One line of the viewer; the id keeps a row's expansion while the tail refreshes.
-struct TrackerLogItem: Identifiable, Equatable {
-    let id: String
-    let row: TrackerLogRow
-
-    static func == (a: TrackerLogItem, b: TrackerLogItem) -> Bool { a.id == b.id && a.row.summary == b.row.summary }
-}
-
-/// The viewer's state: a live tail of the log with its filters. Reads off the main thread.
+/// The viewer's state, the core's (`TrackerLog`): it lives as long as the app, so the filters survive closing the
+/// sheet. While the sheet is open it reads the tail again as often as the view says, off the main thread.
 @MainActor @Observable final class TrackerLogModel {
     let core: Core
-    var text = "" { didSet { if text != oldValue { refreshSoon() } } }
-    /// "" = any event.
-    var event = "" { didSet { if event != oldValue { refreshSoon() } } }
-    var errorsOnly = false { didSet { if errorsOnly != oldValue { refreshSoon() } } }
-    var live = true
-    private(set) var items: [TrackerLogItem] = []
-    private(set) var dropped: UInt64 = 0
-    var expanded: Set<String> = []
+    let log: TrackerLog
+    private(set) var view: TrackerLogPage
     @ObservationIgnored private var task: Task<Void, Never>?
 
-    init(core: Core) { self.core = core }
+    init(core: Core) {
+        self.core = core
+        log = TrackerLog(core: core)
+        view = log.view()
+    }
+
+    var text: String {
+        get { view.text }
+        set { log.setText(text: newValue); changed() }
+    }
+    var event: String {
+        get { view.event }
+        set { log.setEvent(event: newValue); changed() }
+    }
+    var errorsOnly: Bool {
+        get { view.errorsOnly }
+        set { log.setErrorsOnly(on: newValue); changed() }
+    }
+    var live: Bool {
+        get { view.live }
+        set { log.setLive(on: newValue); view = log.view() }
+    }
 
     func start() {
         guard task == nil else { return }
         task = Task { [weak self] in
             while !Task.isCancelled {
-                if let self, self.live || self.items.isEmpty { await self.refresh() }
-                try? await Task.sleep(for: .seconds(1))
+                guard let self else { return }
+                if self.view.reads { await self.refresh() }
+                try? await Task.sleep(for: .milliseconds(Int(self.view.refreshMs)))
             }
         }
     }
@@ -60,50 +69,44 @@ struct TrackerLogItem: Identifiable, Equatable {
         task = nil
     }
 
-    private func refreshSoon() { Task { await refresh() } }
+    /// A filter changed: shown at once, then read for it.
+    private func changed() {
+        view = log.view()
+        Task { await refresh() }
+    }
 
     func refresh() async {
-        let q = TrackerLogQuery(text: text.trimmingCharacters(in: .whitespaces), tracker: "", event: event, errorsOnly: errorsOnly, limit: 400)
-        let core = self.core
-        let (rows, dropped) = await Task.detached(priority: .utility) { (core.trackerLog(query: q), core.trackerLogDropped()) }.value
-        var seen: [String: Int] = [:]
-        let next = rows.map { r -> TrackerLogItem in
-            let base = "\(r.tsMs)|\(r.torrent)|\(r.kind)|\(r.event)|\(r.host)"
-            let n = seen[base, default: 0]
-            seen[base] = n + 1
-            return TrackerLogItem(id: "\(base)|\(n)", row: r)
-        }
-        if next != items { items = next }
-        self.dropped = dropped
+        await log.read()
+        let next = log.view()
+        if next != view { view = next }
     }
 
     func clear() {
-        items = []
-        expanded = []
-        let core = self.core
         Task {
-            await core.trackerLogClear()
-            await refresh()
+            await log.clear()
+            view = log.view()
         }
     }
 
     func toggle(_ id: String) {
-        if expanded.contains(id) { expanded.remove(id) } else { expanded.insert(id) }
+        log.toggle(id: id)
+        view = log.view()
+    }
+
+    /// QA: opens exactly these lines.
+    func open(_ ids: [String]) {
+        log.setOpen(ids: ids)
+        view = log.view()
     }
 }
-
-private let timeFormat: DateFormatter = {
-    let f = DateFormatter()
-    f.locale = Locale(identifier: "en_US_POSIX")
-    f.dateFormat = "HH:mm:ss"
-    return f
-}()
 
 /// The sheet: filters on top, the tail below, newest at the bottom.
 struct TrackerLogView: View {
     @Bindable var model: TrackerLogModel
     let core: Core
     @Binding var isPresented: Bool
+
+    private var v: TrackerLogPage { model.view }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -126,13 +129,12 @@ struct TrackerLogView: View {
     private var header: some View {
         HStack(alignment: .firstTextBaseline) {
             VStack(alignment: .leading, spacing: 2) {
-                Text("Tracker Log").font(.system(size: 15, weight: .semibold))
-                Text("Every tracker request and answer, newest last. Passkeys and the client key are masked in the file itself.")
-                    .font(.system(size: 11.5)).foregroundStyle(.secondary)
+                Text(v.title).font(.system(size: 15, weight: .semibold))
+                Text(v.subtitle).font(.system(size: 11.5)).foregroundStyle(.secondary)
             }
             Spacer()
-            Button("Done") { isPresented = false }.keyboardShortcut(.defaultAction)
-                .help("Close the tracker log")
+            Button(v.doneTitle) { isPresented = false }.keyboardShortcut(.defaultAction)
+                .help(v.doneHelp)
         }
         .padding(.horizontal, 20).padding(.vertical, 14)
     }
@@ -141,33 +143,31 @@ struct TrackerLogView: View {
         HStack(spacing: 12) {
             HStack(spacing: 6) {
                 Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                TextField("Torrent or tracker", text: $model.text).textFieldStyle(.plain)
-                if !model.text.isEmpty {
+                TextField(v.textPrompt, text: $model.text).textFieldStyle(.plain)
+                if !v.text.isEmpty {
                     Button { model.text = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }
-                        .buttonStyle(.plain).accessibilityLabel("Clear filter")
-                        .help("Clear the search text")
+                        .buttonStyle(.plain).accessibilityLabel(v.clearTextName)
+                        .help(v.clearTextHelp)
                 }
             }
             .padding(.horizontal, 8).padding(.vertical, 5)
             .background(RoundedRectangle(cornerRadius: 7).fill(.primary.opacity(0.06)))
             .frame(maxWidth: 300)
-            Picker("Event", selection: $model.event) {
-                Text("All events").tag("")
-                Divider()
-                Text("Started").tag("started")
-                Text("Regular").tag("regular")
-                Text("Completed").tag("completed")
-                Text("Stopped").tag("stopped")
+            Picker(v.eventName, selection: $model.event) {
+                ForEach(v.events, id: \.value) { e in
+                    Text(e.title).tag(e.value)
+                    if e.separatorAfter { Divider() }
+                }
             }
             .labelsHidden().fixedSize()
-            .accessibilityLabel("Event")
-            Toggle("Errors only", isOn: $model.errorsOnly).toggleStyle(.checkbox)
+            .accessibilityLabel(v.eventName)
+            Toggle(v.errorsOnlyTitle, isOn: $model.errorsOnly).toggleStyle(.checkbox)
             Spacer()
             Toggle(isOn: $model.live) {
-                Label("Live", systemImage: model.live ? "dot.radiowaves.left.and.right" : "pause.circle")
+                Label(v.liveTitle, systemImage: v.live ? "dot.radiowaves.left.and.right" : "pause.circle")
             }
             .toggleStyle(.button)
-            .help(model.live ? "Following the log. Click to pause." : "Paused. Click to follow the log again.")
+            .help(v.liveHelp)
         }
         .font(.system(size: 12.5))
         .padding(.horizontal, 20).padding(.vertical, 9)
@@ -177,45 +177,43 @@ struct TrackerLogView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
-                    if model.items.isEmpty {
-                        emptyState
+                    if let e = v.empty {
+                        emptyState(e)
                     }
-                    ForEach(model.items) { item in
-                        TrackerLogRowView(item: item, expanded: model.expanded.contains(item.id)) { model.toggle(item.id) }
+                    ForEach(v.rows, id: \.id) { line in
+                        TrackerLogRowView(line: line) { model.toggle(line.id) }
                         Divider().padding(.leading, 20)
                     }
                     Color.clear.frame(height: 1).id("end")
                 }
             }
             .defaultScrollAnchor(.bottom)
-            .onChange(of: model.items.last?.id) { _, _ in
-                if model.live { proxy.scrollTo("end", anchor: .bottom) }
+            .onChange(of: v.rows.last?.id) { _, _ in
+                if v.live { proxy.scrollTo("end", anchor: .bottom) }
             }
         }
     }
 
-    private var emptyState: some View {
+    private func emptyState(_ e: TrackerLogEmpty) -> some View {
         VStack(spacing: 6) {
             Image(systemName: "text.alignleft").font(.system(size: 26)).foregroundStyle(.tertiary)
-            Text("Nothing logged yet").font(.system(size: 13, weight: .medium))
-            Text("Entries appear here as torrents announce to their trackers.")
-                .font(.system(size: 12)).foregroundStyle(.secondary)
+            Text(e.title).font(.system(size: 13, weight: .medium))
+            Text(e.text).font(.system(size: 12)).foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity).padding(.top, 90)
     }
 
     private var footer: some View {
         HStack(spacing: 12) {
-            Text("\(model.items.count) entries").foregroundStyle(.secondary).monospacedDigit()
-            if model.dropped > 0 {
-                Label("\(model.dropped) dropped: the log could not keep up", systemImage: "exclamationmark.triangle")
-                    .foregroundStyle(.orange)
+            Text(v.countLine).foregroundStyle(.secondary).monospacedDigit()
+            if let d = v.droppedLine {
+                Label(d, systemImage: "exclamationmark.triangle").foregroundStyle(.orange)
             }
             Spacer()
-            Button("Show in Finder") { TrackerLogFiles.revealInFinder(core: core) }
-                .help("Reveal the tracker log files in Finder")
-            Button("Clear Log") { model.clear() }
-                .help("Delete all recorded tracker log entries")
+            Button(v.revealTitle) { TrackerLogFiles.revealInFinder(core: core) }
+                .help(v.revealHelp)
+            Button(v.clearTitle) { model.clear() }
+                .help(v.clearHelp)
         }
         .font(.system(size: 12))
         .padding(.horizontal, 20).padding(.vertical, 9)
@@ -223,11 +221,8 @@ struct TrackerLogView: View {
 }
 
 struct TrackerLogRowView: View {
-    let item: TrackerLogItem
-    let expanded: Bool
+    let line: TrackerLogLine
     let toggle: () -> Void
-
-    private var row: TrackerLogRow { item.row }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
@@ -235,30 +230,28 @@ struct TrackerLogRowView: View {
                 HStack(alignment: .firstTextBaseline, spacing: 10) {
                     Image(systemName: "chevron.right")
                         .font(.system(size: 9, weight: .semibold)).foregroundStyle(.tertiary)
-                        .rotationEffect(.degrees(expanded ? 90 : 0))
+                        .rotationEffect(.degrees(line.detail != nil ? 90 : 0))
                         .frame(width: 10)
-                    Text(timeFormat.string(from: Date(timeIntervalSince1970: Double(row.tsMs) / 1000)))
-                        .font(.system(size: 11.5, design: .monospaced)).foregroundStyle(.secondary)
-                    Text(row.title.isEmpty ? row.id : row.title)
-                        .font(.system(size: 12.5, weight: .medium)).lineLimit(1)
-                    Text(row.host).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
+                    Text(line.time).font(.system(size: 11.5, design: .monospaced)).foregroundStyle(.secondary)
+                    Text(line.title).font(.system(size: 12.5, weight: .medium)).lineLimit(1)
+                    Text(line.host).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
                     Spacer(minLength: 8)
                     pill
                 }
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .help(expanded ? "Hide the request and the answer" : "Show the request and the answer")
-            .accessibilityLabel("\(row.title.isEmpty ? row.id : row.title), \(row.host), \(label)")
-            .accessibilityHint(expanded ? "Hides the request and the answer" : "Shows the request and the answer")
-            Text(row.summary)
+            .help(line.help)
+            .accessibilityLabel(line.accessibilityLabel)
+            .accessibilityHint(line.accessibilityHint)
+            Text(line.summary)
                 .font(.system(size: 12))
-                .foregroundStyle(row.error ? Color.red : .secondary)
-                .lineLimit(expanded ? nil : 1)
+                .foregroundStyle(line.error ? Color.red : .secondary)
+                .lineLimit(line.detail != nil ? nil : 1)
                 .textSelection(.enabled)
                 .padding(.leading, 20)
-            if expanded {
-                Text(row.detail)
+            if let detail = line.detail {
+                Text(detail)
                     .font(.system(size: 11.5, design: .monospaced))
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -269,18 +262,16 @@ struct TrackerLogRowView: View {
             }
         }
         .padding(.horizontal, 20).padding(.vertical, 8)
-        .background(row.error ? Color.red.opacity(0.06) : .clear)
+        .background(line.error ? Color.red.opacity(0.06) : .clear)
     }
-
-    private var label: String { row.event.isEmpty ? row.kind : row.event }
 
     private var pill: some View {
         HStack(spacing: 5) {
-            if !row.transport.isEmpty { Text(row.transport) }
-            Text(label)
+            if !line.transport.isEmpty { Text(line.transport) }
+            Text(line.label)
         }
         .font(.system(size: 10.5, weight: .medium)).textCase(.uppercase)
-        .foregroundStyle(row.error ? Color.red : .secondary)
+        .foregroundStyle(line.error ? Color.red : .secondary)
         .padding(.horizontal, 7).padding(.vertical, 2)
         .background(Capsule().fill(.primary.opacity(0.07)))
     }

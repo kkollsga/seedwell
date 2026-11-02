@@ -50,6 +50,8 @@ pub enum NoticeKind {
     Agent,
     /// A new message in a conversation.
     ChatMessage,
+    /// An agent asks for access (SPEC 9A.3): Approve and Deny as the notification's actions.
+    AgentRequest,
 }
 
 /// What a click on a notification opens.
@@ -61,9 +63,44 @@ pub enum NoticeRoute {
     Transfer { id: String },
     /// The chooser of what to download of a held torrent.
     Chooser { id: String },
+    /// The starting notifier, on a torrent counting down to its start: the host asks `Starting::reveal`, then shows
+    /// the notifier as `Starting::refresh` says.
+    Starting { id: String },
     /// A place of the window (a conversation).
     Place { place: LibraryPlace },
+    /// Settings › Agents, where agents' requests for access wait (with Approve and Deny).
+    AgentRequests,
 }
+
+/// A button of a notification (macOS: a `UNNotificationAction` of the notice's category; Windows: a toast button).
+#[derive(Clone, Debug, PartialEq, Eq, Hash, uniffi::Record)]
+pub struct NoticeAction {
+    /// What the host gives back to [`notice_decision`] with the notice's `click`.
+    pub id: String,
+    pub title: String,
+    /// Drawn as destructive (Deny).
+    pub destructive: bool,
+    /// The system asks to unlock the device first (Approve).
+    pub authenticate: bool,
+}
+
+/// A kind of notification with buttons: the host registers each at launch ([`notice_categories`]).
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct NoticeCategory {
+    pub id: String,
+    pub actions: Vec<NoticeAction>,
+}
+
+/// What a notification's button decides: the user's answer to an agent's request for access, which the host passes
+/// to `Core::agent_request_decide`.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct NoticeDecision {
+    pub request_id: String,
+    pub approve: bool,
+}
+
+/// The category of a request's notice.
+const REQUEST_CATEGORY: &str = "agent-request";
 
 /// One system notification, ready to post.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
@@ -79,6 +116,10 @@ pub struct Notice {
     /// The route as text: the host keeps it with the notification (macOS: `userInfo`; Windows: the launch argument) and
     /// gives it to [`notice_route`] after a click.
     pub click: String,
+    /// Its buttons' category ([`notice_categories`]); `None`: no buttons.
+    pub category: Option<String>,
+    /// Its buttons, in order (Windows adds them to the toast; the Mac's come with the category).
+    pub actions: Vec<NoticeAction>,
 }
 
 /// What the host does about an event.
@@ -108,7 +149,7 @@ pub enum NoticeEvent {
     /// `on_auto_added`.
     AutoAdded { added: AutoAdded },
     /// `on_duplicate`.
-    Duplicate { name: String, trackers_added: u32 },
+    Duplicate { id: String, name: String, trackers_added: u32 },
     /// `on_agent_activity`.
     Agent { activity: AgentActivity },
 }
@@ -141,6 +182,8 @@ pub struct Notices {
 pub(crate) struct State {
     /// When the finished notices of the last [`BURST_MS`] were posted (ms since the notifier was made).
     burst: Vec<u64>,
+    /// The agents' requests for access already posted (each is posted once).
+    requests_posted: std::collections::HashSet<String>,
     /// Each conversation's unread count at the last poll; `None` before the first, which only takes the baseline.
     seen: Option<HashMap<LibraryPlace, u32>>,
 }
@@ -175,6 +218,32 @@ impl Notices {
     }
 }
 
+/// The kinds of notification with buttons, for the host to register at launch (macOS: `UNNotificationCategory`).
+#[uniffi::export]
+pub fn notice_categories() -> Vec<NoticeCategory> {
+    vec![NoticeCategory { id: REQUEST_CATEGORY.into(), actions: request_actions() }]
+}
+
+fn request_actions() -> Vec<NoticeAction> {
+    vec![
+        NoticeAction { id: "approve".into(), title: "Approve".into(), destructive: false, authenticate: true },
+        NoticeAction { id: "deny".into(), title: "Deny".into(), destructive: true, authenticate: false },
+    ]
+}
+
+/// What a notification's button decides: `action` (a [`NoticeAction::id`]) on the notice whose `click` it is. `None`:
+/// a button of no request (the host opens the notice's route instead).
+#[uniffi::export]
+pub fn notice_decision(click: String, action: String) -> Option<NoticeDecision> {
+    let id = click.strip_prefix("agent-request\n").filter(|id| !id.is_empty() && !id.contains('\n'))?;
+    let approve = match action.as_str() {
+        "approve" => true,
+        "deny" => false,
+        _ => return None,
+    };
+    Some(NoticeDecision { request_id: id.to_owned(), approve })
+}
+
 /// What a click on a notification opens: the route of its [`Notice::click`]. Text that is no route (a notification of
 /// an older version) opens the window.
 #[uniffi::export]
@@ -185,11 +254,13 @@ pub fn notice_route(click: String) -> NoticeRoute {
     match kind {
         "transfer" => next().map_or(NoticeRoute::Window, |id| NoticeRoute::Transfer { id }),
         "chooser" => next().map_or(NoticeRoute::Window, |id| NoticeRoute::Chooser { id }),
+        "starting" => next().map_or(NoticeRoute::Window, |id| NoticeRoute::Starting { id }),
         "chat" => match next() {
             Some(channel_id) => NoticeRoute::Place { place: LibraryPlace::Chat { channel_id, topic_id: next() } },
             None => NoticeRoute::Window,
         },
         "direct" => next().map_or(NoticeRoute::Window, |device_id| NoticeRoute::Place { place: LibraryPlace::Direct { device_id } }),
+        "agent-request" | "agent-requests" => NoticeRoute::AgentRequests,
         _ => NoticeRoute::Window,
     }
 }
@@ -200,11 +271,13 @@ pub(crate) fn click_of(route: &NoticeRoute) -> String {
         NoticeRoute::Window => "window".into(),
         NoticeRoute::Transfer { id } => format!("transfer\n{id}"),
         NoticeRoute::Chooser { id } => format!("chooser\n{id}"),
+        NoticeRoute::Starting { id } => format!("starting\n{id}"),
         NoticeRoute::Place { place: LibraryPlace::Chat { channel_id, topic_id } } => {
             format!("chat\n{channel_id}\n{}", topic_id.as_deref().unwrap_or_default())
         }
         NoticeRoute::Place { place: LibraryPlace::Direct { device_id } } => format!("direct\n{device_id}"),
         NoticeRoute::Place { .. } => "window".into(),
+        NoticeRoute::AgentRequests => "agent-requests".into(),
     }
 }
 
@@ -220,7 +293,26 @@ fn off_runtime<T: Send>(f: impl FnOnce() -> T + Send) -> T {
 
 fn notice(kind: NoticeKind, title: String, body: String, key: Option<String>, route: NoticeRoute) -> NoticeOutcome {
     let click = click_of(&route);
-    NoticeOutcome::Post { notice: Notice { kind, title, body, key, route, click } }
+    NoticeOutcome::Post { notice: Notice { kind, title, body, key, route, click, category: None, actions: Vec::new() } }
+}
+
+/// An agent's request for access, with Approve and Deny (Settings › Agents on a click). Its words are the core's; the
+/// reason is the agent's own, quoted.
+pub(crate) fn request_notice(e: &trs_control::access::Entry) -> NoticeOutcome {
+    let mut body = crate::agent_requests::quoted_why(e).map(|w| format!("{w}\n")).unwrap_or_default();
+    body.push_str("Approve gives exactly this; Deny refuses. Also in Settings › Agents.");
+    NoticeOutcome::Post {
+        notice: Notice {
+            kind: NoticeKind::AgentRequest,
+            title: crate::agent_requests::request_title(e),
+            body,
+            key: Some(format!("agent-request-{}", e.id)),
+            route: NoticeRoute::AgentRequests,
+            click: format!("agent-request\n{}", e.id),
+            category: Some(REQUEST_CATEGORY.into()),
+            actions: request_actions(),
+        },
+    }
 }
 
 // MARK: Transfers
@@ -245,6 +337,8 @@ pub(crate) struct Facts {
     pub queued: Vec<TransferRow>,
     /// The tracker of the torrent an id-only event names (an error, an automatic add).
     pub tracker: Option<String>,
+    /// For an agent's request for access: the requests the user is asked about, newest first.
+    pub requests: Vec<trs_control::access::Entry>,
 }
 
 impl Facts {
@@ -261,7 +355,8 @@ impl Facts {
             NoticeEvent::AutoAdded { added } => Some(added.id.clone()),
             _ => None,
         };
-        let needs_library = !matches!(event, NoticeEvent::Duplicate { .. } | NoticeEvent::Agent { .. });
+        // A duplicate looks for the torrent it repeats among the held ones.
+        let needs_library = !matches!(event, NoticeEvent::Agent { .. });
         let (trackers, downloading, queued) = if needs_library {
             let snap = core.snapshot();
             let downloading = snap.downloading.into_iter().chain(snap.hidden_downloading).collect();
@@ -270,7 +365,11 @@ impl Facts {
         } else {
             Default::default()
         };
-        Facts { settings, trackers, downloading, queued, tracker: id.and_then(|id| core.tracker_of(id)) }
+        let requests = match event {
+            NoticeEvent::Agent { activity } if activity.method == "agents.request" => core.backend.agent_requests(),
+            _ => Vec::new(),
+        };
+        Facts { settings, trackers, downloading, queued, tracker: id.and_then(|id| core.tracker_of(id)), requests }
     }
 }
 
@@ -349,7 +448,18 @@ pub(crate) fn decide(state: &mut State, event: NoticeEvent, f: &Facts, now_ms: u
             let title = format!("Added {}", added.name);
             notice(NoticeKind::Added, title, parts.join(" · "), None, NoticeRoute::Transfer { id: added.id })
         }
-        NoticeEvent::Duplicate { name, trackers_added } => {
+        NoticeEvent::Duplicate { id, name, trackers_added } => {
+            // Added again while the first copy is held (counting down, or waiting for a choice): the notice says so
+            // and opens what holds it, so the second add never vanishes.
+            let held = f.downloading.iter().chain(&f.queued).find(|r| r.id == id && (r.awaiting_choice || r.pending.is_some()));
+            if let Some(r) = held {
+                let (body, route) = if r.awaiting_choice {
+                    (format!("{name} is waiting for you to choose what to download"), NoticeRoute::Chooser { id: id.clone() })
+                } else {
+                    (format!("{name} is about to start"), NoticeRoute::Starting { id: id.clone() })
+                };
+                return notice(NoticeKind::Duplicate, format!("Already in {APP_NAME}"), body, Some(format!("duplicate-{id}")), route);
+            }
             let (title, body) = if trackers_added > 0 {
                 let s = if trackers_added == 1 { "" } else { "s" };
                 (format!("Added {trackers_added} tracker{s} to {name}"), format!("It was already in {APP_NAME}"))
@@ -359,7 +469,18 @@ pub(crate) fn decide(state: &mut State, event: NoticeEvent, f: &Facts, now_ms: u
             notice(NoticeKind::Duplicate, title, body, None, NoticeRoute::Window)
         }
         NoticeEvent::Agent { activity } => {
-            if !f.settings.agents || activity.outcome != "ok" {
+            // An agent asks for access: its request, once, whatever the setting (the user must hear of it to answer).
+            if activity.method == "agents.request" {
+                let Some(e) = f.requests.iter().find(|e| !state.requests_posted.contains(&e.id)) else { return Nothing };
+                state.requests_posted.insert(e.id.clone());
+                return request_notice(e);
+            }
+            // An approval by a reply in chat that could not be done: the user is not looking at the app, so say so.
+            if activity.method == "agents.approve" && activity.outcome.starts_with("error") && activity.summary.contains(trs_control::access::CHAT_WORDS) {
+                return notice(NoticeKind::Agent, "Not approved".into(), activity.summary, None, NoticeRoute::AgentRequests);
+            }
+            // The user's own answers, and expiries, need no notice.
+            if !f.settings.agents || activity.outcome != "ok" || activity.method.starts_with("agents.") {
                 return Nothing;
             }
             notice(NoticeKind::Agent, activity.client, activity.summary, None, NoticeRoute::Window)
@@ -441,7 +562,7 @@ pub(crate) fn chat_step(
             _ => continue,
         };
         let route = NoticeRoute::Place { place: c.place };
-        out.push(Notice { kind: NoticeKind::ChatMessage, title: text.title, body: text.body, key: Some(key), click: click_of(&route), route });
+        out.push(Notice { kind: NoticeKind::ChatMessage, title: text.title, body: text.body, key: Some(key), click: click_of(&route), route, category: None, actions: Vec::new() });
     }
     *seen = Some(now);
     out

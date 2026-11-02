@@ -1,7 +1,7 @@
 import Foundation
 
-/// The `seedwell` command inside the app bundle: where it is, whether the user has it on their PATH, linking
-/// it there and installing the Claude Code skill (SPEC 9A). Nothing here runs unless the user presses a button
+/// The `seedwell` command inside the app bundle: where it is, linking it onto the user's PATH and installing the
+/// Claude Code skill (SPEC 9A). Whether it and the skill are installed is the core's to find (`refreshSettingsHostFacts`). Nothing here runs unless the user presses a button
 /// in Settings > Agents.
 enum CommandLineTool {
     /// The CLI inside the bundle (next to the app executable).
@@ -9,19 +9,6 @@ enum CommandLineTool {
         bundlePath.hasSuffix(".app")
             ? bundlePath + "/Contents/MacOS/seedwell"
             : "/Applications/\(AppInfo.name).app/Contents/MacOS/seedwell"
-    }
-
-    /// The two places a link is offered: shared (may need an administrator) and the user's own.
-    static func installFolders(home: String) -> [String] { ["/usr/local/bin", home + "/.local/bin"] }
-
-    /// Where `seedwell` already is: any folder of `pathEnv`, then the two install folders. `nil` when nowhere.
-    static func findInstalled(home: String, pathEnv: String, fm: FileManager = .default) -> String? {
-        let dirs = pathEnv.split(separator: ":").map(String.init) + installFolders(home: home)
-        for d in dirs {
-            let p = d + "/seedwell"
-            if fm.isExecutableFile(atPath: p) { return p }
-        }
-        return nil
     }
 
     /// True when `~/.local/bin` (or another folder) is on the PATH, so a link there works at once.
@@ -53,17 +40,6 @@ enum CommandLineTool {
         } catch {
             throw LinkError.failed(error.localizedDescription)
         }
-    }
-
-    // MARK: Skill
-
-    /// `~/.claude/skills/seedwell`.
-    static func skillFolder(home: String) -> String { home + "/.claude/skills/seedwell" }
-
-    /// Both skills are there: `seedwell` and, beside it, `seedwell-agents` (since 0.1.8; one installed earlier has
-    /// only the first, and Install brings the second).
-    static func skillInstalled(home: String, fm: FileManager = .default) -> Bool {
-        [skillFolder(home: home), skillFolder(home: home) + "-agents"].allSatisfy { fm.fileExists(atPath: $0 + "/SKILL.md") }
     }
 
     struct Result: Equatable { var status: Int32; var out: String; var err: String }

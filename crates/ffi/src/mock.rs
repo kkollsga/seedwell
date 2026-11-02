@@ -78,6 +78,8 @@ struct State {
     app_paused: std::collections::HashSet<String>,
     /// Limit Speed switched on by the app itself (on battery); the user's toggle ends it.
     alt_by_app: bool,
+    /// Agents' requests for access (one sample to start with, for design work).
+    requests: Vec<trs_control::access::Entry>,
 }
 
 /// The mock; clones of the `Arc` are shared with the ticker thread via `Weak`.
@@ -89,6 +91,26 @@ pub struct MockBackend {
     sync: Arc<crate::sync::MockSync>,
     /// Where Cancel puts a `.torrent` file: `Trash` in the state folder, never the real Trash.
     trash: std::path::PathBuf,
+}
+
+/// The mock's request: Claude asks for Full, a few minutes ago.
+fn sample_request() -> trs_control::access::Entry {
+    use trs_control::access::{Entry, State, TTL_MS, Want};
+    let at_ms = now().saturating_sub(4 * 60) * 1000;
+    Entry {
+        id: "5eed0a11".into(),
+        want: Want::Level(trs_control::Permission::Full),
+        agents: vec!["Claude".into()],
+        why: Some("to install the latest release with seedwell update now".into()),
+        at_ms,
+        expires_ms: at_ms + TTL_MS,
+        state: State::Pending,
+        decided_ms: None,
+        how: None,
+        note: None,
+        announced: None,
+        notify: true,
+    }
 }
 
 fn now() -> u64 {
@@ -278,7 +300,7 @@ impl State {
             known_peers: 0,
             has_video: matches!(it.ext.as_str(), "mkv" | "mp4" | "avi" | "mov" | "m4v" | "webm"),
             video_ext: if it.ext.is_empty() { "mkv".into() } else { String::new() },
-            file_count: if it.ext.is_empty() { it.files_total.max(2) } else { 1 },
+            file_count: if it.ext.is_empty() { it.files_total.max(2) } else { it.files_total.max(1) },
             last_activity: None,
             waiting_note: None,
             idle_stopped: None,
@@ -292,7 +314,7 @@ impl State {
             held_bytes: it.done,
             session_done: it.done.min(it.size),
             session_size: it.size,
-            files_done: if it.ext.is_empty() { it.files_total.max(2) } else { 1 },
+            files_done: if it.ext.is_empty() { it.files_total.max(2) } else { it.files_total.max(1) },
         }
     }
 
@@ -773,6 +795,7 @@ impl MockBackend {
                 sources: std::collections::HashMap::new(),
                 app_paused: std::collections::HashSet::new(),
                 alt_by_app: false,
+                requests: vec![sample_request()],
                 lifetime: [
                     (1_820 * GB, 2_410 * GB),
                     (940 * GB, 1_100 * GB),
@@ -1276,6 +1299,19 @@ impl Backend for MockBackend {
         None
     }
 
+    fn agent_requests(&self) -> Vec<trs_control::access::Entry> {
+        self.lock().requests.iter().filter(|e| e.state == trs_control::access::State::Pending).cloned().collect()
+    }
+
+    fn agent_request_decide(&self, id: &str, approve: bool) -> Result<String, String> {
+        use trs_control::access::State;
+        let mut s = self.lock();
+        let e = s.requests.iter_mut().find(|e| e.id == id && e.state == State::Pending).ok_or("It was answered already")?;
+        e.state = if approve { State::Granted } else { State::Denied };
+        e.how = Some(trs_control::access::How::App);
+        Ok(if approve { format!("Approved: {} now", e.want.text()) } else { format!("Denied: {} does not get {}", e.who(), e.want.text()) })
+    }
+
     fn agent_activity(&self, _limit: u32) -> Vec<AgentActivity> {
         let t = now() * 1000;
         [
@@ -1365,8 +1401,30 @@ impl Backend for MockBackend {
             .iter()
             .find(|i| i.id == id)
             .ok_or_else(|| CoreError::NotFound { id: id.into() })?;
-        // A single file when the row has an extension; otherwise an episode or track list that
-        // matches the category, so the Play entries have something to show.
+        // A single file when the row has an extension (a pack of the film, its sample and subtitles when it lists more
+        // than one: the menu's checklist has a downloading torrent of several files); otherwise an episode or track
+        // list that matches the category, so the Play entries have something to show.
+        if !it.ext.is_empty() && it.files_total > 1 {
+            let (sample, subs) = (it.size / 100, 80 * KB);
+            let main = it.size - sample - subs;
+            let files = [
+                (format!("{0}/{0}.{1}", it.name, it.ext), main, FilePriority::Normal),
+                (format!("{0}/Sample/{0}.sample.{1}", it.name, it.ext), sample, FilePriority::Skip),
+                (format!("{0}/{0}.en.srt", it.name), subs, FilePriority::Normal),
+            ];
+            let mut left = it.done;
+            let facts: Vec<crate::play::FileFacts<'_>> = files
+                .iter()
+                .enumerate()
+                .map(|(i, (p, length, wanted))| {
+                    let priority = s.file_prios.get(&(id.to_owned(), i as u32)).copied().unwrap_or(*wanted);
+                    let done = if priority == FilePriority::Skip { 0 } else { left.min(*length) };
+                    left -= done;
+                    crate::play::FileFacts { path: p, disk: p, length: *length, done, priority, padding: false, uploaded: 0 }
+                })
+                .collect();
+            return Ok(crate::play::list(&facts));
+        }
         let paths: Vec<String> = if !it.ext.is_empty() {
             // The file has its extension, as on disk (the row's name may leave it out): it is what says "video".
             let dotted = format!(".{}", it.ext);
@@ -1412,5 +1470,31 @@ impl Backend for MockBackend {
             content_type: trs_stream::mime::content_type(&f.name).to_owned(),
             is_mp4_family: f.is_mp4_family,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::types::{FilePriority, TransferKind, TransferState};
+    use crate::{Core, CoreOptions};
+
+    /// The menu's file checklist needs a downloading torrent of several files (its row has a chevron): the film pack,
+    /// its sample skipped.
+    #[test]
+    fn the_mock_has_a_downloading_torrent_of_several_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let options = CoreOptions { config_dir: dir.path().display().to_string(), mock: true, allow_loopback_trackers: false, forbidden_root: None };
+        let core = Core::new(options).unwrap();
+        let s = core.snapshot();
+        let row = s
+            .downloading
+            .iter()
+            .find(|r| r.state == TransferState::Downloading && r.kind == TransferKind::Torrent && r.file_count > 1)
+            .expect("a downloading torrent of several files");
+        assert!(row.pending.is_none() && !row.awaiting_choice, "its row has the chevron");
+        let files = core.files(row.id.clone()).unwrap();
+        assert_eq!(files.len(), 3, "{files:?}");
+        assert_eq!(files.iter().filter(|f| f.priority == FilePriority::Skip).count(), 1, "the sample is skipped");
+        assert_eq!(u64::try_from(files.len()).unwrap(), u64::from(row.file_count));
     }
 }

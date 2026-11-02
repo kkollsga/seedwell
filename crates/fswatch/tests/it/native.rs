@@ -1,6 +1,6 @@
 //! The native backend (FSEvents on macOS, inotify on Linux, ReadDirectoryChangesW on Windows).
 
-use trs_fswatch::{ActiveBackend, Backend, watch};
+use trs_fswatch::{ActiveBackend, Backend, RawEvent, watch};
 
 use crate::common::*;
 
@@ -52,6 +52,37 @@ fn stop_is_clean_under_a_burst() {
         }
         assert_eq!(trs_fswatch::debug::live_streams(), 0, "the stream still holds its state after stop");
     }
+}
+
+/// A link to the root elsewhere (a symlink; on Windows a directory junction, as `%USERPROFILE%\.claude\skills` was made
+/// to a synced folder): what is written through it is reported under the root, relative to it, never under the
+/// link's path. So the folder matches its ignore patterns against the right path, whichever way a file was written.
+#[test]
+fn changes_made_through_a_link_to_the_root_are_reported_relative_to_the_root() {
+    let (t, r) = root();
+    let view = t.path().join("view");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&r, &view).expect("symlink");
+    #[cfg(windows)]
+    {
+        let out = std::process::Command::new("cmd").arg("/C").arg("mklink").arg("/J").arg(&view).arg(&r).output().expect("mklink");
+        assert!(out.status.success(), "mklink /J: {out:?}");
+    }
+    let w = watch(&r, opts(Backend::Auto)).expect("watch");
+    std::fs::create_dir_all(view.join("synced").join("u_u")).expect("mkdir through the link");
+    std::fs::write(view.join("synced").join("u_u").join("a.md"), b"written through the link").expect("write through the link");
+    let evs = wait_for(&w, |e| covers(e, "synced/u_u/a.md"));
+    for e in &evs {
+        let rel = match e {
+            RawEvent::Path { rel, .. } | RawEvent::Rescan { rel: Some(rel), .. } => rel,
+            _ => continue,
+        };
+        assert!(rel.is_relative(), "{e:?}");
+        assert!(rel.components().all(|c| matches!(c, std::path::Component::Normal(_))), "{e:?}");
+        let first = rel.components().next().map(|c| c.as_os_str().to_string_lossy().into_owned());
+        assert!(first.is_none_or(|f| f == "synced"), "reported under the root, not the link: {e:?}");
+    }
+    w.stop();
 }
 
 #[test]

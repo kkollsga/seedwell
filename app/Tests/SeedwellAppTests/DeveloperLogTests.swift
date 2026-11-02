@@ -81,20 +81,20 @@ struct DeveloperLogTests {
         defer { try? FileManager.default.removeItem(at: dir) }
         let m = TrackerLogModel(core: core)
         await m.refresh()
-        #expect(m.items.count == 1)
-        let first = m.items[0].id
+        #expect(m.view.rows.count == 1)
+        let first = m.view.rows[0].id
         m.toggle(first)
-        #expect(m.expanded.contains(first))
+        #expect(m.view.rows[0].detail != nil)
         // a new line arrives: the first row keeps its identity (and its expansion)
         let h = try FileHandle(forWritingTo: dir.appendingPathComponent("logs/trackers.log"))
         try h.seekToEnd()
         try h.write(contentsOf: Data((line(2_000, event: "regular", error: true) + "\n").utf8))
         try h.close()
         await m.refresh()
-        #expect(m.items.count == 2)
-        #expect(m.items[0].id == first && m.expanded.contains(first))
+        #expect(m.view.rows.count == 2)
+        #expect(m.view.rows[0].id == first && m.view.rows[0].detail != nil)
         m.errorsOnly = true
         await m.refresh()
-        #expect(m.items.count == 1 && m.items[0].row.error)
+        #expect(m.view.rows.count == 1 && m.view.rows[0].error && m.errorsOnly)
     }
 }

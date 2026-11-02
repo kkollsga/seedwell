@@ -234,7 +234,10 @@ indirect enum MenuEntry {
 
     /// "Move to…": below a folder the user picks, pinned there (SPEC §7A.5).
     func moveTo(_ rows: [TransferRow]) {
-        guard let picked = FolderPicker.choose(start: rows.first?.savePath ?? "~") else { return }
+        Task { if let picked = await FolderPicker.choose(start: rows.first?.savePath ?? "~") { moveTo(rows, picked) } }
+    }
+
+    private func moveTo(_ rows: [TransferRow], _ picked: String) {
         let (core, ids, path) = (self.core, rows.map(\.id), self.core.expandPath(path: picked))
         CoreCalls.inOrder({ await catching { try await core.moveTo(ids: ids, path: path) } }) { [weak self] r in
             switch r {

@@ -453,6 +453,16 @@ impl IndexStore for SimStore {
         tick(&self.ctl, "commit")?;
         self.s().apply(ops)
     }
+    fn ignore(&self) -> Option<Arc<trs_sync::ignore::Ignore>> {
+        self.s().ignore()
+    }
+    fn set_ignore(&mut self, ignore: Option<Arc<trs_sync::ignore::Ignore>>) {
+        self.s().set_ignore(ignore);
+    }
+    fn ignore_applied(&self) -> io::Result<Option<String>> {
+        self.alive()?;
+        self.s().ignore_applied()
+    }
 }
 
 struct SimClock {

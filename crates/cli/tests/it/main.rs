@@ -5,6 +5,7 @@
 #[path = "../common/mod.rs"]
 mod common;
 
+mod chat_files;
 mod cli;
 mod e2e;
 mod mail;

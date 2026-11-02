@@ -132,9 +132,24 @@ sealed class SnapshotRenderer(App app, FlyoutWindow flyout, string dir, string t
         await Place(new LibraryPlace.FolderSync(), "library-foldersync");
         // Settings: Updates, Devices and Folder Sync's Cloudflare rendezvous (off: the guide).
         await Place(new LibraryPlace.Settings(), "library-settings");
-        if (pane.SettingsPageShown?.Rendezvous.Root is UIElement rendezvous)
+        // Every tab of Settings (W5), as its tab button shows it.
+        if (pane.SettingsPageShown is SettingsPage settingsPage)
         {
-            await Save(rendezvous, "settings-rendezvous");
+            foreach (var t in new[] { SettingsTab.General, SettingsTab.Transfers, SettingsTab.Folders, SettingsTab.Network, SettingsTab.FolderSync, SettingsTab.Devices, SettingsTab.Agents, SettingsTab.Advanced })
+            {
+                settingsPage.Show(t);
+                await Settle();
+                await Save(window.Content, $"settings-{t.ToString().ToLowerInvariant()}");
+            }
+            settingsPage.Show(SettingsTab.General);
+        }
+        // Folder Sync's Cloudflare section, on its tab (only there is it in the window).
+        if (pane.SettingsPageShown is SettingsPage withRendezvous)
+        {
+            withRendezvous.Show(SettingsTab.FolderSync);
+            await Settle();
+            await Save(withRendezvous.Rendezvous.Root, "settings-rendezvous");
+            withRendezvous.Show(SettingsTab.General);
         }
         await Place(new LibraryPlace.Downloads(), "library-downloads");
         async Task Menu(MenuFlyout flyout, string name)
@@ -245,6 +260,23 @@ sealed class SnapshotRenderer(App app, FlyoutWindow flyout, string dir, string t
         {
             await Place(chatDirect.Place, "library-direct");
         }
+        // The core's questions (W4) as their dialogs, each from its model with a sample input.
+        foreach (var (title, text, yes, no, name) in new[]
+        {
+            Prompt(TrsFfiMethods.AddRequestPrompt(new AddRequestInfo(@"C:\Users\Anna\Downloads\Ubuntu 26.04.torrent", "ubuntu-26.04.1-desktop-amd64.iso", 6_200_000_000, Category.Software, "torrent.ubuntu.com")), "prompt-add-request"),
+            TrsFfiMethods.LocationMovePrompt(new MoveProposalInfo([new MoveItemInfo("a", "Film.mkv", 4_000_000_000, @"C:\Users\Anna\Downloads", @"D:\Media", true), new MoveItemInfo("b", "Series", 12_000_000_000, @"C:\Users\Anna\Downloads", @"D:\Media", true)], 16_000_000_000, 2)) is LocationMovePrompt lm
+                ? (lm.Title, lm.Text, lm.MoveTitle, lm.DontMoveTitle, "prompt-location-move") : default,
+            Offer(TrsFfiMethods.BacklogOffer(5, @"C:\Users\Anna\Downloads", TorrentFileAction.Leave), "prompt-backlog"),
+        })
+        {
+            if (title is null) continue;
+            var d = new ContentDialog { XamlRoot = window.Content.XamlRoot, Title = title, Content = new TextBlock { Text = text, TextWrapping = TextWrapping.Wrap }, PrimaryButtonText = yes, CloseButtonText = no, DefaultButton = ContentDialogButton.Primary };
+            _ = d.ShowAsync();
+            await PopupOpened(window.Content.XamlRoot);
+            await SavePopups(window.Content.XamlRoot, name);
+            d.Hide();
+            await PopupsClosed(window.Content.XamlRoot);
+        }
         if (pane.Model?.Sidebar.Trackers?.Items.FirstOrDefault() is SidebarItem tracker)
         {
             await Place(tracker.Place, "library-tracker");
@@ -295,6 +327,9 @@ sealed class SnapshotRenderer(App app, FlyoutWindow flyout, string dir, string t
             app.Library.ToggleFold(fold.Key);
         }
     }
+
+    static (string, string, string, string, string) Prompt(AddRequestPrompt p, string name) => (p.Title, p.Text, p.AddTitle, p.DontAddTitle, name);
+    static (string, string, string, string, string) Offer(BacklogOffer o, string name) => (o.Title, o.Text, o.AddTitle, o.LaterTitle, name);
 
     /// <summary>
     /// A file card in every state the core has a sample of (chat_file_samples), the pending sends, and the question

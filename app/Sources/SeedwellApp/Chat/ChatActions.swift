@@ -53,7 +53,13 @@ import SwiftUI
         }
     }
 
-    func setMuted(_ c: SyncChannel, _ muted: Bool) { core.chatSetMuted(id: c.id, muted: muted) }
+    /// Wired by the app delegate: the window reads the library again (a channel's setting changed).
+    var changed: () -> Void = {}
+
+    func setMuted(_ c: SyncChannel, _ muted: Bool) {
+        let (core, id) = (core, c.id)
+        CoreCalls.inOrder({ await core.chatSetMuted(id: id, muted: muted) }) { [weak self] (_: Void) in self?.changed() }
+    }
 
     /// The channel's "On all my devices" (the core's line; hidden while this Mac is not paired).
     func followLine(_ c: SyncChannel) -> FollowLine { core.syncFollowLine(id: c.id) }
@@ -72,8 +78,10 @@ import SwiftUI
 
     /// The channel's Agents: Yes/No, for every member device (owners and admins).
     func setAgents(_ c: SyncChannel, _ open: Bool) {
-        do { try core.chatSetAgents(id: c.id, open: open) } catch {
-            sync.alert(chatAgentsMenu(channel: c).failureTitle, SyncText.message(error))
+        let (core, id, title) = (core, c.id, chatAgentsMenu(channel: c).failureTitle)
+        CoreCalls.inOrder({ await catching { try await core.chatSetAgents(id: id, open: open) } }) { [weak self] r in
+            if case .failure(let error) = r { self?.sync.alert(title, SyncText.message(error)) }
+            self?.changed()
         }
     }
 
@@ -156,7 +164,11 @@ import SwiftUI
     func rename(_ c: SyncChannel, _ dialog: ChatDialog? = nil) {
         let d = dialog ?? chatRenameDialog(channel: c)
         guard case .ready(let name?) = ask(d) else { return }
-        do { try core.chatRename(id: c.id, name: name) } catch { sync.alert(d.failureTitle, SyncText.message(error)) }
+        let (core, id) = (core, c.id)
+        CoreCalls.inOrder({ await catching { try await core.chatRename(id: id, name: name) } }) { [weak self] r in
+            if case .failure(let error) = r { self?.sync.alert(d.failureTitle, SyncText.message(error)) }
+            self?.changed()
+        }
     }
 
     /// Asks for the command that wakes an agent when a message arrives (empty: none). It gets the message as JSON on
@@ -164,7 +176,10 @@ import SwiftUI
     func askWakeCommand(_ c: SyncChannel, _ dialog: ChatDialog? = nil) {
         let d = dialog ?? chatWakeCommandDialog(channel: c)
         guard case .ready(let cmd) = ask(d) else { return }
-        do { try core.chatSetWakeCommand(id: c.id, command: cmd) } catch { sync.alert(d.failureTitle, SyncText.message(error)) }
+        let (core, id) = (core, c.id)
+        CoreCalls.inOrder({ await catching { try await core.chatSetWakeCommand(id: id, command: cmd) } }) { [weak self] r in
+            if case .failure(let error) = r { self?.sync.alert(d.failureTitle, SyncText.message(error)) }
+        }
     }
 
     /// Deletes the private conversation with a device on this Mac (asks first), and goes to Folder Sync. The other

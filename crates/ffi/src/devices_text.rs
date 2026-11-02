@@ -86,6 +86,8 @@ pub struct DevicesView {
     pub my_id_line: String,
     /// Under the list: why a second device as co-owner is a good backup.
     pub note: String,
+    /// While Settings › Devices is shown: read the view again this often (the list, requests, a link's countdown).
+    pub refresh_ms: u32,
 }
 
 /// A pairing link this device made, for Pair a Device….
@@ -280,6 +282,7 @@ pub(crate) fn devices_view_of(s: &DevicesStatus, now_s: u64) -> DevicesView {
         note: "Folders and channels you put on all your devices come to the others with them as admins. Make a second device \
                co-owner in a folder's sharing too: then the folder can still be managed if this one is lost."
             .into(),
+        refresh_ms: 1_000,
     }
 }
 

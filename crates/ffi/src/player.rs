@@ -311,16 +311,33 @@ pub struct PlayWithChoice {
     pub title: String,
     /// A player that cannot run here, or one the setting names that is gone, is listed but not choosable.
     pub enabled: bool,
+    /// The player plays only the MP4 family (QuickTime Player).
+    pub mp4_only: bool,
+}
+
+/// What "Automatic" does with the players found (`choices`, in Automatic's order): "Automatic tries IINA, VLC, then
+/// QuickTime Player (MP4 only)". Names only what this computer has and can run.
+pub(crate) fn automatic_hint(choices: &[PlayWithChoice]) -> String {
+    let names: Vec<String> = choices
+        .iter()
+        .filter(|c| c.enabled && c.value != AUTO)
+        .map(|c| if c.mp4_only { format!("{} (MP4 only)", c.title) } else { c.title.clone() })
+        .collect();
+    match names.as_slice() {
+        [] => format!("No player found. Install {} or {}", platform::SUGGESTED[0], platform::SUGGESTED[1]),
+        [one] => format!("Automatic plays with {one}"),
+        [first @ .., last] => format!("Automatic tries {}, then {last}", first.join(", ")),
+    }
 }
 
 /// Automatic, then every player found; a player the setting names that this computer no longer has stays visible
 /// instead of a blank pop-up.
 fn choices(known: &[KnownPlayer], installed: &[Player], selection: &str) -> Vec<PlayWithChoice> {
-    let mut out = vec![PlayWithChoice { value: AUTO.into(), title: "Automatic".into(), enabled: true }];
-    out.extend(installed.iter().map(|p| PlayWithChoice { value: p.id.clone(), title: menu_title(p), enabled: p.runs }));
+    let mut out = vec![PlayWithChoice { value: AUTO.into(), title: "Automatic".into(), enabled: true, mp4_only: false }];
+    out.extend(installed.iter().map(|p| PlayWithChoice { value: p.id.clone(), title: menu_title(p), enabled: p.runs, mp4_only: p.mp4_only }));
     if selection != AUTO && !installed.iter().any(|p| p.id == selection) {
         let name = platform::spec_in(known, selection).map_or(selection, |s| s.name);
-        out.push(PlayWithChoice { value: selection.into(), title: format!("{name} (not installed)"), enabled: false });
+        out.push(PlayWithChoice { value: selection.into(), title: format!("{name} (not installed)"), enabled: false, mp4_only: false });
     }
     out
 }

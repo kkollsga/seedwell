@@ -10,7 +10,7 @@ use crate::types::{Category, PendingStart, TransferState};
 const ON: NoticeSettings = NoticeSettings { finished: true, errors: true, goal: true, agents: true };
 
 fn facts() -> Facts {
-    Facts { settings: ON, trackers: trackers(), downloading: Vec::new(), queued: Vec::new(), tracker: None }
+    Facts { settings: ON, trackers: trackers(), downloading: Vec::new(), queued: Vec::new(), tracker: None, requests: Vec::new() }
 }
 
 /// "full" hides everything, "seed" only what is sharing, "shown" and "public" nothing.
@@ -161,13 +161,38 @@ fn an_automatic_add_that_waits_to_start_or_is_hidden_says_nothing() {
     assert_eq!(run(NoticeEvent::AutoAdded { added: added(None) }, &f), NoticeOutcome::Nothing);
 }
 
+fn dup(id: &str, trackers_added: u32) -> NoticeEvent {
+    NoticeEvent::Duplicate { id: id.into(), name: "Sintel".into(), trackers_added }
+}
+
 #[test]
 fn a_duplicate_says_it_was_there_or_how_many_trackers_it_gained() {
-    let n = posted(run(NoticeEvent::Duplicate { name: "Sintel".into(), trackers_added: 0 }, &facts()));
+    let n = posted(run(dup("s", 0), &facts()));
     assert_eq!((n.kind, n.title.as_str(), n.body.as_str(), n.route), (NoticeKind::Duplicate, "Already in Seedwell", "Sintel", NoticeRoute::Window));
-    let n = posted(run(NoticeEvent::Duplicate { name: "Sintel".into(), trackers_added: 1 }, &facts()));
+    let n = posted(run(dup("s", 1), &facts()));
     assert_eq!((n.title.as_str(), n.body.as_str()), ("Added 1 tracker to Sintel", "It was already in Seedwell"));
-    assert_eq!(posted(run(NoticeEvent::Duplicate { name: "Sintel".into(), trackers_added: 3 }, &facts())).title, "Added 3 trackers to Sintel");
+    assert_eq!(posted(run(dup("s", 3), &facts())).title, "Added 3 trackers to Sintel");
+}
+
+/// Added again while the first copy is held: the notice says so and opens the starting notifier (a countdown) or the
+/// chooser (a choice), one notice per torrent however often it is added.
+#[test]
+fn a_duplicate_of_a_held_torrent_opens_what_holds_it() {
+    let mut counting = on("s", "public");
+    counting.pending = Some(PendingStart { starts_at_ms: 0, remaining_ms: 5_000, paused: false });
+    let f = Facts { downloading: vec![counting], ..facts() };
+    let n = posted(run(dup("s", 0), &f));
+    assert_eq!((n.kind, n.title.as_str(), n.body.as_str()), (NoticeKind::Duplicate, "Already in Seedwell", "Sintel is about to start"));
+    assert_eq!((n.route.clone(), n.key.as_deref()), (NoticeRoute::Starting { id: "s".into() }, Some("duplicate-s")));
+    assert_eq!(notice_route(n.click), n.route, "the click survives a restart");
+    let mut choosing = on("s", "public");
+    choosing.awaiting_choice = true;
+    let f = Facts { queued: vec![choosing], ..facts() };
+    let n = posted(run(dup("s", 0), &f));
+    assert_eq!((n.body.as_str(), n.route), ("Sintel is waiting for you to choose what to download", NoticeRoute::Chooser { id: "s".into() }));
+    // A running one is not held: the usual notice.
+    let f = Facts { downloading: vec![on("s", "public")], ..facts() };
+    assert_eq!(posted(run(dup("s", 0), &f)).route, NoticeRoute::Window);
 }
 
 #[test]
@@ -181,6 +206,63 @@ fn an_agent_change_is_announced_when_it_worked_and_the_setting_is_on() {
     assert_eq!(run(NoticeEvent::Agent { activity: a("ok") }, &off), NoticeOutcome::Nothing);
 }
 
+/// An agent's request for access (SPEC 9A.3): once, whatever Notify me says, with Approve and Deny; the user's own
+/// answers and expiries post nothing.
+#[test]
+fn an_agents_request_is_announced_once_with_approve_and_deny() {
+    use trs_control::access::{Entry, State as RState, TTL_MS, Want};
+    let e = Entry {
+        id: "5eed0a11".into(),
+        want: Want::Level(trs_control::Permission::Full),
+        agents: vec!["Claude".into()],
+        why: Some("to install the release".into()),
+        at_ms: 0,
+        expires_ms: TTL_MS,
+        state: RState::Pending,
+        decided_ms: None,
+        how: None,
+        note: None,
+        announced: None,
+        notify: true,
+    };
+    let asked = |method: &str| NoticeEvent::Agent {
+        activity: AgentActivity { at_ms: 0, client: "Claude".into(), method: method.into(), summary: "ask the user for agent permission full".into(), outcome: "ok".into() },
+    };
+    // Notify me off: the request is still told.
+    let f = Facts { settings: NoticeSettings { agents: false, ..ON }, requests: vec![e.clone()], ..facts() };
+    let mut state = State::default();
+    let n = posted(decide(&mut state, asked("agents.request"), &f, 0));
+    assert_eq!((n.kind, n.title.as_str(), n.route.clone()), (NoticeKind::AgentRequest, "Claude asks for agent permission full", NoticeRoute::AgentRequests));
+    assert_eq!(n.body, "“to install the release”\nApprove gives exactly this; Deny refuses. Also in Settings › Agents.");
+    assert_eq!((n.key.as_deref(), n.category.as_deref()), (Some("agent-request-5eed0a11"), Some("agent-request")));
+    assert_eq!(n.actions.iter().map(|a| (a.id.as_str(), a.title.as_str(), a.destructive, a.authenticate)).collect::<Vec<_>>(), [
+        ("approve", "Approve", false, true),
+        ("deny", "Deny", true, false)
+    ]);
+    assert_eq!(notice_categories(), [NoticeCategory { id: "agent-request".into(), actions: n.actions.clone() }]);
+    assert_eq!(notice_route(n.click.clone()), NoticeRoute::AgentRequests);
+    assert_eq!(notice_decision(n.click.clone(), "approve".into()), Some(NoticeDecision { request_id: "5eed0a11".into(), approve: true }));
+    assert_eq!(notice_decision(n.click.clone(), "deny".into()), Some(NoticeDecision { request_id: "5eed0a11".into(), approve: false }));
+    for (click, action) in [(n.click.as_str(), "open"), ("transfer\nabc", "approve"), ("agent-request\n", "approve"), ("agent-request\na\nb", "approve"), ("", "approve")] {
+        assert_eq!(notice_decision(click.into(), action.into()), None, "{click:?} {action}");
+    }
+    // Once: the same request again (a second agent joined it) posts nothing.
+    assert_eq!(decide(&mut state, asked("agents.request"), &f, 1), NoticeOutcome::Nothing);
+    // The user's answers and expiries: nothing, also with Notify me on.
+    let on = Facts { requests: vec![e], ..facts() };
+    for m in ["agents.approve", "agents.deny", "agents.expire"] {
+        assert_eq!(run(asked(m), &on), NoticeOutcome::Nothing, "{m}");
+    }
+    assert_eq!(run(asked("agents.request"), &facts()), NoticeOutcome::Nothing, "no request the user is asked about");
+    // A chat reply's approval that could not be done is told (nobody looks at the app); a button's is the host's.
+    let failed = |summary: &str| NoticeEvent::Agent {
+        activity: AgentActivity { at_ms: 0, client: "the user".into(), method: "agents.approve".into(), summary: summary.into(), outcome: "error: invalid".into() },
+    };
+    let n = posted(run(failed("approved Claude's request for agent permission full (with a reply in chat), but agent access is switched off"), &facts()));
+    assert_eq!((n.kind, n.title.as_str(), n.route), (NoticeKind::Agent, "Not approved", NoticeRoute::AgentRequests));
+    assert_eq!(run(failed("approved Claude's request for agent permission full (in the app), but agent access is switched off"), &facts()), NoticeOutcome::Nothing);
+}
+
 // MARK: Clicks
 
 #[test]
@@ -192,6 +274,7 @@ fn every_route_survives_as_text_and_anything_else_opens_the_window() {
         NoticeRoute::Place { place: LibraryPlace::Chat { channel_id: "C-1".into(), topic_id: None } },
         NoticeRoute::Place { place: LibraryPlace::Chat { channel_id: "C-1".into(), topic_id: Some("T/2".into()) } },
         NoticeRoute::Place { place: LibraryPlace::Direct { device_id: "D9".into() } },
+        NoticeRoute::AgentRequests,
     ];
     for r in routes {
         assert_eq!(notice_route(click_of(&r)), r);
@@ -304,7 +387,7 @@ fn the_notifier_reads_the_settings_and_the_library_of_its_core() {
     let (core, _dir) = mock();
     let n = Notices::new(core.clone());
     assert_eq!(n.model().chat_poll_ms, 2_000);
-    let dup = posted(n.event(NoticeEvent::Duplicate { name: "Sintel".into(), trackers_added: 0 }));
+    let dup = posted(n.event(NoticeEvent::Duplicate { id: "nope".into(), name: "Sintel".into(), trackers_added: 0 }));
     assert_eq!(dup.title, "Already in Seedwell");
     // The goal notice is off by default (SPEC §9: optional).
     let goal = core.settings_load().general.notify_goal;

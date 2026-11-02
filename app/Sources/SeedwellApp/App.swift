@@ -72,7 +72,7 @@ import os
         term.setEventHandler { [weak self] in MainActor.assumeIsolated { self?.quitForReal() } }
         term.resume()
         termSource = term
-        if let problem = options.configurationError { return fatal("Cannot start", problem) }
+        if let problem = options.configurationError { return fatal(startFailureTexts().refusedTitle, problem) }
         startWatchdog()
         let launchedByUser = Self.isUserLaunch(notification)
         log.notice("launch: by user \(launchedByUser), background \(self.options.background)")
@@ -147,7 +147,7 @@ import os
                 }
                 return
             }
-            return fatal("\(AppInfo.name) could not start", "\(error)", recovery: true)
+            return fatal(startFailureTexts().title, "\(error)", recovery: true)
         }
         commands = Commands(core: core)
         settings = SettingsModel(core: core)
@@ -173,7 +173,8 @@ import os
         let a = NSAlert()
         a.messageText = title
         a.informativeText = text
-        a.addButton(withTitle: "Quit")
+        let texts = startFailureTexts()
+        a.addButton(withTitle: texts.quitTitle).toolTip = texts.quitHelp
         let actions = recovery
             ? recoveryActions(stateDir: options.resolvedStateDir(), installDir: UpdateCenter.installDir,
                               repoUrl: Bundle.main.object(forInfoDictionaryKey: "SeedwellRepoURL") as? String,
@@ -214,6 +215,7 @@ import os
         sync.showShare = { [weak self, sync] id in self?.syncWindows.showShare(id: id, actions: sync) }
         sync.showShareNew = { [weak self, sync] path in self?.syncWindows.showShare(newFolder: path, actions: sync) }
         let chat = commands.chat
+        chat.changed = { main.libraryModel?.refresh() }
         chat.show = { place in main.show(section: place) }
         // A quiet QA run is never the active app; its window counts as seen.
         chat.noticeView = { NoticeView(inFront: NSApp.isActive || QuietRun.on, windowPlace: main.isOpen ? main.libraryModel?.section : nil) }
@@ -260,6 +262,10 @@ import os
         }
         NSApp.mainMenu = MainMenu.make(commands: commands)
         settings.applied = { [weak self] s in self?.apply(s) }
+        AgentRequests.answered = { [weak self] in
+            self?.settings.reloadRequests()
+            self?.statusMenu?.refreshIcon()
+        }
         apply(settings.app)
         main.onClose = { [weak self] in self?.settings.save() }
 
@@ -410,12 +416,13 @@ import os
         case .pending:
             startingNotifier?.refresh()
             statusMenu?.refreshIcon()
-        case .duplicate(let name, let added):
-            notice(.duplicate(name: name, trackersAdded: UInt32(clamping: added)))
+        case .duplicate(let id, let name, let added):
+            notice(.duplicate(id: id, name: name, trackersAdded: UInt32(clamping: added)))
         case .addRequest(let r):
             chooserWindows.showAddRequest(r, commands: commands)
         case .agent(let a):
             settings.reloadActivity()
+            settings.reloadRequests()
             notice(.agent(activity: a))
         case .settingsChanged(_, let warnings, let restart):
             qaConfigReloads += 1
@@ -445,7 +452,9 @@ import os
         case .window: commands.showMain(nil, nil)
         case .transfer(let id): commands.showMain(nil, id)
         case .chooser(let id): commands.showChooser(id)
+        case .starting(let id): startingNotifier?.reveal(id)
         case .place(let place): commands.chat.show(place)
+        case .agentRequests: commands.showSettings(.agents)
         }
     }
 
@@ -491,7 +500,15 @@ import os
 
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
         let click = response.notification.request.content.userInfo[Notifier.clickKey] as? String ?? ""
-        await MainActor.run { open(noticeRoute(click: click)) }
+        let action = response.actionIdentifier
+        await MainActor.run {
+            // A button (Approve, Deny on an agent's request) answers; a click on the notice opens its route.
+            if let d = noticeDecision(click: click, action: action) {
+                AgentRequests.decide(core: core, id: d.requestId, approve: d.approve, notify: true)
+            } else {
+                open(noticeRoute(click: click))
+            }
+        }
     }
 
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification) async -> UNNotificationPresentationOptions {

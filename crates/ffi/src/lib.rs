@@ -6,6 +6,7 @@
 //! (`trs_engine::Host`, in-process) in the app, a simulated library behind `--mock`. Settings,
 //! rules and tracker profiles are read and written straight through `trs-state`, in both modes.
 
+mod agent_requests;
 mod app_commands;
 mod app_place;
 mod async_calls;
@@ -52,6 +53,7 @@ mod settings_rules;
 mod settings_text;
 mod settings_view;
 mod settings_view_apply;
+mod settings_view_host;
 mod sidebar;
 mod sources;
 mod starting;
@@ -64,6 +66,8 @@ mod sync_share;
 mod sync_rendezvous;
 mod sync_removal;
 mod sync_text;
+mod tracker_folders;
+mod tracker_log;
 mod tracker_page;
 mod types;
 #[cfg(test)]
@@ -74,6 +78,7 @@ mod updates;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+pub use agent_requests::{AgentRequestAnswer, AgentRequestRow, AgentRequestsModel};
 pub use app_commands::*;
 pub use backend::{AttrRow, Backend, ShutdownInfo};
 pub use chat_dialogs::*;
@@ -165,8 +170,13 @@ pub struct Core {
     host: std::sync::Mutex<Option<sync_host::Server>>,
     /// The user's commands to the engine, run one after another in the order they came (`async_calls`).
     commands: calls::Lane,
+    /// The user's changes to folder sync and chat settings (a channel muted then unmuted, a port, the rendezvous), one
+    /// after another in the order they came, apart from the engine's commands (`async_calls`).
+    sync_commands: calls::Lane,
     /// Reads a host makes while it draws, never waiting for a busy engine (`async_calls::Polls`).
     polls: async_calls::Polls,
+    /// What Settings shows of this computer's agent tools, as found last (`settings_view_host`).
+    host_facts: settings_view_host::HostFacts,
 }
 
 impl Core {
@@ -202,7 +212,9 @@ impl Core {
             #[cfg(unix)]
             host: std::sync::Mutex::new(None),
             commands: calls::Lane::new("seedwell-commands"),
+            sync_commands: calls::Lane::new("seedwell-sync-commands"),
             polls: async_calls::Polls::default(),
+            host_facts: Default::default(),
         }))
     }
 
@@ -840,9 +852,10 @@ mod tests {
     fn mock_files_and_stream_url() {
         let (core, _d) = mock_core();
         let s = core.snapshot();
-        // Every single-file row lists one file named with its extension, so a video is a video (Play offers it).
+        // Every single-file row lists one file named with its extension, so a video is a video (Play offers it). (The film
+        // pack lists three: mock.rs tests it.)
         let singles: Vec<&TransferRow> =
-            s.downloading.iter().chain(&s.sharing_busiest).filter(|r| !r.file_ext.is_empty()).collect();
+            s.downloading.iter().chain(&s.sharing_busiest).filter(|r| !r.file_ext.is_empty() && r.file_count == 1).collect();
         assert!(singles.iter().any(|r| row_text::is_video_ext(&r.file_ext)), "a single-file video");
         for r in &singles {
             let files = core.files(r.id.clone()).unwrap();
@@ -1093,7 +1106,7 @@ mod tests {
         fn on_goal_reached(&self, _: TransferRow) {}
         fn on_needs_choice(&self, _: TransferRow) {}
         fn on_auto_added(&self, _: AutoAdded) {}
-        fn on_duplicate(&self, _: String, _: u32) {}
+        fn on_duplicate(&self, _: String, _: String, _: u32) {}
         fn on_add_request(&self, _: AddRequestInfo) {}
         fn on_agent_activity(&self, _: AgentActivity) {}
         fn on_settings_changed(&self, _: String, _: Vec<String>, _: Vec<String>) {}
@@ -1271,5 +1284,80 @@ mod tests {
         assert!(core.pending_start_now("nope".into()).is_err());
         let r = core.shutdown(5);
         assert!(r.finished);
+    }
+
+    /// Hears the duplicates the core reports.
+    struct Dups(std::sync::Mutex<Vec<(String, String, u32)>>);
+    impl CoreListener for Dups {
+        fn on_transfer_finished(&self, _: TransferRow) {}
+        fn on_error(&self, _: Option<String>, _: String) {}
+        fn on_goal_reached(&self, _: TransferRow) {}
+        fn on_needs_choice(&self, _: TransferRow) {}
+        fn on_auto_added(&self, _: AutoAdded) {}
+        fn on_duplicate(&self, id: String, name: String, added: u32) {
+            self.0.lock().unwrap().push((id, name, added));
+        }
+        fn on_add_request(&self, _: AddRequestInfo) {}
+        fn on_agent_activity(&self, _: AgentActivity) {}
+        fn on_settings_changed(&self, _: String, _: Vec<String>, _: Vec<String>) {}
+        fn on_settings_rejected(&self, _: String, _: String) {}
+        fn on_locations_changed(&self, _: u32, _: u64) {}
+        fn on_attention_changed(&self) {}
+        fn on_pending_changed(&self) {}
+    }
+
+    /// A torrent added again while the first copy counts down to its start: the core reports the duplicate with the
+    /// held torrent's id, the notice opens the starting notifier on it, and the notifier shows it again even when the
+    /// user had put it away.
+    #[test]
+    fn a_torrent_added_again_while_it_counts_down_is_announced_and_opens_its_notifier() {
+        let home = tempfile::tempdir().unwrap();
+        let work = tempfile::tempdir().unwrap();
+        // SAFETY: set before the core starts any thread; nextest runs every test in its own process.
+        unsafe { std::env::set_var("HOME", home.path()) };
+        let dir = work.path().join("state");
+        let store = SettingsStore::new(&dir);
+        let mut st = store.load_settings();
+        st.folders.download_dir = work.path().join("done").display().to_string();
+        st.folders.incomplete_dir = work.path().join("incomplete").display().to_string();
+        st.folders.watch.clear();
+        st.network.port_mapping = false;
+        st.transfers.start_delay_secs = 60;
+        // The .torrent stays where it is, so it can be added again (the default would move it to the Trash, which a
+        // test may never use; the real Trash is refused under test on every system).
+        st.folders.torrent_after_add = TorrentFileAction::Leave;
+        store.save_settings(&st).unwrap();
+        let options = CoreOptions { config_dir: dir.display().to_string(), mock: false, allow_loopback_trackers: false, forbidden_root: None };
+        let core = Core::new(options).unwrap();
+        let dups = Arc::new(Dups(std::sync::Mutex::new(Vec::new())));
+        core.set_listener(dups.clone());
+        let id = add_movie(&core, work.path());
+        assert!(core.snapshot().downloading.iter().any(|r| r.id == id && r.pending.is_some()), "it counts down");
+        let starting = Starting::new(core.clone(), Choices::new(core.clone()));
+        let now = || std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+        starting.refresh(core.snapshot().downloading, now(), false);
+        starting.dismiss_all();
+        assert_eq!(starting.refresh(core.snapshot().downloading, now(), false).show, StartingShow::Quiet, "put away");
+
+        let again = work.path().join("movie.torrent");
+        let refused = core.add_source(again.display().to_string()).expect_err("nothing is added twice");
+        let heard = (0..100).find_map(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            dups.0.lock().unwrap().first().cloned()
+        });
+        let Some((dup_id, name, added)) = heard else {
+            panic!("the core reports the duplicate; the second add said {refused:?}; the .torrent is still there: {}", again.exists())
+        };
+        assert_eq!((dup_id.as_str(), added), (id.as_str(), 0));
+        let notices = Notices::new(core.clone());
+        let NoticeOutcome::Post { notice } = notices.event(NoticeEvent::Duplicate { id: dup_id, name, trackers_added: added }) else {
+            panic!("a notice")
+        };
+        assert_eq!((notice.kind, notice.route.clone()), (NoticeKind::Duplicate, NoticeRoute::Starting { id: id.clone() }));
+        assert!(notice.body.ends_with("is about to start"), "{}", notice.body);
+        // Its click: the notifier shows the torrent again.
+        starting.reveal(id.clone());
+        assert!(matches!(starting.refresh(core.snapshot().downloading, now(), false).show, StartingShow::Show { .. }));
+        core.shutdown(5);
     }
 }

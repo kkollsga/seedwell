@@ -48,6 +48,10 @@ pub enum Cmd {
     Send { channel: String, topic: Option<String>, project: Option<String>, agent: Option<String>, reply: Option<String>, json: bool, body: String, attach: Vec<String> },
     /// `chat attachment <channel> <hash> [--out PATH] [--png] [--no-wait]`, `chat dm attachment <device> <hash> …`
     Attachment { channel: String, device: Option<String>, hash: String, out: Option<String>, png: bool, wait: bool },
+    /// `chat attachment <channel> <hash> --cancel`, `chat dm attachment <device> <hash> --cancel`
+    CancelDownload { channel: String, device: Option<String>, hash: String },
+    /// `chat stop-sharing <channel> <hash>`, `chat dm stop-sharing <device> <hash>`
+    StopSharing { channel: String, device: Option<String>, hash: String },
     /// `chat read <channel> [--project P | --topic T] [--since ID | [--unread [--peek]] [--last N]] [--as NAME] [--lean]`
     Read { channel: String, topic: Option<String>, project: Option<String>, since: Option<String>, last: Option<u32>, agent: Option<String>, unread: bool, peek: bool, lean: bool },
     /// `chat watch [<channel>…] [--project P | --topic T] [--as NAME] [--all] [--count N]`
@@ -91,11 +95,11 @@ const MAX_AGENT: usize = 64;
 const MAX_TITLE: usize = 200;
 
 /// The one-line usage.
-pub const USAGE: &str = "usage: seedwell chat list | new <name> | join <link>|- | share <channel> [--role read_write|read_only|admin|owner] [--uses N|unlimited] [--days N|never] | members <channel> | role <channel> <device> owner|admin|read_write|read_only | remove-device <channel> <device> | share-until <channel> <days>|never [--extend] | topics <channel> | topic <channel> <title> [--as NAME] | send <channel> [--project P | --topic T] [--as NAME] [--reply ID] [--as-json] [--attach FILE]... [-|<text>] | attachment <channel> <hash> [--out PATH] [--png] [--no-wait] | read <channel> [--project P | --topic T] [--since ID | [--unread [--peek]] [--last N]] [--as NAME] [--lean] | watch [<channel>...] [--project P | --topic T] [--as NAME] [--unread] [--all] [--count N] [--batch] [--timeout S] [--lean] | dm list | dm send <device> [--as NAME] [--reply ID] [--as-json] [--attach FILE]... [-|<text>] | dm attachment <device> <hash> [--out PATH] [--no-wait] | dm read <device> [--before ID] [--last N] | dm watch [<device>...] [--count N] | dm delete <device> | address <channel> <host:port> | mute <channel> [on|off] | wake <channel> <command>|off | agents <channel> no | tag <channel> <id> [TAG...] [--remove TAG]... [--clear] [--as NAME] | leave <channel>";
+pub const USAGE: &str = "usage: seedwell chat list | new <name> | join <link>|- | share <channel> [--role read_write|read_only|admin|owner] [--uses N|unlimited] [--days N|never] | members <channel> | role <channel> <device> owner|admin|read_write|read_only | remove-device <channel> <device> | share-until <channel> <days>|never [--extend] | topics <channel> | topic <channel> <title> [--as NAME] | send <channel> [--project P | --topic T] [--as NAME] [--reply ID] [--as-json] [--attach FILE]... [-|<text>] | attachment <channel> <hash> [--out PATH] [--png] [--no-wait] | attachment <channel> <hash> --cancel | stop-sharing <channel> <hash> | read <channel> [--project P | --topic T] [--since ID | [--unread [--peek]] [--last N]] [--as NAME] [--lean] | watch [<channel>...] [--project P | --topic T] [--as NAME] [--unread] [--all] [--count N] [--batch] [--timeout S] [--lean] | dm list | dm send <device> [--as NAME] [--reply ID] [--as-json] [--attach FILE]... [-|<text>] | dm attachment <device> <hash> [--out PATH] [--no-wait] | dm attachment <device> <hash> --cancel | dm stop-sharing <device> <hash> | dm read <device> [--before ID] [--last N] | dm watch [<device>...] [--count N] | dm delete <device> | address <channel> <host:port> | mute <channel> [on|off] | wake <channel> <command>|off | agents <channel> no | tag <channel> <id> [TAG...] [--remove TAG]... [--clear] [--as NAME] | leave <channel>";
 
 const READ_USAGE: &str = "read <channel> [--project P | --topic T] [--since ID | [--unread [--peek]] [--last N]] [--as NAME] [--lean]";
 
-const DM_USAGE: &str = "usage: seedwell chat dm list | send <device> [--as NAME] [--reply ID] [--as-json] [--attach FILE]... [-|<text>] | attachment <device> <hash> [--out PATH] [--no-wait] | read <device> [--before ID] [--last N] | watch [<device>...] [--count N] | delete <device>";
+const DM_USAGE: &str = "usage: seedwell chat dm list | send <device> [--as NAME] [--reply ID] [--as-json] [--attach FILE]... [-|<text>] | attachment <device> <hash> [--out PATH] [--no-wait] | attachment <device> <hash> --cancel | stop-sharing <device> <hash> | read <device> [--before ID] [--last N] | watch [<device>...] [--count N] | delete <device>";
 
 /// `chat dm agents`: the switch for private messages is the user's, in the app; no command changes it.
 fn switch_is_the_users() -> Usage {
@@ -135,9 +139,19 @@ fn parse_dm(mut it: impl Iterator<Item = String>) -> Result<Cmd, Usage> {
         }
         "attachment" | "file" | "download" => {
             let out = o.value(&["--out", "-o"])?;
-            let wait = !o.flag(&["--no-wait"]);
-            let mut p = args(o, 2, "dm attachment <device> <hash> [--out PATH] [--no-wait]")?;
-            Cmd::Attachment { hash: p.remove(1), device: Some(p.remove(0)), channel: String::new(), out, png: false, wait }
+            let no_wait = o.flag(&["--no-wait"]);
+            let cancel = o.flag(&["--cancel"]);
+            let mut p = args(o, 2, "dm attachment <device> <hash> [--out PATH] [--no-wait] | dm attachment <device> <hash> --cancel")?;
+            let (hash, device) = (p.remove(1), Some(p.remove(0)));
+            if cancel {
+                cancel_alone(out.is_some() || no_wait)?;
+                return Ok(Cmd::CancelDownload { channel: String::new(), device, hash });
+            }
+            Cmd::Attachment { hash, device, channel: String::new(), out, png: false, wait: !no_wait }
+        }
+        "stop-sharing" => {
+            let mut p = args(o, 2, STOP_SHARING_DM_USAGE)?;
+            Cmd::StopSharing { hash: p.remove(1), device: Some(p.remove(0)), channel: String::new() }
         }
         "read" => {
             let before = o.value(&["--before"])?;
@@ -152,6 +166,25 @@ fn parse_dm(mut it: impl Iterator<Item = String>) -> Result<Cmd, Usage> {
         "delete" | "rm" => Cmd::DmDelete { device: args(o, 1, "dm delete <device>")?.remove(0) },
         other => return Err(Usage(format!("unknown chat dm command `{other}`; {DM_USAGE}"))),
     })
+}
+
+const STOP_SHARING_USAGE: &str = concat!(
+    "stop-sharing <channel> <hash>   (a file sent from this ",
+    trs_platform::computer!(),
+    ": the hash from chat read, at least its first 8 characters; devices that ask for it from now on hear that it is gone, and the file itself stays where it is)"
+);
+const STOP_SHARING_DM_USAGE: &str = concat!(
+    "dm stop-sharing <device> <hash>   (a file sent from this ",
+    trs_platform::computer!(),
+    " in the private conversation: the hash from chat dm read, at least its first 8 characters)"
+);
+
+/// `--cancel` takes nothing else: it undoes a download, it does not start one.
+fn cancel_alone(other: bool) -> Result<(), Usage> {
+    if other {
+        return Err(Usage("--cancel goes alone: it stops a download (--out, --png and --no-wait are for getting one)".into()));
+    }
+    Ok(())
 }
 
 fn args(o: Opts, n: usize, usage: &str) -> Result<Vec<String>, Usage> {
@@ -289,9 +322,19 @@ pub fn parse(args_in: Vec<String>) -> Result<Cmd, Usage> {
         "attachment" | "image" | "file" | "download" => {
             let out = o.value(&["--out", "-o"])?;
             let png = o.flag(&["--png"]);
-            let wait = !o.flag(&["--no-wait"]);
-            let mut p = args(o, 2, "attachment <channel> <hash> [--out PATH] [--png] [--no-wait]   (the hash from chat read: at least its first 8 characters; --png draws an SVG as PNG; a file downloads to --out, else the Downloads folder, and --no-wait leaves it downloading in the app)")?;
-            Cmd::Attachment { hash: p.remove(1), channel: p.remove(0), device: None, out, png, wait }
+            let no_wait = o.flag(&["--no-wait"]);
+            let cancel = o.flag(&["--cancel"]);
+            let mut p = args(o, 2, "attachment <channel> <hash> [--out PATH] [--png] [--no-wait] | attachment <channel> <hash> --cancel   (the hash from chat read: at least its first 8 characters; --png draws an SVG as PNG; a file downloads to --out, else the Downloads folder, and --no-wait leaves it downloading in the app; --cancel stops a download and deletes its partial file and its verified pieces)")?;
+            let (hash, channel) = (p.remove(1), p.remove(0));
+            if cancel {
+                cancel_alone(out.is_some() || png || no_wait)?;
+                return Ok(Cmd::CancelDownload { channel, device: None, hash });
+            }
+            Cmd::Attachment { hash, channel, device: None, out, png, wait: !no_wait }
+        }
+        "stop-sharing" => {
+            let mut p = args(o, 2, STOP_SHARING_USAGE)?;
+            Cmd::StopSharing { hash: p.remove(1), channel: p.remove(0), device: None }
         }
         "read" => {
             let (topic, project) = place(&mut o)?;
@@ -562,6 +605,25 @@ pub async fn run(cmd: Cmd, g: &Global) -> R {
             }
             let what = if d.rendered { "drawn as PNG" } else { a.kind.as_str() };
             show(g, &raw, || format!("{} ({what}, {}×{}, {}) written to {}", a.name, a.width, a.height, size_text(bytes.len() as u64), path.display()));
+        }
+        Cmd::CancelDownload { channel, device, hash } => {
+            // Where it stood first: whether there was a download to cancel.
+            let at = ChatAttachmentParams { channel: channel.clone(), device: device.clone(), hash: hash.clone(), png: false };
+            let (_, before): (Value, ChatAttachmentDataDto) = ask(&mut c, Request::ChatAttachment(at)).await?;
+            let b = &before.attachment;
+            if b.kind != "file" {
+                return Err(CliError::plain(2, format!("{} ({}) is an image: only a file's download can be cancelled", b.name, &b.hash[..b.hash.len().min(12)])));
+            }
+            let (mut raw, d): (Value, ChatAttachmentDataDto) = ask(&mut c, Request::ChatCancelDownload(ChatFileParams { channel, device, hash })).await?;
+            let cancelled = matches!(b.state.as_str(), "downloading" | "paused" | "gone" | "failed") && d.attachment.state == "available";
+            if let Some(o) = raw.as_object_mut() {
+                o.insert("cancelled".into(), Value::from(cancelled));
+            }
+            show(g, &raw, || cancel_text(&d.attachment, cancelled));
+        }
+        Cmd::StopSharing { channel, device, hash } => {
+            let (raw, d): (Value, ChatAttachmentDataDto) = ask(&mut c, Request::ChatStopSharing(ChatFileParams { channel, device, hash })).await?;
+            show(g, &raw, || stop_sharing_text(&d.attachment));
         }
         Cmd::Read { channel, topic, project, since, last, agent, unread, peek, lean } => {
             let unread_for = unread.then(|| label(g, &agent, &project));
@@ -1288,18 +1350,49 @@ fn image_line(m: &ChatMessageDto, a: &ChatAttachmentDto) -> String {
         _ => format!(", {}", a.problem.as_deref().unwrap_or("cannot be shown")),
     };
     if a.kind == "file" {
-        let state = match a.state.as_str() {
-            "available" => String::new(),
-            "downloading" => format!(", downloading {} of {}", size_text(a.done), size_text(a.size)),
-            "paused" => format!(", paused at {}", size_text(a.done)),
-            "downloaded" => format!(", downloaded to {}", a.path.as_deref().unwrap_or("?")),
-            "shared" => format!(", shared from {}", a.path.as_deref().unwrap_or("?")),
-            "gone" => ", no longer available".into(),
-            _ => format!(", {}", a.problem.as_deref().unwrap_or(&a.state)),
-        };
-        return format!("[file: {}, {}{state}]   get: {}", a.name, size_text(a.size), get_command(m, a));
+        return format!("{}   get: {}", file_card(a), get_command(m, a));
     }
     format!("[image: {}, {}×{}, {}{state}]   get: {}", a.name, a.width, a.height, size_text(a.size), get_command(m, a))
+}
+
+/// A file of a message as its card stands: `[file: film.mov, 1.2 GB, downloading 340 MB of 1.2 GB]`.
+fn file_card(a: &ChatAttachmentDto) -> String {
+    let state = match a.state.as_str() {
+        "available" => String::new(),
+        "downloading" => format!(", downloading {} of {}", size_text(a.done), size_text(a.size)),
+        "paused" => format!(", paused at {}", size_text(a.done)),
+        "downloaded" => format!(", downloaded to {}", a.path.as_deref().unwrap_or("?")),
+        "shared" => format!(", shared from {}", a.path.as_deref().unwrap_or("?")),
+        "unshared" => format!(", no longer shared: {}", a.problem.as_deref().unwrap_or("you stopped sharing it")),
+        "gone" => ", no longer available".into(),
+        _ => format!(", {}", a.problem.as_deref().unwrap_or(&a.state)),
+    };
+    format!("[file: {}, {}{state}]", a.name, size_text(a.size))
+}
+
+/// What `chat attachment --cancel` says: the card as it now stands, and what the cancel did.
+fn cancel_text(a: &ChatAttachmentDto, cancelled: bool) -> String {
+    let what = match a.state.as_str() {
+        "available" if cancelled => {
+            "Download cancelled: its partial file and its verified pieces are deleted, so `seedwell chat attachment` starts it again from the beginning.".to_string()
+        }
+        "available" => "It is not being downloaded: nothing to cancel.".into(),
+        "downloaded" => "It is downloaded: nothing to cancel (the file is the user's and stays).".into(),
+        "shared" | "unshared" => {
+            concat!("It was sent from this ", trs_platform::computer!(), ": nothing to cancel (`seedwell chat stop-sharing` stops sharing it).").into()
+        }
+        s => format!("It is {}.", s.replace('_', " ")),
+    };
+    format!("{} {what}", file_card(a))
+}
+
+/// What `chat stop-sharing` says: the card as it now stands.
+fn stop_sharing_text(a: &ChatAttachmentDto) -> String {
+    format!(
+        "{} Devices that ask for it from now on hear that it is gone, and a download of it under way stops; the file itself stays at {} (send it again to share it again).",
+        file_card(a),
+        a.path.as_deref().unwrap_or("where it is")
+    )
 }
 
 /// A size as people read it (as the app shows it).
@@ -1369,6 +1462,13 @@ async fn file(c: &mut trs_control::client::Client, g: &Global, params: ChatAttac
         let place = a.path.clone().unwrap_or_default();
         let how = if a.state == "shared" { "is shared from" } else { "was downloaded to" };
         show(g, &raw, || format!("{} ({}) {how} {place}", a.name, size_text(a.size)));
+        return Ok(());
+    }
+    // Sent from here and no longer shared: there is nothing to download.
+    if a.state == "unshared" {
+        show(g, &raw, || {
+            format!(concat!("{} It was sent from this ", trs_platform::computer!(), "; send it again to share it again."), file_card(a))
+        });
         return Ok(());
     }
     let (mut raw, mut d) = (raw, d.clone());
@@ -1738,5 +1838,53 @@ mod tests {
         assert_eq!(lean_message(&dm, false)["attachments"][0]["get"], "seedwell chat dm attachment QKZ4XNA cdcdcdcdcdcd [--out PATH]");
         assert_eq!(with_attachments(&[a.clone(), a]), " with 2 files");
         assert_eq!(size_text(2_500_000_000_000), "2.5 TB");
+    }
+
+    /// The sender stops sharing a file; the receiver cancels a download. Both by the hash's prefix, in a channel or a
+    /// private conversation, and each says where the card stands now.
+    #[test]
+    fn a_file_stops_being_shared_and_a_download_is_cancelled() {
+        let stop = |channel: &str, device: Option<&str>| Cmd::StopSharing { channel: channel.into(), device: device.map(Into::into), hash: "0a1b2c3d".into() };
+        let cancel = |channel: &str, device: Option<&str>| Cmd::CancelDownload { channel: channel.into(), device: device.map(Into::into), hash: "0a1b2c3d".into() };
+        assert_eq!(parse(w("stop-sharing Plans 0a1b2c3d")).unwrap(), stop("Plans", None));
+        assert_eq!(parse(w("dm stop-sharing QKZ4 0a1b2c3d")).unwrap(), stop("", Some("QKZ4")));
+        assert_eq!(parse(w("attachment Plans 0a1b2c3d --cancel")).unwrap(), cancel("Plans", None));
+        assert_eq!(parse(w("download Plans 0a1b2c3d --cancel")).unwrap(), cancel("Plans", None));
+        assert_eq!(parse(w("dm attachment QKZ4 0a1b2c3d --cancel")).unwrap(), cancel("", Some("QKZ4")));
+        for bad in [
+            "stop-sharing Plans",
+            "stop-sharing Plans a b",
+            "dm stop-sharing QKZ4",
+            "attachment Plans --cancel",
+            "attachment Plans 0a1b2c3d --cancel --out x",
+            "attachment Plans 0a1b2c3d --cancel --no-wait",
+            "attachment Plans 0a1b2c3d --cancel --png",
+            "dm attachment QKZ4 0a1b2c3d --cancel --out x",
+        ] {
+            assert!(parse(w(bad)).is_err(), "{bad}");
+        }
+        assert!(parse(w("attachment Plans 0a1b2c3d --cancel --out x")).unwrap_err().0.contains("--cancel goes alone"));
+        assert!(USAGE.contains("stop-sharing <channel> <hash>") && USAGE.contains("--cancel") && DM_USAGE.contains("stop-sharing <device> <hash>"));
+
+        let file = |state: &str, problem: Option<&str>| ChatAttachmentDto {
+            hash: "cd".repeat(32),
+            kind: "file".into(),
+            name: "build.zip".into(),
+            size: 3_100_000,
+            state: state.into(),
+            problem: problem.map(Into::into),
+            path: Some("Builds/build.zip".into()),
+            ..Default::default()
+        };
+        let stopped = stop_sharing_text(&file("unshared", Some("you stopped sharing it")));
+        assert!(stopped.starts_with("[file: build.zip, 3.1 MB, no longer shared: you stopped sharing it] Devices that ask for it"), "{stopped}");
+        assert!(stopped.contains("stays at Builds/build.zip"), "{stopped}");
+        let m = ChatMessageDto { id: "0392ba7c".into(), channel_id: "UAIQA6S-X".into(), kind: "text".into(), attachments: vec![file("unshared", Some("you stopped sharing it"))], ..Default::default() };
+        assert!(message(&m).contains("[file: build.zip, 3.1 MB, no longer shared: you stopped sharing it]"), "{}", message(&m));
+        let done = cancel_text(&ChatAttachmentDto { path: None, ..file("available", None) }, true);
+        assert!(done.starts_with("[file: build.zip, 3.1 MB] Download cancelled") && done.contains("from the beginning"), "{done}");
+        assert!(cancel_text(&file("available", None), false).contains("nothing to cancel"));
+        assert!(cancel_text(&file("downloaded", None), false).contains("downloaded to Builds/build.zip] It is downloaded: nothing to cancel"));
+        assert!(cancel_text(&file("shared", None), false).contains("seedwell chat stop-sharing"));
     }
 }

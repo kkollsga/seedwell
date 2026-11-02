@@ -289,6 +289,9 @@ pub enum SettingsCommand {
     ManageFinderExtension,
     ManageShareMenu,
     ShowFinderSetup,
+    /// The user's answer to an agent's request for access (Settings › Agents › Requests): the host awaits
+    /// `Core::agent_request_decide(id, approve)`, may show its answer, and reads the requests again.
+    DecideAgentRequest { id: String, approve: bool },
 }
 
 /// A question the host asks before a command: the title, what it does, the choices (each one runs its command) and
@@ -605,12 +608,8 @@ pub enum SettingsUpdates {
 pub struct SettingsCli {
     /// The home folder (where `~/.local/bin` and the skill folder are).
     pub home: String,
-    /// `seedwell` on the PATH or in an install folder; `None`: not installed.
-    pub installed: Option<String>,
     /// The tool inside the app.
     pub bundled: String,
-    /// Both skills are in the skill folder.
-    pub skill_installed: bool,
 }
 
 /// What the host reads for the tab shown, again every `refresh_ms`.
@@ -637,17 +636,19 @@ pub struct SettingsLive {
     pub diagnostics: DiagnosticsInfo,
     /// `Core::agent_activity`, newest first.
     pub activity: Vec<AgentActivity>,
+    /// `Core::agent_requests(now).rows`: agents' requests for access waiting for the user.
+    pub requests: Vec<crate::agent_requests::AgentRequestRow>,
     pub updates: SettingsUpdates,
     /// "Play videos with"'s choices (`Core::play_with_choices` of the setting; only with `HostWindow::Player`).
     pub play_with: Vec<PlayWithChoice>,
     pub cli: SettingsCli,
+    /// `Core::settings_host_facts`: the command-line tool and the skill as the core found them, the version line.
+    pub host: crate::settings_view_host::SettingsHostFacts,
     /// The Finder extension and the Share menu are switched on (the Mac).
     pub finder_on: bool,
     pub share_menu_on: bool,
     /// `Core::state_dir`.
     pub state_dir: String,
-    /// "Seedwell 0.1.15 (build 1202)".
-    pub version_line: String,
 }
 
 /// What the window is built from.
@@ -954,8 +955,6 @@ pub(crate) fn folder(key: SettingKey, path: &str, placeholder: &str, width: u32,
 
 // MARK: General
 
-/// The order "Automatic" tries the players in (only on a host with players: `HostWindow::Player`).
-const AUTOMATIC_PLAYERS_HINT: &str = "Automatic tries IINA, VLC, Infuse, then QuickTime Player (MP4 only)";
 const LIMIT_SPEED_HINT: &str = concat!("Toggle with ", trs_platform::shortcut!(alt "L"), " or Transfers ▸ Limit Speed");
 
 fn updates_group(u: &SettingsUpdates, s: &AppSettings) -> Option<SettingsGroup> {
@@ -1039,7 +1038,7 @@ fn general(i: &SettingsViewInput, host: &[HostWindow]) -> Vec<SettingsBlock> {
         out.push(block(group(
             "playback",
             "Playback",
-            vec![row("playback.player", "Play videos with", Some(AUTOMATIC_PLAYERS_HINT), vec![players_choice(i)])],
+            vec![row("playback.player", "Play videos with", Some(&crate::player::automatic_hint(&i.live.play_with)), vec![players_choice(i)])],
         )));
     }
     let battery = match g.on_battery {
@@ -1741,13 +1740,13 @@ fn folder_sync(i: &SettingsViewInput, features: &[HostFeature]) -> Vec<SettingsB
 
 // MARK: Agents
 
-/// `~/.claude/skills/seedwell` under `home`.
+/// `~/.claude/skills/seedwell` under `home`, with the system's separator.
 pub(crate) fn skill_dir(home: &str) -> String {
-    format!("{}/.claude/skills/seedwell", home.trim_end_matches('/'))
+    std::path::Path::new(home).join(".claude").join("skills").join("seedwell").display().to_string()
 }
 
 /// The two folders a link is offered in: shared (may need an administrator) and the user's own.
-fn cli_folders(home: &str) -> [String; 2] {
+pub(crate) fn cli_folders(home: &str) -> [String; 2] {
     ["/usr/local/bin".into(), format!("{}/.local/bin", home.trim_end_matches('/'))]
 }
 
@@ -1797,12 +1796,13 @@ fn agents(i: &SettingsViewInput, features: &[HostFeature], clock: &dyn LocalCloc
         ],
     );
     let cli = &i.live.cli;
+    let installed = &i.live.host.cli;
     let mut tool_buttons = vec![button_control(button(
         if i.state.view.copied { "Copied" } else { "Copy CLI Path" },
         "Copy the path of the seedwell command to your clipboard",
-        SettingsCommand::CopyCliPath { text: cli.installed.clone().unwrap_or_else(|| cli.bundled.clone()) },
+        SettingsCommand::CopyCliPath { text: installed.clone().unwrap_or_else(|| cli.bundled.clone()) },
     ))];
-    if cli.installed.is_none() && features.contains(&HostFeature::CommandLineLink) {
+    if installed.is_none() && features.contains(&HostFeature::CommandLineLink) {
         tool_buttons.push(button_control(button(
             "Install Command-Line Tool…",
             "Link seedwell into /usr/local/bin or ~/.local/bin so you can type it in a terminal. Asks first.",
@@ -1810,27 +1810,28 @@ fn agents(i: &SettingsViewInput, features: &[HostFeature], clock: &dyn LocalCloc
         )));
     }
     let tool = SettingsRow {
-        hint: Some(match &cli.installed {
+        hint: Some(match installed {
             Some(path) => format!("Installed: {path}"),
             None => "Not installed. It is inside the app; you can also run it by its full path.".into(),
         }),
         ..styled("agents.cli", "seedwell command", SettingsRowStyle::Described, tool_buttons)
     };
     let dir = skill_dir(&cli.home);
+    let skill_installed = i.live.host.skill_installed;
     let mut skill_buttons = Vec::new();
-    if cli.skill_installed {
+    if skill_installed {
         skill_buttons.push(button_control(button("Remove Skill", "Delete the skill files from ~/.claude/skills/seedwell", SettingsCommand::RemoveSkill {
             dir: dir.clone(),
         })));
     }
     skill_buttons.push(button_control(button(
-        if cli.skill_installed { "Update Skill" } else { "Install Skill for Claude Code" },
+        if skill_installed { "Update Skill" } else { "Install Skill for Claude Code" },
         "Write the Seedwell skill to ~/.claude/skills/seedwell so Claude Code knows the commands",
         SettingsCommand::InstallSkill { dir, force: false },
     )));
     let skill = SettingsRow {
         hint: Some(
-            if cli.skill_installed {
+            if skill_installed {
                 "Installed in ~/.claude/skills/seedwell."
             } else {
                 "Teaches Claude Code the seedwell commands. Writes two text files to ~/.claude/skills/seedwell, only when you press the button."
@@ -1872,7 +1873,39 @@ fn agents(i: &SettingsViewInput, features: &[HostFeature], clock: &dyn LocalCloc
             text("when an agent changes something"),
         ])
     });
-    vec![block(access), block(command_line), block(group("agents.activity", "Activity", activity))]
+    let mut blocks = Vec::new();
+    if !i.live.requests.is_empty() {
+        blocks.push(block(requests_group(&i.live.requests)));
+    }
+    blocks.extend([block(access), block(command_line), block(group("agents.activity", "Activity", activity))]);
+    blocks
+}
+
+/// Settings › Agents › Requests: each agent's request for access with Deny and Approve (the prominent one, last).
+fn requests_group(requests: &[crate::agent_requests::AgentRequestRow]) -> SettingsGroup {
+    let mut rows: Vec<SettingsRow> = requests
+        .iter()
+        .map(|r| {
+            let decide = |approve: bool| SettingsCommand::DecideAgentRequest { id: r.id.clone(), approve };
+            let deny = SettingsButton { identifier: Some(format!("agents.request.{}.deny", r.id)), ..button("Deny", "Refuse it; nothing changes", decide(false)) };
+            let approve = SettingsButton {
+                style: SettingsButtonStyle::Prominent,
+                identifier: Some(format!("agents.request.{}.approve", r.id)),
+                ..button("Approve", "Give exactly this; nothing else changes", decide(true))
+            };
+            SettingsRow {
+                hint: Some(r.detail.clone()),
+                ..styled(&format!("agents.request.{}", r.id), &r.title, SettingsRowStyle::Described, vec![button_control(deny), button_control(approve)])
+            }
+        })
+        .collect();
+    rows.push(styled(
+        "agents.requests.note",
+        "An agent asked for access it lacks. Approve gives it exactly what it asked for; you can also answer with a reply of yes or no to its message in chat. Requests expire after a day.",
+        SettingsRowStyle::Note,
+        Vec::new(),
+    ));
+    group("agents.requests", "Requests", rows)
 }
 
 /// "08:05": the time of day where the user is, always 24-hour with two digits (the activity's column of times).
@@ -1974,6 +2007,8 @@ pub fn settings_view_model(input: SettingsViewInput, host: Vec<HostWindow>, feat
     };
     let refresh_ms = match tab {
         SettingsTab::Network => 2_000,
+        // Requests come, expire and are answered elsewhere (a chat reply).
+        SettingsTab::Agents => 2_000,
         SettingsTab::FolderSync => 1_000,
         SettingsTab::General => match &input.live.updates {
             SettingsUpdates::Core { model } => model.refresh_ms.max(1_000),
@@ -1985,7 +2020,7 @@ pub fn settings_view_model(input: SettingsViewInput, host: Vec<HostWindow>, feat
         tabs,
         tab,
         blocks,
-        footer: (tab == SettingsTab::General && !input.live.version_line.is_empty()).then(|| input.live.version_line.clone()),
+        footer: (tab == SettingsTab::General && !input.live.host.version_line.is_empty()).then(|| input.live.host.version_line.clone()),
         banner: settings_banner(input.live.problems.clone(), input.live.notes.clone(), input.live.restart_required.clone(), true),
         refresh_ms,
         copied_ms: 1_500,
