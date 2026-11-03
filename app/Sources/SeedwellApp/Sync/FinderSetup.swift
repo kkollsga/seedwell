@@ -91,12 +91,12 @@ struct FinderSetupView: View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 3) {
                 ModalCaption(text: "Folder Sync")
-                Text(model.allOn ? "Seedwell Is in Finder" : "Add Seedwell to Finder").font(.system(size: 17, weight: .semibold))
+                Text(model.allOn ? "Seedwell Is in Finder" : "Add Seedwell to Finder").font(Theme.title)
             }
             Text(model.allOn
                  ? "Synced folders and their files carry a badge, and Share ▸ Seedwell shares any folder."
                  : "Two switches in System Settings, each optional. Click Open Settings, then turn on Seedwell in the list. This window notices by itself.")
-                .font(.system(size: 13))
+                .font(Theme.body)
                 .fixedSize(horizontal: false, vertical: true)
                 .padding(.top, 12)
             VStack(alignment: .leading, spacing: 14) {
@@ -128,12 +128,12 @@ struct FinderSetupView: View {
         HStack(spacing: 12) {
             icon.resizable().scaledToFit().frame(width: 22, height: 22).foregroundStyle(.secondary)
             VStack(alignment: .leading, spacing: 1) {
-                Text(title).font(.system(size: 13))
-                Text(note).font(.system(size: 12)).foregroundStyle(.secondary)
+                Text(title).font(Theme.body)
+                Text(note).font(Theme.secondary).foregroundStyle(.secondary)
             }
             Spacer()
             if on {
-                Label("On", systemImage: "checkmark.circle.fill").font(.system(size: 12.5)).foregroundStyle(.secondary)
+                Label("On", systemImage: "checkmark.circle.fill").font(Theme.secondary).foregroundStyle(.secondary)
             } else {
                 Button("Open Settings", action: open).help("Open the list in System Settings where Seedwell is switched on")
             }
@@ -151,7 +151,7 @@ struct FinderSetupView: View {
                 badge(.conflict, "A conflict or a problem")
             }
         }
-        .font(.system(size: 11.5))
+        .font(Theme.caption)
         .foregroundStyle(.secondary)
     }
 

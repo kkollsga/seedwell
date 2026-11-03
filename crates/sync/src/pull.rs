@@ -74,6 +74,16 @@ pub enum FetchError {
 pub trait ChunkSource: Sync {
     /// One result per request, in order.
     fn fetch(&self, reqs: &[ChunkRequest]) -> Vec<Result<Vec<u8>, FetchError>>;
+
+    /// The same results, each handed to `got` (with its request's index) in order as soon as it and those before it
+    /// are known, before the call returns: the puller writes each chunk as it comes, so a fetch's partial file grows
+    /// while a window that takes long (a slow link, a big file) is still on its way (SPEC §7G.11: a host shows how far
+    /// a fetch is). The default hands them over once [`Self::fetch`] is done.
+    fn fetch_each(&self, reqs: &[ChunkRequest], got: &mut dyn FnMut(usize, Result<Vec<u8>, FetchError>)) {
+        for (i, r) in self.fetch(reqs).into_iter().enumerate() {
+            got(i, r);
+        }
+    }
 }
 
 /// What a pull round did.
@@ -1283,20 +1293,27 @@ impl Puller<'_> {
                     holders: n.holders.clone(),
                 })
                 .collect();
-            let results = self.source.fetch(&reqs);
-            for ((off, c), res) in missing[i..j].iter().zip(results) {
-                match res {
-                    Ok(data) if data.len() == c.len as usize && hash(&data) == c.hash => {
-                        fh.write_at(*off, &data)?;
-                        report.fetched_bytes += data.len() as u64;
-                    }
-                    Ok(_) => return Err(Skip::Failed("a device sent data that does not match its hash".into())),
-                    Err(FetchError::Unavailable) => waiting = true,
-                    Err(FetchError::Corrupt(_)) => {
-                        return Err(Skip::Failed("a device sent data that does not match its hash".into()));
-                    }
-                    Err(FetchError::Failed(why)) => return Err(Skip::Failed(why)),
+            // Each chunk is written as it comes (in order), so the temp file shows how far the fetch is; the first
+            // failure (in order) ends the step once the window is over, what came before it kept for the next try.
+            let window = &missing[i..j];
+            let mut failed: Option<Skip> = None;
+            self.source.fetch_each(&reqs, &mut |k, res| {
+                if failed.is_some() {
+                    return;
                 }
+                let (off, c) = &window[k];
+                match res {
+                    Ok(data) if data.len() == c.len as usize && hash(&data) == c.hash => match fh.write_at(*off, &data) {
+                        Ok(()) => report.fetched_bytes += data.len() as u64,
+                        Err(e) => failed = Some(Skip::from(e)),
+                    },
+                    Ok(_) | Err(FetchError::Corrupt(_)) => failed = Some(Skip::Failed("a device sent data that does not match its hash".into())),
+                    Err(FetchError::Unavailable) => waiting = true,
+                    Err(FetchError::Failed(why)) => failed = Some(Skip::Failed(why)),
+                }
+            });
+            if let Some(e) = failed {
+                return Err(e);
             }
             i = j;
         }

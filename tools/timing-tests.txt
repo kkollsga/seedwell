@@ -13,7 +13,7 @@ test(/^calls::tests::/)
 test(/^sync_host_tests::a_pipe_in_the_uploads_is_refused_at_once$/)
 
 # Bounds of a second or less, and rates.
-package(trs-sync-net) & test(/^ondemand::(holders_are_asked_together_and_a_paused_one_holds_nothing|a_change_sent_between_resume_and_the_new_session_arrives_by_the_new_one)$/)
+package(trs-sync-net) & test(/^ondemand::(holders_are_asked_together_and_a_paused_one_holds_nothing|a_change_sent_between_resume_and_the_new_session_arrives_by_the_new_one|a_fetch_only_an_offline_device_can_serve_fails_at_once_and_one_waits_while_it_connects|a_fetch_that_gets_none_of_the_file_gives_up|a_slow_fetch_answers_each_wait_in_time_and_shows_how_far_it_is|a_fetch_while_the_core_is_busy_answers_in_time_and_asks_once_it_is_free)$/)
 package(trs-stream) & test(/^protocol::client_disconnect_drops_urgency_at_once$/)
 package(trs-tracker) & test(/^dual_stack_transport::accept_then_blackhole_falls_back_after_the_address_timeout$/)
 package(trs-storage) & test(/^(pool::dropping_joins_the_running_workers_and_an_unused_pool_drops_at_once|relocate::cancel_mid_copy_cleans_parts_and_keeps_source|verify::tests::limiter_paces)$/)

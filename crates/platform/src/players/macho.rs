@@ -1,31 +1,16 @@
 //! The CPU slices in a Mach-O header: whether an app can run on this Mac. Pure, so it is tested on every system.
 
-/// The CPU families that matter for "can this app run here".
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum Arch {
-    Arm64,
-    X86_64,
-    Other,
-}
-
-impl Arch {
-    /// "arm64", "x86_64", "other".
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Arm64 => "arm64",
-            Self::X86_64 => "x86_64",
-            Self::Other => "other",
-        }
-    }
-}
+use super::Arch;
 
 const CPU_ARM64: u32 = 0x0100_000C;
 const CPU_X86_64: u32 = 0x0100_0007;
+const CPU_I386: u32 = 7;
 
 fn family(cpu: u32) -> Arch {
     match cpu {
         CPU_ARM64 => Arch::Arm64,
         CPU_X86_64 => Arch::X86_64,
+        CPU_I386 => Arch::X86,
         _ => Arch::Other,
     }
 }
@@ -101,6 +86,7 @@ mod tests {
         assert_eq!(architectures(&thin(CPU_ARM64)), Some(vec![Arch::Arm64]));
         assert_eq!(architectures(&thin(CPU_X86_64)), Some(vec![Arch::X86_64]));
         assert_eq!(architectures(&thin(0x12)), Some(vec![Arch::Other]), "32-bit PowerPC");
+        assert_eq!(architectures(&thin(CPU_I386)), Some(vec![Arch::X86]), "32-bit Intel");
         assert_eq!(architectures(&fat(&[CPU_X86_64, CPU_ARM64], 0xCAFE_BABE)), Some(vec![Arch::Arm64, Arch::X86_64]));
         assert_eq!(architectures(&fat(&[CPU_X86_64], 0xCAFE_BABE)), Some(vec![Arch::X86_64]));
         assert_eq!(architectures(&fat(&[CPU_ARM64, CPU_X86_64], 0xCAFE_BABF)), Some(vec![Arch::Arm64, Arch::X86_64]));

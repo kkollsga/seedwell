@@ -25,15 +25,15 @@ struct TrackerInfoPage: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 Button { model.trackerInfo = false } label: {
-                    Label(p.back.title, systemImage: "chevron.left").font(.system(size: 12))
+                    Label(p.back.title, systemImage: "chevron.left").font(Theme.secondary)
                 }
                 .buttonStyle(.plain).foregroundStyle(Color.accentColor)
                 .help(p.back.help)
 
                 HStack(spacing: 8) {
                     if p.favorite { Image(systemName: "star.fill").foregroundStyle(Color.accentColor.opacity(0.85)) }
-                    Text(p.title).font(.system(size: 20, weight: .semibold)).lineLimit(1)
-                    Text(p.subtitle).font(.system(size: 13)).foregroundStyle(.tertiary)
+                    Text(p.title).font(Theme.title).lineLimit(1)
+                    Text(p.subtitle).font(Theme.body).foregroundStyle(.tertiary)
                 }
 
                 if let q = p.removal {
@@ -71,11 +71,11 @@ struct TrackerInfoPage: View {
     // MARK: Sections
 
     private func section(_ t: String) -> some View {
-        Text(t).font(.system(size: 11, weight: .semibold)).foregroundStyle(.tertiary).textCase(.uppercase)
+        Text(t).font(Theme.caption.weight(.semibold)).foregroundStyle(.tertiary).textCase(.uppercase)
     }
 
     private func quiet(_ t: String) -> some View {
-        Text(t).font(.system(size: 11)).foregroundStyle(.tertiary).fixedSize(horizontal: false, vertical: true)
+        Text(t).font(Theme.caption).foregroundStyle(.tertiary).fixedSize(horizontal: false, vertical: true)
     }
 
     private func facts(_ p: TrackerInfoPageModel) -> some View {
@@ -83,8 +83,8 @@ struct TrackerInfoPage: View {
             section(p.nowTitle)
             ForEach(Array(p.now.enumerated()), id: \.offset) { _, f in
                 HStack(alignment: .firstTextBaseline, spacing: 10) {
-                    Text(f.label).font(.system(size: 12)).foregroundStyle(.secondary).frame(width: 120, alignment: .leading)
-                    Text(f.value).font(.system(size: 13)).foregroundStyle(f.error ? Color.red : Color.primary).lineLimit(2)
+                    Text(f.label).font(Theme.secondary).foregroundStyle(.secondary).frame(width: 120, alignment: .leading)
+                    Text(f.value).font(Theme.body).foregroundStyle(f.error ? Color.red : Color.primary).lineLimit(2)
                 }
             }
         }
@@ -98,13 +98,13 @@ struct TrackerInfoPage: View {
         return VStack(alignment: .leading, spacing: 7) {
             section(x.title)
             HStack(alignment: .firstTextBaseline, spacing: 10) {
-                Text(x.label).font(.system(size: 13))
+                Text(x.label).font(Theme.body)
                 Spacer(minLength: 12)
                 Toggle("", isOn: on).labelsHidden().toggleStyle(.switch)
                     .disabled(!x.enabled)
                     .help(x.help)
             }
-            Text(x.note).font(.system(size: 11)).foregroundStyle(x.noteIsReason ? .secondary : .tertiary)
+            Text(x.note).font(Theme.caption).foregroundStyle(x.noteIsReason ? .secondary : .tertiary)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
@@ -115,9 +115,9 @@ struct TrackerInfoPage: View {
             section(l.title)
             ForEach(Array(l.rows.enumerated()), id: \.offset) { _, row in
                 HStack(alignment: .firstTextBaseline, spacing: 10) {
-                    Text(row.label).font(.system(size: 12)).foregroundStyle(.secondary).frame(width: 120, alignment: .leading)
+                    Text(row.label).font(Theme.secondary).foregroundStyle(.secondary).frame(width: 120, alignment: .leading)
                     RateField(bytes: limit(l, row.direction))
-                    Text(row.line).font(.system(size: 12)).monospacedDigit().foregroundStyle(.secondary)
+                    Text(row.line).font(Theme.secondary).monospacedDigit().foregroundStyle(.secondary)
                 }
             }
             quiet(l.note)
@@ -153,7 +153,7 @@ struct TrackerInfoPage: View {
                         }
                     }
                 }
-                if let h = l.hint { Text(h).font(.system(size: 11)).foregroundStyle(.red) }
+                if let h = l.hint { Text(h).font(Theme.caption).foregroundStyle(.red) }
             }
             if let n = l.note { quiet(n) }
         }
@@ -168,7 +168,7 @@ struct TrackerInfoPage: View {
                     field(f)
                 } else {
                     HStack(spacing: 6) {
-                        Text(row.text).font(.system(size: 12, design: .monospaced)).foregroundStyle(.secondary)
+                        Text(row.text).font(Theme.mono).foregroundStyle(.secondary)
                             .lineLimit(1).truncationMode(.middle)
                             .textSelection(.enabled)
                         Spacer(minLength: 8)
@@ -179,7 +179,7 @@ struct TrackerInfoPage: View {
             }
             if let f = a.adding { field(f) }
             if let b = a.add { symbolButton(b) }
-            if let n = a.note { Text(n).font(.system(size: 11)).foregroundStyle(.tertiary) }
+            if let n = a.note { Text(n).font(Theme.caption).foregroundStyle(.tertiary) }
         }
     }
 
@@ -195,8 +195,8 @@ struct TrackerInfoPage: View {
 
     private func field(_ f: TrackerInfoField) -> some View {
         VStack(alignment: .leading, spacing: 2) {
-            InlineField(editing: commands.favorites, target: f.target, prompt: f.prompt, font: .system(size: 12, design: .monospaced))
-            if let h = f.hint { Text(h).font(.system(size: 11)).foregroundStyle(.red).padding(.leading, 4) }
+            InlineField(editing: commands.favorites, target: f.target, prompt: f.prompt, font: Theme.mono)
+            if let h = f.hint { Text(h).font(Theme.caption).foregroundStyle(.red).padding(.leading, 4) }
         }
     }
 }
@@ -211,7 +211,7 @@ struct RowIconButton: View {
     var body: some View {
         Button(action: action) {
             Image(systemName: symbol)
-                .font(.system(size: 11, weight: .medium))
+                .font(.system(size: Theme.Icon.small, weight: .medium))
                 .foregroundStyle(hovering ? Color.primary : Color.secondary)
                 .frame(width: 22, height: 20)
                 .background(RoundedRectangle(cornerRadius: 5, style: .continuous).fill(Color.primary.opacity(hovering ? 0.10 : 0)))

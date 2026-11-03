@@ -661,11 +661,11 @@ async fn on_demand_call(h: &SyncHandle, r: Request) -> Result<Reply, ApiError> {
             if wait == 0 {
                 h.od_request(&fid, &path).await.map_err(s::err)?;
             } else {
-                match h.od_fetch(&fid, &path, std::time::Duration::from_secs(wait)).await {
-                    Ok(done) => unavailable = done.unavailable,
+                // Given up (no device that has it is connected, or none of it came for a while): an error.
+                match h.od_fetch_wait(&fid, &path, std::time::Duration::from_secs(wait)).await.map_err(s::err)? {
+                    trs_sync_net::service::FetchWait::Here(done) => unavailable = done.unavailable,
                     // Still on its way: the answer says how far.
-                    Err(trs_sync_net::SyncError::OnDemand(trs_sync_net::OnDemandError::NotHereYet, _)) => {}
-                    Err(e) => return Err(s::err(e)),
+                    trs_sync_net::service::FetchWait::Coming { unavailable: u, .. } => unavailable = u,
                 }
             }
             let item = item_at(h, &fid, &path)?;

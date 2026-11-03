@@ -22,7 +22,7 @@ struct ChooserView: View {
             ruleCard(page).padding(.top, 8)
             if let notice = page.notice {
                 Label {
-                    Text(notice).font(.system(size: 13)).fixedSize(horizontal: false, vertical: true)
+                    Text(notice).font(Theme.body).fixedSize(horizontal: false, vertical: true)
                 } icon: {
                     Image(systemName: page.unsure ? "questionmark.circle.fill" : "checkmark.circle.fill")
                         .foregroundStyle(page.unsure ? Color.orange : Color.green)
@@ -44,20 +44,20 @@ struct ChooserView: View {
 
     private func header(_ page: ChooserPage) -> some View {
         VStack(alignment: .leading, spacing: 3) {
-            Text(page.origin.uppercased()).font(.system(size: 11, weight: .semibold)).tracking(0.5).foregroundStyle(.secondary)
-            Text(page.name).font(.system(size: 17, weight: .semibold)).lineLimit(2)
-            Text(page.summary).font(.system(size: 13)).foregroundStyle(.secondary)
+            Text(page.origin.uppercased()).font(Theme.caption.weight(.semibold)).tracking(0.5).foregroundStyle(.secondary)
+            Text(page.name).font(Theme.title).lineLimit(2)
+            Text(page.summary).font(Theme.body).foregroundStyle(.secondary)
         }
     }
 
     private func categoryCard(_ page: ChooserPage) -> some View {
         HStack(spacing: 12) {
             Image(systemName: page.category.symbol)
-                .font(.system(size: 20)).frame(width: 46, height: 46)
+                .font(.system(size: Theme.Icon.large)).frame(width: 46, height: 46)
                 .background(RoundedRectangle(cornerRadius: 10).fill(.primary.opacity(0.08)))
             VStack(alignment: .leading, spacing: 2) {
-                Text(page.categoryTitle).font(.system(size: 14, weight: .semibold)).lineLimit(1)
-                Text(page.categoryDetail).font(.system(size: 12)).foregroundStyle(.secondary)
+                Text(page.categoryTitle).font(Theme.heading).lineLimit(1)
+                Text(page.categoryDetail).font(Theme.secondary).foregroundStyle(.secondary)
             }
             Spacer()
             Menu(page.changeTitle) {
@@ -82,7 +82,7 @@ struct ChooserView: View {
                         .lineLimit(line.emphasized ? nil : 1).truncationMode(.middle)
                 }
             }
-            .font(.system(size: 13))
+            .font(Theme.body)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 14).padding(.vertical, 10)
             .background(RoundedRectangle(cornerRadius: 12).fill(.primary.opacity(0.05)))
@@ -95,7 +95,7 @@ struct ChooserView: View {
         HStack(spacing: 2) {
             ForEach(page.picks, id: \.title) { p in
                 Button { edit { $0.applyPick(pick: p.pick) } } label: {
-                    Text(p.title).font(.system(size: 13))
+                    Text(p.title).font(Theme.body)
                         .padding(.horizontal, 12).padding(.vertical, 5)
                         .background(RoundedRectangle(cornerRadius: 7).fill(p.selected ? Color.primary.opacity(0.16) : .clear))
                         .foregroundStyle(p.selected ? .primary : .secondary)
@@ -131,7 +131,7 @@ struct ChooserView: View {
     private func row(_ item: ChooserRow) -> some View {
         HStack(spacing: 10) {
             if item.level == 0 {
-                FoldChevron(open: item.open, size: 10, width: 28, height: 28, help: item.foldHelp, label: item.foldLabel) {
+                FoldChevron(open: item.open, size: Theme.Size.micro, width: 28, height: 28, help: item.foldHelp, label: item.foldLabel) {
                     edit { $0.toggleFolded(id: item.id) }
                 }
                 .opacity(item.foldable ? 1 : 0).allowsHitTesting(item.foldable)
@@ -142,18 +142,18 @@ struct ChooserView: View {
             // Only the title area ticks the row: the chevron and the box have their own buttons, and
             // a click that misses their glyphs must not fall through to this tap.
             HStack(spacing: 10) {
-                Text(item.title).font(.system(size: 14))
+                Text(item.title).font(Theme.body)
                     .foregroundStyle(item.dimmed ? .secondary : .primary)
                 if !item.detail.isEmpty {
-                    Text(item.detail).font(.system(size: 13)).foregroundStyle(.secondary)
+                    Text(item.detail).font(Theme.body).foregroundStyle(.secondary)
                 }
                 if let badge = item.badge {
-                    Text(badge).font(.system(size: 12)).foregroundStyle(Color.green)
+                    Text(badge).font(Theme.secondary).foregroundStyle(Color.green)
                         .padding(.horizontal, 8).padding(.vertical, 2)
                         .background(Capsule().fill(Color.green.opacity(0.16)))
                 }
                 Spacer()
-                Text(item.size).font(.system(size: 13)).foregroundStyle(.secondary).monospacedDigit()
+                Text(item.size).font(Theme.body).foregroundStyle(.secondary).monospacedDigit()
             }
             .frame(maxHeight: .infinity)
             .contentShape(Rectangle())
@@ -167,8 +167,8 @@ struct ChooserView: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Text(page.totalsLine)
-                    .font(.system(size: 13)).foregroundStyle(page.notEnoughSpace ? Color.orange : .secondary).monospacedDigit()
-                if page.notEnoughSpace { Text(page.spaceWarning).font(.system(size: 12)).foregroundStyle(Color.orange) }
+                    .font(Theme.body).foregroundStyle(page.notEnoughSpace ? Color.orange : .secondary).monospacedDigit()
+                if page.notEnoughSpace { Text(page.spaceWarning).font(Theme.secondary).foregroundStyle(Color.orange) }
                 Spacer()
                 if page.awaiting {
                     HeldButtons(actions: page.buttons, cancel: cancel, start: confirm)
@@ -204,8 +204,8 @@ struct TriCheck: View {
                     .stroke(state == .off ? Color.primary.opacity(0.35) : Color.clear, lineWidth: 1)
                     .frame(width: 18, height: 18)
                 switch state {
-                case .on: Image(systemName: "checkmark").font(.system(size: 10, weight: .bold)).foregroundStyle(.white)
-                case .mixed: Image(systemName: "minus").font(.system(size: 10, weight: .bold)).foregroundStyle(.white)
+                case .on: Image(systemName: "checkmark").font(Theme.micro.weight(.bold)).foregroundStyle(.white)
+                case .mixed: Image(systemName: "minus").font(Theme.micro.weight(.bold)).foregroundStyle(.white)
                 case .off: EmptyView()
                 }
             }
@@ -353,7 +353,7 @@ struct TriCheck: View {
 /// a miss would fall through to the row under it). Only folds or unfolds; the caller never ticks.
 struct FoldChevron: View {
     let open: Bool
-    var size: CGFloat = 10
+    var size: CGFloat = Theme.Size.micro
     var width: CGFloat = 28
     var height: CGFloat = 28
     var help = ""

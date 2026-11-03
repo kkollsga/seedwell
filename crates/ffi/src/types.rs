@@ -333,6 +333,14 @@ pub struct Snapshot {
     pub online: bool,
     /// Unix milliseconds at which the outage began, while there is one.
     pub offline_since_ms: Option<u64>,
+    /// Agents' requests for access waiting for the user's answer (SPEC 9A.3): the same requests as the menu's line
+    /// (`Core::agent_requests`), so the menu bar icon's dot and that line come and go together. `Core::snapshot` fills
+    /// it.
+    #[uniffi(default = 0)]
+    pub agent_requests: u32,
+    /// When the first of them expires unanswered (Unix ms): the icon looks again then, so the dot goes with it.
+    #[uniffi(default = None)]
+    pub agent_requests_expire_ms: Option<u64>,
 }
 
 /// One day of tracker traffic for the 30-day chart; `days_ago == 0` is today.
@@ -476,6 +484,9 @@ pub enum CoreError {
     /// Settings, rules or profiles failed validation; one `path: message` per problem.
     Invalid { problems: Vec<String> },
     Failed { message: String },
+    /// An on-demand call failed in a way a host acts on (Windows answers a Cloud Files callback with the matching
+    /// status): its kind, and the words.
+    OnDemand { kind: crate::sync::ondemand::SyncErrorKind, message: String },
 }
 
 impl std::fmt::Display for CoreError {
@@ -484,7 +495,7 @@ impl std::fmt::Display for CoreError {
             Self::InvalidSource { message } => write!(f, "{message}"),
             Self::NotFound { id } => write!(f, "no such transfer: {id}"),
             Self::Invalid { problems } => write!(f, "{}", problems.join("; ")),
-            Self::Failed { message } => write!(f, "{message}"),
+            Self::Failed { message } | Self::OnDemand { message, .. } => write!(f, "{message}"),
         }
     }
 }

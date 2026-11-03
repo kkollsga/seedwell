@@ -90,13 +90,24 @@ fn load_into(path: &Path, mut m: Membership) -> io::Result<Membership> {
 
 /// Writes a folder's membership atomically.
 pub(crate) fn save(path: &Path, m: &Membership) -> io::Result<()> {
+    write_bytes(path, &bytes(m))
+}
+
+/// A membership as its file keeps it ([`write_bytes`] writes it).
+fn bytes(m: &Membership) -> Vec<u8> {
     let mut out = MAGIC.to_vec();
     put_varint(&mut out, MEMBERS_FORMAT);
     for st in m.statements() {
         put_bytes(&mut out, &st.to_bytes());
     }
+    out
+}
+
+/// Writes a membership's [`bytes`] to `path` atomically.
+fn write_bytes(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let tmp = path.with_extension("members.tmp");
-    std::fs::write(&tmp, out)?;
+    std::fs::write(&tmp, bytes)?;
+    crate::shared::slow_disk();
     std::fs::rename(&tmp, path)
 }
 
@@ -112,15 +123,27 @@ pub(crate) fn noun(f: &Space) -> &'static str {
 /// Adds statements to a membership and keeps it on disk. True when roles or invitations changed (call [`changed`]
 /// then).
 pub(crate) fn add(f: &Space, statements: impl IntoIterator<Item = Statement>) -> bool {
-    let mut m = f.membership.write().unwrap_or_else(|e| e.into_inner());
-    let ended = m.set_now(now_s());
-    if !m.add(statements) {
-        return ended;
+    {
+        let mut m = f.membership.write().unwrap_or_else(|e| e.into_inner());
+        let ended = m.set_now(now_s());
+        if !m.add(statements) {
+            return ended;
+        }
     }
-    if let Err(e) = save(&f.members_path, &m) {
+    keep(f);
+    true
+}
+
+/// Writes a space's membership to its file. The membership is locked only while its bytes are made, never for the
+/// write: the app's calls read it, and a disk may take long to save (a virus scanner reads each new file first). The
+/// saves take turns ([`Space::saving`]), and each writes the membership as it is at its turn, so the file never goes
+/// back to an older one.
+pub(crate) fn keep(f: &Space) {
+    let _turn = lock(&f.saving);
+    let b = bytes(&f.membership.read().unwrap_or_else(|e| e.into_inner()));
+    if let Err(e) = write_bytes(&f.members_path, &b) {
         f.problem(format!("the {}'s membership could not be saved: {e}", noun(f)));
     }
-    true
 }
 
 /// The sharing ended (or counts again) since the last look: true then (call [`changed`]).

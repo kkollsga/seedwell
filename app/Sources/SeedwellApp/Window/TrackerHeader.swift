@@ -22,7 +22,7 @@ struct TrackerHeader: View {
             if !model.chart.isEmpty {
                 VStack(alignment: .leading, spacing: 4) {
                     sparkline.frame(height: 30)
-                    Text(model.chartCaption).font(.system(size: 11)).foregroundStyle(.tertiary)
+                    Text(model.chartCaption).font(Theme.caption).foregroundStyle(.tertiary)
                 }
             }
         }
@@ -33,9 +33,9 @@ struct TrackerHeader: View {
 
     private func stat(_ s: TrackerHeaderStat) -> some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text(s.value).font(.system(size: 20, weight: .semibold)).monospacedDigit().lineLimit(1).minimumScaleFactor(0.7)
-            Text(s.caption).font(.system(size: 12)).foregroundStyle(.secondary)
-            Text(s.sub ?? " ").font(.system(size: 11)).foregroundStyle(.tertiary).monospacedDigit()
+            Text(s.value).font(Theme.title).monospacedDigit().lineLimit(1).minimumScaleFactor(0.7)
+            Text(s.caption).font(Theme.secondary).foregroundStyle(.secondary)
+            Text(s.sub ?? " ").font(Theme.caption).foregroundStyle(.tertiary).monospacedDigit()
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityElement(children: .combine)

@@ -60,7 +60,7 @@ struct RulesTab: View {
 
     private func list(_ m: RulesEditorModel) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(m.note).font(.system(size: 12.5)).foregroundStyle(.secondary)
+            Text(m.note).font(Theme.secondary).foregroundStyle(.secondary)
             VStack(spacing: 0) {
                 if let empty = m.empty {
                     Text(empty).foregroundStyle(.secondary).padding(14).frame(maxWidth: .infinity)
@@ -111,15 +111,15 @@ struct RulesTab: View {
         if let badge = r.badge {
             HStack(spacing: 10) {
                 Text(badge)
-                    .font(.system(size: 11, weight: .semibold)).monospacedDigit()
+                    .font(Theme.caption.weight(.semibold)).monospacedDigit()
                     .frame(width: 22, height: 22)
                     .background(Circle().fill(.primary.opacity(0.1)))
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(r.title).font(.system(size: 13.5, weight: .semibold)).lineLimit(1)
-                    Text(r.subtitle).font(.system(size: 11.5)).foregroundStyle(.secondary).lineLimit(1)
+                    Text(r.title).font(Theme.headline).lineLimit(1)
+                    Text(r.subtitle).font(Theme.caption).foregroundStyle(.secondary).lineLimit(1)
                 }
                 Spacer(minLength: 4)
-                if let count = r.count { Text("\(count)").font(.system(size: 12)).foregroundStyle(.secondary).monospacedDigit() }
+                if let count = r.count { Text("\(count)").font(Theme.secondary).foregroundStyle(.secondary).monospacedDigit() }
             }
             .opacity(r.enabled ? 1 : 0.5)
             .frame(height: 52)
@@ -128,9 +128,9 @@ struct RulesTab: View {
                 Image(systemName: r.new ? "plus.circle" : "dot.radiowaves.left.and.right").frame(width: 22)
                     .foregroundStyle(r.new ? Color.primary : .secondary)
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(r.title).font(.system(size: 13.5, weight: .semibold)).lineLimit(1)
+                    Text(r.title).font(Theme.headline).lineLimit(1)
                     if !r.subtitle.isEmpty {
-                        Text(r.subtitle).font(.system(size: 11.5)).foregroundStyle(.secondary).lineLimit(1)
+                        Text(r.subtitle).font(Theme.caption).foregroundStyle(.secondary).lineLimit(1)
                     }
                 }
                 Spacer()
@@ -144,7 +144,7 @@ struct RulesTab: View {
     private func editor(_ m: RulesEditorModel) -> some View {
         VStack(alignment: .leading, spacing: 18) {
             if let placeholder = m.placeholder {
-                Text(placeholder).font(.system(size: 12.5)).foregroundStyle(.secondary).padding(.top, 8)
+                Text(placeholder).font(Theme.secondary).foregroundStyle(.secondary).padding(.top, 8)
             }
             ForEach(m.groups, id: \.id) { g in
                 ModelGroupView(group: g, act: act)
@@ -164,7 +164,7 @@ struct RulesTab: View {
             Image(systemName: "info.circle").foregroundStyle(Color.accentColor)
             f.runs.reduce(Text("")) { t, r in t + (r.bold ? Text(r.text).bold() : Text(r.text)) }
                 .foregroundStyle(f.problem ? Color.red : .primary)
-                .font(.system(size: 12.5)).frame(maxWidth: .infinity, alignment: .leading)
+                .font(Theme.secondary).frame(maxWidth: .infinity, alignment: .leading)
             ModelButton(button: f.revert, act: act)
             ModelButton(button: f.save, act: act)
         }

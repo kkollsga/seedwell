@@ -131,7 +131,7 @@ impl SyncHandle {
             *lock(&self.inner.rendezvous.status) = RendezvousStatus::default();
             *lock(&self.inner.rendezvous.published) = Published::default();
         }
-        if let Err(e) = publish_now(self).await {
+        if let Err(e) = publish_now(self, Want::UnlessJustWritten).await {
             note_error(self, &e);
         }
         // The user's other devices learn it (and take it when they have none: `crate::devices`).
@@ -177,7 +177,7 @@ impl SyncHandle {
         }
         let r = Rendezvous::new(&url).map_err(|e| e.to_string())?;
         r.self_test().await.map_err(|e| e.to_string())?;
-        publish_now(self).await.map_err(|e| {
+        publish_now(self, Want::Always).await.map_err(|e| {
             note_error(self, &e);
             e.to_string()
         })?;
@@ -368,15 +368,40 @@ fn write_key(h: &SyncHandle, url: &str) -> Result<WriteKey, ClientError> {
     Ok(k)
 }
 
-/// Writes this device's record now (one write at a time).
-async fn publish_now(h: &SyncHandle) -> Result<(), ClientError> {
+/// When a write goes out, decided once the write lock is held: a write that waited for it may find its record
+/// written meanwhile (the loop's first look and `set_rendezvous` both write a new rendezvous's record; under load the
+/// loop's write came right after, a second PUT for nothing).
+#[derive(Clone, Copy)]
+enum Want {
+    /// Whatever was written (the test of the rendezvous).
+    Always,
+    /// Unless this record went to this rendezvous moments ago (`set_rendezvous`: "written at once" either way).
+    UnlessJustWritten,
+    /// When [`due`] still says so (the loop; `urgent`: a network change asked for it).
+    Due { urgent: bool },
+}
+
+/// Writes this device's record now (one write at a time), as `want` says; `Ok(false)`: not needed after all.
+async fn publish_now(h: &SyncHandle, want: Want) -> Result<bool, ClientError> {
     let _one = h.inner.rendezvous.writing.lock().await;
     let url = h.rendezvous_url();
     if url.is_empty() {
-        return Ok(());
+        return Ok(false);
     }
     let reach = h.own_reach();
     let addrs: Vec<SocketAddr> = reach.addresses().collect();
+    let needed = match want {
+        Want::Always => true,
+        Want::UnlessJustWritten => {
+            let p = lock(&h.inner.rendezvous.published);
+            let fresh = p.at.is_some_and(|at| at.elapsed() < MIN_GAP_CHANGE);
+            !(fresh && p.url == url && p.fails == 0 && p.addrs == addrs)
+        }
+        Want::Due { urgent } => due(h, &url, &addrs, urgent).is_ok(),
+    };
+    if !needed {
+        return Ok(false);
+    }
     let r = Rendezvous::new(&url)?;
     let key = write_key(h, &url)?;
     let t = next_ms(h);
@@ -399,7 +424,7 @@ async fn publish_now(h: &SyncHandle) -> Result<(), ClientError> {
             p.retry_at = Some(Instant::now() + Duration::from_secs(wait));
         }
     }
-    result
+    result.map(|()| true)
 }
 
 fn note_error(h: &SyncHandle, e: &ClientError) {
@@ -440,9 +465,18 @@ pub(crate) async fn run(h: SyncHandle) {
             let addrs: Vec<SocketAddr> = tokio::task::spawn_blocking(move || h2.own_reach().addresses().collect()).await.unwrap_or_default();
             match due(&h, &url, &addrs, urgent) {
                 Ok(()) => {
+                    // Cleared first: a network change during the write asks for the next one.
                     h.inner.rendezvous.urgent.store(false, Ordering::SeqCst);
-                    if let Err(e) = publish_now(&h).await {
-                        note_error(&h, &e);
+                    match publish_now(&h, Want::Due { urgent }).await {
+                        Ok(true) => {}
+                        // Written meanwhile: the change still wants its write, once the gap allows.
+                        Ok(false) => {
+                            if urgent {
+                                h.inner.rendezvous.urgent.store(true, Ordering::SeqCst);
+                            }
+                            wait = Duration::from_millis(200);
+                        }
+                        Err(e) => note_error(&h, &e),
                     }
                 }
                 Err(w) => wait = w.max(Duration::from_millis(200)),

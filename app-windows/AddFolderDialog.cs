@@ -370,6 +370,7 @@ sealed class AddFolderDialog
     internal void QaLocation(string path) => Change(TrsFfiMethods.SyncAddSetLocation(form, path));
     internal void QaParent(string path) => Change(TrsFfiMethods.SyncAddChooseParent(form, path));
     internal void QaAllDevices(bool on) => Change(form with { AllDevices = on });
+    internal void QaOnDemand(bool on) => Change(form with { OnDemand = on });
     internal async Task<bool> QaStart()
     {
         if (!await Start())

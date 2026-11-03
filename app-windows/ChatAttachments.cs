@@ -28,39 +28,177 @@ sealed class ChatAttachments
 
     static Brush Res(string key) => (Brush)Application.Current.Resources[key];
 
-    /// <summary>The largest an image is shown, its aspect kept (the Mac's ChatImageLayout), and the pixels asked for it.</summary>
-    const double MaxWidth = 420, MaxHeight = 320;
-    const uint Side = 840;
-
-    internal static (double W, double H) Fit(uint width, uint height)
-    {
-        double w = Math.Max(width, 1u), h = Math.Max(height, 1u);
-        var scale = Math.Min(Math.Min(MaxWidth / w, MaxHeight / h), 1);
-        return (Math.Max(40, Math.Round(w * scale)), Math.Max(40, Math.Round(h * scale)));
-    }
-
     // ---------------------------------------------------------------------------------------------- images
 
-    /// <summary>A message's images, one under the other.</summary>
-    internal StackPanel Images(string place, IEnumerable<ChatImage> images, Action changed)
+    /// <summary>The highest an image is shown (the Mac's ChatImageLayout: the content width and 420 high).</summary>
+    const double MaxHeight = 420;
+    /// <summary>A gallery's filmstrip: 46 px squares, the picture inset 5 px, 4 px apart.</summary>
+    const double Thumb = 46, ThumbInset = 5;
+
+    /// <summary>Where a picture comes from: the core (<c>chat_image_view</c>), or a fixture's (the snapshots' samples).</summary>
+    internal delegate Task<ChatImageView?> ViewSource(ChatImage image, uint side);
+
+    /// <summary>
+    /// An image's size: at most <paramref name="maxWidth"/> wide and 420 high, its aspect kept, and never larger than its
+    /// own pixels at the screen's <paramref name="scale"/> (no upscaling).
+    /// </summary>
+    internal static (double W, double H) Fit(uint width, uint height, double maxWidth, double scale)
     {
-        var s = new StackPanel { Spacing = 8, Margin = new Thickness(0, 4, 0, 0) };
-        foreach (var i in images)
-        {
-            s.Children.Add(Image(place, i, changed));
-        }
-        return s;
+        double w = Math.Max(width, 1u) / scale, h = Math.Max(height, 1u) / scale;
+        var k = Math.Min(Math.Min(maxWidth / w, MaxHeight / h), 1);
+        return (Math.Max(12, Math.Round(w * k)), Math.Max(12, Math.Round(h * k)));
     }
 
-    UIElement Image(string place, ChatImage image, Action changed)
+    /// <summary>The pixels to ask for a picture shown at <paramref name="w"/> × <paramref name="h"/>: in steps, so a redraw at a close size reuses it.</summary>
+    static uint SideFor(ChatImage image, double w, double h, double scale)
     {
-        var (w, h) = Fit(image.Width, image.Height);
-        var frame = new Grid { Width = w, Height = h, HorizontalAlignment = HorizontalAlignment.Left, CornerRadius = new CornerRadius(6), BorderThickness = new Thickness(1), BorderBrush = Res("ControlStrokeColorDefaultBrush"), Background = Res("SubtleFillColorSecondaryBrush") };
+        var want = (uint)Math.Ceiling(Math.Max(w, h) * scale / 64) * 64;
+        return Math.Max(64, Math.Min(want, Math.Max(image.Width, image.Height)));
+    }
+
+    /// <summary>
+    /// A message's images, at its top: one alone (fitted, on <paramref name="side"/>), or a gallery for several
+    /// (<paramref name="gallery"/>, the core's). <paramref name="active"/> is the image a gallery shows (view state, the
+    /// page's); the returned <c>Show</c> switches it (an image reference's chip), and <paramref name="selected"/> hears it.
+    /// </summary>
+    internal (FrameworkElement View, Action<int> Show) Images(string place, ChatImage[] images, bool gallery, double maxWidth, double scale,
+        HorizontalAlignment side, int active, Action<int> selected, Action changed, ViewSource? source = null)
+    {
+        source ??= (image, px) => app.Core.ChatImageView(place, image.Hash, px);
+        if (!gallery || images.Length < 2)
+        {
+            var one = new StackPanel { Spacing = 8, HorizontalAlignment = side };
+            foreach (var i in images)
+            {
+                var (w, h) = Fit(i.Width, i.Height, maxWidth, scale);
+                one.Children.Add(Image(place, i, w, h, scale, source, changed));
+            }
+            return (one, _ => { });
+        }
+        return Gallery(place, images, maxWidth, scale, side, active, selected, changed, source);
+    }
+
+    /// <summary>
+    /// A gallery (Finder's Gallery view): a stage as tall as the tallest image fitted (switching never changes the
+    /// height) with the active image centred, the arrows over its edges while the pointer is on it, the core's "2 / 5"
+    /// at its top-right, and a filmstrip under it; Left and Right switch while it has focus.
+    /// </summary>
+    (FrameworkElement, Action<int>) Gallery(string place, ChatImage[] images, double maxWidth, double scale, HorizontalAlignment side,
+        int active, Action<int> selected, Action changed, ViewSource source)
+    {
+        var current = Math.Clamp(active, 0, images.Length - 1);
+        var stageHeight = images.Max(i => Fit(i.Width, i.Height, maxWidth, scale).H);
+        var stage = new Grid { Height = stageHeight, Width = maxWidth, Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent) };
+        var strip = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4, HorizontalAlignment = HorizontalAlignment.Center };
+        var thumbs = new List<Grid>();
+        var counter = new TextBlock { FontSize = Theme.Micro, FontWeight = FontWeights.SemiBold, Foreground = new SolidColorBrush(Microsoft.UI.Colors.White) };
+        var previous = Arrow("", HorizontalAlignment.Left);
+        var next = Arrow("", HorizontalAlignment.Right);
+        var picture = new Border { HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
+        stage.Children.Add(picture);
+        stage.Children.Add(new Border
+        {
+            Child = counter,
+            Padding = new Thickness(7, 1, 7, 2),
+            CornerRadius = new CornerRadius(8),
+            Background = new SolidColorBrush(Microsoft.UI.Colors.Black) { Opacity = 0.45 },
+            HorizontalAlignment = HorizontalAlignment.Right,
+            VerticalAlignment = VerticalAlignment.Top,
+            Margin = new Thickness(0, 8, 8, 0),
+        });
+        stage.Children.Add(previous);
+        stage.Children.Add(next);
+        void Show(int n)
+        {
+            current = (n % images.Length + images.Length) % images.Length;
+            var i = images[current];
+            var (w, h) = Fit(i.Width, i.Height, maxWidth, scale);
+            picture.Child = Image(place, i, w, h, scale, source, changed);
+            counter.Text = TrsFfiMethods.ChatGalleryCounter((uint)current + 1, (uint)images.Length);
+            for (int t = 0; t < thumbs.Count; t++)
+            {
+                var on = t == current;
+                thumbs[t].Background = on ? Theme.Brush(Theme.Accent, 0.22) : null;
+                thumbs[t].BorderThickness = new Thickness(on ? 2 : 0);
+                thumbs[t].Opacity = on ? 1 : 0.6;
+            }
+            selected(current);
+        }
+        previous.Click += (_, _) => Show(current - 1);
+        next.Click += (_, _) => Show(current + 1);
+        for (int n = 0; n < images.Length; n++)
+        {
+            var i = images[n];
+            var index = n;
+            var cell = new Grid { Width = Thumb, Height = Thumb, CornerRadius = new CornerRadius(7), BorderBrush = Theme.Brush(Theme.Accent) };
+            var small = new Image { Stretch = Stretch.Uniform, Margin = new Thickness(ThumbInset) };
+            if (i.State == ChatImageState.Available)
+            {
+                var px = SideFor(i, Thumb, Thumb, scale);
+                Load(small, $"{place}/{i.Hash}/view/{px}", () => source(i, px), 1);
+            }
+            else if (i.HasPreview)
+            {
+                Load(small, $"{place}/{i.Hash}/preview", () => app.Core.ChatImagePreview(place, i.Hash), 0.7);
+            }
+            cell.Children.Add(small);
+            ToolTipService.SetToolTip(cell, i.Caption);
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(cell, i.Caption);
+            cell.Tapped += (_, _) => Show(index);
+            cell.PointerEntered += (_, _) => cell.Opacity = 1;
+            cell.PointerExited += (_, _) => { if (index != current) cell.Opacity = 0.6; };
+            thumbs.Add(cell);
+            strip.Children.Add(cell);
+        }
+        var all = new StackPanel { Spacing = 6 };
+        all.Children.Add(stage);
+        all.Children.Add(new ScrollViewer
+        {
+            Content = strip,
+            MaxWidth = maxWidth,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Disabled,
+            HorizontalScrollMode = ScrollMode.Auto,
+        });
+        // A control of its own, so Left and Right reach it.
+        var view = new ContentControl { Content = all, IsTabStop = true, UseSystemFocusVisuals = true, HorizontalAlignment = side, HorizontalContentAlignment = HorizontalAlignment.Stretch };
+        view.KeyDown += (_, e) =>
+        {
+            if (e.Key == Windows.System.VirtualKey.Left) { Show(current - 1); e.Handled = true; }
+            else if (e.Key == Windows.System.VirtualKey.Right) { Show(current + 1); e.Handled = true; }
+        };
+        stage.PointerEntered += (_, _) => previous.Opacity = next.Opacity = 1;
+        stage.PointerExited += (_, _) => previous.Opacity = next.Opacity = 0;
+        strip.Tapped += (_, _) => view.Focus(FocusState.Pointer);
+        Show(current);
+        return (view, Show);
+    }
+
+    /// <summary>A gallery's previous or next: a round button over the stage's edge, shown while the pointer is on the stage.</summary>
+    static Button Arrow(string glyph, HorizontalAlignment edge) => new()
+    {
+        Content = new FontIcon { Glyph = glyph, FontSize = 12 },
+        Width = 32,
+        Height = 32,
+        Padding = new Thickness(0),
+        CornerRadius = new CornerRadius(16),
+        Opacity = 0,
+        HorizontalAlignment = edge,
+        VerticalAlignment = VerticalAlignment.Center,
+        Margin = new Thickness(8, 0, 8, 0),
+        Background = Theme.Res("AcrylicInAppFillColorDefaultBrush"),
+    };
+
+    /// <summary>One image at <paramref name="w"/> × <paramref name="h"/>, rounded, no caption (name and size in its tooltip); a click opens it.</summary>
+    FrameworkElement Image(string place, ChatImage image, double w, double h, double scale, ViewSource source, Action changed)
+    {
+        var frame = new Grid { Width = w, Height = h, CornerRadius = new CornerRadius(Theme.ImageRadius), Background = Res("SubtleFillColorSecondaryBrush") };
         var picture = new Image { Stretch = Stretch.Uniform };
         frame.Children.Add(picture);
         if (image.State == ChatImageState.Available)
         {
-            Load(picture, $"{place}/{image.Hash}/view", () => app.Core.ChatImageView(place, image.Hash, Side), 1);
+            var px = SideFor(image, w, h, scale);
+            Load(picture, $"{place}/{image.Hash}/view/{px}", () => source(image, px), 1);
         }
         else
         {
@@ -73,7 +211,7 @@ sealed class ChatAttachments
             {
                 over.Children.Add(new ProgressRing { IsActive = true, Width = 16, Height = 16 });
             }
-            over.Children.Add(new TextBlock { Text = image.Status, FontSize = 11.5, TextWrapping = TextWrapping.Wrap, TextAlignment = TextAlignment.Center, MaxWidth = Math.Max(40, w - 36) });
+            over.Children.Add(new TextBlock { Text = image.Status, FontSize = Theme.Caption, TextWrapping = TextWrapping.Wrap, TextAlignment = TextAlignment.Center, MaxWidth = Math.Max(40, w - 36) });
             if (image.State is ChatImageState.NotDownloaded or ChatImageState.Failed)
             {
                 var download = new Button { Content = Texts.Download, HorizontalAlignment = HorizontalAlignment.Center };
@@ -86,10 +224,7 @@ sealed class ChatAttachments
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(frame, image.Caption);
         frame.Tapped += (_, _) => { if (image.State == ChatImageState.Available) OpenImage(place, image.Hash); };
         frame.ContextFlyout = ImageMenu(place, image, changed);
-        var s = new StackPanel { Spacing = 3, HorizontalAlignment = HorizontalAlignment.Left };
-        s.Children.Add(frame);
-        s.Children.Add(new TextBlock { Text = image.Caption, FontSize = 11, Foreground = Res("TextFillColorSecondaryBrush"), TextTrimming = TextTrimming.CharacterEllipsis, MaxWidth = w });
-        return s;
+        return frame;
     }
 
     MenuFlyout ImageMenu(string place, ChatImage image, Action changed)

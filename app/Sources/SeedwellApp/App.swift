@@ -222,6 +222,7 @@ import os
         chat.noteDirectName = { device, name in main.libraryModel?.noteDirectName(device, name) }
         notices = Notices(core: core)
         chat.start(notices)
+        Notifier.withdrawStale(notices)  // what an earlier run left of requests answered or expired since
         sync.showChat = { [chat] id in chat.showChannel(id) }
         sync.showFolder = { id, ask in main.show(section: .folderSync); main.libraryModel?.showSyncFolder(id, askRemove: ask) }
         FinderSetup.show = { [weak self] in self?.syncWindows.showFinderSetup() }
@@ -265,6 +266,7 @@ import os
         AgentRequests.answered = { [weak self] in
             self?.settings.reloadRequests()
             self?.statusMenu?.refreshIcon()
+            if let n = self?.notices { Notifier.withdrawStale(n) }
         }
         apply(settings.app)
         main.onClose = { [weak self] in self?.settings.save() }
@@ -424,6 +426,9 @@ import os
             settings.reloadActivity()
             settings.reloadRequests()
             notice(.agent(activity: a))
+            // A request came, was answered (here or by a chat reply) or expired: the icon's dot and the notices follow.
+            statusMenu?.refreshIcon()
+            Notifier.withdrawStale(notices)
         case .settingsChanged(_, let warnings, let restart):
             qaConfigReloads += 1
             settings.noteReloaded(warnings: warnings, restart: restart)
@@ -501,18 +506,12 @@ import os
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
         let click = response.notification.request.content.userInfo[Notifier.clickKey] as? String ?? ""
         let action = response.actionIdentifier
-        await MainActor.run {
-            // A button (Approve, Deny on an agent's request) answers; a click on the notice opens its route.
-            if let d = noticeDecision(click: click, action: action) {
-                AgentRequests.decide(core: core, id: d.requestId, approve: d.approve, notify: true)
-            } else {
-                open(noticeRoute(click: click))
-            }
-        }
+        await MainActor.run { Notifier.respond(click: click, action: action, core: core) { [weak self] in self?.open($0) } }
     }
 
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification) async -> UNNotificationPresentationOptions {
-        [.banner]
+        // One that waits for an answer (an agent's request) stays in Notification Center too, until it is answered.
+        notification.request.content.interruptionLevel == .timeSensitive ? [.banner, .list] : [.banner]
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ app: NSApplication) -> Bool { false }

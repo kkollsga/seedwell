@@ -197,6 +197,17 @@ pub struct SyncMember {
     pub expires_s: Option<u64>,
 }
 
+/// A device that joined a channel (also one that left since), in the order they joined: what each person's colour in
+/// the conversation follows (`chat_page`).
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct SyncJoined {
+    pub device_id: String,
+    /// When it joined (its first grant), Unix seconds.
+    pub at_s: u64,
+    /// Its user's name from its signed profile (empty: none): a person's devices share a colour.
+    pub user: String,
+}
+
 /// An invitation to a folder. The link is a secret: shown and copied, never logged.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct SyncInvite {
@@ -628,6 +639,30 @@ pub trait SyncBackend: Send + Sync {
     fn od_delete(&self, _id: &str, _item: &str, _seen: Option<trs_sync_net::DeleteSeen>) -> Result<ondemand::SyncDeleted, ondemand::OdError> {
         Err(ondemand::not_on_demand())
     }
+    /// Whether an on-demand folder keeps its content in place (in the host's placeholders).
+    fn od_in_place(&self, _id: &str) -> Result<bool, ondemand::OdError> {
+        Err(ondemand::not_on_demand())
+    }
+    /// Keeps an on-demand folder's content in place, or in the cache.
+    fn od_set_in_place(&self, _id: &str, _on: bool) -> Result<(), ondemand::OdError> {
+        Err(ondemand::not_on_demand())
+    }
+    /// The host filled an item's placeholder with the content `content_version` a fetch handed it.
+    fn od_hydrated(&self, _id: &str, _item: &str, _content_version: &str) -> Result<ondemand::SyncItem, ondemand::OdError> {
+        Err(ondemand::not_on_demand())
+    }
+    /// What an item's placeholder holds against the core's record.
+    fn od_local_change(&self, _id: &str, _item: &str) -> Result<ondemand::SyncLocalChange, ondemand::OdError> {
+        Err(ondemand::not_on_demand())
+    }
+    /// The host's last change-feed anchor of a folder.
+    fn od_host_anchor(&self, _id: &str) -> Result<Option<u64>, ondemand::OdError> {
+        Err(ondemand::not_on_demand())
+    }
+    /// Keeps the host's last change-feed anchor of a folder.
+    fn od_set_host_anchor(&self, _id: &str, _anchor: u64) -> Result<(), ondemand::OdError> {
+        Err(ondemand::not_on_demand())
+    }
     /// Adds a folder of this computer on demand, whole or not at all (the mock: added, then switched).
     fn add_folder_on_demand(&self, path: &str) -> Result<SyncFolder, CoreError> {
         let f = self.add_folder(path)?;
@@ -657,6 +692,26 @@ pub trait SyncBackend: Send + Sync {
     /// service is not up.
     fn service(&self) -> Option<(SyncHandle, tokio::runtime::Handle)> {
         None
+    }
+    /// The user's own devices (Settings › Devices, "Your devices"), this one among them, as messages name their
+    /// authors (`SyncMessage::author_device`): empty while this device is in no group (or was removed from it). Cheap.
+    /// Every device that joined channel `id`, also those that left, in the order they joined (empty for a private
+    /// conversation, or when unknown). Cheap.
+    fn chat_joined(&self, id: &str) -> Vec<SyncJoined> {
+        let (Some((h, _)), Ok(fid)) = (self.service(), folder_id(id)) else { return Vec::new() };
+        h.joined(&fid)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(d, at_s, user)| SyncJoined { device_id: d.to_string(), at_s, user })
+            .collect()
+    }
+    fn own_devices(&self) -> Vec<String> {
+        use trs_sync_net::devices::DevicesState;
+        self.service()
+            .map(|(h, _)| h.devices_status())
+            .filter(|s| matches!(s.state, DevicesState::Paired | DevicesState::Alone))
+            .map(|s| s.devices.iter().map(|d| d.id.to_string()).collect())
+            .unwrap_or_default()
     }
 }
 
@@ -1112,6 +1167,24 @@ impl SyncBackend for RealSync {
     }
     fn od_delete(&self, id: &str, item: &str, seen: Option<trs_sync_net::DeleteSeen>) -> Result<ondemand::SyncDeleted, ondemand::OdError> {
         RealSync::od_delete(self, id, item, seen)
+    }
+    fn od_in_place(&self, id: &str) -> Result<bool, ondemand::OdError> {
+        RealSync::od_in_place(self, id)
+    }
+    fn od_set_in_place(&self, id: &str, on: bool) -> Result<(), ondemand::OdError> {
+        RealSync::od_set_in_place(self, id, on)
+    }
+    fn od_hydrated(&self, id: &str, item: &str, content_version: &str) -> Result<ondemand::SyncItem, ondemand::OdError> {
+        RealSync::od_hydrated(self, id, item, content_version)
+    }
+    fn od_local_change(&self, id: &str, item: &str) -> Result<ondemand::SyncLocalChange, ondemand::OdError> {
+        RealSync::od_local_change(self, id, item)
+    }
+    fn od_host_anchor(&self, id: &str) -> Result<Option<u64>, ondemand::OdError> {
+        RealSync::od_host_anchor(self, id)
+    }
+    fn od_set_host_anchor(&self, id: &str, anchor: u64) -> Result<(), ondemand::OdError> {
+        RealSync::od_set_host_anchor(self, id, anchor)
     }
 
 
@@ -1815,6 +1888,10 @@ fn mock_members(mine: SyncRole, others: &[(&str, SyncRole, bool)], share_until_s
     out
 }
 
+/// The mock's own device (this Mac) and the user's phone, paired with it (`own_devices`).
+const MOCK_ME: &str = "HTU7WQB-QKZ4XNA-MFZWI3D-YLTMRWG";
+const MOCK_MY_PHONE: &str = "YLTMRWG-MFZWI3D-HTU7WQB-P2RFOJE";
+
 /// The other mock devices' ids, by their place in a folder's member list.
 const MOCK_DEVICES: [&str; 4] = ["MFZWI3D-BONSGYC-YLTMRWG-QKZ4XNA", "P2RFOJE-HTU7WQB-MFZWI3D-BONSGYC", "QKZ4XNA-YLTMRWG-P2RFOJE-HTU7WQB", "BONSGYC-P2RFOJE-QKZ4XNA-MFZWI3D"];
 
@@ -1943,7 +2020,8 @@ impl MockSync {
             messages: vec![
                 pm(&"e1".repeat(16), false, 5400, "Kan vi ta budsjettet på tomannshånd?"),
                 pm(&"e2".repeat(16), true, 5000, "Ja, i morgen kl. 10?"),
-                pm(&"e3".repeat(16), false, 1200, "Passer fint 👍"),
+                // A reply to the user's message.
+                SyncMessage { reply_to: Some("e2".repeat(16)), ..pm(&"e3".repeat(16), false, 1200, "Passer fint 👍") },
                 SyncMessage {
                     files: vec![crate::chat_files::card_of(&crate::chat_files::sample_info("Budsjett 2027.xlsx", 2_400_000, "available", 0, 0, None, None), "Ola's MacBook Air")],
                     place: format!("dm:{ola}"),
@@ -1981,7 +2059,7 @@ impl MockSync {
             m.topic = Some(t.to_string());
             m
         };
-        let (kari, studio) = ("MFZWI3D-BONSGYC-YLTMRWG-QKZ4XNA", "P2RFOJE-HTU7WQB-MFZWI3D-BONSGYC");
+        let (kari, studio, ola) = ("MFZWI3D-BONSGYC-YLTMRWG-QKZ4XNA", "P2RFOJE-HTU7WQB-MFZWI3D-BONSGYC", "QKZ4XNA-YLTMRWG-P2RFOJE-HTU7WQB");
         let mut out = Vec::new();
         let mut family = mk(11, "Family", SyncAccess::ReadWrite, SyncState::UpToDate, 4, 2);
         family.role = SyncRole::Owner;
@@ -1991,6 +2069,8 @@ impl MockSync {
         let messages = vec![
             msg("a1".repeat(16).as_str(), &fid, kari, "Kari's iPhone", None, 3 * 3600, None, SyncMessageKind::Text, "Middag på lørdag? Noen som kan bestille bord?"),
             msg("a2".repeat(16).as_str(), &fid, me, "Kristian's MacBook Pro", None, 3 * 3600 - 300, None, SyncMessageKind::Text, "Jeg spør agenten min. Se tråden «Lørdag»."),
+            // From the user's phone (paired with this Mac): the user's as much as what this Mac sent.
+            msg("a7".repeat(16).as_str(), &fid, MOCK_MY_PHONE, "Kristian's iPhone", None, 3 * 3600 - 330, None, SyncMessageKind::Text, "Jeg tar med dessert 🍰"),
             in_topic(msg(
                 "a3".repeat(16).as_str(),
                 &fid,
@@ -2028,7 +2108,7 @@ impl MockSync {
             f: family,
             members,
             invites: vec![mock_invite(11, 1, "Family", SyncRole::ReadWrite, 1, 7, true)],
-            chat: Some(MockChat { read: first_read(&messages, 3), messages, topics, muted: false, agents: false, wake: None }),
+            chat: Some(MockChat { read: first_read(&messages, 4), messages, topics, muted: false, agents: false, wake: None }),
         });
         let mut build = mk(12, "Release notes", SyncAccess::ReadWrite, SyncState::UpToDate, 2, 2);
         build.role = SyncRole::Admin;
@@ -2047,6 +2127,14 @@ impl MockSync {
                 "## Release notes drafted\n\nFrom the merged pull requests, in `docs/notes.md`:\n\n1. **Folder Sync**: links, roles, Finder badges\n2. **Chats**: topics and private messages\n\nTo check them:\n\n```sh\nseedwell chat read \"Release notes\" --project Seedwell\n```",
             ),
             msg("b3".repeat(16).as_str(), &bid, studio, "Studio iMac", Some("Website"), 6800, None, SyncMessageKind::Text, "Thanks. I'll link them from the download page.\n\n- [ ] screenshot\n- [x] changelog"),
+            // The user and another person: every kind of author in one channel (yours, your agent's, theirs, theirs' agents).
+            msg("b4".repeat(16).as_str(), &bid, me, "Kristian's MacBook Pro", None, 6500, None, SyncMessageKind::Text, "Looks good. Ship it once the screenshot is in."),
+            msg("b5".repeat(16).as_str(), &bid, me, "Kristian's MacBook Pro", None, 6440, None, SyncMessageKind::Text, "And mention the new chat look in the notes."),
+            msg("b6".repeat(16).as_str(), &bid, kari, "Kari's iPhone", None, 6300, Some(&"b4".repeat(16)), SyncMessageKind::Text, "I'll take the screenshot tonight 👍"),
+            // A second person with an agent of their own, and the user answering them.
+            msg("b7".repeat(16).as_str(), &bid, ola, "Ola's MacBook Air", None, 6000, None, SyncMessageKind::Text, "Can someone check the Windows notes too?"),
+            msg("b8".repeat(16).as_str(), &bid, ola, "Ola's MacBook Air", Some("kglite"), 5940, None, SyncMessageKind::Text, "Checked: the Windows section lists build 47. Two links were stale; fixed in `docs/notes.md`."),
+            msg("b9".repeat(16).as_str(), &bid, me, "Kristian's MacBook Pro", None, 5800, Some(&"b7".repeat(16)), SyncMessageKind::Text, "Thanks, Ola. Looks right now."),
         ];
         out.push(MockFolder {
             n: 12,
@@ -2054,7 +2142,7 @@ impl MockSync {
             members: mock_members(SyncRole::Admin, &[("Studio iMac", SyncRole::Owner, true)], None),
             invites: Vec::new(),
             chat: Some(MockChat {
-                read: first_read(&messages, 2),
+                read: first_read(&messages, 8),
                 messages,
                 topics: Vec::new(),
                 muted: false,
@@ -2191,6 +2279,19 @@ impl SyncBackend for MockSync {
     fn od_changes(&self, id: &str, anchor: u64, _limit: u32) -> Result<ondemand::SyncChangePage, ondemand::OdError> {
         MockSync::od_changes(self, id, anchor)
     }
+    /// This Mac and the user's phone.
+    fn own_devices(&self) -> Vec<String> {
+        vec![MOCK_ME.into(), MOCK_MY_PHONE.into()]
+    }
+    /// Every channel: the user (this Mac, then the phone), Kari, the Studio iMac, Ola, an old iPad that left.
+    fn chat_joined(&self, _: &str) -> Vec<SyncJoined> {
+        let at = 1_790_000_000;
+        [(MOCK_ME, "Kristian"), (MOCK_MY_PHONE, "Kristian"), (MOCK_DEVICES[0], "Kari"), (MOCK_DEVICES[1], ""), (MOCK_DEVICES[3], "Old"), (MOCK_DEVICES[2], "Ola")]
+            .iter()
+            .enumerate()
+            .map(|(n, (d, user))| SyncJoined { device_id: (*d).into(), at_s: at + n as u64 * 3_600, user: (*user).into() })
+            .collect()
+    }
     fn od_anchor(&self, id: &str) -> Result<u64, ondemand::OdError> {
         MockSync::od_changes(self, id, u64::MAX).map(|p| p.anchor)
     }
@@ -2214,6 +2315,24 @@ impl SyncBackend for MockSync {
     }
     fn od_delete(&self, id: &str, item: &str, _seen: Option<trs_sync_net::DeleteSeen>) -> Result<ondemand::SyncDeleted, ondemand::OdError> {
         MockSync::od_delete(self, id, item)
+    }
+    fn od_in_place(&self, id: &str) -> Result<bool, ondemand::OdError> {
+        MockSync::od_in_place(self, id)
+    }
+    fn od_set_in_place(&self, id: &str, on: bool) -> Result<(), ondemand::OdError> {
+        MockSync::od_set_in_place(self, id, on)
+    }
+    fn od_hydrated(&self, id: &str, item: &str, content_version: &str) -> Result<ondemand::SyncItem, ondemand::OdError> {
+        MockSync::od_hydrated(self, id, item, content_version)
+    }
+    fn od_local_change(&self, id: &str, item: &str) -> Result<ondemand::SyncLocalChange, ondemand::OdError> {
+        MockSync::od_local_change(self, id, item)
+    }
+    fn od_host_anchor(&self, id: &str) -> Result<Option<u64>, ondemand::OdError> {
+        MockSync::od_host_anchor(self, id)
+    }
+    fn od_set_host_anchor(&self, id: &str, anchor: u64) -> Result<(), ondemand::OdError> {
+        MockSync::od_set_host_anchor(self, id, anchor)
     }
 
 
@@ -3313,7 +3432,7 @@ mod tests {
         let fam = &chans[0];
         assert_eq!((fam.role, fam.unread, fam.agents), (SyncRole::Owner, 3, false), "General's 1 and the topic's 2");
         let general = core.chat_messages(fam.id.clone(), None, None, 50);
-        assert!(general.iter().all(|m| m.topic.is_none()) && general.len() == 3);
+        assert!(general.iter().all(|m| m.topic.is_none()) && general.len() == 4, "with one from the user's phone");
         let topics = core.chat_topics(fam.id.clone());
         assert_eq!((topics.len(), topics[0].title.as_str(), topics[0].messages, topics[0].unread), (1, "Lørdag", 3, 2));
         let msgs = core.chat_messages(fam.id.clone(), Some(topics[0].id.clone()), None, 50);

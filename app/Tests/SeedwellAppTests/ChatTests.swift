@@ -81,14 +81,15 @@ import Testing
         #expect(p.toolbar.tag?.text == "agents")
         #expect(p.toolbar.share?.title == "Share…")
         #expect(p.composer.placeholder == "Message Bridge" && p.composer.canPost)
-        #expect(p.messages.first?.author?.name == "Kari" && p.messages.first?.author?.computer == "Studio iMac")
+        #expect(p.messages.first?.meta?.name == "Kari" && p.messages.first?.meta?.detail.hasPrefix("Studio iMac · ") == true)
+        #expect(p.messages.first?.who == .theirs && !p.bubbles)
         // The Windows app's windows: no Share dialog yet.
         let w = try #require(Self.page(Self.channel("Bridge"), [], host: [.getInfo, .moveTo, .newChannel, .chatDialogs]))
         #expect(w.toolbar.share == nil)
-        #expect(w.empty == "No messages yet.")
-        // The snapshot's sample conversation: every card has its author, the bug mail its tags.
+        #expect(w.empty == "No messages yet")
+        // The snapshot's sample conversation: every card says who wrote it, the bug mail has its tags.
         let cards = SnapshotRenderer.sampleCards()
-        #expect(cards.count == 8 && cards.allSatisfy { $0.author != nil })
+        #expect(cards.count == 8 && cards.allSatisfy { $0.meta != nil })
         #expect(cards[6].tags.map(\.text) == ["kglite: Seen, Backlog", "You: Needs triage"])
     }
 
@@ -136,5 +137,30 @@ import Testing
             Issue.record("no mail: \(p.messages[0].body)"); return
         }
         #expect(chip == "Bug" && tint == .red && summary == "Wrong repo")
+    }
+
+    /// Reply opens the reply bar above the composer; Escape and its × cancel it (both call `cancelReply`, which says
+    /// whether Escape was used up), and another conversation drops it. The mock's channel has the user's, their agent's,
+    /// another person's and other agents' messages.
+    @MainActor @Test func replyOpensTheBarAndEscapeCancelsIt() throws {
+        let dir = NSTemporaryDirectory() + "seedwell-chat-reply-\(getpid())"
+        try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let core = try Core(options: CoreOptions(configDir: dir, mock: true, allowLoopbackTrackers: false, forbiddenRoot: nil))
+        let notes = try #require(core.chatChannels().first { $0.name == "Release notes" })
+        let m = LibraryModel(core: core, section: .chat(channelId: notes.id, topicId: nil))
+        m.loadChatMessages()
+        let cards = try #require(m.chatPage?.messages)
+        #expect(Set(cards.map(\.who)) == [.mine, .ourAgent, .theirs, .theirAgent])
+        let kari = try #require(cards.first { $0.who == .theirs })
+        #expect(!m.cancelReply(), "Escape without a reply is the window's")
+        m.reply(to: kari)
+        #expect(m.chatReply?.replying.title == "Replying to Kari")
+        #expect(m.cancelReply() && m.chatReply == nil)
+        m.reply(to: kari)
+        m.select(.downloads)
+        m.select(.chat(channelId: notes.id, topicId: nil))
+        m.loadChatMessages()
+        #expect(m.chatReply == nil, "another conversation drops the reply")
     }
 }

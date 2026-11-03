@@ -29,10 +29,10 @@ public partial class App : Application
     /// sidebar's adds and menus). Not yet: the chooser, custom goal, rules editor, player, Tracker Info, favorite
     /// editing and a channel's Share dialog.
     /// </summary>
-    /// <summary>What this host can do beyond its windows (the core's HostFeature): none yet; OnDemandFolders comes with Cloud Files.</summary>
-    internal static HostFeature[] HostFeatures { get; } = [];
+    /// <summary>What this host can do beyond its windows (the core's HostFeature): on-demand folders, over Cloud Files.</summary>
+    internal static HostFeature[] HostFeatures { get; } = [HostFeature.OnDemandFolders];
 
-    internal static HostWindow[] HostWindows { get; } = [HostWindow.GetInfo, HostWindow.MoveTo, HostWindow.NewChannel, HostWindow.ChatDialogs, HostWindow.AddFolder, HostWindow.FolderEditor, HostWindow.FolderShare, HostWindow.ChannelShare];
+    internal static HostWindow[] HostWindows { get; } = [HostWindow.GetInfo, HostWindow.MoveTo, HostWindow.NewChannel, HostWindow.ChatDialogs, HostWindow.AddFolder, HostWindow.FolderEditor, HostWindow.FolderShare, HostWindow.ChannelShare, HostWindow.FileList, HostWindow.Chooser, HostWindow.Player, HostWindow.TrackerInfo, HostWindow.FavoriteEditing, HostWindow.RulesEditor];
     /// <summary>Notifications (the core's Notices), the core's questions, and the settings banner.</summary>
     internal Notifier? Notifier { get; private set; }
     internal Prompts Prompts { get; private set; } = null!;
@@ -177,6 +177,10 @@ public partial class App : Application
         CreateLibrary(dir);
         Updater = new Updater(this, Core);
         Updater.Changed += () => flyout?.UpdateChanged();
+        // On-demand folders over Cloud Files (item 6); in an isolated run the core hosts only the folders inside its own
+        // state folder.
+        Cloud = new CloudHost(this);
+        Cloud.Start();
         ApplySettings();
         flyout = new FlyoutWindow(this);
         TaskbarWatch.Start(flyout.Hwnd, TaskbarCreated);
@@ -450,6 +454,227 @@ public partial class App : Application
         Library = new Library(Core, folded, new Clock());
         Library.SetHostWindows(HostWindows);
         ChatDialogs = new ChatDialogs(this);
+        Files = new FilesStore(this, FileListPlace.Window);
+        MenuFiles = new FilesStore(this, FileListPlace.Menu);
+        Files.Changed += id => LibraryWindowIfCreated?.Pane.FilesChanged(id);
+        Files.Edited += () => LibraryWindowIfCreated?.Pane.Refresh();
+        MenuFiles.Changed += id => flyout?.FilesChanged(id);
+        MenuFiles.Edited += () => LibraryWindowIfCreated?.Pane.Refresh();
+        // The file rows' Play follows the host set (with HostWindow.Player: Play and Play With).
+        Files.Lists.SetHostWindows(HostWindows);
+        MenuFiles.Lists.SetHostWindows(HostWindows);
+        Favorites = new FavoriteEditing(this);
+        Favorites.Changed += () => LibraryWindowIfCreated?.Pane.FavoritesChanged();
+        Choices = new ChoiceStore(this);
+        Choices.Changed += () => LibraryWindowIfCreated?.Pane.ChoicesChanged();
+        StartingNotifier = new StartingWindow(this, Choices);
+        // The first look after start: torrents an earlier run left waiting.
+        StartingNotifier.Refresh(launch: true);
+    }
+
+    /// <summary>The on-demand folders' host (Cloud Files), when it runs.</summary>
+    internal CloudHost? Cloud { get; private set; }
+
+    /// <summary>Favorite trackers: the one inline edit and the Remove from Favorites question (Part F).</summary>
+    internal FavoriteEditing Favorites { get; private set; } = null!;
+
+    /// <summary>The one chooser per torrent every surface shares, and the starting notifier at the tray (Part E).</summary>
+    internal ChoiceStore Choices { get; private set; } = null!;
+    internal StartingWindow? StartingNotifier { get; private set; }
+
+    /// <summary>Held torrents whose checklist is open under their row (the window's list in selection mode).</summary>
+    internal HashSet<string> HeldOpen { get; } = [];
+
+    /// <summary>A held row's triangle: its checklist opens under it (the shared chooser, loaded off the UI thread), or closes.</summary>
+    internal void ToggleHeld(string id)
+    {
+        if (!HeldOpen.Remove(id))
+        {
+            HeldOpen.Add(id);
+            _ = Choices.Load(id);
+        }
+        LibraryWindowIfCreated?.Pane.ChoicesChanged();
+    }
+
+    /// <summary>The window on a torrent, selected and in view, its list open (the notifier's title).</summary>
+    internal void ShowTorrent(string id)
+    {
+        if (!Ready(() => ShowTorrent(id))) return;
+        ShowMainWindow();
+        Library.RevealRow(id);
+        if (TakeSnapshot().Downloading.Any(r => r.Id == id && r.AwaitingChoice))
+        {
+            if (HeldOpen.Add(id)) _ = Choices.Load(id);
+        }
+        else
+        {
+            Files.Expand(id);
+        }
+        LibraryWindow.Pane.Refresh();
+    }
+
+    /// <summary>
+    /// A torrent waits for a choice (the core's event): the notifier looks first; when it shows, it is the notice and
+    /// holds the checklist (SPEC 8.6); a choice someone asked for opens the chooser.
+    /// </summary>
+    internal void NeedsChoice(TransferRow row)
+    {
+        var requested = StartingNotifier?.ConsumeRequest(row.Id) == true;
+        StartingNotifier?.Refresh();
+        Notifier?.Event(new NoticeEvent.NeedsChoice(row, requested, StartingNotifier?.IsShown == true));
+    }
+
+    /// <summary>The file lists under the window's rows, and the tray's checklist (the core's FileLists, one per place).</summary>
+    internal FilesStore Files { get; private set; } = null!;
+    internal FilesStore MenuFiles { get; private set; } = null!;
+
+    /// <summary>The QA command files: what it does is what a click does; it answers with the lists as drawn.</summary>
+    async Task<string> QaFiles(string[] w, Func<int, string> arg, RowFinder row, LibraryPane pane)
+    {
+        string? Torrent() => row(arg(2), out _)?.Id;
+        uint? Node(string id) => Files.Lists.Find(id, arg(3)) ?? MenuFiles.Lists.Find(id, arg(3));
+        string done = "";
+        switch (arg(1))
+        {
+            case "toggle" when Torrent() is string t: Files.Toggle(t); await Task.Delay(800); break;
+            case "click" when Torrent() is string t && Node(t) is uint n:
+                if (pane.ListShown is LibraryList l) l.Files.Click(t, n); else done = "no list; ";
+                break;
+            case "check" when Torrent() is string t && Node(t) is uint n: Files.ToggleCheck(t, n); break;
+            case "priority" when Torrent() is string t && Node(t) is uint n && Enum.TryParse<FilePriority>(arg(4), out var p): Files.SetPriority(t, n, p); break;
+            case "all" when Torrent() is string t: Files.SelectAll(t, arg(3) == "on"); break;
+            case "filter" when Torrent() is string t: Files.SetFilter(t, string.Join(' ', w.Skip(3))); break;
+            case "flush" when Torrent() is string t: Files.Flush(t); await Task.Delay(800); break;
+            case "menu" when Torrent() is string t:
+                if (flyout is null) { done = "no tray; "; break; }
+                flyout.QaToggleFiles(t);
+                break;
+            case "menu-check" when Torrent() is string t && Node(t) is uint n: MenuFiles.ToggleCheck(t, n); break;
+            case "describe" or "": break;
+            default: done = "no such row or file; "; break;
+        }
+        string Rows(FileListView v) => string.Join(", ", v.Rows.Take(30).Select(r => $"{r.File.Name}:{r.File.Check}:{r.File.PriorityLabel}{(r.Selected ? "*" : "")}"));
+        var lists = string.Join(" | ", Files.Views.Values.Select(v =>
+            $"{v.Status ?? v.Header?.Summary ?? ""} (filter {(v.Header?.Filter is null ? "none" : $"\"{v.Header.Filter.Text}\"")}, pending {Files.Lists.HasPending(v.TorrentId)}) rows {v.Rows.Length} [{Rows(v)}]"));
+        var menu = string.Join(" | ", MenuFiles.Expanded.Select(id => MenuFiles.Lists.MenuView(id) is FileMenuView m ? $"{m.Footer} rows {m.Rows.Length} [{string.Join(", ", m.Rows.Select(r => $"{r.Name}:{r.Check}"))}]" : "not read"));
+        return $"{done}open {Files.Expanded.Length}, selected {Files.Selection?.Nodes.Length ?? 0}; lists {lists}; menu {menu}";
+    }
+
+    internal delegate ListRow? RowFinder(string part, out string group);
+
+    /// <summary>The QA commands favorite and tracker-info: what each does is what a click does; they answer with what is drawn.</summary>
+    async Task<string> QaFavorite(string verb, string[] w, Func<int, string> arg)
+    {
+        var f = Favorites;
+        string? Tracker(string part) => TakeSnapshot().Trackers.FirstOrDefault(t => t.Name.Contains(part, StringComparison.OrdinalIgnoreCase))?.Id;
+        // Types into the one field as a user does, then commits (Return).
+        async Task Type(FavoriteTarget target, string text)
+        {
+            // The field drawn for it (the sidebar's, the page's) once the redraw placed it.
+            await Task.Delay(500);
+            if (!Equals(f.View.Target, target) || !f.QaType(text)) return;
+            await Task.Delay(200);
+            f.Commit();
+            await Task.Delay(1000);
+        }
+        // favorite <verb> <tracker> …, tracker-info <tracker> [<verb> …].
+        var id = Tracker(verb == "tracker-info" ? arg(1) : arg(2));
+        switch (verb, arg(1))
+        {
+            case ("favorite", "save") when id is string t: f.SaveAsFavorite(t); await Task.Delay(1200); break;
+            case ("favorite", "rename") when id is string t:
+                f.BeginRename(t);
+                await Type(new FavoriteTarget.SidebarName(t), string.Join(' ', w.Skip(3)));
+                break;
+            case ("favorite", "remove") when id is string t: f.AskRemove(t); await Task.Delay(500); break;
+            case ("favorite", "confirm"): f.ConfirmRemoval(); await Task.Delay(1200); break;
+            case ("favorite", "cancel"): f.CancelRemoval(); break;
+            case ("tracker-info", _) when id is string t:
+                Library.SelectPlace(new LibraryPlace.Tracker(t));
+                Library.SetTrackerInfo(true);
+                LibraryWindow.Pane.Refresh();
+                await Task.Delay(1200);
+                var page = LibraryWindow.Pane.TrackerPage;
+                switch (arg(2))
+                {
+                    case "limits" when ulong.TryParse(arg(3), out var down) && ulong.TryParse(arg(4), out var up): f.SetLimits(t, down, up); await Task.Delay(1200); break;
+                    case "pex": f.Run(t, new TrackerInfoCommand.SetPex(arg(3) == "on")); await Task.Delay(1000); break;
+                    case "add":
+                        f.Run(t, new TrackerInfoCommand.AddAddress());
+                        await Task.Delay(500);
+                        if (f.View.Target is FavoriteTarget target) await Type(target, string.Join(' ', w.Skip(3)));
+                        break;
+                }
+                page?.Load();
+                await Task.Delay(800);
+                break;
+            case (_, "status"): break;
+            default: return "no such command or tracker";
+        }
+        var v = f.View;
+        var m = LibraryWindow.Pane.TrackerPage?.Model;
+        var info = m is null ? "none" : $"{m.Title} favorite {m.Favorite}, header {(m.Header is null ? "none" : m.Header.Stats.Length.ToString())}, now [{string.Join("; ", m.Now.Select(x => $"{x.Label}: {x.Value}"))}], limits [{string.Join("; ", m.Limits.Rows.Select(x => $"{x.Label} {x.Limit} {x.Line}"))}], folders {(m.Location.Record is null ? "none" : "editable")}, addresses [{string.Join("; ", m.Addresses.Rows.Select(x => x.Text))}]";
+        var trackers = string.Join(", ", TakeSnapshot().Trackers.Select(x => $"{x.Name}{(x.Favorite ? "*" : "")}"));
+        return $"editor target {v.Target?.GetType().Name ?? "none"}, hint \"{v.Hint ?? ""}\", note \"{v.Note ?? ""}\", removal \"{v.Removal?.Message ?? ""}\", busy {v.Busy}; trackers [{trackers}]; info {info}";
+    }
+
+    /// <summary>The QA commands chooser, held and starting: what each does is what a click does; they answer with what is drawn.</summary>
+    async Task<string> QaChoice(string verb, string[] w, Func<int, string> arg, RowFinder row)
+    {
+        // A torrent by part of its name: the window's rows, else the notifier's blocks.
+        string? Torrent(string part) => row(part, out _)?.Id
+            ?? StartingNotifier?.Page.Blocks.FirstOrDefault(b => b.Title.Contains(part, StringComparison.OrdinalIgnoreCase))?.Id;
+        string Page(string? id) => id is not null && Choices.Page(id) is ChooserPage p
+            ? $"checked {p.CheckedCount}, rows {p.Rows.Length} [{string.Join(", ", p.Rows.Take(12).Select(r => $"{r.Title}:{r.Check}"))}], selected \"{p.SelectedLine}\", awaiting {p.Awaiting}, can start {p.CanConfirm}"
+            : "no chooser";
+        var rest = string.Join(' ', w.Skip(3));
+        switch (verb, arg(1))
+        {
+            case ("chooser", "show") when Torrent(arg(2)) is string t:
+                ChooserDialog.Show(this, t);
+                for (int i = 0; i < 40 && ChooserDialog.Open?.TorrentId != t; i++) await Task.Delay(100);
+                break;
+            case ("chooser", "close"): ChooserDialog.Open?.Close(); await Task.Delay(300); break;
+            case ("chooser", _) when ChooserDialog.Open is not ChooserDialog: return "no chooser open";
+            case ("chooser", "toggle"):
+                var cid = ChooserDialog.Open!.TorrentId;
+                if (Choices.Loaded(cid)?.FindRow(string.Join(' ', w.Skip(2))) is string r) Choices.Edit(cid, c => c.Toggle(r)); else return "no such row";
+                break;
+            case ("chooser", "pick") when Enum.TryParse<ChooserPick>(arg(2), out var pick): Choices.Edit(ChooserDialog.Open!.TorrentId, c => c.ApplyPick(pick)); break;
+            case ("chooser", "category") when TrsFfiMethods.CategoryChoices(Category.Other).FirstOrDefault(c => string.Equals(c.Title, arg(2), StringComparison.OrdinalIgnoreCase)) is CategoryChoice cc:
+                Choices.ChangeCategory(ChooserDialog.Open!.TorrentId, cc.Category); await Task.Delay(800); break;
+            case ("chooser", "start"): Choices.Confirm(ChooserDialog.Open!.TorrentId); await Task.Delay(1000); break;
+            case ("chooser", "cancel"): Choices.Cancel(ChooserDialog.Open!.TorrentId, arg(2) == "keep"); await Task.Delay(1000); break;
+            case ("held", "toggle") when Torrent(arg(2)) is string t:
+                ToggleHeld(t);
+                for (int i = 0; i < 30 && Choices.Page(t) is null; i++) await Task.Delay(100);
+                LibraryWindow.Pane.ChoicesChanged();
+                break;
+            case ("starting", "show"): StartingNotifier?.QaShow(); break;
+            case ("starting", "close"): StartingNotifier?.QaClose(); break;
+            case ("starting", "shift"): Choosing.QaShift = arg(2) switch { "on" => true, "off" => false, _ => null }; break;
+            case ("starting", "chevron") when Torrent(arg(2)) is string t: StartingNotifier?.QaChevron(t); await Task.Delay(800); break;
+            case ("starting", var action) when action is "ok" or "start-now" or "cancel" or "title" or "category" or "all" or "none" or "open" or "toggle" && Torrent(arg(2)) is string t:
+                StartingNotifier?.QaAction(action, t, rest);
+                await Task.Delay(800);
+                break;
+            case (_, "status" or ""): break;
+            default: return "no such command or row";
+        }
+        StartingNotifier?.Refresh();
+        var open = ChooserDialog.Open?.TorrentId;
+        var held = string.Join(" | ", HeldOpen.Select(id => $"{id[..8]}: {Page(id)}"));
+        return $"chooser {(open is null ? "none" : $"{open[..8]}: {Page(open)}")}; held [{held}]; {StartingNotifier?.QaSummary ?? "no notifier"}";
+    }
+
+    /// <summary>The window on a torrent with its file list open (the tray checklist's "Show All in Seedwell…").</summary>
+    internal void ShowFiles(string id)
+    {
+        if (!Ready(() => ShowFiles(id))) return;
+        ShowMainWindow();
+        Library.RevealRow(id);
+        Files.Expand(id);
+        LibraryWindow.Pane.Refresh();
     }
 
     /// <summary>Folds or unfolds a group and remembers the folds.</summary>
@@ -684,6 +909,14 @@ public partial class App : Application
         iconTimer.Start();
     }
 
+    /// <summary>An agent's activity: the icon (its dot while a request waits) at once, and the request toasts no longer waiting go.</summary>
+    internal void AgentActivity()
+    {
+        iconTimer?.Stop();
+        UpdateIcon();
+        Notifier?.WithdrawStale();
+    }
+
     /// <summary>The flyout opened or closed: the icon's refresh time depends on it.</summary>
     internal void FlyoutChanged()
     {
@@ -839,7 +1072,10 @@ public partial class App : Application
     /// <summary>QA: the folder the next folder dialog answers with (the QA command pick-folder).</summary>
     internal string? QaFolder { get; set; }
 
-    /// <summary>A quiet notification from the tray icon (no sound, held back in Do Not Disturb).</summary>
+    /// <summary>
+    /// A quiet notification from the tray icon (no sound, held back in Do Not Disturb); logged, and not shown in a QA or
+    /// render run. A balloon the shell refuses is logged: it must not end the app (it runs from the dispatcher's queue).
+    /// </summary>
     internal void Notify(string title, string body)
     {
         if (!ui.HasThreadAccess)
@@ -847,7 +1083,19 @@ public partial class App : Application
             ui.TryEnqueue(() => Notify(title, body));
             return;
         }
-        tray?.ShowNotification(title, body, H.NotifyIcon.Core.NotificationIcon.None, sound: false, respectQuietTime: true);
+        AppLog.Write($"notify: {title}: {body}");
+        if (Quiet.On)
+        {
+            return;
+        }
+        try
+        {
+            tray?.ShowNotification(title, body, H.NotifyIcon.Core.NotificationIcon.None, sound: false, respectQuietTime: true);
+        }
+        catch (Exception e)
+        {
+            AppLog.Write($"notify: not shown ({e.Message})");
+        }
     }
 
     /// <summary>
@@ -900,6 +1148,7 @@ public partial class App : Application
         Updater?.Quitting();
         var clock = System.Diagnostics.Stopwatch.StartNew();
         iconTimer?.Stop();
+        Cloud?.Stop();
         flyout?.Close();
         main?.CloseForQuit();
         tray?.Dispose();
@@ -936,7 +1185,12 @@ public partial class App : Application
             AppLog.Write($"qa {string.Join(' ', words)}: waits for the core");
             return;
         }
-        _ = QaRun(words);
+        _ = QaRun(words).ContinueWith(t =>
+        {
+            // A command that throws answers with its error (else the run waits for an answer that never comes).
+            var e = t.Exception?.InnerException;
+            AppLog.Write($"qa {string.Join(' ', words)}: failed: {e?.GetType().Name}: {e?.Message} {e?.StackTrace?.Split(Environment.NewLine).FirstOrDefault()?.Trim()}");
+        }, TaskContinuationOptions.OnlyOnFaulted);
     }
 
     async Task QaRun(string[] w)
@@ -983,6 +1237,24 @@ public partial class App : Application
                         "direct" => new LibraryPlace.Direct(Arg(2)),
                         _ => new LibraryPlace.Downloads(),
                     });
+                    break;
+                // The file lists (the core's FileLists): describe | toggle <row> | click <row> <file> | check <row> <file> |
+                // priority <row> <file> High|Normal|Low | all <row> on|off | filter <row> <text> | flush <row> | menu <row>
+                // (the tray's chevron) | menu-check <row> <file>. A row by part of its title, a file by part of its name.
+                case "files":
+                    result = await QaFiles(w, Arg, Row, pane);
+                    break;
+                // The chooser, the held list and the starting notifier (Part E): chooser show <row> | status | toggle <text>
+                // | pick All|Missing|Latest | category <name> | start | cancel [keep] | close; held toggle <row> | status;
+                // starting status | show | close | chevron <row> | <ok|start-now|cancel|title|category|all|none|open|toggle>
+                // <row> [arg] | shift on|off|auto. A row by part of its title.
+                // Favorites and the Info page (Part F): favorite save|rename <tracker> <name>|remove|confirm|cancel|status <tracker>;
+                // tracker-info <tracker> [limits <down> <up> | pex on|off | add <url>]. A tracker by part of its name.
+                case "favorite" or "tracker-info":
+                    result = await QaFavorite(verb, w, Arg);
+                    break;
+                case "chooser" or "held" or "starting":
+                    result = await QaChoice(verb, w, Arg, Row);
                     break;
                 case "rowclick":
                     if (Row(Arg(1), out var group) is ListRow clicked) Library.ClickRow(group, clicked.Id, Has("command"), Has("shift"));
@@ -1103,6 +1375,9 @@ public partial class App : Application
                         case "rows": result = sp2.QaRows() + "; "; break;
                         case "row": result = sp2.QaRow(Arg(2)) + "; "; break;
                         case "set": result = sp2.QaSet(Arg(2), w.Skip(3).ToArray()) + "; "; await Task.Delay(700); await CoreCalls.Idle(); break;
+                        // The rules editor: rules [status | section rules|trackers | select <title> | add | remove | save | revert |
+                        // move <from> <to> | new-tracker <host>]; its rows are set with set <row> as Settings' are.
+                        case "rules": result = sp2.QaRulesCommand(w.Skip(2).ToArray()) + "; "; await Task.Delay(900); await CoreCalls.Idle(); result += sp2.QaRules() + "; "; break;
                     }
                     await Quiet.Settle(LibraryWindow.Content);
                     result += sp2.QaDescribe();
@@ -1128,7 +1403,7 @@ public partial class App : Application
                 // Agents waiting for access: requests (the tray's line and the rows, as the core gives them).
                 case "requests":
                     var rq = Core.AgentRequests(Now());
-                    result = $"line \"{rq.Line ?? ""}\", rows {rq.Rows.Length} [{string.Join(" | ", rq.Rows.Select(r => r.Title))}]";
+                    result = $"line \"{rq.Line ?? ""}\", rows {rq.Rows.Length} [{string.Join(" | ", rq.Rows.Select(r => r.Title))}], icon \"{tray?.ToolTipText ?? ""}\" dot {drawn?.Attention} for {drawn?.NeedsAnswer?.ToString() ?? "none"}";
                     break;
                 // The question the core asks, in a QA run waiting for its answer: prompt status | yes | no.
                 case "prompt":
@@ -1140,6 +1415,27 @@ public partial class App : Application
                 case "banner":
                     result = Banner.QaText(false);
                     break;
+                // Play on a row as its Play button does (a QA run starts no player: it logs play-url): the note shown after.
+                case "play":
+                    if (Row(Arg(1), out _) is not ListRow played) { result = "no such row"; break; }
+                    Player.Play(this, played.Transfer);
+                    await Task.Delay(1500);
+                    result = $"note \"{pane.NoteShown ?? ""}\"";
+                    break;
+                // The on-demand host (item 6): its roots and each file's Cloud Files state; read <folder-relative path> reads a file
+                // (off the UI thread: a placeholder's read is filled by the host's callback).
+                case "ondemand":
+                    if (Cloud is null) { result = "no host"; break; }
+                    if (Arg(1) == "read") { var rel = string.Join(' ', w.Skip(2)); result = await Task.Run(() => Cloud.QaRead(rel)) + "; "; }
+                    // placeholder <full path>: whether a file or folder is still a Cloud Files placeholder (after a switch to full, none is).
+                    if (Arg(1) == "placeholder") { var at = string.Join(' ', w.Skip(2)); result = $"placeholder {await Task.Run(() => CloudFiles.IsPlaceholder(at))}; "; }
+                    result += Cloud.QaStatus();
+                    break;
+                // The Cloud Files plumbing's own check (item 6): a sync root in this run's temp state, no core involved.
+                case "cloudfiles" when Arg(1) == "selftest":
+                    var cfState = Core.StateDir();
+                    result = await Task.Run(() => CloudSelfTest.Run(cfState));
+                    break;
                 // The players the core found on this PC (Windows: the registry and PATH), each with what Automatic plays.
                 case "play-players":
                     result = string.Join(" | ", Core.PlayPlayersReport());
@@ -1149,7 +1445,9 @@ public partial class App : Application
                     result = await Task.Run(() => Core.OtherSeedwells()) ?? "none";
                     break;
                 // The conversation shown: describe | type <text> | send | reply <card> | attach <path> | menu <title> | menu-text |
-                // members | file <card> <file> <action> | image <card> <image> open|fetch | tag <card> <tag> | open-answer yes|no.
+                // members | file <card> <file> <action> | image <card> <image> open|fetch | tag <card> <tag> | open-answer yes|no |
+                // hover <card> on|off (its time, Tag and Reply as the pointer shows them) | quote <card> (a click on its reply quote) |
+                // show-image <card> <image> (an image reference's click) | escape (Escape in the field).
                 // Cards count from 0; a file action is the core's kind (Download, SaveAs, Retry, Cancel, Open, ShowInFolder,
                 // StopSharing).
                 case "chatpage":
@@ -1167,6 +1465,16 @@ public partial class App : Application
                         case "menu": result = cp.QaMenu(Arg(2)) + "; "; await Quiet.Settle(LibraryWindow.Content); break;
                         case "menu-text": result = cp.QaMenuText() + "; "; break;
                         case "members": cp.QaMembers(); await Task.Delay(1500); break;
+                        case "hover": result = (cp.QaHover(int.TryParse(Arg(2), out var hn) ? hn : -1, Arg(3) != "off") ? "hover" : "no such card") + "; "; break;
+                        case "quote": result = cp.QaQuote(int.TryParse(Arg(2), out var qn) ? qn : -1) + "; "; break;
+                        case "show-image":
+                            var sn = int.TryParse(Arg(2), out var sv) ? sv : -1;
+                            cp.QaShowImage(sn, int.TryParse(Arg(3), out var si) ? si : 0);
+                            result = $"gallery shows {cp.GalleryShown(sn)}; ";
+                            break;
+                        case "escape": result = (cp.Escape() ? "reply cancelled" : "passed on") + "; "; break;
+                        case "drop-over" when int.TryParse(Arg(2), out var overChar): var hit = await cp.QaDropOver(overChar, string.Join(' ', w.Skip(3))); result = $"hit {hit}, draft \"{cp.Draft}\"; "; break;
+                        case "drop-at" when uint.TryParse(Arg(2), out var dropAt): await cp.QaDropAt(string.Join(' ', w.Skip(3)), dropAt); result = $"draft \"{cp.Draft}\"; "; break;
                         case "open-answer": ChatAttachments.QaOpenAnswer = Arg(2) == "yes"; break;
                         case "file":
                             if (CardAt(Arg(2)) is not ChatMessageCard fc || !int.TryParse(Arg(3), out var fi) || fi < 0 || fi >= fc.Files.Length) { result = "no such file; "; break; }
@@ -1199,7 +1507,7 @@ public partial class App : Application
                         ChatMessageBody.Unsupported un => "unsupported " + un.Text,
                         _ => "",
                     };
-                    result += $"cards {cm.Messages.Length}, empty \"{cm.Empty ?? ""}\", last \"{(lastCard is null ? "" : BodyText(lastCard))}\", last images {lastCard?.Images.Length ?? 0} [{string.Join(",", lastCard?.Images.Select(i => i.State) ?? [])}], last files {lastCard?.Files.Length ?? 0} [{string.Join(",", lastCard?.Files.Select(f => $"{f.State}:{string.Join("+", f.Actions.Select(a => a.Kind))}") ?? [])}], last tags \"{string.Join("; ", lastCard?.Tags.Select(t => t.Text) ?? [])}\", tags total {cm.Messages.Sum(m => m.Tags.Length)}, reply quote \"{lastCard?.ReplyQuote ?? ""}\", toolbar [{(cm.Toolbar.Tag is null ? "" : "tag ")}{(cm.Toolbar.Members is null ? "" : "members ")}{(cm.Toolbar.Share is null ? "" : "share ")}menu], can post {cm.Composer.CanPost} \"{cm.Composer.CannotPost ?? ""}\", attach {cm.Composer.Attach}, attached {cp.Attached}, pending {cm.Composer.Pending.Length}, replying {cp.ReplyingTo ?? "none"}, members panel {(cm.Members is null ? "none" : $"{cm.Members.Rows.Length} rows")}, open {cp.MembersOpen}";
+                    result += $"cards {cm.Messages.Length}, empty \"{cm.Empty ?? ""}\", last \"{(lastCard is null ? "" : BodyText(lastCard))}\", last images {lastCard?.Images.Length ?? 0} [{string.Join(",", lastCard?.Images.Select(i => i.State) ?? [])}], last files {lastCard?.Files.Length ?? 0} [{string.Join(",", lastCard?.Files.Select(f => $"{f.State}:{string.Join("+", f.Actions.Select(a => a.Kind))}") ?? [])}], last tags \"{string.Join("; ", lastCard?.Tags.Select(t => t.Text) ?? [])}\", tags total {cm.Messages.Sum(m => m.Tags.Length)}, reply quote \"{(lastCard?.ReplyQuote is ChatQuote quoted ? $"{quoted.Title}: {quoted.Text}" : "")}\", bubbles {cm.Bubbles}, last who {lastCard?.Who.ToString() ?? "none"}, last meta \"{(lastCard?.Meta is ChatMessageMeta lm ? $"{lm.Name} · {lm.Detail}" : "")}\", runs {cm.Messages.Count(m => m.StartsRun)}, metas {cm.Messages.Count(m => m.Meta is not null)}, toolbar [{(cm.Toolbar.Tag is null ? "" : "tag ")}{(cm.Toolbar.Members is null ? "" : "members ")}{(cm.Toolbar.Share is null ? "" : "share ")}menu], can post {cm.Composer.CanPost} \"{cm.Composer.CannotPost ?? ""}\", attach {cm.Composer.Attach}, attached {cp.Attached}, send enabled {cp.SendEnabled}, pending {cm.Composer.Pending.Length}, replying {cp.ReplyingTo ?? "none"}, members panel {(cm.Members is null ? "none" : $"{cm.Members.Rows.Length} rows")}, open {cp.MembersOpen}";
                     break;
                 // The Folder Sync page: describe | press <title> [<folder>] (a button, or a list row's menu item; its question
                 // counts as confirmed) | trash on|off | remove (the Stop Syncing question's Remove) | choose <folder>. A folder is named by its name or id.
@@ -1218,7 +1526,7 @@ public partial class App : Application
                     result += page.QaDescribe();
                     break;
                 // Add Folder: open [link] | mode local|shared | folder <path> | link <text> | location <path> | parent <path> |
-                // devices on|off | start | cancel | status.
+                // devices on|off | ondemand on|off | start | cancel | status.
                 case "add-folder":
                     if (Arg(1) == "open") { AddFolderDialog.Show(this, w.Length > 2 ? w[2] : null); await Quiet.Settle(LibraryWindow.Content); }
                     else if (AddFolderDialog.Open is not AddFolderDialog af) { result = "not open"; break; }
@@ -1230,18 +1538,19 @@ public partial class App : Application
                         case "location": af.QaLocation(string.Join(' ', w.Skip(2))); break;
                         case "parent": af.QaParent(string.Join(' ', w.Skip(2))); break;
                         case "devices": af.QaAllDevices(Arg(2) == "on"); break;
+                        case "ondemand": af.QaOnDemand(Arg(2) == "on"); break;
                         case "start": result = await af.QaStart() ? "started" : "not started"; await Quiet.Settle(LibraryWindow.Content); break;
                         case "cancel": af.QaCancel(); break;
                     }
                     if (AddFolderDialog.Open is AddFolderDialog afOpen)
                     {
                         var am = afOpen.Model;
-                        result += $"; add folder {afOpen.Form.Mode}, can start {am.CanStart}, folder \"{am.FolderText}\", link line \"{am.LinkLine}\", location \"{am.Location}\", failure \"{afOpen.Failure}\"";
+                        result += $"; add folder {afOpen.Form.Mode}, can start {am.CanStart}, folder \"{am.FolderText}\", link line \"{am.LinkLine}\", location \"{am.Location}\", on demand \"{am.OnDemandLabel ?? "none"}\" {afOpen.Form.OnDemand} note \"{am.OnDemandNote ?? ""}\", failure \"{afOpen.Failure}\"";
                     }
                     if (ShareDialog.Open is not null) result += "; share open";
                     break;
-                // A folder's Edit dialog: open <folder> | name <text> | pause on|off | lan on|off | devices on|off | options on|off |
-                // parent <path> | share | save | cancel | status.
+                // A folder's Edit dialog: open <folder> | name <text> | pause on|off | lan on|off | devices on|off | ondemand on|off |
+                // options on|off | parent <path> | share | save | cancel | status.
                 case "edit-folder":
                     if (Arg(1) == "open") { EditFolderDialog.Show(this, FolderId(Arg(2))); await Quiet.Settle(LibraryWindow.Content); }
                     else if (EditFolderDialog.Open is not EditFolderDialog ef) { result = "not open"; break; }
@@ -1251,6 +1560,7 @@ public partial class App : Application
                         case "pause": ef.QaPaused(Arg(2) == "on"); break;
                         case "lan": ef.QaLanOnly(Arg(2) == "on"); break;
                         case "devices": ef.QaAllDevices(Arg(2) == "on"); break;
+                        case "ondemand": ef.QaOnDemand(Arg(2) == "on"); break;
                         case "options": ef.QaOptions(Arg(2) == "on"); break;
                         case "parent": ef.QaParent(string.Join(' ', w.Skip(2))); break;
                         case "share": ef.QaShare(); await Quiet.Settle(LibraryWindow.Content); break;
@@ -1260,7 +1570,7 @@ public partial class App : Application
                     if (EditFolderDialog.Open is EditFolderDialog efOpen)
                     {
                         var em = efOpen.Model;
-                        result += $"; edit {em.Title}, changed {em.Changed}, can save {em.CanSave}, location \"{em.Location}\", share {(em.ShareTitle ?? "none")}, follow {(em.Follow is null ? "none" : em.Follow.On.ToString())}, failure \"{efOpen.Failure}\"";
+                        result += $"; edit {em.Title}, changed {em.Changed}, can save {em.CanSave}, location \"{em.Location}\", share {(em.ShareTitle ?? "none")}, follow {(em.Follow is null ? "none" : em.Follow.On.ToString())}, on demand \"{em.OnDemandLabel ?? "none"}\" {efOpen.Form.OnDemand} note \"{em.OnDemandNote ?? ""}\", failure \"{efOpen.Failure}\"";
                     }
                     if (ShareDialog.Open is not null) result += "; share open";
                     break;
@@ -1350,7 +1660,9 @@ public partial class App : Application
                     var dialogPopup = Arg(2) == "dialog" && LibraryWindow.Content.XamlRoot is XamlRoot xr
                         ? Microsoft.UI.Xaml.Media.VisualTreeHelper.GetOpenPopupsForXamlRoot(xr).Select(p => p.Child).OfType<UIElement>().FirstOrDefault()
                         : null;
-                    UIElement shown = dialogPopup ?? (Arg(2) == "rendezvous" && pane.SettingsPageShown?.Rendezvous.Root is UIElement section ? section : LibraryWindow.Content);
+                    // With "starting" the starting notifier (a window of its own).
+                    UIElement shown = dialogPopup ?? (Arg(2) == "starting" && StartingNotifier?.RootElement is UIElement notifier ? notifier
+                        : Arg(2) == "rendezvous" && pane.SettingsPageShown?.Rendezvous.Root is UIElement section ? section : LibraryWindow.Content);
                     await SnapshotRenderer.SaveImage(shown, file, RequestedTheme == ApplicationTheme.Light);
                     result = file;
                     break;

@@ -52,6 +52,10 @@ pub enum NoticeKind {
     ChatMessage,
     /// An agent asks for access (SPEC 9A.3): Approve and Deny as the notification's actions.
     AgentRequest,
+    /// A file of an on-demand folder could not be opened ([`Notices::sync_ondemand_notice`]).
+    SyncProblem,
+    /// The user's "Free up space" kept some files, and why ([`Notices::sync_evict_notice`]).
+    SyncKept,
 }
 
 /// What a click on a notification opens.
@@ -101,6 +105,24 @@ pub struct NoticeDecision {
 
 /// The category of a request's notice.
 const REQUEST_CATEGORY: &str = "agent-request";
+/// A request's notice key is this and the request's id.
+const REQUEST_KEY_PREFIX: &str = "agent-request-";
+
+/// How hard a notification asks to be seen. The host maps it to what its system offers; it never changes the user's
+/// own choices (alert style, Focus, Do Not Disturb), which decide in the end.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, uniffi::Enum)]
+pub enum NoticeUrgency {
+    /// An ordinary banner (macOS: `.active`; Windows: a default toast).
+    Normal,
+    /// It is about now: it may break through a Focus that allows time-sensitive notifications (macOS:
+    /// `.timeSensitive`; Windows: a default toast).
+    TimeSensitive,
+    /// Someone waits for the answer: time-sensitive, and on screen until it is acted on where the system lets an app
+    /// ask for that (macOS: `.timeSensitive`, as apps cannot make an alert persistent: the user's alert style for the
+    /// app does; Windows: a toast with `scenario="reminder"`, which stays until a button or a dismissal). The host
+    /// takes it away once it is answered anywhere ([`Notices::withdrawn`]).
+    Persistent,
+}
 
 /// One system notification, ready to post.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
@@ -120,6 +142,8 @@ pub struct Notice {
     pub category: Option<String>,
     /// Its buttons, in order (Windows adds them to the toast; the Mac's come with the category).
     pub actions: Vec<NoticeAction>,
+    /// How hard it asks to be seen.
+    pub urgency: NoticeUrgency,
 }
 
 /// What the host does about an event.
@@ -184,6 +208,8 @@ pub(crate) struct State {
     burst: Vec<u64>,
     /// The agents' requests for access already posted (each is posted once).
     requests_posted: std::collections::HashSet<String>,
+    /// When each on-demand problem was last told (ms since the notifier was made), by its key.
+    od_told: HashMap<String, u64>,
     /// Each conversation's unread count at the last poll; `None` before the first, which only takes the baseline.
     seen: Option<HashMap<LibraryPlace, u32>>,
 }
@@ -207,6 +233,43 @@ impl Notices {
         decide(&mut self.state.lock().unwrap_or_else(|e| e.into_inner()), event, &facts, now)
     }
 
+    /// The notifications to take away now, of `delivered` (the keys of the app's notifications the system still holds,
+    /// on screen or in its list): an agent's request answered anywhere (a button, Settings, the menu, a chat reply),
+    /// expired or withdrawn, so a stale one is never answered. The host asks after each agent event and each answer,
+    /// and once at launch (what an earlier run left).
+    pub fn withdrawn(&self, delivered: Vec<String>) -> Vec<String> {
+        if !delivered.iter().any(|k| k.starts_with(REQUEST_KEY_PREFIX)) {
+            return Vec::new();
+        }
+        let pending = off_runtime(|| self.core.backend.agent_requests());
+        stale_request_keys(&delivered, &pending)
+    }
+
+    /// Whether the user is told that an on-demand call failed (`kind`, from `CoreError::OnDemand`) for `path` (the
+    /// item's path in folder `folder_id`), and how. The host asks whenever a call it made for the file manager failed
+    /// (Windows: a Cloud Files callback answered with an error, whose own message Explorer shows): only what the user
+    /// can act on is told (a version no device has, a file no connected device can give), once per file in
+    /// [`OD_QUIET_MS`]; the rest (an item gone, an anchor expired, a change that came first) the host handles itself.
+    pub fn sync_ondemand_notice(&self, folder_id: String, kind: crate::sync::ondemand::SyncErrorKind, path: String) -> Option<Notice> {
+        let folder = off_runtime(|| self.core.backend.sync().snapshot().folders.into_iter().find(|f| f.id == folder_id).map(|f| f.name));
+        let now = self.start.elapsed().as_millis() as u64;
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        ondemand_notice(&mut state.od_told, now, &folder_id, folder.as_deref(), kind, &path)
+    }
+
+    /// What the user is told after freeing space in an on-demand folder (`evicted`, from `sync_evict`) kept files: one
+    /// notice for the folder, "N files stay on this computer" and why, in the core's words, which a second free of the
+    /// folder replaces. For a host whose file manager gives a free no error to show (Windows: Explorer's "Free up
+    /// space" only sets an attribute). `None` when everything was freed, and for the system's own clean-ups
+    /// (`initiated_by_user` false: Storage Sense, disk pressure), which stay silent.
+    pub fn sync_evict_notice(&self, folder_id: String, evicted: crate::sync::ondemand::SyncEvicted, initiated_by_user: bool) -> Option<Notice> {
+        if !initiated_by_user || (evicted.kept_why.is_empty() && evicted.failed.is_empty()) {
+            return None;
+        }
+        let folder = off_runtime(|| self.core.backend.sync().snapshot().folders.into_iter().find(|f| f.id == folder_id).map(|f| f.name));
+        evict_notice(&folder_id, folder.as_deref(), &evicted, initiated_by_user)
+    }
+
     /// The banners of new chat messages since the last call: for each conversation (a channel's General or topic, a
     /// private one) whose unread count went up, its newest message, when another device sent it, the channel is not
     /// muted and the conversation is not on screen. The first call only takes the counts.
@@ -216,6 +279,121 @@ impl Notices {
         let seen = &mut state.seen;
         off_runtime(move || chat_step(seen, conversations(core), &view, |p| last_message(core, p)))
     }
+}
+
+/// How long the same on-demand problem of one file is not told again.
+pub const OD_QUIET_MS: u64 = 10 * 60 * 1000;
+
+/// [`Notices::sync_ondemand_notice`]'s rule: `told` holds when each key was last told; `folder` is the folder's name
+/// (`None`: no longer synced here, nothing to tell).
+pub(crate) fn ondemand_notice(
+    told: &mut HashMap<String, u64>,
+    now: u64,
+    folder_id: &str,
+    folder: Option<&str>,
+    kind: crate::sync::ondemand::SyncErrorKind,
+    path: &str,
+) -> Option<Notice> {
+    use crate::sync::ondemand::SyncErrorKind as K;
+    let folder = folder?;
+    let name = path.rsplit('/').find(|n| !n.is_empty()).unwrap_or(folder);
+    let (title, body) = match kind {
+        K::Unavailable => (
+            format!("Can't open “{name}”"),
+            format!("No device has this version of it right now. It opens once a device that has it connects (“{folder}” in Folder Sync)."),
+        ),
+        K::NotHereYet => (
+            format!("“{name}” isn't here yet"),
+            format!("No device that has it is connected. Open it again once one is (“{folder}” in Folder Sync shows the devices)."),
+        ),
+        K::NoItem | K::NotOnDemand | K::Gone | K::NotRunning | K::AnchorExpired | K::Changed => return None,
+    };
+    // One notification per file and problem (Windows' tag holds 64 characters: the path is hashed).
+    let key = {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::hash::DefaultHasher::new();
+        (folder_id, path, kind).hash(&mut h);
+        format!("sync-od-{:016x}", h.finish())
+    };
+    if told.get(&key).is_some_and(|t| now.saturating_sub(*t) < OD_QUIET_MS) {
+        return None;
+    }
+    told.retain(|_, t| now.saturating_sub(*t) < OD_QUIET_MS);
+    told.insert(key.clone(), now);
+    let route = NoticeRoute::Place { place: LibraryPlace::FolderSync };
+    let click = click_of(&route);
+    Some(Notice { kind: NoticeKind::SyncProblem, title, body, key: Some(key), route, click, category: None, actions: Vec::new(), urgency: NoticeUrgency::Normal })
+}
+
+/// Why a file a free kept stays ([`evict_notice`]).
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Kept {
+    Pinned,
+    OnlyCopy,
+    Changed,
+    InUse,
+    Other(String),
+}
+
+/// [`Notices::sync_evict_notice`]'s words: `folder` is the folder's name (`None`: no longer synced here, nothing to
+/// tell).
+pub(crate) fn evict_notice(folder_id: &str, folder: Option<&str>, e: &crate::sync::ondemand::SyncEvicted, initiated_by_user: bool) -> Option<Notice> {
+    use trs_sync::ondemand::{KEPT_CHANGED, KEPT_PINNED, NOT_HELD_ELSEWHERE};
+    let folder = folder?;
+    if !initiated_by_user {
+        return None;
+    }
+    let mut why: std::collections::BTreeMap<Kept, u64> = std::collections::BTreeMap::new();
+    for k in &e.kept_why {
+        let kind = match k.error.as_str() {
+            KEPT_PINNED => Kept::Pinned,
+            NOT_HELD_ELSEWHERE => Kept::OnlyCopy,
+            KEPT_CHANGED => Kept::Changed,
+            other => Kept::Other(other.to_string()),
+        };
+        *why.entry(kind).or_default() += 1;
+    }
+    if !e.failed.is_empty() {
+        *why.entry(Kept::InUse).or_default() += e.failed.len() as u64;
+    }
+    let n: u64 = why.values().sum();
+    if n == 0 {
+        return None;
+    }
+    let one = e.kept_why.iter().chain(&e.failed).next().filter(|_| n == 1);
+    let title = match one {
+        Some(f) => format!("“{}” stays on this {}", f.path.rsplit('/').find(|s| !s.is_empty()).unwrap_or(&f.path), trs_platform::computer!()),
+        None => format!("{n} files stay on this {}", trs_platform::computer!()),
+    };
+    let mut body = Vec::new();
+    for (kind, c) in &why {
+        let c = *c;
+        // "It" for the one file the title names, "They" for all of them, else how many.
+        let (s, is, it) = match (n, c == n) {
+            (1, _) => ("It".to_string(), "is", "it"),
+            (_, true) => ("They".to_string(), "are", "them"),
+            _ if c == 1 => ("1".to_string(), "is", "it"),
+            _ => (c.to_string(), "are", "them"),
+        };
+        body.push(match kind {
+            Kept::Pinned => format!("{s} {is} set to always stay on this {}: stop keeping {it} here first.", trs_platform::computer!()),
+            Kept::OnlyCopy => format!("{s} {is} kept until a device that has {it} too is connected, so nothing is lost."),
+            Kept::Changed => format!("{s} changed on this {} and {is} synced first.", trs_platform::computer!()),
+            Kept::InUse => format!("{s} couldn't be freed: {} open in another app.", if it == "it" { "it may be" } else { "they may be" }),
+            Kept::Other(why) => format!("{s}: {why}."),
+        });
+    }
+    body.push(format!("(“{folder}” in Folder Sync)"));
+    // One per folder: a later free replaces it (Windows' tag holds 64 characters: the id is hashed).
+    let key = {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::hash::DefaultHasher::new();
+        folder_id.hash(&mut h);
+        format!("sync-kept-{:016x}", h.finish())
+    };
+    let route = NoticeRoute::Place { place: LibraryPlace::FolderSync };
+    let click = click_of(&route);
+    Some(Notice { kind: NoticeKind::SyncKept, title, body: body.join(" "), key: Some(key), route, click, category: None, actions: Vec::new(), urgency: NoticeUrgency::Normal })
 }
 
 /// The kinds of notification with buttons, for the host to register at launch (macOS: `UNNotificationCategory`).
@@ -261,6 +439,7 @@ pub fn notice_route(click: String) -> NoticeRoute {
         },
         "direct" => next().map_or(NoticeRoute::Window, |device_id| NoticeRoute::Place { place: LibraryPlace::Direct { device_id } }),
         "agent-request" | "agent-requests" => NoticeRoute::AgentRequests,
+        "folder-sync" => NoticeRoute::Place { place: LibraryPlace::FolderSync },
         _ => NoticeRoute::Window,
     }
 }
@@ -276,6 +455,7 @@ pub(crate) fn click_of(route: &NoticeRoute) -> String {
             format!("chat\n{channel_id}\n{}", topic_id.as_deref().unwrap_or_default())
         }
         NoticeRoute::Place { place: LibraryPlace::Direct { device_id } } => format!("direct\n{device_id}"),
+        NoticeRoute::Place { place: LibraryPlace::FolderSync } => "folder-sync".into(),
         NoticeRoute::Place { .. } => "window".into(),
         NoticeRoute::AgentRequests => "agent-requests".into(),
     }
@@ -293,7 +473,23 @@ fn off_runtime<T: Send>(f: impl FnOnce() -> T + Send) -> T {
 
 fn notice(kind: NoticeKind, title: String, body: String, key: Option<String>, route: NoticeRoute) -> NoticeOutcome {
     let click = click_of(&route);
-    NoticeOutcome::Post { notice: Notice { kind, title, body, key, route, click, category: None, actions: Vec::new() } }
+    NoticeOutcome::Post { notice: Notice { kind, title, body, key, route, click, category: None, actions: Vec::new(), urgency: NoticeUrgency::Normal } }
+}
+
+/// The notice key (the host's notification identifier) of request `id`'s notice.
+fn request_key(id: &str) -> String {
+    format!("{REQUEST_KEY_PREFIX}{id}")
+}
+
+/// The keys among `delivered` (the host's notifications still on screen or in its list) of request notices whose
+/// request no longer waits (`pending`: the requests that do): answered anywhere, expired or withdrawn. Other keys are
+/// never named.
+pub(crate) fn stale_request_keys(delivered: &[String], pending: &[trs_control::access::Entry]) -> Vec<String> {
+    delivered
+        .iter()
+        .filter(|k| k.strip_prefix(REQUEST_KEY_PREFIX).is_some_and(|id| !pending.iter().any(|e| e.id == id)))
+        .cloned()
+        .collect()
 }
 
 /// An agent's request for access, with Approve and Deny (Settings › Agents on a click). Its words are the core's; the
@@ -306,11 +502,12 @@ pub(crate) fn request_notice(e: &trs_control::access::Entry) -> NoticeOutcome {
             kind: NoticeKind::AgentRequest,
             title: crate::agent_requests::request_title(e),
             body,
-            key: Some(format!("agent-request-{}", e.id)),
+            key: Some(request_key(&e.id)),
             route: NoticeRoute::AgentRequests,
             click: format!("agent-request\n{}", e.id),
             category: Some(REQUEST_CATEGORY.into()),
             actions: request_actions(),
+            urgency: NoticeUrgency::Persistent,
         },
     }
 }
@@ -562,7 +759,17 @@ pub(crate) fn chat_step(
             _ => continue,
         };
         let route = NoticeRoute::Place { place: c.place };
-        out.push(Notice { kind: NoticeKind::ChatMessage, title: text.title, body: text.body, key: Some(key), click: click_of(&route), route, category: None, actions: Vec::new() });
+        out.push(Notice {
+            kind: NoticeKind::ChatMessage,
+            title: text.title,
+            body: text.body,
+            key: Some(key),
+            click: click_of(&route),
+            route,
+            category: None,
+            actions: Vec::new(),
+            urgency: NoticeUrgency::Normal,
+        });
     }
     *seen = Some(now);
     out

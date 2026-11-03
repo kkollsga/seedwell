@@ -153,6 +153,9 @@ pub struct ShutdownSummary {
     pub finished: bool,
 }
 
+/// The core's log in `<state>/logs/`: its standard error, when the app's goes nowhere ([`Core::new`]).
+pub const CORE_LOG: &str = "core.log";
+
 /// The one object the shell talks to.
 #[derive(uniffi::Object)]
 pub struct Core {
@@ -168,6 +171,8 @@ pub struct Core {
     /// The File Provider extension's server, while the app runs it (`sync_host_start`).
     #[cfg(unix)]
     host: std::sync::Mutex<Option<sync_host::Server>>,
+    /// The in-process host of on-demand folders (Windows' Cloud Files), while the app runs it (`sync_host_attach`).
+    host_attached: std::sync::Mutex<Option<sync_host::Attached>>,
     /// The user's commands to the engine, run one after another in the order they came (`async_calls`).
     commands: calls::Lane,
     /// The user's changes to folder sync and chat settings (a channel muted then unmuted, a port, the rendezvous), one
@@ -184,6 +189,18 @@ impl Core {
     /// (`None`: a 0600 file in the state folder).
     fn open(options: CoreOptions, vault: Option<Arc<dyn SecretVault>>) -> Result<Arc<Self>, CoreError> {
         let dir = PathBuf::from(&options.config_dir);
+        // What the core says on standard error (every crate's `eprintln!`, a panic) goes to `<state>/logs/core.log`
+        // when it would go nowhere: a Windows app has no console, a Mac app started from the Finder writes to
+        // /dev/null. A terminal or a test run keeps it.
+        let log = dir.join("logs").join(CORE_LOG);
+        match trs_platform::proc::stderr_to_log(&log) {
+            Ok(true) => {
+                let ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+                eprintln!("seedwell: {} Seedwell {} started (process {})", trs_devlog::iso_time(ms), env!("CARGO_PKG_VERSION"), std::process::id());
+            }
+            Ok(false) => {}
+            Err(e) => eprintln!("seedwell: standard error could not go to {}: {e}", log.display()),
+        }
         let builds = trs_control::BuildsSlot::new();
         let backend: Arc<dyn Backend> = if options.mock {
             let _ = std::fs::create_dir_all(&dir);
@@ -211,6 +228,7 @@ impl Core {
             builds,
             #[cfg(unix)]
             host: std::sync::Mutex::new(None),
+            host_attached: std::sync::Mutex::new(None),
             commands: calls::Lane::new("seedwell-commands"),
             sync_commands: calls::Lane::new("seedwell-sync-commands"),
             polls: async_calls::Polls::default(),
@@ -484,9 +502,14 @@ impl Core {
         Self::open(options, None)
     }
 
-    /// Cheap; the shell calls it about once a second while something is visible.
+    /// Cheap; the shell calls it about once a second while something is visible. It carries the agents' requests
+    /// waiting for the user too (the icon's dot), read from the same list as [`Core::agent_requests`].
     pub fn snapshot(&self) -> Snapshot {
-        self.backend.snapshot()
+        let mut s = self.backend.snapshot();
+        let requests = self.backend.agent_requests();
+        s.agent_requests = u32::try_from(requests.len()).unwrap_or(u32::MAX);
+        s.agent_requests_expire_ms = requests.iter().map(|e| e.expires_ms).min();
+        s
     }
 
     /// Registers the event listener, replacing any previous one.

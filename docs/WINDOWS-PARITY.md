@@ -63,6 +63,8 @@ C# (bundles in `Seedwell Sync/builds`, patches in `from-pc/`, messages in "Seedw
       keys). The Windows app passes no `SecretVault`. Verified by Windows CI only.
     - An Explorer Share verb.
     - Cloud Files on-demand folders (CfRegisterSyncRoot; `sync_ondemand.rs` is host-neutral) and their states.
+      No navigation-pane entry and no sparse package (the user's decision, 2026-11-03: Seedwell can have several
+      on-demand folders, each in its own place); each folder shows Cloud Files states wherever it lives.
     - Overlays.
 11. **QA protocol:** `--qa` verbs for every new window, so `qa/run.ps1` covers it.
 

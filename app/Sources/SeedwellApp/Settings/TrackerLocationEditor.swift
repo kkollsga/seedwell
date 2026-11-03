@@ -18,13 +18,13 @@ struct TrackerLocationEditor: View {
             ForEach(v.rows, id: \.label) { row($0) }
             if let w = v.warning { DifferentDisksWarning(text: w).padding(.horizontal, -14) }
             Text(v.note)
-                .font(.system(size: 11)).foregroundStyle(.tertiary).fixedSize(horizontal: false, vertical: true)
+                .font(Theme.caption).foregroundStyle(.tertiary).fixedSize(horizontal: false, vertical: true)
             DisclosureGroup(isExpanded: $showTypes) {
                 VStack(alignment: .leading, spacing: 4) {
                     ForEach(v.types, id: \.category) { type($0) }
                 }.padding(.top, 4)
             } label: {
-                Text(v.typesTitle).font(.system(size: 12)).foregroundStyle(.secondary)
+                Text(v.typesTitle).font(Theme.secondary).foregroundStyle(.secondary)
             }
         }
         .onAppear { showTypes = v.typesOpen }
@@ -32,7 +32,7 @@ struct TrackerLocationEditor: View {
 
     private func row(_ r: TrackerFolderRow) -> some View {
         HStack(alignment: .center, spacing: 10) {
-            Text(r.label).font(.system(size: 12)).foregroundStyle(.secondary).frame(width: 120, alignment: .leading)
+            Text(r.label).font(Theme.secondary).foregroundStyle(.secondary).frame(width: 120, alignment: .leading)
             OptionalPathField(row: r, width: 220) { path in
                 record = trackerFoldersSet(record: record, category: r.category, field: r.field, path: path)
             }
@@ -43,10 +43,10 @@ struct TrackerLocationEditor: View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 8) {
                 Image(systemName: t.category.symbol).frame(width: 18).foregroundStyle(.secondary)
-                Text(t.title).font(.system(size: 12, weight: .semibold))
+                Text(t.title).font(Theme.secondary.weight(.semibold))
                 Spacer(minLength: 8)
                 if let c = t.custom {
-                    Text(c).font(.system(size: 11)).foregroundStyle(Color.accentColor)
+                    Text(c).font(Theme.caption).foregroundStyle(Color.accentColor)
                 }
                 if let w = t.warning {
                     Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Color.orange).help(w)

@@ -292,7 +292,7 @@ struct ChatNewView: View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 3) {
                 ModalCaption(text: w.caption)
-                Text(w.title).font(.system(size: 17, weight: .semibold))
+                Text(w.title).font(Theme.title)
             }
             Picker("", selection: $model.mode) {
                 ForEach(w.modes, id: \.mode) { Text($0.title).tag($0.mode) }
@@ -308,7 +308,7 @@ struct ChatNewView: View {
                                 .accessibilityIdentifier("chat-new-name")
                         }
                         Text(w.nameNote)
-                            .font(.system(size: 12)).foregroundStyle(.secondary).padding(.leading, 70)
+                            .font(Theme.secondary).foregroundStyle(.secondary).padding(.leading, 70)
                             .fixedSize(horizontal: false, vertical: true)
                         HStack(spacing: 10) {
                             Text(w.agentsLabel).frame(width: 60, alignment: .leading)
@@ -320,7 +320,7 @@ struct ChatNewView: View {
                         }
                         .padding(.top, 6)
                         Text(w.agentsNote)
-                            .font(.system(size: 12)).foregroundStyle(.secondary).padding(.leading, 70)
+                            .font(Theme.secondary).foregroundStyle(.secondary).padding(.leading, 70)
                             .fixedSize(horizontal: false, vertical: true)
                         if let follow = w.follow {
                             FollowToggle(line: follow, isOn: $model.allDevices).padding(.top, 6).padding(.leading, 70)
@@ -335,14 +335,14 @@ struct ChatNewView: View {
                                 .accessibilityIdentifier("chat-join-link")
                             if !w.linkLine.isEmpty {
                                 Label(w.linkLine, systemImage: w.linkOk ? "checkmark.circle.fill" : "xmark.circle")
-                                    .font(.system(size: 12)).foregroundStyle(w.linkOk ? Color.secondary : Color.orange)
+                                    .font(Theme.secondary).foregroundStyle(w.linkOk ? Color.secondary : Color.orange)
                             }
                         }
                     }
                 }
             }
             .padding(.top, 18)
-            .font(.system(size: 13))
+            .font(Theme.body)
             if let e = model.error { ModalError(text: e).padding(.top, 14) }
             ModalButtons(primary: w.confirmTitle, enabled: w.canStart, busy: model.busy,
                          primaryHelp: w.confirmHelp,

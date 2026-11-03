@@ -30,7 +30,7 @@ struct SidebarView: View {
                         Text(p.title)
                         // A new download arrived while the user was in Settings or editing: a quiet dot, not a switch.
                         if let flag = p.flag {
-                            Circle().fill(Color.accentColor).frame(width: 6, height: 6)
+                            SidebarAccentMark { Circle().fill($0).frame(width: 6, height: 6) }
                                 .help(flag.help)
                                 .accessibilityLabel(flag.accessibility)
                         }
@@ -101,16 +101,16 @@ struct SidebarView: View {
                 // Only the live rates; the limits are in the tooltips.
                 if let down = f.down {
                     Text(down.text)
-                        .font(.system(size: 13, weight: .medium)).foregroundStyle(.primary)
+                        .font(Theme.body.weight(.medium)).foregroundStyle(.primary)
                         .help(down.help)
                 }
                 if let up = f.up {
                     Text(up.text)
-                        .font(.system(size: 13, weight: .medium)).foregroundStyle(.primary)
+                        .font(Theme.body.weight(.medium)).foregroundStyle(.primary)
                         .help(up.help)
                 }
                 if let help = f.limitSpeed {
-                    Image(systemName: "tortoise.fill").font(.system(size: 10)).foregroundStyle(.secondary)
+                    Image(systemName: "tortoise.fill").font(.system(size: Theme.Icon.small)).foregroundStyle(.secondary)
                         .help(help)
                 }
                 // Quiet, not an alert: the engine holds its requests and checks again by itself.
@@ -121,7 +121,7 @@ struct SidebarView: View {
                 SidebarIconButton(symbol: f.settingsActive ? "gearshape.fill" : "gearshape", help: f.settingsHelp, label: f.settingsLabel,
                                   active: f.settingsActive) { commands.showSettings(nil) }
             }
-            .font(.system(size: 11.5)).monospacedDigit()
+            .font(Theme.caption).monospacedDigit()
             .lineLimit(1).minimumScaleFactor(0.7)
             .foregroundStyle(.secondary)
             .padding(.leading, 18).padding(.trailing, 10).padding(.vertical, 8)
@@ -207,7 +207,7 @@ struct SidebarIconButton: View {
     var body: some View {
         Button(action: action) {
             Image(systemName: symbol)
-                .font(.system(size: 13, weight: .regular))
+                .font(.system(size: Theme.Icon.regular))
                 .foregroundStyle(active ? Color.accentColor : hovering ? Color.primary : Color.secondary)
                 .frame(width: 26, height: 24)
                 .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(Color.primary.opacity(hovering || active ? 0.10 : 0)))
@@ -309,7 +309,7 @@ struct EmptyListNote: View {
 
     var body: some View {
         Text(text)
-            .font(.system(size: 13)).foregroundStyle(.secondary)
+            .font(Theme.body).foregroundStyle(.secondary)
             .frame(maxWidth: .infinity).padding(.top, 60)
     }
 }
@@ -324,7 +324,7 @@ struct AddSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text(sheet.title).font(.headline)
+            Text(sheet.title).font(Theme.headline)
             TextField(sheet.placeholder, text: $text).textFieldStyle(.roundedBorder).onSubmit(add)
             HStack {
                 Button(sheet.chooseFileTitle) { close(); DispatchQueue.main.async { commands.chooseTorrentFile() } }
@@ -366,12 +366,12 @@ struct TitleToolbarItem: ToolbarContent {
     private var label: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 6) {
-                if favorite { Image(systemName: "star.fill").font(.system(size: 12)).foregroundStyle(Color.accentColor.opacity(0.85)).accessibilityHidden(true) }
-                Text(title).font(.system(size: 18, weight: .semibold)).lineLimit(1)
+                if favorite { Image(systemName: "star.fill").font(.system(size: Theme.Icon.regular)).foregroundStyle(Color.accentColor.opacity(0.85)).accessibilityHidden(true) }
+                Text(title).font(Theme.title).lineLimit(1)
             }
             // A page without a line (Settings) has its title alone.
             if !summary.isEmpty {
-                Text(summary).font(.system(size: 11.5)).foregroundStyle(.secondary).monospacedDigit().lineLimit(1)
+                Text(summary).font(Theme.caption).foregroundStyle(.secondary).monospacedDigit().lineLimit(1)
             }
         }
         .fixedSize()

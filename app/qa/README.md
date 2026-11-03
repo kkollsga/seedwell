@@ -30,7 +30,7 @@ the countdown), `qa_app_start [args]`, and
 - `qa_shot <name> [main|settings|info|chooser|popover|menu|alert|window <id>]`: draws it at 2x into
   `app/build/qa/<name>.png`. A missing shot fails the script.
 - `qa_ask "<command>"`: runs a reporting command (`where`, `ui state`, `starting state`, `menu-titles`, `windows`,
-  `getinfo-card`, …) and prints its report.
+  `getinfo-card`, `menu-icon` (the menu bar icon's dots and label), …) and prints its report.
 - `qa_wait "<command> ~ <text>" [s]` (or `!~`): the app answers once the command's report holds (no longer holds)
   the text, e.g. `qa_wait "where ~ section downloads" 10`, `qa_wait "windows ~ chooser"`. Prints the report; fails
   after the timeout (default 15 s).
@@ -74,6 +74,7 @@ check that nothing happens for a while.
 | `capture_addpop2.sh` | the add popover's Cancel + Start, the title that opens the main window in selection mode, a tick in the window's list that shows in the popover, ⇧ captions, a magnet link (own QA root `seedwell-qa-addpop2`, fake Trash); `addpop2-*.png`, `selmode-*.png` |
 | `capture_agents.sh` | Settings > Agents (SPEC 9A.4; own QA root `seedwell-qa-agents`): agent access, the Command line group (Copy CLI Path, Install Command-Line Tool…, Install Skill for Claude Code) and the activity list, dark and light; no button is pressed (nothing is written to the real `~/.claude` or PATH folders); `agents-dark\|light.png` |
 | `capture_cancel.sh` | Cancel on a held torrent (SPEC 7A.6; own QA root `seedwell-qa-cancel`): `.torrent` files in the QA home's Downloads and a watch folder, `SEEDWELL_QA_TRASH_DIR` as a fake Trash inside the QA root (the real Trash is never used); Cancel trashes the file, `starting cancel keep` (⇧-Cancel) keeps it, a replaced file is never trashed, a magnet link has no Shift variant; asserts the files, `cancel-normal\|shift\|expanded\|expanded-shift\|watch\|magnet.png`. QA commands: `open-file <path>`, `starting shift on\|off`, `starting cancel [name] keep` |
+| `capture_composer.sh` | the chat composer end to end (own QA root `seedwell-qa-composer`; a channel made with `seedwell chat new`): typing, Shift- and Option-Return, an input method's composition that Return commits (never sends), a paste of text and of a picture, a drop before a character and onto the chips, Reply (the field takes the keyboard) and Escape, Return sending; asserts `chat state` after each step and the message through `seedwell chat read`; `composer-draft\|reply\|sent.png`. QA commands: `chat …` (below) |
 | `age.py` | rewrites last-activity so most torrents are dormant (the engine needs 24 h otherwise) |
 | `rebuild.sh`, `sb.sh` | fast (no LTO) rebuild of the app; Swift-only rebuild with error filtering |
 
@@ -88,11 +89,38 @@ input (AGENTS.md, Safety). A click or a key is the QA command that makes the cal
 read the window. That a click lands on the control drawn under it (an unticked box, a chevron beside its glyph) is
 checked by `app/Tests/SeedwellAppTests/HitAreaTests.swift` through SwiftUI's accessibility hit test, not in the app.
 
+**Chat** (`Support/QAChat.swift`; every `chat` command but `open`, `messages`, `reply` and a message's own reports the
+composer's state after it):
+
+| Command | What it calls |
+|---|---|
+| `chat open <channel>` / `chat messages` | the channel's General in the main window (name or id) / its messages as shown: `<id> <who> <first words>` |
+| `chat type <text>` | typing: the text inserted at the selection as the keyboard's input method inserts it |
+| `chat compose <text>` / `chat compose end` | an input method's composition (marked text, as Japanese or Chinese input makes it) / its commit |
+| `chat select <start> [length]` | the selection, in UTF-16 |
+| `chat key enter\|shift-enter\|option-enter\|escape` | the command that key makes in the field (`insertNewline:` with its modifiers, `cancelOperation:`): Return sends, Shift- or Option-Return starts a line, Return while composing commits the composition, Escape cancels a reply. Which command a key event becomes is the text system's; `ChatComposerFieldTests` hands real key events to the field for that |
+| `chat paste text <text>\|png <file>\|file <file>` | Cmd-V with that on a pasteboard of QA's own (never the user's) |
+| `chat drop <file> at <index>` / `chat drop <file> chips` | a drop onto the text before the character at that UTF-16 index (the text view's drag-destination calls with a drag at the window point the layout gives) / onto the conversation outside the text (the chips): attached, no reference |
+| `chat reply <id>\|cancel` | Reply on a message (the field takes the keyboard) / the reply bar's × |
+| `chat state` | `text "…" · caret 4+0 · markers 1@6+17 · attachments a.png · reply <id>\|none · focus yes\|no · placeholder yes\|no · composing yes\|no · dropping yes\|no · height N lines` |
+| `chat hover <id> [off]` | the pointer onto (off) a message: its time, Tag and Reply show (`shot` draws them) |
+| `chat gallery <id> next\|prev\|<n>\|state` | a gallery's → and ← (keys and buttons) and its n-th thumbnail; reports "2 / 5" and the caption |
+| `chat chip <id> <n>` | a click on the message's n-th image reference: the gallery shows that image |
+| `chat copy-code <id> [n]` | the n-th code block's copy button; in a QA run it copies to a pasteboard of its own and reports what it holds |
+
+`notice-action approve|deny|open <click words…>` is a notification's button or a click on it as the system hands it
+to the app (`agent-request <id>`: an agent's request); `menu-requests` reports the menu bar menu's request line and its
+submenu (`menu open` first) and `menu-requests approve|deny <id>` presses one. The system's Notification Center, which
+draws the banners and their buttons, is another process: it is never driven; the core's actions and the app's answer to
+them are (`notify_tests.rs`, `ChatControlsTests`).
+
 **Shots** (`shot`, `Support/QAShots.swift`) draw the app's own windows in their active look (accent colours, window
-buttons in colour), every 50 ms until two drawings match. Materials draw as with Reduce transparency (the window
-server composites them from what is behind a window on screen) and vibrant layers (the sidebar) through their own
-colour matrix. Menus and popovers cannot be drawn off screen: a quiet run opens and refreshes the menu bar menu
-without showing it and keeps context menus "open" for drawing; `shot … menu` draws their real item views and
+buttons in colour) from the first shot on, every 50 ms until two drawings match. Materials draw as with Reduce
+transparency (the window server composites them from what is behind a window on screen) and vibrant layers (the
+sidebar) as Core Animation composites them: their colour matrix applied to what is under them, the layer giving only
+the shape (`VibrancyPass`, checked against Core Animation's own renderer in `SidebarDrawingTests`). Menus and
+popovers cannot be drawn off screen: a quiet run opens and refreshes the menu bar menu without showing it and keeps
+context menus "open" for drawing; `shot … menu` draws their real item views and
 stand-ins of what NSMenu draws itself (MenuPanel); the "Starting in …" popover's content lives in a window off screen
 and `shot … popover` draws it on a stand-in of its background; `shot … info` is Get Info's popover. The menu bar, the
 Dock and other apps are never drawn: `policy` reports the Dock icon the app would show.

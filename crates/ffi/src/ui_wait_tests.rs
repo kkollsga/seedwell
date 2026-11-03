@@ -1,12 +1,13 @@
 //! The calls the app makes on its main thread never wait for long work: a first scan of a big folder, a folder's core
 //! held (as a long pull holds it), a rescan, a move, a chat message whose big file is being read, an engine whose
-//! actor is busy. Each call is timed while that work runs. The FFI's `async` calls (`async_calls`) are timed to their
+//! actor is busy, saves of folder sync's state to a slow disk. Each call is timed while that work runs. The FFI's `async` calls (`async_calls`) are timed to their
 //! first poll, which is what a host's UI thread waits for: they must say "pending" at once.
 
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::calls::testing::{first_poll, wait};
@@ -20,6 +21,10 @@ use crate::*;
 /// slices, so a runner that coalesces timers adds little: `calls::wait_until`). The work a call must not wait for lasts
 /// seconds here, so a call that waited for it shows as that.
 const BOUND: Duration = Duration::from_millis(100);
+
+/// How long a save of folder sync's state takes on the slow disk of the first scan: longer than [`BOUND`], so a call
+/// that waited for one shows.
+const SLOW_SAVE: Duration = Duration::from_millis(150);
 
 /// How late this process's timers fire: the latest of a few plain 40 ms waits that nothing ends early. Said when a
 /// call was slow, so that a runner that delays timers shows as one.
@@ -103,19 +108,29 @@ struct Calls {
     library: Arc<Library>,
     favorites: Arc<FavoriteEditor>,
     slowest: BTreeMap<&'static str, Duration>,
+    /// For a call slower than [`BOUND`]: the longest it waited for one of folder sync's locks, and where (debug
+    /// builds). None there means it waited for something else, or was not run (a busy machine).
+    waits: BTreeMap<&'static str, String>,
     rounds: u32,
 }
 
 impl Calls {
     fn new(core: &Arc<Core>) -> Self {
         let library = Library::new(core.clone(), Vec::new(), Arc::new(Clock));
-        Calls { core: core.clone(), library, favorites: FavoriteEditor::new(core.clone()), slowest: BTreeMap::new(), rounds: 0 }
+        Calls { core: core.clone(), library, favorites: FavoriteEditor::new(core.clone()), slowest: BTreeMap::new(), waits: BTreeMap::new(), rounds: 0 }
     }
 
     fn time<T>(&mut self, name: &'static str, f: impl FnOnce(&Core) -> T) -> T {
+        trs_sync_net::shared::take_longest_lock_wait();
         let at = Instant::now();
         let out = f(&self.core);
-        self.note(name, at.elapsed());
+        let took = at.elapsed();
+        if took > BOUND {
+            let wait = trs_sync_net::shared::take_longest_lock_wait();
+            let said = wait.map_or_else(|| "no wait for a lock of folder sync".into(), |(d, at)| format!("waited {d:?} for a lock at {at}"));
+            self.waits.insert(name, format!("{took:?}: {said}"));
+        }
+        self.note(name, took);
         out
     }
 
@@ -220,7 +235,8 @@ impl Calls {
         let slow: Vec<_> = self.slowest.iter().filter(|(_, d)| **d > BOUND).collect();
         assert!(
             slow.is_empty(),
-            "{what}: calls of the app's main thread waited: {slow:?} (all: {:?}; a plain 40 ms timer fires up to {:?} late here)",
+            "{what}: calls of the app's main thread waited: {slow:?} ({:?}; all: {:?}; a plain 40 ms timer fires up to {:?} late here)",
+            self.waits,
             self.slowest,
             timer_lateness()
         );
@@ -241,8 +257,26 @@ fn the_apps_calls_never_wait_for_a_first_scan_a_held_folder_a_rescan_or_a_busy_e
     let f = core.sync_add_folder(place.display().to_string()).unwrap();
     let id = f.id.clone();
 
-    // The first scan, and meanwhile the engine's actor busy for seconds.
+    // The first scan, and meanwhile the engine's actor busy for seconds, and the device renamed again and again (each
+    // rename saves folder sync's configuration and the folder's membership, as a device that connects or a member
+    // admitted elsewhere does) on a disk that is slow to save (as one whose virus scanner reads each new file:
+    // Windows' Defender).
     core.backend.test_stall_engine(Duration::from_secs(3));
+    trs_sync_net::shared::test_slow_saves(SLOW_SAVE);
+    let renaming = Arc::new(AtomicBool::new(true));
+    let renames = Arc::new(AtomicU32::new(0));
+    let renamer = {
+        let (core, renaming, renames) = (core.clone(), renaming.clone(), renames.clone());
+        std::thread::spawn(move || {
+            while renaming.load(Ordering::SeqCst) {
+                let mut s = core.sync_settings();
+                s.device_name = format!("Renamed {}", renames.load(Ordering::SeqCst));
+                core.set_sync_settings(s).unwrap();
+                renames.fetch_add(1, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        })
+    };
     let mut calls = Calls::new(&core);
     let mut grew = Vec::new();
     let end = Instant::now() + Duration::from_secs(60);
@@ -251,12 +285,17 @@ fn the_apps_calls_never_wait_for_a_first_scan_a_held_folder_a_rescan_or_a_busy_e
         let s = folder_state(&core, &id).unwrap();
         if s.state == SyncState::Scanning || grew.is_empty() {
             grew.push(s.files);
-        } else {
+        } else if renames.load(Ordering::SeqCst) >= 3 {
             break;
         }
         std::thread::sleep(Duration::from_millis(20));
     }
-    calls.assert_quick("during the first scan and a busy engine");
+    renaming.store(false, Ordering::SeqCst);
+    renamer.join().unwrap();
+    trs_sync_net::shared::test_slow_saves(Duration::ZERO);
+    calls.assert_quick("during the first scan, a busy engine and slow saves");
+    let renamed = renames.load(Ordering::SeqCst);
+    assert!(renamed >= 3, "the device was renamed {renamed} times");
     // The count of files grows while the scan runs (each step is committed and shown).
     let mid: Vec<u64> = grew.iter().copied().filter(|n| *n > 0 && *n < 3006).collect();
     assert!(!mid.is_empty() || grew.len() < 3, "the files are counted as the scan goes: {grew:?}");

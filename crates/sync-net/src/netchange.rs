@@ -65,6 +65,8 @@ impl SyncHandle {
             return;
         }
         let n = self.inner.netwatch.changes.fetch_add(1, Ordering::SeqCst) + 1;
+        // Sessions come up again: a fetch waits for them a moment before it says no device that has the file is here.
+        self.inner.ctx.settle();
         let dropped = self.drop_stranded_sessions();
         eprintln!("seedwell sync: network change {n} ({why}): {dropped} session(s) on a gone address closed; finding devices again");
         // The others: a ping now, so one the change broke fails sooner.

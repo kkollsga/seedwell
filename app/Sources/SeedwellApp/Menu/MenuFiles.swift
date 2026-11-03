@@ -118,11 +118,11 @@ extension NSView {
         }
     }
 
-    private static var font: NSFont { .menuFont(ofSize: 0) }
-    private static var small: NSFont { .menuFont(ofSize: NSFont.smallSystemFontSize) }
+    private static var font: NSFont { Theme.NS.menu }
+    private static var small: NSFont { Theme.NS.menuSmall }
     /// File rows match the window's file list: smaller, quieter text and digits that line up.
-    private static var fileFont: NSFont { .systemFont(ofSize: 12) }
-    private static var fileSize: NSFont { .monospacedDigitSystemFont(ofSize: 10.5, weight: .regular) }
+    private static var fileFont: NSFont { Theme.NS.secondary() }
+    private static var fileSize: NSFont { Theme.NS.digits(Theme.Size.micro) }
 
     /// Left edge of the fold chevron (a file reserves the space).
     private var chevronX: CGFloat { Self.edge + 6 + CGFloat(content.indent) * Self.step }
@@ -176,7 +176,7 @@ extension NSView {
         if content.check != nil {
             // The fold chevron in the label colour, not the faint one: it is a control, and must be seen.
             if let open = content.disclosure {
-                _ = symbol(open ? "chevron.down" : "chevron.right", size: 10, color: hovered ? .selectedMenuItemTextColor : .secondaryLabelColor, at: chevronX + 1)
+                _ = symbol(open ? "chevron.down" : "chevron.right", size: Theme.Size.micro, color: hovered ? .selectedMenuItemTextColor : .secondaryLabelColor, at: chevronX + 1)
             }
             x = chevronX + 18
             if let check = content.check {
@@ -195,13 +195,13 @@ extension NSView {
         // right edge: keep the size column clear of both.
         var right = bounds.maxX - Self.edge - (content.check != nil ? 24 : 9)
         if content.reservesPlay {
-            if content.playable { _ = symbol(QAFlags.playGlyph, size: 9.5, color: hovered ? .selectedMenuItemTextColor : .secondaryLabelColor, at: right - 11) }
+            if content.playable { _ = symbol(QAFlags.playGlyph, size: Theme.Size.micro, color: hovered ? .selectedMenuItemTextColor : .secondaryLabelColor, at: right - 11) }
             right -= Self.playColumn
         }
         var textRight = right
         if !content.trailing.isEmpty {
             let attrs: [NSAttributedString.Key: Any] = if let active = content.rateActive {
-                [.font: NSFont.monospacedDigitSystemFont(ofSize: Self.font.pointSize, weight: .regular),
+                [.font: Theme.NS.digits(Self.font.pointSize),
                  .foregroundColor: hovered ? NSColor.selectedMenuItemTextColor : active ? NSColor.labelColor : NSColor.secondaryLabelColor]
             } else {
                 [.font: isFile ? Self.fileSize : Self.small, .foregroundColor: faint]
@@ -224,6 +224,8 @@ extension NSView {
 /// download and a Play icon at the right edge for a video. The chevron (24 pt hit area) opens the list, the
 /// check pauses or resumes, the Play icon plays; elsewhere a Recent row reveals the file, a held row
 /// opens its chooser and a download row does nothing (its commands are on the right-click menu). It takes its texts from the NSMenuItem the controller keeps up to date (`sync`).
+/// The Play icon is an accessibility button of its own, named and with a tooltip by the core's `MenuRow.playHelp`
+/// ("Play Movie.2024.mkv"), and the row's custom action of that name plays (as the folder rows' Edit and Remove).
 @MainActor final class MenuTorrentRow: NSView, HoverRow {
     private var title = ""
     private var subtitle = ""
@@ -234,7 +236,11 @@ extension NSView {
     /// The checkbox: ticked = running, empty = paused; nil = the row has none.
     var running: Bool? { didSet { if running != oldValue { needsDisplay = true } } }
     /// A Play icon at the right edge.
-    var playable = false { didSet { if playable != oldValue { needsDisplay = true } } }
+    var playable = false { didSet { if playable != oldValue { needsDisplay = true; refreshPlay() } } }
+    /// The Play icon's tooltip and screen reader name (`MenuRow.playHelp`).
+    var playHelp: String? { didSet { if playHelp != oldValue { refreshPlay() } } }
+    private let playElement = NSAccessibilityElement()
+    private var playTip: NSView.ToolTipTag?
     var onCheck: (@MainActor () -> Void)?
     var onPlay: (@MainActor () -> Void)?
     /// A right-click: the row's commands.
@@ -252,6 +258,41 @@ extension NSView {
         autoresizingMask = .width
         setAccessibilityElement(true)
         setAccessibilityRole(.menuItem)
+        playElement.setAccessibilityRole(.button)
+        playElement.setAccessibilityParent(self)
+    }
+
+    /// The Play button's accessibility element and tooltip follow `playable`, `playHelp` and the row's width.
+    private func refreshPlay() {
+        if let playTip { removeToolTip(playTip) }
+        playTip = nil
+        guard playable, let help = playHelp else {
+            setAccessibilityChildren(nil)
+            setAccessibilityCustomActions(nil)
+            return
+        }
+        playElement.setAccessibilityLabel(help)
+        playElement.setAccessibilityFrame(window == nil ? .zero : NSAccessibility.screenRect(fromView: self, rect: playZone))
+        setAccessibilityChildren([playElement])
+        setAccessibilityCustomActions([
+            NSAccessibilityCustomAction(name: help) { [weak self] in
+                guard let self else { return false }
+                self.closeThen { self.onPlay?() }
+                return true
+            },
+        ])
+        playTip = addToolTip(playZone, owner: help as NSString, userData: nil)
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        refreshPlay()
+    }
+
+    override func accessibilityChildren() -> [Any]? {
+        guard playable, playHelp != nil else { return nil }
+        playElement.setAccessibilityFrame(NSAccessibility.screenRect(fromView: self, rect: playZone))
+        return [playElement]
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
@@ -319,7 +360,7 @@ extension NSView {
         }
         let ink: NSColor = hovered ? .selectedMenuItemTextColor : (dimmed ? .secondaryLabelColor : .labelColor)
         let faint: NSColor = hovered ? .selectedMenuItemTextColor : .secondaryLabelColor
-        let cfg = NSImage.SymbolConfiguration(pointSize: 10, weight: .semibold).applying(.init(paletteColors: [faint]))
+        let cfg = NSImage.SymbolConfiguration(pointSize: Theme.Size.micro, weight: .semibold).applying(.init(paletteColors: [faint]))
         if canExpand, let img = NSImage(systemSymbolName: expanded ? "chevron.down" : "chevron.right", accessibilityDescription: nil)?.withSymbolConfiguration(cfg) {
             img.draw(at: NSPoint(x: Self.edge + 7, y: (bounds.height - img.size.height) / 2), from: .zero, operation: .sourceOver, fraction: 1)
         }
@@ -338,7 +379,7 @@ extension NSView {
         }
         var right = bounds.maxX - Self.edge - 10
         if playable {
-            let c = NSImage.SymbolConfiguration(pointSize: 10.5, weight: .semibold).applying(.init(paletteColors: [faint]))
+            let c = NSImage.SymbolConfiguration(pointSize: Theme.Icon.small, weight: .semibold).applying(.init(paletteColors: [faint]))
             if let img = NSImage(systemSymbolName: QAFlags.playGlyph, accessibilityDescription: nil)?.withSymbolConfiguration(c) {
                 right -= img.size.width
                 img.draw(at: NSPoint(x: right, y: (bounds.height - img.size.height) / 2), from: .zero, operation: .sourceOver, fraction: 1)
@@ -347,8 +388,8 @@ extension NSView {
         }
         let style = NSMutableParagraphStyle()
         style.lineBreakMode = .byTruncatingTail
-        let tAttrs: [NSAttributedString.Key: Any] = [.font: NSFont.menuFont(ofSize: 0), .foregroundColor: ink, .paragraphStyle: style]
-        let sAttrs: [NSAttributedString.Key: Any] = [.font: NSFont.menuFont(ofSize: NSFont.smallSystemFontSize), .foregroundColor: faint, .paragraphStyle: style]
+        let tAttrs: [NSAttributedString.Key: Any] = [.font: Theme.NS.menu, .foregroundColor: ink, .paragraphStyle: style]
+        let sAttrs: [NSAttributedString.Key: Any] = [.font: Theme.NS.menuSmall, .foregroundColor: faint, .paragraphStyle: style]
         let th = (title as NSString).size(withAttributes: tAttrs).height
         let sh = (subtitle as NSString).size(withAttributes: sAttrs).height
         let total = th + (subtitle.isEmpty ? 0 : sh + 1)
@@ -400,7 +441,7 @@ private final class FlippedView: NSView { override var isFlipped: Bool { true } 
         scroll.scrollerStyle = .overlay
         scroll.borderType = .noBorder
         scroll.documentView = doc
-        footer.font = .menuFont(ofSize: NSFont.smallSystemFontSize)
+        footer.font = Theme.NS.menuSmall
         footer.textColor = .secondaryLabelColor
         footer.frame = NSRect(x: 16, y: 3, width: width - 32, height: 16)
         footer.autoresizingMask = .width
@@ -526,7 +567,7 @@ private final class FlippedView: NSView { override var isFlipped: Bool { true } 
 
     /// Gives the torrent's menu item its row view (ring, texts, and as the core's `MenuRow` says the chevron, the
     /// check and the Play icon). Without a file list a row that is not `interactive` keeps the plain item.
-    func decorate(_ item: NSMenuItem, row r: TransferRow, expands: Bool, playable: Bool, interactive: Bool,
+    func decorate(_ item: NSMenuItem, row r: TransferRow, expands: Bool, playable: Bool, playHelp: String?, interactive: Bool,
                   onActivate: (@MainActor () -> Void)?, running: Bool?, onCheck: (@MainActor () -> Void)?) {
         guard expands || interactive else { return }
         let view = MenuTorrentRow()
@@ -535,6 +576,7 @@ private final class FlippedView: NSView { override var isFlipped: Bool { true } 
         view.running = running
         view.onCheck = onCheck
         view.playable = playable
+        view.playHelp = playHelp
         view.onPlay = { [commands] in commands.playButtonPressed(r) }
         view.onToggle = { [weak self, weak item] in if let item { self?.toggle(r, item: item) } }
         item.view = view

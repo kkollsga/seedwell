@@ -17,6 +17,8 @@ struct Fake {
     cache: PathBuf,
     fetch_rounds: AtomicU64,
     fetched: AtomicU64,
+    /// From this fetch call on, the core gives up (`NotHereYet`); 0: never.
+    not_here_after: AtomicU64,
     cancelled: Mutex<Vec<String>>,
     evicted: Mutex<Vec<String>>,
     /// `modify` answers with a conflict copy.
@@ -55,6 +57,7 @@ fn item(id: &str, parent: &str, name: &str, kind: SyncItemKind, state: SyncItemS
         exec: false,
         symlink_target: None,
         conflict_of: None,
+        in_place: false,
     }
 }
 
@@ -122,6 +125,9 @@ impl HostCore for Fake {
     fn fetch(&self, _: &str, id: &str, wait_ms: u64) -> Result<SyncFetch, OdError> {
         std::thread::sleep(Duration::from_millis(wait_ms.min(20)));
         let n = self.fetched.fetch_add(1, Ordering::Relaxed) + 1;
+        if (1..=n).contains(&self.not_here_after.load(Ordering::Relaxed)) {
+            return Err(OdError { kind: OdKind::NotHereYet, error: CoreError::Failed { message: format!("{id}: not here yet (no device that has it is connected)") } });
+        }
         let i = self.get(id).ok_or_else(|| no_item(id))?;
         let here = n >= self.fetch_rounds.load(Ordering::Relaxed);
         Ok(SyncFetch {
@@ -130,6 +136,7 @@ impl HostCore for Fake {
             total: i.size,
             item: i,
             unavailable: Vec::new(),
+            waiting_for: None,
         })
     }
     fn cancel(&self, _: &str, id: &str) -> Result<(), OdError> {
@@ -340,15 +347,18 @@ fn a_fetch_reports_progress_and_hands_over_a_copy() {
 }
 
 #[test]
-fn a_fetch_that_gets_nowhere_gives_up_and_takes_its_request_back() {
+fn a_fetch_the_core_gives_up_on_is_unreachable_at_once() {
     let d = tempfile::tempdir().unwrap();
     let fake = Fake::new(&d.path().join("cache"));
     fake.fetch_rounds.store(u64::MAX, Ordering::Relaxed);
-    let mut h = host(&fake, d.path());
-    h.stall = Duration::from_millis(100);
-    let (kind, _) = err(&h, json!({"v":1,"op":"fetch","folder":"F","item":"a"}));
-    assert_eq!(kind, "unreachable");
-    assert_eq!(*fake.cancelled.lock().unwrap(), ["a"]);
+    // The core gives up after a few rounds (no device that has it is connected): the host keeps no timer of its own.
+    fake.not_here_after.store(3, Ordering::Relaxed);
+    let h = host(&fake, d.path());
+    let (kind, why) = err(&h, json!({"v":1,"op":"fetch","folder":"F","item":"a"}));
+    assert_eq!((kind.as_str(), why.as_str()), ("unreachable", "a: not here yet (no device that has it is connected)"));
+    assert_eq!(fake.fetched.load(Ordering::Relaxed), 3, "asked until the core said no, and no more");
+    // The core took its request back itself.
+    assert!(fake.cancelled.lock().unwrap().is_empty());
 }
 
 #[test]
@@ -1067,7 +1077,7 @@ fn a_folder_emptied_here_is_deleted_with_its_new_version() {
     std::fs::write(docs.join("D/x.txt"), b"x").unwrap();
     std::fs::write(docs.join("D/y.txt"), b"y").unwrap();
     let f = c.sync_add_folder_on_demand(docs.display().to_string()).unwrap();
-    let h = Host::new(Arc::new(BackendCore(c.backend.sync())), &work.path().join("group"));
+    let h = Host::new(Arc::new(BackendCore(c.backend.sync(), None)), &work.path().join("group"));
     let t0 = Instant::now();
     let dir = loop {
         let root = ok(&h, json!({"v":1,"op":"children","folder":f.id,"item":"root"}));

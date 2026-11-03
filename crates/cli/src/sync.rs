@@ -346,7 +346,7 @@ pub async fn run(cmd: Cmd, g: &Global) -> R {
             show(g, &raw, || match &d.local_path {
                 Some(at) => format!("{} is on this {} ({}).", shown(&path), trs_platform::computer!(), at),
                 None if wait_s == 0 => format!("Fetching {}.", shown(&path)),
-                None => format!("Fetching {}: {} of {} so far (no device that has it is connected?).", shown(&path), human::bytes(d.done), human::bytes(d.total)),
+                None => format!("Fetching {}: {} of {} so far.", shown(&path), human::bytes(d.done), human::bytes(d.total)),
             });
         }
         Cmd::Pin { folder: f, path, on } => {

@@ -274,6 +274,7 @@ sealed class EditFolderDialog
     internal void QaPaused(bool on) => Change(form with { Paused = on });
     internal void QaLanOnly(bool on) => Change(form with { LanOnly = on });
     internal void QaAllDevices(bool on) => Change(form with { AllDevices = on });
+    internal void QaOnDemand(bool on) => Change(form with { OnDemand = on });
     internal void QaOptions(bool open) => Change(form with { OptionsOpen = open });
     internal void QaParent(string path) => Change(TrsFfiMethods.SyncEditChooseParent(form, path));
     internal void QaShare()

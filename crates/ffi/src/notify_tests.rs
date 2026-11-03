@@ -235,6 +235,7 @@ fn an_agents_request_is_announced_once_with_approve_and_deny() {
     assert_eq!((n.kind, n.title.as_str(), n.route.clone()), (NoticeKind::AgentRequest, "Claude asks for agent permission full", NoticeRoute::AgentRequests));
     assert_eq!(n.body, "“to install the release”\nApprove gives exactly this; Deny refuses. Also in Settings › Agents.");
     assert_eq!((n.key.as_deref(), n.category.as_deref()), (Some("agent-request-5eed0a11"), Some("agent-request")));
+    assert_eq!(n.urgency, NoticeUrgency::Persistent, "someone waits for the answer: it stays in view");
     assert_eq!(n.actions.iter().map(|a| (a.id.as_str(), a.title.as_str(), a.destructive, a.authenticate)).collect::<Vec<_>>(), [
         ("approve", "Approve", false, true),
         ("deny", "Deny", true, false)
@@ -420,4 +421,116 @@ fn the_settings_banner_lists_problems_first_and_the_restart_last() {
     assert_eq!(outside.action.map(|a| a.title), Some("Open Settings".into()));
     let restart_only = settings_banner(Vec::new(), Vec::new(), vec!["uTP".into()], false).unwrap();
     assert_eq!(restart_only.action, None, "nothing to fix in Settings");
+}
+
+// MARK: Urgency and withdrawal
+
+#[test]
+fn only_a_request_asks_to_stay_in_view() {
+    let finished = posted(run(NoticeEvent::Finished { row: on("f", "public") }, &facts()));
+    assert_eq!(finished.urgency, NoticeUrgency::Normal);
+    let dup = posted(run(NoticeEvent::Duplicate { id: "d".into(), name: "Sintel".into(), trackers_added: 0 }, &facts()));
+    assert_eq!(dup.urgency, NoticeUrgency::Normal);
+}
+
+/// A request's notice goes once the request no longer waits (answered anywhere, expired, withdrawn); other notices and
+/// the requests still waiting stay.
+#[test]
+fn a_request_no_longer_waiting_takes_its_notice_away() {
+    use trs_control::access::{Entry, State as RState, TTL_MS, Want};
+    let waiting = Entry {
+        id: "b2".into(),
+        want: Want::DevBuilds,
+        agents: vec!["Codex".into()],
+        why: None,
+        at_ms: 0,
+        expires_ms: TTL_MS,
+        state: RState::Pending,
+        decided_ms: None,
+        how: None,
+        note: None,
+        announced: None,
+        notify: true,
+    };
+    let delivered: Vec<String> = ["agent-request-a1", "agent-request-b2", "chat-C-1/", "finished-burst", "agent-requests"].map(String::from).into();
+    assert_eq!(stale_request_keys(&delivered, std::slice::from_ref(&waiting)), ["agent-request-a1"]);
+    assert_eq!(stale_request_keys(&delivered, &[]), ["agent-request-a1", "agent-request-b2"]);
+    assert!(stale_request_keys(&["chat-C-1/".to_string()], &[]).is_empty());
+}
+
+#[test]
+fn answering_a_request_takes_its_notice_away() {
+    let (core, _dir) = mock();
+    let n = Notices::new(core.clone());
+    let id = core.agent_requests(0).rows[0].id.clone();
+    let key = format!("agent-request-{id}");
+    let delivered = vec![key.clone(), "chat-C-1/".into()];
+    assert!(n.withdrawn(delivered.clone()).is_empty(), "it still waits");
+    assert!(core.agent_request_decide(id, true).ok);
+    assert_eq!(n.withdrawn(delivered), [key]);
+    assert!(n.withdrawn(Vec::new()).is_empty());
+}
+
+fn kept(path: &str, why: &str) -> crate::sync::ondemand::SyncFailed {
+    crate::sync::ondemand::SyncFailed { path: path.into(), error: why.into() }
+}
+
+fn evicted(kept_why: Vec<crate::sync::ondemand::SyncFailed>, failed: Vec<crate::sync::ondemand::SyncFailed>) -> crate::sync::ondemand::SyncEvicted {
+    crate::sync::ondemand::SyncEvicted { files: 2, bytes: 10, kept: kept_why.len() as u64, kept_why, failed }
+}
+
+/// "Free up space" that kept files tells the user once per folder, in the core's words; a free that freed everything
+/// and the system's own clean-ups say nothing.
+#[test]
+fn a_free_that_kept_files_says_how_many_and_why() {
+    use trs_sync::ondemand::{KEPT_CHANGED, KEPT_PINNED, NOT_HELD_ELSEWHERE};
+    let (core, _dir) = mock();
+    let n = Notices::new(core.clone());
+    let f = core.sync_snapshot().folders[0].clone();
+
+    // Everything freed, or the system's clean-up (Storage Sense, disk pressure): nothing to tell.
+    assert_eq!(n.sync_evict_notice(f.id.clone(), evicted(Vec::new(), Vec::new()), true), None);
+    assert_eq!(n.sync_evict_notice(f.id.clone(), evicted(vec![kept("a.jpg", KEPT_PINNED)], Vec::new()), false), None);
+    assert_eq!(n.sync_evict_notice("not-a-folder".into(), evicted(vec![kept("a.jpg", KEPT_PINNED)], Vec::new()), true), None, "no folder");
+
+    // One file: named.
+    let one = n.sync_evict_notice(f.id.clone(), evicted(vec![kept("2026/beach.jpg", KEPT_PINNED)], Vec::new()), true).unwrap();
+    assert_eq!(one.kind, NoticeKind::SyncKept);
+    assert_eq!(one.title, format!("“beach.jpg” stays on this {}", trs_platform::computer!()));
+    assert_eq!(
+        one.body,
+        format!("It is set to always stay on this {}: stop keeping it here first. (“{}” in Folder Sync)", trs_platform::computer!(), f.name)
+    );
+    assert_eq!(one.route, NoticeRoute::Place { place: LibraryPlace::FolderSync });
+    assert_eq!(notice_route(one.click.clone()), one.route);
+
+    // Several, for several reasons: counted per reason.
+    let many = n
+        .sync_evict_notice(
+            f.id.clone(),
+            evicted(vec![kept("a", KEPT_PINNED), kept("b", KEPT_PINNED), kept("c", NOT_HELD_ELSEWHERE), kept("d", KEPT_CHANGED)], vec![kept("e", "Resource busy")]),
+            true,
+        )
+        .unwrap();
+    assert_eq!(many.title, format!("5 files stay on this {}", trs_platform::computer!()));
+    let pc = trs_platform::computer!();
+    assert_eq!(
+        many.body,
+        format!(
+            "2 are set to always stay on this {pc}: stop keeping them here first. 1 is kept until a device that has it too is connected, so nothing is lost. 1 changed on this {pc} and is synced first. 1 couldn't be freed: it may be open in another app. (“{}” in Folder Sync)",
+            f.name
+        )
+    );
+    // All for one reason: "They".
+    let same = n.sync_evict_notice(f.id.clone(), evicted(vec![kept("a", NOT_HELD_ELSEWHERE), kept("b", NOT_HELD_ELSEWHERE)], Vec::new()), true).unwrap();
+    assert!(same.body.starts_with("They are kept until a device that has them too is connected"), "{}", same.body);
+    // A reason the notice has no words of its own for is passed on.
+    let odd = evict_notice(&f.id, Some("Photos"), &evicted(vec![kept("x", "some new reason")], Vec::new()), true).unwrap();
+    assert_eq!(odd.body, "It: some new reason. (“Photos” in Folder Sync)");
+
+    // One notice per folder: a later free replaces the earlier.
+    assert_eq!(one.key, many.key);
+    assert!(one.key.as_ref().is_some_and(|k| k.len() <= 64));
+    let elsewhere = evict_notice("another", Some("Docs"), &evicted(vec![kept("x", KEPT_PINNED)], Vec::new()), true).unwrap();
+    assert_ne!(elsewhere.key, one.key);
 }

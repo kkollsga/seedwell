@@ -18,7 +18,7 @@ namespace Seedwell;
 /// move to and a question to ask; the host reads the live part (ports, reachability, activity, the updater, the
 /// command-line tool) for the tab shown, again every <c>refresh_ms</c>.
 /// </summary>
-sealed class SettingsPage
+sealed partial class SettingsPage
 {
     readonly App app;
     readonly StackPanel tabs = new() { Orientation = Orientation.Horizontal, Spacing = 2, Padding = new Thickness(24, 4, 24, 8) };
@@ -251,7 +251,7 @@ sealed class SettingsPage
         SettingsBlock.Pair p => Pair(p.Left, p.Right),
         SettingsBlock.Rendezvous => Detach(Rendezvous.Root),
         SettingsBlock.Devices => Detach(Devices.Root),
-        // NEED: the rules and trackers editors (HostWindow::RulesEditor, a later batch): never offered without it.
+        SettingsBlock.RulesEditor => RulesEditor(),
         _ => new TextBlock(),
     };
 
@@ -449,9 +449,9 @@ sealed class SettingsPage
                 if (row.Hint is string sh)
                 {
                     var hint = Hint(sh);
-                    if (row.Controls.Length >= 4)
+                    if (row.Controls.Length >= 4 || drawingRules)
                     {
-                        // Many controls: the hint under them, so neither is cut.
+                        // Many controls, or the rules editor (drawn compact): the hint under them, so neither is cut.
                         sg.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
                         sg.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
                         Grid.SetRow(hint, 1);
@@ -520,6 +520,8 @@ sealed class SettingsPage
 
     FrameworkElement Control(SettingsControl c)
     {
+        // A control of the rules editor sends its change there (RulesChange.Set), not to settings_apply.
+        var rules = drawingRules;
         switch (c)
         {
             case SettingsControl.Toggle t:
@@ -527,12 +529,12 @@ sealed class SettingsPage
                 {
                     var box = new CheckBox { IsChecked = t.On, IsEnabled = t.Enabled, MinWidth = 0 };
                     Help(box, t.Help);
-                    box.Click += (_, _) => Set(t.Key, new SettingsValue.Flag(box.IsChecked == true));
+                    box.Click += (_, _) => Deliver(rules, t.Key, new SettingsValue.Flag(box.IsChecked == true));
                     return box;
                 }
                 var sw = new ToggleSwitch { IsOn = t.On, IsEnabled = t.Enabled, OnContent = "", OffContent = "", MinWidth = 0 };
                 Help(sw, t.Help);
-                sw.Toggled += (_, _) => { if (sw.IsOn != t.On) Set(t.Key, new SettingsValue.Flag(sw.IsOn)); };
+                sw.Toggled += (_, _) => { if (sw.IsOn != t.On) Deliver(rules, t.Key, new SettingsValue.Flag(sw.IsOn)); };
                 return sw;
             case SettingsControl.Choice ch when ch.Style == SettingsChoiceStyle.Segmented:
                 var seg = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 2 };
@@ -541,7 +543,7 @@ sealed class SettingsPage
                     var b = new Button { Content = o.Title, IsEnabled = ch.Enabled && o.Enabled, Padding = new Thickness(10, 4, 10, 5) };
                     if (o.Id == ch.Selected) b.Style = (Style)Application.Current.Resources["AccentButtonStyle"];
                     var id = o.Id;
-                    b.Click += (_, _) => Set(ch.Key, new SettingsValue.Choice(id));
+                    b.Click += (_, _) => Deliver(rules, ch.Key, new SettingsValue.Choice(id));
                     seg.Children.Add(b);
                 }
                 Help(seg, ch.Help);
@@ -552,7 +554,7 @@ sealed class SettingsPage
                 combo.SelectedIndex = Array.FindIndex(ch.Options, o => o.Id == ch.Selected);
                 combo.SelectionChanged += (_, _) =>
                 {
-                    if (combo.SelectedItem is ComboBoxItem { Tag: string id } && id != ch.Selected) Set(ch.Key, new SettingsValue.Choice(id));
+                    if (combo.SelectedItem is ComboBoxItem { Tag: string id } && id != ch.Selected) Deliver(rules, ch.Key, new SettingsValue.Choice(id));
                 };
                 Help(combo, ch.Help);
                 return combo;
@@ -562,14 +564,14 @@ sealed class SettingsPage
                 var fp = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
                 var path = new TextBox { Text = fo.Path, PlaceholderText = fo.Placeholder, Width = fo.Width > 0 ? fo.Width : 280 };
                 Help(path, fo.Help);
-                path.TextChanged += (_, _) => { if (path.Text != fo.Path) Set(fo.Key, new SettingsValue.Typed(path.Text), redraw: false); };
+                path.TextChanged += (_, _) => { if (path.Text != fo.Path) Deliver(rules, fo.Key, new SettingsValue.Typed(path.Text), redraw: false); };
                 path.LostFocus += (_, _) => Draw();
                 fp.Children.Add(path);
                 fp.Children.Add(ButtonControl(fo.Choose));
                 if (fo.Clearable && fo.Path.Length > 0)
                 {
                     var clear = new Button { Content = new FontIcon { Glyph = "", FontSize = 10 }, Padding = new Thickness(6), Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent), BorderThickness = new Thickness(0) };
-                    clear.Click += (_, _) => Set(fo.Key, new SettingsValue.Typed(""));
+                    clear.Click += (_, _) => Deliver(rules, fo.Key, new SettingsValue.Typed(""));
                     fp.Children.Add(clear);
                 }
                 return fp;
@@ -592,22 +594,30 @@ sealed class SettingsPage
                 {
                     var item = new ToggleMenuFlyoutItem { Text = ck.Title, IsChecked = ck.Checked };
                     var id = ck.Id;
-                    item.Click += (_, _) => Set(cl.Key, new SettingsValue.Choice(id));
+                    item.Click += (_, _) => Deliver(rules, cl.Key, new SettingsValue.Choice(id));
                     flyout.Items.Add(item);
                 }
                 dd.Flyout = flyout;
                 return dd;
             case SettingsControl.Chips chips:
+                // In the rules editor (drawn compact) the chips wrap, four to a line.
+                var chipLines = new StackPanel { Spacing = 4 };
                 var cp = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4 };
+                chipLines.Children.Add(cp);
                 foreach (var ck in chips.Checks)
                 {
+                    if (rules && cp.Children.Count == 4)
+                    {
+                        cp = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4 };
+                        chipLines.Children.Add(cp);
+                    }
                     var chip = new ToggleButton { Content = ck.Title, IsChecked = ck.Checked, Padding = new Thickness(10, 3, 10, 4), CornerRadius = new CornerRadius(12) };
                     ToolTipService.SetToolTip(chip, (ck.Checked ? chips.HelpOn : chips.HelpOff).Replace("{}", ck.Title));
                     var id = ck.Id;
-                    chip.Click += (_, _) => Set(chips.Key, new SettingsValue.Choice(id));
+                    chip.Click += (_, _) => Deliver(rules, chips.Key, new SettingsValue.Choice(id));
                     cp.Children.Add(chip);
                 }
-                return cp;
+                return chipLines;
             default:
                 return new TextBlock();
         }
@@ -619,6 +629,7 @@ sealed class SettingsPage
     /// </summary>
     FrameworkElement Field(SettingsControl.Field f)
     {
+        var rules = drawingRules;
         var box = new TextBox
         {
             Text = f.Text,
@@ -638,7 +649,7 @@ sealed class SettingsPage
         {
             var text = box.Text;
             if (text == f.Text && unit == f.Unit) return;
-            Set(f.Key, f.Units.Length > 0 ? new SettingsValue.Measure(text, unit) : new SettingsValue.Typed(text));
+            Deliver(rules, f.Key, f.Units.Length > 0 ? new SettingsValue.Measure(text, unit) : new SettingsValue.Typed(text));
         }
         var live = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread().CreateTimer();
         live.IsRepeating = false;
@@ -677,6 +688,7 @@ sealed class SettingsPage
 
     ButtonBase ButtonControl(SettingsButton b)
     {
+        var rules = drawingRules;
         ButtonBase button = b.Style switch
         {
             SettingsButtonStyle.Link => new HyperlinkButton { Content = b.Title, Padding = new Thickness(0) },
@@ -688,7 +700,7 @@ sealed class SettingsPage
         button.IsEnabled = b.Enabled;
         Help(button, b.Style == SettingsButtonStyle.Remove ? b.Title : b.Help);
         if (b.Identifier is string id) Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(button, id);
-        button.Click += (_, _) => Run(b.Command);
+        button.Click += (_, _) => Run(b.Command, rules);
         return button;
     }
 
@@ -723,6 +735,12 @@ sealed class SettingsPage
     // ------------------------------------------------------------------------------------------------ changes
 
     void Set(SettingKey key, SettingsValue value, bool redraw = true) => Apply(new SettingsChange.Set(key, value), redraw);
+
+    /// <summary>A control's change: the rules editor's own (its controls), else Settings'.</summary>
+    void Deliver(bool rules, SettingKey key, SettingsValue value, bool redraw = true)
+    {
+        if (rules) RulesApply(new RulesChange.Set(key, value), redraw); else Set(key, value, redraw);
+    }
 
     /// <summary>A change: the core's rule, then the saves, the port and the question it names.</summary>
     internal void Apply(SettingsChange change, bool redraw = true)
@@ -775,14 +793,17 @@ sealed class SettingsPage
     }
 
     /// <summary>What a control's command does: a change, or what the system does (pickers, the clipboard, Explorer, the updater, the tool).</summary>
-    internal async void Run(SettingsCommand command)
+    internal async void Run(SettingsCommand command, bool rules = false)
     {
         AppLog.Write($"settings command: {command.GetType().Name}");
         switch (command)
         {
+            // The rules editor's controls change its draft; its commands are its own (RulesChange).
+            case SettingsCommand.Apply { Change: SettingsChange.Set rs } when rules: RulesApply(new RulesChange.Set(rs.Key, rs.Value)); break;
+            case SettingsCommand.Rules r: RulesApply(r.Change); break;
             case SettingsCommand.Apply a: Apply(a.Change); break;
             case SettingsCommand.ChooseFolder cf:
-                if (await app.PickFolder() is string folder) Set(cf.Key, new SettingsValue.Typed(folder));
+                if (await app.PickFolder() is string folder) Deliver(rules, cf.Key, new SettingsValue.Typed(folder));
                 break;
             case SettingsCommand.ChooseWatchFolder:
                 if (await app.PickFolder() is string watch) Apply(new SettingsChange.AddWatchFolder(watch));
@@ -907,24 +928,18 @@ sealed class SettingsPage
     internal string QaSet(string rowId, string[] value)
     {
         if (model is null) return "no model";
-        IEnumerable<SettingsRow> All(SettingsRow r) => r.Style is SettingsRowStyle.Disclosure d ? new[] { r }.Concat(d.Children.SelectMany(All)) : [r];
-        var row = model.Blocks.SelectMany(b => b switch
-        {
-            SettingsBlock.Single s => s.Group.Rows,
-            SettingsBlock.Pair p => p.Left.Rows.Concat(p.Right.Rows),
-            _ => [],
-        }).SelectMany(All).FirstOrDefault(r => r.Id == rowId);
+        var (row, rules) = QaAllRows().FirstOrDefault(r => r.Row.Id == rowId);
         if (row is null) return "no such row";
         var v = value.Length > 0 ? value[0] : "";
         foreach (var c in row.Controls)
         {
             switch (c)
             {
-                case SettingsControl.Toggle t when v is "on" or "off": Set(t.Key, new SettingsValue.Flag(v == "on")); return "set";
-                case SettingsControl.Choice ch when ch.Options.Any(o => o.Id == v): Set(ch.Key, new SettingsValue.Choice(v)); return "set";
-                case SettingsControl.Field f: Set(f.Key, f.Units.Length > 0 ? new SettingsValue.Measure(v, value.Length > 1 ? value[1] : f.Unit) : new SettingsValue.Typed(string.Join(' ', value))); return "set";
-                case SettingsControl.Folder fo: Set(fo.Key, new SettingsValue.Typed(string.Join(' ', value))); return "set";
-                case SettingsControl.Button b when b.Action.Title.StartsWith(v): Run(b.Action.Command); return "pressed";
+                case SettingsControl.Toggle t when v is "on" or "off": Deliver(rules, t.Key, new SettingsValue.Flag(v == "on")); return "set";
+                case SettingsControl.Choice ch when ch.Options.Any(o => o.Id == v): Deliver(rules, ch.Key, new SettingsValue.Choice(v)); return "set";
+                case SettingsControl.Field f: Deliver(rules, f.Key, f.Units.Length > 0 ? new SettingsValue.Measure(v, value.Length > 1 ? value[1] : f.Unit) : new SettingsValue.Typed(string.Join(' ', value))); return "set";
+                case SettingsControl.Folder fo: Deliver(rules, fo.Key, new SettingsValue.Typed(string.Join(' ', value))); return "set";
+                case SettingsControl.Button b when b.Action.Title.StartsWith(v): Run(b.Action.Command, rules); return "pressed";
             }
         }
         return "no control for it";
@@ -934,26 +949,32 @@ sealed class SettingsPage
     internal string QaRows()
     {
         if (model is null) return "no model";
+        return string.Join(" ", QaAllRows().Select(r => r.Row.Id));
+    }
+
+    /// <summary>QA: every row of the tab (a disclosure's children too), the rules editor's among them (Rules: its controls are the editor's).</summary>
+    IEnumerable<(SettingsRow Row, bool Rules)> QaAllRows()
+    {
+        if (model is null) yield break;
         IEnumerable<SettingsRow> All(SettingsRow r) => r.Style is SettingsRowStyle.Disclosure d ? new[] { r }.Concat(d.Children.SelectMany(All)) : [r];
-        return string.Join(" ", model.Blocks.SelectMany(b => b switch
+        foreach (var b in model.Blocks)
         {
-            SettingsBlock.Single s => s.Group.Rows,
-            SettingsBlock.Pair p => p.Left.Rows.Concat(p.Right.Rows),
-            _ => [],
-        }).SelectMany(All).Select(r => r.Id));
+            var (rows, rules) = b switch
+            {
+                SettingsBlock.Single s => (s.Group.Rows.AsEnumerable(), false),
+                SettingsBlock.Pair p => (p.Left.Rows.Concat(p.Right.Rows), false),
+                SettingsBlock.RulesEditor => ((RulesModel?.Groups ?? []).SelectMany(g => g.Rows), true),
+                _ => (Enumerable.Empty<SettingsRow>(), false),
+            };
+            foreach (var r in rows.SelectMany(All)) yield return (r, rules);
+        }
     }
 
     /// <summary>QA: the text of a row's controls as drawn (labels, fields).</summary>
     internal string QaRow(string rowId)
     {
         if (model is null) return "no model";
-        IEnumerable<SettingsRow> All(SettingsRow r) => r.Style is SettingsRowStyle.Disclosure d ? new[] { r }.Concat(d.Children.SelectMany(All)) : [r];
-        var row = model.Blocks.SelectMany(b => b switch
-        {
-            SettingsBlock.Single s => s.Group.Rows,
-            SettingsBlock.Pair p => p.Left.Rows.Concat(p.Right.Rows),
-            _ => [],
-        }).SelectMany(All).FirstOrDefault(r => r.Id == rowId);
+        var row = QaAllRows().FirstOrDefault(r => r.Row.Id == rowId).Row;
         if (row is null) return "no such row";
         return $"{row.Label}: " + string.Join(" | ", row.Controls.Select(c => c switch
         {

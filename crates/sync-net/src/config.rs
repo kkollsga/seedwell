@@ -110,6 +110,11 @@ pub struct FolderEntry {
     /// keeps no folders on demand ([`crate::Options::on_demand`]): its page says so.
     #[serde(default)]
     pub full_here: bool,
+    /// On demand, its content kept *in place* (SPEC §7G.11): the host's placeholders at `path` hold what is here (Cloud
+    /// Files hydrates into them), and the cache only stages it ([`crate::placed`]). Set by the host for the folders it
+    /// keeps that way; the Mac's File Provider keeps none.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub in_place: bool,
 }
 
 fn yes() -> bool {
@@ -139,6 +144,7 @@ impl FolderEntry {
             pins: Vec::new(),
             mode_switched: false,
             full_here: false,
+            in_place: false,
         }
     }
 }
@@ -371,9 +377,20 @@ impl SyncConfig {
 
     /// Writes `path` atomically, in this version's format.
     pub fn save(&self, path: &Path) -> io::Result<()> {
+        Self::write_text(path, &self.text()?)
+    }
+
+    /// The file's text, in this version's format ([`Self::write_text`] writes it).
+    pub fn text(&self) -> io::Result<String> {
         let text = toml::to_string(&SyncConfig { format: CONFIG_FORMAT, ..self.clone() }).map_err(io::Error::other)?;
+        Ok(format!("# Seedwell folder sync. Secrets are kept elsewhere (the Keychain or a 0600 file), not here.\n{text}"))
+    }
+
+    /// Writes a configuration's [`Self::text`] to `path` atomically.
+    pub fn write_text(path: &Path, text: &str) -> io::Result<()> {
         let tmp = path.with_extension("toml.tmp");
-        std::fs::write(&tmp, format!("# Seedwell folder sync. Secrets are kept elsewhere (the Keychain or a 0600 file), not here.\n{text}"))?;
+        std::fs::write(&tmp, text)?;
+        crate::shared::slow_disk();
         std::fs::rename(&tmp, path)
     }
 

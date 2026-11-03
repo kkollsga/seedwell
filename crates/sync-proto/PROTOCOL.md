@@ -321,6 +321,13 @@ message = fields (varint length ‖ bytes) ‖ signature (64)
   message it keeps names. Members fetch by themselves the images of the newest messages, up to 512 MiB a channel;
   older ones when the user asks. An SVG is drawn on the device in Rust (no scripts, `foreignObject`, files, URLs,
   entities or nested SVG; bounded size, elements and time): hosts draw only the PNG it makes.
+- **Image references** (0.1.18). A message's text (its caption) may point at one of its own images where the image
+  belongs in the text, as a Markdown image whose destination is `att:` and the image's number, counted from 1 in the
+  order the record lists the message's attachments: `![Image 2](att:2)` (1 to 99; anything else after `att:` is no
+  reference). Nothing else on the wire changes: it is text. A version that knows it draws a chip there that shows
+  that image; a reference to a number the message does not carry is drawn as its description, as plain text; 0.1.17
+  and earlier show the description ("Image 2") as for any Markdown image. Senders add one only where the user put an
+  image inside the text (pasting it there); an attachment added any other way, and `--attach`, add none.
 - **Files** (0.1.15). Any other file, of any size, is an attachment of kind 16 in the same record:
   `sha256` is the whole file's, `width` and `height` are 0, there is no preview, and after the preview comes
   `pieces` (32), the SHA-256 of its piece table. The fallback line is `[file: report.pdf, 1.2 GB]`. Private

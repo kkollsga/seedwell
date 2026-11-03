@@ -7,7 +7,7 @@ struct InlineField: View {
     let editing: FavoriteEditing
     let target: FavoriteTarget
     var prompt = ""
-    var font: Font = .system(size: 13)
+    var font: Font = Theme.body
     @FocusState private var focused: Bool
 
     var body: some View {
@@ -36,9 +36,11 @@ struct TrackerRow: View {
     var body: some View {
         let id = item.trackerID
         HStack(spacing: 8) {
-            Image(systemName: SidebarSymbols.symbol(item.icon))
-                .frame(width: 20)
-                .foregroundStyle(item.icon == .favoriteTracker ? Color.accentColor.opacity(0.85) : Color.secondary)
+            SidebarAccentMark { accent in
+                Image(systemName: SidebarSymbols.symbol(item.icon))
+                    .frame(width: 20)
+                    .foregroundStyle(item.icon == .favoriteTracker ? accent.opacity(0.85) : Color.secondary)
+            }
             if editing.target == .sidebarName(trackerId: id) {
                 InlineField(editing: editing, target: .sidebarName(trackerId: id))
             } else {
@@ -67,8 +69,8 @@ struct FavoriteRemoveStrip: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            Image(systemName: "star.slash").font(.system(size: 11)).foregroundStyle(.secondary)
-            Text(question.message).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(2)
+            Image(systemName: "star.slash").font(.system(size: Theme.Icon.small)).foregroundStyle(.secondary)
+            Text(question.message).font(Theme.secondary).foregroundStyle(.secondary).lineLimit(2)
             Spacer(minLength: 8)
             Button(question.cancelTitle, action: cancel).controlSize(.small).keyboardShortcut(.cancelAction)
                 .help(question.cancelHelp)

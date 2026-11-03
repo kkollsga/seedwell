@@ -22,7 +22,7 @@ import AppKit
     required init?(coder: NSCoder) { fatalError("not used") }
 
     /// Height of a plain menu row.
-    static var height: CGFloat { ceil(NSFont.menuFont(ofSize: 0).boundingRectForFont.height) + 8 }
+    static var height: CGFloat { ceil(Theme.NS.menu.boundingRectForFont.height) + 8 }
     /// Inset of the highlight from the menu's edge, and of the text inside it (matches the plain rows).
     private static let edge: CGFloat = 5
     static let pad: CGFloat = 11
@@ -73,7 +73,7 @@ import AppKit
     var fitting: CGFloat { ceil((title as NSString).size(withAttributes: attributes(highlighted: false)).width) }
 
     private func attributes(highlighted: Bool) -> [NSAttributedString.Key: Any] {
-        [.font: NSFont.menuFont(ofSize: 0),
+        [.font: Theme.NS.menu,
          .foregroundColor: highlighted ? NSColor.selectedMenuItemTextColor : NSColor.labelColor]
     }
 

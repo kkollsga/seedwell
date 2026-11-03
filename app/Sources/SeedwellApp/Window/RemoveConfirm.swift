@@ -14,10 +14,10 @@ struct RemoveConfirmContent: View {
     var body: some View {
         HStack(spacing: 10) {
             Image(systemName: pending.deleteFiles ? "trash" : "minus.circle")
-                .font(.system(size: 11))
+                .font(.system(size: Theme.Icon.small))
                 .foregroundStyle(.secondary)
             Text(pending.message)
-                .font(.system(size: 12))
+                .font(Theme.secondary)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .truncationMode(.middle)

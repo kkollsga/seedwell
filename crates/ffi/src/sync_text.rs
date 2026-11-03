@@ -752,7 +752,7 @@ pub fn sync_remove_help(trash: bool) -> String {
 #[uniffi::export]
 pub fn core_error_message(error: CoreError) -> String {
     match error {
-        CoreError::Failed { message } | CoreError::InvalidSource { message } => message,
+        CoreError::Failed { message } | CoreError::InvalidSource { message } | CoreError::OnDemand { message, .. } => message,
         CoreError::Invalid { problems } => problems.join("\n"),
         CoreError::NotFound { .. } => concat!("This folder is no longer synced on this ", computer!(), ".").into(),
     }

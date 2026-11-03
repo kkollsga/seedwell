@@ -64,6 +64,23 @@ release procedure.
   fails only sometimes, an error in a log, wrong behaviour noticed in passing. Find the root cause, fix it with a test,
   and commit it on its own. Never wave a failure off as flaky or unrelated.
 
+## Catching bugs early
+
+A bug the PC finds costs a round trip of an hour or more; most can be caught in the first minutes on the Mac.
+
+- **Every core call a host uses gets a test that acts like the host,** in the same change. It calls it the way
+  Finder, Explorer or the app will (repeated calls, the `wait_ms` they pass, the threads they call from) and asserts
+  the promise the host relies on: "answers within `wait_ms`", "`done` rises while data comes", "gives up within N s".
+  Write the promise in the call's doc comment, and also what each host's system does with it (Cloud Files cancels a
+  fetch that reports nothing for 60 s; a Finder-started Mac app's standard error goes to /dev/null; a Windows app
+  has no console). When a host reports a bug, first write this test and see it fail on the old code.
+- **Compile for Windows on the Mac:** `tools/check.sh --quick` runs `cargo check --target x86_64-pc-windows-gnu`
+  over the affected crates, which catches Windows-only compile errors before a bundle goes to the PC.
+- **A review that builds nothing:** before a worker's branch goes into a bundle, the coordinator has its diff read by
+  a reviewer agent (the `code-review` skill, medium) against the call's promise and the platform differences above.
+  It takes a few minutes and can run while something else builds.
+- **Test what you changed; the full check runs once per release** (see *Heavy work*).
+
 ## Heavy work (16 GB Mac)
 
 - Run builds, tests and benches through `tools/sysguard/heavy.sh`, one at a time and never nested.
@@ -74,8 +91,13 @@ release procedure.
   - On macOS it runs the timing tests (`tools/timing-tests.txt`) a second time at utility priority, where timers
     are late as on CI's Mac runner, and it scans the affected crates' tests for Mac assumptions
     (`tools/test-portability.py`). docs/ENGINEERING.md §5 says how a test joins the one and passes the other.
-  - While iterating, narrow it further: `tools/check.sh -p trs-tracker -- -E 'test(/host_recovery/)'`.
-  - Run the plain `tools/check.sh` once when the work is done, before handing it back.
+  - While iterating, narrow it further: `tools/check.sh --quick -p trs-tracker -- -E 'test(/host_recovery/)'`.
+  - **A worker hands back once `tools/check.sh --quick` passes.** It runs the tests of the crates that changed
+    only (not of the crates that depend on them), clippy over those and their dependents (which compiles them, no
+    tests), the app and Swift tests only when `app/` or `trs-ffi` itself changed, and the Windows compile check.
+  - The plain `tools/check.sh` (every affected crate and its dependents) runs once on master before a release's
+    public commit (`--base public`, the coordinator), not once per worker. The coordinator asks a worker for it only
+    when a change is wide (many crates, a shared type).
   - `tools/check.sh --full` is the whole workspace, which is what GitHub CI runs on every push to `main`. Do not run
     it locally unless the coordinator asks; never run the whole suite more than once per task.
 - **Clear the build cache as you go.** `tools/check.sh` removes, once a day, the build artifacts no build has

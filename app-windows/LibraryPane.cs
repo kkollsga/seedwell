@@ -96,10 +96,14 @@ sealed class LibraryPane
         var under = new StackPanel();
         under.Children.Add(banner);
         under.Children.Add(titleQuestion);
+        under.Children.Add(favoriteQuestion);
         Grid.SetRow(under, 1);
         main.Children.Add(under);
         Grid.SetRow(page, 2);
         main.Children.Add(page);
+        // Play's calm note (the core's sentence) at the bottom of the page, for 6 s.
+        Grid.SetRow(note, 2);
+        main.Children.Add(note);
         // Get Info lies over the page, at its top right, with the theme's card colours and a shadow.
         infoHost.Background = (Brush)Application.Current.Resources["SolidBackgroundFillColorTertiaryBrush"];
         infoHost.BorderBrush = (Brush)Application.Current.Resources["CardStrokeColorDefaultBrush"];
@@ -186,14 +190,97 @@ sealed class LibraryPane
         {
             outcome = library.Key(key, modifiers, KeyScope.List, Context());
         }
-        // The file list's actions (LibraryKeyAction) come only with HostWindow.FileList, which Windows does not pass yet.
+        RunKeyAction(outcome.Action);
         AppLog.Write($"key {key} shift={modifiers.Shift} command={modifiers.Command}: handled {outcome.Handled}");
         Refresh();
         return outcome.Handled;
     }
 
     /// <summary>What the Library needs to know about the window for keys and new downloads.</summary>
-    internal WindowContext Context() => new(Editing(), [], null, 0);
+    internal WindowContext Context() => new(Editing() || app.Favorites.View.Busy, app.Files.Expanded, app.Files.Selection?.TorrentId, (uint)(app.Files.Selection?.Nodes.Length ?? 0));
+
+    /// <summary>The file lists' part of a key (the core's LibraryKeyAction); the rest the Library did already.</summary>
+    void RunKeyAction(LibraryKeyAction? action)
+    {
+        var files = app.Files;
+        switch (action)
+        {
+            case LibraryKeyAction.ToggleFileRows: files.ToggleSelected(); break;
+            case LibraryKeyAction.OpenFileFolder: files.OpenSelected(); break;
+            case LibraryKeyAction.CloseFileFolder:
+                if (files.CloseSelected().SelectTorrent is string torrent) library.SetSelection([torrent]);
+                break;
+            case LibraryKeyAction.OpenFiles open: files.Expand(open.TorrentId); break;
+            case LibraryKeyAction.CloseFiles close: files.Collapse(close.TorrentId); break;
+            case LibraryKeyAction.ClearFileSelection: files.ClearSelection(); break;
+        }
+    }
+
+    readonly Border note = new()
+    {
+        Visibility = Visibility.Collapsed,
+        HorizontalAlignment = HorizontalAlignment.Center,
+        VerticalAlignment = VerticalAlignment.Bottom,
+        Margin = new Thickness(20, 0, 20, 18),
+        Padding = new Thickness(14, 7, 14, 8),
+        CornerRadius = new CornerRadius(16),
+        Background = (Brush)Application.Current.Resources["SolidBackgroundFillColorTertiaryBrush"],
+        BorderBrush = (Brush)Application.Current.Resources["CardStrokeColorDefaultBrush"],
+        BorderThickness = new Thickness(1),
+    };
+    Microsoft.UI.Dispatching.DispatcherQueueTimer? noteTimer;
+
+    /// <summary>A calm note at the bottom of the window (Play could not start: the core's sentence), gone after 6 s.</summary>
+    internal void ShowNote(string text)
+    {
+        note.Child = new TextBlock { Text = text, TextWrapping = TextWrapping.Wrap, MaxWidth = 520, FontSize = Theme.Secondary };
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(note, text);
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetLiveSetting(note, Microsoft.UI.Xaml.Automation.Peers.AutomationLiveSetting.Polite);
+        note.Visibility = Visibility.Visible;
+        if (noteTimer is null)
+        {
+            noteTimer = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread().CreateTimer();
+            noteTimer.Interval = TimeSpan.FromSeconds(6);
+            noteTimer.IsRepeating = false;
+            noteTimer.Tick += (_, _) => note.Visibility = Visibility.Collapsed;
+        }
+        noteTimer.Stop();
+        noteTimer.Start();
+    }
+
+    /// <summary>The note shown now (QA), or none.</summary>
+    internal string? NoteShown => note.Visibility == Visibility.Visible ? (note.Child as TextBlock)?.Text : null;
+
+    // The Remove from Favorites question over the tracker's list (its Info page draws its own).
+    readonly ContentControl favoriteQuestion = new() { HorizontalContentAlignment = HorizontalAlignment.Stretch, Margin = new Thickness(16, 0, 16, 0) };
+    TrackerInfoPage? trackerPage;
+
+    /// <summary>The Tracker Info page while shown (QA).</summary>
+    internal TrackerInfoPage? TrackerPage => trackerPage;
+
+    /// <summary>The favorite editor changed: the sidebar (a name being edited), the question over the list.</summary>
+    internal void FavoritesChanged()
+    {
+        sidebarKey = "";
+        Refresh();
+    }
+
+    void DrawFavoriteQuestion(LibraryViewModel m)
+    {
+        var f = app.Favorites;
+        favoriteQuestion.Content = m.Page == LibraryPage.List && m.Place is LibraryPlace.Tracker t && f.View.Removal is FavoriteRemoval q && q.Id == t.TrackerId
+            ? f.RemovalStrip(q, f.ConfirmRemoval, f.CancelRemoval)
+            : null;
+    }
+
+    /// <summary>The list page while shown (QA clicks its file rows).</summary>
+    internal LibraryList? ListShown => list;
+
+    /// <summary>A chooser changed (a tick here, in the notifier or the chooser window): the held lists draw it again.</summary>
+    internal void ChoicesChanged() => list?.ChoicesChanged();
+
+    /// <summary>A file list changed (read, an edit, the engine's answer): the list draws it under its row.</summary>
+    internal void FilesChanged(string? id) => list?.FilesChanged(id);
 
     /// <summary>A text field has the keyboard (the add sheet's): keys are typing, not commands.</summary>
     bool Editing() => root.XamlRoot is not null && Microsoft.UI.Xaml.Input.FocusManager.GetFocusedElement(root.XamlRoot) is TextBox;
@@ -270,6 +357,8 @@ sealed class LibraryPane
     public void SetVisible(bool visible)
     {
         library.SetVisible(visible);
+        // Open file lists are read only while the window can be seen.
+        if (visible) app.Files.Resume(); else app.Files.Suspend();
         if (visible) Refresh(); else timer.Stop();
     }
 
@@ -290,6 +379,8 @@ sealed class LibraryPane
             return;
         }
         Draw(m);
+        // The open file lists the core says are due are read again (the Mac's tick on the window's refresh).
+        if (m.Page == LibraryPage.List) app.Files.Tick();
         if (m.RefreshMs is uint ms)
         {
             timer.Interval = TimeSpan.FromMilliseconds(ms);
@@ -303,14 +394,20 @@ sealed class LibraryPane
         Model = m;
         title.Text = m.TitleStar ? $"★ {m.Title}" : m.Title;
         summary.Text = m.Summary;
-        summary.Visibility = m.Summary.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+        summary.Visibility = m.Summary.Length > 0 && m.Page != LibraryPage.TrackerInfo ? Visibility.Visible : Visibility.Collapsed;
+        // The Info page has its own title row (the star, the name, "Info" under Back): the header gives way (one title).
+        title.Visibility = m.Page == LibraryPage.TrackerInfo ? Visibility.Collapsed : Visibility.Visible;
         // The rows' live rates, as the Mac's tracker header (Fmt.liveRate with its arrow).
-        rates.Text = m.TrackerRates is TrackerRates r ? $"{TrsFfiMethods.FmtLiveRate(r.Down, "↓")}   {TrsFfiMethods.FmtLiveRate(r.Up, "↑")}" : "";
+        // On the Info page the header has them (the core's TrackerHeaderModel).
+        rates.Text = m.TrackerRates is TrackerRates r && m.Page != LibraryPage.TrackerInfo ? $"{TrsFfiMethods.FmtLiveRate(r.Down, "↓")}   {TrsFfiMethods.FmtLiveRate(r.Up, "↑")}" : "";
+        // Another place: every torrent opens closed again.
+        if (before is not null && !Equals(before.Place, m.Place)) app.Files.CollapseAll();
         if (SidebarKey(m.Sidebar) != sidebarKey || !Equals(before?.Place, m.Place))
         {
             DrawSidebar(m);
         }
         DrawFooter(m.Sidebar.Footer);
+        DrawFavoriteQuestion(m);
         DrawAddSheet(m.AddSheet);
         DrawInfo(m);
         ScrollTo(m.ScrollTo);
@@ -451,6 +548,16 @@ sealed class LibraryPane
         head.Children.Add(icon);
         g.Children.Add(head);
         var name = new TextBlock { Text = item.Title, TextTrimming = TextTrimming.CharacterEllipsis, VerticalAlignment = VerticalAlignment.Center };
+        // A favorite being renamed: its label is the field (the core's one edit).
+        if (item.Place is LibraryPlace.Tracker renamed && app.Favorites.View.Target is FavoriteTarget.SidebarName sn && sn.TrackerId == renamed.TrackerId)
+        {
+            var field = new StackPanel();
+            field.Children.Add(app.Favorites.Field(sn));
+            if (app.Favorites.Hint() is FrameworkElement hint) field.Children.Add(hint);
+            Grid.SetColumn(field, 1);
+            g.Children.Add(field);
+            return g;
+        }
         if (on || item.Unread > 0)
         {
             // Selected, or a chat with unread messages (as the Mac's ChatSidebarRow).
@@ -588,6 +695,17 @@ sealed class LibraryPane
             case SidebarCommand.TrackerInfo:
                 library.SelectPlace(place);
                 library.SetTrackerInfo(true);
+                break;
+            // Favorites (the core's FavoriteEditor): the name becomes a field, the question opens, an automatic tracker
+            // becomes a favorite.
+            case SidebarCommand.RenameTracker when place is LibraryPlace.Tracker rt:
+                app.Favorites.BeginRename(rt.TrackerId);
+                break;
+            case SidebarCommand.RemoveFavorite when place is LibraryPlace.Tracker ft:
+                app.Favorites.AskRemove(ft.TrackerId);
+                break;
+            case SidebarCommand.SaveAsFavorite when place is LibraryPlace.Tracker st:
+                app.Favorites.SaveAsFavorite(st.TrackerId);
                 break;
             case SidebarCommand.Mute or SidebarCommand.Unmute when c is not null:
                 var muted = command is SidebarCommand.Mute;
@@ -812,6 +930,9 @@ sealed class LibraryPane
         {
             chatPage = null;
         }
+        // The Info page reads its tracker only while it is shown.
+        trackerPage?.Stop();
+        trackerPage = null;
         if (m.Page == LibraryPage.List && m.List is ListModel l)
         {
             listSignature = l.Signature;
@@ -837,7 +958,11 @@ sealed class LibraryPane
             }
             return chatPage.Root;
         }
-        // NEED: Tracker Info (a later stage): the page's title for now.
+        if (m.Page == LibraryPage.TrackerInfo && m.Place is LibraryPlace.Tracker tracker)
+        {
+            trackerPage = new TrackerInfoPage(app, app.Favorites, tracker.TrackerId);
+            return trackerPage.Root;
+        }
         return Quiet(m.Page == LibraryPage.Missing ? m.Missing ?? "" : m.Title);
     }
 

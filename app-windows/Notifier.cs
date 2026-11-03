@@ -50,6 +50,8 @@ sealed class Notifier
         chat.Interval = TimeSpan.FromMilliseconds(notices.Model().ChatPollMs);
         chat.Tick += (_, _) => PollChat();
         chat.Start();
+        // Request toasts an earlier run left whose request no longer waits.
+        WithdrawStale();
     }
 
     /// <summary>A core event (hopped onto the UI thread by the listener): the core says post, open or nothing.</summary>
@@ -86,7 +88,8 @@ sealed class Notifier
         }));
     }
 
-    void Post(Notice n)
+    /// <summary>Posts a notice the core made (also one a host asked for, such as an on-demand file that is not here yet).</summary>
+    internal void Post(Notice n)
     {
         AppLog.Write($"notice: {n.Kind}: {n.Title} | {n.Body} [{n.Key ?? "-"}] {{{n.Click}}}");
         Posted.Add(n);
@@ -106,6 +109,9 @@ sealed class Notifier
                 .AddArgument("click", n.Click)
                 .AddText(n.Title)
                 .AddText(n.Body);
+            // An agent's request stays on screen until it is answered or dismissed (a reminder; it has its two buttons).
+            // TimeSensitive is a default toast until a notice needs more.
+            if (n.Urgency == NoticeUrgency.Persistent) builder.SetScenario(AppNotificationScenario.Reminder);
             // The notice's buttons (an agent's request: Approve, Deny), each with its action for notice_decision.
             foreach (var a in n.Actions)
             {
@@ -150,8 +156,35 @@ sealed class Notifier
         {
             AppLog.Write($"agent request {(approve ? "approved" : "denied")}: {answer.Title}");
             if (!Quiet.On) app.Notify(answer.Title, answer.Body);
+            WithdrawStale();
             then?.Invoke();
         }, e => app.Alert(new SyncAlert(e, "")));
+    }
+
+    /// <summary>
+    /// Takes away the toasts whose request no longer waits (answered anywhere, expired, withdrawn): of the tags still in
+    /// Action Center, the core names the ones to remove (<c>Notices.withdrawn</c>; never another notice's). At launch,
+    /// after each agent activity and after each answer the app gave; off the UI thread.
+    /// </summary>
+    internal void WithdrawStale()
+    {
+        if (!posting) return;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var shown = await AppNotificationManager.Default.GetAllAsync();
+                foreach (var tag in notices.Withdrawn(shown.Select(t => t.Tag).Where(t => !string.IsNullOrEmpty(t)).ToArray()))
+                {
+                    await AppNotificationManager.Default.RemoveByTagAndGroupAsync(tag, "seedwell");
+                    AppLog.Write($"notice withdrawn: {tag}");
+                }
+            }
+            catch (Exception e)
+            {
+                AppLog.Write($"notices not withdrawn: {e.Message}");
+            }
+        });
     }
 
     /// <summary>What a notice opens (the core's table).</summary>
@@ -164,12 +197,10 @@ sealed class Notifier
                 app.ShowTransfer(t.Id);
                 break;
             case NoticeRoute.Chooser c:
-                // NEED: the chooser window (HostWindow::Chooser, batch 7): until then the window on the transfer.
-                app.ShowTransfer(c.Id);
+                ChooserDialog.Show(app, c.Id);
                 break;
             case NoticeRoute.Starting s:
-                // NEED: the starting notifier (batch 7: Starting.Reveal, then its refresh): until then the transfer.
-                app.ShowTransfer(s.Id);
+                if (app.StartingNotifier is StartingWindow starting) starting.Reveal(s.Id); else app.ShowTransfer(s.Id);
                 break;
             case NoticeRoute.Place p:
                 app.ShowPlace(p.PlaceValue);

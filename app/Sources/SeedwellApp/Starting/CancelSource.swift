@@ -32,7 +32,7 @@ struct CancelControl: View {
         .overlay(alignment: captionAlignment == .trailing ? .bottomTrailing : .bottomLeading) {
             if shift, let caption = keep?.caption {
                 Text(caption)
-                    .font(.system(size: 11))
+                    .font(Theme.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1).fixedSize()
                     .padding(.horizontal, 2)

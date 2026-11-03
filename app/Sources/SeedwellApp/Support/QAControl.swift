@@ -1,4 +1,5 @@
 import AppKit
+import UserNotifications
 
 /// QA only (`--qa-control <file>`): runs scene commands appended to a text file, one per line. A run with this flag is
 /// quiet (QuietRun): the app never becomes active or frontmost, never takes the focus or a key, and none of its windows
@@ -62,6 +63,25 @@ import AppKit
 ///     alert <n>                       presses the n-th button of the open alert
 ///     chatfile download|retry|cancel|stop-sharing <place> <hash>   a file card's button (place: a channel id or
 ///                                     dm:<device>), as the card calls it; reports the card's state and line
+///     chatreply <message id> | chatreply cancel   Reply on a message of the conversation shown (its reply bar opens
+///                                     above the composer) / Escape or the bar's ×; reports the bar's words
+///     chat open <channel> | chat messages | chat reply <id>|cancel   a channel's General shown (name or id); its
+///                                     messages (id, whose, first words); Reply on a message, as above
+///     chat type <text> | chat compose <text>|end | chat select <start> [length]   typing at the selection; an input
+///                                     method's composition (marked text) and its commit; the selection (UTF-16)
+///     chat key enter|shift-enter|option-enter|escape   the command that key makes in the composer (no key event)
+///     chat paste text <text>|png <file>|file <file>   Cmd-V with that on a pasteboard of QA's own
+///     chat drop <file> at <index> | chat drop <file> chips   a drop onto the text before that UTF-16 index (the drag
+///                                     destination's calls at the point the layout gives), or onto the chips
+///     notice-action approve|deny|open <click words…>   a notification's button or a click on it, as the system hands
+///                                     it over (`agent-request <id>`); Notification Center itself is the system's
+///     menu-requests | menu-requests approve|deny <id>   the menu's request line and submenu (`menu open` first); a press
+///     chat state                      the composer: text, caret, image references, attachments, reply, focus,
+///                                     placeholder, composing, drop outline, height in lines (every `chat` command reports it)
+///     chat hover <id> [off] | chat gallery <id> next|prev|<n>|state | chat chip <id> <n> | chat copy-code <id> [n]
+///                                     a message's pointer controls, its gallery (arrow keys and buttons, a thumbnail),
+///                                     a click on its n-th image reference, its n-th code block's copy button (QA's own
+///                                     pasteboard, never the user's)
 ///     net offline | net online        the OS path monitor said so (engine holds everything / probes once); no debounce
 ///     power battery | power ac        the power source as PowerWatcher tells the core (the "On battery" setting acts);
 ///                                     a real change of the power source still reports as well
@@ -90,6 +110,8 @@ import AppKit
         try? "0".write(toFile: path + ".ack", atomically: true, encoding: .utf8)
         // Play never reaches a player here, but the URL it would have handed over lands in `<file>.bench`.
         PlayerLauncher.onBlockedLaunch = { [weak self] url in self?.report("play-url: \(url)") }
+        // The conversation's rows say what their pointer, gallery and references do (`chat hover|gallery|chip`).
+        ChatQAHooks.enabled = true
         // A file-system watch instead of a timer: the harness must not add wake-ups of its own
         // while idle numbers are measured.
         fd = open(path, O_EVTONLY)
@@ -442,6 +464,33 @@ import AppKit
                 case .failure(let error): report("chatfile: \(SyncText.message(error))")
                 }
             }
+        case "chat":
+            report(await QAChat.run(arg, app: app, commands: commands))
+        case "notice-action":
+            // `notice-action <action> <click words…>`: a notification's button (approve, deny) or a click on it (open) as
+            // the system hands it to the app; the click's words are its lines (`agent-request <id>`, `chat <channel>`).
+            let p = arg.split(separator: " ").map(String.init)
+            guard p.count >= 2 else { return report("notice-action: approve|deny|open <click words…>") }
+            let action = p[0] == "open" ? UNNotificationDefaultActionIdentifier : p[0]
+            var opened = "nothing"
+            Notifier.respond(click: p.dropFirst().joined(separator: "\n"), action: action, core: commands.core) { route in
+                opened = "\(route)"
+                app.open(route)
+            }
+            report("notice-action: \(p[0]) opened \(opened)")
+        case "menu-requests":
+            // The menu bar menu's request line (`menu open` first) and its submenu; `menu-requests approve|deny <id>` presses one.
+            let p = arg.split(separator: " ").map(String.init)
+            guard let menu = app.statusMenuController else { return report("menu-requests: no menu") }
+            if p.count == 2, p[0] == "approve" || p[0] == "deny" { return report("menu-requests: \(menu.qaRequests(press: (p[1], p[0] == "approve")))") }
+            report("menu-requests: \(menu.qaRequests())")
+        case "chatreply":
+            // Reply on a message of the conversation shown (the pill's Reply), or Escape / the reply bar's × (`cancel`).
+            guard let m = app.mainWindowController?.libraryModel else { return report("chatreply: no window") }
+            if arg == "cancel" { return report("chatreply: \(m.cancelReply() ? "cancelled" : "none")") }
+            guard let card = m.chatPage?.messages.first(where: { $0.id == arg }) else { return report("chatreply: no message \(arg)") }
+            m.reply(to: card)
+            report("chatreply: \(card.replying.title) · \(card.replying.text)")
         case "alert":
             // `alert 1` presses the first button of the alert that is open (1000 = first button).
             NSApp.stopModal(withCode: NSApplication.ModalResponse(rawValue: 999 + (Int(arg) ?? 1)))
@@ -548,6 +597,13 @@ import AppKit
             report("menu: \(app.statusMenuController?.qaTitles ?? "")")
         case "menu-subtitles":
             report("menu-subtitles: \(app.statusMenuController?.qaSubtitles ?? "")")
+        case "menu-icon":
+            // The menu bar icon as last drawn: its dots and its label ("menu-icon: answer-dot agent-request, problem-dot no,
+            // label 'Seedwell, an agent is waiting for your answer'").
+            app.statusMenuController?.refreshIcon()
+            let look = app.statusMenuController?.qaIconLook
+            let dot = look?.needsAnswer.map { "\($0)".replacingOccurrences(of: "agentRequest", with: "agent-request") } ?? "none"
+            report("menu-icon: answer-dot \(dot), problem-dot \(look?.attention == true ? "yes" : "no"), label '\(app.statusMenuController?.qaIconLabel ?? "")'")
         case "menu-sync":
             menuSyncCommand(arg)
         case "menu-hover":

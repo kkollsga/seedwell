@@ -15,7 +15,6 @@ use trs_fswatch::aggregate::{Aggregator, Batch};
 use trs_fswatch::{RawEvent, WatchOptions};
 use trs_sync::clock::SystemClock;
 use trs_sync::folder::FolderCore;
-use trs_sync::fs::{Fs, StdFs};
 use trs_sync::global::Need;
 use trs_sync::pull::PullReport;
 use trs_sync::scan::{ScanError, ScanJob, ScanReport};
@@ -473,7 +472,7 @@ async fn settle(f: &Arc<FolderShared>) {
     let copies: Vec<String> = lock(&f.live).conflicts.keys().cloned().collect();
     let totals = tokio::task::spawn_blocking(move || {
         // Copies resolved since (here, or on another device and synced): a few lstats.
-        let fs = StdFs::new(f2.root.clone());
+        let fs = f2.fs();
         let gone: Vec<String> = copies.into_iter().filter(|c| matches!(fs.lstat(c), Ok(None))).collect();
         let ignore_file = has_ignore_file(&f2);
         let core = lock(&f2.core);
@@ -556,7 +555,7 @@ pub(crate) async fn refresh_conflicts(f: &Arc<FolderShared>) -> std::io::Result<
     let list = tokio::task::spawn_blocking(move || -> std::io::Result<Vec<(String, String)>> {
         let mut all: std::collections::BTreeMap<String, String> = lock(&f2.core).conflicts()?.into_iter().collect();
         all.extend(made_here);
-        let fs = StdFs::new(f2.root.clone());
+        let fs = f2.fs();
         let mut out = Vec::with_capacity(all.len());
         for (copy, original) in all {
             if fs.lstat(&copy)?.is_some() {

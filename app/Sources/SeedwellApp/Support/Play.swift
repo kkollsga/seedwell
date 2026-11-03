@@ -31,8 +31,8 @@ struct PlayNoticeView: View {
     var body: some View {
         if let text = notice.text {
             HStack(spacing: 8) {
-                Image(systemName: notice.symbol).font(.system(size: 11)).foregroundStyle(.secondary)
-                Text(text).font(.system(size: 12.5))
+                Image(systemName: notice.symbol).font(.system(size: Theme.Icon.small)).foregroundStyle(.secondary)
+                Text(text).font(Theme.secondary)
             }
             .padding(.horizontal, 14).padding(.vertical, 8)
             .background(.regularMaterial, in: Capsule())

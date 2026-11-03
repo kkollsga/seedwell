@@ -21,7 +21,7 @@ struct SyncPage: View {
         Group {
             if let e = m.empty {
                 VStack(spacing: 10) {
-                    Text(e.text).font(.system(size: 13)).foregroundStyle(.secondary)
+                    Text(e.text).font(Theme.body).foregroundStyle(.secondary)
                     if let add = e.add { Button(add.title) { actions.showAdd(nil) }.help(add.help) }
                 }
                 .frame(maxWidth: .infinity).padding(.top, 60)
@@ -75,7 +75,7 @@ struct SyncPage: View {
                 Divider()
                 HStack {
                     Button { actions.showAdd(nil) } label: { Label(add.title, systemImage: "plus") }
-                        .buttonStyle(.plain).foregroundStyle(.secondary).font(.system(size: 12.5))
+                        .buttonStyle(.plain).foregroundStyle(.secondary).font(Theme.secondary)
                         .help(add.help)
                     Spacer()
                 }
@@ -147,8 +147,8 @@ struct SyncListRow: View {
         HStack(spacing: 9) {
             SyncBadgeView(badge: row.badge)
             VStack(alignment: .leading, spacing: 1) {
-                Text(row.title).font(.system(size: 13)).lineLimit(1).truncationMode(.middle)
-                Text(row.subtitle).font(.system(size: 11.5)).foregroundStyle(.secondary).lineLimit(1)
+                Text(row.title).font(Theme.body).lineLimit(1).truncationMode(.middle)
+                Text(row.subtitle).font(Theme.caption).foregroundStyle(.secondary).lineLimit(1)
             }
             Spacer(minLength: 0)
         }
@@ -218,8 +218,8 @@ struct SyncFolderPageView: View {
                     ForEach(Array(issues.rows.enumerated()), id: \.offset) { n, i in
                         if n > 0 { Divider().opacity(0.6) }
                         VStack(alignment: .leading, spacing: 2) {
-                            if let path = i.path { Text(path).font(.system(size: 13)).lineLimit(1).truncationMode(.middle) }
-                            Text(i.reason).font(.system(size: 11.5)).foregroundStyle(.secondary)
+                            if let path = i.path { Text(path).font(Theme.body).lineLimit(1).truncationMode(.middle) }
+                            Text(i.reason).font(Theme.caption).foregroundStyle(.secondary)
                         }
                         .padding(.vertical, 6)
                     }
@@ -238,7 +238,7 @@ struct SyncFolderPageView: View {
     private var header: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(alignment: .firstTextBaseline, spacing: 10) {
-                Text(page.title).font(.system(size: 20, weight: .semibold)).lineLimit(1).truncationMode(.middle)
+                Text(page.title).font(Theme.title).lineLimit(1).truncationMode(.middle)
                 Spacer(minLength: 8)
                 ForEach(page.buttons, id: \.title) { b in
                     Button(b.title) { press(b) }.help(b.help)
@@ -250,20 +250,20 @@ struct SyncFolderPageView: View {
                     .buttonStyle(.plain).foregroundStyle(.secondary).help(page.reveal.help)
                     .accessibilityLabel(page.reveal.accessibilityLabel ?? page.reveal.title)
             }
-            .font(.system(size: 12.5)).foregroundStyle(.secondary)
+            .font(Theme.secondary).foregroundStyle(.secondary)
             HStack(spacing: 6) {
                 SyncBadgeView(badge: page.badge, size: 14)
-                Text(page.status).font(.system(size: 12.5))
+                Text(page.status).font(Theme.secondary)
             }
             .padding(.top, 2)
-            if let e = page.error { Text(e).font(.system(size: 12)).foregroundStyle(.red) }
+            if let e = page.error { Text(e).font(Theme.secondary).foregroundStyle(.red) }
             if let n = page.note {
-                Text(n).font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                Text(n).font(Theme.secondary).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
             // macOS keeps a new File Provider domain switched off until the user allows it.
             if let off = page.onDemandOff {
                 HStack(spacing: 8) {
-                    Text(off.text).font(.system(size: 12)).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
+                    Text(off.text).font(Theme.secondary).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
                     Spacer(minLength: 8)
                     if let b = off.button {
                         Button(b.title) { press(b) }.controlSize(.small).help(b.help)
@@ -281,8 +281,8 @@ struct SyncFolderPageView: View {
         VStack(alignment: .leading, spacing: 8) {
             ForEach(page.gone, id: \.deviceId) { g in
                 HStack(spacing: 10) {
-                    Image(systemName: "moon.zzz").font(.system(size: 11)).foregroundStyle(.secondary)
-                    Text(g.line).font(.system(size: 12)).foregroundStyle(.secondary)
+                    Image(systemName: "moon.zzz").font(.system(size: Theme.Icon.small)).foregroundStyle(.secondary)
+                    Text(g.line).font(Theme.secondary).foregroundStyle(.secondary)
                     Spacer(minLength: 8)
                     Button(g.button.title) { press(g.button) }.controlSize(.small).help(g.button.help)
                         .accessibilityLabel(g.button.accessibilityLabel ?? g.button.title)
@@ -291,8 +291,8 @@ struct SyncFolderPageView: View {
             }
             if let r = page.reshare {
                 HStack(spacing: 10) {
-                    Image(systemName: "person.crop.circle.badge.questionmark").font(.system(size: 11)).foregroundStyle(.secondary)
-                    Text(r.note).font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    Image(systemName: "person.crop.circle.badge.questionmark").font(.system(size: Theme.Icon.small)).foregroundStyle(.secondary)
+                    Text(r.note).font(Theme.secondary).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     Spacer(minLength: 8)
                     Button(r.button.title) { press(r.button) }.controlSize(.small).help(r.button.help)
                         .accessibilityIdentifier("sync-reshare")
@@ -305,10 +305,10 @@ struct SyncFolderPageView: View {
 
     private func removeStrip(_ r: SyncMenuConfirm) -> some View {
         HStack(spacing: 10) {
-            Image(systemName: r.trash ? "trash" : "minus.circle").font(.system(size: 11)).foregroundStyle(.secondary)
+            Image(systemName: r.trash ? "trash" : "minus.circle").font(.system(size: Theme.Icon.small)).foregroundStyle(.secondary)
             VStack(alignment: .leading, spacing: 6) {
-                Text(r.question).font(.system(size: 12)).foregroundStyle(.secondary)
-                Toggle(r.trashLabel, isOn: $trash).toggleStyle(.checkbox).font(.system(size: 12))
+                Text(r.question).font(Theme.secondary).foregroundStyle(.secondary)
+                Toggle(r.trashLabel, isOn: $trash).toggleStyle(.checkbox).font(Theme.secondary)
             }
             Spacer(minLength: 8)
             Button(r.cancelTitle) { run(.cancelRemove) }.controlSize(.small).keyboardShortcut(.cancelAction).help(r.cancelHelp)
@@ -322,7 +322,7 @@ struct SyncFolderPageView: View {
 
     private func section<C: View>(_ title: String, @ViewBuilder _ content: () -> C) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(title).font(.system(size: 12, weight: .semibold)).foregroundStyle(.secondary)
+            Text(title).font(Theme.secondary.weight(.semibold)).foregroundStyle(.secondary)
                 .padding(.bottom, 2)
             content()
         }
@@ -330,7 +330,7 @@ struct SyncFolderPageView: View {
     }
 
     private func quiet(_ t: String) -> some View {
-        Text(t).font(.system(size: 13)).foregroundStyle(.secondary).padding(.vertical, 4)
+        Text(t).font(Theme.body).foregroundStyle(.secondary).padding(.vertical, 4)
     }
 
     private static func symbol(_ r: SyncMemberReach) -> String {
@@ -346,14 +346,14 @@ struct SyncFolderPageView: View {
     /// A member: how it is reached, its name, line and role; the owner's menu for the others.
     private func memberRow(_ m: SyncPageMember) -> some View {
         HStack(spacing: 10) {
-            Image(systemName: Self.symbol(m.reach)).font(.system(size: 12)).foregroundStyle(.secondary).frame(width: 18)
+            Image(systemName: Self.symbol(m.reach)).font(.system(size: Theme.Icon.regular)).foregroundStyle(.secondary).frame(width: 18)
             VStack(alignment: .leading, spacing: 1) {
-                Text(m.name).font(.system(size: 13))
-                if !m.line.isEmpty { Text(m.line).font(.system(size: 11.5)).foregroundStyle(.secondary) }
+                Text(m.name).font(Theme.body)
+                if !m.line.isEmpty { Text(m.line).font(Theme.caption).foregroundStyle(.secondary) }
             }
             Spacer()
             if let t = m.transfer {
-                Text(t).font(.system(size: 12)).monospacedDigit().foregroundStyle(.secondary).help(m.transferHelp)
+                Text(t).font(Theme.secondary).monospacedDigit().foregroundStyle(.secondary).help(m.transferHelp)
             }
             if let menu = m.roleMenu {
                 Menu(menu.title) {
@@ -363,7 +363,7 @@ struct SyncFolderPageView: View {
                 .help(menu.help)
                 .accessibilityIdentifier("sync-member-role")
             } else {
-                Text(m.role).font(.system(size: 12)).foregroundStyle(.secondary)
+                Text(m.role).font(Theme.secondary).foregroundStyle(.secondary)
             }
         }
         .padding(.vertical, 6)
@@ -372,10 +372,10 @@ struct SyncFolderPageView: View {
 
     private func conflictRow(_ c: SyncPageConflict) -> some View {
         HStack(spacing: 10) {
-            Image(systemName: "doc.on.doc").font(.system(size: 12)).foregroundStyle(.orange).frame(width: 18)
+            Image(systemName: "doc.on.doc").font(.system(size: Theme.Icon.regular)).foregroundStyle(.orange).frame(width: 18)
             VStack(alignment: .leading, spacing: 1) {
-                Text(c.title).font(.system(size: 13)).lineLimit(1).truncationMode(.middle)
-                Text(c.line).font(.system(size: 11.5)).foregroundStyle(.secondary)
+                Text(c.title).font(Theme.body).lineLimit(1).truncationMode(.middle)
+                Text(c.line).font(Theme.caption).foregroundStyle(.secondary)
             }
             Spacer()
             Button(c.reveal.title) { press(c.reveal) }.controlSize(.small).help(c.reveal.help)

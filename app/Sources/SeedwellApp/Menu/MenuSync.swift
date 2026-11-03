@@ -10,7 +10,7 @@ extension SyncBadge {
     @MainActor func image(hovered: Bool) -> NSImage? {
         let ink: NSColor = hovered ? .selectedMenuItemTextColor : .secondaryLabelColor
         func symbol(_ name: String, _ color: NSColor) -> NSImage? {
-            let cfg = NSImage.SymbolConfiguration(pointSize: 13, weight: .regular).applying(.init(paletteColors: [color]))
+            let cfg = NSImage.SymbolConfiguration(pointSize: Theme.Icon.regular, weight: .regular).applying(.init(paletteColors: [color]))
             return NSImage(systemSymbolName: name, accessibilityDescription: nil)?.withSymbolConfiguration(cfg)
         }
         switch self {
@@ -162,7 +162,7 @@ extension NSImage {
             for (zone, name) in (editable ? [(editZone, "pencil")] : []) + [(deleteZone, "trash")] {
                 let lit = name == "trash" && confirming
                 let color: NSColor = hovered ? .selectedMenuItemTextColor : (lit ? .controlAccentColor : .secondaryLabelColor)
-                let cfg = NSImage.SymbolConfiguration(pointSize: 12, weight: .medium).applying(.init(paletteColors: [color]))
+                let cfg = NSImage.SymbolConfiguration(pointSize: Theme.Icon.regular, weight: .medium).applying(.init(paletteColors: [color]))
                 if let img = NSImage(systemSymbolName: name, accessibilityDescription: nil)?.withSymbolConfiguration(cfg) {
                     img.draw(at: NSPoint(x: zone.midX - img.size.width / 2, y: (bounds.height - img.size.height) / 2), from: .zero, operation: .sourceOver, fraction: 1)
                 }
@@ -171,8 +171,8 @@ extension NSImage {
         }
         let style = NSMutableParagraphStyle()
         style.lineBreakMode = .byTruncatingTail
-        let tAttrs: [NSAttributedString.Key: Any] = [.font: NSFont.menuFont(ofSize: 0), .foregroundColor: ink, .paragraphStyle: style]
-        let sAttrs: [NSAttributedString.Key: Any] = [.font: NSFont.menuFont(ofSize: NSFont.smallSystemFontSize), .foregroundColor: faint, .paragraphStyle: style]
+        let tAttrs: [NSAttributedString.Key: Any] = [.font: Theme.NS.menu, .foregroundColor: ink, .paragraphStyle: style]
+        let sAttrs: [NSAttributedString.Key: Any] = [.font: Theme.NS.menuSmall, .foregroundColor: faint, .paragraphStyle: style]
         let (title, subtitle) = (row.title, row.subtitle)
         let th = (title as NSString).size(withAttributes: tAttrs).height
         let sh = (subtitle as NSString).size(withAttributes: sAttrs).height
@@ -217,17 +217,17 @@ private final class FlippedPanel: NSView { override var isFlipped: Bool { true }
         trash.title = c.trashLabel
         cancel.title = c.cancelTitle
         remove.title = c.removeTitle
-        question.font = .menuFont(ofSize: NSFont.smallSystemFontSize + 0.5)
+        question.font = Theme.NS.menuSmall
         question.textColor = .secondaryLabelColor
         question.maximumNumberOfLines = 2
         question.lineBreakMode = .byWordWrapping
-        trash.font = .menuFont(ofSize: NSFont.smallSystemFontSize + 0.5)
+        trash.font = Theme.NS.menuSmall
         trash.state = c.trash ? .on : .off
         trash.controlSize = .small
         for b in [cancel, remove] {
             b.bezelStyle = .push
             b.controlSize = .small
-            b.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+            b.font = Theme.NS.caption()
         }
         remove.hasDestructiveAction = true
         cancel.toolTip = c.cancelHelp

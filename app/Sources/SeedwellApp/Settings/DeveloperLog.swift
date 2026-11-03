@@ -129,8 +129,8 @@ struct TrackerLogView: View {
     private var header: some View {
         HStack(alignment: .firstTextBaseline) {
             VStack(alignment: .leading, spacing: 2) {
-                Text(v.title).font(.system(size: 15, weight: .semibold))
-                Text(v.subtitle).font(.system(size: 11.5)).foregroundStyle(.secondary)
+                Text(v.title).font(Theme.heading)
+                Text(v.subtitle).font(Theme.caption).foregroundStyle(.secondary)
             }
             Spacer()
             Button(v.doneTitle) { isPresented = false }.keyboardShortcut(.defaultAction)
@@ -169,7 +169,7 @@ struct TrackerLogView: View {
             .toggleStyle(.button)
             .help(v.liveHelp)
         }
-        .font(.system(size: 12.5))
+        .font(Theme.secondary)
         .padding(.horizontal, 20).padding(.vertical, 9)
     }
 
@@ -196,9 +196,9 @@ struct TrackerLogView: View {
 
     private func emptyState(_ e: TrackerLogEmpty) -> some View {
         VStack(spacing: 6) {
-            Image(systemName: "text.alignleft").font(.system(size: 26)).foregroundStyle(.tertiary)
-            Text(e.title).font(.system(size: 13, weight: .medium))
-            Text(e.text).font(.system(size: 12)).foregroundStyle(.secondary)
+            Image(systemName: "text.alignleft").font(.system(size: Theme.Icon.hero)).foregroundStyle(.tertiary)
+            Text(e.title).font(Theme.body.weight(.medium))
+            Text(e.text).font(Theme.secondary).foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity).padding(.top, 90)
     }
@@ -215,7 +215,7 @@ struct TrackerLogView: View {
             Button(v.clearTitle) { model.clear() }
                 .help(v.clearHelp)
         }
-        .font(.system(size: 12))
+        .font(Theme.secondary)
         .padding(.horizontal, 20).padding(.vertical, 9)
     }
 }
@@ -229,12 +229,12 @@ struct TrackerLogRowView: View {
             Button(action: toggle) {
                 HStack(alignment: .firstTextBaseline, spacing: 10) {
                     Image(systemName: "chevron.right")
-                        .font(.system(size: 9, weight: .semibold)).foregroundStyle(.tertiary)
+                        .font(Theme.micro.weight(.semibold)).foregroundStyle(.tertiary)
                         .rotationEffect(.degrees(line.detail != nil ? 90 : 0))
                         .frame(width: 10)
-                    Text(line.time).font(.system(size: 11.5, design: .monospaced)).foregroundStyle(.secondary)
-                    Text(line.title).font(.system(size: 12.5, weight: .medium)).lineLimit(1)
-                    Text(line.host).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
+                    Text(line.time).font(Theme.monoSmall).foregroundStyle(.secondary)
+                    Text(line.title).font(Theme.secondary.weight(.medium)).lineLimit(1)
+                    Text(line.host).font(Theme.secondary).foregroundStyle(.secondary).lineLimit(1)
                     Spacer(minLength: 8)
                     pill
                 }
@@ -245,14 +245,14 @@ struct TrackerLogRowView: View {
             .accessibilityLabel(line.accessibilityLabel)
             .accessibilityHint(line.accessibilityHint)
             Text(line.summary)
-                .font(.system(size: 12))
+                .font(Theme.secondary)
                 .foregroundStyle(line.error ? Color.red : .secondary)
                 .lineLimit(line.detail != nil ? nil : 1)
                 .textSelection(.enabled)
                 .padding(.leading, 20)
             if let detail = line.detail {
                 Text(detail)
-                    .font(.system(size: 11.5, design: .monospaced))
+                    .font(Theme.monoSmall)
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(10)
@@ -270,7 +270,7 @@ struct TrackerLogRowView: View {
             if !line.transport.isEmpty { Text(line.transport) }
             Text(line.label)
         }
-        .font(.system(size: 10.5, weight: .medium)).textCase(.uppercase)
+        .font(Theme.micro).textCase(.uppercase)
         .foregroundStyle(line.error ? Color.red : .secondary)
         .padding(.horizontal, 7).padding(.vertical, 2)
         .background(Capsule().fill(.primary.opacity(0.07)))

@@ -79,7 +79,7 @@ fn seedwell_route(text: &str) -> LinkRoute {
         "share" => {
             let value = query.split('&').find_map(|kv| kv.strip_prefix("path="));
             match value.and_then(percent_decode) {
-                Some(p) if Path::new(&p).is_absolute() => LinkRoute::SharePath { path: p },
+                Some(p) if is_absolute_path(&p) => LinkRoute::SharePath { path: p },
                 _ => problem("The link names no folder to share."),
             }
         }
@@ -110,22 +110,109 @@ pub fn link_route(url: String) -> LinkRoute {
     }
 }
 
+/// The option that names a path to share (the file manager's Share verb on Windows: `"Seedwell.exe" --share "%1"`).
+pub const SHARE_OPTION: &str = "--share";
+
 /// The arguments of a command line that open something, in their order: each `seedwell://` link's route (a second
-/// launch hands its own arguments on; Windows starts the app with the link when the scheme is registered), and each
-/// thing to add (`command_line_sources`' rule) as [`LinkRoute::AddSource`]. Everything else (options, other files,
-/// other URL schemes, empty arguments) is left out.
+/// launch hands its own arguments on; Windows starts the app with the link when the scheme is registered), each
+/// `--share <path>` as [`LinkRoute::SharePath`] (a path that is not whole, or none, is a problem), and each thing to
+/// add (`command_line_sources`' rule) as [`LinkRoute::AddSource`]. Everything else (options, other files, other URL
+/// schemes, empty arguments) is left out.
 #[uniffi::export]
 pub fn command_line_routes(args: Vec<String>) -> Vec<LinkRoute> {
-    args.iter()
-        .map(|a| a.trim())
-        .filter_map(|a| {
-            if a.get(..9).is_some_and(|h| h.eq_ignore_ascii_case("seedwell:")) {
-                Some(seedwell_route(a))
-            } else {
-                is_command_line_source(a).then(|| LinkRoute::AddSource { source: a.to_owned() })
-            }
-        })
-        .collect()
+    let mut out = Vec::new();
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        let a = arg.trim();
+        if a == SHARE_OPTION {
+            out.push(share_route(args.next().map(String::as_str)));
+        } else if let Some(p) = a.strip_prefix(SHARE_OPTION).and_then(|r| r.strip_prefix('=')) {
+            out.push(share_route(Some(p)));
+        } else if a.get(..9).is_some_and(|h| h.eq_ignore_ascii_case("seedwell:")) {
+            out.push(seedwell_route(a));
+        } else if is_command_line_source(a) {
+            out.push(LinkRoute::AddSource { source: a.to_owned() });
+        }
+    }
+    out
+}
+
+/// `--share`'s path: where it goes, or why not.
+///
+/// Windows' command-line rules read a backslash before a quote as a quote, so the verb's `"%1"` of a drive's root
+/// (`"C:\"`) arrives as `C:"`. A Windows path never holds a `"`, so a trailing one is that backslash.
+fn share_route(path: Option<&str>) -> LinkRoute {
+    let Some(p) = path.map(str::trim).filter(|p| !p.is_empty()) else { return problem("Nothing was named to share.") };
+    let p = match p.strip_suffix('"') {
+        Some(head) if !head.contains('"') => format!(r"{head}\"),
+        _ => p.to_owned(),
+    };
+    if is_absolute_path(&p) {
+        LinkRoute::SharePath { path: p }
+    } else {
+        problem(format!("{APP_NAME} shares a folder named by its whole path, and “{p}” is not one."))
+    }
+}
+
+/// A whole path, on any system: a Windows drive path (`C:\…`, `C:/…`) or share (`\\server\share…`, `\\?\…`) is one
+/// everywhere (Windows hands those over, and the rule is tested on every system); a path from `/` is one where it
+/// means that (not on Windows, where it is relative to the current drive).
+pub(crate) fn is_absolute_path(p: &str) -> bool {
+    let b = p.as_bytes();
+    let drive = b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && matches!(b[2], b'\\' | b'/');
+    let unc = p.strip_prefix(r"\\").is_some_and(|rest| {
+        // `\\?\` and `\\.\` (the system's long and device forms) name what follows; a share needs a server and a name.
+        if let Some(inner) = rest.strip_prefix(r"?\").or_else(|| rest.strip_prefix(r".\")) {
+            return !inner.is_empty();
+        }
+        let mut parts = rest.split('\\');
+        matches!((parts.next(), parts.next()), (Some(server), Some(share)) if !server.is_empty() && !share.is_empty())
+    });
+    drive || unc || (cfg!(not(windows)) && Path::new(p).is_absolute())
+}
+
+/// The bytes a `seedwell://share?path=` value keeps as they are: unreserved characters, and `/` and `:`, which a query
+/// may hold. Everything else (`%`, `#`, `&`, `+`, `=`, spaces, backslashes, each byte of a non-ASCII character) is
+/// escaped, so the link reads back to the same path ([`link_route`]) in any URL reader.
+fn kept_in_query(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~' | b'/' | b':')
+}
+
+/// The link that opens the Share dialog of the folder at `path` (`seedwell://share?path=…`, the path escaped).
+#[uniffi::export]
+pub fn share_path_link(path: String) -> String {
+    let mut out = String::from("seedwell://share?path=");
+    for &b in path.as_bytes() {
+        if kept_in_query(b) {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+/// A verb the file manager shows on folders (Windows: a registry verb under `Directory\shell`), in the core's words.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct ExplorerVerb {
+    /// The menu item: "Share with Seedwell".
+    pub title: String,
+    /// The line the file manager shows for it.
+    pub help: String,
+    /// What follows the app's own quoted path in the verb's command (`--share "%1"`): the host writes
+    /// `"<Seedwell.exe>" ` and these, and encodes nothing; [`command_line_routes`] reads them back. (A new record: no
+    /// default, and uniffi would not escape the quotes of one.)
+    pub arguments: String,
+}
+
+/// The file manager's Share verb: what it says, and how it starts the app.
+#[uniffi::export]
+pub fn explorer_share_verb() -> ExplorerVerb {
+    ExplorerVerb {
+        title: format!("Share with {APP_NAME}"),
+        help: format!("Sync this folder with your other devices, or with people you invite, using {APP_NAME}."),
+        arguments: format!("{SHARE_OPTION} \"%1\""),
+    }
 }
 
 #[uniffi::export]
@@ -209,6 +296,85 @@ mod tests {
         assert_eq!(got[3], LinkRoute::ShowFolder { folder_id: "F".into() });
         assert!(is_problem(&got[4]), "a seedwell link it cannot open says so");
         assert!(command_line_routes(Vec::new()).is_empty());
+    }
+
+    fn share(path: &str) -> LinkRoute {
+        LinkRoute::SharePath { path: path.into() }
+    }
+
+    /// Odd paths, as Explorer's `"%1"` hands them over (after Windows' own command-line rules), on every system.
+    const ODD: [&str; 9] = [
+        r"C:\Users\Kari\My Photos",
+        r"C:\Users\Kari\100% done",
+        r"C:\Users\Kari\#1 & #2",
+        r"D:\Bilder\Sommer på Hvaler ☀️",
+        r"C:\a+b=c;d,e'f(g)[h]{i}!~`^",
+        r"\\nas\share",
+        r"\\nas\share\Team Folder",
+        r"\\?\C:\very\long",
+        r"C:\",
+    ];
+
+    #[test]
+    fn the_explorer_verb_shares_the_path_it_names() {
+        for p in ODD {
+            assert_eq!(command_line_routes(vec!["--share".into(), p.into()]), [share(p)], "{p}");
+            assert_eq!(command_line_routes(vec![format!("--share={p}")]), [share(p)], "{p}");
+        }
+        // A drive's root: `"C:\"` reaches the app as `C:"` (a backslash before a quote is a quote on Windows).
+        assert_eq!(command_line_routes(vec!["--share".into(), r#"C:""#.into()]), [share(r"C:\")]);
+        assert_eq!(command_line_routes(vec!["--share".into(), r#"\\nas\share""#.into()]), [share(r"\\nas\share\")]);
+        // Not a whole path, or nothing: the core's words.
+        for bad in [vec!["--share".to_string()], vec!["--share".into(), "  ".into()], vec!["--share".into(), "Photos".into()], vec!["--share".into(), r"\\nas".into()]] {
+            let got = command_line_routes(bad.clone());
+            assert!(got.len() == 1 && is_problem(&got[0]), "{bad:?}: {got:?}");
+        }
+        let LinkRoute::Problem { text, .. } = &command_line_routes(vec!["--share".into(), r"relative\dir".into()])[0] else { panic!() };
+        assert!(text.contains(r"“relative\dir”"), "{text}");
+        // With other arguments around it, in order; the path is never read as anything else.
+        let got = command_line_routes(["--state-dir", r"C:\x", "--share", r"C:\a.torrent", "magnet:?xt=urn:btih:ab"].map(String::from).to_vec());
+        assert_eq!(got, [share(r"C:\a.torrent"), LinkRoute::AddSource { source: "magnet:?xt=urn:btih:ab".into() }]);
+        #[cfg(not(windows))]
+        assert_eq!(command_line_routes(vec!["--share".into(), "/Users/kari/My Photos".into()]), [share("/Users/kari/My Photos")]);
+        #[cfg(windows)]
+        assert!(is_problem(&command_line_routes(vec!["--share".into(), "/Users/kari".into()])[0]), "no drive on Windows");
+    }
+
+    #[test]
+    fn the_verb_is_the_cores_and_starts_the_app_with_share() {
+        let v = explorer_share_verb();
+        assert_eq!(v.title, "Share with Seedwell");
+        assert!(!v.help.is_empty());
+        assert_eq!(v.arguments, r#"--share "%1""#);
+        // The command Explorer runs, split as Windows splits it, for a path with spaces.
+        let args: Vec<String> = v.arguments.replace("%1", r"C:\My Photos").split_once(' ').map(|(o, p)| vec![o.into(), p.trim_matches('"').into()]).unwrap();
+        assert_eq!(command_line_routes(args), [share(r"C:\My Photos")]);
+    }
+
+    #[test]
+    fn a_share_link_reads_back_to_its_path() {
+        assert_eq!(share_path_link(r"C:\100% #1 & x".into()), "seedwell://share?path=C:%5C100%25%20%231%20%26%20x");
+        assert_eq!(share_path_link("/a/æ+b".into()), "seedwell://share?path=/a/%C3%A6%2Bb");
+        let mut paths: Vec<&str> = ODD.to_vec();
+        if cfg!(not(windows)) {
+            paths.extend(["/Users/kari/My Photos", "/tmp/50%/#tag/&?=+", "/Users/kari/Sommer på Hvaler ☀️"]);
+        }
+        for p in paths {
+            let link = share_path_link(p.into());
+            assert!(link.is_ascii() && !link["seedwell://share?".len()..].contains(['#', '&', ' ', '\\']), "{link}");
+            assert_eq!(link_route(link.clone()), share(p), "{p} → {link}");
+        }
+    }
+
+    #[test]
+    fn a_whole_path_is_told_the_same_way_on_every_system() {
+        for yes in [r"C:\", "c:/x", r"\\server\share", r"\\server\share\x", r"\\?\C:\x", r"\\.\pipe\x"] {
+            assert!(is_absolute_path(yes), "{yes}");
+        }
+        for no in ["", "C:", "C:x", r"\\", r"\\server", r"\\server\", r"\\?\", "x/y", r"x\y", "1:/x"] {
+            assert!(!is_absolute_path(no), "{no}");
+        }
+        assert_eq!(is_absolute_path("/x"), cfg!(not(windows)));
     }
 
     #[test]

@@ -548,6 +548,9 @@ pub(crate) struct Torrent {
     /// The finished files are being moved out of `.incomplete`.
     pub finalizing: bool,
     pub shutting_down: bool,
+    /// Told to stop while the finished files were being moved: answered (and the actor ends) once the move is over, so
+    /// whoever stopped it (a removal that deletes the files) never finds them half moved.
+    pub shutdown_after_finalize: Option<oneshot::Sender<ShutdownInfo>>,
     pub meta_fetch: Option<MetaFetch>,
     pub info_cache: Option<(Instant, Arc<[u8]>)>,
     pub info_loading: bool,
@@ -652,6 +655,7 @@ impl Torrent {
             demote_sent: false,
             finalizing: false,
             shutting_down: false,
+            shutdown_after_finalize: None,
             meta_fetch: None,
             info_cache: None,
             info_loading: false,
@@ -790,7 +794,13 @@ impl Torrent {
             }
             TorrentMsg::InfoBytes(r) => self.on_info_bytes(r),
             TorrentMsg::Fingerprints(f) => self.on_fingerprints(f),
-            TorrentMsg::Finalized(r) => self.on_finalized(r),
+            TorrentMsg::Finalized(r) => {
+                self.on_finalized(r);
+                if let Some(reply) = self.shutdown_after_finalize.take() {
+                    let _ = reply.send(self.shutdown_info());
+                    return true;
+                }
+            }
             TorrentMsg::Cmd(c) => return self.on_cmd(c),
         }
         false
@@ -800,11 +810,16 @@ impl Torrent {
         match c {
             TorrentCmd::Shutdown(reply) => {
                 self.shutting_down = true;
-                let info = self.shutdown_info();
                 for p in self.peers.values() {
                     let _ = p.tx.try_send(PeerCmd::Disconnect);
                 }
-                let _ = reply.send(info);
+                // The finished files are moving out of staging (a task of their own): the stop is answered when
+                // the move is over (`Finalized`), never with some files moved and others not.
+                if self.finalizing {
+                    self.shutdown_after_finalize = Some(reply);
+                    return false;
+                }
+                let _ = reply.send(self.shutdown_info());
                 return true;
             }
             TorrentCmd::SetFilePriorities(p) => self.set_file_priorities(p),

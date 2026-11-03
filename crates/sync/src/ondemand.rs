@@ -442,6 +442,10 @@ impl Holder<'_> {
 
 /// Why a file is not freed when no device can stand in for it.
 pub const NOT_HELD_ELSEWHERE: &str = "no other device that has it is connected";
+/// Why a pinned file is not freed.
+pub const KEPT_PINNED: &str = "kept on this device (pinned): unpin it first";
+/// Why a file changed in the cache since it was recorded is not freed (it is a change, not scanned yet).
+pub const KEPT_CHANGED: &str = "changed here since it was recorded";
 
 /// The files this device holds that no other member (none of `not_members`) is known to hold (at this version or a
 /// later one, with the content): if this device stops syncing the folder, the others lose them (SPEC §7G.11).

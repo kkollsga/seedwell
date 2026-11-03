@@ -15,6 +15,9 @@ static class Registration
     static readonly string Classes = Environment.GetEnvironmentVariable("SEEDWELL_INSTALL_TEST") == "1"
         ? @"Software\SeedwellInstallTest\Classes" : @"Software\Classes";
     const string ProgId = "Seedwell.torrent";
+    const string VerbKey = "Seedwell.Share";
+    // A folder's own menu (%1: the folder) and its background's (%V: the folder shown).
+    static string[] VerbParents => [$@"{Classes}\Directory\shell\{VerbKey}", $@"{Classes}\Directory\Background\shell\{VerbKey}"];
     static string AppKey => $@"{Classes}\Applications\Seedwell.exe";
 
     static string Exe => Environment.ProcessPath ?? Path.Combine(AppContext.BaseDirectory, "Seedwell.exe");
@@ -57,6 +60,18 @@ static class Registration
             using (var icon = s.CreateSubKey("DefaultIcon")) icon.SetValue("", $"\"{Exe}\",0");
             using (var cmd = s.CreateSubKey(@"shell\open\command")) cmd.SetValue("", Open);
         }
+        // Explorer's "Share with Seedwell" on folders: the core's title and arguments (--share "%1"), after the quoted
+        // path of this exe; the core reads the path back (command_line_routes). Nothing is encoded here.
+        var verb = uniffi.trs_ffi.TrsFfiMethods.ExplorerShareVerb();
+        foreach (var key in VerbParents)
+        {
+            using var v = Registry.CurrentUser.CreateSubKey(key);
+            v.SetValue("MUIVerb", verb.Title);
+            v.SetValue("Icon", $"\"{Exe}\",0");
+            var arguments = key.Contains(@"\Background\") ? verb.Arguments.Replace("%1", "%V") : verb.Arguments;
+            using var cmd = v.CreateSubKey("command");
+            cmd.SetValue("", $"\"{Exe}\" {arguments}");
+        }
         // The application itself, so "Open with" and Default apps list it for both.
         using (var app = Registry.CurrentUser.CreateSubKey(AppKey))
         {
@@ -86,6 +101,7 @@ static class Registration
         }
         Registry.CurrentUser.DeleteSubKeyTree($@"{Classes}\seedwell", false);
         Registry.CurrentUser.DeleteSubKeyTree(AppKey, false);
+        foreach (var key in VerbParents) Registry.CurrentUser.DeleteSubKeyTree(key, false);
         Changed();
     }
 

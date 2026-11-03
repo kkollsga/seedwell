@@ -8,7 +8,7 @@ import SwiftUI
 /// Play a video: a plain triangle in the text colour (white in dark mode), no circle or button chrome,
 /// so it never reads as the accent-coloured Resume control.
 struct PlayGlyph: View {
-    var size: CGFloat = 12
+    var size: CGFloat = Theme.Icon.regular
 
     var body: some View {
         Image(systemName: QAFlags.playGlyph).font(.system(size: size)).foregroundStyle(.primary)
@@ -25,6 +25,8 @@ struct FileIconView: View {
     let ext: String
     var linked = false
     var size: CGFloat = 38
+    /// The link glyph drawn inside the 16-point badge circle: smaller than any text style so it fits the circle.
+    private static let badgeGlyph: CGFloat = 8
 
     var body: some View {
         Image(nsImage: FileIcons.icon(ext: ext))
@@ -34,7 +36,7 @@ struct FileIconView: View {
             .overlay(alignment: .bottomTrailing) {
                 if linked {
                     Image(systemName: "link")
-                        .font(.system(size: 8, weight: .bold))
+                        .font(.system(size: Self.badgeGlyph, weight: .bold))
                         .foregroundStyle(.white)
                         .frame(width: 16, height: 16)
                         .background(Circle().fill(Color.accentColor))
@@ -77,7 +79,7 @@ struct PauseRing: View {
                     .stroke(Color.accentColor, style: StrokeStyle(lineWidth: 2, lineCap: .round))
                     .rotationEffect(.degrees(-90))
                 Image(systemName: retry ? "arrow.clockwise" : paused ? "play.fill" : "pause.fill")
-                    .font(.system(size: retry ? 10 : 9, weight: .bold))
+                    .font(Theme.micro.weight(.bold))
                     .foregroundStyle(.primary)
             }
             .frame(width: 26, height: 26)
@@ -123,7 +125,7 @@ struct TransferRowView: View {
                         Circle().fill(Color.orange).frame(width: 8, height: 8).accessibilityHidden(true)
                     }
                     Text(row.title)
-                        .font(.system(size: 13.5, weight: row.dimmed ? .regular : .medium))
+                        .font(Theme.body.weight(row.dimmed ? .regular : .medium))
                         .foregroundStyle(row.dimmed ? .secondary : .primary)
                         .lineLimit(1)
                         .truncationMode(.middle)
@@ -132,12 +134,12 @@ struct TransferRowView: View {
                         .layoutPriority(1)
                 }
                 statusText
-                    .font(.system(size: 12))
+                    .font(Theme.secondary)
                     .monospacedDigit()
                     .lineLimit(1)
                 if let detail = row.detail {
                     Text(detail)
-                        .font(.system(size: 12))
+                        .font(Theme.secondary)
                         .monospacedDigit()
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
@@ -147,7 +149,7 @@ struct TransferRowView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             if let slot = row.rate {
                 Text(slot.text)
-                    .font(.system(size: 13, weight: .medium)).monospacedDigit()
+                    .font(Theme.body.weight(.medium)).monospacedDigit()
                     .foregroundStyle(slot.active ? Color.primary : Color.secondary)
                     .lineLimit(1)
                     .frame(width: Self.rateWidth, alignment: .trailing)
@@ -228,26 +230,26 @@ struct TransferRowView: View {
             }
         case .reveal:
             Button { commands.reveal([t]) } label: {
-                Image(systemName: "magnifyingglass").font(.system(size: 14, weight: .medium)).foregroundStyle(Color.accentColor)
+                Image(systemName: "magnifyingglass").font(.system(size: Theme.Icon.regular, weight: .medium)).foregroundStyle(Color.accentColor)
             }
             .buttonStyle(.plain)
             .help(c.help)
             .padding(.trailing, 4)
         case .lowPower:
-            Image(systemName: "moon.fill").font(.system(size: 11)).foregroundStyle(.secondary)
+            Image(systemName: "moon.fill").font(.system(size: Theme.Icon.small)).foregroundStyle(.secondary)
                 .frame(width: 16)
                 .help(c.help)
         case .errorBadge:
-            Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 13)).foregroundStyle(Color.orange).padding(.trailing, 4)
+            Image(systemName: "exclamationmark.triangle.fill").font(.system(size: Theme.Icon.regular)).foregroundStyle(Color.orange).padding(.trailing, 4)
                 .help(c.help)
         case .deadBadge:
-            Image(systemName: "xmark.octagon.fill").font(.system(size: 13)).foregroundStyle(Color.red).help(c.help)
+            Image(systemName: "xmark.octagon.fill").font(.system(size: Theme.Icon.regular)).foregroundStyle(Color.red).help(c.help)
         case .remove:
             Button(c.title ?? "") { commands.confirmRemove([t], deleteFiles: false) }.controlSize(.small)
                 .help(c.help)
         case .resumeSharing:
             Button { commands.resume([t.id]) } label: {
-                Image(systemName: "play.circle").font(.system(size: 18, weight: .light)).foregroundStyle(Color.accentColor)
+                Image(systemName: "play.circle").font(.system(size: Theme.Icon.large, weight: .light)).foregroundStyle(Color.accentColor)
             }
             .buttonStyle(.plain)
             .help(c.help)
@@ -261,7 +263,7 @@ struct TransferRowView: View {
 
     private func infoButton(_ c: RowControl) -> some View {
         Button(action: openInfo) {
-            Image(systemName: "info.circle").font(.system(size: 19, weight: .light)).foregroundStyle(Color.accentColor)
+            Image(systemName: "info.circle").font(.system(size: Theme.Icon.large, weight: .light)).foregroundStyle(Color.accentColor)
         }
         .buttonStyle(.plain)
         .help(c.help)
@@ -278,8 +280,8 @@ struct RowCategoryPill: View {
     var body: some View {
         let active = pill.active
         let capsule = HStack(spacing: 3) {
-            Image(systemName: pill.category.symbol).font(.system(size: 8.5, weight: .medium))
-            Text(pill.label).font(.system(size: 10.5, weight: .medium))
+            Image(systemName: pill.category.symbol).font(Theme.micro)
+            Text(pill.label).font(Theme.micro)
         }
         .foregroundStyle(active ? Color.accentColor : .secondary)
         .padding(.horizontal, 6).padding(.vertical, 1.5)
@@ -305,9 +307,9 @@ struct CategoryFilterChip: View {
     var body: some View {
         Button(action: clear) {
             HStack(spacing: 5) {
-                Image(systemName: chip.category.symbol).font(.system(size: 10, weight: .medium))
-                Text(chip.label).font(.system(size: 11.5, weight: .medium))
-                Image(systemName: "xmark").font(.system(size: 8.5, weight: .bold))
+                Image(systemName: chip.category.symbol).font(Theme.caption.weight(.medium))
+                Text(chip.label).font(Theme.caption.weight(.medium))
+                Image(systemName: "xmark").font(Theme.micro.weight(.bold))
             }
             .foregroundStyle(Color.accentColor)
             .padding(.horizontal, 9).padding(.vertical, 3)

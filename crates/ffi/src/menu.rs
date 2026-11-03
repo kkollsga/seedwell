@@ -219,6 +219,10 @@ pub struct MenuRow {
     pub expands: bool,
     /// A Play icon at the right edge.
     pub playable: bool,
+    /// The Play icon's tooltip and screen reader name, "Play Movie.2024.mkv" (as a file's Play button,
+    /// [`crate::file_list::FilePlayButton`]): the row's whole name. Set exactly when `playable`.
+    #[uniffi(default = None)]
+    pub play_help: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, uniffi::Record)]
@@ -315,6 +319,9 @@ fn offered(mut m: MenuModel, host: &[HostWindow]) -> MenuModel {
                 }
             }
             row.playable &= player;
+            if !row.playable {
+                row.play_help = None;
+            }
         }
     }
     m
@@ -387,6 +394,11 @@ fn recent_subtitle(r: &TransferRow, now_ms: u64) -> String {
     parts.join(" · ")
 }
 
+/// The Play icon's words, when the row has one.
+fn play_help(r: &TransferRow, playable: bool) -> Option<String> {
+    playable.then(|| format!("Play {}", r.display_name))
+}
+
 fn ring(f: f64) -> Option<MenuMark> {
     Some(MenuMark::Ring { fraction: f })
 }
@@ -404,6 +416,7 @@ fn downloading_row(r: &TransferRow, now_ms: u64) -> MenuRow {
         click: None,
         expands: expands(r),
         playable: shows_play(r),
+        play_help: play_help(r, shows_play(r)),
     };
     if r.awaiting_choice {
         // Waits for the user (SPEC §7A.6): no check, the whole name, and a click opens the chooser.
@@ -442,6 +455,7 @@ fn queued_row(r: &TransferRow) -> MenuRow {
         click: None,
         expands: expands(r),
         playable: shows_play(r),
+        play_help: play_help(r, shows_play(r)),
     }
 }
 
@@ -449,6 +463,7 @@ fn queued_row(r: &TransferRow) -> MenuRow {
 /// list has the row's controls (the chevron, and Play).
 fn recent_row(r: &TransferRow, now_ms: u64) -> MenuRow {
     let expands = expands(r);
+    let playable = expands && shows_play(r);
     MenuRow {
         id: r.id.clone(),
         title: r.display_name.clone(),
@@ -459,7 +474,8 @@ fn recent_row(r: &TransferRow, now_ms: u64) -> MenuRow {
         dimmed: false,
         click: Some(MenuClick::Reveal),
         expands,
-        playable: expands && shows_play(r),
+        playable,
+        play_help: play_help(r, playable),
     }
 }
 
@@ -637,9 +653,39 @@ pub struct IconLook {
     pub progress: Option<f64>,
     /// Aggregate move progress (a green bar instead of the hairline) once a move has run long enough to show.
     pub moving: Option<f64>,
-    /// A small orange dot: something waits for the user.
+    /// The icon's one dot (small, orange, lower right): something needs the user. A problem (an error, a torrent
+    /// waiting for its files to be chosen) or something waiting for the user's answer ([`IconLook::needs_answer`]).
     pub attention: bool,
+    /// Why the dot also shows, when something waits for the user's answer (the tooltip says what). `None`: nothing does.
+    /// It goes the moment the last one is answered, expires or is withdrawn.
+    #[uniffi(default = None)]
+    pub needs_answer: Option<AttentionKind>,
 }
+
+/// What waits for the user's answer, for the icon's attention dot. One kind today; others (a setting whose problem
+/// blocks, say) join here, each with its words in [`attention_text`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, uniffi::Enum)]
+pub enum AttentionKind {
+    /// Agents' requests for access (SPEC 9A.3), the ones the menu's line shows.
+    AgentRequest,
+}
+
+/// What the icon's dot waits for in `s`, if anything.
+fn needs_answer(s: &Snapshot) -> Option<AttentionKind> {
+    (s.agent_requests > 0).then_some(AttentionKind::AgentRequest)
+}
+
+/// The dot's words, for the tooltip and (in lower case) the icon's accessibility label: "An agent is waiting for your
+/// answer".
+fn attention_text(kind: AttentionKind, s: &Snapshot) -> String {
+    match kind {
+        AttentionKind::AgentRequest if s.agent_requests > 1 => format!("{} requests from agents are waiting for your answer", s.agent_requests),
+        AttentionKind::AgentRequest => "An agent is waiting for your answer".into(),
+    }
+}
+
+/// How long after a request's expiry the icon looks again (the expiry is noticed when the requests are read).
+const EXPIRY_SLACK_MS: u64 = 250;
 
 #[derive(Clone, Debug, PartialEq, uniffi::Record)]
 pub struct IconModel {
@@ -652,6 +698,10 @@ pub struct IconModel {
     pub next_refresh_ms: u32,
     /// How late the timer may fire (lets the system coalesce wake-ups).
     pub refresh_leeway_ms: u32,
+    /// What the attention dot means, for the icon's tooltip ("An agent is waiting for your answer"); `None` without
+    /// the dot.
+    #[uniffi(default = None)]
+    pub attention_text: Option<String>,
 }
 
 /// The menu bar icon. It remembers when the current move started (the move bar shows only for a move still
@@ -695,8 +745,10 @@ impl IconState {
             up: intensity(s.up_rate),
             progress: downloading.then(|| (done as f64 / total.max(1) as f64 * 50.0).round() / 50.0),
             moving: move_fraction(&mut since, s.moving_percent, now_unix_ms),
-            attention: s.attention,
+            attention: s.attention || needs_answer(s).is_some(),
+            needs_answer: needs_answer(s),
         };
+        let attention_text = look.needs_answer.map(|k| attention_text(k, s));
         let mut label = APP_NAME.to_string();
         if s.down_rate > 0 {
             label.push_str(&format!(", downloading {}", d::rate(s.down_rate)));
@@ -709,9 +761,15 @@ impl IconState {
         if s.attention {
             label.push_str(", needs attention");
         }
+        if let Some(t) = &attention_text {
+            let mut c = t.chars();
+            label.push_str(", ");
+            label.extend(c.next().map(|f| f.to_ascii_lowercase()));
+            label.push_str(c.as_str());
+        }
         // A finished download's rate fades over a few seconds after its last block: the colours follow it.
         let moves = downloading || s.up_rate > 0 || s.down_rate > 0 || look.down > 0.0 || look.up > 0.0;
-        let (next_refresh_ms, refresh_leeway_ms) = if since.is_some() {
+        let (mut next_refresh_ms, mut refresh_leeway_ms) = if since.is_some() {
             (500, 100)
         } else if menu_open {
             (MENU_REFRESH_MS, 100)
@@ -720,7 +778,14 @@ impl IconState {
         } else {
             (30_000, 15_000)
         };
-        IconModel { look, accessibility_label: label, next_refresh_ms, refresh_leeway_ms }
+        // A request that expires before then takes the dot with it on time.
+        if let Some(at) = s.agent_requests_expire_ms {
+            let until = u32::try_from(at.saturating_sub(now_unix_ms) + EXPIRY_SLACK_MS).unwrap_or(u32::MAX);
+            if until < next_refresh_ms {
+                (next_refresh_ms, refresh_leeway_ms) = (until, refresh_leeway_ms.min(100));
+            }
+        }
+        IconModel { look, accessibility_label: label, next_refresh_ms, refresh_leeway_ms, attention_text }
     }
 }
 
@@ -767,6 +832,8 @@ mod tests {
             connections: 0,
             online: true,
             offline_since_ms: None,
+            agent_requests: 0,
+            agent_requests_expire_ms: None,
         }
     }
 
@@ -1239,15 +1306,16 @@ mod tests {
         // Waiting for a choice: the whole name, an orange dot, no check, the chooser.
         assert_eq!(d[0].title, long);
         assert_eq!((d[0].subtitle.as_str(), d[0].mark, d[0].running, d[0].click), ("Choose what to download…", Some(MenuMark::Attention), None, Some(MenuClick::OpenChooser)));
-        assert!(!d[0].expands && !d[0].playable);
+        assert!(!d[0].expands && !d[0].playable && d[0].play_help.is_none());
         // Counting down: an empty ring, the countdown, its check pauses the countdown.
         assert_eq!((d[1].subtitle.as_str(), d[1].mark, d[1].running, d[1].countdown), ("Starting in 7 s", Some(MenuMark::Ring { fraction: 0.0 }), Some(true), true));
-        assert!(!d[1].playable, "held: nothing to play yet");
+        assert!(!d[1].playable && d[1].play_help.is_none(), "held: nothing to play yet");
         // Downloading: the name cut in the middle, the ring at its progress, the file list, Play.
         assert_eq!(d[2].title.chars().count(), 44);
         assert!(d[2].title.starts_with("AAAA") && d[2].title.ends_with("BBBB") && d[2].title.contains('…'));
         assert_eq!((d[2].subtitle.as_str(), d[2].mark, d[2].running, d[2].countdown), ("42% · 3.1 MB/s · 4 min left", Some(MenuMark::Ring { fraction: 0.42 }), Some(true), false));
         assert!(d[2].expands && d[2].playable && !d[2].dimmed && d[2].click.is_none());
+        assert_eq!(d[2].play_help, Some(format!("Play {long}")), "the Play icon's words name the whole row, not the cut title");
         // Queued: dimmed, the whole name, no grey line; a paused row with data keeps its ring, without data none.
         let q = &m.sections[1].rows;
         assert!(q.iter().all(|r| r.dimmed && r.subtitle.is_empty()));
@@ -1261,11 +1329,13 @@ mod tests {
         let mut single = recent("s", 0);
         single.file_ext = "mkv".into();
         assert!(!recent_row(&single, 0).playable && !recent_row(&single, 0).expands);
+        assert_eq!(recent_row(&single, 0).play_help, None, "no Play icon, no words for it");
         let mut pack = recent("p", 0);
         pack.file_ext = String::new();
         pack.has_video = true;
         pack.file_count = 8;
         assert!(recent_row(&pack, 0).playable && recent_row(&pack, 0).expands);
+        assert_eq!(recent_row(&pack, 0).play_help, Some(format!("Play {}", pack.display_name)));
         assert_eq!(recent_row(&pack, 200_000).subtitle, "TV · 4 min ago", "minutes round up");
         pack.finished_at = None;
         assert_eq!(recent_row(&pack, 0).subtitle, "TV");
@@ -1392,6 +1462,40 @@ mod tests {
     }
 
     #[test]
+    fn the_attention_dot_comes_with_a_request_and_goes_when_it_expires() {
+        let icon = IconState::new();
+        let idle = icon.icon(empty(), 0, false);
+        assert_eq!((idle.look.needs_answer, idle.attention_text), (None, None));
+        // A request waits (it expires in a day): the dot, its words, the label; the icon's cadence is its own.
+        let now = 1_800_000_000_000;
+        let mut s = empty();
+        s.agent_requests = 1;
+        s.agent_requests_expire_ms = Some(now + 86_400_000);
+        let m = icon.icon(s.clone(), now, false);
+        assert_eq!(m.look.needs_answer, Some(AttentionKind::AgentRequest));
+        assert!(m.look.attention, "one dot: a waiting request shows it too");
+        assert_eq!(m.attention_text.as_deref(), Some("An agent is waiting for your answer"));
+        assert_eq!(m.accessibility_label, "Seedwell, an agent is waiting for your answer");
+        assert_eq!((m.next_refresh_ms, m.refresh_leeway_ms), (30_000, 15_000));
+        assert_ne!(m.look, idle.look, "the host redraws");
+        // Two, one about to expire: the icon looks again right after it does.
+        s.agent_requests = 2;
+        s.agent_requests_expire_ms = Some(now + 4_000);
+        s.attention = true;
+        let m = icon.icon(s.clone(), now, false);
+        assert_eq!(m.attention_text.as_deref(), Some("2 requests from agents are waiting for your answer"));
+        assert_eq!(m.accessibility_label, "Seedwell, needs attention, 2 requests from agents are waiting for your answer");
+        assert_eq!((m.next_refresh_ms, m.refresh_leeway_ms), (4_250, 100));
+        // Overdue (not swept yet): soon, never zero.
+        assert_eq!(icon.icon(s.clone(), now + 10_000, false).next_refresh_ms, 250);
+        // Answered, expired or withdrawn: the core's requests list it no more, and the dot goes.
+        s.agent_requests = 0;
+        s.agent_requests_expire_ms = None;
+        let m = icon.icon(s, now + 10_000, false);
+        assert_eq!((m.look.needs_answer, m.attention_text, m.next_refresh_ms), (None, None, 30_000));
+    }
+
+    #[test]
     fn a_host_without_the_chooser_the_file_list_or_a_player_gets_rows_without_them() {
         use crate::host::host_windows_all;
         let a = ArrivalsState::default();
@@ -1407,13 +1511,14 @@ mod tests {
         let before = rows(&full);
         assert_eq!(before[0].click, Some(MenuClick::OpenChooser));
         assert!(before[1].expands && before[1].playable, "the pack has its chevron and Play");
+        assert!(before[1].play_help.is_some());
         let windows = offered(full.clone(), &[HostWindow::GetInfo, HostWindow::MoveTo, HostWindow::NewChannel, HostWindow::ChatDialogs]);
         let after = rows(&windows);
         assert_eq!((after[0].click, after[0].subtitle.as_str()), (None, "Choose what to download…"), "it still says what it waits for");
-        assert!(!after[1].expands && !after[1].playable);
+        assert!(!after[1].expands && !after[1].playable && after[1].play_help.is_none());
         assert_eq!(after[1].click, Some(MenuClick::Reveal), "showing it in the file manager needs no window");
         assert_eq!(windows.signature, full.signature);
         let lists = rows(&offered(full, &[HostWindow::FileList]));
-        assert!(lists[1].expands && !lists[1].playable, "Play needs a player");
+        assert!(lists[1].expands && !lists[1].playable && lists[1].play_help.is_none(), "Play needs a player");
     }
 }

@@ -10,7 +10,7 @@ struct SettingsBox<Content: View>: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
             Text(title.uppercased())
-                .font(.system(size: 11, weight: .semibold)).tracking(0.4)
+                .font(Theme.caption.weight(.semibold)).tracking(0.4)
                 .foregroundStyle(.secondary)
                 .padding(.leading, 4)
             VStack(spacing: 0) {
@@ -52,7 +52,7 @@ struct SettingsLine<Control: View>: View {
                     VStack(alignment: .leading, spacing: 4) {
                         control
                         if let hint {
-                            Text(hint).font(.system(size: 11.5)).foregroundStyle(.secondary)
+                            Text(hint).font(Theme.caption).foregroundStyle(.secondary)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
                     }
@@ -65,14 +65,14 @@ struct SettingsLine<Control: View>: View {
                     Spacer(minLength: 12)
                     if let hint {
                         Text(hint)
-                            .font(.system(size: 11.5)).foregroundStyle(.secondary)
+                            .font(Theme.caption).foregroundStyle(.secondary)
                             .multilineTextAlignment(.trailing).frame(maxWidth: 260, alignment: .trailing)
                             .layoutPriority(-1)
                     }
                 }
             }
         }
-        .font(.system(size: 13))
+        .font(Theme.body)
         .padding(.horizontal, 14)
         .padding(.vertical, 9)
         .frame(minHeight: 40)
@@ -95,7 +95,7 @@ struct SettingsPage<Content: View>: View {
 struct CodePill: View {
     let text: String
     var body: some View {
-        Text(text).font(.system(size: 12.5, design: .monospaced)).lineLimit(1).fixedSize()
+        Text(text).font(Theme.mono).lineLimit(1).fixedSize()
             .padding(.horizontal, 8).padding(.vertical, 3)
             .background(RoundedRectangle(cornerRadius: 6).stroke(.primary.opacity(0.18), lineWidth: 0.5))
     }

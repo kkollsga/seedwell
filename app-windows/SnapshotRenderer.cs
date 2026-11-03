@@ -42,6 +42,16 @@ sealed class SnapshotRenderer(App app, FlyoutWindow flyout, string dir, string t
         await Settle();
         await Save(root, "menu");
 
+        // A row's files open in the tray (its chevron), the core's checklist under it.
+        if (flyout.FirstExpandable() is string expandable)
+        {
+            flyout.QaToggleFiles(expandable);
+            flyout.OpenPinned(withSync: false);
+            await Settle();
+            await Save(root, "menu-files");
+            flyout.QaToggleFiles(expandable);
+        }
+
         flyout.OpenPinned(withSync: true);
         await Settle();
         await Save(root, "menu-sync");
@@ -84,6 +94,7 @@ sealed class SnapshotRenderer(App app, FlyoutWindow flyout, string dir, string t
 
         await RenderLibrary();
         await RenderChatFiles();
+        await RenderChatImages();
         await RenderFileIcons();
 
         // The tray icon in its looks, at the tray's sizes (drawn for the taskbar's current theme).
@@ -93,6 +104,8 @@ sealed class SnapshotRenderer(App app, FlyoutWindow flyout, string dir, string t
             ("down", new IconLook(1, 0, 0.4, null, false)),
             ("up", new IconLook(0, 0.5, null, null, false)),
             ("both", new IconLook(0.625, 1, 0.8, null, true)),
+            // An agent's request waiting: the same small dot (build 51), the request only in the tooltip.
+            ("request", new IconLook(0, 0.5, null, null, true, AttentionKind.AgentRequest)),
             ("moving", new IconLook(0, 0, null, 0.6, false)),
         };
         foreach (var (name, look) in looks)
@@ -128,6 +141,16 @@ sealed class SnapshotRenderer(App app, FlyoutWindow flyout, string dir, string t
             await Save(window.Content, name);
         }
         await Place(new LibraryPlace.Downloads(), "library-downloads");
+        // A torrent's file list open under its row (the core's FileLists, read from the mock), as its triangle opens it.
+        if (pane.Model?.List?.Groups.SelectMany(g => g.Rows).FirstOrDefault(r => r.Disclosure == RowDisclosure.Files) is ListRow withFiles)
+        {
+            app.Files.Expand(withFiles.Id);
+            for (int i = 0; i < 60 && !(app.Files.Views.TryGetValue(withFiles.Id, out var v) && v.Status is null); i++) await Task.Delay(50);
+            await Settle();
+            await Save(window.Content, "library-files");
+            app.Files.Collapse(withFiles.Id);
+            await Settle();
+        }
         await Place(new LibraryPlace.Sharing(), "library-sharing");
         await Place(new LibraryPlace.FolderSync(), "library-foldersync");
         // Settings: Updates, Devices and Folder Sync's Cloudflare rendezvous (off: the guide).
@@ -256,6 +279,34 @@ sealed class SnapshotRenderer(App app, FlyoutWindow flyout, string dir, string t
                 await Menu(chat.RenderMenu(), "chat-menu");
             }
         }
+        // The chat's look (build 49) on the mock's "Release notes", which has every kind of author, reply quotes and code:
+        // the channel, a message's controls inside a run and at a run's end as the pointer shows them, and the reply bar.
+        if (app.Core.ChatChannels().FirstOrDefault(c => c.Name == "Release notes") is SyncChannel notes)
+        {
+            await Place(new LibraryPlace.Chat(notes.Id, null), "library-chat-notes");
+            if (pane.ChatPageShown is ChatPage page && page.Model is ChatPageModel notesModel)
+            {
+                var inRun = notesModel.Messages.ToList().FindIndex(m => m.Meta is null && m.StartsRun);
+                var runEnd = notesModel.Messages.Length - 1;
+                page.QaHover(inRun, true);
+                page.QaHover(runEnd, true);
+                await Settle();
+                await Save(window.Content, "library-chat-hover");
+                page.QaHover(inRun, false);
+                page.QaHover(runEnd, false);
+                page.QaReply(notesModel.Messages.ToList().FindIndex(m => m.Who == ChatAuthorKind.Theirs));
+                await Settle();
+                await Save(window.Content, "library-chat-reply");
+                page.Escape();
+                // Send as it can send (the accent; grey above, with nothing to send).
+                page.QaType("Shipping it tonight");
+                // The button's state changes with a short animation.
+                await Task.Delay(500);
+                await Settle();
+                await Save(window.Content, "library-chat-typed");
+                page.QaType("");
+            }
+        }
         if (pane.Model?.Sidebar.Directs?.Items.FirstOrDefault() is SidebarItem chatDirect)
         {
             await Place(chatDirect.Place, "library-direct");
@@ -373,6 +424,57 @@ sealed class SnapshotRenderer(App app, FlyoutWindow flyout, string dir, string t
     }
 
     /// <summary>
+    /// A message's images in each shape the core has a sample of (chat_image_layout_samples: a wide photo and a tall
+    /// screenshot fitted, a small picture and an icon at their own size, never enlarged), then a gallery of five on its
+    /// second image with its arrows shown, as a channel draws them.
+    /// </summary>
+    async Task RenderChatImages()
+    {
+        var window = app.LibraryWindow;
+        var scale = window.Content.XamlRoot?.RasterizationScale ?? 1;
+        var samples = TrsFfiMethods.ChatImageLayoutSamples((uint)Math.Ceiling(760 * scale));
+        var attachments = new ChatAttachments(app);
+        Task<ChatImageView?> From(ChatImage image, uint side) => Task.FromResult(samples.FirstOrDefault(x => x.Image.Hash == image.Hash)?.View);
+        StackPanel Labelled(ChatImageSample sample, double width)
+        {
+            var cell = new StackPanel { Spacing = 4 };
+            cell.Children.Add(new TextBlock { Text = sample.Label, FontSize = 11, Opacity = 0.6 });
+            cell.Children.Add(attachments.Images("", [sample.Image], false, width, scale, HorizontalAlignment.Left, 0, _ => { }, () => { }, From).View);
+            return cell;
+        }
+        var singles = samples.Where(x => !x.Label.StartsWith("gallery")).ToArray();
+        var sheet = new StackPanel { Padding = new Thickness(16), Spacing = 16, Background = new SolidColorBrush(Base), Width = 900 };
+        var top = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 24 };
+        var bottom = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 24 };
+        foreach (var sample in singles)
+        {
+            (sample.Label is "wide" or "tall" ? top : bottom).Children.Add(Labelled(sample, 520));
+        }
+        sheet.Children.Add(top);
+        sheet.Children.Add(bottom);
+        var before = window.Content;
+        window.Content = sheet;
+        await PicturesDrawn(sheet);
+        await Save(sheet, "chat-images");
+
+        var gallery = samples.Where(x => x.Label.StartsWith("gallery")).Select(x => x.Image).ToArray();
+        var stage = new StackPanel { Padding = new Thickness(16), Spacing = 4, Background = new SolidColorBrush(Base), Width = 900 };
+        stage.Children.Add(new TextBlock { Text = "gallery", FontSize = 11, Opacity = 0.6 });
+        stage.Children.Add(attachments.Images("", gallery, true, 760, scale, HorizontalAlignment.Left, 1, _ => { }, () => { }, From).View);
+        window.Content = stage;
+        await PicturesDrawn(stage);
+        // The arrows, as the pointer on the stage shows them.
+        foreach (var arrow in RowCommands.Tree(stage).OfType<Button>().Where(x => x.Width == 32))
+        {
+            arrow.Opacity = 1;
+        }
+        await Settle();
+        await Save(stage, "chat-gallery");
+        window.Content = before;
+        await Settle();
+    }
+
+    /// <summary>
     /// The file-type icons from each system image list the rows use by scaling (100 %, 150 %, 200 %), each drawn at
     /// 64 px, so their sharpness can be compared without a high-DPI screen.
     /// </summary>
@@ -396,6 +498,18 @@ sealed class SnapshotRenderer(App app, FlyoutWindow flyout, string dir, string t
         window.Content = sheet;
         await Settle();
         await Save(sheet, "file-icons");
+    }
+
+    /// <summary>Waits until every picture in <paramref name="element"/> is drawn (they decode off the UI thread), at most 3 s.</summary>
+    async Task PicturesDrawn(UIElement element)
+    {
+        for (int i = 0; i < 60 && RowCommands.Tree(element).OfType<Image>().Any(x => x.Source is null); i++)
+        {
+            await Task.Delay(50);
+        }
+        // A decoded picture reaches the screen a moment after its source is set.
+        await Task.Delay(1000);
+        await Settle();
     }
 
     /// <summary>Waits until a popup is open and drawn (a dialog opens with an animation), at most 3 s.</summary>
@@ -423,8 +537,9 @@ sealed class SnapshotRenderer(App app, FlyoutWindow flyout, string dir, string t
         int i = 0;
         foreach (var p in VisualTreeHelper.GetOpenPopupsForXamlRoot(root))
         {
-            // A popup still closing (a dialog just hidden) has no size left: nothing to draw.
-            if (p.Child is FrameworkElement { ActualWidth: > 0, ActualHeight: > 0 } child)
+            // A popup still closing (a dialog just hidden) has no size left, or has closed since the list was made (the
+            // last dialog's smoke layer): nothing to draw.
+            if (p.IsOpen && p.Child is FrameworkElement { ActualWidth: > 0, ActualHeight: > 0 } child)
             {
                 await Save(child, i == 0 ? name : $"{name}-{i}");
                 i++;

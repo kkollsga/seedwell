@@ -182,7 +182,7 @@ struct DevicesTab: View {
 
     var body: some View {
         SettingsPage {
-            Text(model.view.intro).font(.system(size: 13)).foregroundStyle(.secondary)
+            Text(model.view.intro).font(Theme.body).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             if !model.view.rows.isEmpty {
                 SettingsBox(title: "Your Devices") {
@@ -192,9 +192,9 @@ struct DevicesTab: View {
             ForEach(model.waiting, id: \.id) { r in PairRequestView(request: r, busy: model.busy, pair: { model.confirm(r) }, refuse: { model.refuse(r) }) }
             if let line = model.view.joiningLine {
                 VStack(alignment: .leading, spacing: 4) {
-                    Label(line, systemImage: "hourglass").font(.system(size: 13))
+                    Label(line, systemImage: "hourglass").font(Theme.body)
                     if let p = model.view.joiningProblem { ModalError(text: p) }
-                    Text(model.view.myIdLine).font(.system(size: 12, design: .monospaced)).foregroundStyle(.secondary).textSelection(.enabled)
+                    Text(model.view.myIdLine).font(Theme.mono).foregroundStyle(.secondary).textSelection(.enabled)
                 }
             }
             HStack(spacing: 8) {
@@ -210,7 +210,7 @@ struct DevicesTab: View {
                 }
             }
             if let e = model.error, model.sheet == nil { ModalError(text: e) }
-            Text(model.view.note).font(.system(size: 11.5)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            Text(model.view.note).font(Theme.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
         }
         .task { await model.watch() }
         .onAppear { takeLink() }
@@ -238,9 +238,9 @@ private struct DeviceRowView: View {
             Image(systemName: row.isMe ? "laptopcomputer" : "desktopcomputer").foregroundStyle(.secondary).frame(width: 22)
             VStack(alignment: .leading, spacing: 2) {
                 Text(row.title)
-                Text(row.detail).font(.system(size: 11.5)).foregroundStyle(.secondary)
+                Text(row.detail).font(Theme.caption).foregroundStyle(.secondary)
                 if let w = row.warning {
-                    Label(w, systemImage: "exclamationmark.triangle.fill").font(.system(size: 11.5)).foregroundStyle(.orange)
+                    Label(w, systemImage: "exclamationmark.triangle.fill").font(Theme.caption).foregroundStyle(.orange)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
@@ -249,7 +249,7 @@ private struct DeviceRowView: View {
                 Button("Remove…", action: remove).help("Take this device out of your devices for good")
             }
         }
-        .font(.system(size: 13))
+        .font(Theme.body)
         .padding(.horizontal, 14).padding(.vertical, 9)
     }
 }
@@ -263,10 +263,10 @@ private struct PairRequestView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(request.question).font(.system(size: 14, weight: .semibold))
-            Text(request.idLine).font(.system(size: 15, design: .monospaced)).textSelection(.enabled)
+            Text(request.question).font(Theme.heading)
+            Text(request.idLine).font(Theme.heading.monospaced().weight(.regular)).textSelection(.enabled)
                 .accessibilityIdentifier("devices-request-id")
-            Text(request.hint).font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            Text(request.hint).font(Theme.secondary).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             HStack(spacing: 8) {
                 if busy { ProgressView().controlSize(.small) }
                 Spacer(minLength: 0)
@@ -286,19 +286,19 @@ private struct PairSheet: View {
         VStack(alignment: .leading, spacing: 14) {
             VStack(alignment: .leading, spacing: 3) {
                 ModalCaption(text: "Devices")
-                Text(link.title).font(.system(size: 17, weight: .semibold))
+                Text(link.title).font(Theme.title)
             }
             if let r = model.request {
                 PairRequestView(request: r, busy: model.busy, pair: { model.confirm(r) }, refuse: { model.refuse(r) })
             } else {
-                Text(link.text).font(.system(size: 12.5)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                Text(link.text).font(Theme.secondary).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 HStack(spacing: 8) {
-                    Text(link.link).font(.system(size: 11.5, design: .monospaced)).lineLimit(2).truncationMode(.middle)
+                    Text(link.link).font(Theme.monoSmall).lineLimit(2).truncationMode(.middle)
                         .textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
                     Button(link.copyTitle) { model.copy(link) }.help("Copy the link, to paste it on your other device")
                         .accessibilityIdentifier("devices-copy-link")
                 }
-                Text(model.countdown(link)).font(.system(size: 12)).foregroundStyle(.secondary).monospacedDigit()
+                Text(model.countdown(link)).font(Theme.secondary).foregroundStyle(.secondary).monospacedDigit()
                 HStack {
                     Spacer()
                     Button("Done") { model.sheet = nil }.keyboardShortcut(.cancelAction).help("Close; the link keeps working until it expires")
@@ -318,14 +318,14 @@ private struct PasteSheet: View {
         VStack(alignment: .leading, spacing: 14) {
             VStack(alignment: .leading, spacing: 3) {
                 ModalCaption(text: "Devices")
-                Text("Pair with a Link").font(.system(size: 17, weight: .semibold))
+                Text("Pair with a Link").font(Theme.title)
             }
             TextField("seedwell://devices/…", text: Binding(get: { model.pasted }, set: { model.setPasted($0) }))
                 .textFieldStyle(.roundedBorder).accessibilityIdentifier("devices-link-field")
             if let p = model.pasteProblem {
-                Label(p, systemImage: "xmark.circle").font(.system(size: 12)).foregroundStyle(.orange)
+                Label(p, systemImage: "xmark.circle").font(Theme.secondary).foregroundStyle(.orange)
             }
-            Text(model.view.myIdLine).font(.system(size: 12, design: .monospaced)).foregroundStyle(.secondary).textSelection(.enabled)
+            Text(model.view.myIdLine).font(Theme.mono).foregroundStyle(.secondary).textSelection(.enabled)
             if let e = model.error { ModalError(text: e) }
             ModalButtons(primary: "Pair", enabled: model.canJoin, busy: model.busy, primaryHelp: "Ask the other device to let this Mac join",
                          cancel: { model.sheet = nil }, confirm: { model.join() })
@@ -341,17 +341,17 @@ private struct RemoveDeviceSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text(view.title).font(.system(size: 15, weight: .semibold)).fixedSize(horizontal: false, vertical: true)
-            Text(view.text).font(.system(size: 12.5)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            Text(view.title).font(Theme.heading).fixedSize(horizontal: false, vertical: true)
+            Text(view.text).font(Theme.secondary).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             if !view.places.isEmpty {
-                Text(view.placesTitle).font(.system(size: 13))
+                Text(view.placesTitle).font(Theme.body)
                 ForEach(view.places, id: \.id) { p in
                     Toggle(p.title, isOn: Binding(get: { model.ticked.contains(p.id) }, set: { _ in model.toggle(p) }))
                         .toggleStyle(.checkbox)
                 }
             }
-            if let a = view.askOwner { Text(a).font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true) }
-            if let p = view.paired { Text(p).font(.system(size: 12)).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true) }
+            if let a = view.askOwner { Text(a).font(Theme.secondary).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true) }
+            if let p = view.paired { Text(p).font(Theme.secondary).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true) }
             if let e = model.error { ModalError(text: e) }
             ModalButtons(primary: view.removeTitle, busy: model.busy, primaryHelp: "Remove this device from your devices for good",
                          cancel: { model.sheet = nil }, confirm: { model.remove(view) })
@@ -366,7 +366,7 @@ private struct LeaveSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text(model.view.leaveQuestion).font(.system(size: 13)).fixedSize(horizontal: false, vertical: true)
+            Text(model.view.leaveQuestion).font(Theme.body).fixedSize(horizontal: false, vertical: true)
             if let e = model.error { ModalError(text: e) }
             ModalButtons(primary: model.view.leaveAction, busy: model.busy,
                          primaryHelp: model.view.kind == .removed ? "Make new keys for your devices" : "Stop being one of your devices",

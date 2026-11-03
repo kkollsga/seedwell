@@ -100,7 +100,7 @@ extension SnapshotRenderer {
             NSSize(width: max(s.width, p.1.x + p.0.frame.width), height: max(s.height, p.1.y + p.0.frame.height))
         }
         let label = caption.map { NSTextField(wrappingLabelWithString: $0) }
-        label?.font = .systemFont(ofSize: 10.5)
+        label?.font = Theme.NS.caption()
         label?.textColor = .secondaryLabelColor
         let width = caption == nil ? content.width : max(content.width, 320)
         label?.preferredMaxLayoutWidth = width
@@ -274,9 +274,9 @@ private final class Canvas: NSView {
     private static let checkColumn: CGFloat = 18
     private static let imageColumn: CGFloat = 16 + 8
     private static let right: CGFloat = 15
-    private static var font: NSFont { .menuFont(ofSize: 0) }
-    private static var small: NSFont { .menuFont(ofSize: NSFont.smallSystemFontSize) }
-    private static var header: NSFont { .systemFont(ofSize: NSFont.smallSystemFontSize, weight: .bold) }
+    private static var font: NSFont { Theme.NS.menu }
+    private static var small: NSFont { Theme.NS.menuSmall }
+    private static var header: NSFont { Theme.NS.caption(.bold) }
 
     init(item: NSMenuItem, width: CGFloat, stateColumn: Bool) {
         self.item = item
@@ -354,7 +354,7 @@ private final class Canvas: NSView {
         }
         var x = Self.left
         if stateColumn {
-            if item.state != .off, let img = symbol(item.state == .on ? "checkmark" : "minus", size: 11, color: ink) {
+            if item.state != .off, let img = symbol(item.state == .on ? "checkmark" : "minus", size: Theme.Icon.small, color: ink) {
                 img.draw(at: NSPoint(x: x + 1, y: ((bounds.height - img.size.height) / 2).rounded()), from: .zero, operation: .sourceOver, fraction: 1)
             }
             x += Self.checkColumn
@@ -366,7 +366,7 @@ private final class Canvas: NSView {
             x += Self.imageColumn
         }
         var right = bounds.maxX - Self.right
-        if item.submenu != nil, let img = symbol("chevron.right", size: 10, color: .secondaryLabelColor) {
+        if item.submenu != nil, let img = symbol("chevron.right", size: Theme.Size.micro, color: .secondaryLabelColor) {
             right -= img.size.width
             img.draw(at: NSPoint(x: right, y: ((bounds.height - img.size.height) / 2).rounded()), from: .zero, operation: .sourceOver, fraction: 1)
             right -= 10

@@ -33,8 +33,9 @@ sealed class InfoCard
         this.app = app;
         this.row = row;
         this.close = close;
-        // NEED: the file chooser on Windows (chooser_available false until it exists) and the play offers (Play With).
-        card = new GetInfoCard(app.Core, first, new Clock(), false, null, App.HostWindows);
+        PlayOffer? play = null;
+        try { play = app.Core.PlayOffer(first); } catch (Exception e) { AppLog.Write($"play offer failed: {e.Message}"); }
+        card = new GetInfoCard(app.Core, first, new Clock(), true, play, App.HostWindows);
         Root = new ScrollViewer { Content = panel, MaxHeight = 720, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
         var q = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread();
         refresh = q.CreateTimer();
@@ -284,6 +285,7 @@ sealed class InfoCard
             switch (c)
             {
                 case InfoCommand.Reveal: RowCommands.Reveal([r]); break;
+                case InfoCommand.ChooseFiles: ChooserDialog.Show(app, r.Id); break;
                 case InfoCommand.Remove: app.Library.AskRemoval(app.Library.MenuRows(r.Id), false); break;
                 case InfoCommand.AskTrackerAgain: CoreCalls.InOrder("ask tracker again", () => app.Core.AskTrackerAgain([r.Id]), Refresh); break;
                 case InfoCommand.AnnounceAnyway: CoreCalls.InOrder("announce anyway", () => app.Core.AnnounceAnyway([r.Id]), Refresh); break;

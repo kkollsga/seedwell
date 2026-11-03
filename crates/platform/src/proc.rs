@@ -418,9 +418,161 @@ fn decimal(v: &str) -> Option<f64> {
     v.replace(',', ".").parse().ok()
 }
 
+/// A log of standard error larger than this at start is kept as `<name>.1` (the one before it goes) and begun anew.
+pub const STDERR_LOG_KEEP: u64 = 2 << 20;
+
+static STDERR_TO_LOG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Standard error goes nowhere: no handle at all (a Windows app with no console), or the null device (a Mac app
+/// started by launchd or the Finder).
+pub fn stderr_goes_nowhere() -> bool {
+    #[cfg(unix)]
+    {
+        // SAFETY: `stat` is plain old data, written by the calls; fd 2 and the path are only read.
+        unsafe {
+            let mut st: libc::stat = std::mem::zeroed();
+            if libc::fstat(2, &mut st) != 0 {
+                return true;
+            }
+            let mut null: libc::stat = std::mem::zeroed();
+            libc::stat(c"/dev/null".as_ptr(), &mut null) == 0 && st.st_dev == null.st_dev && st.st_ino == null.st_ino
+        }
+    }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+        use windows_sys::Win32::Storage::FileSystem::{FILE_TYPE_UNKNOWN, GetFileType};
+        use windows_sys::Win32::System::Console::{GetStdHandle, STD_ERROR_HANDLE};
+        // SAFETY: plain calls on this process's standard handle; nothing is written through it.
+        unsafe {
+            let h = GetStdHandle(STD_ERROR_HANDLE);
+            h.is_null() || h == INVALID_HANDLE_VALUE || GetFileType(h) == FILE_TYPE_UNKNOWN
+        }
+    }
+}
+
+/// **Tests only:** this process's standard error goes nowhere from now, as an app's does ([`stderr_goes_nowhere`]):
+/// the null device on a Unix, no handle at all on Windows.
+#[doc(hidden)]
+pub fn test_stderr_to_nowhere() {
+    #[cfg(unix)]
+    // SAFETY: fd 2 becomes a copy of a descriptor of the null device, which is closed again.
+    unsafe {
+        let fd = libc::open(c"/dev/null".as_ptr(), libc::O_WRONLY);
+        if fd >= 0 {
+            libc::dup2(fd, 2);
+            libc::close(fd);
+        }
+    }
+    #[cfg(windows)]
+    // SAFETY: this process's own standard handle, set to none.
+    unsafe {
+        windows_sys::Win32::System::Console::SetStdHandle(windows_sys::Win32::System::Console::STD_ERROR_HANDLE, std::ptr::null_mut());
+    }
+}
+
+/// Sends this process's standard error to the file `path` (appended; kept as `<path>.1` and begun anew when larger
+/// than [`STDERR_LOG_KEEP`]), when it goes nowhere ([`stderr_goes_nowhere`]): what the core says there (every
+/// `eprintln!`, a panic's message) reaches a log in an app started from the Finder or a Windows app, which has no
+/// console. Standard error that goes somewhere (a terminal, a test run, a QA script that reads it) is left as it is.
+/// Once per process; true when it was redirected now.
+pub fn stderr_to_log(path: &std::path::Path) -> io::Result<bool> {
+    use std::sync::atomic::Ordering;
+    if !stderr_goes_nowhere() || STDERR_TO_LOG.swap(true, Ordering::SeqCst) {
+        return Ok(false);
+    }
+    let r = (|| {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        if std::fs::metadata(path).is_ok_and(|m| m.len() > STDERR_LOG_KEEP) {
+            let mut old = path.as_os_str().to_owned();
+            old.push(".1");
+            std::fs::rename(path, old)?;
+        }
+        let file = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            // SAFETY: both descriptors are open; fd 2 becomes a copy of the file's (which closes when `file` drops).
+            if unsafe { libc::dup2(file.as_raw_fd(), 2) } == -1 {
+                return Err(io::Error::last_os_error());
+            }
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::IntoRawHandle;
+            use windows_sys::Win32::System::Console::{STD_ERROR_HANDLE, SetStdHandle};
+            // The handle stays open for the life of the process: standard error is written through it (Rust's
+            // standard error asks for the handle at each write).
+            let h = file.into_raw_handle();
+            // SAFETY: `h` is an open file handle this process owns from here on.
+            if unsafe { SetStdHandle(STD_ERROR_HANDLE, h as _) } == 0 {
+                let e = io::Error::last_os_error();
+                // SAFETY: not handed over: closed again.
+                unsafe { windows_sys::Win32::Foundation::CloseHandle(h as _) };
+                return Err(e);
+            }
+        }
+        Ok(())
+    })();
+    if r.is_err() {
+        STDERR_TO_LOG.store(false, Ordering::SeqCst);
+    }
+    r.map(|()| true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Set in the copy of this test binary that [`standard_error_that_goes_nowhere_goes_to_the_log`] starts: the log.
+    const STDERR_CHILD: &str = "TRS_PLATFORM_TEST_STDERR_LOG";
+
+    /// This test binary again, running only `test` (its output not captured), with `log` to write to.
+    fn child(test: &str, log: &std::path::Path, nowhere: bool) -> std::process::Output {
+        let mut c = std::process::Command::new(std::env::current_exe().unwrap());
+        c.args([test, "--exact", "--nocapture", "--test-threads=1"]).env(STDERR_CHILD, log).stdin(std::process::Stdio::null());
+        if nowhere {
+            c.env("TRS_PLATFORM_TEST_STDERR_NONE", "1");
+        } else {
+            c.stderr(std::process::Stdio::piped());
+        }
+        c.output().unwrap()
+    }
+
+    #[test]
+    fn standard_error_that_goes_nowhere_goes_to_the_log() {
+        let name = format!("{}::standard_error_that_goes_nowhere_goes_to_the_log", module_path!().split_once("::").unwrap().1);
+        if let Some(log) = std::env::var_os(STDERR_CHILD) {
+            // The copy: it says whether it redirected, then something on standard error, then panics.
+            if std::env::var_os("TRS_PLATFORM_TEST_STDERR_NONE").is_some() {
+                test_stderr_to_nowhere();
+            }
+            let moved = stderr_to_log(std::path::Path::new(&log)).unwrap();
+            println!("redirected {moved}, again {}", stderr_to_log(std::path::Path::new(&log)).unwrap());
+            eprintln!("a line on standard error");
+            panic!("the panic's message");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        // Standard error that goes nowhere: redirected once, every line and the panic in the log, a large log kept.
+        let log = dir.path().join("logs").join("core.log");
+        std::fs::create_dir_all(dir.path().join("logs")).unwrap();
+        std::fs::write(&log, vec![b'x'; STDERR_LOG_KEEP as usize + 1]).unwrap();
+        let out = child(&name, &log, true);
+        let said = String::from_utf8_lossy(&out.stdout);
+        assert!(said.contains("redirected true, again false"), "{said}");
+        let text = std::fs::read_to_string(&log).unwrap();
+        assert!(text.contains("a line on standard error") && text.contains("the panic's message"), "{text}");
+        let old = std::fs::metadata(dir.path().join("logs").join("core.log.1")).unwrap();
+        assert_eq!(old.len(), STDERR_LOG_KEEP + 1, "the large log is kept as .1 and begun anew");
+        // Standard error that goes somewhere (here a pipe this test reads) is left alone.
+        let log2 = dir.path().join("other.log");
+        let out = child(&name, &log2, false);
+        assert!(String::from_utf8_lossy(&out.stdout).contains("redirected false, again false"));
+        assert!(String::from_utf8_lossy(&out.stderr).contains("a line on standard error"));
+        assert!(!log2.exists());
+    }
 
     #[test]
     fn this_process_is_measured_whatever_the_locale() {

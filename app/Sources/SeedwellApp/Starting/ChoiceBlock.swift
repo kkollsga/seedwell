@@ -28,7 +28,7 @@ struct ChoiceBlock: View {
             } else {
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)
-                    Text(block.line).font(.system(size: 12.5)).foregroundStyle(.secondary)
+                    Text(block.line).font(Theme.secondary).foregroundStyle(.secondary)
                     Spacer()
                     CancelControl(cancel: block.actions.cancel, keep: nil) { actions.cancel(block.id, $0) }
                 }
@@ -61,7 +61,7 @@ struct ChoiceChecklist: View {
                     HStack(spacing: 6) {
                         TriCheck(state: page.all.check, help: page.all.checkHelp, value: page.all.checkValue) { edit { $0.toggleAll() } }
                             .scaleEffect(0.85).frame(width: 16, height: 16)
-                        Text(page.all.title).font(.system(size: 12.5))
+                        Text(page.all.title).font(Theme.secondary)
                     }
                 }
                 .buttonStyle(.plain)
@@ -69,10 +69,10 @@ struct ChoiceChecklist: View {
                 Spacer()
                 if offersShowAll, fullHeight > maxListHeight || FilesStore.shared.showAll {
                     ShowAllButton(button: fileListShowAll(on: FilesStore.shared.showAll))
-                        .buttonStyle(.plain).font(.system(size: 12)).foregroundStyle(Color.accentColor)
+                        .buttonStyle(.plain).font(Theme.secondary).foregroundStyle(Color.accentColor)
                 }
                 Text(page.selectedLine)
-                    .font(.system(size: 12)).monospacedDigit()
+                    .font(Theme.secondary).monospacedDigit()
                     .foregroundStyle(page.notEnoughSpace ? Color.orange : .secondary)
             }
             ScrollView {
@@ -91,7 +91,7 @@ struct ChoiceChecklist: View {
             .onKeyPress(.downArrow) { edit { $0.moveCursor(delta: 1) }; return .handled }
             .onKeyPress(.upArrow) { edit { $0.moveCursor(delta: -1) }; return .handled }
             if page.notEnoughSpace {
-                Text(page.spaceNote).font(.system(size: 12)).foregroundStyle(Color.orange)
+                Text(page.spaceNote).font(Theme.secondary).foregroundStyle(Color.orange)
             }
             if let buttons {
                 HeldButtons(actions: buttons, cancel: cancel, start: start)
@@ -113,7 +113,7 @@ struct ChoiceChecklist: View {
     private func row(_ item: ChooserRow) -> some View {
         HStack(spacing: 4) {
             if item.level == 0 {
-                FoldChevron(open: item.open, size: 9, width: 26, height: 28, help: item.foldHelp, label: item.foldLabel) {
+                FoldChevron(open: item.open, size: Theme.Size.micro, width: 26, height: 28, help: item.foldHelp, label: item.foldLabel) {
                     edit { $0.toggleFolded(id: item.id) }
                 }
                 .opacity(item.foldable ? 1 : 0).allowsHitTesting(item.foldable)
@@ -124,16 +124,16 @@ struct ChoiceChecklist: View {
                 .scaleEffect(0.85).frame(width: 22, height: 22)
             // The tap that ticks the row covers the title area only, never the chevron or the box.
             HStack(spacing: 6) {
-                Text(item.title).font(.system(size: 12.5))
+                Text(item.title).font(Theme.secondary)
                     .foregroundStyle(item.dimmed ? .secondary : .primary)
                     .lineLimit(1).truncationMode(.middle)
                 if let badge = item.badge {
-                    Text(badge).font(.system(size: 10.5)).foregroundStyle(Color.green)
+                    Text(badge).font(Theme.micro).foregroundStyle(Color.green)
                         .padding(.horizontal, 6).padding(.vertical, 1)
                         .background(Capsule().fill(Color.green.opacity(0.16)))
                 }
                 Spacer(minLength: 4)
-                Text(item.size).font(.system(size: 11.5)).foregroundStyle(.secondary).monospacedDigit()
+                Text(item.size).font(Theme.caption).foregroundStyle(.secondary).monospacedDigit()
             }
             .frame(maxHeight: .infinity)
             .contentShape(Rectangle())

@@ -21,6 +21,10 @@ sealed class LibraryList
     readonly Action refresh;
     readonly StackPanel panel = new() { Padding = new Thickness(16, 0, 16, 16) };
     readonly Dictionary<string, (Border Element, ulong Revision)> rows = [];
+    // Under each row, its open file list (empty while closed); the row's group and model, to draw its triangle again.
+    readonly Dictionary<string, ContentControl> fileSlots = [];
+    readonly Dictionary<string, (ListGroup Group, ListRow Row)> drawnRows = [];
+    readonly FileTree files;
 
     public UIElement Root { get; }
 
@@ -29,12 +33,67 @@ sealed class LibraryList
         this.app = app;
         this.library = library;
         this.refresh = refresh;
+        files = new FileTree(app, app.Files, library, () => { library.SetSelection([]); refresh(); });
         Root = new ScrollViewer { Content = panel, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
         Build(list, removal);
     }
 
     /// <summary>A row's drawn element (to bring a new download into view), if it is in the list.</summary>
     public FrameworkElement? RowElement(string id) => rows.TryGetValue(id, out var drawn) ? drawn.Element : null;
+
+    /// <summary>A file list changed (or opened, or closed): its slot under the row, and the row's triangle.</summary>
+    public void FilesChanged(string? id)
+    {
+        foreach (var rowId in id is null ? fileSlots.Keys.ToArray() : [id])
+        {
+            FillSlot(rowId);
+            if (rows.TryGetValue(rowId, out var drawn) && drawnRows.TryGetValue(rowId, out var d))
+            {
+                drawn.Element.Child = RowContent(d.Group, d.Row);
+            }
+        }
+    }
+
+    /// <summary>A chooser changed: the held rows' checklists and their triangles again.</summary>
+    public void ChoicesChanged()
+    {
+        foreach (var (id, d) in drawnRows.ToArray())
+        {
+            if (d.Row.Disclosure != RowDisclosure.Choice) continue;
+            FillSlot(id);
+            if (rows.TryGetValue(id, out var drawn)) drawn.Element.Child = RowContent(d.Group, d.Row);
+        }
+    }
+
+    void FillSlot(string id)
+    {
+        if (!fileSlots.TryGetValue(id, out var slot)) return;
+        // A held torrent's checklist (selection mode, SPEC 8.3): the shared chooser, its Cancel and Start on the row.
+        if (drawnRows.TryGetValue(id, out var held) && held.Row.Disclosure == RowDisclosure.Choice)
+        {
+            slot.Content = app.HeldOpen.Contains(id) && app.Choices.Page(id) is ChooserPage page
+                ? new Border
+                {
+                    Padding = new Thickness(52, 2, 10, 10),
+                    Child = Choosing.Checklist(id, page, app.Choices, app.Files.ShowAll ? double.PositiveInfinity : 280,
+                        showAll: TrsFfiMethods.FileListShowAll(app.Files.ShowAll), toggleShowAll: () => { app.Files.SetShowAll(!app.Files.ShowAll); ChoicesChanged(); }),
+                }
+                : null;
+            return;
+        }
+        if (app.Files.Views.TryGetValue(id, out var v))
+        {
+            slot.Content = files.Draw(v);
+        }
+        else
+        {
+            slot.Content = null;
+            files.Forget(id);
+        }
+    }
+
+    /// <summary>The file tree's drawing (QA clicks its rows as a click would).</summary>
+    internal FileTree Files => files;
 
     /// <summary>The same list (same signature): only the rows whose revision changed are redrawn.</summary>
     public void Update(ListModel list)
@@ -45,6 +104,7 @@ sealed class LibraryList
             {
                 if (rows.TryGetValue(r.Id, out var drawn) && drawn.Revision != r.Revision)
                 {
+                    drawnRows[r.Id] = (g, r);
                     drawn.Element.Child = RowContent(g, r);
                     drawn.Element.Background = RowBackground(r);
                     rows[r.Id] = (drawn.Element, r.Revision);
@@ -57,6 +117,8 @@ sealed class LibraryList
     {
         panel.Children.Clear();
         rows.Clear();
+        fileSlots.Clear();
+        drawnRows.Clear();
         if (list.FilterChip is FilterChip chip)
         {
             panel.Children.Add(Chip(chip));
@@ -92,7 +154,12 @@ sealed class LibraryList
                 }
                 Wire(border, g, r);
                 rows[r.Id] = (border, r.Revision);
+                drawnRows[r.Id] = (g, r);
                 panel.Children.Add(border);
+                var slot = new ContentControl { HorizontalContentAlignment = HorizontalAlignment.Stretch, Margin = border.Margin };
+                fileSlots[r.Id] = slot;
+                panel.Children.Add(slot);
+                FillSlot(r.Id);
                 if (removal is { RowId: string rid, GroupKey: string gk } && rid == r.Id && gk == g.Key)
                 {
                     panel.Children.Add(Question(removal.Question, library, refresh));
@@ -210,6 +277,8 @@ sealed class LibraryList
                     return;
                 }
             }
+            // A torrent row takes the selection from the file rows.
+            if (app.Files.Selection is not null) app.Files.ClearSelection();
             library.ClickRow(key, id, Down(Windows.System.VirtualKey.Control), Down(Windows.System.VirtualKey.Shift));
             refresh();
         };
@@ -269,8 +338,9 @@ sealed class LibraryList
         };
         ToolTipService.SetToolTip(confirm, q.ConfirmHelp);
         confirm.Click += (_, _) => { library.ConfirmRemoval(); refresh(); };
-        buttons.Children.Add(cancel);
+        // The Windows order: the primary (Remove) first, then Cancel.
         buttons.Children.Add(confirm);
+        buttons.Children.Add(cancel);
         strip.Children.Add(buttons);
         // For screen readers: the strip is announced when it appears (a live region named by its question), and each
         // button says what it does (its help, the Mac's tooltips and accessibility hints).
@@ -324,10 +394,28 @@ sealed class LibraryList
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
-        if (r.Disclosure is not null)
+        if (r.Disclosure is RowDisclosure disclosure)
         {
-            // Files needs HostWindow.FileList and Choice HostWindow.Chooser: without them the core gives no triangle.
-            grid.Children.Add(new FontIcon { Glyph = "", FontSize = 10, Opacity = 0.6, VerticalAlignment = VerticalAlignment.Center });
+            // Files opens the torrent's list under the row; Choice its checklist (the shared chooser).
+            var open = disclosure == RowDisclosure.Choice ? app.HeldOpen.Contains(r.Id) : app.Files.IsExpanded(r.Id);
+            var toggle = TrsFfiMethods.FileListToggle(open);
+            var triangle = new Button
+            {
+                Content = new FontIcon { Glyph = open ? "" : "", FontSize = 10 },
+                Padding = new Thickness(2),
+                MinWidth = 0,
+                MinHeight = 0,
+                Opacity = 0.7,
+                VerticalAlignment = VerticalAlignment.Center,
+                Background = new SolidColorBrush(Colors.Transparent),
+                BorderThickness = new Thickness(0),
+            };
+            ToolTipService.SetToolTip(triangle, toggle.Help);
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(triangle, toggle.Label);
+            var id = r.Id;
+            if (disclosure == RowDisclosure.Files) triangle.Click += (_, _) => app.Files.Toggle(id);
+            else triangle.Click += (_, _) => app.ToggleHeld(id);
+            grid.Children.Add(triangle);
         }
 
         var icon = new Grid { Width = 32, Height = 32 };

@@ -245,6 +245,9 @@ pub(crate) fn snapshot(
         connections: t.connections,
         online: t.online,
         offline_since_ms: t.offline_since_ms,
+        // The library knows no requests: `Core::snapshot` adds them.
+        agent_requests: 0,
+        agent_requests_expire_ms: None,
     }
 }
 

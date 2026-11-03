@@ -54,9 +54,6 @@ pub const CLONES: &str = "t";
 pub const UPLOADS: &str = "u";
 /// Files left in those folders this long (the extension crashed between its steps) are removed.
 pub const LEFTOVER_AGE: Duration = Duration::from_secs(600);
-/// A fetch that gets no byte further for this long gives up (no device that has the file is connected); the request
-/// is taken back, so nothing is fetched for nobody.
-pub const FETCH_STALL: Duration = Duration::from_secs(30);
 /// How often a fetch reports its progress.
 const PROGRESS_EVERY: Duration = Duration::from_millis(250);
 /// How often the watcher looks at the folders and their change feeds.
@@ -320,6 +317,44 @@ impl trs_sync_net::OnDemandHost for Release {
     }
 }
 
+/// The host of on-demand folders when it calls the core in its own process (Windows: Cloud Files calls back into
+/// the provider's process, so there is no extension and no socket): told which folders there should be and when a
+/// folder's change feed moved, and asked to let go of a folder before it is removed or switched to full, as the
+/// Mac's server tells its host. Stops when dropped.
+pub struct Attached {
+    host: Arc<Host>,
+    stop: Arc<AtomicBool>,
+}
+
+impl Attached {
+    /// Watches the folders for `listener` (every [`WATCH_EVERY`]) and lets it release a folder first.
+    pub(crate) fn start(core: Arc<dyn HostCore>, dir: &Path, listener: Arc<dyn SyncHostListener>) -> std::io::Result<Attached> {
+        Self::start_every(core, dir, listener, WATCH_EVERY)
+    }
+
+    fn start_every(core: Arc<dyn HostCore>, dir: &Path, listener: Arc<dyn SyncHostListener>, every: Duration) -> std::io::Result<Attached> {
+        let host = Arc::new(Host::new(core, dir));
+        host.core.set_release(Some(Arc::new(Release { host: host.clone(), listener: listener.clone() })));
+        let stop = Arc::new(AtomicBool::new(false));
+        let (h, s) = (host.clone(), stop.clone());
+        std::thread::Builder::new().name("od-host-watch".into()).spawn(move || {
+            let (mut anchors, mut shown) = (HashMap::new(), None);
+            while !s.load(Ordering::Relaxed) {
+                h.watch_once(listener.as_ref(), &mut anchors, &mut shown);
+                std::thread::sleep(every);
+            }
+        })?;
+        Ok(Attached { host, stop })
+    }
+}
+
+impl Drop for Attached {
+    fn drop(&mut self) {
+        self.host.core.set_release(None);
+        self.stop.store(true, Ordering::Relaxed);
+    }
+}
+
 // ------------------------------------------------------------------------------------------ the core it asks
 
 /// An on-demand folder, as the server needs it.
@@ -353,7 +388,72 @@ pub(crate) trait HostCore: Send + Sync {
 }
 
 /// The sync backend as the server's core.
-pub(crate) struct BackendCore(pub Arc<dyn SyncBackend>);
+/// The sync backend as the host's core. `confine`: an isolated (test) run hosts only the on-demand folders that lie
+/// inside its own state folder, so a test can never register a sync root on a real folder.
+pub(crate) struct BackendCore(pub Arc<dyn SyncBackend>, pub Option<std::path::PathBuf>);
+
+/// Whether `path` lies inside `root`. Both are resolved as far as they exist (the deepest existing ancestor, then the
+/// rest of the path with `..` taken lexically), so links and `..` cannot leave `root`, and a folder whose place is gone
+/// (an on-demand folder after its switch) still counts. Windows' verbatim prefixes (`\\?\`, `\\?\UNC\`, which
+/// `canonicalize` adds) are dropped on both sides, so a resolved and an unresolved path compare alike.
+fn inside(root: &Path, path: &Path) -> bool {
+    path.is_absolute() && plain(&resolved(path)).starts_with(plain(&resolved(root)))
+}
+
+/// `p` resolved through its deepest existing ancestor, the rest appended with `.` and `..` taken lexically.
+fn resolved(p: &Path) -> std::path::PathBuf {
+    use std::path::Component;
+    let mut rest = Vec::new();
+    let mut base = p;
+    let real = loop {
+        if let Ok(r) = std::fs::canonicalize(base) {
+            break r;
+        }
+        match (base.file_name(), base.parent()) {
+            (Some(name), Some(parent)) => {
+                rest.push(name.to_os_string());
+                base = parent;
+            }
+            // Nothing of it exists (or it ends in `..`): take it lexically as it is.
+            _ => {
+                let mut out = std::path::PathBuf::new();
+                for c in p.components() {
+                    match c {
+                        Component::ParentDir => {
+                            out.pop();
+                        }
+                        Component::CurDir => {}
+                        c => out.push(c),
+                    }
+                }
+                return out;
+            }
+        }
+    };
+    let mut out = real;
+    for name in rest.into_iter().rev() {
+        match name.to_str() {
+            Some("..") => {
+                out.pop();
+            }
+            Some(".") => {}
+            _ => out.push(name),
+        }
+    }
+    out
+}
+
+/// `p` without a Windows verbatim prefix: `\\?\C:\x` is `C:\x`, `\\?\UNC\server\share` is `\\server\share`.
+fn plain(p: &Path) -> std::path::PathBuf {
+    let s = p.to_string_lossy();
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        return std::path::PathBuf::from(format!(r"\\{rest}"));
+    }
+    if let Some(rest) = s.strip_prefix(r"\\?\") {
+        return std::path::PathBuf::from(rest);
+    }
+    p.to_path_buf()
+}
 
 impl HostCore for BackendCore {
     fn folders(&self) -> Option<Vec<HostFolder>> {
@@ -365,6 +465,7 @@ impl HostCore for BackendCore {
             s.folders
                 .into_iter()
                 .filter(|f| f.on_demand)
+                .filter(|f| self.1.as_deref().is_none_or(|root| inside(root, Path::new(&f.path))))
                 .map(|f| HostFolder { writable: f.access != SyncAccess::ReadOnly, id: f.id, name: f.name })
                 .collect(),
         )
@@ -614,8 +715,7 @@ pub(crate) struct Host {
     /// Report the domains on the next look even if nothing changed (a release ended: one refused shows again).
     pub(crate) force_report: AtomicBool,
     pub(crate) keepalive: Duration,
-    /// [`FETCH_STALL`], [`REQUEST_WAIT`], [`SEND_WAIT`], [`MAX_CONNECTIONS`] (shorter in tests).
-    pub(crate) stall: Duration,
+    /// [`REQUEST_WAIT`], [`SEND_WAIT`], [`MAX_CONNECTIONS`] (shorter in tests).
     pub(crate) request_wait: Duration,
     pub(crate) send_wait: Duration,
     pub(crate) max_connections: usize,
@@ -670,7 +770,6 @@ impl Host {
             releasing: Mutex::new(HashSet::new()),
             force_report: AtomicBool::new(false),
             keepalive: KEEPALIVE,
-            stall: FETCH_STALL,
             request_wait: REQUEST_WAIT,
             send_wait: SEND_WAIT,
             max_connections: MAX_CONNECTIONS,
@@ -992,7 +1091,9 @@ impl Host {
         above.into_iter().chain(items).collect()
     }
 
-    /// Waits for the content, reporting progress, and hands the extension a copy of it (a clone on APFS) in `t/`.
+    /// Waits for the content, reporting progress, and hands the extension a copy of it (a clone on APFS) in `t/`. The
+    /// core decides when it gives up (no device that has the file is connected, or none of it came for a while), and
+    /// takes its request back then: its error is the answer.
     fn fetch(&self, f: &str, id: &str, progress: &mut dyn FnMut(u64, u64) -> bool) -> Result<Value, HostError> {
         let i = self.item_or_gone(f, id)?;
         if i.kind != SyncItemKind::File {
@@ -1005,18 +1106,11 @@ impl Host {
         if i.state == SyncItemState::Unavailable {
             return Err(HostError::new(ErrKind::Unreachable, trs_sync::ondemand::UNAVAILABLE));
         }
-        let mut last = (u64::MAX, Instant::now());
         loop {
             let got = self.core.fetch(f, id, PROGRESS_EVERY.as_millis() as u64)?;
             if let Some(from) = got.local_path.as_deref() {
                 let to = self.hand_over(from)?;
                 return Ok(json!({ "item": self.wire(f, &got.item)?, "path": to.display().to_string() }));
-            }
-            if got.done != last.0 {
-                last = (got.done, Instant::now());
-            } else if last.1.elapsed() >= self.stall {
-                let _ = self.core.cancel(f, id);
-                return Err(HostError::new(ErrKind::Unreachable, "No device that has this file is connected right now."));
             }
             if !progress(got.done, got.total) {
                 // The client went away (the user or the system cancelled).
@@ -1701,7 +1795,7 @@ impl Core {
         {
             let mut slot = lock(&self.host);
             *slot = None;
-            let core: Arc<dyn HostCore> = Arc::new(BackendCore(self.backend.sync()));
+            let core: Arc<dyn HostCore> = Arc::new(BackendCore(self.backend.sync(), None));
             let s = Server::start(core, Path::new(&dir), listener)
                 .map_err(|e| CoreError::Failed { message: format!("The Finder's on-demand folders could not start: {e}.") })?;
             let path = s.socket().display().to_string();
@@ -1790,6 +1884,33 @@ impl Core {
         out
     }
 
+    /// For a host of on-demand folders that calls the core in its own process (Windows' Cloud Files sync roots; no
+    /// extension, no socket, `verify_peer` never asked): tells `listener` which folders there should be (`domains`:
+    /// register and connect a sync root for each, unregister the others), when a folder's change feed moved
+    /// (`feed_moved`: read `sync_changes` from `sync_host_anchor`), and asks it to let go of a folder before it is
+    /// removed or switched to full (`remove_domain`, which blocks until it has). An isolated run (tests, QA)
+    /// hosts only the on-demand folders inside its own state folder, so it can test sync roots for real in its temp
+    /// state and never registers one on a real folder. Attaching again replaces it; `sync_host_detach`
+    /// (at quit) stops it.
+    pub fn sync_host_attach(&self, listener: Arc<dyn SyncHostListener>) -> Result<(), CoreError> {
+        // An isolated (test) run hosts only folders inside its own state folder: a QA run can test sync roots for real
+        // in its temp state, and can never register one on a real folder.
+        let confine = self.isolated.then(|| self.dir.clone());
+        let mut slot = lock(&self.host_attached);
+        *slot = None;
+        let core: Arc<dyn HostCore> = Arc::new(BackendCore(self.backend.sync(), confine));
+        *slot = Some(
+            Attached::start(core, &self.dir, listener)
+                .map_err(|e| CoreError::Failed { message: format!("On-demand folders could not start: {e}.") })?,
+        );
+        Ok(())
+    }
+
+    /// Stops what `sync_host_attach` started (at quit).
+    pub fn sync_host_detach(&self) {
+        *lock(&self.host_attached) = None;
+    }
+
     /// Stops serving the extension (at quit): its socket goes, so the extension knows the app is not there.
     pub fn sync_host_stop(&self) {
         #[cfg(unix)]
@@ -1802,3 +1923,76 @@ impl Core {
 #[cfg(all(test, unix))]
 #[path = "sync_host_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod attached_tests {
+    use super::*;
+
+    #[derive(Default)]
+    struct Heard {
+        domains: Mutex<Vec<Vec<SyncHostDomain>>>,
+        moved: Mutex<Vec<String>>,
+    }
+
+    impl SyncHostListener for Heard {
+        fn feed_moved(&self, folder_id: String) {
+            lock(&self.moved).push(folder_id);
+        }
+        fn domains(&self, domains: Vec<SyncHostDomain>) {
+            lock(&self.domains).push(domains);
+        }
+        fn remove_domain(&self, _folder_id: String) -> SyncHostRemoval {
+            SyncHostRemoval { error: None }
+        }
+        fn notice(&self, _title: String, _text: String) {}
+        fn verify_peer(&self, _audit_token: Vec<u8>) -> bool {
+            panic!("an in-process host has no peer to verify")
+        }
+    }
+
+    /// On every system: the in-process host hears the folders it should show and each move of their feeds.
+    #[test]
+    fn an_attached_host_hears_its_folders_and_their_feeds() {
+        let (core, dir) = crate::library::tests::mock();
+        let id = core.sync_snapshot().folders[0].id.clone();
+        core.sync_set_on_demand(id.clone(), true, None).unwrap();
+        let heard = Arc::new(Heard::default());
+        let a = Attached::start_every(Arc::new(BackendCore(core.backend.sync(), None)), dir.path(), heard.clone(), Duration::from_millis(20)).unwrap();
+        let end = Instant::now() + Duration::from_secs(10);
+        while lock(&heard.moved).is_empty() {
+            assert!(Instant::now() < end, "nothing heard in 10 s");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let domains = lock(&heard.domains).last().cloned().unwrap();
+        assert_eq!(domains.iter().map(|d| d.id.as_str()).collect::<Vec<_>>(), [id.as_str()]);
+        assert_eq!(lock(&heard.moved).first(), Some(&id));
+        drop(a);
+        // Confined to a root (an isolated run's state folder): only the on-demand folders inside it are shown.
+        let path = core.sync_snapshot().folders.into_iter().find(|f| f.id == id).unwrap().path;
+        let elsewhere = BackendCore(core.backend.sync(), Some(dir.path().join("state")));
+        assert_eq!(elsewhere.folders().unwrap().len(), 0, "a folder outside the run's own state is never hosted");
+        let within = BackendCore(core.backend.sync(), Path::new(&path).parent().map(Path::to_path_buf));
+        assert_eq!(within.folders().unwrap().into_iter().map(|f| f.id).collect::<Vec<_>>(), std::slice::from_ref(&id));
+        // A place that is gone (an on-demand folder after its switch) still counts by where it was; `..` cannot leave.
+        let root = tempfile::tempdir().unwrap();
+        assert!(inside(root.path(), &root.path().join("od").join("Docs")), "a missing folder inside the root");
+        assert!(!inside(root.path(), &root.path().join("od").join("..").join("..").join("elsewhere")), "`..` out of it");
+        assert!(!inside(&root.path().join("state"), &root.path().join("other").join("Docs")), "a missing folder outside");
+        assert!(!inside(root.path(), Path::new("relative/Docs")), "only an absolute path");
+        // Windows' verbatim prefixes compare like plain paths.
+        assert_eq!(plain(Path::new(r"\\?\C:\Users\me\state")), Path::new(r"C:\Users\me\state"));
+        assert_eq!(plain(Path::new(r"\\?\UNC\nas\share\x")), Path::new(r"\\nas\share\x"));
+        assert_eq!(plain(Path::new("/tmp/x")), Path::new("/tmp/x"));
+        // An isolated run attaches (QA tests sync roots in its own temp state), confined to its state folder.
+        let d = tempfile::tempdir().unwrap();
+        let isolated = Core::new(crate::CoreOptions {
+            config_dir: d.path().display().to_string(),
+            mock: true,
+            allow_loopback_trackers: false,
+            forbidden_root: Some(d.path().join("home").display().to_string()),
+        })
+        .unwrap();
+        isolated.sync_host_attach(heard).unwrap();
+        isolated.sync_host_detach();
+    }
+}

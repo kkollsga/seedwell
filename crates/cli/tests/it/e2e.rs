@@ -196,7 +196,8 @@ fn download_pause_resume_info_stats_and_two_step_remove() {
     // counts the skipped file after a priority change: an engine detail reported separately.)
     let g = wait_until(60, "gamma (one file) to finish", || row(&leech, &t3.id).filter(|r| is_done(r) && r["finished_at"].is_number()));
     assert!(g["done_bytes"].as_u64().unwrap() < g["total_bytes"].as_u64().unwrap(), "skipped file not downloaded: {g}");
-    // (The file may be mid-move out of staging for a moment.)
+    // The kept file is in the download folder (in staging or moved out of it: the file may be mid-move for a moment,
+    // and a walk of the folder during the move can miss it, so it is looked for until found, never walked once).
     let start = std::time::Instant::now();
     loop {
         let ok = try_find_file(&leech.dl, "keep.bin").and_then(|p| std::fs::read(p).ok()).is_some_and(|d| d == t3.files[0].1);
@@ -206,8 +207,6 @@ fn download_pause_resume_info_stats_and_two_step_remove() {
         assert!(start.elapsed().as_secs() < 8, "keep.bin never appeared; row {} tree {:?}", row(&leech, &t3.id).unwrap(), tree(&leech.dl));
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
-    // (A torrent with skipped files is never "complete", so the engine keeps it in staging.)
-    assert!(tree(&leech.dl).iter().any(|p| p.ends_with("keep.bin")), "download folder: {:?}", tree(&leech.dl));
 
     // ---- filters
     let seeding = leech.json(&["list", "seeding"])["total"].as_u64().unwrap();

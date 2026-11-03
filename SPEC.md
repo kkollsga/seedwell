@@ -692,7 +692,9 @@ player's timeline jumps there: Seedwell fetches that part first and playback res
   QuickTime; or a chosen app). "Play With ▸" in the row and Get Info menus lists every installed player that can play
   this file's container; players that cannot (QuickTime for MKV) are left out, and with none left Play explains which
   player to install. Apps whose executable cannot run on this Mac (no arm64 slice and no Rosetta, e.g. an Intel-only
-  VLC) are left out, and Play says to update that player. A player not in the table is offered when LaunchServices says it opens the type and is launched
+  VLC) are left out, and Play says to update that player. On Windows the executable's PE header names its CPU, checked
+  against the PC's own: x86 apps run everywhere (WOW64), x64 apps on x64 and on Windows 11 on Arm (emulation; Windows
+  10 on Arm has none), arm64 apps only on Arm. A player not in the table is offered when LaunchServices says it opens the type and is launched
   with open -a and the URL.
 - **Several players at once.** Each Play makes its own stream (own token, own read cursors), so two episodes in two
   players, or the same file in two players, work together. Urgent windows of all live streams share the urgent
@@ -1183,6 +1185,9 @@ baseline every later version must still sync with:
   - A channel has no *share again*: its history is sealed with the channel's own keys, and a new channel starts
     empty. Its owner removes gone devices as a folder's does.
 - **Limits:** LAN unlimited by default; the Internet has its own up and down limits, separate from torrent limits.
+  *QA only:* `SEEDWELL_QA_LIMIT_LAN=1` applies those limits to LAN sessions too (so a check over loopback sees a transfer
+  take its time), honoured only when the state folder is inside a temporary folder (an isolated run, the guard of
+  `SEEDWELL_QA_TRASH_DIR`); the user's Seedwell ignores it, and the log says which.
 
 ### 7G.4 Budgets
 
@@ -1218,7 +1223,12 @@ baseline every later version must still sync with:
 - **Share…** opens the Share dialog, for owners and admins only. It is in the folder list's right-click menu, the
   folder page, the edit modal, and Finder's right-click menu on synced items.
 - **The system Share menu** (Finder's Share ▸, next to AirDrop) has *Seedwell* for one file or folder. A Share
-  extension hands the path to the app (`seedwell://share?path=…`); it reads nothing itself.
+  extension hands the path to the app (`seedwell://share?path=…`); it reads nothing itself. On Windows, Explorer's
+  right-click menu on a folder has *Share with Seedwell* (a registry verb; title and help line from the core,
+  `explorer_share_verb`), whose command is `"Seedwell.exe" --share "%1"`: the core reads `--share <path>` from the
+  command line as the same route (`command_line_routes`; a path that is not whole is refused in the core's words, and
+  a drive's root, which Windows' quoting rules hand over as `C:"`, reads as `C:\`). The host encodes nothing;
+  `share_path_link` builds the link form for a host that needs one.
   - Inside a synced folder, it opens that folder's Share dialog, or says that only the owner and admins can share.
   - Anywhere else, it opens the Share dialog for the folder (or the file's folder) as a new one: add and share in one.
     A note says it is not synced yet; Copy Link starts syncing it from this Mac, as its owner, and makes the link.
@@ -1336,7 +1346,10 @@ baseline every later version must still sync with:
 - Encrypted members: names encrypted with AES-SIV, chunks with XChaCha20-Poly1305 (Syncthing's untrusted-device
   scheme).
 - On-demand folders: the core and the Mac's File Provider extension are in (§7G.11); Windows' Cloud Files sync root
-  is next.
+  is next (the core's side, content kept in place, is in). Later: ranged fetch, so a placeholder fills progressively
+  (playback before the whole file is here): the core would report which byte ranges of a file being fetched are here
+  (its chunks verified so far in the partial copy) and wait for a range; the host would hydrate those ranges
+  (`CF_HYDRATION_POLICY_PROGRESSIVE`). Until then a read waits for the whole file.
 - Renaming a folder on every device.
 - Device records in the DHT (BEP 44).
 - On the folder page: recent changes, and the archive with *Restore*. In the edit modal: archive length and local
@@ -1382,9 +1395,9 @@ Chat between devices, for people and agents (0.1.6).
     the channel is open to agents on the joining device at once, *joining* until an owner or admin admits it (there
     is nothing to read before). Once admitted the membership decides: if it says No, the channel disappears for
     agents there. A link without it (a No channel's) is joined closed: the agent learns nothing of the channel.
-  - **Agents are marked:** a message an agent posts carries its agent name (below) and shows with the *agent* badge
-    on every device; a Yes channel carries a small *agents* tag (a quiet capsule) after its name in the sidebar and
-    by its name in the toolbar (its tooltip says what Yes means), and its page's line ends "agents: yes". The
+  - **Agents are marked:** a message an agent posts carries its agent name (below) and shows with the agent symbol
+    (✦) before that name on every device; a Yes channel carries a small *agents* tag (a quiet capsule) after its
+    name in the sidebar and the agent symbol by its name in the toolbar (its tooltip says what Yes means). The
     Windows app tags it in its sidebar. Agents see `"agents": "yes"` or `"no"` on a channel.
   - A headless daemon, which has no app, takes `--chat-agents off|read|post` for private messages of its run (in
     memory only); its channels need nothing.
@@ -1412,8 +1425,61 @@ Chat between devices, for people and agents (0.1.6).
   - Messages are Markdown: the app shows headings, paragraphs (their line breaks kept), numbered, bulleted and task
     lists (nested), fenced code blocks (with their language; long lines scroll sideways), quotes, rules, pipe tables and
     inline styles. Previews, banners and reply quotes show the text without its Markdown.
-  - Each message is a card (rounded, lightly shaded; the user's own have the accent's tint), so one message ends
-    visibly where the next begins. A run's first card has the author line; the rest of the run sits closer.
+  - **The look (build 49, the user's decisions of 2026-11-02).** Whose a message is decides how it is drawn: the
+    user's (written on this device or on one of the user's own devices, §7G.1 "Your devices"), the user's agents'
+    (an agent on one of those devices), another person's, or another person's agent's. In a channel the messages are
+    one left-aligned column and every message has a thin edge on its left: the user's the accent with a very faint
+    tint of it (only the user's are tinted), the user's agents' a muted grey of the accent, and each other person's
+    their own soft colour (one of eight calm hues, away from the accent's and from the status red and green), their
+    agents' a muted shade of it. In each channel people (a user's devices together, by the user name of their signed
+    profiles; else a device alone) take the colours in the order they joined the channel (the earliest grant of each
+    device in its membership) and keep theirs for good: one who leaves keeps their place, so nobody else's colour
+    changes, and a later joiner takes the next. Up to eight people (the user among them) never share a colour; from
+    the ninth on they repeat. The core decides it from the membership every member device holds, so every device
+    shows the same colours. A device a channel does not list (a private conversation) takes a colour from its id.
+    A private conversation is always one to one and is drawn as bubbles: the user's on the right in the accent
+    colour, the other's on the left in a neutral grey.
+  - A run (one author, the same device and agent, each message within five minutes of the one before; an agent's
+    message and a reply start their own) sits close together and says who wrote it once, on one small quiet line
+    (caption size, regular weight, the tertiary colour) directly under its **last** message, outside its block or
+    bubble and aligned with its edge (a bubble on the right: its right edge): "Kari · Kari's iPhone · 14.32",
+    "You · 14.32" on this device, "You · Kristian's iPhone · 14.32" on another of the user's devices,
+    "Seedwell · Studio iMac · 14.32" after the agent symbol. Another person's line starts with their round initial
+    (an agent symbol in the circle for their agent), as quiet as the line; its tooltip says who and where.
+  - While the pointer is on a message its time, Tag and Reply show, small and quiet, in that row under it: at the
+    right end of the run's line under its last message (in a private conversation on the side away from the bubble's
+    edge), and in the same place under a message inside a run, drawn over the space below it. Nothing moves or wraps
+    anew and the next message is never pushed down. Reply opens a reply bar docked on top of the composer ("Replying to Kari", the message's
+    line, ×) and puts the focus in the field; × or Escape cancels it, and so does going to another conversation. A
+    sent reply shows the message it answers as a small inset block over it: the quoted author's edge colour, their
+    name (quiet) and one line of what they wrote; a click scrolls to the original and lights it for a moment.
+  - A fenced code block (in any message, an agent's Markdown too) shows a copy button (a symbol, "Copy" in its
+    tooltip) in its top-right corner while the pointer is on it or it has the keyboard's focus, over the block (nothing
+    moves); it copies the code exactly, without its language, and shows a check mark for a moment.
+  - **Images sit at the top of their message**, above its text; its files keep their compact cards under the text.
+    One image is shown at most as wide as the message's content area and 420 points high (a tall screenshot is fitted,
+    never cropped), never larger than its own pixels (a small picture stays sharp, centred), with rounded corners and
+    no frame or caption (its name, size and dimensions are in its tooltip); a click opens it (Quick Look on the Mac).
+    Several are a gallery, as Finder's Gallery view: one large on a stage as tall as the tallest of them (so switching
+    never changes the message's height), a filmstrip of evenly sized thumbnails under it (each picture fitted, never
+    cropped; centred, scrolling sideways when there are many; the active one in the accent's rounded highlight, the
+    others dimmed until the pointer is on them), arrows over the stage while the pointer is on it, the arrow keys while
+    the message has the focus, and a quiet "2 / 5". The core says whether a message is a gallery and the order; which
+    image is shown is the window's.
+  - **Image references** (crates/sync-proto/PROTOCOL.md): an image pasted into the text of the composer (with text
+    in the field) leaves `![Image 2](att:2)` at the cursor, one dropped onto the text where it lands (a space keeps it
+    apart from a word it touches); the composer shows the reference in the accent colour, and the message a small chip
+    there (a photo symbol and "Image 2") that shows that image in the gallery and scrolls the message's top into view.
+    Taking the attachment out of the composer takes its references out and renumbers the later ones, as does an image
+    the core refuses. An image added any other way (the paperclip, a drop elsewhere on the conversation, a paste or a
+    drop into an empty field, `--attach`) leaves none. A reference to an image the message does not carry is plain
+    text.
+  - The page's line under its name is short: a channel "2 of 3 online · Muted · shared until 1 Nov" (its role is in
+    the members panel), a topic its channel's, a private conversation "End-to-end encrypted" or "Not connected". The
+    toolbar's Members, Share… and ⋯ are symbols with their words in tooltips; the composer is one field with the
+    paperclip and Send (an arrow) and no other words. In the field Return sends, Shift- or Option-Return starts a
+    line, and Escape cancels a reply. While an input method composes (Japanese, Chinese, a dead key's accent) Return
+    commits the composition and never sends, and Escape is the input method's.
   - `trust` (0.1.7): `this-device` only for what the user posted on this Mac; `untrusted-agent` for an agent's post
     on this Mac; `untrusted-peer` for another device's. Everything but `this-device` reaches an agent as data,
     never as instructions.
@@ -1876,7 +1942,7 @@ an app group shared by the app and its extension), a Cloud Files sync root on Wi
   role's capabilities (a read-only member reads and deletes; the folder itself is neither renamed nor deleted from the
   Finder), and a kept item downloads eagerly and is never evicted by the system; the Finder actions *Always Keep on
   This Mac* and *Stop Keeping on This Mac* pin and unpin. A fetch reports progress and hands the extension a copy (a
-  clone) of the cache's file, and gives up after 30 s without a byte, taking its request back. The system's set of
+  clone) of the cache's file, and fails when the core gives up on it (below, *When a fetch gives up*). The system's set of
   items on disk is reported on each change; a file that left it (Remove Download, disk pressure) is freed by the core
   as an evict (the first report after a start is the baseline). Files the core holds show downloaded, not online
   only: once a run for each enabled domain, and again after a switch, the app reads the system's set, the core lists
@@ -1892,6 +1958,22 @@ an app group shared by the app and its extension), a Cloud Files sync root on Wi
   version already listed below does, once (its record is new: the index notes no separate arrival time for a version
   and for its content), and the folder comes back with its new version. The folder's place stays where the user chose it
   (joining) or where it was (switching): it is where the files go if it is switched to full or removed.
+- **Windows' host.** Cloud Files calls back into the provider's own process, so the app calls the core's on-demand
+  calls in-process: no extension, no socket. `sync_host_attach` tells it the folders there should be (a sync root
+  each, identity = the folder's id), each move of a change feed, and asks it to let go of a folder before a removal
+  or switch (as `remove_domain` on the Mac). Every on-demand folder it registers it keeps in place (above). It keeps no
+  state of its own: the last change-feed anchor it applied is the core's, kept with the folder
+  (`sync_host_anchor`, `sync_set_host_anchor`; `<sync state>/<id>.anchor`, deleted with the folder and dropped by a
+  switch). Failed calls are typed (`CoreError::OnDemand` with a `SyncErrorKind`), so each callback answers with the
+  matching status; whether the user is also told is the core's (`Notices::sync_ondemand_notice`: a version no device
+  has, a file no connected device can give, once per file in ten minutes; nothing for what the host handles itself).
+  Explorer's *Free up space* only sets an attribute, so it has no error to show: after the user's free the host asks
+  `Notices::sync_evict_notice` with what `sync_evict` kept, and the core tells the user in one notice per folder (a
+  later free replaces it) how many files stay on this PC and why (kept here, no other device that has them connected,
+  changed here, open in another app); nothing when everything was freed, and nothing for the system's own clean-ups
+  (Storage Sense, disk pressure).
+  Explorer's own states (cloud, outlined and solid checks) come from the in-sync state and the pin attribute; the
+  core's words for its custom state column are `sync_item_state_text`.
 - **Removing** an on-demand folder never deletes content: what is held here (changes no other device has, the
   former folder after a switch, ignored files, the archive) becomes an ordinary folder at its place (or next to it,
   `<name> 2`, when something is there); a folder still busy is not removed (it stays, try again). Nothing is forgotten
@@ -1916,6 +1998,28 @@ an app group shared by the app and its extension), a Cloud Files sync root on Wi
   whose content is here already (a downloaded file stays current: a newer version elsewhere is fetched). Any other
   new version is taken as its version alone (online only, the new size and time shown). Directories and links are
   always made (they hold no content). Unpinning stops what was on its way; what is here stays.
+- **When a fetch gives up.** The core decides, never a host timer (`od_fetch_wait`, `sync_fetch`): a host asks and
+  waits a moment (`wait_ms`), and while the content is on its way it gets how far it is (and the connected devices
+  it comes from, `waiting_for`) and asks again. The fetch fails with *not here yet* (`NotHereYet`), and takes its
+  request back (what is pinned stays wanted), as soon as
+  - no connected device has the content (none holds the version, as its index says, on a session that shares the
+    folder) and none may be coming up: past a grace of 3 s (`FETCH_GRACE`) after the service started, the network
+    changed or the last session began (a session then links its folders and sends its index). So a file only an
+    offline device has fails at once (a read in the file manager says so, instead of hanging), and one asked for
+    right after a start or a reconnect waits for the sessions;
+  - or the devices asked sent none of it for 30 s (`FETCH_STALL`) while it was waited on (counted anew when nobody
+    waited on it for 2 s).
+
+  Each ask returns within about `wait_ms`, whatever the folder's core is doing (a pull round holds it while it
+  downloads, minutes on a slow link): a request that stands already is not made again, and one that must wait for
+  the core goes in by itself once the core is free (the asks meanwhile wait on it and never give up). How far it is
+  (`done`) is the bytes of the file here so far, in order: the puller writes each chunk as it arrives (a window of
+  chunks is not held back until all of it is in), so a host reports progress at least once a chunk and a slow link
+  never looks stalled to it (Cloud Files cancels a read that reports nothing for 60 s).
+
+  A version no device can give at all is *unavailable* at once (above). The Mac's File Provider answers the
+  extension with the core's error (*server unreachable*); Windows' Cloud Files answers the read with the network-
+  unavailable status, and the core decides whether the user is told (`sync_ondemand_notice`).
 - **States** (per file): *online only* (dataless, not wanted), *downloading* (dataless, wanted), *downloaded* (here,
   and another device holds this version too), *only here* (here, a change no other device holds yet). *Pinned* is a
   flag beside them. **In sync**, for an on-demand folder, means: the current version of every item is recorded
@@ -1950,9 +2054,39 @@ an app group shared by the app and its extension), a Cloud Files sync root on Wi
   File Provider domain under `~/Library/CloudStorage/`, the Cloud Files sync root) is what the user sees. The core
   does not write into the host's tree; it hands the host the path of the complete file in the cache (`fetch`), and
   the host takes a copy: File Provider's `fetchContents` hands the system a file it then owns (a clone on APFS: no
-  space twice), Cloud Files reads it in ranges. So the cache can serve other devices and verify every chunk whatever
-  the host does with its copy, and the host's tree stays the system's. The cache holds exactly what is here: the
-  host reports what it lets go of (File Provider's materialized items), and the core frees the same.
+  space twice). So the cache can serve other devices and verify every chunk whatever the host does with its copy, and
+  the host's tree stays the system's. The cache holds exactly what is here: the host reports what it lets go of (File
+  Provider's materialized items), and the core frees the same.
+  - **Kept in place** (Windows' Cloud Files, which hydrates a file into its placeholder in the sync root itself, on
+    NTFS without clones: a copy in the cache too would store every file twice). A per-folder setting the host sets
+    for each folder it registers (`sync_set_in_place`, saved with the folder as `in_place`; the Mac never sets it, so
+    its path is unchanged). The cache is then only the staging area: a fetch lands there as always (partial
+    downloads, chunk checks); the host transfers the whole file into the placeholder and says so (`sync_hydrated` with
+    the content version it was handed); the core checks the placeholder holds exactly that content (every chunk's
+    hash, the file unchanged while it was read), notes it (`<sync state>/<id>.placed`, an append-only log beside the
+    index, deleted with the folder), and only then deletes its cache copy (a stop in between leaves both, and the
+    cache's copy wins). From then on the folder's filesystem reads that file from its placeholder (serving chunks to
+    other devices, which still checks every chunk's hash; answering whether it holds it; scans), shown with the
+    stamp the core recorded while the placeholder is unchanged since (size, time, file id), as it is once it changed
+    (so the core sees the user's edit as it sees a change in its cache), and as no content when it is dehydrated or
+    gone (online only, never a delete). A place that is not there at all (its disk not mounted) is an error, so
+    nothing is taken for gone. The core never reads a dehydrated placeholder (that would ask its own host to fetch
+    it) and never writes into one: anything it does to such a file besides reading (an archive, a conflict copy, a
+    write, another device's rename, a new time) takes the content back into the cache first, and freeing or deleting
+    it only lets go (the host dehydrates or deletes the placeholder from the feed). The user's rename, reported by the
+    host before the placeholder moves, moves the note with it (found at its old name until the rename is over).
+    `SyncItem.in_place` says which items' content is in their placeholders. Each placeholder the core filled keeps a
+    note after the core lets go of it (what was placed, the file as it was then), so `sync_local_change` can tell the
+    user's edit (*modified*, with the content version it started from) from an earlier version or content let go
+    of, unchanged since (*stale*: the host may dehydrate it) and from the content as recorded (*unchanged*); a file
+    changed since is told by its content (chunk hashes), and one never noted that differs is a change with no base
+    (a conflict copy where something else is now, so nothing is overwritten). Before such a folder is switched to
+    full, removed or kept in the cache again, the host lets go of its placeholders (filled ones become plain files,
+    the others are deleted, the sync root unregistered) and the core takes the content back: moved into the cache on
+    one volume, then the folders it left empty at the place go, and the switch or removal goes on as for any
+    on-demand folder (the place must be empty then; what is left there is not the folder's and refuses the switch,
+    the content safe in the cache). Its place is its sync root, so renaming such a folder is refused (switch it to
+    full first).
   - A file missing from the cache is a file no longer held here (online only), **never a delete**: deletes, renames
     and new files come from the host as calls (`host_delete`, `host_rename`, `host_write`, `host_mkdir`), each a
     version of this device like a scan's.
@@ -2051,8 +2185,8 @@ Principle: **the menu is for glancing, the main window is for acting.** The menu
 ### 8.1 Menu bar icon
 - A down and an up arrow, no text (decided 2026-10-13). Each arrow is the menu bar's dimmed grey when nothing moves and shifts toward green (download) or red (upload) with the transfer rate: faintly tinted from 5 KB/s, full colour at 10 MB/s, logarithmic in 8 steps.
 - A subtle hairline under the arrows shows total download progress while downloading. While files are being moved (§7A.5) the hairline becomes a **green** bar with the aggregate progress of all moves (size-weighted); it appears only for a move still running after 0.4 s (a same-volume rename takes about 30 ms and would only flicker), is checked twice a second while a move runs and not at all otherwise, and gives the hairline back to the download progress (or nothing) when the moves end.
-- A small, soft dot (3 pt, a muted orange at 75 %) in the lower right corner says something waits for the user: a choice to make, or an error that needs action (disk error, permanent tracker refusal, a tracker problem older than a day). A temporary tracker outage never shows it. One calm colour for both: the dot is a nudge, not an alarm; red is kept for text that says what is wrong.
-- The icon is redrawn only when its look changes; it refreshes every 5 s while something transfers and every 30 s otherwise.
+- One small, soft dot (3 pt, a muted orange at 75 %) in the lower right corner says something waits for the user: a choice to make, an error that needs action (disk error, permanent tracker refusal, a tracker problem older than a day), or an agent's request for access (§9A.3, the same requests as the menu's request line, so the dot and the line come and go together). A temporary tracker outage never shows it. One calm colour and one place for all of them (the user's decision, 2026-11-02: one dot, not two): the dot is a nudge, not an alarm; red is kept for text that says what is wrong. For a request, the icon's tooltip and accessibility label say why ("An agent is waiting for your answer"), and the dot goes the moment the last request is answered (anywhere), expires or is withdrawn. The core decides it (`IconLook.attention`; `IconLook.needs_answer` names a waiting answer, an `AttentionKind`, so other things can join).
+- The icon is redrawn only when its look changes; it refreshes every 5 s while something transfers and every 30 s otherwise (sooner when a waiting request expires before then).
 - Drop a `.torrent` file or a magnet link onto the icon to add it.
 
 ### 8.2 Menu bar menu: plain native menu, as simple as possible
@@ -2206,7 +2340,12 @@ Settings > Advanced > **Developer mode** (`advanced.developer_mode`, off by defa
 - Default handler for `.torrent` UTI and the `magnet:` URL scheme.
 - `UserNotifications`: download finished, errors. Optional "seeding goal reached". Which events notify, their words, the burst (more than three finished within ten seconds become one "N downloads finished") and what a click opens are the core's (`Notices`, `notice_route`); the host posts them.
 - `IOPMAssertion` blocks idle sleep while downloading (setting, on by default), and while an agent works (§9A.7, setting "Keep awake while agents work", on by default). Both are `PreventUserIdleSystemSleep`: the display still sleeps and the screen still locks. Seeding alone never keeps the Mac awake. While peers are connected or data flows the app holds an activity that keeps App Nap away (it would throttle timers and disk and network work) but allows idle sleep; the core decides both (`power_needs`).
-- Logging through `os_log` (Console.app); no log files by default.
+- Logging through `os_log` (Console.app). What the core says on standard error (folder sync, chat, the engine; a
+  panic's message) goes to `<state dir>/logs/core.log` when the app's standard error goes nowhere (started from the
+  Finder or at login it is /dev/null; a Windows app has no console at all): the core redirects it when it starts
+  (`trs_platform::proc::stderr_to_log`, once per process), the same on every system, with a first line
+  `seedwell: <time> Seedwell <version> started (process <pid>)`. A log larger than 2 MB at start is kept as
+  `core.log.1` and begun anew. A terminal, a test run or a QA script that reads standard error keeps it.
 - Distribution: Developer ID signed and notarized (Team ID `6GND8Z2C7Z`, from 0.1.11; earlier releases were signed ad hoc), as a disk image (`Seedwell.dmg`: the app, a link to Applications, a background with an arrow) and as a zip for `install.sh` and the updater (updates: §12A). `install.sh` installs a release from GitHub only when it is signed by that team and Gatekeeper accepts it (a `--zip` test build and a local test server excepted; a release from before signing only when pinned with `--version`). Not sandboxed and not on the App Store, because the sandbox makes arbitrary download folders painful.
 - Opened straight from its disk image, from App Translocation's copy or from Downloads, the app asks once per launch "Move Seedwell to Applications?" (Move to Applications / Not Now; Replace when one is there, which goes to the Trash with its data kept). The rule and the words are the core's (`move_to_applications_offer`); the host copies the app into Applications without the download's quarantine mark, quits, ejects the disk image and opens the copy. Never in tests, QA or a `--state-dir` run.
 - The first signed release is a new code identity to macOS: what it remembered for the ad-hoc app (opening at login, notifications, folder access) may be asked for once more.
@@ -2319,7 +2458,11 @@ flag it to the user, a comment from the user allows the agents to enable require
   open (owner or admin); otherwise the request waits unseen until it expires. Only the user's answer tells.
 - **Tell the user.** A notification (the core's `Notices`, `NoticeKind::AgentRequest`, whatever Notify me says) titled
   "Claude asks for agent permission full", the reason quoted below, with **Approve** (the system asks to unlock first)
-  and **Deny** as its buttons; a click opens Settings › Agents. The pending requests also show in Settings › Agents ›
+  and **Deny** as its buttons; a click opens Settings › Agents. It is time-sensitive (`NoticeUrgency::Persistent`:
+  macOS `.timeSensitive`, Windows a reminder toast that stays until acted on; whether a Mac alert stays on screen is
+  the user's alert style for Seedwell, which the app never changes), and the app removes it from the notification
+  list the moment the request is answered anywhere, expires or is withdrawn (`Notices::withdrawn`), so a stale one is
+  never answered. The menu bar icon shows the attention dot meanwhile (§8.1). The pending requests also show in Settings › Agents ›
   Requests (each with Deny and Approve, Approve the prominent one, last) and as a line at the top of the menu bar
   menu (a submenu with the reason, Approve and Deny). With `--channel` (a channel open to agents; `--topic`, and
   `--reply <message>` to keep it in the agent's thread) Seedwell also posts the request there, under the label

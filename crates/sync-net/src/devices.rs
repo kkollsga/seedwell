@@ -672,12 +672,16 @@ impl SyncHandle {
         let link = InviteLink { invite, token_seed, name: Some(name).filter(|n| !n.is_empty()), agents: false, reach: Some(self.own_reach()) };
         let text = link.format_devices();
         {
-            let mut links = lock(&g.links);
-            // Expired ones go: a pairing link is good for minutes only.
-            links.retain(|_, t| InviteLink::parse_devices(t).is_ok_and(|l| !l.invite.expired(now)));
-            links.insert(invite.id, text.clone());
-            let all: Vec<String> = links.values().cloned().collect();
-            self.inner.secrets.put(&crate::roles::links_name(&g.id), all.join("\n").as_bytes())?;
+            // (Kept with the links unlocked: Settings reads them, and the secret store may be slow.)
+            let _turn = lock(&g.saving);
+            let all = {
+                let mut links = lock(&g.links);
+                // Expired ones go: a pairing link is good for minutes only.
+                links.retain(|_, t| InviteLink::parse_devices(t).is_ok_and(|l| !l.invite.expired(now)));
+                links.insert(invite.id, text.clone());
+                links.values().map(String::as_str).collect::<Vec<_>>().join("\n")
+            };
+            self.inner.secrets.put(&crate::roles::links_name(&g.id), all.as_bytes())?;
         }
         Ok((text, invite.expires_s))
     }
@@ -876,22 +880,24 @@ impl SyncHandle {
             return Ok(());
         }
         let gone: BTreeSet<String> = removed.iter().map(|pk| DeviceId::of_public_key(pk).to_string()).collect();
-        let entry = {
+        let (entry, forgotten) = {
             let mut cfg = lock(&self.inner.cfg);
             let Some(e) = cfg.my_devices.as_mut() else { return Err(SyncError::NotFound) };
             e.previous.retain(|p| p.id != g.id.to_string() && p.id != id.to_string());
             e.previous.push(crate::config::PreviousGroup { id: g.id.to_string(), group_pk: hex(&pk_of(g)) });
+            let mut forgotten = Vec::new();
             while e.previous.len() > crate::config::MAX_PREVIOUS_GROUPS {
-                let old = e.previous.remove(0);
-                if let Ok(oid) = old.id.parse::<FolderId>() {
-                    let _ = std::fs::remove_file(self.members_path(&oid));
-                }
+                forgotten.extend(e.previous.remove(0).id.parse::<FolderId>());
             }
             e.id = id.to_string();
             e.group_pk = hex(&target);
             e.devices.retain(|d| !gone.contains(&d.id));
-            e.clone()
+            (e.clone(), forgotten)
         };
+        // (With the configuration unlocked: the app's calls read it.)
+        for oid in forgotten {
+            let _ = std::fs::remove_file(self.members_path(&oid));
+        }
         self.save_config()?;
         // The old key is worth nothing from now on: it goes.
         for name in [crate::roles::secret_name(&g.id), crate::roles::invite_name(&g.id), crate::roles::links_name(&g.id)] {

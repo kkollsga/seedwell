@@ -134,7 +134,7 @@ struct SyncShareView: View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 3) {
                 ModalCaption(text: w.caption)
-                Text(w.title).font(.system(size: 17, weight: .semibold)).lineLimit(1).truncationMode(.middle)
+                Text(w.title).font(Theme.title).lineLimit(1).truncationMode(.middle)
             }
             if let gone = w.gone {
                 Text(gone).foregroundStyle(.secondary).padding(.top, 16)
@@ -142,13 +142,13 @@ struct SyncShareView: View {
                 Text(refusal).foregroundStyle(.secondary).padding(.top, 16).fixedSize(horizontal: false, vertical: true)
             } else {
                 if let note = w.newNote {
-                    Text(note).font(.system(size: 12)).foregroundStyle(.secondary)
+                    Text(note).font(Theme.secondary).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true).padding(.top, 6)
                         .accessibilityIdentifier("sync-share-new")
                 }
                 settings(w).padding(.top, 18)
                 Text(w.summary)
-                    .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    .font(Theme.secondary).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     .padding(.top, 14)
                     .accessibilityIdentifier("sync-share-summary")
                 if let s = w.sharing {
@@ -160,7 +160,7 @@ struct SyncShareView: View {
             if let e = model.error { ModalError(text: e).padding(.top, 14) }
             HStack(spacing: 8) {
                 if model.copied {
-                    Label(w.copiedTitle, systemImage: "checkmark").font(.system(size: 12)).foregroundStyle(.secondary)
+                    Label(w.copiedTitle, systemImage: "checkmark").font(Theme.secondary).foregroundStyle(.secondary)
                         .transition(.opacity)
                 }
                 if model.busy { ProgressView().controlSize(.small) }
@@ -179,7 +179,7 @@ struct SyncShareView: View {
         .padding(22)
         .frame(width: 460)
         .background(.background)
-        .font(.system(size: 13))
+        .font(Theme.body)
     }
 
     private func settings(_ w: SyncShareWindowModel) -> some View {
@@ -241,7 +241,7 @@ struct SyncShareView: View {
             .accessibilityIdentifier("sync-share-until")
         }
         Text(s.line)
-            .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            .font(Theme.secondary).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
     }
 
     private func row<V: View>(_ s: SyncShareSetting, on: Binding<Bool>, @ViewBuilder value: () -> V) -> some View {
@@ -278,16 +278,16 @@ struct SyncShareView: View {
                 HStack(spacing: 8) {
                     VStack(alignment: .leading, spacing: 1) {
                         Text(l.line)
-                        if !l.detail.isEmpty { Text(l.detail).font(.system(size: 11.5)).foregroundStyle(.secondary) }
+                        if !l.detail.isEmpty { Text(l.detail).font(Theme.caption).foregroundStyle(.secondary) }
                     }
                     Spacer()
                     Button(w.revokeTitle) { model.revoke(l.id) }.controlSize(.small).help(w.revokeHelp)
                 }
-                .font(.system(size: 12.5))
+                .font(Theme.secondary)
                 .padding(.vertical, 3)
             }
             if let more = w.linksMore {
-                Text(more).font(.system(size: 11.5)).foregroundStyle(.secondary)
+                Text(more).font(Theme.caption).foregroundStyle(.secondary)
             }
         }
     }

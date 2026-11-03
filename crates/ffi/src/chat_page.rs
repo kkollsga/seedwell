@@ -20,14 +20,14 @@ use trs_platform::computer;
 use crate::chat_dialogs::{chat_delete_conversation_dialog, chat_leave_dialog, chat_new_topic_dialog, chat_rename_dialog, chat_wake_command_dialog, ChatDialog};
 use crate::chat_files::ChatPendingSend;
 use crate::chat_images::ChatImage;
-use crate::chat_markdown::{blocks, plain, ChatBlock};
+use crate::chat_markdown::{blocks, plain, ChatBlock, ChatRun};
 use crate::chat_text::{agent_tag, agents_menu, chat_agents_label, general_unread, named, UNNAMED_DEVICE};
 use crate::devices_text::{follow_line_for, FollowLine};
 use crate::host::{has, HostWindow};
 use crate::library::{local_day, local_day_number, LibraryPlace, LocalClock};
 use crate::mail::{chat_cards, chat_mail, chat_tag_label, ChatMail, ChatTagOwner};
 use crate::sidebar::SidebarTag;
-use crate::sync::{SyncAgentAccess, SyncChannel, SyncDirect, SyncMember, SyncMessage, SyncMessageKind, SyncRole, SyncTopic, DIRECT_OFFLINE};
+use crate::sync::{SyncAgentAccess, SyncChannel, SyncDirect, SyncJoined, SyncMember, SyncMessage, SyncMessageKind, SyncRole, SyncTopic};
 use crate::sync_page::SyncQuestion;
 use crate::sync_text::{role, sync_can_share, sync_gone_prompt, sync_members_ordered};
 use crate::Core;
@@ -145,18 +145,103 @@ pub struct ChatPageToolbar {
     pub menu: ChatPageMenu,
 }
 
-/// Who wrote a message, at the start of a run: a person by their name with the device (or the device alone; "You" on
-/// this computer), an agent by its name with a badge and the computer it runs on.
+/// Whose a message is, which decides how it is drawn: the user's own and their agents' as one family (a thin accent
+/// edge and a faint tint in a channel, the right side in a private conversation), other people's and their agents'
+/// plain, with a round initial or the agent symbol at the start of a run. An agent's always carries the agent symbol.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, uniffi::Enum)]
+pub enum ChatAuthorKind {
+    /// The user wrote it, on this device or one of their own devices (Settings › Devices, "Your devices").
+    Mine,
+    /// An agent posted it on this device or one of the user's own devices.
+    OurAgent,
+    /// Another person (another device) wrote it.
+    Theirs,
+    /// An agent on another person's device posted it.
+    TheirAgent,
+}
+
+/// Who wrote a run of messages, on one small quiet line under its last message (under the bubble, on its side, in a
+/// private conversation): "Kari · Kari's iPhone · 14.32", "Seedwell · Studio iMac · 14.32" (an agent, after the agent
+/// symbol), "You · 14.32" on this device, "You · Kristian's iPhone · 14.32" on another of the user's devices.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
-pub struct ChatMessageAuthor {
-    /// Semibold.
+pub struct ChatMessageMeta {
+    /// The author, a little stronger than the rest: "You", "Kari", "Studio iMac", "Seedwell".
     pub name: String,
-    /// The "agent" badge (a capsule, like the channel's tag), with its tooltip.
-    pub badge: Option<SidebarTag>,
-    /// The computer, quiet, after a computer symbol.
-    pub computer: Option<String>,
-    /// "14.32" today, "Yesterday 14.32", "1 Nov 14.32" before.
-    pub time: String,
+    /// After the name and " · ": the device (left out when it is this one, or the name already) and the time of the
+    /// run's last message ("14.32" today, "Yesterday 14.32", "1 Nov 14.32" before).
+    pub detail: String,
+    /// The letter of another person's round initial: "K".
+    pub initial: String,
+    /// The line's tooltip: "Seedwell, an agent on Studio iMac", "Kari on Kari's iPhone"; empty for your own here.
+    pub help: String,
+}
+
+/// A quoted message: a sent reply's quote (a small inset block with the quoted author's edge colour: "Kari",
+/// "Middag på lørdag?"; a click scrolls to the original and lights it briefly) and the composer's reply bar
+/// ("Replying to Kari", "Middag på lørdag?").
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct ChatQuote {
+    pub title: String,
+    /// The message without its Markdown, on one line.
+    pub text: String,
+    /// The quoted message (its card's `id`), and whose it is with its colour, as on its own card.
+    pub message_id: String,
+    pub who: ChatAuthorKind,
+    #[uniffi(default = None)]
+    pub palette: Option<u32>,
+}
+
+/// How many calm colours the edges of other people's messages take (`ChatMessageCard::palette`); the host maps each
+/// index to a soft, low-saturation colour that works in dark and light, away from the accent's hue and from red and
+/// green.
+pub const CHAT_PALETTE_SIZE: u32 = 8;
+
+/// Each person's colour in a channel, by device: people (a user's devices together, else a device alone) take the
+/// palette's colours in the order they joined the channel, and keep theirs for good (one who left keeps their place,
+/// so nobody else's colour changes). Up to [`CHAT_PALETTE_SIZE`] people never share a colour; from the next one on
+/// they repeat. Built from the membership every member device holds, so every device shows the same colours. The
+/// user counts as a person too (their own messages show the accent), so that holds on every device.
+pub(crate) fn palette_map(joined: &[SyncJoined]) -> HashMap<String, u32> {
+    let mut order: Vec<&SyncJoined> = joined.iter().collect();
+    order.sort_by(|a, b| (a.at_s, &a.device_id).cmp(&(b.at_s, &b.device_id)));
+    let mut people: HashMap<String, u32> = HashMap::new();
+    let mut out = HashMap::new();
+    for j in order {
+        let person = if j.user.is_empty() { format!("device:{}", j.device_id) } else { format!("user:{}", j.user) };
+        let next = people.len() as u32;
+        let index = *people.entry(person).or_insert(next);
+        out.insert(j.device_id.clone(), index % CHAT_PALETTE_SIZE);
+    }
+    out
+}
+
+/// The colour of a message's edge: its person's in `map`; for a device the channel does not list (a private
+/// conversation), one from its id (FNV-1a), the same everywhere. Their agents take the same colour, muted. `None` for
+/// the user's own (the accent).
+pub(crate) fn palette(m: &SyncMessage, who: ChatAuthorKind, map: &HashMap<String, u32>) -> Option<u32> {
+    if matches!(who, ChatAuthorKind::Mine | ChatAuthorKind::OurAgent) {
+        return None;
+    }
+    if let Some(&i) = map.get(&m.author_device) {
+        return Some(i);
+    }
+    let mut h: u32 = 0x811c_9dc5;
+    for b in m.author_device.bytes() {
+        h = (h ^ u32::from(b)).wrapping_mul(0x0100_0193);
+    }
+    Some(h % CHAT_PALETTE_SIZE)
+}
+
+/// The number of colours of other people's edges ([`CHAT_PALETTE_SIZE`]).
+#[uniffi::export]
+pub fn chat_palette_size() -> u32 {
+    CHAT_PALETTE_SIZE
+}
+
+/// The tooltip and accessibility name of a code block's copy button.
+#[uniffi::export]
+pub fn chat_code_copy_help() -> String {
+    "Copy".into()
 }
 
 /// The colour of a mail's type chip.
@@ -207,32 +292,42 @@ pub struct ChatTagLine {
     pub seen: bool,
 }
 
-/// A message as a card (yours tinted with the accent colour). A run's first card stands apart from the one before
-/// (10 points on the Mac); the rest of the run sits close (4).
+/// A message. A run's first message stands apart from the one before (16 points on the Mac); the rest of the run
+/// sits close (2). How it is drawn follows `who`.
 #[derive(Clone, Debug, PartialEq, uniffi::Record)]
 pub struct ChatMessageCard {
     pub id: String,
     /// What its attachments are asked for by (`Core::chat_image_*`, `Core::chat_file_*`): the channel's id, or
     /// `dm:<device>`.
     pub place: String,
-    /// At the start of a run only.
-    pub author: Option<ChatMessageAuthor>,
-    /// The message it answers: "↳ Kari (Studio iMac): Middag på lørdag?", one quiet line.
-    pub reply_quote: Option<String>,
+    /// Under the last message of a run only: who wrote the run, from where and when.
+    pub meta: Option<ChatMessageMeta>,
+    /// The first message of a run (it stands apart from the one before; the rest sit close).
+    pub starts_run: bool,
+    /// Whose it is.
+    pub who: ChatAuthorKind,
+    /// The colour of its left edge, for another person's message and their agents' (muted): an index below
+    /// [`CHAT_PALETTE_SIZE`], stable per person. `None` for the user's and their agents' (the accent).
+    pub palette: Option<u32>,
+    /// Its time ("14.32", "Yesterday 14.32"), shown while the pointer is on it (without moving anything).
+    pub time: String,
+    /// The message it answers, one quiet line over it: "Kari" and "Middag på lørdag?".
+    pub reply_quote: Option<ChatQuote>,
     pub body: ChatMessageBody,
     /// Its images and files, after the text: the image view (`chat_images`) and file cards (`chat_files`) as they are.
     pub images: Vec<ChatImage>,
+    /// Its images are a gallery (more than one): one large at a time, in this order, with a filmstrip under it to
+    /// switch (which one is shown is the host's); else its one image is shown alone.
+    pub gallery: bool,
     pub files: Vec<crate::chat_files::ChatFileCard>,
     /// Its tags by owner, on one line under it.
     pub tags: Vec<ChatTagLine>,
-    /// Your tags (a tag symbol, shown while the pointer is on the card); `None` where you cannot post.
+    /// Your tags (a tag symbol in the pill over the message while the pointer is on it); `None` where you cannot post.
     pub tag_menu: Option<ChatPageMenu>,
-    /// Reply (an arrow symbol, shown while the pointer is on the card); `None` where you cannot post.
+    /// Reply (an arrow symbol in the same pill); `None` where you cannot post.
     pub reply: Option<ChatPageButton>,
-    /// The composer's line while it replies to this message: "Replying to Kari (Studio iMac): Middag på lørdag?".
-    pub replying: String,
-    /// Yours (not an agent's on this computer): tinted with the accent colour.
-    pub mine: bool,
+    /// The composer's reply bar while it replies to this message: "Replying to Kari" and the message's line.
+    pub replying: ChatQuote,
 }
 
 /// A member in the members panel.
@@ -272,7 +367,7 @@ pub struct ChatMembersPanel {
 /// The composer under the messages.
 #[derive(Clone, Debug, PartialEq, uniffi::Record)]
 pub struct ChatComposer {
-    /// It may post; else `cannot_post` shows instead of the field (quiet, 12 points).
+    /// It may post; else `cannot_post` shows instead of the field (quiet, the secondary size).
     pub can_post: bool,
     pub cannot_post: Option<String>,
     /// "Message Family", "Message Dinner", "Message Kari's iPhone".
@@ -284,7 +379,7 @@ pub struct ChatComposer {
     pub send_title: String,
     /// "Send (Return; Shift-Return for a new line)".
     pub send_help: String,
-    /// The tooltip of the reply line's close button.
+    /// The tooltip of the reply bar's close button (Escape also cancels the reply).
     pub reply_cancel_help: String,
 }
 
@@ -298,6 +393,9 @@ pub struct ChatPageModel {
     pub toolbar: ChatPageToolbar,
     /// Oldest first; the host keeps the newest in view (it scrolls to the last when it changes).
     pub messages: Vec<ChatMessageCard>,
+    /// A private conversation (always one to one) is drawn as bubbles, the user's on the right; a channel as one
+    /// column.
+    pub bubbles: bool,
     /// The quiet line while there are no messages.
     pub empty: Option<String>,
     /// A channel's members panel, from the members last read.
@@ -317,6 +415,13 @@ pub struct ChatPageRead {
     pub follow: Option<FollowLine>,
     /// What agents on this computer may do with private messages.
     pub direct_agents: SyncAgentAccess,
+    /// The user's own devices (Settings › Devices, "Your devices"), this one among them: what they and their agents
+    /// write is the user's ([`ChatAuthorKind`]). Empty while this device is in no group.
+    #[uniffi(default = [])]
+    pub own_devices: Vec<String>,
+    /// A channel's devices in the order they joined, also those that left: each person's colour.
+    #[uniffi(default = [])]
+    pub joined: Vec<SyncJoined>,
 }
 
 /// What the page is built from.
@@ -423,8 +528,8 @@ pub(crate) fn message_time(clock: &dyn LocalClock, at: u64, now: u64) -> String 
     }
 }
 
-/// A run of messages from one author within five minutes shows the author once; an agent's message and a reply
-/// start their own.
+/// A run of messages from one author (one device, one agent) within five minutes shows who wrote it once, under its
+/// last message; an agent's message and a reply start their own.
 pub(crate) fn starts_run(m: &SyncMessage, prev: Option<&SyncMessage>) -> bool {
     let Some(prev) = prev else { return true };
     prev.author_device != m.author_device || prev.agent != m.agent || m.at_s > prev.at_s + RUN_S || m.reply_to.is_some()
@@ -583,7 +688,7 @@ fn channel_menu(c: &SyncChannel, follow: Option<&FollowLine>, host: &[HostWindow
     v.extend(asking("Rename…", ChatPageCommand::Rename, chat_rename_dialog(c.clone()), true, host));
     v.push(ChatPageMenuEntry::Separator);
     v.extend(asking("Leave Channel…", ChatPageCommand::Leave, chat_leave_dialog(c.clone()), true, host));
-    ChatPageMenu { title: String::new(), help: "Mute, whether agents may use this channel, the wake command, a new topic, rename, leave".into(), entries: tidy(v) }
+    ChatPageMenu { title: String::new(), help: "More".into(), entries: tidy(v) }
 }
 
 /// A private conversation's ⋯ menu: what agents on this computer may do with private messages; Delete Conversation….
@@ -594,11 +699,7 @@ fn direct_menu(name: &str, access: SyncAgentAccess, host: &[HostWindow]) -> Chat
         .collect();
     let mut v = vec![ChatPageMenuEntry::Submenu { title: concat!("Agents on This ", computer!()).into(), entries: levels }, ChatPageMenuEntry::Separator];
     v.extend(asking("Delete Conversation…", ChatPageCommand::DeleteConversation, chat_delete_conversation_dialog(name.to_owned()), true, host));
-    ChatPageMenu {
-        title: String::new(),
-        help: concat!("What agents on this ", computer!(), " may do with private messages, and deleting this conversation").into(),
-        entries: tidy(v),
-    }
+    ChatPageMenu { title: String::new(), help: "More".into(), entries: tidy(v) }
 }
 
 fn tint(kind: Option<&str>) -> ChatMailTint {
@@ -628,7 +729,39 @@ fn banner(mail: &ChatMail) -> ChatMailBanner {
     }
 }
 
+/// `blocks` with their image references checked against the `images` the message carries: one to an image it does not
+/// carry is plain text (its description).
+fn with_images(mut blocks: Vec<ChatBlock>, images: usize) -> Vec<ChatBlock> {
+    let check = |runs: &mut Vec<ChatRun>| {
+        let mut out: Vec<ChatRun> = Vec::with_capacity(runs.len());
+        for mut r in runs.drain(..) {
+            if r.image.is_some_and(|i| i as usize >= images) {
+                r.image = None;
+            }
+            // Text again: it joins the text beside it.
+            match out.last_mut() {
+                Some(last) if r.image.is_none() && last.image.is_none() && ChatRun { text: String::new(), ..last.clone() } == ChatRun { text: String::new(), ..r.clone() } => {
+                    last.text.push_str(&r.text)
+                }
+                _ => out.push(r),
+            }
+        }
+        *runs = out;
+    };
+    for b in &mut blocks {
+        match b {
+            ChatBlock::Heading { runs, .. } | ChatBlock::Paragraph { runs } | ChatBlock::Item { runs, .. } | ChatBlock::Quote { runs } => check(runs),
+            ChatBlock::Table { header, rows } => {
+                header.iter_mut().chain(rows.iter_mut().flat_map(|r| r.cells.iter_mut())).for_each(|c| check(&mut c.runs));
+            }
+            ChatBlock::CodeBlock { .. } | ChatBlock::Rule => {}
+        }
+    }
+    blocks
+}
+
 fn body(m: &SyncMessage) -> ChatMessageBody {
+    let blocks = |text: &str| with_images(blocks(text), m.images.len());
     match m.kind {
         SyncMessageKind::Text => match chat_mail(&m.body) {
             Some(mail) => ChatMessageBody::Mail { banner: banner(&mail), blocks: blocks(&mail.body) },
@@ -639,19 +772,43 @@ fn body(m: &SyncMessage) -> ChatMessageBody {
     }
 }
 
-fn message_author(m: &SyncMessage, clock: &dyn LocalClock, now: u64) -> ChatMessageAuthor {
-    let time = message_time(clock, m.at_s, now);
-    let computer = computer_name(m).to_owned();
-    match &m.agent {
-        Some(agent) => ChatMessageAuthor {
-            name: agent.clone(),
-            badge: Some(SidebarTag { text: "agent".into(), help: format!("Sent by an agent through Seedwell on {computer}") }),
-            computer: Some(computer),
-            time,
-        },
-        None if !m.is_me && !m.author_user.is_empty() => ChatMessageAuthor { name: m.author_user.clone(), badge: None, computer: Some(computer), time },
-        None => ChatMessageAuthor { name: if m.is_me { "You".into() } else { computer }, badge: None, computer: None, time },
+/// Whose `m` is: the user's when it came from this device or one of `own` (the user's devices).
+pub(crate) fn author_kind(m: &SyncMessage, own: &[String]) -> ChatAuthorKind {
+    let ours = m.is_me || own.iter().any(|d| d == &m.author_device);
+    match (ours, m.agent.is_some()) {
+        (true, false) => ChatAuthorKind::Mine,
+        (true, true) => ChatAuthorKind::OurAgent,
+        (false, false) => ChatAuthorKind::Theirs,
+        (false, true) => ChatAuthorKind::TheirAgent,
     }
+}
+
+/// A message's author in a few letters: "You", "Seedwell" (an agent), "Kari", else the device: "Studio iMac".
+fn short_author(m: &SyncMessage, who: ChatAuthorKind) -> String {
+    match (&m.agent, who) {
+        (Some(agent), _) => agent.clone(),
+        (None, ChatAuthorKind::Mine) => "You".into(),
+        (None, _) if !m.author_user.is_empty() => m.author_user.clone(),
+        (None, _) => computer_name(m).to_owned(),
+    }
+}
+
+/// The line under a run whose last message is `m`.
+fn message_meta(m: &SyncMessage, who: ChatAuthorKind, clock: &dyn LocalClock, now: u64) -> ChatMessageMeta {
+    let name = short_author(m, who);
+    let computer = computer_name(m);
+    let here = m.is_me && m.agent.is_none();
+    let help = match who {
+        ChatAuthorKind::OurAgent | ChatAuthorKind::TheirAgent => format!("{name}, an agent on {computer}"),
+        ChatAuthorKind::Mine if here => String::new(),
+        ChatAuthorKind::Mine => format!("You on {computer}"),
+        ChatAuthorKind::Theirs if name == computer => String::new(),
+        ChatAuthorKind::Theirs => format!("{name} on {computer}"),
+    };
+    let time = message_time(clock, m.at_s, now);
+    let detail = if here || name == computer { time } else { format!("{computer} · {time}") };
+    let initial = name.chars().find(|c| c.is_alphanumeric()).map_or_else(|| "?".into(), |c| c.to_uppercase().collect());
+    ChatMessageMeta { name, detail, initial, help }
 }
 
 /// Your tags on a message: the usual ones to switch on and off, and clearing them.
@@ -670,11 +827,12 @@ fn tag_menu(id: &str, owners: &[ChatTagOwner]) -> ChatPageMenu {
         entries.push(ChatPageMenuEntry::Separator);
         entries.push(item("Clear My Tags", set(Vec::new())));
     }
-    ChatPageMenu { title: String::new(), help: "Tag it (your tags; others see them under your name)".into(), entries }
+    ChatPageMenu { title: String::new(), help: "Tag".into(), entries }
 }
 
 /// The messages as cards: tag notes are lines on the message they are about, not cards.
-pub(crate) fn cards(messages: Vec<SyncMessage>, can_post: bool, clock: &dyn LocalClock, now: u64) -> Vec<ChatMessageCard> {
+pub(crate) fn cards(messages: Vec<SyncMessage>, own: &[String], joined: &[SyncJoined], can_post: bool, clock: &dyn LocalClock, now: u64) -> Vec<ChatMessageCard> {
+    let colours = palette_map(joined);
     let c = chat_cards(messages);
     let tags: HashMap<String, Vec<ChatTagOwner>> = c.tags.into_iter().map(|t| (t.message, t.owners)).collect();
     let ms = c.cards;
@@ -682,13 +840,22 @@ pub(crate) fn cards(messages: Vec<SyncMessage>, can_post: bool, clock: &dyn Loca
         .enumerate()
         .map(|(n, m)| {
             let owners = tags.get(&m.id.chars().take(8).collect::<String>().to_lowercase()).map(Vec::as_slice).unwrap_or_default();
+            let who = author_kind(m, own);
             ChatMessageCard {
                 id: m.id.clone(),
                 place: m.place.clone(),
-                author: starts_run(m, n.checked_sub(1).map(|p| &ms[p])).then(|| message_author(m, clock, now)),
-                reply_quote: m.reply_to.as_ref().and_then(|r| ms.iter().find(|x| &x.id == r)).map(|r| format!("↳ {}: {}", author(r), preview(r, 80))),
+                meta: ms.get(n + 1).is_none_or(|next| starts_run(next, Some(m))).then(|| message_meta(m, who, clock, now)),
+                starts_run: starts_run(m, n.checked_sub(1).map(|p| &ms[p])),
+                who,
+                palette: palette(m, who, &colours),
+                time: message_time(clock, m.at_s, now),
+                reply_quote: m.reply_to.as_ref().and_then(|r| ms.iter().find(|x| &x.id == r)).map(|r| {
+                    let rw = author_kind(r, own);
+                    ChatQuote { title: short_author(r, rw), text: preview(r, 120), message_id: r.id.clone(), who: rw, palette: palette(r, rw, &colours) }
+                }),
                 body: body(m),
                 images: m.images.clone(),
+                gallery: m.images.len() > 1,
                 files: m.files.clone(),
                 tags: owners
                     .iter()
@@ -699,8 +866,13 @@ pub(crate) fn cards(messages: Vec<SyncMessage>, can_post: bool, clock: &dyn Loca
                     .collect(),
                 tag_menu: can_post.then(|| tag_menu(&m.id, owners)),
                 reply: can_post.then(|| button("Reply", "Reply", ChatPageCommand::Reply { message_id: m.id.clone() })),
-                replying: format!("Replying to {}: {}", author(m), preview(m, 60)),
-                mine: m.is_me && m.agent.is_none(),
+                replying: ChatQuote {
+                    title: format!("Replying to {}", short_author(m, who)),
+                    text: preview(m, 120),
+                    message_id: m.id.clone(),
+                    who,
+                    palette: palette(m, who, &colours),
+                },
             }
         })
         .collect()
@@ -764,7 +936,7 @@ fn composer(can_post: bool, cannot_post: &str, name: &str, pending: Vec<ChatPend
         pending,
         send_title: "Send".into(),
         send_help: SEND_HELP.into(),
-        reply_cancel_help: "Don't reply to it".into(),
+        reply_cancel_help: "Cancel Reply (Esc)".into(),
     }
 }
 
@@ -779,21 +951,22 @@ pub fn chat_page_model(input: ChatPageInput, clock: std::sync::Arc<dyn LocalCloc
             let c = input.channel.as_ref().filter(|c| &c.id == channel_id)?;
             let can_post = c.role != SyncRole::ReadOnly;
             let name = input.topic.as_ref().map_or(c.name.as_str(), |t| t.title.as_str());
-            let messages = cards(input.read.messages.clone(), can_post, clock.as_ref(), now);
+            let messages = cards(input.read.messages.clone(), &input.read.own_devices, &input.read.joined, can_post, clock.as_ref(), now);
             ChatPageModel {
                 place: c.id.clone(),
                 topic: topic_id.clone(),
                 toolbar: ChatPageToolbar {
                     tag: agent_tag(c),
-                    members: Some(button("Members", "Who is in this channel", ChatPageCommand::ShowMembers)),
+                    members: Some(button("Members", "Members", ChatPageCommand::ShowMembers)),
                     share: (sync_can_share(c.role) && has(&host, Some(HostWindow::ChannelShare)))
-                        .then(|| button("Share…", concat!("Make a link that lets another ", computer!(), " join this channel"), ChatPageCommand::Share)),
+                        .then(|| button("Share…", concat!("Share: invite another ", computer!(), " to this channel"), ChatPageCommand::Share)),
                     menu: channel_menu(c, input.read.follow.as_ref(), &host),
                 },
-                empty: messages.is_empty().then(|| "No messages yet.".into()),
+                empty: messages.is_empty().then(|| "No messages yet".into()),
                 messages,
+                bubbles: false,
                 members: Some(members_panel(c, &input.members, now)),
-                composer: composer(can_post, "Read only: you see the messages but cannot post.", name, input.read.pending.clone()),
+                composer: composer(can_post, "Read only", name, input.read.pending.clone()),
                 signature: String::new(),
             }
         }
@@ -801,15 +974,17 @@ pub fn chat_page_model(input: ChatPageInput, clock: std::sync::Arc<dyn LocalCloc
             // Only while the two are connected directly (a conversation just started from a channel's members is not
             // listed yet: the core says why if it cannot be written to).
             let can_post = input.direct.as_ref().filter(|d| &d.device_id == device_id).is_none_or(|d| d.online);
-            let messages = cards(input.read.messages.clone(), can_post, clock.as_ref(), now);
+            let messages = cards(input.read.messages.clone(), &input.read.own_devices, &input.read.joined, can_post, clock.as_ref(), now);
             ChatPageModel {
                 place: format!("dm:{device_id}"),
                 topic: None,
                 toolbar: ChatPageToolbar { tag: None, members: None, share: None, menu: direct_menu(&input.title, input.read.direct_agents, &host) },
-                empty: messages.is_empty().then(|| format!("No messages yet. Only you and {} can read what you write here.", input.title)),
+                empty: messages.is_empty().then(|| "No messages yet".into()),
                 messages,
+                bubbles: true,
                 members: None,
-                composer: composer(can_post, DIRECT_OFFLINE, &input.title, input.read.pending.clone()),
+                // Why, at length, is in the error a send gets (`DIRECT_OFFLINE`); here one short line.
+                composer: composer(can_post, &format!("You can write when {} is connected directly", input.title), &input.title, input.read.pending.clone()),
                 signature: String::new(),
             }
         }
@@ -829,7 +1004,14 @@ impl Core {
     /// calls it with each refresh of the page (the library's `refresh_ms`) and after a send.
     pub fn chat_page_read(&self, place: LibraryPlace) -> ChatPageRead {
         let sync = self.backend.sync();
-        let mut read = ChatPageRead { messages: Vec::new(), pending: Vec::new(), follow: None, direct_agents: sync.chat_direct_agents() };
+        let mut read = ChatPageRead {
+            messages: Vec::new(),
+            pending: Vec::new(),
+            follow: None,
+            direct_agents: sync.chat_direct_agents(),
+            own_devices: sync.own_devices(),
+            joined: Vec::new(),
+        };
         match place {
             LibraryPlace::Chat { channel_id, topic_id } => {
                 let Some(c) = sync.chat_channels().into_iter().find(|c| c.id == channel_id) else { return read };
@@ -844,6 +1026,7 @@ impl Core {
                 }
                 read.pending = self.chat_pending_sends(channel_id.clone());
                 read.follow = Some(follow_line_for(self.backend.as_ref(), &channel_id));
+                read.joined = sync.chat_joined(&channel_id);
             }
             LibraryPlace::Direct { device_id } => {
                 read.messages = sync.chat_direct_messages(&device_id, None, PAGE_MESSAGES);

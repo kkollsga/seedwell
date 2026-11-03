@@ -25,7 +25,10 @@ static class RowCommands
         }
         RuleRecord[] rules = [];
         try { rules = core.RulesLoad().Rules; } catch { }
-        var list = TrsFfiMethods.RowCommands(rows, info, rules, null, inMenuBar, false, App.HostWindows);
+        // Play and Play With from the core's offer (its players, the row's videos); the chooser is here (Choose Files…).
+        PlayOffer? play = null;
+        if (rows.Length == 1) { try { play = core.PlayOffer(rows[0]); } catch (Exception e) { AppLog.Write($"play offer failed: {e.Message}"); } }
+        var list = TrsFfiMethods.RowCommands(rows, info, rules, play, inMenuBar, true, App.HostWindows);
         var menu = new MenuFlyout();
         foreach (var item in Draw(core, list, rows, root, remove))
         {
@@ -35,14 +38,15 @@ static class RowCommands
     }
 
     /// <summary>
-    /// A held row's buttons (the row's countdown or choice actions), in the core's order and words: its Cancel and Start
-    /// from the row's commands (CancelHeld; StartNow while it counts down, ConfirmChoice while it waits for a choice).
+    /// A held row's buttons (the row's countdown or choice actions), in the core's words: Start first, then Cancel (the
+    /// Windows order, primary first: the user's decision)
+    /// from the row's commands (StartNow while it counts down, ConfirmChoice while it waits for a choice; CancelHeld).
     /// </summary>
     public static CommandEntry.Item[] Held(TransferRow row) =>
-        TrsFfiMethods.RowCommands([row], null, [], null, false, false, App.HostWindows)
+        TrsFfiMethods.RowCommands([row], null, [], null, false, true, App.HostWindows)
             .OfType<CommandEntry.Item>()
             .Where(i => i.Command is RowCommand.CancelHeld or RowCommand.StartNow or RowCommand.ConfirmChoice)
-            .OrderBy(i => i.Command is RowCommand.CancelHeld ? 0 : 1)
+            .OrderBy(i => i.Command is RowCommand.CancelHeld ? 1 : 0)
             .ToArray();
 
     /// <summary>A menu of these entries (Get Info's menus and Play With), built when it opens on its anchor.</summary>
@@ -191,7 +195,7 @@ static class RowCommands
     internal static IEnumerable<DependencyObject> Descendants(XamlRoot root) =>
         Microsoft.UI.Xaml.Media.VisualTreeHelper.GetOpenPopupsForXamlRoot(root).SelectMany(p => Tree(p.Child));
 
-    static IEnumerable<DependencyObject> Tree(DependencyObject? o)
+    internal static IEnumerable<DependencyObject> Tree(DependencyObject? o)
     {
         if (o is null)
         {
@@ -220,8 +224,23 @@ static class RowCommands
                 case RowCommand.Pause: InOrder(() => core.Pause(ids)); break;
                 case RowCommand.Resume: InOrder(() => core.Resume(ids)); break;
                 case RowCommand.StartNow: InOrder(() => core.PendingStartNow(first.Id)); break;
-                // Start of a torrent that waits for a choice: the core's default selection (everything but the Extras).
-                case RowCommand.ConfirmChoice: InOrder(() => core.ConfirmChoiceDefault(first.Id)); break;
+                // Start of a torrent that waits for a choice: the shared chooser's ticks (the core loads it first when
+                // nothing showed it, with its default ticks: everything but the Extras).
+                case RowCommand.ConfirmChoice:
+                    if (App.Current?.Choices is ChoiceStore choices) choices.Confirm(first.Id); else InOrder(() => core.ConfirmChoiceDefault(first.Id));
+                    break;
+                case RowCommand.OpenChooser:
+                    if (App.Current is App app) ChooserDialog.Show(app, first.Id);
+                    break;
+                // Choose Files… of a torrent counting down: its countdown ends and the chooser opens (a magnet link's once
+                // its files are known).
+                case RowCommand.ChooseFiles:
+                    CoreCalls.InOrder("choose files", () => core.PendingChoose(first.Id), open =>
+                    {
+                        if (open && App.Current is App a) ChooserDialog.Show(a, first.Id);
+                        App.Current?.Refreshed();
+                    });
+                    break;
                 // Removed, and its .torrent file to the Recycle Bin unless Shift is down (SPEC 7A.6); a file that could not
                 // go is a quiet notification.
                 case RowCommand.CancelHeld:
@@ -233,6 +252,8 @@ static class RowCommands
                         App.Current?.Refreshed();
                     });
                     break;
+                case RowCommand.PlayRow: if (App.Current is App pa) Player.Play(pa, first); break;
+                case RowCommand.Play p: if (App.Current is App pb) Player.Play(pb, first, p.FileIndex, p.PlayerId); break;
                 case RowCommand.StopSharing: InOrder(() => core.StopSharing(ids)); break;
                 case RowCommand.MoveToTop: InOrder(() => core.MoveToTop(first.Id)); break;
                 case RowCommand.Verify: InOrder(() => core.Verify(ids)); break;

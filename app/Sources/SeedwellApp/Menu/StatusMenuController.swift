@@ -98,9 +98,13 @@ import os
         let m = icon.icon(snapshot: s, nowUnixMs: Date().unixMs, menuOpen: qaMenuOpen)
         if m.look != iconLook {
             iconLook = m.look
-            statusItem?.button?.image = Drawing.statusIcon(down: m.look.down, up: m.look.up, progress: m.look.progress, moving: m.look.moving, attention: m.look.attention)
+            statusItem?.button?.image = Drawing.statusIcon(down: m.look.down, up: m.look.up, progress: m.look.progress, moving: m.look.moving,
+                                                           attention: m.look.attention)
         }
         statusItem?.button?.setAccessibilityLabel(m.accessibilityLabel)
+        statusItem?.button?.toolTip = m.attentionText
+        qaIconLook = m.look
+        qaIconLabel = m.accessibilityLabel
         iconTimer?.invalidate()
         let t = Timer(timeInterval: Double(m.nextRefreshMs) / 1000, repeats: false) { [weak self] _ in MainActor.assumeIsolated { self?.refreshIcon() } }
         t.tolerance = Double(m.refreshLeewayMs) / 1000
@@ -200,6 +204,8 @@ import os
         let m = model(s, sync)
         let r = core.agentRequests(nowMs: Date().unixMs)
         requests = r
+        // A request came or went: the icon's dot follows the line at once (both read the core's requests).
+        if r.signature != requestsSignature { refreshIcon() }
         // An open file list is not rebuilt under the pointer (ticking a file can move the row).
         if m.signature != signature || r.signature != requestsSignature, !menuFiles.isOpen { rebuild(s, m) } else { update(s, m) }
         menuSync.update(sync)
@@ -238,11 +244,15 @@ import os
         return menu.items
     }
 
+    /// QA: what the icon showed and said at its last refresh (also in a quiet QA run, which has no menu bar item).
+    private(set) var qaIconLook: IconLook?
+    private(set) var qaIconLabel = ""
+
     /// QA: the menu is tracking.
     private(set) var qaMenuOpen = false
 
     /// QA: the titles of the right-click menu of the open menu's row whose title contains `key`, plus the row's
-    /// check ("check on|off|none") and Play icon ("play yes|no").
+    /// check ("check on|off|none") and Play icon ("play yes (Play Movie.mkv)|no", with the icon's words).
     func qaRowContext(_ key: String) -> String {
         guard let item = rowItems.values.first(where: { ($0.attributedTitle?.string ?? $0.title).localizedCaseInsensitiveContains(key) }),
               let id = item.representedObject as? String, let row = rows[id] else { return "none" }
@@ -255,7 +265,8 @@ import os
         }.joined(separator: "|")
         let view = item.view as? MenuTorrentRow
         let check = view?.running.map { $0 ? "on" : "off" } ?? "none"
-        return "\(titles) [check \(check), play \(view?.playable == true ? "yes" : "no")]"
+        let play = view?.playable == true ? "yes (\(view?.playHelp ?? "no words"))" : "no"
+        return "\(titles) [check \(check), play \(play)]"
     }
 
     private func rebuild(_ s: Snapshot, _ m: MenuModel) {
@@ -273,14 +284,14 @@ import os
         requestsSignature = requests?.signature ?? ""
         qaRequestsItem = nil
         if let r = requests, let line = r.line {
-            let item = requestsItem(r, line)
+            let item = Self.requestsItem(r, line, core: core)
             qaRequestsItem = item
             menu.addItem(item)
             menu.addItem(.separator())
         }
         if let line = m.offline {
             let item = NSMenuItem(title: "", action: nil, keyEquivalent: "")
-            item.attributedTitle = NSAttributedString(string: line, attributes: [.foregroundColor: NSColor.secondaryLabelColor, .font: NSFont.menuFont(ofSize: 0)])
+            item.attributedTitle = NSAttributedString(string: line, attributes: [.foregroundColor: NSColor.secondaryLabelColor, .font: Theme.NS.menu])
             item.isEnabled = false
             menu.addItem(item)
         }
@@ -345,23 +356,40 @@ import os
 
     /// The line of agents' requests for access: who asks what; its submenu has each request's reason, Approve and Deny
     /// (in a menu the positive item comes first). The core makes the change.
-    private func requestsItem(_ r: AgentRequestsModel, _ line: String) -> NSMenuItem {
+    /// Approve and Deny carry their request's id (`representedObject`), so QA's `menu-requests` presses the right one.
+    static func requestsItem(_ r: AgentRequestsModel, _ line: String, core: Core) -> NSMenuItem {
         let item = NSMenuItem(title: line, action: nil, keyEquivalent: "")
         item.image = NSImage(systemSymbolName: "person.badge.key", accessibilityDescription: nil)
         if r.rows.count == 1 { item.subtitle = r.rows[0].detail }
         let sub = NSMenu()
-        let core = self.core
         for (n, row) in r.rows.enumerated() {
             if n > 0 { sub.addItem(.separator()) }
             sub.addItem(.sectionHeader(title: row.title))
             let detail = NSMenuItem(title: row.detail, action: nil, keyEquivalent: "")
             detail.isEnabled = false
             sub.addItem(detail)
-            sub.addItem(ActionItem(title: r.approveTitle) { AgentRequests.decide(core: core, id: row.id, approve: true, notify: false) })
-            sub.addItem(ActionItem(title: r.denyTitle) { AgentRequests.decide(core: core, id: row.id, approve: false, notify: false) })
+            for (title, approve) in [(r.approveTitle, true), (r.denyTitle, false)] {
+                let answer = ActionItem(title: title) { AgentRequests.decide(core: core, id: row.id, approve: approve, notify: false) }
+                answer.representedObject = row.id
+                sub.addItem(answer)
+            }
         }
         item.submenu = sub
         return item
+    }
+
+    /// QA (`menu-requests`): the request line and its submenu as drawn ("line | header / detail / Approve / Deny | …"),
+    /// or with `press`, the Approve or Deny of request `id` pressed as a click on it presses it (`performActionForItem`).
+    func qaRequests(press: (id: String, approve: Bool)? = nil) -> String {
+        guard let item = qaRequestsItem, let sub = item.submenu else { return "none" }
+        if let press {
+            let title = press.approve ? requests?.approveTitle : requests?.denyTitle
+            guard let i = sub.items.firstIndex(where: { $0.representedObject as? String == press.id && $0.title == title }) else { return "no request \(press.id)" }
+            sub.performActionForItem(at: i)
+            return "pressed \(sub.items[i].title) on \(press.id)"
+        }
+        let lines = sub.items.map { $0.isSeparatorItem ? "|" : $0.title }.joined(separator: " / ").replacingOccurrences(of: " / | / ", with: " | ")
+        return "\(item.title)\(item.subtitle.map { " (\($0))" } ?? "") | \(lines)"
     }
 
     /// Updates subtitles, marks and checks in place; no structural change, so the highlight stays put.
@@ -419,7 +447,7 @@ import os
         // The row's own view: the file list's chevron, the check (running / paused) and Play, as the model says. A
         // Recent row without a file list keeps the plain item.
         if let r = rows[id] {
-            menuFiles.decorate(item, row: r, expands: m.expands, playable: m.playable, interactive: kind != .recent,
+            menuFiles.decorate(item, row: r, expands: m.expands, playable: m.playable, playHelp: m.playHelp, interactive: kind != .recent,
                                onActivate: activate, running: m.running, onCheck: onCheck)
         }
         (item.view as? MenuTorrentRow)?.onContext = { [weak self] in

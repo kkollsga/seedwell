@@ -36,9 +36,15 @@ pub fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
         let at = std::time::Instant::now();
         let g = m.lock().unwrap_or_else(|e| e.into_inner());
         let waited = at.elapsed();
+        let caller = std::panic::Location::caller();
         if waited >= LONG_LOCK_WAIT {
-            eprintln!("seedwell sync: waited {} ms for a lock at {}", waited.as_millis(), std::panic::Location::caller());
+            eprintln!("seedwell sync: waited {} ms for a lock at {caller}", waited.as_millis());
         }
+        LONGEST_WAIT.with(|w| {
+            if w.get().is_none_or(|(d, _)| waited > d) {
+                w.set(Some((waited, caller)));
+            }
+        });
         return g;
     }
     m.lock().unwrap_or_else(|e| e.into_inner())
@@ -46,6 +52,40 @@ pub fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 /// Debug builds: a wait for a lock this long is reported ([`lock`]).
 const LONG_LOCK_WAIT: std::time::Duration = std::time::Duration::from_millis(250);
+
+type LockWait = Option<(std::time::Duration, &'static std::panic::Location<'static>)>;
+
+thread_local! {
+    /// Debug builds: this thread's longest wait for a lock ([`lock`]) since [`take_longest_lock_wait`] last asked.
+    static LONGEST_WAIT: std::cell::Cell<LockWait> = const { std::cell::Cell::new(None) };
+}
+
+/// **Tests (debug builds):** the longest this thread waited for one of folder sync's locks since the last call, and
+/// where: a call of the app that took long says whether it waited for a lock or was not run (a busy machine).
+#[doc(hidden)]
+pub fn take_longest_lock_wait() -> LockWait {
+    LONGEST_WAIT.with(|w| w.take())
+}
+
+/// **Tests only:** milliseconds every save of folder sync's state to disk takes on top of the disk's own time
+/// ([`slow_disk`]); process-wide.
+static SAVE_WAIT_MS: AtomicU64 = AtomicU64::new(0);
+
+/// **Tests only:** every save of folder sync's state (its configuration, a membership) takes `wait` longer, as on a
+/// disk that a virus scanner reads before each write is done (Windows' Defender does). For the whole process.
+#[doc(hidden)]
+pub fn test_slow_saves(wait: std::time::Duration) {
+    SAVE_WAIT_MS.store(wait.as_millis() as u64, Ordering::SeqCst);
+}
+
+/// A save to disk is under way (the test hook [`test_slow_saves`] makes it slow). What the app's calls read is never
+/// locked across one: they would wait for the disk.
+pub(crate) fn slow_disk() {
+    let ms = SAVE_WAIT_MS.load(Ordering::Relaxed);
+    if ms > 0 {
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+    }
+}
 
 /// A folder or a channel.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -85,6 +125,9 @@ pub struct Space {
     pub invite: Mutex<Option<InviteLink>>,
     /// The links of invitations this device made, by invite id (shown again in the Share dialog).
     pub links: Mutex<BTreeMap<[u8; 16], String>>,
+    /// Taken by a save of its membership or its links for the whole write, never by a read: the app's calls read
+    /// them, and never wait for a disk ([`crate::roles::add`]).
+    pub saving: Mutex<()>,
     /// Devices we have seen in it (from their announcements and sessions): dialed when not connected.
     pub members: RwLock<BTreeSet<DeviceId>>,
     /// Its name on this device.
@@ -173,6 +216,7 @@ impl Space {
             members_path,
             invite: Mutex::new(invite),
             links: Mutex::new(links),
+            saving: Mutex::new(()),
             members: RwLock::new(BTreeSet::new()),
             name: Mutex::new(name),
             paused: AtomicBool::new(false),
@@ -259,6 +303,8 @@ pub struct FolderShared {
     pub freeing: Mutex<BTreeMap<String, u32>>,
     /// The ignore patterns as they are now (the core keeps them up to date), for answers given without the core.
     pub ignore: trs_sync::ignore::Current,
+    /// On demand and kept in place: the files whose content is in the host's placeholders ([`crate::placed`]).
+    pub placed: Option<Arc<crate::placed::Placed>>,
     /// The core. Lock only on a blocking thread.
     pub core: Mutex<FolderCore>,
     /// Reads the core's index without its lock: requests from peers are answered while a pull holds the
@@ -281,9 +327,39 @@ pub struct FolderShared {
     pub fetched: crate::limit::Meter,
     /// Bytes served to peers from this folder.
     pub served: crate::limit::Meter,
+    /// On demand: the fetches being waited for (SPEC §7G.11).
+    pub fetches: Mutex<Fetches>,
     /// Set once everything above is dropped, the index included. Last, because fields drop in order: the last
     /// `Arc` of a folder counts as gone before its fields are, so only this says the index file is closed.
     pub closed: Closed,
+}
+
+/// The fetches of an on-demand folder being waited for ([`FolderShared::fetches`]).
+#[derive(Default)]
+pub struct Fetches {
+    /// How far each got and since when, by path.
+    pub watch: std::collections::HashMap<String, FetchWatch>,
+    /// The latest ask of each path (its number): a fetch that gives up takes its request back only if no fetch of the
+    /// path asked since (a host asking again at once keeps its request).
+    pub asks: std::collections::HashMap<String, u64>,
+    /// Asks so far.
+    pub asked: u64,
+    /// Requests on their way to the folder's core (which a pull round holds while it downloads), by path: the ask that
+    /// made each. A fetch waits for one without making it again; a cancel removes it, and it is not made then.
+    pub requesting: std::collections::HashMap<String, u64>,
+    /// Why such a request failed after the fetch that made it had answered: the next wait on it says so.
+    pub request_failed: std::collections::HashMap<String, crate::SyncError>,
+}
+
+/// How far a fetch being waited for got, and since when ([`Fetches::watch`]).
+#[derive(Clone, Copy, Debug)]
+pub struct FetchWatch {
+    /// What counts as getting further: the file data that came from the devices asked, and the files here.
+    pub mark: (u64, u64),
+    /// When `mark` last moved (or the wait began).
+    pub since: std::time::Instant,
+    /// When a caller last looked: a fetch nobody waited on for a while starts its count again.
+    pub seen: std::time::Instant,
 }
 
 /// A flag that goes up when it is dropped (see [`FolderShared::closed`]).
@@ -304,6 +380,15 @@ impl Drop for Closed {
 }
 
 impl FolderShared {
+    /// The folder's files as the core reads them: its root, or for a folder kept in place the cache with each held file
+    /// read from its placeholder.
+    pub fn fs(&self) -> Box<dyn trs_sync::fs::Fs> {
+        match &self.placed {
+            Some(p) => Box::new(crate::placed::PlaceFs::new(p.clone())),
+            None => Box::new(trs_sync::fs::StdFs::new(self.root.clone())),
+        }
+    }
+
     /// Our index id and the last sequence given out, from the index's read-only view (never waits for the core).
     pub fn index_state(&self) -> std::io::Result<(u64, u64)> {
         let m = trs_sync::index::IndexStore::meta(&self.index.view())?;
@@ -882,6 +967,8 @@ pub struct Ctx {
     pub hub: mpsc::UnboundedSender<HubMsg>,
     /// Internet speed limits.
     pub limits: crate::limit::Limits,
+    /// **QA:** the speed limits apply to LAN sessions too ([`crate::limit::QA_LIMIT_LAN`], an isolated run only).
+    pub limit_lan: AtomicBool,
     /// Where secrets are kept (a new co-owner stores the folder secret it receives).
     pub secrets: Arc<dyn crate::secrets::SecretStore>,
     /// The protocol versions this device speaks, lowest and highest (in its Hello).
@@ -922,9 +1009,31 @@ pub struct Ctx {
     pub devices_wake: Notify,
     /// One change of the devices group at a time (a removal and its key change, a move, leaving).
     pub devices_lock: tokio::sync::Mutex<()>,
+    /// Sessions may still be coming up until then (the service started, the network changed, a session began): a
+    /// fetch whose file no connected device has waits for them until then, and says so after (SPEC §7G.11).
+    pub settling: Mutex<std::time::Instant>,
+    /// How long that is after each of those ([`crate::service::FETCH_GRACE`]; shorter in tests).
+    pub fetch_grace: Mutex<std::time::Duration>,
+    /// How long a fetch may get no byte further from the devices it asks before it gives up
+    /// ([`crate::service::FETCH_STALL`]; shorter in tests).
+    pub fetch_stall: Mutex<std::time::Duration>,
 }
 
 impl Ctx {
+    /// The speed limits apply to a session (`lan`: it stays on the local network, which is never limited, but in an
+    /// isolated QA run that asks for it).
+    pub fn limited(&self, lan: bool) -> bool {
+        !lan || self.limit_lan.load(Ordering::Relaxed)
+    }
+
+    /// Sessions may be coming up from now ([`Self::settling`]): the service started, the network changed, a session
+    /// began.
+    pub fn settle(&self) {
+        let until = std::time::Instant::now() + *lock(&self.fetch_grace);
+        let mut s = lock(&self.settling);
+        *s = (*s).max(until);
+    }
+
     /// **Tests:** a device offering none of the on-demand feature bits plays Seedwell 0.1.11 in its sessions: it
     /// keeps no stale folders and no session reconciling, links a folder on any Join for it it has not linked,
     /// answers one only if it did not name it itself before, and offers a folder it opened again on the same session.

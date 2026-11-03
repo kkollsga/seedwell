@@ -258,6 +258,21 @@ import SwiftUI
         chatInput = nil
         chatPage = nil
         chatMembers = []
+        chatReply = nil
+    }
+
+    /// The message the composer answers (its reply bar above the field), until it is sent, cancelled (the bar's ×,
+    /// Escape) or the conversation changes.
+    private(set) var chatReply: ChatMessageCard?
+
+    /// Reply on a message (the pill over it): the reply bar opens above the composer.
+    func reply(to card: ChatMessageCard) { chatReply = card }
+
+    /// The reply bar's × and Escape in the field: `true` when there was a reply to cancel (Escape is then used up).
+    @discardableResult func cancelReply() -> Bool {
+        guard chatReply != nil else { return false }
+        chatReply = nil
+        return true
     }
 
     func loadChatMembers() {

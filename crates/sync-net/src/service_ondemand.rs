@@ -23,7 +23,7 @@ const RENAME_ARRIVAL: Duration = Duration::from_secs(60);
 const RENAME_ANSWER_MARGIN: Duration = Duration::from_secs(10);
 /// How long a rename whose outcome is not known is watched for, so the pins follow it if it arrives.
 const RENAME_LATE_WATCH: Duration = Duration::from_secs(600);
-use crate::shared::{FolderShared, Freeing};
+use crate::shared::{FetchWatch, FolderShared, Freeing};
 use crate::status::FolderStatus;
 
 /// What a fetch brought: where the content is in the cache (the host copies it into place), and, for a folder, its
@@ -34,6 +34,43 @@ pub struct Fetched {
     pub path: PathBuf,
     /// Files below a folder no device can give right now.
     pub unavailable: Vec<String>,
+}
+
+/// What a fetch that waited found ([`SyncHandle::od_fetch_wait`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FetchWait {
+    /// It is here.
+    Here(Fetched),
+    /// Still on its way.
+    Coming {
+        /// The connected devices it comes from (their names; none while devices may still be coming up).
+        from: Vec<String>,
+        /// A folder's files no device can give right now (not waited for).
+        unavailable: Vec<String>,
+    },
+}
+
+/// How long sessions may take to come up (after the service starts, the network changes or a session begins) before a
+/// fetch whose content no connected device has gives up (SPEC §7G.11).
+pub const FETCH_GRACE: Duration = Duration::from_secs(3);
+/// How long a fetch may get none of the content from the connected devices that have it before it gives up.
+pub const FETCH_STALL: Duration = Duration::from_secs(30);
+/// A fetch nobody waited on for this long counts its [`FETCH_STALL`] anew when it is waited on again.
+const FETCH_FORGOTTEN: Duration = Duration::from_secs(2);
+
+/// Where a fetch stands ([`SyncHandle::fetch_state`]).
+#[derive(Default)]
+struct FetchState {
+    /// Everything is here (but the files no device can give).
+    here: bool,
+    /// Something not here is still asked for.
+    wanted: bool,
+    /// Files here (below a folder): one more counts as getting further.
+    here_count: u64,
+    /// The devices that hold what is asked for and is not here.
+    holders: std::collections::BTreeSet<ShortId>,
+    /// Files no device can give right now.
+    unavailable: Vec<String>,
 }
 
 /// How far a fetch of one file is.
@@ -56,6 +93,16 @@ fn host_err(e: HostError) -> SyncError {
         HostError::NotFound(_) => super::on_demand(OnDemandError::NoItem, e.to_string()),
         HostError::Changed(_) => super::on_demand(OnDemandError::Changed, e.to_string()),
         other => invalid(other.to_string()),
+    }
+}
+
+/// The same error again (for a second caller): an I/O error keeps its kind and words.
+fn copy_err(e: &SyncError) -> SyncError {
+    match e {
+        SyncError::NotFound => SyncError::NotFound,
+        SyncError::OnDemand(k, why) => SyncError::OnDemand(*k, why.clone()),
+        SyncError::Invalid(why) => SyncError::Invalid(why.clone()),
+        SyncError::Io(e) => SyncError::Io(io::Error::new(e.kind(), e.to_string())),
     }
 }
 
@@ -177,6 +224,8 @@ impl SyncHandle {
     pub async fn od_request(&self, id: &FolderId, path: &str) -> Result<Requested, SyncError> {
         check(path)?;
         let f = self.on_demand_folder(id)?;
+        // Kept in place, and asked for again: its placeholder lost the content behind the core's back.
+        self.od_lost_in_place(&f, path).await?;
         let p = path.to_string();
         let r = self.with_core(&f, move |c| c.request(&p)).await?;
         if matches!(r, Requested::Fetching(_)) {
@@ -189,6 +238,8 @@ impl SyncHandle {
     pub async fn od_cancel(&self, id: &FolderId, path: &str) -> Result<(), SyncError> {
         check(path)?;
         let f = self.on_demand_folder(id)?;
+        // A request still on its way to the core is not made (the core may run it after this cancel).
+        lock(&f.fetches).requesting.remove(path);
         let p = path.to_string();
         self.with_core(&f, move |c| c.cancel_request(&p)).await?;
         Ok(())
@@ -196,63 +247,248 @@ impl SyncHandle {
 
     /// Fetches `path` (a file, or every file below a folder) and waits until it is here, at most `timeout`. Returns
     /// where it is in the cache: the host copies it into place (a clone on APFS costs nothing).
-    /// A folder's files no device can give are not waited for: they are reported (`unavailable`).
+    /// A folder's files no device can give are not waited for: they are reported (`unavailable`). Still on its way when
+    /// `timeout` ends, or given up ([`Self::od_fetch_wait`]): [`OnDemandError::NotHereYet`].
     pub async fn od_fetch(&self, id: &FolderId, path: &str, timeout: Duration) -> Result<Fetched, SyncError> {
+        match self.od_fetch_wait(id, path, timeout).await? {
+            FetchWait::Here(f) => Ok(f),
+            FetchWait::Coming { .. } => Err(super::on_demand(OnDemandError::NotHereYet, format!("{path}: still on its way"))),
+        }
+    }
+
+    /// Fetches `path` (a file, or every file below a folder) and waits for it at most `wait` (SPEC §7G.11): here
+    /// ([`FetchWait::Here`]), or still coming from the connected devices that have it ([`FetchWait::Coming`]: ask again
+    /// to wait on). The caller keeps no timer: the fetch gives up itself, with [`OnDemandError::NotHereYet`], and takes
+    /// its request back (what is pinned stays wanted), as soon as
+    /// - no connected device has the content and none may be coming up: past [`FETCH_GRACE`] after the service
+    ///   started, the network changed or the last session began (sessions come up, link their folders, send their
+    ///   index);
+    /// - or the devices asked sent none of it for [`FETCH_STALL`] while it was waited on.
+    ///
+    /// A version no device can give at all is [`OnDemandError::Unavailable`] at once.
+    ///
+    /// Returns within about `wait` whatever the folder's core is doing: the core is needed only to make the request,
+    /// and a pull round holds it while it downloads (a whole window of files, minutes on a slow link). A request that
+    /// stands already (every file not here is wanted) is not made again; one that has to be made is waited for until
+    /// `wait` ends and then left to go in by itself ([`FetchWait::Coming`]; the next call waits on it without giving
+    /// up). How far the file is meanwhile: [`Self::od_progress`].
+    pub async fn od_fetch_wait(&self, id: &FolderId, path: &str, wait: Duration) -> Result<FetchWait, SyncError> {
+        let end = Instant::now() + wait;
         // A version no device can give is not waited for.
         if self.od_item_at(id, path)?.is_some_and(|i| i.state == trs_sync::ondemand::ItemState::Unavailable) {
             return Err(super::on_demand(OnDemandError::Unavailable, format!("{path}: {}", trs_sync::ondemand::UNAVAILABLE)));
         }
-        let r = self.od_request(id, path).await?;
         let f = self.on_demand_folder(id)?;
-        let end = Instant::now() + timeout;
-        let mut unavailable = Vec::new();
-        if r != Requested::Here {
-            loop {
-                let (here, wanted, missing) = self.fetch_state(&f, path)?;
-                // A file that became one no device can give meanwhile says so at once.
-                if missing.iter().any(|p| p == path) {
-                    return Err(super::on_demand(OnDemandError::Unavailable, format!("{path}: {}", trs_sync::ondemand::UNAVAILABLE)));
+        let (ask, requesting) = {
+            let mut x = lock(&f.fetches);
+            x.asked += 1;
+            let n = x.asked;
+            x.asks.insert(path.to_string(), n);
+            let requesting = x.requesting.contains_key(path);
+            if !requesting {
+                // (A failure nobody waited on: this call makes the request again and finds out itself.)
+                x.request_failed.remove(path);
+            }
+            (n, requesting)
+        };
+        if !requesting && !self.request_stands(&f, path)? {
+            lock(&f.fetches).requesting.insert(path.to_string(), ask);
+            let (h, f2, p) = (self.clone(), f.clone(), path.to_string());
+            let made = tokio::spawn(async move {
+                let r = h.od_request_for(&f2, &p, ask).await;
+                let mut x = lock(&f2.fetches);
+                if x.requesting.get(&p) == Some(&ask) {
+                    x.requesting.remove(&p);
+                    // For a later call waiting on it, should this one have answered already.
+                    if let Err(e) = &r {
+                        x.request_failed.insert(p.clone(), copy_err(e));
+                    }
                 }
-                unavailable = missing;
-                match (here, wanted) {
-                    (true, _) => break,
-                    (false, false) => return Err(invalid(format!("{path}: the fetch was cancelled"))),
-                    (false, true) => {}
-                }
-                if Instant::now() >= end {
-                    return Err(super::on_demand(OnDemandError::NotHereYet, format!("{path}: not here yet (is a device that has it connected?)")));
-                }
-                tokio::time::sleep(Duration::from_millis(50)).await;
+                r
+            });
+            match tokio::time::timeout_at(end.into(), made).await {
+                Ok(r) => match r.map_err(io::Error::other)?.inspect_err(|_| {
+                    lock(&f.fetches).request_failed.remove(path);
+                })? {
+                    Some(Requested::Here) => {
+                        Self::fetch_over(&f, path);
+                        return Ok(FetchWait::Here(Fetched { path: abs(&f.root, path), unavailable: Vec::new() }));
+                    }
+                    Some(Requested::Fetching(_)) => {}
+                    None => return Err(invalid(format!("{path}: the fetch was cancelled"))),
+                },
+                // The core is busy (a pull round): the request goes in when it is free.
+                Err(_) => return Ok(FetchWait::Coming { from: Vec::new(), unavailable: Vec::new() }),
             }
         }
-        Ok(Fetched { path: abs(&f.root, path), unavailable })
+        loop {
+            let st = self.fetch_state(&f, path)?;
+            // A file that became one no device can give meanwhile says so at once.
+            if st.unavailable.iter().any(|p| p == path) {
+                Self::fetch_over(&f, path);
+                return Err(super::on_demand(OnDemandError::Unavailable, format!("{path}: {}", trs_sync::ondemand::UNAVAILABLE)));
+            }
+            if st.here {
+                Self::fetch_over(&f, path);
+                return Ok(FetchWait::Here(Fetched { path: abs(&f.root, path), unavailable: st.unavailable }));
+            }
+            // Its request is still on its way to the core (an earlier call made it): waited for, never given up on; and
+            // one that failed says why.
+            let pending = {
+                let mut x = lock(&f.fetches);
+                let pending = x.requesting.contains_key(path);
+                if !pending && let Some(e) = x.request_failed.remove(path) {
+                    return Err(e);
+                }
+                pending
+            };
+            if pending {
+                if Instant::now() >= end {
+                    return Ok(FetchWait::Coming { from: Vec::new(), unavailable: st.unavailable });
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                continue;
+            }
+            // Who can give it: the connected devices that hold it and share the folder on their session.
+            let asked: Vec<Arc<crate::shared::PeerHandle>> =
+                self.inner.ctx.registry.peers().into_iter().filter(|p| st.holders.contains(&p.device.short()) && p.access(&f.id).is_some()).collect();
+            let data: u64 = asked.iter().map(|p| p.rx_bytes.load(std::sync::atomic::Ordering::Relaxed)).sum();
+            let now = Instant::now();
+            let stalled = {
+                let stall = *lock(&self.inner.ctx.fetch_stall);
+                let mark = (data, st.here_count);
+                let mut w = lock(&f.fetches);
+                let e = w.watch.entry(path.to_string()).or_insert(FetchWatch { mark, since: now, seen: now });
+                // Nobody waited on it for a while (a fetch let go of, a host that came back later): counted anew.
+                if now.duration_since(e.seen) > FETCH_FORGOTTEN || e.mark != mark {
+                    *e = FetchWatch { mark, since: now, seen: now };
+                }
+                e.seen = now;
+                !asked.is_empty() && now.duration_since(e.since) >= stall
+            };
+            let settling = now < *lock(&self.inner.ctx.settling);
+            let why = if asked.is_empty() && !settling {
+                Some("no device that has it is connected")
+            } else if stalled {
+                Some("the devices that have it sent none of it for a while")
+            } else {
+                None
+            };
+            if let Some(why) = why {
+                // Taken back, so nothing is fetched for nobody; off the answer's way (the folder's core may be busy), and
+                // not if the path was asked for again meanwhile.
+                let (h, f2, p) = (self.clone(), f.clone(), path.to_string());
+                tokio::spawn(async move {
+                    let f3 = f2.clone();
+                    let _ = h
+                        .with_core(&f2, move |c| {
+                            if lock(&f3.fetches).asks.get(&p) == Some(&ask) {
+                                c.cancel_request(&p)?;
+                            }
+                            Ok(())
+                        })
+                        .await;
+                });
+                return Err(super::on_demand(OnDemandError::NotHereYet, format!("{path}: not here yet ({why})")));
+            }
+            if !st.wanted {
+                Self::fetch_over(&f, path);
+                return Err(invalid(format!("{path}: the fetch was cancelled")));
+            }
+            if now >= end {
+                let mut from: Vec<String> = asked.iter().map(|p| p.name.clone()).collect();
+                from.sort();
+                from.dedup();
+                return Ok(FetchWait::Coming { from, unavailable: st.unavailable });
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
     }
 
-    /// (here, still wanted) for a file, or for every file below a folder.
-    /// (here, still wanted, unavailable) for a file, or for every file below a folder: a file no device can give
-    /// counts as neither here nor waited for, and is listed.
-    fn fetch_state(&self, f: &FolderShared, path: &str) -> io::Result<(bool, bool, Vec<String>)> {
+    /// Makes the request ask number `ask` of [`Self::od_fetch_wait`] stands for, unless a cancel took it back
+    /// meanwhile (`None`).
+    async fn od_request_for(&self, f: &Arc<FolderShared>, path: &str, ask: u64) -> Result<Option<Requested>, SyncError> {
+        // Kept in place, and asked for again: its placeholder lost the content behind the core's back.
+        self.od_lost_in_place(f, path).await?;
+        let (f2, p) = (f.clone(), path.to_string());
+        let r = self
+            .with_core(f, move |c| {
+                if lock(&f2.fetches).requesting.get(&p) != Some(&ask) {
+                    return Ok(None);
+                }
+                c.request(&p).map(Some)
+            })
+            .await?;
+        if matches!(r, Some(Requested::Fetching(_))) {
+            f.remote_changed.notify_one();
+        }
+        Ok(r)
+    }
+
+    /// The request for `path` stands already (read from the index, never waiting for the core): every file at or
+    /// below it that is not here is wanted, and a file kept in place still has its content in its placeholder. False
+    /// also for a path with no item (the request says why).
+    fn request_stands(&self, f: &FolderShared, path: &str) -> Result<bool, SyncError> {
+        if let Some(placed) = &f.placed
+            && let Some(n) = placed.held(path)
+            && placed.locate(path, &n)?.is_none()
+        {
+            return Ok(false);
+        }
         let view = f.index.view();
-        let mut here = true;
-        let mut wanted = false;
-        let mut unavailable = Vec::new();
+        if !view.local(path)?.is_some_and(|r| trs_sync::ondemand::live(&r)) {
+            return Ok(false);
+        }
+        let mut after: Option<String> = None;
+        loop {
+            let page = view.local_paths(path, after.as_deref(), 1000)?;
+            let Some(last) = page.last().cloned() else { return Ok(true) };
+            for p in &page {
+                if view.local(p)?.is_some_and(|r| trs_sync::ondemand::live(&r) && r.dataless && !r.want) {
+                    return Ok(false);
+                }
+            }
+            after = Some(last);
+        }
+    }
+
+    /// The fetch of `path` is over (here, or not to be waited for).
+    fn fetch_over(f: &FolderShared, path: &str) {
+        let mut x = lock(&f.fetches);
+        x.watch.remove(path);
+        x.asks.remove(path);
+    }
+
+    /// Where a fetch of `path` (a file, or every file below a folder) stands: a file no device can give counts as
+    /// neither here nor waited for, and is listed.
+    fn fetch_state(&self, f: &FolderShared, path: &str) -> io::Result<FetchState> {
+        let view = f.index.view();
+        let mut st = FetchState { here: true, ..FetchState::default() };
         let mut after: Option<String> = None;
         loop {
             let page = view.local_paths(path, after.as_deref(), 1000)?;
             let Some(last) = page.last().cloned() else { break };
             for p in &page {
-                if let Some(r) = view.local(p)?.filter(|r| r.dataless && !r.file.info.deleted) {
-                    if view.unavailable_at(p)?.is_some() {
-                        unavailable.push(p.clone());
-                        continue;
-                    }
-                    here = false;
-                    wanted |= r.want;
+                let Some(r) = view.local(p)?.filter(|r| !r.file.info.deleted) else { continue };
+                if !r.dataless {
+                    st.here_count += u64::from(r.file.info.kind == trs_sync_proto::model::FileKind::File);
+                    continue;
+                }
+                if view.unavailable_at(p)?.is_some() {
+                    st.unavailable.push(p.clone());
+                    continue;
+                }
+                st.here = false;
+                st.wanted |= r.want;
+                if r.want
+                    && let Some(n) = view.need(p)?
+                {
+                    st.holders.extend(n.holders);
                 }
             }
             after = Some(last);
         }
-        Ok((here, wanted, unavailable))
+        Ok(st)
     }
 
     /// How far the fetch of the file at `path` is (its partial copy in the cache).
@@ -393,6 +629,7 @@ impl SyncHandle {
         let f = self.on_demand_folder(id)?;
         let (root, p, from, base) = (f.root.clone(), path.to_string(), from.to_path_buf(), base.map(str::to_string));
         let device = lock(&self.inner.ctx.device_name).clone();
+        let placed = f.placed.clone();
         self.with_core(&f, move |c| {
             // Checked first: a refused write leaves the cache as it was.
             let to = c.host_target(&p, base.as_deref(), &device)?;
@@ -401,6 +638,11 @@ impl SyncHandle {
             let tmp = abs(&root, &trs_sync::pull::temp_path(&to));
             // `std::fs::copy` clones on APFS: the host's copy and the cache share their blocks.
             std::fs::copy(&from, &tmp)?;
+            // Kept in place: the new content is the cache's until the host fills the placeholder with it
+            // (`od_hydrated`), whose note stays as a record of what it held.
+            if let Some(pl) = &placed {
+                pl.let_go(&to)?;
+            }
             std::fs::rename(&tmp, &target)?;
             if to == p { c.host_written(&to) } else { c.host_written_copy(&to, &p) }?;
             Ok(to)
@@ -493,8 +735,13 @@ impl SyncHandle {
         check(to)?;
         let f = self.on_demand_folder(id)?;
         let (from2, to2) = (from.to_string(), to.to_string());
+        // Kept in place: the user's placeholders move with the rename, and so do the notes of what is in them.
+        let placed = f.placed.clone();
         let here = self
-            .with_core(&f, move |c| match c.host_rename(&from2, &to2) {
+            .with_core(&f, move |c| match match &placed {
+                Some(p) => p.host_rename(&from2, &to2, || c.host_rename(&from2, &to2)),
+                None => c.host_rename(&from2, &to2),
+            } {
                 Ok(n) => Ok(Ok((n, c.pins().clone()))),
                 Err(HostError::NeedsHolder) => Ok(Err((c.rename_seen(&from2)?, c.rename_holders(&from2)?, c.rename_target(&to2)?))),
                 Err(e) => Err(e),
@@ -627,17 +874,30 @@ impl SyncHandle {
         if on && cache.exists() {
             return Err(invalid("an earlier cache of this folder is still there"));
         }
+        let not_empty = |place: &Path| place.exists() && std::fs::read_dir(place).map(|mut d| d.next().is_some()).unwrap_or(true);
+        // Kept in place at its own place: the host's placeholders are there until it lets go of them, and the content
+        // they hold comes back into the cache first (so the place is checked after that).
+        let own_place = entry.in_place && place == entry.path;
         if !on {
             super::refuse_cloud_root(&place)?;
             self.refuse_forbidden(&place)?;
             self.refuse_overlap_other(&place, Some(id))?;
             // The place must be free (an empty folder there, the host's, is taken over).
-            if place.exists() && std::fs::read_dir(&place).map(|mut d| d.next().is_some()).unwrap_or(true) {
+            if !own_place && not_empty(&place) {
                 return Err(invalid(format!("{} is not empty: choose another place for the folder", place.display())));
             }
         }
         // The file manager's host lets go of the folder first (told when the switch is over, done or not).
         let _settle = if on { None } else { self.release_host(id, &entry).await? };
+        if !on && entry.in_place {
+            self.take_back_placed(id).await?;
+            if not_empty(&place) {
+                return Err(invalid(format!(
+                    "{} is not empty: what is left there is not the folder's (its files are back in Seedwell's storage); choose another place for the folder",
+                    place.display()
+                )));
+            }
+        }
         // The journal first, before anything is touched: a crash from here on finishes the switch at the next start
         // (moved, or its copy whole, not saved) or undoes it (a partial copy goes; the original was never touched).
         let (from_shown, to_shown) = (from.clone(), to.clone());
@@ -683,6 +943,10 @@ impl SyncHandle {
         entry2.pins = Vec::new();
         entry2.mode_switched = true;
         entry2.path = place;
+        // Kept in place is the host's choice for each on-demand folder it shows; whatever the host had of it is gone.
+        entry2.in_place = false;
+        crate::placed::Placed::remove_log(&self.placed_path(id));
+        self.drop_host_anchor(id);
         if let Some(e) = lock(&self.inner.cfg).folder_mut(&id.to_string()) {
             *e = entry2.clone();
         }

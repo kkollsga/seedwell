@@ -17,34 +17,59 @@ struct ChatComposerImage: Identifiable {
     var items: [ChatComposerImage] = []
     /// Images are being dragged over the conversation.
     var dropping = false
+    /// Images pasted or dropped into the text (`first` and how many, counted in `items`, and where: the selection a
+    /// paste replaces, the point a drop lands on, UTF-16): the composer puts a reference to each there
+    /// (`chatComposerWithImages`).
+    @ObservationIgnored var placed: ((_ first: Int, _ count: Int, _ at: NSRange?) -> Void)?
+    /// An attachment taken out (its index): the composer drops its references (`chatComposerWithoutImage`).
+    @ObservationIgnored var removed: ((Int) -> Void)?
+    /// Added and still being checked: they take their places after `items`, in the order they came.
+    @ObservationIgnored private var checking = 0
+    /// The checks, one batch after another, so the attachments keep the order (and the numbers) they came in.
+    @ObservationIgnored private var queue: Task<Void, Never>?
 
-    /// Checks and adds images (off the main thread: a large photo takes a moment to check); a problem is said once.
-    func add(_ inputs: [ChatImageInput], core: Core) {
+    /// Checks and adds images (off the main thread: a large photo takes a moment to check); a problem is said once. One
+    /// that the core refuses gives up its place: its references go and the later ones are renumbered (`removed`).
+    /// Returns how many were taken (the rest did not fit).
+    @discardableResult func add(_ inputs: [ChatImageInput], core: Core) -> Int {
         let texts = ChatImageWords.texts(core)
-        let room = Int(texts.maxImages) - items.count
+        let room = Int(texts.maxImages) - items.count - checking
         if inputs.count > room { alert(texts.tooMany) }
         let taken = Array(inputs.prefix(max(room, 0)))
-        guard !taken.isEmpty else { return }
-        Task {
+        guard !taken.isEmpty else { return 0 }
+        checking += taken.count
+        let before = queue
+        queue = Task {
+            await before?.value
             var checked: [Result<(ChatImageInput, ChatImageDraft), Error>] = []
             for input in taken {
                 checked.append(await catching { (input, try await core.chatImageCheck(image: input)) })
             }
+            checking -= taken.count
             var problems: [String] = []
             for r in checked {
                 switch r {
-                case .success(let (input, draft)):
-                    if items.count < Int(texts.maxImages) {
-                        items.append(ChatComposerImage(input: input, draft: draft, chip: NSImage(data: draft.previewPng)))
-                    }
-                case .failure(let e): problems.append(SyncText.message(e))
+                case .success(let (input, draft)) where items.count < Int(texts.maxImages):
+                    items.append(ChatComposerImage(input: input, draft: draft, chip: NSImage(data: draft.previewPng)))
+                case .success: removed?(items.count)
+                case .failure(let e):
+                    problems.append(SyncText.message(e))
+                    removed?(items.count)
                 }
             }
             if !problems.isEmpty { alert(problems.joined(separator: "\n")) }
         }
+        return taken.count
     }
 
-    func remove(_ id: UUID) { items.removeAll { $0.id == id } }
+    /// The checks under way are done (tests).
+    func settled() async { await queue?.value }
+
+    func remove(_ id: UUID) {
+        guard let n = items.firstIndex(where: { $0.id == id }) else { return }
+        items.remove(at: n)
+        removed?(n)
+    }
 
     /// The attach button: an open panel for the files the core takes (any, when it names no types).
     func choose(core: Core) {
@@ -57,12 +82,16 @@ struct ChatComposerImage: Identifiable {
         add(panel.urls.map(ChatImagePasteboard.input(file:)), core: core)
     }
 
-    /// Cmd-V with images on the pasteboard: they are attached (true); with text, the field pastes it (false).
-    func paste(from pb: NSPasteboard = .general, core: Core) -> Bool {
+    /// A paste (Cmd-V, Edit > Paste) or a drop onto the text with images or files on the pasteboard: they are attached
+    /// (true), with a reference each `at` the selection or drop point when the field holds text; with text, the field
+    /// pastes it (false).
+    func paste(from pb: NSPasteboard = .general, core: Core, at: NSRange? = nil) -> Bool {
         guard ChatImagePasteboard.hasImage(pb) else { return false }
         let inputs = ChatImagePasteboard.inputs(from: pb, pastedName: ChatImageWords.texts(core).pastedName)
         guard !inputs.isEmpty else { return false }
-        add(inputs, core: core)
+        let first = items.count + checking
+        let taken = add(inputs, core: core)
+        placed?(first, taken, at)
         return true
     }
 
@@ -120,23 +149,23 @@ struct ChatComposerChips: View {
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
+            HStack(spacing: Theme.Space.s) {
                 ForEach(images.items) { item in
-                    HStack(spacing: 6) {
+                    HStack(spacing: Theme.Space.s - 2) {
                         if let chip = item.chip {
                             Image(nsImage: chip).resizable().aspectRatio(contentMode: .fill).frame(width: 32, height: 32)
                                 .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
                         } else if item.draft.file {
-                            Image(systemName: ChatFileLayout.symbol(item.draft.icon)).font(.system(size: 18)).foregroundStyle(.secondary)
+                            Image(systemName: ChatFileLayout.symbol(item.draft.icon)).font(.system(size: Theme.Icon.large)).foregroundStyle(.secondary)
                                 .frame(width: 32, height: 32)
                         }
-                        Text(item.draft.caption).font(.system(size: 11)).lineLimit(1).truncationMode(.middle).frame(maxWidth: 220)
+                        Text(item.draft.caption).font(Theme.caption).lineLimit(1).truncationMode(.middle).frame(maxWidth: 220)
                         Button { images.remove(item.id) } label: { Image(systemName: "xmark.circle.fill") }
                             .buttonStyle(.plain).foregroundStyle(.secondary)
                             .accessibilityLabel(ChatImageWords.texts(core).remove).help(ChatImageWords.texts(core).remove)
                     }
-                    .padding(4)
-                    .background(Color.secondary.opacity(0.1), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                    .padding(Theme.Space.xs)
+                    .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: Theme.Radius.medium, style: .continuous))
                 }
             }
         }
@@ -149,8 +178,11 @@ struct ChatAttachButton: View {
     let core: Core
 
     var body: some View {
-        Button { images.choose(core: core) } label: { Image(systemName: "paperclip") }
-            .buttonStyle(.borderless)
+        Button { images.choose(core: core) } label: {
+            Image(systemName: "paperclip").font(.system(size: Theme.Icon.regular + 1)).foregroundStyle(.secondary)
+                .frame(width: 28, height: 30).contentShape(Rectangle())
+        }
+            .buttonStyle(.plain)
             .help(ChatImageWords.texts(core).attachHelp)
             .accessibilityLabel(ChatImageWords.texts(core).attach)
             .accessibilityIdentifier("chat-attach")
@@ -158,10 +190,10 @@ struct ChatAttachButton: View {
 }
 
 extension View {
-    /// Images pasted (Cmd-V while the field is focused) or dropped onto the conversation go into the composer. The key
-    /// is the user's own: this only looks at it, and passes it on to the field when the pasteboard holds no image.
-    func chatImageInput(_ images: ChatComposerImages, core: Core, enabled: Bool, focused: Bool) -> some View {
-        modifier(ChatImageInputModifier(images: images, core: core, enabled: enabled, focused: focused))
+    /// Images and files dropped onto the conversation go into the composer, without a reference (a drop onto the text
+    /// is the field's: `ChatComposerTextView`).
+    func chatImageInput(_ images: ChatComposerImages, core: Core, enabled: Bool) -> some View {
+        modifier(ChatImageInputModifier(images: images, core: core, enabled: enabled))
     }
 }
 
@@ -169,8 +201,6 @@ struct ChatImageInputModifier: ViewModifier {
     let images: ChatComposerImages
     let core: Core
     let enabled: Bool
-    let focused: Bool
-    @State private var monitor: Any?
 
     func body(content: Content) -> some View {
         content
@@ -179,32 +209,11 @@ struct ChatImageInputModifier: ViewModifier {
             }
             .overlay {
                 if images.dropping {
-                    RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Color.accentColor, lineWidth: 2)
-                        .overlay(Text(ChatImageWords.texts(core).dropHint).font(.system(size: 13, weight: .medium)).padding(10)
-                            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8)))
-                        .padding(6).allowsHitTesting(false)
+                    RoundedRectangle(cornerRadius: Theme.Radius.large, style: .continuous).strokeBorder(Color.accentColor, lineWidth: 2)
+                        .overlay(Text(ChatImageWords.texts(core).dropHint).font(Theme.body.weight(.medium)).padding(Theme.Space.s + 2)
+                            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: Theme.Radius.medium)))
+                        .padding(Theme.Space.s - 2).allowsHitTesting(false)
                 }
             }
-            .onChange(of: enabled && focused, initial: true) { _, on in on ? install() : uninstall() }
-            .onDisappear { uninstall() }
-    }
-
-    private func install() {
-        guard monitor == nil else { return }
-        let (images, core) = (images, core)
-        monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-            ChatImageInputModifier.isPaste(event) && MainActor.assumeIsolated({ images.paste(core: core) }) ? nil : event
-        }
-    }
-
-    private func uninstall() {
-        if let m = monitor { NSEvent.removeMonitor(m) }
-        monitor = nil
-    }
-
-    /// Cmd-V, without other modifiers.
-    nonisolated static func isPaste(_ event: NSEvent) -> Bool {
-        event.modifierFlags.intersection(.deviceIndependentFlagsMask).subtracting([.capsLock, .numericPad, .function]) == .command
-            && event.charactersIgnoringModifiers?.lowercased() == "v"
     }
 }

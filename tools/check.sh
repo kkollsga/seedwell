@@ -5,6 +5,9 @@
 #   tools/check.sh --base public    everything since that revision
 #   tools/check.sh -p trs-tracker   these crates (and the crates that depend on them)
 #   tools/check.sh --full           the whole workspace, app and Swift tests (what GitHub CI runs)
+#   tools/check.sh --quick          a worker's check: the tests of the changed crates only, clippy for them and
+#                                   their dependents (no tests there), the app only when app/ or trs-ffi changed,
+#                                   and a Windows compile check (AGENTS.md, *Catching bugs early*)
 #   tools/check.sh -- -E 'test(/accuracy/)'   extra arguments for cargo nextest
 #
 # Affected = the crates whose files changed plus every workspace crate that depends on them. Clippy
@@ -20,16 +23,17 @@ cd "$(dirname "$0")/.."
 export TRS_FORBID_REAL_HOME=1
 
 orig=("$@")
-base="" full=0 app="auto" pkgs=() extra=()
+base="" full=0 quick=0 app="auto" pkgs=() extra=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --base) base="$2"; shift 2 ;;
     --full) full=1; shift ;;
+    --quick) quick=1; shift ;;
     --app) app=1; shift ;;
     --no-app) app=0; shift ;;
     -p) pkgs+=("$2"); shift 2 ;;
     --) shift; extra=("$@"); break ;;
-    -h|--help) sed -n '2,17p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
     *) echo "check: unknown option $1" >&2; exit 2 ;;
   esac
 done
@@ -52,7 +56,7 @@ meta = json.load(sys.stdin)
 root = meta["workspace_root"]
 crates = {p["name"]: (os.path.relpath(os.path.dirname(p["manifest_path"]), root),
                       {d["name"] for d in p["dependencies"]}) for p in meta["packages"]}
-full, wanted, files = sys.argv[1] == "1", set(sys.argv[2].split()), sys.argv[3].split("\n")
+full, wanted, files, quick = sys.argv[1] == "1", set(sys.argv[2].split()), sys.argv[3].split("\n"), sys.argv[4] == "1"
 app, scan_all = False, False
 if not full and not wanted:
     for f in files:
@@ -63,22 +67,24 @@ if not full and not wanted:
         for name, (d, _) in crates.items():
             if f.startswith(d + "/") and not f.endswith(".md"): wanted.add(name)
 if full: wanted = set(crates)
+direct = set(wanted)
 grow = True
 while grow:
     grow = False
     for name, (_, deps) in crates.items():
         if name not in wanted and deps & wanted: wanted.add(name); grow = True
-app = app or full or "trs-ffi" in wanted
+app = app or full or "trs-ffi" in (direct if quick else wanted)
 # The folders tools/test-portability.py reads: those of the affected crates (all when the scan itself changed).
 scan = sorted(d for d, _ in crates.values() if d.startswith("crates/")) if scan_all else sorted(crates[n][0] for n in wanted)
-print(" ".join(sorted(wanted)) + "|" + ("1" if app else "0") + "|" + " ".join(scan))
-' "$full" "${pkgs[*]:-}" "${files:-}")
+print(" ".join(sorted(wanted)) + "|" + ("1" if app else "0") + "|" + " ".join(sorted(direct)) + "|" + " ".join(scan))
+' "$full" "${pkgs[*]:-}" "${files:-}" "$quick")
 affected=${plan%%|*}
 scan_dirs=${plan##*|}
+direct=$(echo "$plan" | cut -d'|' -f3)
 if [ "$app" = auto ]; then app=${plan#*|}; app=${app%%|*}; fi
 
 if [ -z "$affected" ] && [ "$app" = 0 ] && [ -z "$scan_dirs" ]; then echo "check: only documentation changed"; exit 0; fi
-echo "check: crates: ${affected:-none}; app: $([ "$app" = 1 ] && echo yes || echo no)"
+echo "check: crates: ${affected:-none}; app: $([ "$app" = 1 ] && echo yes || echo no)$([ $quick -eq 1 ] && echo "; tests only for: ${direct:-none} (--quick)")"
 
 # Tests that assume the Mac (a ~/ path, "This Mac", a /-joined path, a Unix-only helper without its cfg), which only
 # Windows CI would find. Not heavy: before the heavy job, and only once.
@@ -90,8 +96,10 @@ if [ -z "${CHECK_INNER:-}" ] && [ -n "$scan_dirs" ]; then
 fi
 [ -n "$affected" ] || [ "$app" = 1 ] || exit 0
 
-args=()
+args=() targs=()
 if [ $full -eq 1 ]; then args=(--workspace); else for p in $affected; do args+=(-p "$p"); done; fi
+# --quick: tests (and the timing tests) only for the crates that changed; clippy still compiles their dependents.
+if [ $quick -eq 1 ]; then for p in $direct; do targs+=(-p "$p"); done; else targs=(${args[@]+"${args[@]}"}); fi
 
 # One heavy job for every step: this script runs itself again under heavy.sh.
 if [ -z "${CHECK_INNER:-}" ]; then
@@ -120,15 +128,22 @@ if [[ " $affected " == *" trs-ffi "* ]]; then
 fi
 if [ ${#args[@]} -gt 0 ]; then
   cargo clippy "${args[@]}" --all-targets --locked -q -- -D warnings
-  cargo nextest run "${args[@]}" --locked --status-level fail --final-status-level slow ${extra[@]+"${extra[@]}"}
+  if [ ${#targs[@]} -gt 0 ]; then
+    cargo nextest run "${targs[@]}" --locked --status-level fail --final-status-level slow ${extra[@]+"${extra[@]}"}
+  fi
+  # A worker's check also compiles the changed crates for Windows: what only the PC or Windows CI would find.
+  if [ $quick -eq 1 ] && rustup target list --installed 2>/dev/null | grep -qx x86_64-pc-windows-gnu; then
+    cargo check "${args[@]}" --all-targets --locked -q --target x86_64-pc-windows-gnu
+    echo "check: compiles for Windows (x86_64-pc-windows-gnu)"
+  fi
 fi
 # The timing tests again at utility priority: macOS then delays the timers of the test threads as it does on GitHub's
 # macOS runner (f20ed77), so a bound that holds only on a quiet Mac fails here, not on CI. Which tests:
 # tools/timing-tests.txt (docs/ENGINEERING.md §5). Skipped when extra nextest arguments narrow the run.
-if [ ${#args[@]} -gt 0 ] && [ ${#extra[@]} -eq 0 ] && [ "$(uname)" = Darwin ]; then
+if [ ${#targs[@]} -gt 0 ] && [ ${#extra[@]} -eq 0 ] && [ "$(uname)" = Darwin ]; then
   timing=$(python3 -I -c 'import sys; print(" | ".join("(%s)" % l.strip() for l in open(sys.argv[1]) if l.strip() and not l.lstrip().startswith("#")))' tools/timing-tests.txt)
   t0=$(date +%s)
-  taskpolicy -c utility cargo nextest run "${args[@]}" --locked --no-tests pass --status-level fail \
+  taskpolicy -c utility cargo nextest run "${targs[@]}" --locked --no-tests pass --status-level fail \
     --final-status-level slow -E "$timing"
   echo "check: the timing tests pass at utility priority, as on CI's Mac ($(( $(date +%s) - t0 )) s)"
 fi

@@ -63,6 +63,8 @@ pub(crate) fn snap() -> Snapshot {
         connections: 0,
         online: true,
         offline_since_ms: None,
+        agent_requests: 0,
+        agent_requests_expire_ms: None,
     }
 }
 
@@ -442,22 +444,22 @@ fn chats_name_the_channel_the_topic_and_the_person() {
     i.topics = vec![vec![topic("Dinner", "Team", 1)]];
     let general = model(&i, &state(LibraryPlace::Chat { channel_id: "Team".into(), topic_id: None }));
     assert_eq!((general.page, general.title.as_str()), (LibraryPage::Conversation, "Team"));
-    assert_eq!(general.summary, format!("Owner · 2 of 3 online · shared until D{}", NOW_S + 10 * 86_400), "this year: no year");
+    assert_eq!(general.summary, format!("2 of 3 online · shared until D{}", NOW_S + 10 * 86_400), "this year: no year");
     i.channels[0].share_until_s = Some(NOW_S + 400 * 86_400);
     let later = model(&i, &state(LibraryPlace::Chat { channel_id: "Team".into(), topic_id: None }));
     assert!(later.summary.ends_with(&format!("shared until D{}Y", NOW_S + 400 * 86_400)));
     let t = model(&i, &state(LibraryPlace::Chat { channel_id: "Team".into(), topic_id: Some("Dinner".into()) }));
-    assert_eq!((t.title.as_str(), t.summary.as_str()), ("Team › Dinner", "Topic by Kari's iPhone · 12 messages"));
+    assert_eq!((t.title.as_str(), t.summary.as_str()), ("Team › Dinner", "2 of 3 online"));
     let gone = model(&i, &state(LibraryPlace::Chat { channel_id: "Team".into(), topic_id: Some("Old".into()) }));
     assert_eq!((gone.page, gone.missing.as_deref(), gone.title.as_str()), (LibraryPage::Missing, Some("This topic is no longer in the channel"), "Team"));
     i.directs = vec![SyncDirect { device_id: "d1".into(), name: "Studio iMac".into(), user: "Kari".into(), online: true, unread: 2, last_message_s: None }];
     let d = model(&i, &state(LibraryPlace::Direct { device_id: "d1".into() }));
-    assert_eq!((d.page, d.title.as_str(), d.summary.as_str()), (LibraryPage::Conversation, "Kari (Studio iMac)", "Private · connected · end-to-end encrypted"));
+    assert_eq!((d.page, d.title.as_str(), d.summary.as_str()), (LibraryPage::Conversation, "Kari (Studio iMac)", "End-to-end encrypted"));
     let mut st = state(LibraryPlace::Direct { device_id: "new".into() });
     assert_eq!(model(&i, &st).title, "Unnamed device");
     st.direct_names.insert("new".into(), "Kari's iPhone".into());
     let m = model(&i, &st);
-    assert_eq!((m.title.as_str(), m.summary.as_str()), ("Kari's iPhone", "Private · not connected · end-to-end encrypted"));
+    assert_eq!((m.title.as_str(), m.summary.as_str()), ("Kari's iPhone", "Not connected"));
     // The conversation just started is listed first in the sidebar.
     let directs = m.sidebar.directs.unwrap();
     assert_eq!(directs.title, "Direct Messages");
@@ -562,14 +564,14 @@ fn a_channel_open_to_agents_is_tagged_in_the_sidebar_and_on_its_page() {
     assert_eq!(tag.text, "agents");
     assert!(tag.help.contains("read and post"), "{}", tag.help);
     assert!(chats.channels[0].topics[0].tag.is_none() && chats.channels[1].item.tag.is_none(), "its topics and a No channel: none");
-    assert_eq!(m.summary, "Owner · 2 of 2 online · agents: yes");
+    assert_eq!(m.summary, "2 of 2 online", "the agents tag is in the toolbar");
     // Set to No (on any member device): the tag goes, and the sidebar is drawn again.
     let before = m.sidebar.signature.clone();
     i.channels[0].agents = false;
     let m = model(&i, &st);
     assert!(m.sidebar.chats.channels[0].item.tag.is_none());
     assert_ne!(m.sidebar.signature, before);
-    assert_eq!(m.summary, "Owner · 2 of 2 online");
+    assert_eq!(m.summary, "2 of 2 online");
 }
 
 #[test]

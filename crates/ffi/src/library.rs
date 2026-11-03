@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use trs_platform::computer;
 
 use crate::backend::Backend;
-use crate::chat_text::{header, named, topic_line, UNNAMED_DEVICE};
+use crate::chat_text::{header, named, subtitle, UNNAMED_DEVICE};
 use crate::devices_text::follow_line_for;
 use crate::host::{disclosure_window, has, host_windows_all, offered_sidebar, row_command_window, HostWindow};
 use crate::library_rows::{
@@ -416,7 +416,8 @@ pub(crate) fn build(i: &Inputs, st: &LibraryState, now_ms: u64, clock: &dyn Loca
                 None => name.to_owned(),
             };
             let summary = match chat {
-                Some((_, Some(t))) => topic_line(t),
+                // A topic's title says its channel; its line is the channel's (who made it is in its tooltip).
+                Some((c, Some(_))) => subtitle(c),
                 Some((c, None)) => header(c, c.share_until_s.map(|u| local_day(clock, u, now_ms / 1000))),
                 None => concat!("No longer on this ", computer!()).to_owned(),
             };

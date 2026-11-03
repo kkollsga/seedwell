@@ -1,6 +1,6 @@
 //! Speed limits for Internet traffic and rate meters for the UI.
 //!
-//! The LAN is never limited (SPEC §7G.3). A limit is a token bucket: a request may take the bucket into
+//! The LAN is never limited (SPEC §7G.3), but in an isolated QA run that asks for it ([`QA_LIMIT_LAN`]). A limit is a token bucket: a request may take the bucket into
 //! debt (a chunk can be bigger than one second's allowance), and the next one waits until it is paid off,
 //! so the average holds without splitting chunks.
 
@@ -105,6 +105,17 @@ impl Meter {
     }
 }
 
+/// **QA only:** with this set to `1`, the speed limits apply to LAN sessions too, so a check over loopback sees a
+/// transfer take its time. Honoured only in an isolated run: a state folder inside a temporary folder (as
+/// `SEEDWELL_QA_TRASH_DIR` is), never in the user's own Seedwell.
+pub const QA_LIMIT_LAN: &str = "SEEDWELL_QA_LIMIT_LAN";
+
+/// Whether the speed limits apply to LAN sessions too: [`QA_LIMIT_LAN`] is `1` (`value`) and the service's state
+/// folder (`state`) is inside a temporary folder.
+pub fn qa_limit_lan(value: Option<&std::ffi::OsStr>, state: &std::path::Path) -> bool {
+    value.is_some_and(|v| v == "1") && trs_platform::dirs::in_temp_folder(state)
+}
+
 /// The Internet limits of the whole service.
 #[derive(Default)]
 pub struct Limits {
@@ -137,6 +148,24 @@ mod tests {
         // 640 KiB at 100 KiB/s with a 64 KiB start: about 5.8 s.
         let took = start.elapsed().as_secs_f64();
         assert!((5.0..7.0).contains(&took), "{took}");
+    }
+
+    /// The QA switch counts only in an isolated run: a state folder inside a temporary folder, never the user's own.
+    #[test]
+    fn the_lan_limit_switch_counts_only_in_an_isolated_run() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path().join("state");
+        let on = Some(std::ffi::OsStr::new("1"));
+        assert!(qa_limit_lan(on, &state));
+        assert!(!qa_limit_lan(None, &state), "not asked for");
+        assert!(!qa_limit_lan(Some(std::ffi::OsStr::new("0")), &state));
+        assert!(!qa_limit_lan(Some(std::ffi::OsStr::new("yes")), &state));
+        // A state folder outside any temporary folder (as the user's own is; here one in the source tree, never touched),
+        // and a relative path.
+        let here = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("state");
+        assert!(!trs_platform::dirs::in_temp_folder(&here), "the source tree is not in a temporary folder: {}", here.display());
+        assert!(!qa_limit_lan(on, &here));
+        assert!(!qa_limit_lan(on, std::path::Path::new("state")));
     }
 
     #[tokio::test]

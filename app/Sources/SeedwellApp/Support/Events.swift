@@ -60,32 +60,73 @@ final class CoreEvents: CoreListener, Sendable {
 
     /// The notifications with buttons (an agent's request: Approve, Deny), as the core lists them.
     static func registerCategories() {
-        let categories = noticeCategories().map { c in
+        UNUserNotificationCenter.current().setNotificationCategories(categories())
+    }
+
+    /// The core's notification kinds with buttons as the system's categories (Approve asks to unlock first, Deny is
+    /// marked destructive).
+    nonisolated static func categories() -> Set<UNNotificationCategory> {
+        Set(noticeCategories().map { c in
             UNNotificationCategory(identifier: c.id, actions: c.actions.map { a in
                 var options: UNNotificationActionOptions = []
                 if a.destructive { options.insert(.destructive) }
                 if a.authenticate { options.insert(.authenticationRequired) }
                 return UNNotificationAction(identifier: a.id, title: a.title, options: options)
             }, intentIdentifiers: [], options: [])
+        })
+    }
+
+    /// A notification answered: a button (Approve, Deny on an agent's request) answers the request, as the core reads
+    /// it (`noticeDecision`); a click on the notice (or a button of no request) opens its route. What the system's
+    /// response calls (`userNotificationCenter(_:didReceive:)`) and QA's `notice-action`; the system's own
+    /// Notification Center, which shows the buttons, is outside the app and is not driven.
+    @MainActor static func respond(click: String, action: String, core: Core, open: (NoticeRoute) -> Void) {
+        if let d = noticeDecision(click: click, action: action) {
+            AgentRequests.decide(core: core, id: d.requestId, approve: d.approve, notify: true)
+        } else {
+            open(noticeRoute(click: click))
         }
-        UNUserNotificationCenter.current().setNotificationCategories(Set(categories))
     }
 
     /// A notice of the core's; one with a `key` takes the place of the last one with that key.
     static func post(_ n: Notice) {
-        post(title: n.title, body: n.body, key: n.key ?? UUID().uuidString, click: n.click, category: n.category)
+        post(title: n.title, body: n.body, key: n.key ?? UUID().uuidString, click: n.click, category: n.category, level: level(n.urgency))
+    }
+
+    /// The system's interruption level for the core's urgency. Apps cannot make an alert stay on screen (the user's
+    /// alert style for Seedwell, Persistent or not, decides that), so a persistent notice is time-sensitive here: it
+    /// breaks through a Focus that allows it, and the host takes it away once it is answered (`withdrawStale`).
+    nonisolated static func level(_ u: NoticeUrgency) -> UNNotificationInterruptionLevel {
+        switch u {
+        case .normal: .active
+        case .timeSensitive, .persistent: .timeSensitive
+        }
     }
 
     /// A notification whose click opens the window, unless `click` (a `Notice.click`) says otherwise; `category`: its
     /// buttons (`registerCategories`).
-    static func post(title: String, body: String, key: String = UUID().uuidString, click: String = "", category: String? = nil) {
+    static func post(title: String, body: String, key: String = UUID().uuidString, click: String = "", category: String? = nil,
+                     level: UNNotificationInterruptionLevel = .active) {
         guard available else { log.notice("(notification) \(title, privacy: .public): \(body, privacy: .private)"); return }
         let content = UNMutableNotificationContent()
         content.title = title
         content.body = body
         content.userInfo = [clickKey: click]
+        content.interruptionLevel = level
         if let category { content.categoryIdentifier = category }
         UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: key, content: content, trigger: nil))
+    }
+
+    /// Takes away the notifications the core says are stale (`Notices.withdrawn`): an agent's request answered anywhere,
+    /// expired or withdrawn, so its Approve and Deny can no longer be pressed. Off the main thread: the system lists the
+    /// delivered ones in its own time.
+    static func withdrawStale(_ notices: Notices) {
+        guard available else { return }
+        UNUserNotificationCenter.current().getDeliveredNotifications { delivered in
+            let gone = notices.withdrawn(delivered: delivered.map(\.request.identifier))
+            guard !gone.isEmpty else { return }
+            UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: gone)
+        }
     }
 
     /// `/Users/me/Movies` as `~/Movies`; `$HOME` is the one the app runs with (`--home-root` aware).

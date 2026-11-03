@@ -9,7 +9,6 @@ use trs_control::display as d;
 
 use crate::sidebar::SidebarTag;
 use crate::sync::{SyncAgentAccess, SyncChannel, SyncRole, SyncTopic};
-use crate::sync_text::role;
 
 /// A device that never said its name.
 pub(crate) const UNNAMED_DEVICE: &str = "Unnamed device";
@@ -137,20 +136,18 @@ pub fn chat_new_agents_note(open: bool) -> String {
     format!("{} You can change it later in the channel's ⋯ menu.", if open { AGENTS_YES } else { AGENTS_NO })
 }
 
-/// A channel page's line under its name: "Owner · 2 of 3 online · shared until 1 Nov · agents: yes" (the last only
-/// for a channel open to agents). `share_until_day`: the channel's share end in the user's own date style.
+/// A channel page's line under its name: "2 of 3 online · Muted · shared until 1 Nov". Its role is in the members
+/// panel, and a channel open to agents has its tag in the toolbar. `share_until_day`: the channel's share end in the
+/// user's own date style.
 pub(crate) fn header(channel: &SyncChannel, share_until_day: Option<String>) -> String {
-    let mut parts = vec![role(channel.role).to_owned(), subtitle(channel)];
+    let mut parts = vec![subtitle(channel)];
     if let Some(day) = share_until_day.filter(|_| channel.share_until_s.is_some()) {
         parts.push(format!("shared until {day}"));
-    }
-    if channel.agents {
-        parts.push("agents: yes".into());
     }
     parts.join(" · ")
 }
 
-/// A channel page's line: "Owner · 2 of 3 online · shared until 1 Nov · agents: yes".
+/// A channel page's line: "2 of 3 online · Muted · shared until 1 Nov".
 #[uniffi::export]
 pub fn chat_header(channel: SyncChannel, share_until_day: Option<String>) -> String {
     header(&channel, share_until_day)
@@ -168,11 +165,11 @@ pub fn chat_topic_line(topic: SyncTopic) -> String {
     topic_line(&topic)
 }
 
-/// A private conversation's line: "Private · connected · end-to-end encrypted" (connected directly: the only way a
-/// private message goes).
+/// A private conversation's line: "End-to-end encrypted" while connected directly (the only way a private message
+/// goes), else "Not connected".
 #[uniffi::export]
 pub fn chat_direct_line(online: bool) -> String {
-    format!("Private · {} · end-to-end encrypted", if online { "connected" } else { "not connected" })
+    if online { "End-to-end encrypted" } else { "Not connected" }.into()
 }
 
 /// A channel's unread messages under General: its total less its topics' (the core counts the total), never below
@@ -228,27 +225,25 @@ pub(crate) mod tests {
     #[test]
     fn the_list_and_the_page_say_what_is_going_on() {
         let c = channel("Team", 3, 2, 0, false);
-        assert_eq!(header(&c, None), "Owner · 2 of 3 online");
+        assert_eq!(header(&c, None), "2 of 3 online", "the role is in the members panel");
         let mut m = channel("Team", 3, 2, 0, true);
         m.agents = true;
-        assert_eq!(header(&m, None), "Owner · 2 of 3 online · Muted · agents: yes");
+        assert_eq!(header(&m, None), "2 of 3 online · Muted", "the agents tag is in the toolbar");
         m.share_until_s = Some(1_800_000_000);
-        assert_eq!(header(&m, Some("1 Nov".into())), "Owner · 2 of 3 online · Muted · shared until 1 Nov · agents: yes");
+        assert_eq!(header(&m, Some("1 Nov".into())), "2 of 3 online · Muted · shared until 1 Nov");
         assert_eq!(subtitle(&c), "2 of 3 online");
         assert_eq!(chat_agents_label(SyncAgentAccess::ReadPost), "Read and post");
     }
 
     #[test]
-    fn a_channel_open_to_agents_has_a_tag_and_says_so_on_its_page() {
+    fn a_channel_open_to_agents_has_a_tag() {
         let plain = channel("Family", 2, 1, 0, false);
         assert_eq!(agent_tag(&plain), None, "Agents: No: no tag");
-        assert_eq!(header(&plain, None), "Owner · 1 of 2 online");
         let mut c = channel("Bridge", 2, 2, 0, false);
         c.agents = true;
         let tag = chat_agent_tag(c.clone()).unwrap();
         assert_eq!(tag.text, "agents");
         assert!(tag.help.starts_with("Agents: Yes. Agents on every member's device") && tag.help.contains("marked"), "{}", tag.help);
-        assert_eq!(header(&c, None), "Owner · 2 of 2 online · agents: yes");
     }
 
     #[test]
@@ -280,7 +275,7 @@ pub(crate) mod tests {
         assert_eq!(subtitle(&channel("Solo", 1, 0, 0, true)), "Only this Mac · Muted");
         let alone = SyncChannel { waiting: Some("Waiting for Mac mini (last seen 3 days ago)".into()), ..channel("Plans", 2, 1, 0, false) };
         assert_eq!(subtitle(&alone), "Waiting for Mac mini (last seen 3 days ago)", "whom it waits for, from the core");
-        assert_eq!(header(&alone, None), "Owner · Waiting for Mac mini (last seen 3 days ago)");
+        assert_eq!(header(&alone, None), "Waiting for Mac mini (last seen 3 days ago)");
     }
 
     #[test]
@@ -298,8 +293,8 @@ pub(crate) mod tests {
         nameless.author_name.clear();
         nameless.messages = 1;
         assert_eq!(topic_line(&nameless), "Topic by an unnamed device · 1 message");
-        assert_eq!(chat_direct_line(false), "Private · not connected · end-to-end encrypted");
-        assert_eq!(chat_direct_line(true), "Private · connected · end-to-end encrypted");
+        assert_eq!(chat_direct_line(false), "Not connected");
+        assert_eq!(chat_direct_line(true), "End-to-end encrypted");
         let topics = [topic("a", "Team", 1), topic("b", "Team", 2)];
         assert_eq!(general_unread(&channel("Team", 2, 1, 5, false), &topics), 2);
         assert_eq!(general_unread(&channel("Team", 2, 1, 1, false), &topics), 0, "never below zero while the counts catch up");

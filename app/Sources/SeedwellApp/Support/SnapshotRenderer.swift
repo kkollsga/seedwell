@@ -17,6 +17,8 @@ import SwiftUI
         try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
         // SEEDWELL_SNAPSHOTS=files: only the file lists, the chooser and the notifier (a quick before/after of them).
         if ProcessInfo.processInfo.environment["SEEDWELL_SNAPSHOTS"] == "files" { return await renderFileLists() }
+        // The menu bar icon, plain and with the attention dot (IconSnapshots); `SEEDWELL_RENDER_ONLY=menubar-icon` alone.
+        if wanted("menubar-icon") { renderMenuBarIcons() }
         let mainSize = NSSize(width: 1180, height: 820)
 
         await render("downloads-dark", size: mainSize) { MainWindowView(model: model(.downloads, select: nil), commands: commands, settings: settings, nav: SettingsNavigation()) }
@@ -183,7 +185,7 @@ import SwiftUI
                 let m = model(.chat(channelId: c, topicId: core.chatTopics(channelId: c).first?.id), select: nil)
                 return MainWindowView(model: m, commands: commands, settings: settings, nav: SettingsNavigation())
             }
-            await render("chats-agents-\(suffix)", size: NSSize(width: 1180, height: 760), dark: dark) {
+            await render("chats-agents-\(suffix)", size: NSSize(width: 1180, height: 1380), dark: dark) {
                 // Agents writing Markdown, each with its name and computer.
                 let c = core.chatChannels().first { $0.name == "Release notes" }?.id ?? ""
                 return MainWindowView(model: model(.chat(channelId: c, topicId: nil), select: nil), commands: commands, settings: settings, nav: SettingsNavigation())
@@ -197,16 +199,59 @@ import SwiftUI
                 ScrollView { VStack(alignment: .leading, spacing: 0) {
                     ForEach(Self.sampleCards(), id: \.id) { ChatMessageRow(card: $0) }
                 }
-                .padding(.horizontal, 22).padding(.vertical, 12) }
+                .padding(.horizontal, Theme.Space.xl).padding(.vertical, Theme.Space.l) }
                 .frame(width: 820, height: 1700)
                 .background(.background)
             }
             await render("chat-new-\(suffix)", size: NSSize(width: 440, height: 240), dark: dark, settings: true) {
                 ChatNewView(model: ChatNewModel(core: core, prefill: nil))
             }
+            let notes = core.chatChannels().first { $0.name == "Release notes" }?.id ?? ""
+            await render("chat-reply-\(suffix)", size: NSSize(width: 1180, height: 760), dark: dark) {
+                // Reply on the other person's message: the reply bar on top of the composer.
+                let m = model(.chat(channelId: notes, topicId: nil), select: nil)
+                m.loadChatMessages()
+                if let card = m.chatPage?.messages.last(where: { $0.who == .theirs }) { m.reply(to: card) }
+                return MainWindowView(model: m, commands: commands, settings: settings, nav: SettingsNavigation())
+            }
+            await render("chat-code-copy-\(suffix)", size: NSSize(width: 820, height: 520), dark: dark, settings: true) {
+                // The pointer on a code block (an agent's Markdown): its copy button in the top-right corner.
+                let m = model(.chat(channelId: notes, topicId: nil), select: nil)
+                m.loadChatMessages()
+                let cards = (m.chatPage?.messages ?? []).filter { $0.who == .ourAgent }
+                return ScrollView { VStack(alignment: .leading, spacing: 0) {
+                    ForEach(cards, id: \.id) { ChatMessageRow(card: $0, core: core) }
+                }
+                .padding(.horizontal, Theme.Space.xl).padding(.vertical, Theme.Space.l) }
+                .environment(\.chatCodeHover, true)
+                .frame(width: 820, height: 520)
+                .background(.background)
+            }
+            // The pointer on a message: its time, Tag and Reply under it, at the right end of its line (a message inside a
+            // run: the user's first; the last of a run: the other person's), and in a private conversation.
+            let direct = core.chatDirects().first?.deviceId ?? ""
+            for (name, place, pick) in [("inrun", LibraryModel.Section.chat(channelId: notes, topicId: nil), { (c: [ChatMessageCard]) in c.first { $0.who == .mine && $0.meta == nil } }),
+                                        ("last", .chat(channelId: notes, topicId: nil), { c in c.last { $0.who == .theirs } }),
+                                        ("direct", .direct(deviceId: direct), { c in c.first { $0.meta == nil && $0.who == .theirs } }),
+                                        ("direct-last", .direct(deviceId: direct), { c in c.first { $0.who == .mine } })] {
+                await render("chat-hover-\(name)-\(suffix)", size: NSSize(width: 820, height: 640), dark: dark, settings: true) {
+                    let m = model(place, select: nil)
+                    m.loadChatMessages()
+                    let page = m.chatPage
+                    let cards = page?.messages ?? []
+                    let hovered = pick(cards)?.id
+                    return ScrollView { VStack(alignment: .leading, spacing: 0) {
+                        ForEach(cards, id: \.id) { ChatMessageRow(card: $0, core: core, bubbles: page?.bubbles ?? false, hovered: $0.id == hovered) }
+                    }
+                    .padding(.horizontal, Theme.Space.xl).padding(.vertical, Theme.Space.l) }
+                    .frame(width: 820, height: 640)
+                    .background(.background)
+                }
+            }
         }
         await renderFiles()
         await renderImages()
+        await renderImageLayouts()
         await render("settings-folderSync-light", size: NSSize(width: 860, height: 900), dark: false, settings: true) {
             SettingsView(model: settings, nav: nav(.folderSync))
         }
@@ -247,10 +292,60 @@ import SwiftUI
         }
     }
 
+    /// Images in a conversation, every shape (the core's `chatImageLayoutSamples`): a wide photo, a tall screenshot, a
+    /// small picture and an icon at their own sizes, and a five-image gallery (its second image shown) with a file
+    /// under it, in a channel and in a private conversation. Never chat state.
+    private func renderImageLayouts() async {
+        // Made off the main thread: drawing nine pictures at Retina size takes a moment.
+        let samples = await Task.detached { chatImageLayoutSamples(maxSide: ChatImageLayout.side) }.value
+        let byLabel = Dictionary(uniqueKeysWithValues: samples.map { ($0.label, $0.image) })
+        let byHash = Dictionary(uniqueKeysWithValues: samples.map { ($0.image.hash, $0) })
+        let file = chatFileSamples().cards.first { $0.label == "available" }?.card
+        let start = UInt64(Date().timeIntervalSince1970) - 3_600
+        let me = "D0"
+        func message(_ n: Int, _ device: String, _ name: String, _ user: String, agent: String? = nil, _ body: String, _ labels: [String], files: [ChatFileCard] = []) -> SyncMessage {
+            SyncMessage(id: "img\(n)-c0ffee", channelId: "C", authorDevice: device, authorName: name, authorUser: user, isMe: device == me, agent: agent,
+                        atS: start + UInt64(n) * 400, replyTo: nil, topic: nil, kind: .text, body: body,
+                        images: labels.compactMap { byLabel[$0] }, files: files, place: "C")
+        }
+        let messages = [
+            message(1, "D1", "Kari's iPhone", "Kari", "Utsikten fra hytta i kveld", ["wide"]),
+            message(2, me, "Kristian's MacBook Pro", "Kristian", "", ["tall"]),
+            message(3, "D1", "Kari's iPhone", "Kari", "Ny logo-skisse", ["small"]),
+            message(4, "D2", "Studio iMac", "", agent: "Website", "The favicon at its own size:", ["icon"]),
+            message(5, me, "Kristian's MacBook Pro", "Kristian", "Bilder fra turen: utsikten fra toppen ![Image 2](att:2), og hytta i snøen ![Image 4](att:4).", (1...5).map { "gallery-\($0)" }, files: file.map { [$0] } ?? []),
+        ]
+        let channel = SyncChannel(id: "C", name: "Hytta", role: .owner, shareUntilS: nil, members: 3, online: 2, unread: 0, lastMessageS: nil,
+                                  muted: false, agents: true, wakeCommand: nil, progress: nil, problem: nil, waiting: nil, gone: [])
+        let read = ChatPageRead(messages: messages, pending: [], follow: nil, directAgents: .off, ownDevices: [me])
+        let inChannel = ChatPageInput(place: .chat(channelId: "C", topicId: nil), title: "Hytta", channel: channel, topic: nil, direct: nil, read: read,
+                                      members: [], nowUnixS: UInt64(Date().timeIntervalSince1970))
+        let direct = SyncDirect(deviceId: "D1", name: "Kari's iPhone", user: "Kari", online: true, unread: 0, lastMessageS: nil)
+        let privately = ChatPageRead(messages: messages.filter { $0.authorDevice != "D2" }, pending: [], follow: nil, directAgents: .off, ownDevices: [me])
+        let inDirect = ChatPageInput(place: .direct(deviceId: "D1"), title: "Kari (Kari's iPhone)", channel: nil, topic: nil, direct: direct, read: privately,
+                                     members: [], nowUnixS: UInt64(Date().timeIntervalSince1970))
+        for (name, input) in [("channel", inChannel), ("direct", inDirect)] {
+            guard let page = chatPageModel(input: input, clock: MacClock(), host: hostWindowsAll()) else { continue }
+            for dark in [true, false] {
+                await render("chat-images-\(name)-\(dark ? "dark" : "light")", size: NSSize(width: 900, height: 2300), dark: dark, settings: true) {
+                    ScrollView { VStack(alignment: .leading, spacing: 0) {
+                        ForEach(page.messages, id: \.id) { ChatMessageRow(card: $0, core: core, bubbles: page.bubbles) }
+                    }
+                    .frame(maxWidth: ChatLook.column)
+                    .padding(.horizontal, Theme.Space.xl).padding(.vertical, Theme.Space.l) }
+                    .environment(\.chatImageSamples, byHash)
+                    .environment(\.chatGalleryStart, 1)
+                    .frame(width: 900, height: 2300)
+                    .background(.background)
+                }
+            }
+        }
+    }
+
     /// Images in chat (SPEC 7G.7 Attachments): an image in each state with its preview or picture, and the composer's
     /// chips. Fixtures made by the core (`chatImageSamples`), never chat state.
     private func renderImages() async {
-        let samples = chatImageSamples(maxSide: ChatImageLayout.side)
+        let samples = await Task.detached { chatImageSamples(maxSide: ChatImageLayout.side) }.value
         for dark in [true, false] {
             let suffix = dark ? "dark" : "light"
             for s in samples.images {
@@ -268,6 +363,30 @@ import SwiftUI
                 }
                 return ChatComposerChips(images: images, core: core).padding(16)
                     .frame(width: 620, height: 120, alignment: .topLeading).background(.background)
+            }
+            // The composer after two images were dropped into its text: each reference where it landed (the core's
+            // `chatComposerWithImages`, as a drop calls it), set apart in the accent colour, and the two attachments.
+            let channel = core.chatChannels().first?.id ?? ""
+            let m = model(.chat(channelId: channel, topicId: nil), select: nil)
+            m.loadChatMessages()
+            var text = "Before and after the fix: which one reads better?"
+            for (n, word) in ["Before", "after"].enumerated() {
+                let r = (text as NSString).range(of: word)
+                let at = ChatTextRange(start: UInt32(r.location + r.length), length: 0)
+                text = chatComposerWithImages(draft: text, first: UInt32(n), count: 1, at: at)?.text ?? text
+            }
+            if let page = m.chatPage, page.composer.canPost {
+                await render("chat-composer-drop-\(suffix)", size: NSSize(width: 720, height: 150), dark: dark, settings: true) {
+                    let images = ChatComposerImages()
+                    // The samples' one picture, dropped twice.
+                    let picture = samples.drafts.filter { !$0.file }.prefix(1)
+                    images.items = (picture + picture).map {
+                        ChatComposerImage(input: ChatImageInput(name: $0.name, path: nil, bytes: nil), draft: $0, chip: NSImage(data: $0.previewPng))
+                    }
+                    return ChatComposerView(model: m, page: page, draft: .constant(text), selection: .constant(NSRange(location: 0, length: 0)),
+                                            typing: .constant(false), images: images, send: {})
+                        .padding(Theme.Space.l).frame(width: 720, height: 150, alignment: .bottom).background(.background)
+                }
             }
         }
     }

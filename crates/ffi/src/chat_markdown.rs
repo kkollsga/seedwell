@@ -11,6 +11,14 @@
 //! e-mail addresses): what the Mac drew before (Foundation's Markdown). A link opens only when it is a web or mail
 //! address ([`ChatLinkTarget::Open`]) or a `seedwell://` link ([`ChatLinkTarget::Route`]); any other (a `file:` or
 //! `javascript:` link, a relative path) is drawn as plain text.
+//!
+//! **Image references** (build 49): `![Image 2](att:2)` in a message's text refers to the message's own second
+//! image (counted from 1, in the order it carries them). The run is drawn as a small chip where it stands; a click shows
+//! that image in the gallery at the top of the message. A reference to an image the message does not carry
+//! (`chat_page` checks) is plain text, its description. Versions before it show the description alone, as for any
+//! Markdown image. [`chat_image_marker`] writes one; [`chat_composer_with_images`] puts references into a draft where
+//! images were pasted or dropped; [`chat_composer_without_image`] keeps a draft's references right when an attachment
+//! is taken out of it; [`chat_composer_image_refs`] finds them for the composer to set apart.
 
 /// What a link does when it is clicked.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, uniffi::Enum)]
@@ -39,6 +47,10 @@ pub struct ChatRun {
     pub code: bool,
     /// Drawn as a link (the accent colour) and clickable.
     pub link: Option<ChatLink>,
+    /// A reference to the message's image at this index (0 for its first): drawn as a chip, which shows that image in
+    /// the message's gallery when clicked. Its text is the reference's description ("Image 2").
+    #[uniffi(default = None)]
+    pub image: Option<u32>,
 }
 
 /// A cell of a table.
@@ -373,12 +385,161 @@ struct Tok {
     emph: u16,
     strike: u16,
     link: Option<usize>,
+    image: Option<u32>,
 }
 
 impl Tok {
     fn new(text: String, kind: Kind) -> Self {
-        Tok { text, kind, strong: 0, emph: 0, strike: 0, link: None }
+        Tok { text, kind, strong: 0, emph: 0, strike: 0, link: None, image: None }
     }
+}
+
+/// The highest image a reference names: a message carries at most this many attachments.
+const MAX_IMAGE_REF: u32 = 99;
+
+/// The image an `att:` destination names, 0 for the first: `att:2` → 1. `None` for anything else (`att:0`, `att:x`,
+/// `att:100`).
+pub(crate) fn image_ref(url: &str) -> Option<u32> {
+    let n = url.strip_prefix("att:")?;
+    if n.is_empty() || n.len() > 2 || !n.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    n.parse::<u32>().ok().filter(|&n| (1..=MAX_IMAGE_REF).contains(&n)).map(|n| n - 1)
+}
+
+/// The reference to a message's image `index` (0 for its first) to put in its text: `![Image 2](att:2)`.
+#[uniffi::export]
+pub fn chat_image_marker(index: u32) -> String {
+    format!("![Image {0}](att:{0})", index + 1)
+}
+
+/// A draft's text once the attachment at `index` (0 for the first) is taken out of the composer: its references go,
+/// and those to the attachments after it count one less (their descriptions too, when they are the marker's own).
+#[uniffi::export]
+pub fn chat_composer_without_image(draft: String, index: u32) -> String {
+    let mut out = String::with_capacity(draft.len());
+    let mut last = 0;
+    for r in composer_refs(&draft) {
+        out.push_str(&draft[last..r.start]);
+        if r.image > index {
+            let description = &draft[r.start + 2..r.close];
+            let own = description == format!("Image {}", r.image + 1);
+            let text = if own { format!("Image {}", r.image) } else { description.to_owned() };
+            out.push_str(&format!("![{text}](att:{})", r.image));
+        } else if r.image < index {
+            out.push_str(&draft[r.start..r.end]);
+        }
+        last = r.end;
+    }
+    out.push_str(&draft[last..]);
+    out
+}
+
+/// The image references in a draft (UTF-16, as [`ChatTextRange`]), for the composer to set apart from the text around
+/// them (the accent colour): the runs a message draws as chips.
+#[uniffi::export]
+pub fn chat_composer_image_refs(draft: String) -> Vec<ChatTextRange> {
+    let mut units = 0u32;
+    let mut last = 0;
+    let mut out = Vec::new();
+    for r in composer_refs(&draft) {
+        units += draft[last..r.start].encode_utf16().count() as u32;
+        let length = draft[r.start..r.end].encode_utf16().count() as u32;
+        out.push(ChatTextRange { start: units, length });
+        units += length;
+        last = r.end;
+    }
+    out
+}
+
+/// An image reference in a draft: `![description](att:N)` from `start` to `end` (bytes), its `](` at `close`.
+struct ComposerRef {
+    start: usize,
+    close: usize,
+    end: usize,
+    /// The image it names, 0 for the first.
+    image: u32,
+}
+
+/// A draft's image references, in order (as the composer sees them: a `![` closed by an `att:` link).
+fn composer_refs(draft: &str) -> Vec<ComposerRef> {
+    let mut out = Vec::new();
+    let mut pos = 0;
+    while let Some(at) = draft[pos..].find("![") {
+        let start = pos + at;
+        let tail = &draft[start..];
+        // The description ends at the first `](`; an `att:` link must follow it (`![x](https://…) ![y](att:2)` is
+        // a web image and then a reference, not one long reference).
+        let parsed = tail.find("](").filter(|&close| tail[close + 2..].starts_with("att:")).and_then(|close| {
+            let end = tail[close..].find(')')? + close;
+            Some((close, end, image_ref(&tail[close + 2..end])?))
+        });
+        match parsed {
+            Some((close, end, image)) => {
+                out.push(ComposerRef { start, close: start + close, end: start + end + 1, image });
+                pos = start + end + 1;
+            }
+            None => pos = start + 2,
+        }
+    }
+    out
+}
+
+/// A stretch of a composer's text in UTF-16 code units, as the hosts' text fields count (AppKit's `NSRange`, WinUI's
+/// selection start and length): a selection, or a point (`length` 0).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct ChatTextRange {
+    pub start: u32,
+    pub length: u32,
+}
+
+/// The composer's text after the core changed it, and where its caret goes (UTF-16, as [`ChatTextRange`]).
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct ChatComposerEdit {
+    pub text: String,
+    pub caret: u32,
+}
+
+/// The draft once attachments `first..first + count` (0 for the composer's first) were pasted or dropped into its
+/// text: their references ([`chat_image_marker`], a space between them) replace `at` (the selection a paste replaces,
+/// the point a drop lands on), with a space on each side where a word touches them; without `at`, or with one outside
+/// the text, they go at its end. `None` when the field holds no text (an image alone is no reference: it is a plain
+/// attachment) or `count` is 0.
+#[uniffi::export]
+pub fn chat_composer_with_images(draft: String, first: u32, count: u32, at: Option<ChatTextRange>) -> Option<ChatComposerEdit> {
+    if count == 0 || draft.trim().is_empty() {
+        return None;
+    }
+    let markers = (first..first.saturating_add(count)).map(chat_image_marker).collect::<Vec<_>>().join(" ");
+    let range = at.and_then(|r| Some(utf16_byte(&draft, r.start)?..utf16_byte(&draft, r.start.checked_add(r.length)?)?));
+    let (before, after) = range.map_or((draft.as_str(), ""), |r| (&draft[..r.start], &draft[r.end..]));
+    let mut text = String::with_capacity(draft.len() + markers.len() + 2);
+    text.push_str(before);
+    if before.chars().next_back().is_some_and(|c| !c.is_whitespace()) {
+        text.push(' ');
+    }
+    text.push_str(&markers);
+    if after.chars().next().is_some_and(|c| !c.is_whitespace()) {
+        text.push(' ');
+    }
+    let caret = text.encode_utf16().count() as u32;
+    text.push_str(after);
+    Some(ChatComposerEdit { text, caret })
+}
+
+/// The byte index of UTF-16 offset `offset` in `s`; `None` past its end or inside a character (a surrogate pair).
+fn utf16_byte(s: &str, offset: u32) -> Option<usize> {
+    let mut units = 0u32;
+    for (i, c) in s.char_indices() {
+        if units == offset {
+            return Some(i);
+        }
+        units += c.len_utf16() as u32;
+        if units > offset {
+            return None;
+        }
+    }
+    (units == offset).then_some(s.len())
 }
 
 fn is_punct(c: char) -> bool {
@@ -398,6 +559,7 @@ impl Inline<'_> {
         if let Some(last) = self.toks.last_mut()
             && last.kind == Kind::Text
             && last.link.is_none()
+            && last.image.is_none()
         {
             last.text.push_str(s);
             return;
@@ -541,7 +703,13 @@ impl Inline<'_> {
         }
         self.toks[open].kind = Kind::Text;
         self.toks[open].text.clear();
-        // An image shows its description (as the Mac did), never the picture.
+        // An image shows its description (as the Mac did), never the picture; one of the message's own (`att:2`) is a
+        // reference to it.
+        if image && let Some(n) = image_ref(&url) {
+            for t in &mut self.toks[open + 1..] {
+                t.image.get_or_insert(n);
+            }
+        }
         if !image {
             if let Some(target) = link_target(&url) {
                 let id = self.links.len();
@@ -894,9 +1062,13 @@ pub(crate) fn runs(text: &str) -> Vec<ChatRun> {
             strikethrough: t.strike > 0,
             code: t.kind == Kind::Code,
             link: t.link.map(|l| p.links[l].clone()),
+            image: t.image,
         };
         match out.last_mut() {
-            Some(last) if (last.bold, last.italic, last.strikethrough, last.code, &last.link) == (run.bold, run.italic, run.strikethrough, run.code, &run.link) => {
+            Some(last)
+                if (last.bold, last.italic, last.strikethrough, last.code, &last.link, last.image)
+                    == (run.bold, run.italic, run.strikethrough, run.code, &run.link, run.image) =>
+            {
                 last.text.push_str(&run.text)
             }
             _ => out.push(run),
@@ -905,7 +1077,7 @@ pub(crate) fn runs(text: &str) -> Vec<ChatRun> {
     // Bare e-mail addresses in the plain text.
     out.into_iter()
         .flat_map(|r| {
-            if r.code || r.link.is_some() || !r.text.contains('@') {
+            if r.code || r.link.is_some() || r.image.is_some() || !r.text.contains('@') {
                 return vec![r];
             }
             emails(&r.text)

@@ -1168,6 +1168,22 @@ impl Membership {
         self.members.get(device_pk).is_some_and(|m| !self.active(m))
     }
 
+    /// Every device ever granted a place here, also the ones removed since, in the order they joined: by the earliest
+    /// `at_s` of a grant that names it (a later grant does not move it), ties by key. The same on every device that
+    /// holds the statements.
+    pub fn joined(&self) -> Vec<([u8; 32], u64)> {
+        let mut first: BTreeMap<[u8; 32], u64> = BTreeMap::new();
+        for st in self.statements.values() {
+            if let Body::Grant { device, at_s, .. } = &st.body {
+                let at = first.entry(*device).or_insert(*at_s);
+                *at = (*at).min(*at_s);
+            }
+        }
+        let mut out: Vec<([u8; 32], u64)> = first.into_iter().collect();
+        out.sort_by_key(|&(pk, at)| (at, pk));
+        out
+    }
+
     /// Every statement, in a stable order (to send, or to store).
     pub fn statements(&self) -> impl Iterator<Item = &Statement> {
         self.statements.values()
@@ -1832,6 +1848,22 @@ mod tests {
 
     fn profile(d: &DeviceKey, fid: &FolderId, name: &str, user: &str, serial: u64) -> Statement {
         Statement::by_device(d, fid, Body::Profile { device_name: name.into(), user_name: user.into(), serial, at_s: NOW })
+    }
+
+    #[test]
+    fn devices_are_listed_in_the_order_they_joined_also_after_they_left() {
+        let (s, mut m, me) = base();
+        let at = |d: &DeviceKey, role: Role, serial: u64, at_s: u64| Statement::by_owner(&s, Body::Grant { device: *d.public_key(), role, serial, at_s, invite: None });
+        assert!(m.add([at(&dev(2), Role::ReadWrite, 2, NOW + 20), at(&dev(3), Role::ReadOnly, 3, NOW + 10)]));
+        let order = |m: &Membership| m.joined().into_iter().map(|(pk, _)| pk).collect::<Vec<_>>();
+        let (p1, p2, p3) = (*me.public_key(), *dev(2).public_key(), *dev(3).public_key());
+        assert_eq!(order(&m), [p1, p3, p2], "by the time of the first grant, not the order they arrived in");
+        // A role change later does not move a device; one that leaves keeps its place.
+        assert!(m.add([at(&dev(3), Role::Admin, 4, NOW + 99)]));
+        assert!(m.add([Statement::by_owner(&s, Body::Remove { device: p3, serial: 5, at_s: NOW + 100 })]));
+        assert!(m.is_removed(&p3));
+        assert_eq!(order(&m), [p1, p3, p2]);
+        assert_eq!(m.joined()[1].1, NOW + 10);
     }
 
     fn agents(open: bool, serial: u64) -> Body {

@@ -89,7 +89,9 @@ struct HangWatchdogTests {
     }
 
     /// A snapshot render or QA run: a stall that reaches the limit is told at once, from the watch thread, while the
-    /// queue is still held (the real `onFail` ends the process).
+    /// queue is still held (the real `onFail` ends the process). The watch thread runs at utility priority, which a
+    /// busy test run may wake late (it once missed a fixed half second entirely): the test waits for the report as long
+    /// as the queue stays held, and the hold marks its end, so a report that came after it names that instead.
     @Test func aTestRunThatHangsFailsWhileItHangs() async throws {
         let q = DispatchQueue(label: "watched")
         let failed = Seen()
@@ -98,8 +100,16 @@ struct HangWatchdogTests {
         wd.start()
         defer { wd.stop() }
         try await Task.sleep(for: .milliseconds(80))
-        held(q, seconds: 0.8, marking: "render test", in: failed)
-        try await Task.sleep(for: .milliseconds(500))
+        let hold = 3.0
+        q.async {
+            failed.mark("render test")
+            Thread.sleep(forTimeInterval: hold)
+            failed.mark("released")
+        }
+        let start = ContinuousClock.now
+        while failed.all.isEmpty, ContinuousClock.now - start < .seconds(hold - 0.2) {
+            try await Task.sleep(for: .milliseconds(20))
+        }
         let f = failed.all
         #expect(f.count == 1, "told while the queue is still held: \(f)")
         #expect((f.first?.ms ?? 0) >= 250 && f.first?.action == "render test", "\(f)")

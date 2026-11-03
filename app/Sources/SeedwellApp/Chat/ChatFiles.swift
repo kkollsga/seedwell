@@ -24,7 +24,7 @@ enum ChatFileLayout {
     }
 
     /// The widest a card is drawn, in points.
-    static let width: CGFloat = 380
+    static let width: CGFloat = 360
 }
 
 /// A message's files, one card under the other.
@@ -34,10 +34,11 @@ struct ChatFilesView: View {
     let files: [ChatFileCard]
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            ForEach(files, id: \.hash) { ChatFileCardView(core: core, place: place, card: $0) }
+        VStack(alignment: .leading, spacing: Theme.Space.s - 2) {
+            // By place: the same file twice in one message is two cards (one identity each).
+            ForEach(Array(files.enumerated()), id: \.offset) { ChatFileCardView(core: core, place: place, card: $1) }
         }
-        .padding(.top, 4)
+        .padding(.top, Theme.Space.hair)
     }
 }
 
@@ -48,30 +49,31 @@ struct ChatFileCardView: View {
     let card: ChatFileCard
 
     var body: some View {
-        HStack(alignment: .top, spacing: 10) {
-            Image(systemName: ChatFileLayout.symbol(card.icon)).font(.system(size: 22)).foregroundStyle(.secondary)
-                .frame(width: 30, height: 30)
-            VStack(alignment: .leading, spacing: 3) {
-                Text(card.name).font(.system(size: 12.5, weight: .medium)).lineLimit(1).truncationMode(.middle)
-                Text(card.status).font(.system(size: 11)).foregroundStyle(card.state == .failed || card.state == .gone ? .red : .secondary)
+        HStack(alignment: .top, spacing: Theme.Space.m - 2) {
+            Image(systemName: ChatFileLayout.symbol(card.icon)).font(.system(size: Theme.Icon.large)).foregroundStyle(.secondary)
+                .frame(width: 34, height: 34)
+                .background(RoundedRectangle(cornerRadius: Theme.Radius.small + 1, style: .continuous).fill(Color.primary.opacity(0.06)))
+            VStack(alignment: .leading, spacing: Theme.Space.hair) {
+                Text(card.name).font(Theme.body.weight(.medium)).lineLimit(1).truncationMode(.middle)
+                Text(card.status).font(Theme.caption).foregroundStyle(card.state == .failed || card.state == .gone ? .red : .secondary)
                     .lineLimit(2).fixedSize(horizontal: false, vertical: true)
-                if let p = card.progress { ProgressView(value: p).controlSize(.small) }
+                if let p = card.progress { ProgressView(value: p).controlSize(.small).padding(.top, Theme.Space.hair) }
                 if !card.actions.isEmpty {
-                    HStack(spacing: 6) {
+                    HStack(spacing: Theme.Space.s - 2) {
                         ForEach(Array(card.actions.enumerated()), id: \.offset) { n, a in
                             Button(a.label) { run(a.kind) }.controlSize(.small)
                                 .buttonStyle(.bordered).tint(n == 0 ? .accentColor : nil)
                         }
                     }
-                    .padding(.top, 2)
+                    .padding(.top, Theme.Space.xs)
                 }
             }
             Spacer(minLength: 0)
         }
-        .padding(10)
+        .padding(Theme.Space.s + 2)
         .frame(maxWidth: ChatFileLayout.width, alignment: .leading)
-        .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Color.secondary.opacity(0.15)))
+        .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: Theme.Radius.medium + 2, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: Theme.Radius.medium + 2, style: .continuous).strokeBorder(Color.primary.opacity(0.08)))
         .help(card.status)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("\(card.name), \(card.status)")
@@ -143,20 +145,20 @@ struct ChatPendingSendsView: View {
     let changed: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: Theme.Space.xs) {
             ForEach(pending, id: \.id) { p in
-                HStack(spacing: 8) {
+                HStack(spacing: Theme.Space.s) {
                     if p.failed {
                         Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
                         VStack(alignment: .leading, spacing: 1) {
-                            Text(p.title).font(.system(size: 11.5, weight: .medium))
-                            Text(p.problem).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(4).fixedSize(horizontal: false, vertical: true)
+                            Text(p.title).font(Theme.caption.weight(.medium))
+                            Text(p.problem).font(Theme.caption).foregroundStyle(.secondary).lineLimit(4).fixedSize(horizontal: false, vertical: true)
                         }
                         Spacer()
                         Button(p.dismiss) { core.chatDismissPending(place: place, id: p.id); changed() }.controlSize(.small)
                     } else {
                         ProgressView(value: p.progress).controlSize(.small).frame(width: 80)
-                        Text(p.title).font(.system(size: 11.5)).foregroundStyle(.secondary).lineLimit(1)
+                        Text(p.title).font(Theme.caption).foregroundStyle(.secondary).lineLimit(1)
                         Spacer()
                     }
                 }

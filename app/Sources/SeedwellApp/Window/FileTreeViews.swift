@@ -34,7 +34,7 @@ struct DisclosureTriangle: View {
         let words = fileListToggle(expanded: expanded)
         Button(action: toggle) {
             Image(systemName: "chevron.right")
-                .font(.system(size: 9.5, weight: .bold))
+                .font(Theme.micro.weight(.bold))
                 .foregroundStyle(.secondary)
                 .rotationEffect(.degrees(expanded ? 90 : 0))
                 .frame(width: FileLayout.triangle, height: 22)
@@ -58,13 +58,13 @@ struct FileTreeBlock: View {
         if let v = store.views[row.id] {
             if let status = v.status {
                 Text(status)
-                    .font(.system(size: 12)).foregroundStyle(.secondary)
+                    .font(Theme.secondary).foregroundStyle(.secondary)
                     .padding(.leading, FileLayout.iconX + 4).padding(.vertical, 8)
             } else {
                 if let header = v.header { FilesHeader(id: row.id, header: header, store: store) }
                 if let empty = v.empty {
                     Text(empty)
-                        .font(.system(size: 12)).foregroundStyle(.secondary)
+                        .font(Theme.secondary).foregroundStyle(.secondary)
                         .padding(.leading, FileLayout.iconX + 4).padding(.vertical, 6)
                 }
                 if !v.rows.isEmpty, v.maxRows == nil {
@@ -103,7 +103,7 @@ struct FilesHeader: View {
     var body: some View {
         HStack(alignment: .center, spacing: 10) {
             Text(header.summary)
-                .font(.system(size: 11)).monospacedDigit().foregroundStyle(Color.secondary)
+                .font(Theme.caption).monospacedDigit().foregroundStyle(Color.secondary)
                 .lineLimit(1)
                 .help(header.summaryHelp)
             Spacer(minLength: 8)
@@ -115,7 +115,7 @@ struct FilesHeader: View {
                 .help(header.selectNone.help)
         }
         .buttonStyle(.plain)
-        .font(.system(size: 11))
+        .font(Theme.caption)
         .foregroundStyle(Color.accentColor)
         .padding(.leading, FileLayout.iconX).padding(.trailing, 10)
         .padding(.top, 0).padding(.bottom, 3)
@@ -123,12 +123,12 @@ struct FilesHeader: View {
 
     private func filterField(_ filter: FileFilterField) -> some View {
         HStack(spacing: 4) {
-            Image(systemName: "magnifyingglass").font(.system(size: 10.5)).foregroundStyle(Color.secondary)
+            Image(systemName: "magnifyingglass").font(.system(size: Theme.Icon.small)).foregroundStyle(Color.secondary)
             TextField(filter.placeholder, text: Binding(get: { filter.text }, set: { store.setFilter(id, $0) }))
-                .textFieldStyle(.plain).font(.system(size: 11)).foregroundStyle(Color.primary)
+                .textFieldStyle(.plain).font(Theme.caption).foregroundStyle(Color.primary)
                 .frame(width: 110)
             if !filter.text.isEmpty {
-                Button { store.setFilter(id, "") } label: { Image(systemName: "xmark.circle.fill").font(.system(size: 11)).foregroundStyle(Color.secondary) }
+                Button { store.setFilter(id, "") } label: { Image(systemName: "xmark.circle.fill").font(.system(size: Theme.Icon.small)).foregroundStyle(Color.secondary) }
                     .help(filter.clearHelp)
                     .accessibilityLabel(filter.clearLabel)
             }
@@ -165,7 +165,7 @@ struct FileRowView: View {
             if f.isFolder {
                 Button { store.toggleFolder(row.id, f.id) } label: {
                     Image(systemName: "chevron.right")
-                        .font(.system(size: 8.5, weight: .bold)).foregroundStyle(.secondary)
+                        .font(Theme.micro.weight(.bold)).foregroundStyle(.secondary)
                         .rotationEffect(.degrees(f.isOpen ? 90 : 0))
                         .frame(width: 12, height: 18).contentShape(Rectangle())
                 }
@@ -179,12 +179,12 @@ struct FileRowView: View {
             Image(nsImage: FileIcons.icon(ext: f.isFolder ? "" : f.ext)).resizable().frame(width: 14, height: 14)
                 .opacity(skipped ? 0.5 : 1)
             Text(f.name)
-                .font(.system(size: 11.5))
+                .font(Theme.caption)
                 .foregroundStyle(skipped ? .tertiary : .secondary)
                 .lineLimit(1).truncationMode(.middle)
                 .frame(maxWidth: .infinity, alignment: .leading)
             Text(f.rate)
-                .font(.system(size: 9.5)).monospacedDigit().foregroundStyle(.tertiary)
+                .font(Theme.micro).monospacedDigit().foregroundStyle(.tertiary)
                 .lineLimit(1)
                 .frame(width: FileLayout.rateWidth, alignment: .trailing)
             SizeCapsule(text: f.size, fraction: f.fill, label: item.sizeLabel)
@@ -215,7 +215,7 @@ struct FileRowView: View {
         let c = item.file.check
         return Button { store.toggleCheck(row.id, item.file.id) } label: {
             Image(systemName: c == .on ? "checkmark.square.fill" : c == .mixed ? "minus.square.fill" : "square")
-                .font(.system(size: 12.5))
+                .font(.system(size: Theme.Icon.regular))
                 .foregroundStyle(c == .off ? Color.secondary : Color.accentColor)
                 .frame(width: 18, height: 18).contentShape(Rectangle())
         }
@@ -232,12 +232,12 @@ struct FileRowView: View {
             if file.check == .off {
                 Text("").frame(width: FileLayout.progressWidth)
             } else if file.complete {
-                Image(systemName: "checkmark").font(.system(size: 9.5, weight: .semibold)).foregroundStyle(.secondary)
+                Image(systemName: "checkmark").font(Theme.micro.weight(.semibold)).foregroundStyle(.secondary)
                     .frame(width: FileLayout.progressWidth, alignment: .trailing)
                     .accessibilityLabel(completeLabel)
             } else {
                 ThinProgress(value: file.progress).frame(width: 30)
-                Text("\(file.percent)%").font(.system(size: 10)).monospacedDigit().foregroundStyle(.secondary)
+                Text("\(file.percent)%").font(Theme.micro).monospacedDigit().foregroundStyle(.secondary)
                     .frame(width: 28, alignment: .trailing)
             }
         }
@@ -252,7 +252,7 @@ struct FileRowView: View {
                 }
             }
         } label: {
-            Text(item.file.priorityLabel).font(.system(size: 10.5)).foregroundStyle(item.file.priority == .skip ? .tertiary : .secondary)
+            Text(item.file.priorityLabel).font(Theme.micro).foregroundStyle(item.file.priority == .skip ? .tertiary : .secondary)
         }
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
@@ -267,7 +267,7 @@ struct FileRowView: View {
         ZStack {
             if let play = item.play {
                 Button { Self.play(row, node: item.file.id, player: nil, commands: commands, store: store) } label: {
-                    PlayGlyph(size: 10.5)
+                    PlayGlyph(size: Theme.Icon.small)
                         .frame(width: FileLayout.playWidth, height: 19).contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
@@ -334,7 +334,7 @@ struct SizeCapsule: View {
     var body: some View {
         let shown = fraction > 0
         Text(text)
-            .font(.system(size: 10.5)).monospacedDigit()
+            .font(Theme.micro).monospacedDigit()
             .foregroundStyle(.secondary)
             .lineLimit(1)
             .frame(width: FileLayout.sizeWidth, height: 16)

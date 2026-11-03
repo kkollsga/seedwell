@@ -425,9 +425,9 @@ struct FileProviderSetupView: View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 3) {
                 ModalCaption(text: n.caption)
-                Text(n.title).font(.system(size: 17, weight: .semibold))
+                Text(n.title).font(Theme.title)
             }
-            Text(n.text).font(.system(size: 13)).fixedSize(horizontal: false, vertical: true).padding(.top, 12)
+            Text(n.text).font(Theme.body).fixedSize(horizontal: false, vertical: true).padding(.top, 12)
             HStack(spacing: 8) {
                 Spacer()
                 if let b = n.button {

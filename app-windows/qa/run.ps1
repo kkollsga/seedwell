@@ -12,7 +12,7 @@
   the network either (no DHT, PEX, LSD, UPnP or NAT-PMP).
 
   Checks: render, handoff, separate, gate, selection, keys, removal, info, alert, trash, choice, move, add, chat,
-  dialogs, newchannel, links, tray, scheme, rendezvous, follow, folders, chatpage, platform, slowstart, damaged, notices, settingspage, requests, notray, settings, quit (all of them: all, the default).
+  dialogs, newchannel, links, tray, scheme, rendezvous, follow, folders, chatpage, platform, slowstart, damaged, notices, settingspage, requests, files, chooser, play, favorites, rules, cloudfiles, ondemand, ondemandfetch, ondemandpin, ondemandchanges, notray, settings, quit (all of them: all, the default).
   -Build builds the app first (build.ps1; -CoreProfile Debug builds its core from the debug test build, as CI does).
   -Out keeps the pictures in <dir> (default: a temp folder, printed).
   Flyouts (menus, the members panel and its role menus) are drawn by the render run (SnapshotRenderer.cs, check
@@ -34,7 +34,7 @@ $Repo = Split-Path $App -Parent
 $Exe = Join-Path $App 'bin\x64\Release\net10.0-windows10.0.19041.0\win-x64\Seedwell.exe'
 $Cli = Join-Path $Repo 'target\debug\seedwell.exe'
 $Fixtures = Join-Path $Repo 'crates\metainfo\tests\fixtures'
-$All = @('render', 'handoff', 'separate', 'gate', 'selection', 'keys', 'removal', 'info', 'alert', 'trash', 'choice', 'move', 'add', 'chat', 'dialogs', 'newchannel', 'links', 'tray', 'scheme', 'rendezvous', 'follow', 'folders', 'chatpage', 'platform', 'slowstart', 'damaged', 'notices', 'settingspage', 'requests', 'notray', 'settings', 'quit')
+$All = @('render', 'handoff', 'separate', 'gate', 'selection', 'keys', 'removal', 'info', 'alert', 'trash', 'choice', 'move', 'add', 'chat', 'dialogs', 'newchannel', 'links', 'tray', 'scheme', 'rendezvous', 'follow', 'folders', 'chatpage', 'platform', 'slowstart', 'damaged', 'notices', 'settingspage', 'requests', 'files', 'chooser', 'play', 'favorites', 'rules', 'cloudfiles', 'ondemand', 'ondemandfetch', 'ondemandpin', 'ondemandchanges', 'notray', 'settings', 'quit')
 
 if ($Build) {
   & powershell -NoProfile -File (Join-Path $App 'build.ps1') -CoreProfile $CoreProfile | Out-Host
@@ -56,7 +56,26 @@ public static class QaForeground {
   [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
   public static uint Pid() { uint p; GetWindowThreadProcessId(GetForegroundWindow(), out p); return p; }
 }
+// Another process freeing a placeholder's space, as Storage Sense does (the app's NOTIFY_DEHYDRATE decides).
+public static class QaCloud {
+  [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+  static extern Microsoft.Win32.SafeHandles.SafeFileHandle CreateFileW(string name, uint access, uint share, IntPtr security, uint disposition, uint flags, IntPtr template);
+  [DllImport("cldapi.dll")]
+  static extern int CfDehydratePlaceholder(Microsoft.Win32.SafeHandles.SafeFileHandle file, long offset, long length, uint flags, IntPtr overlapped);
+  public static int Dehydrate(string path) {
+    using (var h = CreateFileW(path, 0x180, 7, IntPtr.Zero, 3, 0x02000000, IntPtr.Zero)) {
+      if (h.IsInvalid) return Marshal.GetHRForLastWin32Error();
+      return CfDehydratePlaceholder(h, 0, -1, 0, IntPtr.Zero);
+    }
+  }
+}
 '@
+
+# A placeholder freed by another process (Storage Sense's way): 'freed', or the HRESULT the system answered.
+function CfDehydrate([string]$path) {
+  $hr = [QaCloud]::Dehydrate($path)
+  if ($hr -eq 0) { 'freed' } else { 'refused 0x{0:X8}' -f $hr }
+}
 
 function Fail([string]$why) { throw $why }
 
@@ -106,6 +125,12 @@ function Log([string]$dir) {
   if (Test-Path $f) { @(Get-Content $f -Encoding utf8) } else { @() }
 }
 
+# The core's standard error (its eprintln! lines and panics), which an app with no console sends to core.log.
+function CoreLog([string]$dir) {
+  $f = "$dir\state\logs\core.log"
+  if (Test-Path $f) { @(Get-Content $f -Encoding utf8) } else { @() }
+}
+
 function List([string]$dir) { @(& $Cli --socket "$dir\state\control.sock" list 2>&1 | ForEach-Object { "$_" }) }
 
 # Starts an instance on the state (quiet with -QaControl) and waits until its core answers.
@@ -135,11 +160,11 @@ function Launch([string]$dir, [string[]]$words) {
 }
 
 # A --qa command, then its line in app.log (the acknowledgement: the command has run).
-function Qa([string]$dir, [string[]]$words) {
+function Qa([string]$dir, [string[]]$words, [int]$ms = 10000) {
   $before = (Log $dir).Count
   Launch $dir (@('--qa') + $words) | Out-Null
   $pattern = "qa $($words -join ' '):"
-  WaitFor { Log $dir | Select-Object -Skip $before | Where-Object { $_ -like "*$pattern*" -or $_ -like '*qa refused*' } | Select-Object -Last 1 } 10000 "'$pattern' in app.log"
+  WaitFor { Log $dir | Select-Object -Skip $before | Where-Object { $_ -like "*$pattern*" -or $_ -like '*qa refused*' } | Select-Object -Last 1 } $ms "'$pattern' in app.log"
 }
 
 # Folder sync starts in the background, a moment after the core answers.
@@ -182,7 +207,7 @@ $checks.render = {
     if ($front -gt 0) { Fail "the $theme render held the foreground ($front samples)" }
   }
   $pictures = @(Get-ChildItem $dir -Filter *.png | ForEach-Object FullName)
-  foreach ($must in 'menu-dark', 'menu-sync-confirm-light', 'row-menu-dark', 'remove-light', 'library-downloads-dark', 'library-info-light', 'library-removal-dark', 'library-foldersync-light', 'library-settings-dark', 'channel-menu-light', 'tray-menu-dark', 'new-channel-light', 'new-channel-join-dark', 'dialog-new-topic-dark', 'dialog-leave-light', 'dialog-agents-dark', 'library-foldersync-dark', 'foldersync-remove-light', 'add-folder-dark', 'add-folder-shared-light', 'edit-folder-dark', 'share-light', 'library-chat-dark', 'library-direct-light', 'chat-menu-dark', 'chat-files-light', 'prompt-add-request-dark', 'prompt-location-move-light', 'prompt-backlog-dark', 'settings-general-dark', 'settings-transfers-light', 'settings-folders-dark', 'settings-network-light', 'settings-agents-dark', 'settings-advanced-light', 'file-icons-dark', 'tray-both-32') {
+  foreach ($must in 'library-files-dark', 'library-files-light', 'menu-files-dark', 'library-chat-notes-dark', 'library-chat-notes-light', 'library-chat-hover-light', 'library-chat-reply-dark', 'chat-images-light', 'chat-gallery-dark', 'menu-dark', 'menu-sync-confirm-light', 'row-menu-dark', 'remove-light', 'library-downloads-dark', 'library-info-light', 'library-removal-dark', 'library-foldersync-light', 'library-settings-dark', 'channel-menu-light', 'tray-menu-dark', 'new-channel-light', 'new-channel-join-dark', 'dialog-new-topic-dark', 'dialog-leave-light', 'dialog-agents-dark', 'library-foldersync-dark', 'foldersync-remove-light', 'add-folder-dark', 'add-folder-shared-light', 'edit-folder-dark', 'share-light', 'library-chat-dark', 'library-direct-light', 'chat-menu-dark', 'chat-files-light', 'prompt-add-request-dark', 'prompt-location-move-light', 'prompt-backlog-dark', 'settings-general-dark', 'settings-transfers-light', 'settings-folders-dark', 'settings-network-light', 'settings-agents-dark', 'settings-advanced-light', 'file-icons-dark', 'tray-both-32') {
     if (-not (Test-Path "$dir\$must.png")) { Fail "missing $must.png" }
   }
   $pictures
@@ -578,6 +603,12 @@ $checks.links = {
     $pair = Qa $dir @('link', 'seedwell://devices/not-a-real-link')
     if ($pair -notmatch 'place Settings') { Fail "a pairing link did not open Settings: $pair" }
     WaitFor { Log $dir | Where-Object { $_ -like '*devices: pair with a link (filled in)*' } } 5000 'Pair with a Link, filled in' | Out-Null
+    # Explorer's Share with Seedwell (item 5): the verb's launch, --share <folder> (a space in its name), opens that
+    # folder's Share dialog through the core's command_line_routes (a folder not synced yet: a new one).
+    New-Item -ItemType Directory -Force "$dir\To Share" | Out-Null
+    Launch $dir @('--share', "$dir\To Share") | Out-Null
+    WaitFor { Log $dir | Where-Object { $_ -like '*share: open on a new folder*' } } 5000 'the Share dialog of the folder' | Out-Null
+    Qa $dir @('share', 'cancel') | Out-Null
   } finally { Stop-App $dir $p; Remove-Item -Recurse -Force $dir }
   @()
 }
@@ -617,8 +648,17 @@ $checks.scheme = {
     if ((Get-ItemProperty $test).'URL Protocol' -ne '') { Fail 'the seedwell: key is not a URL protocol' }
     $cmd = (Get-Item "$test\shell\open\command").GetValue('')
     if ($cmd -notlike "*Seedwell.exe*%1*") { Fail "its open command: $cmd" }
+    # Explorer's Share with Seedwell (item 5): the core's title, the exe and --share "%1" (%V on a folder's background).
+    $verb = 'HKCU:\Software\SeedwellInstallTest\Classes\Directory\shell\Seedwell.Share'
+    if (-not (Test-Path $verb)) { Fail 'no Share with Seedwell verb after --register' }
+    if ((Get-ItemProperty $verb).MUIVerb -notmatch 'Seedwell') { Fail "the verb's title: $((Get-ItemProperty $verb).MUIVerb)" }
+    $vcmd = (Get-Item "$verb\command").GetValue('')
+    if ($vcmd -notlike '"*Seedwell.exe" --share "%1"') { Fail "the verb's command: $vcmd" }
+    $bcmd = (Get-Item 'HKCU:\Software\SeedwellInstallTest\Classes\Directory\Background\shell\Seedwell.Share\command').GetValue('')
+    if ($bcmd -notlike '"*Seedwell.exe" --share "%V"') { Fail "the background verb's command: $bcmd" }
     Start-Process $Exe -ArgumentList '--unregister' -Wait
     if (Test-Path $test) { Fail 'the seedwell: key is left after --unregister' }
+    if (Test-Path $verb) { Fail 'the Share verb is left after --unregister' }
   } finally {
     Remove-Item env:SEEDWELL_INSTALL_TEST
     Remove-Item -Recurse -Force 'HKCU:\Software\SeedwellInstallTest' -ErrorAction SilentlyContinue
@@ -694,6 +734,11 @@ $checks.folders = {
     if ($open -notmatch 'add folder Local, can start False') { Fail "Add Folder did not open on this PC with Start off: $open" }
     $chosen = Qa $dir @('add-folder', 'folder', "$dir\Shared")
     if ($chosen -notmatch 'can start True') { Fail "a chosen folder cannot start: $chosen" }
+    # Files on demand (HostFeature.OnDemandFolders): the switch is there, off; on, the core says what it means.
+    if ($chosen -notmatch 'on demand "(?!none")[^"]+" False') { Fail "Add Folder has no Files on demand switch: $chosen" }
+    $od = Qa $dir @('add-folder', 'ondemand', 'on')
+    if ($od -notmatch 'on demand "[^"]+" True note "[^"]+"') { Fail "Files on demand on says nothing: $od" }
+    Qa $dir @('add-folder', 'ondemand', 'off') | Out-Null
     Shot 'add-folder' -Dialog
     $added = Qa $dir @('add-folder', 'start')
     if ($added -notmatch 'started') { Fail "the folder was not added: $added" }
@@ -708,6 +753,10 @@ $checks.folders = {
 
     $edit = Qa $dir @('edit-folder', 'open', 'Shared')
     if ($edit -notmatch 'changed False') { Fail "Edit did not open unchanged: $edit" }
+    if ($edit -notmatch 'on demand "(?!none")[^"]+" False') { Fail "Edit has no Files on demand switch: $edit" }
+    $od = Qa $dir @('edit-folder', 'ondemand', 'on')
+    if ($od -notmatch 'changed True.*on demand "[^"]+" True note "[^"]+"') { Fail "Files on demand on in Edit says nothing: $od" }
+    Qa $dir @('edit-folder', 'ondemand', 'off') | Out-Null
     Qa $dir @('edit-folder', 'name', 'Renamed') | Out-Null
     $opts = Qa $dir @('edit-folder', 'options', 'on')
     if ($opts -notmatch 'changed True, can save True') { Fail "a new name cannot be saved: $opts" }
@@ -771,7 +820,10 @@ $checks.chatpage = {
     if ($empty -notmatch 'cards 0, empty "[^"]+"' -or $empty -notmatch 'can post True') { Fail "the empty channel is not drawn with its line and a field: $empty" }
     if ($empty -notmatch 'toolbar \[[^\]]*members[^\]]*menu\]') { Fail "no Members and ⋯ in the toolbar: $empty" }
 
+    if ($empty -notmatch 'send enabled False') { Fail "Send is on with nothing to send: $empty" }
     Qa $dir @('chatpage', 'type', 'Hello **there** from the PC') | Out-Null
+    # The field says it changed a moment later (TextChanged), and Send follows.
+    WaitFor { (Qa $dir @('chatpage')) -match 'send enabled True' } 3000 'Send on with text to send' | Out-Null
     $sent = Qa $dir @('chatpage', 'send')
     if ($sent -notmatch 'sent; cards 1, empty "", last "Hello there from the PC"') { Fail "the message was not sent and drawn: $sent" }
 
@@ -782,7 +834,21 @@ $checks.chatpage = {
     Qa $dir @('chatpage', 'reply', '0') | Out-Null
     Qa $dir @('chatpage', 'type', 'A reply') | Out-Null
     $reply = Qa $dir @('chatpage', 'send')
-    if ($reply -notmatch 'reply quote "[^"]+"') { Fail "the reply has no quote: $reply" }
+    if ($reply -notmatch 'reply quote "[^"]+: Hello there from the PC"') { Fail "the reply has no quote: $reply" }
+    # Build 49: the run's meta line under its last message (yours here: "You", no device), a quote's click jumps to the
+    # original, the controls show under the pointer, and Escape in the field cancels a reply (and goes on without one).
+    if ($reply -notmatch 'bubbles False, last who Mine, last meta "You . \S+') { Fail "the reply is not yours with its meta line: $reply" }
+    $jump = Qa $dir @('chatpage', 'quote', '2')
+    if ($jump -notmatch 'jumped to 0') { Fail "the quote did not jump to the original: $jump" }
+    $hover = Qa $dir @('chatpage', 'hover', '1', 'on')
+    if ($hover -notmatch 'hover') { Fail "no controls under the pointer: $hover" }
+    Qa $dir @('chatpage', 'hover', '1', 'off') | Out-Null
+    Qa $dir @('chatpage', 'reply', '1') | Out-Null
+    Shot 'chat-reply-bar'
+    $esc = Qa $dir @('chatpage', 'escape')
+    if ($esc -notmatch 'reply cancelled; .*replying none') { Fail "Escape did not cancel the reply: $esc" }
+    $again = Qa $dir @('chatpage', 'escape')
+    if ($again -notmatch 'passed on') { Fail "Escape without a reply was not passed on: $again" }
 
     # A picture and a text file of the temp state's own.
     Add-Type -AssemblyName System.Drawing
@@ -819,6 +885,13 @@ $checks.chatpage = {
 
     $members = Qa $dir @('chatpage', 'members')
     if ($members -notmatch 'members panel [1-9] rows, open True') { Fail "the members panel has no rows: $members" }
+
+    # Build 52: a picture dropped onto the field's text leaves its reference where it lands (the core's spacing).
+    Qa $dir @('chatpage', 'type', 'Hello world') | Out-Null
+    # The drop's hit-test at a point: just inside the leading edge of the 'w' of "world" (character 6) is index 6.
+    $dropped = Qa $dir @('chatpage', 'drop-over', '6', "$dir\picture.png")
+    if ($dropped -notmatch 'hit 6,') { Fail "the drop's point did not hit character 6: $dropped" }
+    if ($dropped -notmatch 'draft "Hello !\[Image \d+\]\(att:\d+\) ?world"') { Fail "the dropped picture's reference is not where it landed: $dropped" }
   } finally { Stop-App $dir $p; Remove-Item -Recurse -Force $dir }
   $pictures.ToArray()
 }
@@ -987,6 +1060,9 @@ $checks.requests = {
     $notice = WaitFor { $s = Qa $dir @('notices'); if ($s -match 'AgentRequest: ') { $s } } 10000 "the request's notice"
     $line = Qa $dir @('requests')
     if ($line -notmatch 'line "[^"]+", rows 1') { Fail "no tray line and one request: $line" }
+    # Build 50/51: the icon's dot comes with it at once (the agent activity), the tooltip says why.
+    $icon = WaitFor { $s = Qa $dir @('requests'); if ($s -match 'dot True for AgentRequest') { $s } } 5000 "the icon's dot"
+    if ($icon -notmatch 'icon "[^"]*waiting for your answer') { Fail "the tooltip does not say an agent waits: $icon" }
     Qa $dir @('settings', 'tab', 'Agents') | Out-Null
     $rows = Qa $dir @('settings', 'rows')
     if ($rows -notmatch 'request') { Fail "Settings › Agents has no Requests row: $rows" }
@@ -995,7 +1071,568 @@ $checks.requests = {
     WaitFor { ((& $Cli --socket "$dir\state\control.sock" agents requests --all 2>&1) -join ' ') -match '(?i)denied' } 10000 'the request denied' | Out-Null
     $after = Qa $dir @('requests')
     if ($after -notmatch 'line "", rows 0') { Fail "the request is still waiting: $after" }
+    WaitFor { (Qa $dir @('requests')) -match 'dot False for none' } 5000 "the icon's dot to go" | Out-Null
   } finally { Stop-App $dir $p; Remove-Item -Recurse -Force $dir }
+  @()
+}
+
+# A multi-file torrent of the temp state's own (the fixtures are single files): <count> small text files in a folder
+# named <name>, three of them in a subfolder, bencoded here with their SHA-1 pieces. Returns the .torrent's path.
+function New-MultiTorrent([string]$root, [string]$name, [int]$count) {
+  $data = Join-Path $root $name
+  New-Item -ItemType Directory -Force (Join-Path $data 'sub') | Out-Null
+  $files = @()
+  for ($i = 1; $i -le $count; $i++) {
+    [string[]]$rel = if ($i -le 3) { @('sub', "part-$i.txt") } else { @(('file-{0:D2}.txt' -f $i)) }
+    $bytes = [Text.Encoding]::ASCII.GetBytes(("Seedwell QA file $i. " * (20 + $i)))
+    [IO.File]::WriteAllBytes((Join-Path $data ($rel -join '\')), $bytes)
+    $files += , @{ Path = $rel; Bytes = $bytes }
+  }
+  $pieceLength = 16384
+  $all = New-Object IO.MemoryStream
+  foreach ($f in $files) { $all.Write($f.Bytes, 0, $f.Bytes.Length) }
+  $blob = $all.ToArray()
+  $sha = [Security.Cryptography.SHA1]::Create()
+  $pieces = New-Object IO.MemoryStream
+  for ($o = 0; $o -lt $blob.Length; $o += $pieceLength) {
+    $h = $sha.ComputeHash($blob, $o, [Math]::Min($pieceLength, $blob.Length - $o))
+    $pieces.Write($h, 0, 20)
+  }
+  $out = New-Object IO.MemoryStream
+  function W([object]$v) {
+    if ($v -is [byte[]]) { $p = [Text.Encoding]::ASCII.GetBytes("$($v.Length):"); $out.Write($p, 0, $p.Length); $out.Write($v, 0, $v.Length) }
+    elseif ($v -is [string]) { W ([Text.Encoding]::UTF8.GetBytes($v)) }
+    elseif ($v -is [int] -or $v -is [long]) { $p = [Text.Encoding]::ASCII.GetBytes("i$($v)e"); $out.Write($p, 0, $p.Length) }
+    elseif ($v -is [System.Collections.IDictionary]) {
+      $out.WriteByte([byte][char]'d')
+      foreach ($k in ($v.Keys | Sort-Object -CaseSensitive { $_ })) { W ([string]$k); W $v[$k] }
+      $out.WriteByte([byte][char]'e')
+    }
+    else { $out.WriteByte([byte][char]'l'); foreach ($x in $v) { W $x }; $out.WriteByte([byte][char]'e') }
+  }
+  $list = @(foreach ($f in $files) { @{ 'length' = [long]$f.Bytes.Length; 'path' = [string[]]$f.Path } })
+  W @{ 'info' = @{ 'name' = $name; 'piece length' = $pieceLength; 'pieces' = $pieces.ToArray(); 'files' = $list } }
+  $torrent = Join-Path $root "$name.torrent"
+  [IO.File]::WriteAllBytes($torrent, $out.ToArray())
+  $torrent
+}
+
+# The file list under a row (build 42 Part E, the core's FileLists), on a temp state with a 25-file torrent of its own:
+# the triangle opens it (the core's summary, a filter for more than 20 files, every row checked); a file's check is
+# sent to the engine and stays after the list is read again; the filter narrows the rows; a click selects a file row and
+# Space skips it (the Library's key action); the tray's chevron opens its checklist with the core's footer.
+$checks.files = {
+  $dir = New-State 'control'
+  $torrent = New-MultiTorrent $dir 'QA-Files' 25
+  $p = Start-App $dir -QaControl -extra @($torrent)
+  $pictures = @()
+  try {
+    WaitFor { List $dir | Where-Object { $_ -match 'QA-Files' } } 10000 'the torrent' | Out-Null
+    # Started at once (the app's Start), so it is no longer held and has its file list.
+    $started = (& $Cli --socket "$dir\state\control.sock" start 'QA-Files' --suggested 2>&1) -join ' '
+    if ($LASTEXITCODE -ne 0) { Fail "the CLI could not start the torrent: $started" }
+    WaitFor { -not ((List $dir | Where-Object { $_ -match 'QA-Files' }) -match '(?i)choose|held|pending') } 10000 'the torrent to start' | Out-Null
+    Qa $dir @('window') | Out-Null
+    Qa $dir @('place', 'downloads') | Out-Null
+    WaitFor { (Qa $dir @('rowclick', 'QA-Files')) -notmatch 'no such row' } 10000 'the row in the window' | Out-Null
+    Qa $dir @('files', 'toggle', 'QA-Files') | Out-Null
+    $open = WaitFor { $s = Qa $dir @('files'); if ($s -match 'rows \d+ \[') { $s } } 10000 'the files read'
+    if ($open -notmatch 'open 1' -or $open -notmatch '25 files') { Fail "the list did not open with its summary: $open" }
+    if ($open -notmatch 'filter ""') { Fail "a 25-file list has no filter: $open" }
+    if ($open -notmatch 'file-05\.txt:On') { Fail "the files are not all wanted: $open" }
+
+    Qa $dir @('files', 'check', 'QA-Files', 'file-05.txt') | Out-Null
+    $skipped = WaitFor { $s = Qa $dir @('files'); if ($s -match 'file-05\.txt:Off' -and $s -match 'pending False') { $s } } 5000 'the check sent to the engine'
+    # Read again from the engine: closed and opened.
+    Qa $dir @('files', 'toggle', 'QA-Files') | Out-Null
+    Qa $dir @('files', 'toggle', 'QA-Files') | Out-Null
+    $again = WaitFor { $s = Qa $dir @('files'); if ($s -match 'rows \d+ \[') { $s } } 10000 'the files read again'
+    if ($again -notmatch 'file-05\.txt:Off') { Fail "the engine did not keep the skipped file: $again" }
+
+    $filtered = Qa $dir @('files', 'filter', 'QA-Files', 'part')
+    if ($filtered -notmatch 'filter "part"' -or $filtered -match 'file-0') { Fail "the filter did not narrow the rows: $filtered" }
+    Qa $dir @('shot', 'files-filter') | Out-Null
+    Copy-Item "$dir\state\qa\files-filter.png" "$Out\files-filter.png"
+    $pictures += "$Out\files-filter.png"
+    # No text: the filter cleared.
+    Qa $dir @('files', 'filter', 'QA-Files') | Out-Null
+
+    $clicked = Qa $dir @('files', 'click', 'QA-Files', 'file-07.txt')
+    if ($clicked -notmatch 'selected 1' -or $clicked -notmatch 'file-07\.txt:On:[^,]*\*') { Fail "a click did not select the file row: $clicked" }
+    $space = Qa $dir @('key', 'space', 'list')
+    if ($space -notmatch 'handled True') { Fail "Space on a file row was not handled: $space" }
+    WaitFor { (Qa $dir @('files')) -match 'file-07\.txt:Off' } 5000 'Space to skip the file' | Out-Null
+    Qa $dir @('shot', 'files') | Out-Null
+    Copy-Item "$dir\state\qa\files.png" "$Out\files.png"
+    $pictures += "$Out\files.png"
+
+    $menu = Qa $dir @('files', 'menu', 'QA-Files')
+    if ($menu -notmatch 'menu [^|]*25 files[^|]* rows \d+ \[') { Fail "the tray's checklist did not open with the core's footer: $menu" }
+  } finally { Stop-App $dir $p; Remove-Item -Recurse -Force $dir }
+  $pictures
+}
+
+# The chooser, the held list and the starting notifier (build 42 Part E), on a temp state: a torrent that waits for a
+# choice (always ask) and one that counts down. The notifier shows both (its choice block opens its checklist); the
+# held row's list and the chooser window show the same chooser (a tick in one is the other's); Start in the chooser
+# starts the torrent and closes it; Start now in the notifier starts the countdown's.
+$checks.chooser = {
+  $dir = New-State 'control'
+  $cfg = "$dir\state\config.toml"
+  (Get-Content $cfg -Raw) -replace 'start_delay_secs = 600', "start_delay_secs = 600`nask_before_adding = `"always`"" | Set-Content -NoNewline -Encoding utf8 $cfg
+  # Start makes it announce: a copy whose tracker is a closed port on loopback, never Fedora's.
+  $latin = [Text.Encoding]::GetEncoding(28591)
+  $text = $latin.GetString([IO.File]::ReadAllBytes($fixture.fedora))
+  $tracker = 'http://127.0.0.1:9/announce'
+  $text = $text -replace '^d8:announce\d+:https?://[^/]+/announce', "d8:announce$($tracker.Length):$tracker"
+  [IO.File]::WriteAllBytes("$dir\fedora.torrent", $latin.GetBytes($text))
+  $p = Start-App $dir -QaControl -extra @("$dir\fedora.torrent")
+  $pictures = [System.Collections.Generic.List[string]]::new()
+  function Shot([string]$name, [string]$what = '') {
+    Qa $dir (@('shot', $name) + $(if ($what) { @($what) } else { @() })) | Out-Null
+    Copy-Item "$dir\state\qa\$name.png" "$Out\$name.png"
+    $pictures.Add("$Out\$name.png")
+  }
+  try {
+    WaitFor { (List $dir) -join ' ' -match 'awaiting-choice' } 10000 'the torrent to wait for a choice' | Out-Null
+    Qa $dir @('window') | Out-Null
+    $shown = WaitFor { $s = Qa $dir @('starting', 'status'); if ($s -match 'starting: shown True, items 1 \[.*Choice') { $s } } 10000 'the notifier with the choice'
+    Qa $dir @('starting', 'chevron', 'fedora') | Out-Null
+    $open = Qa $dir @('starting', 'status')
+    if ($open -notmatch '\| picked ') { Fail "the choice block did not open its checklist: $open" }
+    Shot 'starting-choice' 'starting'
+
+    $held = Qa $dir @('held', 'toggle', 'fedora')
+    if ($held -notmatch 'held \[[0-9a-f]{8}: checked (\d+), rows (\d+) \[') { Fail "no checklist under the held row: $held" }
+    $heldChecked = $Matches[1]
+    Shot 'held-list'
+
+    $chooser = Qa $dir @('chooser', 'show', 'fedora')
+    if ($chooser -notmatch 'chooser [0-9a-f]{8}: checked (\d+), rows \d+ \[([^:\]]+):') { Fail "the chooser window did not open: $chooser" }
+    if ($Matches[1] -ne $heldChecked) { Fail "the chooser and the held list differ: $chooser" }
+    $first = $Matches[2]
+    Shot 'chooser' 'dialog'
+    $toggled = Qa $dir @('chooser', 'toggle', $first)
+    if ($toggled -notmatch 'chooser [0-9a-f]{8}: checked (\d+)' -or $Matches[1] -eq $heldChecked) { Fail "a tick in the chooser did not change it: $toggled" }
+    $now = $Matches[1]
+    if ($toggled -notmatch "held \[[0-9a-f]{8}: checked $now,") { Fail "the held list does not show the chooser's tick: $toggled" }
+    # Back, so Start has something to start.
+    Qa $dir @('chooser', 'toggle', $first) | Out-Null
+
+    $started = Qa $dir @('chooser', 'start')
+    WaitFor { -not ((List $dir) -join ' ' -match 'awaiting-choice') } 10000 'Start to start the torrent' | Out-Null
+    WaitFor { (Qa $dir @('chooser', 'status')) -match 'no chooser open' } 5000 'the chooser to close' | Out-Null
+  } finally { Stop-App $dir $p; Remove-Item -Recurse -Force $dir }
+
+  # A countdown: the notifier's ring and line, Start now.
+  $dir = New-State 'control'
+  $p = Start-App $dir -QaControl -extra @($fixture.debian)
+  try {
+    WaitFor { List $dir | Where-Object { $_ -match 'Debian' } } 10000 'the torrent' | Out-Null
+    $count = WaitFor { $s = Qa $dir @('starting', 'status'); if ($s -match 'starting: shown True, items 1 \[.*Countdown') { $s } } 10000 'the notifier with the countdown'
+    Qa $dir @('starting', 'shift', 'on') | Out-Null
+    $shift = Qa $dir @('starting', 'status')
+    if ($shift -notmatch 'cancel caption: Keep') { Fail "Shift does not show Cancel's caption: $shift" }
+    Shot 'starting-countdown' 'starting'
+    Qa $dir @('starting', 'shift', 'auto') | Out-Null
+    Qa $dir @('starting', 'start-now', 'debian') | Out-Null
+    WaitFor { -not ((List $dir | Where-Object { $_ -match 'Debian' }) -match 'pending') } 10000 'Start now to start it' | Out-Null
+    WaitFor { (Qa $dir @('starting', 'status')) -match 'shown False' } 10000 'the notifier to close' | Out-Null
+  } finally { Stop-App $dir $p; Remove-Item -Recurse -Force $dir }
+  $pictures.ToArray()
+}
+
+# Play (Part F): the players the core finds on this PC (the registry and PATH), and Play on a torrent with no video
+# here: the core's calm note at the bottom of the window (a QA run starts no player).
+$checks.play = {
+  $dir = New-State
+  $p = Start-App $dir -QaControl -extra @($fixture.debian)
+  try {
+    WaitFor { List $dir | Where-Object { $_ -match 'Debian' } } 10000 'the torrent' | Out-Null
+    Qa $dir @('window') | Out-Null
+    $players = Qa $dir @('play-players')
+    Write-Host "  play-players: $players"
+    $note = Qa $dir @('play', 'debian')
+    if ($note -notmatch 'note "[^"]+"') { Fail "Play gave no note: $note" }
+    Qa $dir @('shot', 'play-note') | Out-Null
+    Copy-Item "$dir\state\qa\play-note.png" "$Out\play-note.png"
+  } finally { Stop-App $dir $p; Remove-Item -Recurse -Force $dir }
+  @("$Out\play-note.png")
+}
+
+# Favorite trackers and the Info page (Part F), on a temp state: Debian's automatic tracker is saved as a favorite; its
+# Info page shows the core's numbers, limits, folders and addresses; a download limit is saved; the favorite is renamed
+# through its sidebar field; Remove from Favorites asks first (the strip), Cancel keeps it, Remove removes it.
+$checks.favorites = {
+  $dir = New-State
+  $p = Start-App $dir -QaControl -extra @($fixture.debian)
+  $pictures = [System.Collections.Generic.List[string]]::new()
+  function Shot([string]$name) {
+    Qa $dir @('shot', $name) | Out-Null
+    Copy-Item "$dir\state\qa\$name.png" "$Out\$name.png"
+    $pictures.Add("$Out\$name.png")
+  }
+  try {
+    WaitFor { List $dir | Where-Object { $_ -match 'Debian' } } 10000 'the torrent' | Out-Null
+    Qa $dir @('window') | Out-Null
+    $saved = Qa $dir @('favorite', 'save', 'debian')
+    $saved = WaitFor { $s = Qa $dir @('favorite', 'status', 'debian'); if ($s -match 'trackers \[[^\]]*\*') { $s } } 10000 'the tracker to become a favorite'
+    $info = Qa $dir @('tracker-info', 'debian')
+    if ($info -notmatch 'favorite True' -or $info -notmatch 'folders editable' -or $info -notmatch 'addresses \[[^\]]+\]') { Fail "the Info page of the favorite: $info" }
+    $limited = Qa $dir @('tracker-info', 'debian', 'limits', '5000000', '0')
+    if ($limited -notmatch 'limits \[[^\]]*5000000') { Fail "the download limit was not saved: $limited" }
+    Shot 'tracker-info'
+    $renamed = Qa $dir @('favorite', 'rename', 'debian', 'Debian QA')
+    if ($renamed -notmatch 'trackers \[[^\]]*Debian QA\*') { Fail "the favorite was not renamed: $renamed" }
+    $asked = Qa $dir @('favorite', 'remove', 'Debian QA')
+    if ($asked -notmatch 'removal "[^"]+"') { Fail "Remove from Favorites did not ask: $asked" }
+    Shot 'favorite-remove'
+    $kept = Qa $dir @('favorite', 'cancel')
+    if ($kept -notmatch 'removal ""' -or $kept -notmatch 'Debian QA\*') { Fail "Cancel did not keep the favorite: $kept" }
+    Qa $dir @('favorite', 'remove', 'Debian QA') | Out-Null
+    $removed = Qa $dir @('favorite', 'confirm')
+    WaitFor { (Qa $dir @('favorite', 'status', 'debian')) -notmatch 'trackers \[[^\]]*\*' } 10000 'the favorite to be removed' | Out-Null
+  } finally { Stop-App $dir $p; Remove-Item -Recurse -Force $dir }
+  $pictures.ToArray()
+}
+
+# Settings › Rules (item 4): the core's rules editor on a temp state. The Default rule is shown with its footer; + adds
+# a rule; its name is set through its row (the editor's draft, not settings_apply) and saved; a second rule is dragged
+# before it (MoveRule); − removes it. Trackers: a new tracker for a host, its folder editor, saved into the list.
+$checks.rules = {
+  $dir = New-State
+  $p = Start-App $dir -QaControl -extra @($fixture.debian)
+  $pictures = [System.Collections.Generic.List[string]]::new()
+  function Shot([string]$name) {
+    Qa $dir @('shot', $name) | Out-Null
+    Copy-Item "$dir\state\qa\$name.png" "$Out\$name.png"
+    $pictures.Add("$Out\$name.png")
+  }
+  try {
+    WaitFor { List $dir | Where-Object { $_ -match 'Debian' } } 10000 'the torrent' | Out-Null
+    Qa $dir @('window') | Out-Null
+    Qa $dir @('settings', 'tab', 'rules') | Out-Null
+    $start = Qa $dir @('settings', 'rules', 'status')
+    if ($start -notmatch 'section rules, rows \[\], default Default\*' -or $start -notmatch 'footer "[^"]+"') { Fail "the Default rule is not shown with its footer: $start" }
+    $added = Qa $dir @('settings', 'rules', 'add')
+    if ($added -notmatch 'rows \[1:[^\]]*\*') { Fail "+ did not add a rule: $added" }
+    Qa $dir @('settings', 'set', 'rule.name', 'QA Rule') | Out-Null
+    $saved = Qa $dir @('settings', 'rules', 'save')
+    if ($saved -notmatch 'rows \[1:QA Rule\*') { Fail "the rule's name was not saved: $saved" }
+    Shot 'settings-rules'
+    Qa $dir @('settings', 'rules', 'add') | Out-Null
+    $moved = Qa $dir @('settings', 'rules', 'move', '1', '0')
+    if ($moved -notmatch 'rows \[1:New rule[^,]*, 2:QA Rule') { Fail "the rule was not moved before the other: $moved" }
+    Qa $dir @('settings', 'rules', 'select', 'QA Rule') | Out-Null
+    $removed = Qa $dir @('settings', 'rules', 'remove')
+    WaitFor { (Qa $dir @('settings', 'rules', 'status')) -notmatch 'QA Rule' } 5000 'the rule to be removed' | Out-Null
+    Qa $dir @('settings', 'rules', 'section', 'trackers') | Out-Null
+    $new = Qa $dir @('settings', 'rules', 'new-tracker', 'tracker.example.org')
+    if ($new -notmatch 'section trackers, rows \[[^\]]*\+:' -or $new -notmatch 'folders shown') { Fail "no new tracker with its folder editor: $new" }
+    Shot 'settings-trackers'
+    $trackerSaved = Qa $dir @('settings', 'rules', 'save')
+    if ($trackerSaved -notmatch 'rows \[[^\]]*t:[^\]]*tracker\.example\.org') { Fail "the new tracker was not saved: $trackerSaved" }
+  } finally { Stop-App $dir $p; Remove-Item -Recurse -Force $dir }
+  $pictures.ToArray()
+}
+
+# The Cloud Files plumbing (item 6) on this PC, before the host is wired to the core: a sync root in the run's temp state,
+# placeholders for a file and a folder, reads served by FETCH_DATA (filled), pin, dehydrate and a second read; then the
+# root is unregistered and removed. Nothing of the user's is touched.
+$checks.cloudfiles = {
+  $dir = New-State
+  $p = Start-App $dir -QaControl
+  try {
+    $r = Qa $dir @('cloudfiles', 'selftest')
+    Write-Host "  cloudfiles: $($r -replace '^.*qa cloudfiles selftest: ', '' -replace '; place .*$', '')"
+    foreach ($want in 'registered', 'connected', 'placeholders True', 'sizes 35/10000', 'read matches', 'hydrated True', 'inner matches', 'pinned True', 'dehydrated True', 'read again matches') {
+      if ($r -notmatch [regex]::Escape($want)) { Fail "Cloud Files: no '$want' in: $r" }
+    }
+    if ($r -match 'failed|cleanup') { Fail "Cloud Files: $r" }
+  } finally { Stop-App $dir $p; Remove-Item -Recurse -Force $dir }
+  @()
+}
+
+# On-demand folders end to end (item 6), on a temp state: the isolated run hosts the folder inside its own state folder
+# as a Cloud Files sync root; placeholders appear, a read fills the file through the core and the core adopts it, and
+# after a restart the host picks up where it left off (filled files stay filled, nothing placed twice).
+$checks.ondemand = {
+  $dir = New-State 'full'
+  $docs = "$dir\state\od\Docs"
+  New-Item -ItemType Directory -Force "$docs\sub" | Out-Null
+  'alpha text' | Set-Content -NoNewline "$docs\a.txt"
+  'bravo text' | Set-Content -NoNewline "$docs\b.txt"
+  'charlie text' | Set-Content -NoNewline "$docs\sub\c.txt"
+  'delta text' | Set-Content -NoNewline "$docs\d.txt"
+  $sock = "$dir\state\control.sock"
+  $p = Start-App $dir -QaControl
+  try {
+    WaitForSync $dir
+    $added = (& $Cli --socket $sock sync add $docs 2>&1) -join ' '
+    if ($added -notlike 'Sharing Docs*') { throw "sync add: $added" }
+    $mode = (& $Cli --socket $sock sync mode Docs on-demand 2>&1) -join ' '
+    if ($mode -notlike 'Docs is on demand*') { throw "sync mode: $mode" }
+    WaitFor { (Qa $dir @('ondemand')) -match 'roots 1 \[\S+ connected True placed 5 files \[a\.txt:p, b\.txt:p, d\.txt:p, sub/c\.txt:p\]\]' } 20000 'the placeholders' | Out-Null
+    $read = Qa $dir @('ondemand', 'read', 'a.txt')
+    if ($read -notmatch 'read "alpha text"; roots 1 \[.*a\.txt:f, b\.txt:p, d\.txt:p, sub/c\.txt:p\]') { throw "read a.txt: $read" }
+    WaitFor { Log $dir | Where-Object { $_ -like '*on-demand: a.txt filled (*' } } 5000 'the core to adopt a.txt' | Out-Null
+    $read = Qa $dir @('ondemand', 'read', 'sub/c.txt')
+    if ($read -notmatch 'read "charlie text"; .*sub/c\.txt:f\]') { throw "read sub/c.txt: $read" }
+
+    # Again after a restart: the anchor is kept, so nothing is placed again and the filled files stay filled.
+    Stop-App $dir $p
+    $p = Start-App $dir -QaControl
+    WaitForSync $dir
+    WaitFor { (Qa $dir @('ondemand')) -match 'roots 1 \[\S+ connected True placed 5 files \[a\.txt:f, b\.txt:p, d\.txt:p, sub/c\.txt:f\]\]' } 20000 'the folder again after a restart' | Out-Null
+    $read = Qa $dir @('ondemand', 'read', 'b.txt')
+    if ($read -notmatch 'read "bravo text"; .*b\.txt:f') { throw "read b.txt after the restart: $read" }
+
+    # Back to full: the host lets the folder go (filled placeholders become plain files, the rest are removed, the sync
+    # root is unregistered) and the core brings every file back, d.txt (never filled) too. Nothing is a placeholder.
+    $full = (& $Cli --socket $sock sync mode Docs full 2>&1) -join ' '
+    WaitFor { ((& $Cli --socket $sock sync list --json 2>&1) -join '' | ConvertFrom-Json).folders | Where-Object { $_.name -eq 'Docs' -and -not $_.on_demand } } 20000 "the folder to be full again ($full)" | Out-Null
+    WaitFor { (Qa $dir @('ondemand')) -match 'roots 0 \[\]' } 10000 'the host to let the folder go' | Out-Null
+    WaitFor { Log $dir | Where-Object { $_ -like '*on-demand folder released:*' } } 5000 'the sync root to be released' | Out-Null
+    $want = @{ 'a.txt' = 'alpha text'; 'b.txt' = 'bravo text'; 'd.txt' = 'delta text'; 'sub\c.txt' = 'charlie text' }
+    foreach ($f in $want.Keys) {
+      WaitFor { (Test-Path "$docs\$f") -and (Get-Content -Raw "$docs\$f") -eq $want[$f] } 20000 "$f back in full" | Out-Null
+    }
+    foreach ($f in @($want.Keys) + @('sub', '')) {
+      $is = Qa $dir @('ondemand', 'placeholder', (Join-Path $docs $f).TrimEnd('\'))
+      if ($is -notmatch 'placeholder False') { throw "$(if ($f) { $f } else { 'the folder' }) is still a placeholder after the switch to full: $is" }
+    }
+    $failed = @(Log $dir | Where-Object { $_ -like '*on-demand fetch of * failed*' -or $_ -like '*on-demand folders: not hosted*' -or $_ -like '*: not in the snapshot*' -or $_ -like '*on-demand folder not released*' })
+    if ($failed) { throw "the log: $($failed -join ' || ')" }
+  } finally { Stop-App $dir $p; Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue }
+  @()
+}
+
+# On-demand fetching from another device (item 6 step 2), two temp states on this PC: A shares a folder, B joins it on
+# demand inside its own state folder, and a read on B fills the placeholder with A's bytes. With A gone, a read fails
+# with the system's not-here-yet error (network unavailable), the core's notice is posted once (the Notifier, logged in
+# a QA run), and B keeps running.
+$checks.ondemandfetch = {
+  $a = New-State 'full'
+  $b = New-State 'full'
+  $docs = "$a\state\od\Docs"
+  New-Item -ItemType Directory -Force $docs | Out-Null
+  $bytes = New-Object byte[] (3MB)
+  (New-Object Random 7).NextBytes($bytes)
+  [IO.File]::WriteAllBytes("$docs\big.bin", $bytes)
+  $want = (Get-FileHash "$docs\big.bin" -Algorithm SHA256).Hash.ToLowerInvariant()
+  'small text' | Set-Content -NoNewline "$docs\small.txt"
+  $sa = "$a\state\control.sock"; $sb = "$b\state\control.sock"
+  $pa = Start-App $a -QaControl
+  $pb = $null
+  try {
+    # B with Folder Sync's limits on the LAN too (QA only, honoured for a temp state), so a fetch shows progress.
+    $env:SEEDWELL_QA_LIMIT_LAN = '1'
+    try { $pb = Start-App $b -QaControl } finally { Remove-Item Env:SEEDWELL_QA_LIMIT_LAN }
+    WaitForSync $a; WaitForSync $b
+    WaitFor { CoreLog $b | Where-Object { $_ -like '*QA: the speed limits apply to LAN sessions too*' } } 10000 'B''s core to limit the LAN (core.log)' | Out-Null
+    $added = (& $Cli --socket $sa sync add $docs 2>&1) -join ' '
+    if ($added -notlike 'Sharing Docs*') { throw "sync add: $added" }
+    $link = ((& $Cli --socket $sa sync share Docs --json 2>&1) -join '' | ConvertFrom-Json).link
+    $joined = ($link | & $Cli --socket $sb sync join - --on-demand --to "$b\state\od\Docs" 2>&1) -join ' '
+    if ($joined -notlike 'Joining Docs*') { throw "sync join: $joined" }
+    WaitFor { (Qa $b @('ondemand')) -match 'roots 1 \[\S+ connected True placed 2 files \[big\.bin:p, small\.txt:p\]\]' } 60000 'the placeholders on B' | Out-Null
+
+    # At 500 kB/s the 3 MB take about 6 s: the read shows progress while it waits.
+    & $Cli --socket $sb sync settings --down 500k 2>&1 | Out-Null
+    $read = Qa $b @('ondemand', 'read', 'big.bin') 60000
+    if ($read -notmatch "read 3145728 bytes, sha256 $want; .*big\.bin:f, small\.txt:p") { throw "read big.bin on B: $read" }
+    $filled = WaitFor { Log $b | Where-Object { $_ -like '*on-demand: big.bin filled (Downloaded;*' } | Select-Object -Last 1 } 5000 'the core to adopt big.bin'
+    if (-not ($filled -match 'progress shown (\d+) times') -or [int]$Matches[1] -lt 2) { throw "progress was not shown while fetching: $filled" }
+    & $Cli --socket $sb sync settings --down unlimited 2>&1 | Out-Null
+
+    # A gone: nobody can give small.txt, and the core says so at once (A's quit closed its sessions).
+    Stop-App $a $pa
+    $pa = $null
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    $read = Qa $b @('ondemand', 'read', 'small.txt') 30000
+    if ($clock.Elapsed.TotalSeconds -gt 10) { throw "the read with A gone took $([int]$clock.Elapsed.TotalSeconds) s to fail" }
+    if ($read -notmatch 'read failed: The cloud sync provider failed to perform the operation due to network being unavailable\..*small\.txt:p') { throw "read small.txt with A gone: $read" }
+    $told = @(Log $b | Where-Object { $_ -match 'notice: SyncProblem: .small\.txt. isn.t here yet' })
+    if ($told.Count -ne 1) { throw "the not-here-yet notice was posted $($told.Count) times: $($told -join ' || ')" }
+    if (-not @(Log $b | Where-Object { $_ -like '*on-demand fetch of * failed (NotHereYet)*' })) { throw 'no failed fetch in the log' }
+    if ($pb.HasExited) { throw "B ended (exit code $($pb.ExitCode))" }
+    $status = Qa $b @('ondemand')
+    if ($status -notmatch 'roots 1 \[\S+ connected True') { throw "B after the failure: $status" }
+  } finally {
+    if ($pb) { Stop-App $b $pb }
+    if ($pa) { Stop-App $a $pa }
+    Remove-Item -Recurse -Force $a, $b -ErrorAction SilentlyContinue
+  }
+  @()
+}
+
+# Keeping and freeing on-demand files (item 6 step 3), two temp states: A shares a folder, B joins it on demand.
+# Explorer's Always keep on this device and Free up space set the PINNED and UNPINNED attributes (attrib +P / +U does
+# the same); B's watcher passes them to the core (sync_pin, sync_evict) and the feed fills or frees the placeholders.
+# Storage Sense is another process dehydrating a placeholder: allowed only for what the core frees (A connected),
+# denied otherwise (A gone), and never taken for the user's own Free up space.
+$checks.ondemandpin = {
+  $a = New-State 'full'
+  $b = New-State 'full'
+  $docs = "$a\state\od\Docs"
+  New-Item -ItemType Directory -Force "$docs\sub" | Out-Null
+  foreach ($n in 'a', 'b', 'd', 'e') { "$n text" | Set-Content -NoNewline "$docs\$n.txt" }
+  'c text' | Set-Content -NoNewline "$docs\sub\c.txt"
+  $sa = "$a\state\control.sock"; $sb = "$b\state\control.sock"
+  $bd = "$b\state\od\Docs"
+  $pa = Start-App $a -QaControl
+  $pb = $null
+  # B's files as its host sees them, and a top-level file's line in the core's own listing.
+  $files = { (Qa $b @('ondemand')) -replace '^.*files \[([^\]]*)\].*$', '$1' }
+  $core = { param($name) (& $Cli --socket $sb sync items Docs 2>&1 | Where-Object { $_ -match "\s$([regex]::Escape($name))$" }) -join '' }
+  try {
+    $pb = Start-App $b -QaControl
+    WaitForSync $a; WaitForSync $b
+    & $Cli --socket $sa sync add $docs 2>&1 | Out-Null
+    $link = ((& $Cli --socket $sa sync share Docs --json 2>&1) -join '' | ConvertFrom-Json).link
+    $link | & $Cli --socket $sb sync join - --on-demand --to $bd 2>&1 | Out-Null
+    WaitFor { (& $files) -eq 'a.txt:p, b.txt:p, d.txt:p, e.txt:p, sub/c.txt:p' } 60000 'the placeholders on B' | Out-Null
+
+    # Always keep on this device: a file, then a folder (what is in it).
+    attrib +P -U "$bd\a.txt"
+    WaitFor { (& $files) -match 'a\.txt:fP,' } 15000 'a.txt kept and filled' | Out-Null
+    if ((& $core 'a.txt') -notmatch '^\s*here\s.*kept\s+a\.txt$') { Fail "the core's a.txt: $(& $core 'a.txt')" }
+    attrib +P -U "$bd\sub"
+    WaitFor { (& $files) -match 'sub/c\.txt:fP$' } 15000 'sub/c.txt kept and filled (its folder kept)' | Out-Null
+
+    # Free up space: a kept file (no longer kept, freed), and one that was only read.
+    attrib +U -P "$bd\a.txt"
+    WaitFor { (& $files) -match 'a\.txt:pU?,' } 15000 'a.txt freed' | Out-Null
+    if ((& $core 'a.txt') -notmatch '^\s*online only\s+\S+ \S+\s+a\.txt$') { Fail "the core's a.txt after Free up space: $(& $core 'a.txt')" }
+    if (-not (Log $b | Where-Object { $_ -like '*on-demand: a.txt no longer kept*' })) { Fail 'a.txt was not unpinned first' }
+    Qa $b @('ondemand', 'read', 'b.txt') | Out-Null
+    attrib +U -P "$bd\b.txt"
+    WaitFor { (& $files) -match 'b\.txt:pU?,' } 15000 'b.txt freed' | Out-Null
+    WaitFor { Log $b | Where-Object { $_ -like '*on-demand: b.txt freed 1 files, 6 bytes; kept 0' } } 5000 'the core to free b.txt' | Out-Null
+
+    # Storage Sense with A connected: allowed, and not taken for the user's choice.
+    Qa $b @('ondemand', 'read', 'd.txt') | Out-Null
+    Qa $b @('ondemand', 'read', 'e.txt') | Out-Null
+    $sense = CfDehydrate "$bd\d.txt"
+    if ($sense -ne 'freed') { Fail "Storage Sense on d.txt with A connected: $sense" }
+    WaitFor { (& $files) -match 'd\.txt:pU?,' } 10000 'd.txt freed by the system' | Out-Null
+    if (-not (Log $b | Where-Object { $_ -like '*on-demand: the system asked to free d.txt: allowed*' })) { Fail 'the system''s request for d.txt was not logged as allowed' }
+
+    # A gone: Storage Sense is denied (nobody confirms it), the mark it left goes; the user's Free up space keeps it, says why.
+    Stop-App $a $pa
+    $pa = $null
+    $sense = CfDehydrate "$bd\e.txt"
+    if ($sense -eq 'freed') { Fail 'Storage Sense freed e.txt with A gone' }
+    WaitFor { Log $b | Where-Object { $_ -like '*on-demand: the system asked to free e.txt: denied; no other device that has it is connected*' } } 5000 'the denial for e.txt' | Out-Null
+    WaitFor { (& $files) -match 'e\.txt:f,' } 10000 'e.txt still here, unmarked' | Out-Null
+    # Nothing told so far: a.txt and b.txt were freed whole, and Storage Sense stays silent.
+    $kept = @(Log $b | Where-Object { $_ -like '*notice: SyncKept:*' })
+    if ($kept) { Fail "a kept-files notice before the user's free of e.txt: $($kept -join ' || ')" }
+    attrib +U -P "$bd\e.txt"
+    WaitFor { Log $b | Where-Object { $_ -like '*on-demand: e.txt freed 0 files, 0 bytes; kept 1; e.txt: no other device that has it is connected' } } 10000 'Free up space to keep e.txt, with the reason' | Out-Null
+    # The core's notice says it stays and why (Explorer's menu has no error to show).
+    $kept = @(WaitFor { @(Log $b | Where-Object { $_ -like '*notice: SyncKept:*' }) } 5000 'the kept-files notice')
+    if ($kept.Count -ne 1 -or $kept[0] -notmatch 'SyncKept: .e\.txt. stays on this PC') { Fail "the kept-files notice: $($kept -join ' || ')" }
+    WaitFor { (& $files) -match 'e\.txt:f,' } 10000 'e.txt here and unmarked after Free up space' | Out-Null
+    $system = @(Log $b | Where-Object { $_ -like '*on-demand: d.txt freed*' -or $_ -like '*on-demand: e.txt freed*' })
+    if ($system.Count -ne 1) { Fail "the system's clean-ups were taken for the user's: $($system -join ' || ')" }
+    if ($pb.HasExited) { Fail "B ended (exit code $($pb.ExitCode))" }
+  } finally {
+    if ($pb) { Stop-App $b $pb }
+    if ($pa) { Stop-App $a $pa }
+    Remove-Item -Recurse -Force $a, $b -ErrorAction SilentlyContinue
+  }
+  @()
+}
+
+# The user's own changes in an on-demand folder (item 6 step 4), two temp states: A shares a folder (full, the owner),
+# B joins it on demand. On B, as any app would, from this process: rename, move, delete, edit a filled file, a new
+# file, a new folder with a file, a folder moved in from outside, a folder deleted with what is in it. A's folder
+# shows each. Changes made on A reach B's placeholders without being taken for B's user's. On a read-only folder a
+# delete is refused and the file freed instead. Files made in B's folder while B was not running are taken at start.
+$checks.ondemandchanges = {
+  $a = New-State 'full'
+  $b = New-State 'full'
+  $docs = "$a\state\od\Docs"
+  $ro = "$a\state\od\Ro"
+  New-Item -ItemType Directory -Force "$docs\sub", "$docs\dd", $ro | Out-Null
+  foreach ($n in 'ren', 'mov', 'del', 'edit', 'far', 'gone') { "$n text" | Set-Content -NoNewline "$docs\$n.txt" }
+  'x text' | Set-Content -NoNewline "$docs\sub\x.txt"
+  'y text' | Set-Content -NoNewline "$docs\dd\y.txt"
+  'ro text' | Set-Content -NoNewline "$ro\ro.txt"
+  $sa = "$a\state\control.sock"; $sb = "$b\state\control.sock"
+  $bd = "$b\state\od\Docs"
+  $bro = "$b\state\od\Ro"
+  $pa = Start-App $a -QaControl
+  $pb = $null
+  # A folder's files and their text, for comparing (the folder's own .seedwell left out).
+  $tree = { param($root) (Get-ChildItem -Recurse -File $root -ErrorAction SilentlyContinue | Where-Object { $_.FullName -notlike '*\.seedwell\*' } | Sort-Object FullName | ForEach-Object { "$($_.FullName.Substring($root.Length + 1).Replace('\', '/'))=$(Get-Content -Raw $_.FullName)" }) -join ', ' }
+  $mine = { @(Log $b | Where-Object { $_ -match 'on-demand: .* (moved here|deleted here|changed here|added here)' }) }
+  try {
+    $pb = Start-App $b -QaControl
+    WaitForSync $a; WaitForSync $b
+    & $Cli --socket $sa sync add $docs 2>&1 | Out-Null
+    & $Cli --socket $sa sync add $ro 2>&1 | Out-Null
+    $link = ((& $Cli --socket $sa sync share Docs --json 2>&1) -join '' | ConvertFrom-Json).link
+    $link | & $Cli --socket $sb sync join - --on-demand --to $bd 2>&1 | Out-Null
+    $link = ((& $Cli --socket $sa sync share Ro --role read_only --json 2>&1) -join '' | ConvertFrom-Json).link
+    $link | & $Cli --socket $sb sync join - --on-demand --to $bro 2>&1 | Out-Null
+    # The two roots in either order (as the core names the folders).
+    WaitFor { $s = Qa $b @('ondemand'); $s -match 'placed 10 files' -and $s -match 'placed 1 files \[ro\.txt:p\]' } 60000 'the placeholders on B' | Out-Null
+
+    # Rename, move, delete.
+    Rename-Item "$bd\ren.txt" 'renamed.txt'
+    Move-Item "$bd\mov.txt" "$bd\sub\mov.txt"
+    Remove-Item "$bd\del.txt"
+    WaitFor { (& $tree $docs) -eq 'dd/y.txt=y text, edit.txt=edit text, far.txt=far text, gone.txt=gone text, renamed.txt=ren text, sub/mov.txt=mov text, sub/x.txt=x text' } 15000 'the rename, move and delete on A' | Out-Null
+
+    # An edit of a filled file, a new file, a new folder with a file, a folder moved in, a folder deleted.
+    if ((Get-Content -Raw "$bd\edit.txt") -ne 'edit text') { Fail 'edit.txt did not read on B' }
+    'edited on B' | Set-Content -NoNewline "$bd\edit.txt"
+    'new on B' | Set-Content -NoNewline "$bd\new.txt"
+    New-Item -ItemType Directory "$bd\nd" | Out-Null
+    'z on B' | Set-Content -NoNewline "$bd\nd\z.txt"
+    New-Item -ItemType Directory -Force "$b\outside\in" | Out-Null
+    'w moved in' | Set-Content -NoNewline "$b\outside\in\w.txt"
+    Move-Item "$b\outside\in" "$bd\in"
+    Remove-Item -Recurse "$bd\dd"
+    $want = 'edit.txt=edited on B, far.txt=far text, gone.txt=gone text, in/w.txt=w moved in, nd/z.txt=z on B, new.txt=new on B, renamed.txt=ren text, sub/mov.txt=mov text, sub/x.txt=x text'
+    WaitFor { (& $tree $docs) -eq $want } 15000 'the edit, the new files and the folder delete on A' | Out-Null
+    WaitFor { (Qa $b @('ondemand')) -match 'files \[edit\.txt:f, far\.txt:p, gone\.txt:p, new\.txt:f, renamed\.txt:p, in/w\.txt:f, nd/z\.txt:f, sub/mov\.txt:p, sub/x\.txt:p\]' } 10000 'B''s new files as placeholders in sync' | Out-Null
+
+    # Changes on A: B follows (an edit of a file B holds, a rename, a delete), none taken for B's user's.
+    $before = (& $mine).Count
+    if ((Get-Content -Raw "$bd\sub\x.txt") -ne 'x text') { Fail 'sub/x.txt did not read on B' }
+    'x changed on A' | Set-Content -NoNewline "$docs\sub\x.txt"
+    Rename-Item "$docs\far.txt" 'farther.txt'
+    Remove-Item "$docs\gone.txt"
+    WaitFor { -not (Test-Path "$bd\gone.txt") -and (Test-Path "$bd\farther.txt") -and -not (Test-Path "$bd\far.txt") } 20000 'A''s rename and delete on B' | Out-Null
+    WaitFor { (Get-Content -Raw "$bd\sub\x.txt") -eq 'x changed on A' } 20000 'A''s edit of sub/x.txt on B' | Out-Null
+    $echo = @(& $mine | Select-Object -Skip $before)
+    if ($echo) { Fail "A's changes were taken for B's user's: $($echo -join ' || ')" }
+
+    # A read-only folder: a delete is refused, the file is freed instead and stays listed; A keeps it.
+    if ((Get-Content -Raw "$bro\ro.txt") -ne 'ro text') { Fail 'ro.txt did not read on B' }
+    $refused = $false
+    try { Remove-Item "$bro\ro.txt" -ErrorAction Stop } catch { $refused = $true }
+    if (-not $refused) { Fail 'the delete on a read-only folder was not refused' }
+    WaitFor { Log $b | Where-Object { $_ -like '*on-demand: ro.txt not deleted (read-only here): freed instead*' } } 5000 'the read-only delete to free instead' | Out-Null
+    WaitFor { (Qa $b @('ondemand')) -match 'files \[ro\.txt:pU?\]' } 10000 'ro.txt freed and still listed on B' | Out-Null
+    if (-not (Test-Path "$ro\ro.txt")) { Fail 'the read-only delete reached A' }
+
+    # Made while B was not running: taken at start.
+    Stop-App $b $pb
+    $pb = $null
+    'made offline' | Set-Content -NoNewline "$bd\offline.txt"
+    'deep offline' | Set-Content -NoNewline "$bd\sub\deep.txt"
+    $pb = Start-App $b -QaControl
+    WaitFor { (& $tree $docs) -match 'offline\.txt=made offline' -and (& $tree $docs) -match 'sub/deep\.txt=deep offline' } 30000 'the files made offline on A' | Out-Null
+    if ($pb.HasExited) { Fail "B ended (exit code $($pb.ExitCode))" }
+  } finally {
+    if ($pb) { Stop-App $b $pb }
+    if ($pa) { Stop-App $a $pa }
+    Remove-Item -Recurse -Force $a, $b -ErrorAction SilentlyContinue
+  }
   @()
 }
 

@@ -95,6 +95,17 @@ fn every_row_says_what_its_controls_do() {
 }
 
 #[test]
+fn a_host_that_cannot_play_gets_no_play_button() {
+    let l = window();
+    l.set_host_windows(host_windows_all().into_iter().filter(|w| *w != HostWindow::Player).collect());
+    let v = l.view("t".into(), false).unwrap();
+    assert!(v.rows.iter().all(|r| r.play.is_none()), "no Play on any row without a player window");
+    l.set_host_windows(host_windows_all());
+    let v = l.view("t".into(), false).unwrap();
+    assert!(v.rows.iter().any(|r| r.play.is_some()), "with one, videos have it");
+}
+
+#[test]
 fn a_filter_shows_the_matching_files_and_says_when_none_match() {
     let many: Vec<TorrentFile> = (0..25).map(|i| file(i, &format!("Album/{i:02} Track.flac"), 10, 0, Normal)).collect();
     let l = FileLists::new(FileListPlace::Window);

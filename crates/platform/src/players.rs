@@ -10,6 +10,7 @@
 use std::path::{Path, PathBuf};
 
 mod macho;
+mod pe;
 mod registry;
 
 #[cfg(target_os = "macos")]
@@ -17,8 +18,31 @@ mod mac;
 #[cfg(windows)]
 mod windows;
 
-pub use macho::{architectures, Arch};
+pub use macho::architectures;
+pub use pe::pe_architecture;
 pub use registry::{command_executable, expand_env, file_name_lower};
+
+/// The CPU families that matter for "can this app run here".
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Arch {
+    Arm64,
+    X86_64,
+    /// 32-bit Intel (i386).
+    X86,
+    Other,
+}
+
+impl Arch {
+    /// "arm64", "x86_64", "x86", "other".
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Arm64 => "arm64",
+            Self::X86_64 => "x86_64",
+            Self::X86 => "x86",
+            Self::Other => "other",
+        }
+    }
+}
 
 /// How a player is handed a stream URL.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -164,7 +188,8 @@ pub struct Player {
     pub path: PathBuf,
     /// The CPU families of its executable; `None` when they could not be read (or are not checked here).
     pub archs: Option<Vec<Arch>>,
-    /// It starts on this computer (the Mac: an arm64 slice, or x86_64 with Rosetta installed).
+    /// It starts on this computer (the Mac: an arm64 slice, or x86_64 with Rosetta installed; Windows:
+    /// [`can_run_on_windows`]).
     pub runs: bool,
     pub mp4_only: bool,
 }
@@ -198,13 +223,16 @@ pub use mac::player_at;
 #[cfg(windows)]
 pub use windows::player_at;
 
-// `host_line`: what the machine can run, in a line for QA ("Apple silicon, Rosetta installed").
-#[cfg(not(target_os = "macos"))]
+// `host_line`: what the machine can run, in a line for QA ("Apple silicon, Rosetta installed"; "arm64 Windows, x64
+// emulation").
+#[cfg(not(any(target_os = "macos", windows)))]
 pub fn host_line() -> String {
     std::env::consts::ARCH.to_string()
 }
 #[cfg(target_os = "macos")]
 pub use mac::host_line;
+#[cfg(windows)]
+pub use windows::host_line;
 
 /// What a player is started on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -274,6 +302,21 @@ pub fn can_run(archs: Option<&[Arch]>, apple_silicon: bool, rosetta: bool) -> bo
     }
 }
 
+/// Whether a Windows app built for `archs` starts on a PC whose own CPU is `native` (the machine's, not the process's:
+/// Seedwell may itself run emulated). x86 (32-bit) apps run everywhere, through WOW64; x64 apps run on an x64 PC and,
+/// with `x64_emulation` (Windows 11 on Arm; Windows 10 on Arm has none), on an Arm one; arm64 apps run only on Arm.
+/// Unknown (an unreadable executable) is not held against the app.
+pub fn can_run_on_windows(archs: Option<&[Arch]>, native: Arch, x64_emulation: bool) -> bool {
+    let Some(archs) = archs.filter(|a| !a.is_empty()) else { return true };
+    archs.iter().any(|&a| match (native, a) {
+        (_, Arch::Other) | (Arch::Other, _) => false,
+        (n, a) if n == a => true,
+        (_, Arch::X86) => true,
+        (Arch::Arm64, Arch::X86_64) => x64_emulation,
+        _ => false,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -340,6 +383,22 @@ mod tests {
         assert!(can_run(Some(&both), true, false) && can_run(Some(&both), false, false));
         assert!(!can_run(Some(&[Arch::Other]), true, true));
         assert!(can_run(None, true, false) && can_run(Some(&[]), false, false), "unknown is not held against an app");
+    }
+
+    #[test]
+    fn a_windows_app_runs_natively_through_wow64_or_x64_emulation() {
+        use Arch::*;
+        let run = |a: Arch, native: Arch, emu: bool| can_run_on_windows(Some(&[a]), native, emu);
+        // An x64 PC: x64 and x86, never arm64.
+        assert!(run(X86_64, X86_64, false) && run(X86, X86_64, false));
+        assert!(!run(Arm64, X86_64, false) && !run(Arm64, X86_64, true));
+        // An Arm PC: arm64 and x86 always, x64 only with Windows 11's emulation.
+        assert!(run(Arm64, Arm64, false) && run(X86, Arm64, false));
+        assert!(run(X86_64, Arm64, true) && !run(X86_64, Arm64, false), "Windows 10 on Arm has no x64 emulation");
+        // A 32-bit PC runs only x86.
+        assert!(run(X86, X86, false) && !run(X86_64, X86, true) && !run(Arm64, X86, true));
+        assert!(!run(Other, X86_64, true) && !run(Other, Arm64, true) && !run(X86, Other, true));
+        assert!(can_run_on_windows(None, Arm64, false) && can_run_on_windows(Some(&[]), X86_64, false), "unknown is not held against an app");
     }
 
     #[test]

@@ -41,6 +41,21 @@ enum QuietRun {
         return screens.contains(where: { $0.intersects(back) }) ? back : frame
     }
 
+    /// The windows told they are key (`drawActive`).
+    @MainActor private static let toldKey = NSHashTable<NSWindow>.weakObjects()
+
+    /// `w` drawn in its key look from the first shot on. Its frame (the window buttons) and the vibrancy of its sidebar
+    /// follow the key changes they are told of, not `isKeyWindow`: a window that never became key drew grey buttons
+    /// and a dim, inactive sidebar until something else (a field taking the keyboard) made them look again, so a
+    /// script's first shot showed another state than its later ones. It is told once that it became key and main;
+    /// nothing reaches the window server, so no window takes the keys.
+    @MainActor static func drawActive(_ w: NSWindow) {
+        guard on, !toldKey.contains(w) else { return }
+        toldKey.add(w)
+        w.becomeMain()
+        w.becomeKey()
+    }
+
     /// The Dock icon the app would have (it shows none in a quiet run): QA's `policy` reports it.
     nonisolated(unsafe) static var policy: NSApplication.ActivationPolicy = .accessory
 }

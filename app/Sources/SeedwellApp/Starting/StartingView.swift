@@ -56,7 +56,7 @@ struct StartingView: View {
         .overlay(alignment: .topTrailing) {
             if let help = page.closeHelp {
                 Button(action: actions.closePanel) {
-                    Image(systemName: "xmark").font(.system(size: 9, weight: .bold)).foregroundStyle(.secondary)
+                    Image(systemName: "xmark").font(Theme.micro.weight(.bold)).foregroundStyle(.secondary)
                         .frame(width: 20, height: 20).contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
@@ -88,7 +88,7 @@ struct StartingRow: View {
                     CountdownRing(fraction: tick.fraction, paused: tick.paused)
                         .frame(width: 16, height: 16)
                     Text(tick.line)
-                        .font(.system(size: 12.5))
+                        .font(Theme.secondary)
                         .monospacedDigit()
                         .foregroundStyle(tick.paused ? .secondary : .primary)
                         .contentTransition(.numericText())
@@ -110,7 +110,7 @@ struct BlockHeader: View {
     var body: some View {
         HStack(alignment: .top, spacing: 0) {
             if let chevron = block.chevron {
-                FoldChevron(open: chevron.open, size: 10, width: 24, height: 28, help: chevron.help, label: chevron.label, action: chevronAction)
+                FoldChevron(open: chevron.open, size: Theme.Size.micro, width: 24, height: 28, help: chevron.help, label: chevron.label, action: chevronAction)
                     .padding(.leading, -6)
             }
             StartingHeader(title: block.title, detail: block.detail, help: block.openHelp) { actions.open(block.id) }
@@ -137,13 +137,13 @@ struct StartingHeader: View {
     var body: some View {
         let text = VStack(alignment: .leading, spacing: 3) {
             Text(title)
-                .font(.system(size: 14, weight: .semibold))
+                .font(Theme.heading)
                 .underline(hovering && open != nil)
                 .lineLimit(2)
                 .truncationMode(.middle)
                 .fixedSize(horizontal: false, vertical: true)
             Text(detail)
-                .font(.system(size: 12))
+                .font(Theme.secondary)
                 .foregroundStyle(.secondary)
                 .underline(hovering && open != nil)
                 .lineLimit(1)
@@ -166,6 +166,8 @@ struct StartingHeader: View {
 struct CountdownRing: View {
     let fraction: Double
     let paused: Bool
+    /// The pause glyph drawn inside the 16-point ring: smaller than any text style so it fits the ring.
+    private static let pauseGlyph: CGFloat = 6
 
     var body: some View {
         ZStack {
@@ -175,7 +177,7 @@ struct CountdownRing: View {
                 .stroke(paused ? Color.secondary : Color.accentColor, style: StrokeStyle(lineWidth: 2, lineCap: .round))
                 .rotationEffect(.degrees(-90))
             if paused {
-                Image(systemName: "pause.fill").font(.system(size: 6, weight: .bold)).foregroundStyle(.secondary)
+                Image(systemName: "pause.fill").font(.system(size: Self.pauseGlyph, weight: .bold)).foregroundStyle(.secondary)
             }
         }
     }
@@ -199,8 +201,8 @@ struct CategoryPill: View {
             }
         } label: {
             HStack(spacing: 4) {
-                Image(systemName: pill.category.symbol).font(.system(size: 9.5, weight: .medium))
-                Text(pill.title).font(.system(size: 11, weight: .medium))
+                Image(systemName: pill.category.symbol).font(Theme.caption.weight(.medium))
+                Text(pill.title).font(Theme.caption.weight(.medium))
             }
             .foregroundStyle(.secondary)
             .padding(.horizontal, 8).padding(.vertical, 3)

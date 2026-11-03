@@ -75,7 +75,7 @@ struct SettingsView: View {
     /// Like the About line of System Settings: one quiet, centred, selectable line ("Seedwell 0.0.1 (build 58)").
     private func versionFooter(_ line: String) -> some View {
         Text(line)
-            .font(.system(size: 11.5)).foregroundStyle(.secondary)
+            .font(Theme.caption).foregroundStyle(.secondary)
             .textSelection(.enabled)
             .frame(maxWidth: .infinity)
             .padding(.vertical, 8)
@@ -91,7 +91,7 @@ struct SettingsView: View {
                 }
             }
         }
-        .font(.system(size: 12))
+        .font(Theme.secondary)
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 28).padding(.vertical, 10)
         .background(.bar)
@@ -102,8 +102,8 @@ struct SettingsView: View {
             ForEach(tabs, id: \.tab) { t in
                 Button { nav.tab = t.tab } label: {
                     VStack(spacing: 4) {
-                        Image(systemName: t.tab.symbol).font(.system(size: 17, weight: .regular)).frame(height: 22)
-                        Text(t.title).font(.system(size: 11.5))
+                        Image(systemName: t.tab.symbol).font(.system(size: Theme.Icon.large)).frame(height: 22)
+                        Text(t.title).font(Theme.caption)
                     }
                     .foregroundStyle(nav.tab == t.tab ? Color.accentColor : .secondary)
                     .frame(width: 72, height: 52)

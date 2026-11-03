@@ -47,7 +47,7 @@ fn input(c: SyncChannel, messages: Vec<SyncMessage>) -> ChatPageInput {
         channel: Some(c),
         topic: None,
         direct: None,
-        read: ChatPageRead { messages, pending: Vec::new(), follow: None, direct_agents: SyncAgentAccess::Off },
+        read: ChatPageRead { messages, pending: Vec::new(), follow: None, direct_agents: SyncAgentAccess::Off, own_devices: vec!["D0".into()], joined: Vec::new() },
         members: Vec::new(),
         now_unix_s: NOW,
     }
@@ -60,7 +60,7 @@ fn direct(online: Option<bool>, messages: Vec<SyncMessage>) -> ChatPageInput {
         channel: None,
         topic: None,
         direct: online.map(|online| SyncDirect { device_id: "D2".into(), name: "Kari's iPhone".into(), user: String::new(), online, unread: 0, last_message_s: None }),
-        read: ChatPageRead { messages, pending: Vec::new(), follow: None, direct_agents: SyncAgentAccess::Read },
+        read: ChatPageRead { messages, pending: Vec::new(), follow: None, direct_agents: SyncAgentAccess::Read, own_devices: Vec::new(), joined: Vec::new() },
         members: Vec::new(),
         now_unix_s: NOW,
     }
@@ -122,11 +122,25 @@ fn a_run_of_one_author_shows_it_once() {
         msg("m6aaaaaaaa", "D1", NOW - 270 + RUN_S + 1, "later than five minutes"),
     ];
     let p = page(input(channel("Team", 3, 2, 0, false), ms), &host_windows_all());
-    let heads: Vec<bool> = p.messages.iter().map(|c| c.author.is_some()).collect();
-    assert_eq!(heads, [true, false, true, true, true, true], "an agent's message and a reply start their own run");
-    assert_eq!(p.messages[4].reply_quote.as_deref(), Some("↳ D1's Mac: one"));
+    let starts: Vec<bool> = p.messages.iter().map(|c| c.starts_run).collect();
+    assert_eq!(starts, [true, false, true, true, true, true], "an agent's message and a reply start their own run");
+    let lines: Vec<bool> = p.messages.iter().map(|c| c.meta.is_some()).collect();
+    assert_eq!(lines, [false, true, true, true, true, true], "who wrote a run is said once, under its last message");
+    let q = p.messages[4].reply_quote.as_ref().unwrap();
+    assert_eq!((q.title.as_str(), q.text.as_str()), ("D1's Mac", "one"));
     assert!(!starts_run(&msg("x", "D1", 1_300, ""), Some(&msg("y", "D1", 1_000, ""))), "exactly five minutes is the same run");
-    assert_eq!(p.messages[3].author.as_ref().unwrap().badge.as_ref().map(|b| b.text.as_str()), Some("agent"));
+    assert_eq!(p.messages[3].who, ChatAuthorKind::TheirAgent);
+    // Each person's colour is stable; their agent's is theirs; the quote carries the quoted message's.
+    let colours: Vec<Option<u32>> = p.messages.iter().map(|c| c.palette).collect();
+    assert!(colours.iter().all(|c| c.is_some_and(|i| i < CHAT_PALETTE_SIZE)));
+    assert_eq!(colours[0], colours[3], "D1's agent takes D1's colour");
+    let none = HashMap::new();
+    assert_eq!(colours[0], palette(&msg("x", "D1", 0, ""), ChatAuthorKind::Theirs, &none), "the same for every message of D1");
+    let q = p.messages[4].reply_quote.as_ref().unwrap();
+    assert_eq!((q.message_id.as_str(), q.who, q.palette), ("m1aaaaaaaa", ChatAuthorKind::Theirs, colours[0]));
+    assert_eq!(palette(&msg("x", "D0", 0, ""), ChatAuthorKind::Mine, &none), None, "the user's: the accent");
+    assert_eq!((chat_palette_size(), chat_code_copy_help().as_str()), (8, "Copy"));
+    assert_eq!(p.messages[1].time, format!("T{}", NOW - 500), "every message has its time for the pointer");
 }
 
 #[test]
@@ -141,35 +155,56 @@ fn times_say_today_yesterday_or_the_day_across_day_breaks() {
     assert_eq!(message_time(&clock, midnight - DAY - 1, NOW), format!("D{0} T{0}", midnight - DAY - 1));
     assert_eq!(message_time(&clock, NOW - 400 * DAY, NOW), format!("D{0}Y T{0}", NOW - 400 * DAY), "another year names it");
     assert_eq!(message_time(&clock, NOW + 2 * DAY, NOW), format!("D{0} T{0}", NOW + 2 * DAY), "one dated ahead says its day");
-    // A run goes on across midnight: its time is on its first card.
+    // A run goes on across midnight: its line is under its last message, with that message's time.
     let p = page(input(channel("Team", 2, 1, 0, false), vec![msg("m1aaaaaaaa", "D1", midnight - 60, "late"), msg("m2aaaaaaaa", "D1", midnight + 60, "early")]), &[]);
-    assert_eq!(p.messages[0].author.as_ref().unwrap().time, format!("Yesterday T{}", midnight - 60));
-    assert!(p.messages[1].author.is_none());
+    assert!(p.messages[0].meta.is_none());
+    assert_eq!(p.messages[1].meta.as_ref().unwrap().detail, format!("T{}", midnight + 60));
+    assert_eq!(p.messages[0].time, format!("Yesterday T{}", midnight - 60));
 }
 
 #[test]
 fn authors_are_people_devices_you_or_agents() {
     let mut m = msg("m1aaaaaaaa", "D1", NOW, "hi");
-    let a = |m: &SyncMessage| message_author(m, &Clock, NOW);
-    assert_eq!((a(&m).name, a(&m).computer), ("D1's Mac".to_string(), None));
+    let own: Vec<String> = vec!["D0".into(), "D3".into()];
+    let a = |m: &SyncMessage| message_meta(m, author_kind(m, &own), &Clock, NOW);
+    let line = |x: ChatMessageMeta| (x.name, x.detail, x.initial, x.help);
+    let t = format!("T{NOW}");
+    // A device that is its own name says it once.
+    assert_eq!(line(a(&m)), ("D1's Mac".into(), t.clone(), "D".into(), String::new()));
     m.author_user = "Kari".into();
-    assert_eq!((a(&m).name, a(&m).computer.as_deref()), ("Kari".to_string(), Some("D1's Mac")));
-    assert_eq!(author(&m), "Kari (D1's Mac)");
+    assert_eq!(line(a(&m)), ("Kari".into(), format!("D1's Mac · {t}"), "K".into(), "Kari on D1's Mac".into()));
+    assert_eq!(author(&m), "Kari (D1's Mac)", "notifications keep the device");
     m.is_me = true;
-    assert_eq!((a(&m).name, a(&m).computer), ("You".to_string(), None));
+    assert_eq!(line(a(&m)), ("You".into(), t.clone(), "Y".into(), String::new()), "this device: no device");
     assert_eq!(author(&m), "You");
     m.agent = Some("Seedwell".into());
-    let x = a(&m);
-    assert_eq!((x.name.as_str(), x.computer.as_deref()), ("Seedwell", Some("D1's Mac")));
-    assert_eq!(x.badge.unwrap().help, "Sent by an agent through Seedwell on D1's Mac");
+    assert_eq!(line(a(&m)), ("Seedwell".into(), format!("D1's Mac · {t}"), "S".into(), "Seedwell, an agent on D1's Mac".into()));
     assert_eq!(author(&m), "Seedwell on D1's Mac", "an agent on this computer names the computer too");
     m.author_name.clear();
     assert_eq!(chat_message_author(m.clone()), "Seedwell on Unnamed device");
-    // Yours are tinted; an agent's on this computer are not.
-    let mut mine = msg("m2aaaaaaaa", "D0", NOW, "mine");
+    // Whose: this device and the user's other devices are the user's, with their agents; the rest are others'.
+    let kind = |device: &str, me: bool, agent: Option<&str>| {
+        let mut x = msg("m9aaaaaaaa", device, NOW, "x");
+        x.is_me = me;
+        x.agent = agent.map(str::to_owned);
+        author_kind(&x, &own)
+    };
+    assert_eq!(kind("D0", true, None), ChatAuthorKind::Mine);
+    assert_eq!(kind("D3", false, None), ChatAuthorKind::Mine, "another of the user's devices");
+    assert_eq!(kind("D0", true, Some("ci")), ChatAuthorKind::OurAgent);
+    assert_eq!(kind("D3", false, Some("ci")), ChatAuthorKind::OurAgent);
+    assert_eq!(kind("D1", false, None), ChatAuthorKind::Theirs);
+    assert_eq!(kind("D1", false, Some("ci")), ChatAuthorKind::TheirAgent);
+    assert_eq!(author_kind(&msg("x", "D0", NOW, ""), &[]), ChatAuthorKind::Theirs, "in no group: only this device is the user's");
+    let mut phone = msg("m2aaaaaaaa", "D3", NOW, "from my phone");
+    phone.author_name = "Kari's iPhone".into();
+    let x = a(&phone);
+    assert_eq!((x.name.as_str(), x.detail.as_str(), x.help.as_str()), ("You", format!("Kari's iPhone · {t}").as_str(), "You on Kari's iPhone"));
+    let mut mine = msg("m3aaaaaaaa", "D0", NOW, "mine");
     mine.is_me = true;
     let p = page(input(channel("Team", 2, 1, 0, false), vec![m, mine]), &[]);
-    assert_eq!(p.messages.iter().map(|c| c.mine).collect::<Vec<_>>(), [false, true]);
+    assert_eq!(p.messages.iter().map(|c| c.who).collect::<Vec<_>>(), [ChatAuthorKind::OurAgent, ChatAuthorKind::Mine]);
+    assert!(!p.bubbles, "a channel is one column");
 }
 
 #[test]
@@ -261,7 +296,7 @@ fn json_and_unknown_messages_and_nasty_text() {
     assert_eq!(p.messages[1].body, ChatMessageBody::Unsupported { text: "A message this version cannot show".into() });
     let ChatMessageBody::Markdown { blocks } = &p.messages[2].body else { panic!() };
     assert_eq!(blocks.len(), 2);
-    assert!(matches!(&blocks[0], ChatBlock::Paragraph { runs } if runs == &[ChatRun { text: "**open [x](<y>".into(), bold: false, italic: false, strikethrough: false, code: false, link: None }]));
+    assert!(matches!(&blocks[0], ChatBlock::Paragraph { runs } if runs == &[ChatRun { text: "**open [x](<y>".into(), bold: false, italic: false, strikethrough: false, code: false, link: None, image: None }]));
 }
 
 #[test]
@@ -274,7 +309,7 @@ fn the_channel_menu_with_every_window_and_with_the_windows_set() {
     let p = page(i.clone(), &host_windows_all());
     let t = &p.toolbar;
     assert_eq!(t.tag.as_ref().map(|x| x.text.as_str()), Some("agents"));
-    assert_eq!(t.members.as_ref().map(|b| (b.title.as_str(), b.help.as_str())), Some(("Members", "Who is in this channel")));
+    assert_eq!(t.members.as_ref().map(|b| (b.title.as_str(), b.help.as_str())), Some(("Members", "Members")));
     assert_eq!(t.share.as_ref().map(|b| b.title.as_str()), Some("Share…"));
     assert_eq!(
         titles(&t.menu.entries),
@@ -320,7 +355,7 @@ fn the_channel_menu_with_every_window_and_with_the_windows_set() {
             "Leave Channel…"
         ]
     );
-    assert_eq!(p.composer.cannot_post.as_deref(), Some("Read only: you see the messages but cannot post."));
+    assert_eq!(p.composer.cannot_post.as_deref(), Some("Read only"));
     assert!(!p.composer.can_post && !p.composer.attach);
 }
 
@@ -363,9 +398,9 @@ fn the_composer_says_when_it_may_post_and_send() {
     let p = page(input(channel("Family", 2, 1, 0, false), Vec::new()), &host_windows_all());
     let c = &p.composer;
     assert!(c.can_post && c.attach && c.cannot_post.is_none());
-    assert_eq!((c.placeholder.as_str(), c.send_title.as_str(), c.reply_cancel_help.as_str()), ("Message Family", "Send", "Don't reply to it"));
+    assert_eq!((c.placeholder.as_str(), c.send_title.as_str(), c.reply_cancel_help.as_str()), ("Message Family", "Send", "Cancel Reply (Esc)"));
     assert!(c.send_help.starts_with("Send (") && c.send_help.contains(trs_platform::return_key!()));
-    assert_eq!(p.empty.as_deref(), Some("No messages yet."));
+    assert_eq!(p.empty.as_deref(), Some("No messages yet"));
     // A topic's page is named by the topic.
     let mut i = input(channel("Family", 2, 1, 0, false), Vec::new());
     i.place = LibraryPlace::Chat { channel_id: "Family".into(), topic_id: Some("Dinner".into()) };
@@ -384,7 +419,8 @@ fn the_composer_says_when_it_may_post_and_send() {
     // Replying: the card's line for the bar; reply and tags only where it may post.
     let p = page(input(channel("Family", 2, 1, 0, false), vec![msg("m1aaaaaaaa", "D1", NOW, &format!("**Long** {}", "word ".repeat(30)))]), &[]);
     let card = &p.messages[0];
-    assert!(card.replying.starts_with("Replying to D1's Mac: Long word") && card.replying.ends_with('…'));
+    assert_eq!(card.replying.title, "Replying to D1's Mac");
+    assert!(card.replying.text.starts_with("Long word") && card.replying.text.ends_with('…') && card.replying.text.chars().count() == 120);
     assert_eq!(card.reply.as_ref().map(|b| &b.command), Some(&ChatPageCommand::Reply { message_id: "m1aaaaaaaa".into() }));
     let mut reader = channel("Family", 2, 1, 0, false);
     reader.role = SyncRole::ReadOnly;
@@ -403,13 +439,14 @@ fn private_conversations_differ() {
     );
     let ChatPageMenuEntry::Item { dialog: Some(d), command, .. } = find(&p.toolbar.menu.entries, "Delete Conversation…") else { panic!() };
     assert_eq!((d, command), (&chat_delete_conversation_dialog("Kari's iPhone".into()), &ChatPageCommand::DeleteConversation));
-    assert_eq!(p.empty.as_deref(), Some("No messages yet. Only you and Kari's iPhone can read what you write here."));
+    assert_eq!(p.empty.as_deref(), Some("No messages yet"));
+    assert!(p.bubbles, "a private conversation is drawn as bubbles");
     assert!(p.composer.can_post);
     assert_eq!(p.composer.placeholder, "Message Kari's iPhone");
     // Not connected directly: no field, the core's sentence instead.
     let off = page(direct(Some(false), vec![msg("m1aaaaaaaa", "D2", NOW, "hei")]), &WINDOWS);
     assert!(!off.composer.can_post);
-    assert_eq!(off.composer.cannot_post.as_deref(), Some(DIRECT_OFFLINE));
+    assert_eq!(off.composer.cannot_post.as_deref(), Some("You can write when Kari's iPhone is connected directly"));
     assert!(off.messages[0].reply.is_none());
     // Just started from a channel's members (not listed yet): it may write.
     assert!(page(direct(None, Vec::new()), &[]).composer.can_post);
@@ -437,6 +474,7 @@ fn reading_a_page_marks_it_read() {
     assert!(family.unread > 0, "the mock starts with unread messages");
     let read = core.chat_page_read(LibraryPlace::Chat { channel_id: family.id.clone(), topic_id: None });
     assert!(!read.messages.is_empty() && read.follow.is_some());
+    assert_eq!(read.own_devices.len(), 2, "the user's devices come with the read (the mock: this Mac and a phone)");
     let after = core.chat_channels().into_iter().find(|c| c.name == "Family").unwrap();
     assert_eq!(general_unread(&after, &core.chat_topics(family.id.clone())), 0, "General is read");
     assert!(core.chat_page_read(LibraryPlace::Chat { channel_id: "gone".into(), topic_id: None }).messages.is_empty());
@@ -447,8 +485,61 @@ fn reading_a_page_marks_it_read() {
 fn the_sample_conversation_renders_as_before() {
     let ms = chat_sample_messages();
     let p = page(input(channel("C", 2, 1, 0, false), ms), &[]);
-    assert!(p.messages.iter().all(|c| c.author.is_some()), "every sample is by another device");
-    assert_eq!(p.messages[2].author.as_ref().unwrap().name, "Kari's iPhone");
+    assert!(p.messages.iter().all(|c| c.starts_run && c.meta.is_some()), "every sample is by another device");
+    assert_eq!(p.messages[2].meta.as_ref().unwrap().name, "Kari's iPhone");
+    assert!(p.messages.iter().all(|c| !c.gallery), "no images, no gallery");
+    // One image is shown alone; more are a gallery, in their order.
+    let shots: Vec<_> = crate::chat_images::chat_image_layout_samples(64).into_iter().map(|s| s.image).collect();
+    let with = |n: usize| SyncMessage { images: shots[..n].to_vec(), ..msg(&format!("i{n}aaaaaaaa"), "D1", NOW, "") };
+    let p2 = page(input(channel("C", 2, 1, 0, false), vec![with(1), with(5)]), &[]);
+    assert_eq!(p2.messages.iter().map(|c| c.gallery).collect::<Vec<_>>(), [false, true]);
+    // A reference to an image the message carries is a chip; one to an image it does not carry is text.
+    let refs = SyncMessage { body: "See ![Image 2](att:2), not ![Image 7](att:7)".into(), ..with(5) };
+    let p3 = page(input(channel("C", 2, 1, 0, false), vec![refs]), &[]);
+    let ChatMessageBody::Markdown { blocks } = &p3.messages[0].body else { panic!() };
+    let ChatBlock::Paragraph { runs } = &blocks[0] else { panic!() };
+    assert_eq!(runs.iter().map(|r| (r.text.as_str(), r.image)).collect::<Vec<_>>(), [("See ", None), ("Image 2", Some(1)), (", not Image 7", None)]);
+    assert_eq!(p2.messages[1].images.iter().map(|i| i.hash.as_str()).collect::<Vec<_>>(), shots[..5].iter().map(|i| i.hash.as_str()).collect::<Vec<_>>());
     let ChatMessageBody::Markdown { blocks } = &p.messages[1].body else { panic!() };
     assert!(matches!(&blocks[1], ChatBlock::Table { header, rows } if header.len() == 4 && rows.len() == 3));
+}
+
+fn joined(list: &[(&str, u64, &str)]) -> Vec<SyncJoined> {
+    list.iter().map(|&(d, at_s, user)| SyncJoined { device_id: d.into(), at_s, user: user.into() }).collect()
+}
+
+#[test]
+fn people_take_a_channels_colours_in_the_order_they_joined_and_keep_them() {
+    // Join order, not the order listed; a user's devices are one person.
+    let j = joined(&[("C", 30, "Ola"), ("A", 10, "Kari"), ("B", 20, ""), ("A2", 40, "Kari"), ("D", 50, "Per")]);
+    let map = palette_map(&j);
+    let of = |d: &str| map[d];
+    assert_eq!((of("A"), of("B"), of("C"), of("A2"), of("D")), (0, 1, 2, 0, 3));
+    // Stable: the same membership, in any order, on any device.
+    let mut shuffled = j.clone();
+    shuffled.reverse();
+    assert_eq!(palette_map(&shuffled), map);
+    // One who left keeps their place (the membership keeps them): nobody's colour changes; a later joiner takes the next.
+    let later = joined(&[("C", 30, "Ola"), ("A", 10, "Kari"), ("B", 20, ""), ("A2", 40, "Kari"), ("D", 50, "Per"), ("E", 60, "")]);
+    let m2 = palette_map(&later);
+    assert_eq!((m2["A"], m2["B"], m2["C"], m2["D"], m2["E"]), (0, 1, 2, 3, 4));
+    // Eight people never share a colour; the ninth takes the first again.
+    let many: Vec<SyncJoined> = (0..10).map(|n| SyncJoined { device_id: format!("P{n}"), at_s: n, user: String::new() }).collect();
+    let m3 = palette_map(&many);
+    let first8: std::collections::HashSet<u32> = (0..8).map(|n| m3[&format!("P{n}")]).collect();
+    assert_eq!(first8.len(), 8);
+    assert_eq!((m3["P8"], m3["P9"]), (0, 1), "from the ninth person on, they repeat");
+    // On the cards: an agent takes its person's colour; a quote the quoted person's.
+    let mut c = channel("Team", 3, 2, 0, false);
+    c.agents = true;
+    let mut i = input(c, vec![msg("m1aaaaaaaa", "B", NOW - 60, "hi"), SyncMessage { agent: Some("bot".into()), ..msg("m2aaaaaaaa", "B", NOW - 50, "x") }]);
+    i.read.messages.push(SyncMessage { reply_to: Some("m1aaaaaaaa".into()), ..msg("m3aaaaaaaa", "C", NOW - 40, "re") });
+    i.read.joined = j.clone();
+    let p = page(i, &[]);
+    assert_eq!(p.messages.iter().map(|c| c.palette).collect::<Vec<_>>(), [Some(1), Some(1), Some(2)]);
+    assert_eq!(p.messages[2].reply_quote.as_ref().and_then(|q| q.palette), Some(1));
+    // A device the channel does not list (a private conversation): a colour from its id, the same everywhere.
+    let none = HashMap::new();
+    let d = palette(&msg("x", "ZZ", 0, ""), ChatAuthorKind::Theirs, &none);
+    assert!(d.is_some_and(|i| i < CHAT_PALETTE_SIZE) && d == palette(&msg("y", "ZZ", 9, ""), ChatAuthorKind::TheirAgent, &none));
 }

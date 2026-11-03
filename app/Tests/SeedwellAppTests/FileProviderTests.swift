@@ -227,9 +227,16 @@ import Testing
         let listener = FileProviderListener(host, wait: 0.1)
         let r = await Task.detached { listener.removeDomain(folderId: "F") }.value
         #expect(r.error == syncHostText(t: .noAnswer))
-        try await Task.sleep(nanoseconds: 900_000_000)
+        // Until the late hand-over has finished (it started: the system was asked, and the note of the removal is
+        // gone again), however busy the main actor is: a fixed 0.9 s wait failed while other suites drew on it.
+        var finished = false
+        for _ in 0..<200 {
+            if await fake.waited == ["F"], core.syncHostUnfinishedReleases().isEmpty { finished = true; break }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        #expect(finished, "the note of the removal went with it")
         #expect(await fake.domains.map(\.id) == ["F"], "still there")
-        #expect(core.syncHostUnfinishedReleases().isEmpty, "the note of the removal went with it")
+        #expect(await fake.removals == 0, "nothing was removed late")
         host.stop()
     }
 

@@ -1,6 +1,79 @@
 use super::*;
 use crate::chat_page::samples;
 
+#[test]
+fn image_references_are_runs_of_their_own_and_the_rest_is_text() {
+    let refs = |t: &str| runs(t).into_iter().map(|r| (r.text, r.image)).collect::<Vec<_>>();
+    assert_eq!(refs("Before ![Image 2](att:2) and after"), [("Before ".into(), None), ("Image 2".into(), Some(1)), (" and after".into(), None)]);
+    assert_eq!(chat_image_marker(1), "![Image 2](att:2)");
+    assert_eq!(image_ref("att:1"), Some(0));
+    for bad in ["att:0", "att:", "att:x", "att:100", "att:-1", "att:1a", "att: 1", "https://x.y/a.png", "file:///etc/passwd"] {
+        assert_eq!(image_ref(bad), None, "{bad}");
+    }
+    // Any other image (a web address, a bad reference) shows its description as plain text, as before.
+    assert_eq!(refs("![a cat](https://x.y/cat.png)"), [("a cat".into(), None)]);
+    assert_eq!(refs("![Image 9](att:0)"), [("Image 9".into(), None)]);
+    // In code it is no reference.
+    assert_eq!(refs("`![Image 1](att:1)`"), [("![Image 1](att:1)".into(), None)]);
+    // Styles inside the description stay; the run is still the reference.
+    let r = runs("![**Image 1**](att:1)");
+    assert!(r.iter().all(|r| r.image == Some(0)) && r.iter().any(|r| r.bold));
+    // Previews show the description.
+    assert_eq!(plain("See ![Image 1](att:1)"), "See Image 1");
+}
+
+#[test]
+fn taking_an_attachment_out_renumbers_the_references_after_it() {
+    let d = "A ![Image 1](att:1) B ![Image 2](att:2) C ![the map](att:3) D ![x](https://y.z/x.png)";
+    assert_eq!(chat_composer_without_image(d.into(), 1), "A ![Image 1](att:1) B  C ![the map](att:2) D ![x](https://y.z/x.png)");
+    assert_eq!(chat_composer_without_image(d.into(), 0), "A  B ![Image 1](att:1) C ![the map](att:2) D ![x](https://y.z/x.png)");
+    assert_eq!(chat_composer_without_image("no refs ![ here".into(), 0), "no refs ![ here");
+    assert_eq!(chat_composer_without_image("![Image 1](att:1)".into(), 5), "![Image 1](att:1)");
+}
+
+#[test]
+fn images_pasted_or_dropped_into_the_text_leave_their_references_there() {
+    let at = |start, length| Some(ChatTextRange { start, length });
+    let edit = |d: &str, first, count, r| chat_composer_with_images(d.into(), first, count, r).map(|e| (e.text, e.caret));
+    // A drop just before a word: a space keeps it apart; with spaces on both sides, none is added.
+    assert_eq!(edit("before after", 0, 1, at(7, 0)), Some(("before ![Image 1](att:1) after".into(), 25)));
+    assert_eq!(edit("before  after", 0, 1, at(7, 0)), Some(("before ![Image 1](att:1) after".into(), 24)));
+    // Into a word: spaces keep it apart. At the very start or end: none outside the text.
+    assert_eq!(edit("beforeafter", 1, 1, at(6, 0)), Some(("before ![Image 2](att:2) after".into(), 25)));
+    assert_eq!(edit("text", 0, 1, at(0, 0)), Some(("![Image 1](att:1) text".into(), 18)));
+    assert_eq!(edit("text", 0, 1, at(4, 0)), Some(("text ![Image 1](att:1)".into(), 22)));
+    // Several at once, a space between them; a paste replaces the selection.
+    assert_eq!(edit("look at THIS please", 2, 2, at(8, 4)), Some(("look at ![Image 3](att:3) ![Image 4](att:4) please".into(), 43)));
+    // No point (or one outside the text, or inside a character): at the end.
+    assert_eq!(edit("see", 0, 1, None), Some(("see ![Image 1](att:1)".into(), 21)));
+    assert_eq!(edit("see ", 0, 1, at(40, 0)), Some(("see ![Image 1](att:1)".into(), 21)));
+    assert_eq!(edit("a😀b", 0, 1, at(2, 0)), Some(("a😀b ![Image 1](att:1)".into(), 22)));
+    // UTF-16 offsets, as the text fields count: after the emoji (two units).
+    assert_eq!(edit("a😀b", 0, 1, at(3, 0)), Some(("a😀 ![Image 1](att:1) b".into(), 22)));
+    // An empty field (or one of spaces): a plain attachment, no reference.
+    assert_eq!(edit("", 0, 1, at(0, 0)), None);
+    assert_eq!(edit(" \n", 0, 1, at(1, 0)), None);
+    assert_eq!(edit("text", 0, 0, at(1, 0)), None);
+    // A drop, then the first attachment taken out: the reference left is renumbered where the drop put it.
+    let two = edit("one two three", 0, 1, at(4, 0)).unwrap().0;
+    let two = edit(&two, 1, 1, at(two.len() as u32, 0)).unwrap().0;
+    assert_eq!(two, "one ![Image 1](att:1) two three ![Image 2](att:2)");
+    assert_eq!(chat_composer_without_image(two, 0), "one  two three ![Image 1](att:1)");
+}
+
+#[test]
+fn the_composer_finds_its_references_in_utf16() {
+    let r = |start, length| ChatTextRange { start, length };
+    assert_eq!(chat_composer_image_refs("A ![Image 1](att:1) B ![x](https://y.z/x.png) ![map](att:2)".into()), [r(2, 17), r(46, 13)]);
+    // Counted in UTF-16 units, as the text fields count: the emoji is two.
+    assert_eq!(chat_composer_image_refs("😀![Image 1](att:1)".into()), [r(2, 17)]);
+    assert!(chat_composer_image_refs("no ![ref](att:0) ![ here".into()).is_empty());
+    // A web image before a reference stays whole when another attachment is taken out (it was once read as one long
+    // reference from its `![` to the reference's `)`).
+    assert_eq!(chat_composer_without_image("![x](https://y.z/x.png) ![map](att:2)".into(), 1), "![x](https://y.z/x.png) ");
+    assert_eq!(chat_composer_without_image("![x](https://y.z/x.png) ![Image 2](att:2)".into(), 0), "![x](https://y.z/x.png) ![Image 1](att:1)");
+}
+
 fn h(level: u8, t: &str) -> Raw {
     Raw::Heading(level, t.into())
 }
@@ -74,8 +147,8 @@ fn messages_are_markdown_blocks() {
             numbered: true,
             depth: 0,
             runs: vec![
-                ChatRun { text: "Go".into(), bold: true, italic: false, strikethrough: false, code: false, link: None },
-                ChatRun { text: " now".into(), bold: false, italic: false, strikethrough: false, code: false, link: None },
+                ChatRun { text: "Go".into(), bold: true, italic: false, strikethrough: false, code: false, link: None, image: None },
+                ChatRun { text: " now".into(), bold: false, italic: false, strikethrough: false, code: false, link: None, image: None },
             ]
         }]
     );

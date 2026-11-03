@@ -5,9 +5,10 @@ enum Drawing {
     /// Menu bar icon: a down and an up arrow, no text. Each arrow goes from the menu bar's dimmed
     /// grey to green (download) or red (upload) with its transfer rate (`down`/`up` from
     /// the core's `IconLook`); a faint hairline shows total download progress (`progress`, nil = none); a
-    /// small, soft dot (3 pt, a muted orange) in the lower right corner says something waits for the user. While files are being moved
-    /// (`moving`, 0...1, aggregate over all moves) the hairline is a green bar instead and shows that. Drawn with dynamic
-    /// colours at draw time, so it follows the light/dark menu bar.
+    /// small, soft dot (3 pt, a muted orange) in the lower right corner says something needs the user (`attention`, the
+    /// core's one rule: a problem, or an agent's request waiting for an answer). While files are being moved (`moving`,
+    /// 0...1, aggregate over all moves) the hairline is a green bar instead and shows that. The glyph is drawn with
+    /// dynamic colours at draw time, so it follows the light/dark menu bar; the dot keeps its colour.
     static func statusIcon(down: Double, up: Double, progress: Double?, moving: Double? = nil, attention: Bool) -> NSImage {
         let image = NSImage(size: NSSize(width: 20, height: 18), flipped: false) { _ in
             let grey = NSColor.labelColor.withAlphaComponent(0.5)

@@ -362,6 +362,90 @@ pub fn chat_image_samples(max_side: u32) -> ChatImageSamples {
     ChatImageSamples { images, drafts, texts: texts() }
 }
 
+/// A made-up picture of `w` × `h` pixels: a sky in one of five palettes over hills, so pictures side by side differ.
+fn layout_svg(w: u32, h: u32, palette: usize) -> String {
+    const SKIES: [(&str, &str); 5] = [("#1d2b64", "#f8a170"), ("#0f3443", "#34e89e"), ("#41295a", "#2f0743"), ("#c94b4b", "#4b134f"), ("#2193b0", "#6dd5ed")];
+    let (top, bottom) = SKIES[palette % SKIES.len()];
+    let (wf, hf) = (f64::from(w), f64::from(h));
+    format!(
+        concat!(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="0 0 {w} {h}">"##,
+            r##"<defs><linearGradient id="s" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="{top}"/><stop offset="1" stop-color="{bottom}"/></linearGradient></defs>"##,
+            r##"<rect width="{w}" height="{h}" fill="url(#s)"/><circle cx="{cx}" cy="{cy}" r="{r}" fill="#ffe3b0" fill-opacity="0.85"/>"##,
+            r##"<path d="M0 {base} L{p1} {t1} L{p2} {base} L{p3} {t2} L{w} {base} L{w} {h} L0 {h} Z" fill="#14324a" fill-opacity="0.8"/></svg>"##
+        ),
+        w = w,
+        h = h,
+        top = top,
+        bottom = bottom,
+        cx = (wf * 0.7).round(),
+        cy = (hf * 0.35).round(),
+        r = (wf.min(hf) * 0.12).round().max(2.0),
+        base = (hf * 0.72).round(),
+        p1 = (wf * 0.25).round(),
+        t1 = (hf * 0.38).round(),
+        p2 = (wf * 0.5).round(),
+        p3 = (wf * 0.75).round(),
+        t2 = (hf * 0.48).round(),
+    )
+}
+
+/// Images of every shape a message shows, here and drawn as the host asks for them (`max_side`): a wide photo
+/// (`wide`, 2400 × 1350), a tall screenshot (`tall`, 1170 × 2532), a small picture (`small`, 120 × 80), an icon
+/// (`icon`, 64 × 32), and five for a gallery (`gallery-1` … `gallery-5`, of mixed shapes). The snapshots' fixtures;
+/// never chat state.
+#[uniffi::export]
+pub fn chat_image_layout_samples(max_side: u32) -> Vec<ChatImageSample> {
+    let shapes: [(&str, u32, u32); 9] = [
+        ("wide", 2400, 1350),
+        ("tall", 1170, 2532),
+        ("small", 120, 80),
+        ("icon", 64, 32),
+        ("gallery-1", 1600, 1067),
+        ("gallery-2", 1080, 1350),
+        ("gallery-3", 1920, 1080),
+        ("gallery-4", 1200, 1200),
+        ("gallery-5", 900, 1600),
+    ];
+    shapes
+        .iter()
+        .enumerate()
+        .map(|(n, &(label, w, h))| {
+            let svg = layout_svg(w, h, n);
+            let name = format!("{}.svg", label.replace('-', " "));
+            let picture = trs_media::prepare(&name, svg.as_bytes()).ok();
+            let a = AttachmentInfo {
+                hash: trs_sync_proto::members::hex(&trs_sync_net::blobs::sha256(format!("layout/{label}").as_bytes())),
+                kind: "svg".into(),
+                name,
+                size: svg.len() as u64,
+                width: w,
+                height: h,
+                state: "available".into(),
+                problem: None,
+                done: 0,
+                rate: 0,
+                path: None,
+                thumb: picture.as_ref().map(|p| p.thumb.clone()).unwrap_or_default(),
+            };
+            // An image is never drawn larger than it is: a small one comes at its own size.
+            let side = max_side.min(w.max(h));
+            ChatImageSample {
+                label: label.into(),
+                view: picture.as_ref().and_then(|p| trs_media::render(p.kind, &p.bytes, side).ok()).map(view_of),
+                preview: None,
+                image: image_of(&a, false),
+            }
+        })
+        .collect()
+}
+
+/// A gallery's counter: "2 / 5" (`active` counts from 1).
+#[uniffi::export]
+pub fn chat_gallery_counter(active: u32, count: u32) -> String {
+    format!("{active} / {count}")
+}
+
 fn view_of(v: trs_media::View) -> ChatImageView {
     ChatImageView { bytes: v.bytes, mime: v.mime.into(), width: v.width, height: v.height }
 }
@@ -553,6 +637,20 @@ mod tests {
         assert_eq!(chips, [(false, format!("Fjord.svg · 1200 × 800 · {}", trs_media::size_text(SAMPLE_SVG.len() as u64)).as_str()), (true, "Film.mov · 1.2 GB")]);
         assert!(s.drafts[0].preview_png.starts_with(b"\x89PNG"));
         assert_eq!(s.texts, texts());
+    }
+
+    #[test]
+    fn the_layout_samples_are_every_shape_and_never_drawn_larger_than_they_are() {
+        let s = chat_image_layout_samples(1600);
+        let shapes: Vec<(&str, u32, u32)> = s.iter().map(|i| (i.label.as_str(), i.image.width, i.image.height)).collect();
+        assert_eq!(&shapes[..4], [("wide", 2400, 1350), ("tall", 1170, 2532), ("small", 120, 80), ("icon", 64, 32)]);
+        assert_eq!(s.iter().filter(|i| i.label.starts_with("gallery-")).count(), 5);
+        assert!(s.iter().all(|i| i.image.state == ChatImageState::Available));
+        let size = |label: &str| s.iter().find(|i| i.label == label).and_then(|i| i.view.as_ref()).map(|v| (v.width, v.height));
+        assert_eq!(size("wide"), Some((1600, 900)), "a large one at the size asked");
+        assert_eq!(size("small"), Some((120, 80)), "a small one at its own size");
+        assert_eq!(size("icon"), Some((64, 32)));
+        assert_eq!(chat_gallery_counter(2, 5), "2 / 5");
     }
 
     #[test]

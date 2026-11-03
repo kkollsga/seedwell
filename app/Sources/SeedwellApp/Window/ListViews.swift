@@ -58,7 +58,7 @@ struct RowList<Header: View>: View {
                     if let more = g.more {
                         Button(more.title) { model.showMore(more.group) }
                             .buttonStyle(.plain)
-                            .font(.system(size: 12.5)).foregroundStyle(Color.accentColor)
+                            .font(Theme.secondary).foregroundStyle(Color.accentColor)
                             .padding(.horizontal, 10).padding(.vertical, 8)
                             .help(more.help)
                     }
@@ -119,10 +119,10 @@ struct RowList<Header: View>: View {
             } label: {
                 HStack(spacing: 5) {
                     Text(title).fontWeight(.semibold)
-                        .font(.system(size: g.block ? 13 : 12))
+                        .font(g.block ? Theme.body : Theme.secondary)
                         .foregroundStyle(g.block ? Color.primary : g.tone == .problem ? Color.red : .secondary)
                     Image(systemName: "chevron.down")
-                        .font(.system(size: 9, weight: .semibold))
+                        .font(Theme.micro.weight(.semibold))
                         .foregroundStyle(.tertiary)
                         .rotationEffect(.degrees(g.folded ? -90 : 0))
                 }
@@ -137,7 +137,7 @@ struct RowList<Header: View>: View {
                 Button(action.title) { run(action.command) }.buttonStyle(.plain).fontWeight(.regular).help(action.help)
             }
         }
-        .font(.system(size: 12))
+        .font(Theme.secondary)
         .foregroundStyle(.secondary)
         .padding(.horizontal, 10)
         .padding(.top, g.block ? 24 : g.parent != nil ? 12 : 20)

@@ -83,7 +83,7 @@ import SwiftUI
 struct ModalCaption: View {
     let text: String
     var body: some View {
-        Text(text.uppercased()).font(.system(size: 11, weight: .semibold)).tracking(0.5).foregroundStyle(.secondary)
+        Text(text.uppercased()).font(Theme.caption.weight(.semibold)).tracking(0.5).foregroundStyle(.secondary)
     }
 }
 
@@ -92,7 +92,7 @@ struct ModalError: View {
     let text: String
     var body: some View {
         Label { Text(text).fixedSize(horizontal: false, vertical: true) } icon: { Image(systemName: "exclamationmark.triangle.fill") }
-            .font(.system(size: 12)).foregroundStyle(.red)
+            .font(Theme.secondary).foregroundStyle(.red)
             .accessibilityIdentifier("sync-modal-error")
     }
 }
@@ -129,7 +129,7 @@ struct SyncAddView: View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 3) {
                 ModalCaption(text: w.caption)
-                Text(w.title).font(.system(size: 17, weight: .semibold))
+                Text(w.title).font(Theme.title)
             }
             Picker("", selection: Binding(get: { model.form.mode }, set: { model.form.mode = $0; model.error = nil })) {
                 ForEach(w.modes, id: \.mode) { Text($0.title).tag($0.mode) }
@@ -168,11 +168,11 @@ struct SyncAddView: View {
                 Button(w.chooseTitle, action: model.chooseFolder).help(w.chooseHelp)
             }
             Text(w.localNote)
-                .font(.system(size: 12)).foregroundStyle(.secondary)
+                .font(Theme.secondary).foregroundStyle(.secondary)
                 .padding(.leading, 92)
                 .fixedSize(horizontal: false, vertical: true)
         }
-        .font(.system(size: 13))
+        .font(Theme.body)
     }
 
     private func shared(_ w: SyncAddWindowModel) -> some View {
@@ -185,7 +185,7 @@ struct SyncAddView: View {
                         .accessibilityIdentifier("sync-key-field")
                     if !w.linkLine.isEmpty {
                         Label(w.linkLine, systemImage: w.linkOk ? "checkmark.circle.fill" : "xmark.circle")
-                            .font(.system(size: 12))
+                            .font(Theme.secondary)
                             .foregroundStyle(w.linkOk ? Color.secondary : Color.orange)
                             .accessibilityIdentifier("sync-key-line")
                     }
@@ -206,13 +206,13 @@ struct SyncAddView: View {
                 .help(w.locationHelp)
             }
             if let note = w.locationNote {
-                Text(note).font(.system(size: 12)).foregroundStyle(.secondary)
+                Text(note).font(Theme.secondary).foregroundStyle(.secondary)
                     .padding(.leading, 92)
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityIdentifier("sync-location-note")
             }
         }
-        .font(.system(size: 13))
+        .font(Theme.body)
     }
 
     /// Files on demand (SPEC 7G.11), and what it means for this way in.
@@ -223,11 +223,11 @@ struct SyncAddView: View {
                 .accessibilityIdentifier("sync-on-demand")
             if let note = w.onDemandNote {
                 Text(note)
-                    .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    .font(Theme.secondary).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     .accessibilityIdentifier("sync-on-demand-note")
             }
         }
-        .font(.system(size: 13))
+        .font(Theme.body)
         .padding(.leading, 92)
     }
 
@@ -316,9 +316,9 @@ struct SyncEditView: View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 3) {
                 ModalCaption(text: w.caption)
-                Text(w.title).font(.system(size: 17, weight: .semibold)).lineLimit(1).truncationMode(.middle)
+                Text(w.title).font(Theme.title).lineLimit(1).truncationMode(.middle)
                 if let s = w.subtitle {
-                    Text(s).font(.system(size: 13)).foregroundStyle(.secondary)
+                    Text(s).font(Theme.body).foregroundStyle(.secondary)
                 }
             }
             if let gone = w.gone {
@@ -363,7 +363,7 @@ struct SyncEditView: View {
                         .toggleStyle(.switch).controlSize(.small).help(w.onDemandHelp ?? "")
                         .accessibilityIdentifier("sync-edit-on-demand")
                     if let note = w.onDemandNote {
-                        Text(note).font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                        Text(note).font(Theme.secondary).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     }
                 }
             }
@@ -375,7 +375,7 @@ struct SyncEditView: View {
             VStack(alignment: .leading, spacing: 8) {
                 ModalCaption(text: w.shareCaption)
                 HStack(spacing: 10) {
-                    Text(w.shareNote).font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    Text(w.shareNote).font(Theme.secondary).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     Spacer(minLength: 8)
                     if let share = w.shareTitle {
                         Button(share) { actions.showShare(model.id) }.help(w.shareHelp)
@@ -395,13 +395,13 @@ struct SyncEditView: View {
                     HStack(spacing: 10) {
                         Button(w.rescanTitle, action: model.rescan).help(w.rescanHelp)
                         Text(w.rescanNote)
-                            .font(.system(size: 11.5)).foregroundStyle(.secondary)
+                            .font(Theme.caption).foregroundStyle(.secondary)
                     }
                 }
                 .padding(.top, 10).padding(.leading, 4)
             }
         }
-        .font(.system(size: 13))
+        .font(Theme.body)
     }
 }
 
@@ -418,10 +418,10 @@ struct FollowToggle: View {
                 .help(line.help)
                 .accessibilityIdentifier("sync-all-devices")
             if !line.line.isEmpty {
-                Text(line.line).font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                Text(line.line).font(Theme.secondary).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
         }
-        .font(.system(size: 13))
+        .font(Theme.body)
     }
 }
 

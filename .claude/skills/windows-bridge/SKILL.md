@@ -48,6 +48,19 @@ in it (`git log --oneline win-<N-1>..win-N`), and the one checklist of what the 
 platform checks, what to draw), never one item at a time. For a release, the checklist is the whole of what the
 release needs on Windows (`docs/RELEASING.md`, "Release discipline").
 
+## Before a bundle goes out
+
+A bug the PC finds costs a round trip; the Mac catches what it can first (AGENTS.md, *Catching bugs early*):
+
+- each new or changed core call a host uses has a test that acts like the host and asserts the promise it relies
+  on (timing, progress, giving up), with what each system does with it written in the doc comment;
+- the worker's `tools/check.sh --quick` passed, which includes the Windows compile check;
+- a reviewer agent that builds nothing has read the diff against those promises and the platform differences.
+
+The full `tools/check.sh` is not needed per bundle: it runs once on master before the release's public commit.
+A bundle's note says which host-like tests it added, so the PC knows what is already covered and what only its QA
+can show.
+
 ## PC → Mac: a batch
 
 `git format-patch refs/bridge/win-N..HEAD -o <scratch>/<batch>`: each patch an attachment, screenshots as image

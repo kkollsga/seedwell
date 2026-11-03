@@ -112,6 +112,8 @@ public sealed partial class FlyoutWindow : Window
     /// <summary>The tray icon's left click: show it, or hide it if it is shown.</summary>
     public void Toggle()
     {
+        // The notifier at the same spot steps aside for the flyout (and stays put away for these torrents).
+        app.StartingNotifier?.StepAside();
         // A click on the tray icon first takes the focus away (which hides it): that click only closes it.
         if (IsOpen || DateTime.UtcNow - hiddenAt < TimeSpan.FromMilliseconds(300))
         {
@@ -240,6 +242,7 @@ public sealed partial class FlyoutWindow : Window
         signature = m.Signature;
         syncSignature = sync?.Signature ?? "";
         rows.Clear();
+        checklist = null;
         sharingRate = syncSubtitle = null;
         Body.Children.Clear();
         if (m.Offline is string offline)
@@ -260,8 +263,9 @@ public sealed partial class FlyoutWindow : Window
                 deny.Click += (_, _) => app.Notifier?.Decide(id, false, () => Refresh(false));
                 var approve = new Button { Content = requests.ApproveTitle, MinWidth = 80, FontSize = 12, Padding = new Thickness(8, 3, 8, 4), Style = (Style)Application.Current.Resources["AccentButtonStyle"] };
                 approve.Click += (_, _) => app.Notifier?.Decide(id, true, () => Refresh(false));
-                buttons.Children.Add(deny);
+                // The Windows order: the primary (Approve) first.
                 buttons.Children.Add(approve);
+                buttons.Children.Add(deny);
                 p.Children.Add(buttons);
                 Body.Children.Add(p);
             }
@@ -277,6 +281,11 @@ public sealed partial class FlyoutWindow : Window
             foreach (var r in s.Rows)
             {
                 Body.Children.Add(Row(r));
+                if (r.Expands && app.MenuFiles.IsExpanded(r.Id))
+                {
+                    checklist = new ContentControl { HorizontalContentAlignment = HorizontalAlignment.Stretch, Tag = r.Id, Content = Checklist(r.Id) };
+                    Body.Children.Add(checklist);
+                }
             }
             if (s.More is string more)
             {
@@ -377,12 +386,36 @@ public sealed partial class FlyoutWindow : Window
         g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(20) });
         g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        if (r.Expands)
+        {
+            // The chevron at the left opens the torrent's files under the row (one list at a time, the core's FileLists).
+            var open = app.MenuFiles.IsExpanded(r.Id);
+            var toggle = TrsFfiMethods.FileListToggle(open);
+            var chevron = new Button
+            {
+                Content = new FontIcon { Glyph = open ? "\uE70D" : "\uE76C", FontSize = 9 },
+                Padding = new Thickness(3),
+                MinWidth = 0,
+                MinHeight = 0,
+                Margin = new Thickness(-8, 0, -4, 0),
+                VerticalAlignment = VerticalAlignment.Center,
+                Background = new SolidColorBrush(Colors.Transparent),
+                BorderThickness = new Thickness(0),
+            };
+            ToolTipService.SetToolTip(chevron, toggle.Help);
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(chevron, toggle.Label);
+            var id = r.Id;
+            chevron.Click += (_, _) => ToggleFiles(id);
+            g.ColumnDefinitions.Insert(0, new ColumnDefinition { Width = GridLength.Auto });
+            g.Children.Add(chevron);
+            filesShift = true;
+        }
         var mark = new Grid { Width = 16, Height = 16, VerticalAlignment = VerticalAlignment.Center };
-        Grid.SetColumn(mark, 1);
+        Grid.SetColumn(mark, filesShift ? 2 : 1);
         SetMark(mark, r.Mark);
         g.Children.Add(mark);
         var text = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
-        Grid.SetColumn(text, 2);
+        Grid.SetColumn(text, filesShift ? 3 : 2);
         var title = Text(r.Title);
         title.TextTrimming = TextTrimming.CharacterEllipsis;
         text.Children.Add(title);
@@ -394,6 +427,7 @@ public sealed partial class FlyoutWindow : Window
         if (r.Running is bool running)
         {
             check = new CheckBox { IsChecked = running, MinWidth = 0, Padding = new Thickness(0), VerticalAlignment = VerticalAlignment.Center };
+            Grid.SetColumn(check, filesShift ? 1 : 0);
             var id = r.Id;
             var countdown = r.Countdown;
             check.Click += (_, _) =>
@@ -406,10 +440,24 @@ public sealed partial class FlyoutWindow : Window
             };
             g.Children.Add(check);
         }
+        if (r.Playable)
+        {
+            // A Play icon at the right edge: the row's video (the core decides which, and with which player).
+            g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            var play = new Button { Content = new FontIcon { Glyph = "", FontSize = 12 }, Padding = new Thickness(6), MinWidth = 0, MinHeight = 0, VerticalAlignment = VerticalAlignment.Center, Background = new SolidColorBrush(Colors.Transparent), BorderThickness = new Thickness(0) };
+            // The core's words: "Play <name>" (its tooltip and screen reader name).
+            if (r.PlayHelp is string playHelp) { ToolTipService.SetToolTip(play, playHelp); Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(play, playHelp); }
+            var pid = r.Id;
+            play.Click += (_, _) => { if (Find(pid) is TransferRow t) { Hide(); Player.Play(app, t); } };
+            Grid.SetColumn(play, g.ColumnDefinitions.Count - 1);
+            g.Children.Add(play);
+        }
+        filesShift = false;
         rows[r.Id] = new RowView(mark, sub, check);
         Action? click = r.Click switch
         {
             MenuClick.Reveal => () => { var t = Find(r.Id); if (t is not null) { Hide(); RowCommands.Reveal([t]); } },
+            MenuClick.OpenChooser => () => { Hide(); ChooserDialog.Show(app, r.Id); },
             _ => null,
         };
         var line = Line(g, click);
@@ -435,6 +483,106 @@ public sealed partial class FlyoutWindow : Window
             e.Handled = true;
         };
         return line;
+    }
+
+    // The open checklist under a row, and whether the row being built has a chevron (its columns move one right).
+    ContentControl? checklist;
+    bool filesShift;
+
+    /// <summary>QA and the render: the first row whose files can open under it (as its chevron would), or none.</summary>
+    internal string? FirstExpandable()
+    {
+        if (last is null) return null;
+        try
+        {
+            var m = TrsFfiMethods.MenuModel(last, app.Core.SyncSnapshot(), app.Arrivals, App.Now(), app.Updater.Updates.AvailableVersion(), App.HostWindows);
+            return m.Sections.SelectMany(s => s.Rows).FirstOrDefault(r => r.Expands)?.Id;
+        }
+        catch { return null; }
+    }
+
+    /// <summary>QA and the render: a row's chevron pressed.</summary>
+    internal void QaToggleFiles(string id) => ToggleFiles(id);
+
+    /// <summary>The chevron: the row's files open under it (read now, the flyout is showing), or close.</summary>
+    void ToggleFiles(string id)
+    {
+        var files = app.MenuFiles;
+        if (files.IsExpanded(id))
+        {
+            files.Collapse(id);
+        }
+        else
+        {
+            foreach (var other in files.Expanded) files.Collapse(other);
+            if (files.Lists.Expand(id)) files.LoadNow(id);
+        }
+        signature = "";
+        Refresh(false);
+    }
+
+    /// <summary>The menu's list changed (a check, a folder, the engine's answer): the open checklist again.</summary>
+    internal void FilesChanged(string? id)
+    {
+        if (checklist is { Tag: string open } && (id is null || id == open))
+        {
+            checklist.Content = Checklist(open);
+            if (IsOpen) Place();
+        }
+    }
+
+    /// <summary>
+    /// A torrent's inline checklist (the core's FileMenuView): its rows (a folder's chevron, the check, the name, the
+    /// size), "Show All in Seedwell…" when some were left out, and the footer; it scrolls past about seven rows.
+    /// </summary>
+    UIElement Checklist(string id)
+    {
+        var files = app.MenuFiles;
+        if (files.Lists.MenuView(id) is not FileMenuView v)
+        {
+            // Not read yet, or the engine could not say: the core's line ("Loading files…", "Couldn't read the files.").
+            return Text(files.Lists.View(id, false)?.Status ?? "", secondary: true, size: 12, margin: new Thickness(40, 2, 10, 4));
+        }
+        var list = new StackPanel();
+        foreach (var f in v.Rows)
+        {
+            var g = new Grid { ColumnSpacing = 6, Height = 24, Padding = new Thickness(36 + f.Depth * 14, 0, 10, 0) };
+            g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(14) });
+            g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            var node = f.Id;
+            if (f.IsFolder)
+            {
+                var fold = new Button { Content = new FontIcon { Glyph = f.IsOpen ? "\uE70D" : "\uE76C", FontSize = 8 }, Padding = new Thickness(2), MinWidth = 0, MinHeight = 0, Background = new SolidColorBrush(Colors.Transparent), BorderThickness = new Thickness(0), VerticalAlignment = VerticalAlignment.Center };
+                fold.Click += (_, _) => files.ToggleFolder(id, node);
+                g.Children.Add(fold);
+            }
+            var box = new CheckBox { IsThreeState = true, IsChecked = f.Check switch { FileCheck.On => true, FileCheck.Off => false, _ => null }, MinWidth = 0, MinHeight = 0, Padding = new Thickness(0), VerticalAlignment = VerticalAlignment.Center };
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(box, f.Name);
+            box.Click += (_, _) => files.ToggleCheck(id, node);
+            Grid.SetColumn(box, 1);
+            g.Children.Add(box);
+            var name = Text(f.Name, secondary: f.Check == FileCheck.Off, size: 12);
+            name.TextTrimming = TextTrimming.CharacterEllipsis;
+            name.VerticalAlignment = VerticalAlignment.Center;
+            Grid.SetColumn(name, 2);
+            g.Children.Add(name);
+            var size = Text(f.MenuSize, secondary: true, size: 11);
+            size.VerticalAlignment = VerticalAlignment.Center;
+            Grid.SetColumn(size, 3);
+            g.Children.Add(size);
+            list.Children.Add(g);
+        }
+        var s = new StackPanel { Margin = new Thickness(0, 0, 0, 4) };
+        s.Children.Add(new ScrollViewer { Content = list, MaxHeight = 7.5 * 24, VerticalScrollBarVisibility = ScrollBarVisibility.Auto });
+        if (v.More is string more)
+        {
+            // The window's list of the torrent, open.
+            s.Children.Add(Line(Text(more, secondary: true, size: 12), () => { Hide(); app.ShowFiles(id); }));
+        }
+        s.Children.Add(Text(v.Footer, secondary: true, size: 11, margin: new Thickness(36, 2, 10, 2)));
+        return s;
     }
 
     TransferRow? Find(string id) =>
@@ -693,8 +841,8 @@ public sealed partial class FlyoutWindow : Window
                 }
             }
         };
-        buttons.Children.Add(cancel);
         buttons.Children.Add(remove);
+        buttons.Children.Add(cancel);
         p.Children.Add(buttons);
         return p;
     }

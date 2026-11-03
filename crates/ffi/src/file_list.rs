@@ -359,6 +359,9 @@ fn file_entries(entries: Vec<CommandEntry>, node: u32) -> Vec<FileMenuEntry> {
 pub struct FileLists {
     place: FileListPlace,
     state: Mutex<Lists>,
+    /// Whether the host plays videos (`HostWindow::Player`): a file row's Play button and the menu's room for it come
+    /// only then. All hosts can, until [`FileLists::set_host_windows`] says otherwise.
+    plays: std::sync::atomic::AtomicBool,
 }
 
 impl FileLists {
@@ -380,7 +383,13 @@ impl FileLists {
 impl FileLists {
     #[uniffi::constructor]
     pub fn new(place: FileListPlace) -> Arc<Self> {
-        Arc::new(FileLists { place, state: Mutex::new(Lists::default()) })
+        Arc::new(FileLists { place, state: Mutex::new(Lists::default()), plays: std::sync::atomic::AtomicBool::new(true) })
+    }
+
+    /// The windows this host has (the Library's `set_host_windows`, once): without `HostWindow::Player` a video's row
+    /// has no Play button and the menu bar's checklist keeps no room for one.
+    pub fn set_host_windows(&self, host: Vec<HostWindow>) {
+        self.plays.store(host.contains(&HostWindow::Player), std::sync::atomic::Ordering::Relaxed);
     }
 
     // MARK: Open and closed
@@ -735,6 +744,7 @@ impl FileLists {
 
     /// The list under `torrent`'s row; `show_all` is the host's remembered Show All. `None` when it is not open.
     pub fn view(&self, torrent: String, show_all: bool) -> Option<FileListView> {
+        let plays = self.plays.load(std::sync::atomic::Ordering::Relaxed);
         let s = self.lock();
         let l = s.lists.get(&torrent).filter(|_| s.expanded.contains(&torrent))?;
         let mut v = FileListView {
@@ -806,7 +816,7 @@ impl FileLists {
                         .into_iter()
                         .map(|p| FilePriorityChoice { priority: p, title: priority_label(Some(p)), checked: f.priority == Some(p) })
                         .collect(),
-                    play: (f.is_video && !f.is_folder).then(|| FilePlayButton { help: format!("Play {}", f.name) }),
+                    play: (plays && f.is_video && !f.is_folder).then(|| FilePlayButton { help: format!("Play {}", f.name) }),
                     file: f,
                 }
             })
@@ -847,7 +857,7 @@ impl FileLists {
         let m = t.menu_rows(&l.open, cap);
         Some(FileMenuView {
             torrent_id: torrent,
-            reserves_play: m.rows.iter().any(|r| r.is_video),
+            reserves_play: self.plays.load(std::sync::atomic::Ordering::Relaxed) && m.rows.iter().any(|r| r.is_video),
             more: (m.hidden > 0).then(|| format!("Show All in {APP_NAME}… ({} more)", m.hidden)),
             rows: m.rows,
             footer: t.totals().menu_footer,

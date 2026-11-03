@@ -31,13 +31,19 @@ sealed class Listener(App app) : CoreListener
     public void OnTransferFinished(TransferRow row) => Notice(new NoticeEvent.Finished(row));
     public void OnError(string? id, string message) => Notice(new NoticeEvent.Error(id, message));
     public void OnGoalReached(TransferRow row) => Notice(new NoticeEvent.GoalReached(row));
-    // Windows has no chooser and no starting notifier yet (batch 7): neither was asked for nor is on screen.
-    public void OnNeedsChoice(TransferRow row) => Notice(new NoticeEvent.NeedsChoice(row, false, false));
+    public void OnNeedsChoice(TransferRow row) => app.Dispatch(() => app.NeedsChoice(row));
     public void OnAutoAdded(AutoAdded added) => Notice(new NoticeEvent.AutoAdded(added));
     public void OnDuplicate(string id, string name, uint trackersAdded) => Notice(new NoticeEvent.Duplicate(id, name, trackersAdded));
     public void OnAddRequest(AddRequestInfo request) => app.Dispatch(() => app.Prompts.AddRequest(request));
-    public void OnAgentActivity(AgentActivity activity) => Notice(new NoticeEvent.Agent(activity));
+    // A request coming, answered (also by a chat reply) or expiring is an agent activity: the icon's dot and the request
+    // toasts follow it at once (the Mac's).
+    public void OnAgentActivity(AgentActivity activity) => app.Dispatch(() =>
+    {
+        app.Notifier?.Event(new NoticeEvent.Agent(activity));
+        app.AgentActivity();
+    });
     public void OnLocationsChanged(uint torrents, ulong bytes) => app.Dispatch(() => app.Prompts.LocationsChanged());
     public void OnAttentionChanged() { }
-    public void OnPendingChanged() { }
+    // A torrent began or ended waiting to start: the notifier looks again.
+    public void OnPendingChanged() => app.Dispatch(() => app.StartingNotifier?.Refresh());
 }

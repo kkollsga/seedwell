@@ -24,7 +24,7 @@ struct RendezvousSection: View {
     var body: some View {
         SettingsBox(title: view.title) {
             VStack(alignment: .leading, spacing: 12) {
-                Text(view.explanation).font(.system(size: 12)).foregroundStyle(.secondary)
+                Text(view.explanation).font(Theme.secondary).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 switch view.state {
                 case .off:
@@ -33,7 +33,7 @@ struct RendezvousSection: View {
                 case .working:
                     HStack(spacing: 8) {
                         ProgressView().controlSize(.small)
-                        Text(view.progress).font(.system(size: 12.5))
+                        Text(view.progress).font(Theme.secondary)
                     }
                     .accessibilityIdentifier("rendezvous-progress")
                 case .on:
@@ -43,7 +43,7 @@ struct RendezvousSection: View {
                 if let line = refused ?? (view.result.isEmpty ? nil : view.result) {
                     let problem = refused != nil || view.resultIsProblem
                     Label(line, systemImage: problem ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
-                        .font(.system(size: 12)).foregroundStyle(problem ? .orange : .secondary)
+                        .font(Theme.secondary).foregroundStyle(problem ? .orange : .secondary)
                         .fixedSize(horizontal: false, vertical: true)
                         .accessibilityIdentifier("rendezvous-result")
                 }
@@ -62,7 +62,7 @@ struct RendezvousSection: View {
                     Text("\(i + 1).").monospacedDigit().foregroundStyle(.secondary).frame(width: 16, alignment: .trailing)
                     Text(step).fixedSize(horizontal: false, vertical: true)
                 }
-                .font(.system(size: 12.5))
+                .font(Theme.secondary)
             }
             HStack(spacing: 10) {
                 Button(view.openLabel) {
@@ -84,7 +84,7 @@ struct RendezvousSection: View {
     /// Another device's address (or one deployed with wrangler).
     private var existing: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(view.existingHint).font(.system(size: 12)).foregroundStyle(.secondary)
+            Text(view.existingHint).font(Theme.secondary).foregroundStyle(.secondary)
             HStack(spacing: 10) {
                 TextField(view.urlPlaceholder, text: $address)
                     .textFieldStyle(.roundedBorder).frame(minWidth: 280)
@@ -109,7 +109,7 @@ struct RendezvousSection: View {
                 .accessibilityIdentifier("rendezvous-copy")
             }
             if !view.status.isEmpty {
-                Text(view.status).font(.system(size: 12)).foregroundStyle(.secondary)
+                Text(view.status).font(Theme.secondary).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityIdentifier("rendezvous-status")
             }

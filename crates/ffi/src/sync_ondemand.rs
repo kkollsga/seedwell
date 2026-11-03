@@ -62,6 +62,11 @@ pub struct SyncItem {
     pub symlink_target: Option<String>,
     /// A conflict copy: the path it is a conflict of.
     pub conflict_of: Option<String>,
+    /// A folder kept in place (Windows): the item's content is in its placeholder, and the core keeps no copy of it.
+    /// False for content still in the core's cache (the host fills the placeholder from it, then `sync_hydrated`), and
+    /// always on the Mac.
+    #[uniffi(default = false)]
+    pub in_place: bool,
 }
 
 /// A page of a folder's children.
@@ -127,6 +132,89 @@ fn evicted_of(e: trs_sync::ondemand::Evicted) -> SyncEvicted {
     SyncEvicted { files: e.files, bytes: e.bytes, kept: e.kept, kept_why: failed_of(e.kept_why), failed: failed_of(e.failed) }
 }
 
+/// What an item's placeholder holds against the core's record (`sync_local_change`), for a folder kept in place.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum SyncLocalChange {
+    /// The item's content as the core records it: nothing to report.
+    Unchanged,
+    /// The user changed it: report it with `sync_modify_item` (`contents`: the placeholder's path, `base_version`:
+    /// this; `None` makes it a conflict copy where something else is now, so nothing is overwritten), then fill it in
+    /// with `sync_hydrated` for the item that call returns.
+    Modified { base: Option<String> },
+    /// An earlier version, or content this computer let go of, unchanged since: dehydrate it (and fill it again when
+    /// the item is wanted: downloaded, downloading or pinned).
+    Stale,
+}
+
+/// An item's state in the file manager's words (Windows: Explorer's custom state column, its label and tooltip).
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct SyncStateText {
+    pub label: String,
+    pub tooltip: String,
+}
+
+/// Why an on-demand call failed, typed for a host that acts on it (`CoreError::OnDemand`): Windows answers a Cloud
+/// Files callback with the matching status, and asks `Notices::sync_ondemand_notice` whether the user is told.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, uniffi::Enum)]
+pub enum SyncErrorKind {
+    /// No such item (any more).
+    NoItem,
+    /// The folder is not on demand.
+    NotOnDemand,
+    /// The folder is no longer synced here.
+    Gone,
+    /// Folder sync is not running (yet).
+    NotRunning,
+    /// The anchor is from before the folder's index was made anew: list everything again.
+    AnchorExpired,
+    /// No device has this version right now.
+    Unavailable,
+    /// A fetch waited and the content is not here yet (no device that has it is connected).
+    NotHereYet,
+    /// Something changed since the host saw it (a newer version arrived; a placeholder holds something else).
+    Changed,
+}
+
+impl OdKind {
+    /// The kind a host is told; `None` for anything else (the words say what).
+    pub fn public(self) -> Option<SyncErrorKind> {
+        Some(match self {
+            OdKind::NoItem => SyncErrorKind::NoItem,
+            OdKind::NotOnDemand => SyncErrorKind::NotOnDemand,
+            OdKind::Gone => SyncErrorKind::Gone,
+            OdKind::NotRunning => SyncErrorKind::NotRunning,
+            OdKind::AnchorExpired => SyncErrorKind::AnchorExpired,
+            OdKind::Unavailable => SyncErrorKind::Unavailable,
+            OdKind::NotHereYet => SyncErrorKind::NotHereYet,
+            OdKind::Changed => SyncErrorKind::Changed,
+            OdKind::Other => return None,
+        })
+    }
+}
+
+/// The words of an item's state (`pinned`: kept on this computer), for a file manager that shows its own column
+/// (Windows: Explorer's state column; the cloud, outlined and solid checks are Explorer's own).
+#[uniffi::export]
+pub fn sync_item_state_text(state: SyncItemState, pinned: bool) -> SyncStateText {
+    let (label, tooltip): (&str, String) = match state {
+        SyncItemState::OnlineOnly => ("Online only", concat!("Not on this ", trs_platform::computer!(), ": opening it downloads it from a device that has it.").into()),
+        SyncItemState::Downloading => ("Downloading", concat!("On its way to this ", trs_platform::computer!(), ".").into()),
+        SyncItemState::Downloaded if pinned => {
+            ("Always kept here", concat!("Kept on this ", trs_platform::computer!(), ", and on another device too. Its space is not freed until you stop keeping it.").into())
+        }
+        SyncItemState::Downloaded => ("On this device", concat!("On this ", trs_platform::computer!(), ", and on another device too. Free up space to make it online only.").into()),
+        SyncItemState::ModifiedHere => (
+            "Only here",
+            concat!("Changed on this ", trs_platform::computer!(), ", and no other device has this version yet: its space can't be freed until one does.").into(),
+        ),
+        SyncItemState::Unavailable => (
+            "Unavailable",
+            "No device has this version right now. It opens again once a device that has it connects; you can delete or rename it meanwhile.".into(),
+        ),
+    };
+    SyncStateText { label: label.into(), tooltip }
+}
+
 /// A fetch: the item, and where its content is once it is here.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct SyncFetch {
@@ -138,6 +226,11 @@ pub struct SyncFetch {
     pub total: u64,
     /// A folder's files no device can give right now (not waited for).
     pub unavailable: Vec<String>,
+    /// Still on its way: the connected devices it is coming from, by name (`None` once here, and while devices may
+    /// still be connecting). For the host's log; the host waits by calling again, and keeps no timer of its own: a
+    /// fetch that cannot get further fails with `SyncErrorKind::NotHereYet` (SPEC §7G.11).
+    #[uniffi(default = None)]
+    pub waiting_for: Option<String>,
 }
 
 fn kind_of(k: FileKind) -> SyncItemKind {
@@ -174,7 +267,15 @@ pub(super) fn item_of(i: &Item) -> SyncItem {
         exec: i.exec,
         symlink_target: (!i.symlink_target.is_empty()).then(|| i.symlink_target.clone()),
         conflict_of: i.conflict_of.clone(),
+        in_place: false,
     }
+}
+
+/// [`item_of`], with whether its content is in its placeholder (a folder kept in place).
+fn item_in(h: &SyncHandle, fid: &trs_sync_proto::ids::FolderId, i: &Item) -> SyncItem {
+    let mut s = item_of(i);
+    s.in_place = h.od_held_in_place(fid, &i.path);
+    s
 }
 
 /// The error of an on-demand call on a folder that is not on demand.
@@ -219,8 +320,12 @@ impl From<CoreError> for OdError {
 }
 
 impl From<OdError> for CoreError {
+    /// Typed for the host when the kind says something (`CoreError::OnDemand`), the words unchanged.
     fn from(e: OdError) -> CoreError {
-        e.error
+        match e.kind.public() {
+            Some(kind) => CoreError::OnDemand { kind, message: e.error.to_string() },
+            None => e.error,
+        }
     }
 }
 
@@ -282,7 +387,7 @@ impl RealSync {
     }
 
     fn item_now(&self, h: &SyncHandle, fid: &trs_sync_proto::ids::FolderId, path: &str) -> Result<SyncItem, OdError> {
-        h.od_item_at(fid, path).map_err(od_err)?.map(|i| item_of(&i)).ok_or_else(|| no_item(path))
+        h.od_item_at(fid, path).map_err(od_err)?.map(|i| item_in(h, fid, &i)).ok_or_else(|| no_item(path))
     }
 
     pub(super) fn od_set_mode(&self, id: &str, on: bool, path: Option<&str>) -> Result<SyncFolder, CoreError> {
@@ -304,19 +409,22 @@ impl RealSync {
 
     pub(super) fn od_item(&self, id: &str, item: &str) -> Result<Option<SyncItem>, OdError> {
         let h = self.handle().map_err(not_running)?;
-        Ok(h.od_item(&folder_id(id)?, item).map_err(od_err)?.map(|i| item_of(&i)))
+        let fid = folder_id(id)?;
+        Ok(h.od_item(&fid, item).map_err(od_err)?.map(|i| item_in(&h, &fid, &i)))
     }
 
     pub(super) fn od_children(&self, id: &str, item: &str, cursor: Option<&str>, limit: u32) -> Result<SyncItemPage, OdError> {
         let h = self.handle().map_err(not_running)?;
-        let page = h.od_children(&folder_id(id)?, item, cursor, limit.clamp(1, 1000) as usize).map_err(od_err)?.ok_or_else(|| no_item(item))?;
-        Ok(SyncItemPage { items: page.items.iter().map(item_of).collect(), next: page.next })
+        let fid = folder_id(id)?;
+        let page = h.od_children(&fid, item, cursor, limit.clamp(1, 1000) as usize).map_err(od_err)?.ok_or_else(|| no_item(item))?;
+        Ok(SyncItemPage { items: page.items.iter().map(|i| item_in(&h, &fid, i)).collect(), next: page.next })
     }
 
     pub(super) fn od_changes(&self, id: &str, anchor: u64, limit: u32) -> Result<SyncChangePage, OdError> {
         let h = self.handle().map_err(not_running)?;
-        let p = h.od_changes(&folder_id(id)?, anchor, limit.clamp(1, 1000) as usize).map_err(od_err)?;
-        Ok(SyncChangePage { items: p.items.iter().map(item_of).collect(), deleted: p.deleted, anchor: p.anchor, more: p.more })
+        let fid = folder_id(id)?;
+        let p = h.od_changes(&fid, anchor, limit.clamp(1, 1000) as usize).map_err(od_err)?;
+        Ok(SyncChangePage { items: p.items.iter().map(|i| item_in(&h, &fid, i)).collect(), deleted: p.deleted, anchor: p.anchor, more: p.more })
     }
 
     pub(super) fn od_anchor(&self, id: &str) -> Result<u64, OdError> {
@@ -328,20 +436,29 @@ impl RealSync {
         let fid = folder_id(id)?;
         let path = self.item_path(&h, &fid, item)?;
         let mut unavailable = Vec::new();
+        let mut waiting_for = None;
         if wait_ms == 0 {
             self.rt.block_on(h.od_request(&fid, &path)).map_err(od_err)?;
         } else {
-            match self.rt.block_on(h.od_fetch(&fid, &path, Duration::from_millis(wait_ms))) {
-                Ok(done) => unavailable = done.unavailable,
-                Err(trs_sync_net::SyncError::OnDemand(trs_sync_net::OnDemandError::NotHereYet, _)) => {}
-                Err(e) => return Err(od_err(e)),
+            // Given up (no device that has it is connected, or none of it came for a while): NotHereYet.
+            match self.rt.block_on(h.od_fetch_wait(&fid, &path, Duration::from_millis(wait_ms))).map_err(od_err)? {
+                trs_sync_net::service::FetchWait::Here(done) => unavailable = done.unavailable,
+                trs_sync_net::service::FetchWait::Coming { from, unavailable: u } => {
+                    unavailable = u;
+                    waiting_for = (!from.is_empty()).then(|| from.join(", "));
+                }
             }
         }
         let now = self.item_now(&h, &fid, &path)?;
         let pr = if now.kind == SyncItemKind::File { h.od_progress(&fid, &path).map_err(od_err)? } else { Default::default() };
         let here = now.kind != SyncItemKind::File || pr.here;
-        let local_path = here.then(|| h.od_cache_path(&fid, &path).ok()).flatten().map(|p| p.display().to_string());
-        Ok(SyncFetch { item: now, local_path, done: pr.done, total: pr.total, unavailable })
+        // Kept in place and in its placeholder already: there is nothing in the cache to hand over.
+        let local_path = (here && !now.in_place).then(|| h.od_cache_path(&fid, &path).ok()).flatten().map(|p| p.display().to_string());
+        if local_path.is_some() && now.kind == SyncItemKind::File {
+            h.od_hand(&fid, &path);
+        }
+        let waiting_for = waiting_for.filter(|_| local_path.is_none());
+        Ok(SyncFetch { item: now, local_path, done: pr.done, total: pr.total, unavailable, waiting_for })
     }
 
     pub(super) fn od_cancel(&self, id: &str, item: &str) -> Result<(), OdError> {
@@ -414,6 +531,42 @@ impl RealSync {
         self.item_now(&h, &fid, &path)
     }
 
+    pub(super) fn od_in_place(&self, id: &str) -> Result<bool, OdError> {
+        self.handle().map_err(not_running)?.od_in_place(&folder_id(id)?).map_err(od_err)
+    }
+
+    pub(super) fn od_set_in_place(&self, id: &str, on: bool) -> Result<(), OdError> {
+        let h = self.handle().map_err(not_running)?;
+        self.rt.block_on(h.od_set_in_place(&folder_id(id)?, on)).map_err(od_err)
+    }
+
+    pub(super) fn od_hydrated(&self, id: &str, item: &str, content_version: &str) -> Result<SyncItem, OdError> {
+        let h = self.handle().map_err(not_running)?;
+        let fid = folder_id(id)?;
+        let path = self.item_path(&h, &fid, item)?;
+        self.rt.block_on(h.od_hydrated(&fid, &path, content_version)).map_err(od_err)?;
+        self.item_now(&h, &fid, &path)
+    }
+
+    pub(super) fn od_local_change(&self, id: &str, item: &str) -> Result<SyncLocalChange, OdError> {
+        let h = self.handle().map_err(not_running)?;
+        let fid = folder_id(id)?;
+        let path = self.item_path(&h, &fid, item)?;
+        Ok(match self.rt.block_on(h.od_local_change(&fid, &path)).map_err(od_err)? {
+            trs_sync_net::LocalChange::Unchanged => SyncLocalChange::Unchanged,
+            trs_sync_net::LocalChange::Modified { base } => SyncLocalChange::Modified { base },
+            trs_sync_net::LocalChange::Stale => SyncLocalChange::Stale,
+        })
+    }
+
+    pub(super) fn od_host_anchor(&self, id: &str) -> Result<Option<u64>, OdError> {
+        self.handle().map_err(not_running)?.od_host_anchor(&folder_id(id)?).map_err(od_err)
+    }
+
+    pub(super) fn od_set_host_anchor(&self, id: &str, anchor: u64) -> Result<(), OdError> {
+        self.handle().map_err(not_running)?.od_set_host_anchor(&folder_id(id)?, anchor).map_err(od_err)
+    }
+
     pub(super) fn od_delete(&self, id: &str, item: &str, seen: Option<trs_sync_net::DeleteSeen>) -> Result<SyncDeleted, OdError> {
         let h = self.handle().map_err(not_running)?;
         let fid = folder_id(id)?;
@@ -438,6 +591,9 @@ pub(super) struct MockOd {
     /// The sequence each item last changed at, and deletes by identifier.
     changed: BTreeMap<String, u64>,
     deleted: Vec<(u64, String)>,
+    /// Kept in place, and the host's anchor.
+    in_place: bool,
+    host_anchor: Option<u64>,
 }
 
 impl MockOd {
@@ -462,6 +618,7 @@ impl MockOd {
                 exec: false,
                 symlink_target: None,
                 conflict_of: None,
+                in_place: false,
             });
         };
         use SyncItemKind::{Dir, File};
@@ -550,7 +707,7 @@ impl MockSync {
                 od.put(x);
             }
             let now = od.get(item)?;
-            Ok(SyncFetch { local_path: None, done: now.size, total: now.size, item: now, unavailable: Vec::new() })
+            Ok(SyncFetch { local_path: None, done: now.size, total: now.size, item: now, unavailable: Vec::new(), waiting_for: None })
         })
     }
 
@@ -608,6 +765,7 @@ impl MockSync {
                 exec: false,
                 symlink_target: None,
                 conflict_of: None,
+                in_place: false,
                 path,
             };
             od.put(i.clone());
@@ -631,6 +789,51 @@ impl MockSync {
             x.path = join(&parent_path, &x.name);
             od.put(x.clone());
             Ok(x)
+        })
+    }
+
+    pub(super) fn od_in_place(&self, id: &str) -> Result<bool, OdError> {
+        self.with_od(id, |od| Ok(od.in_place))
+    }
+
+    pub(super) fn od_set_in_place(&self, id: &str, on: bool) -> Result<(), OdError> {
+        self.with_od(id, |od| {
+            od.in_place = on;
+            Ok(())
+        })
+    }
+
+    /// The mock's placeholders hold what they are given.
+    pub(super) fn od_hydrated(&self, id: &str, item: &str, content_version: &str) -> Result<SyncItem, OdError> {
+        self.with_od(id, |od| {
+            let mut x = od.get(item)?;
+            if !od.in_place {
+                return Err(OdError { kind: OdKind::Other, error: failed("This folder keeps its content in Seedwell's storage, not in place.") });
+            }
+            if x.content_version != content_version {
+                return Err(OdError { kind: OdKind::Changed, error: failed(format!("{}: a newer version arrived meanwhile", x.path)) });
+            }
+            x.in_place = true;
+            od.put(x.clone());
+            Ok(x)
+        })
+    }
+
+    pub(super) fn od_local_change(&self, id: &str, item: &str) -> Result<SyncLocalChange, OdError> {
+        self.with_od(id, |od| {
+            od.get(item)?;
+            Ok(SyncLocalChange::Unchanged)
+        })
+    }
+
+    pub(super) fn od_host_anchor(&self, id: &str) -> Result<Option<u64>, OdError> {
+        self.with_od(id, |od| Ok(od.host_anchor))
+    }
+
+    pub(super) fn od_set_host_anchor(&self, id: &str, anchor: u64) -> Result<(), OdError> {
+        self.with_od(id, |od| {
+            od.host_anchor = Some(anchor);
+            Ok(())
         })
     }
 
@@ -708,6 +911,9 @@ impl Core {
     }
 
     /// Fetches an item's content (a folder: every file below it) and waits up to `wait_ms` for it (0: only asks).
+    /// Not here yet when that ends: the answer says how far it got, and the host calls again to wait on. The core
+    /// gives up itself, failing with `SyncErrorKind::NotHereYet` (and taking the request back), as soon as no
+    /// connected device has the content and none is coming up, or none of it came for a while (SPEC §7G.11).
     pub fn sync_fetch(&self, id: String, item: String, wait_ms: u64) -> Result<SyncFetch, CoreError> {
         self.backend.sync().od_fetch(&id, &item, wait_ms).map_err(CoreError::from)
     }
@@ -753,6 +959,47 @@ impl Core {
     /// content instead (`freed`: the host puts the item back, online only).
     pub fn sync_delete_item(&self, id: String, item: String) -> Result<SyncDeleted, CoreError> {
         self.backend.sync().od_delete(&id, &item, None).map_err(CoreError::from)
+    }
+
+    /// Whether on-demand folder `id` keeps its content in place: in the host's placeholders at the folder's place
+    /// (Windows' Cloud Files hydrates into them), each file stored once (SPEC §7G.11).
+    pub fn sync_in_place(&self, id: String) -> Result<bool, CoreError> {
+        self.backend.sync().od_in_place(&id).map_err(CoreError::from)
+    }
+
+    /// Keeps on-demand folder `id`'s content in place (`true`: the Windows host, for each folder it registers as a sync
+    /// root, before it fills any placeholder) or in the core's cache. Saved with the folder; the folder starts again to
+    /// take it. Off, the content in placeholders comes back into the cache first (the host lets go of them before).
+    pub fn sync_set_in_place(&self, id: String, in_place: bool) -> Result<(), CoreError> {
+        self.backend.sync().od_set_in_place(&id, in_place).map_err(CoreError::from)
+    }
+
+    /// The host filled `item`'s placeholder with the content `content_version` that `sync_fetch` handed it (Cloud
+    /// Files: after the last transfer of a fetch). The core checks the placeholder holds exactly that content, then
+    /// drops its own copy: the item comes back `in_place`. Refused (`OnDemand { Changed }`) when a newer version arrived
+    /// meanwhile or the placeholder holds something else (the user writing to it already): ask `sync_local_change`.
+    pub fn sync_hydrated(&self, id: String, item: String, content_version: String) -> Result<SyncItem, CoreError> {
+        self.backend.sync().od_hydrated(&id, &item, &content_version).map_err(CoreError::from)
+    }
+
+    /// What `item`'s placeholder holds against the core's record, in a folder kept in place: the host asks when a
+    /// filled placeholder was written and closed, and before it dehydrates or overwrites one the core did not just
+    /// free (see [`SyncLocalChange`]). Reads the placeholder when its size, time or file id moved: call it off the UI
+    /// thread.
+    pub fn sync_local_change(&self, id: String, item: String) -> Result<SyncLocalChange, CoreError> {
+        self.backend.sync().od_local_change(&id, &item).map_err(CoreError::from)
+    }
+
+    /// The host's last change-feed anchor of on-demand folder `id`, kept with the folder (`None`: none yet, or the
+    /// folder was switched since: list it whole with `sync_children`, from `sync_changes(id, 0, …)`'s anchor).
+    pub fn sync_host_anchor(&self, id: String) -> Result<Option<u64>, CoreError> {
+        self.backend.sync().od_host_anchor(&id).map_err(CoreError::from)
+    }
+
+    /// The host applied every change of folder `id` up to `anchor` (a page of `sync_changes`, or a whole listing):
+    /// kept with the folder, and deleted with it.
+    pub fn sync_set_host_anchor(&self, id: String, anchor: u64) -> Result<(), CoreError> {
+        self.backend.sync().od_set_host_anchor(&id, anchor).map_err(CoreError::from)
     }
 }
 
@@ -878,6 +1125,103 @@ mod tests {
         assert!(p.pinned);
     }
 
+    #[test]
+    fn the_mock_keeps_a_folder_in_place_and_says_why_a_call_failed() {
+        let d = tempfile::tempdir().unwrap();
+        let c = core(true, d.path());
+        let f = c.sync_snapshot().folders[0].clone();
+        // Typed for the host: not on demand yet.
+        let e = c.sync_children(f.id.clone(), ROOT_ID.into(), None, 10).unwrap_err();
+        assert!(matches!(&e, CoreError::OnDemand { kind: SyncErrorKind::NotOnDemand, message } if message == NOT_ON_DEMAND), "{e:?}");
+        assert_eq!(crate::core_error_message(e), NOT_ON_DEMAND, "the same words");
+        c.sync_set_on_demand(f.id.clone(), true, None).unwrap();
+        assert!(!c.sync_in_place(f.id.clone()).unwrap());
+        c.sync_set_in_place(f.id.clone(), true).unwrap();
+        assert!(c.sync_in_place(f.id.clone()).unwrap());
+        let notes = c.sync_item(f.id.clone(), "m:notes.txt".into()).unwrap().unwrap();
+        assert!(!notes.in_place);
+        let filled = c.sync_hydrated(f.id.clone(), notes.id.clone(), notes.content_version.clone()).unwrap();
+        assert!(filled.in_place);
+        let e = c.sync_hydrated(f.id.clone(), notes.id.clone(), "old".into()).unwrap_err();
+        assert!(matches!(e, CoreError::OnDemand { kind: SyncErrorKind::Changed, .. }), "{e:?}");
+        assert_eq!(c.sync_local_change(f.id.clone(), notes.id.clone()).unwrap(), SyncLocalChange::Unchanged);
+        assert_eq!(c.sync_host_anchor(f.id.clone()).unwrap(), None);
+        c.sync_set_host_anchor(f.id.clone(), u64::MAX).unwrap();
+        assert_eq!(c.sync_host_anchor(f.id.clone()).unwrap(), Some(u64::MAX));
+    }
+
+    #[test]
+    fn every_state_has_words_for_the_file_manager() {
+        use SyncItemState::*;
+        let all = [(OnlineOnly, false), (Downloading, false), (Downloaded, false), (Downloaded, true), (ModifiedHere, false), (Unavailable, false)];
+        let texts: Vec<SyncStateText> = all.iter().map(|(s, p)| sync_item_state_text(*s, *p)).collect();
+        for t in &texts {
+            assert!(!t.label.is_empty() && t.tooltip.ends_with('.'), "{t:?}");
+        }
+        let labels: std::collections::HashSet<&str> = texts.iter().map(|t| t.label.as_str()).collect();
+        assert_eq!(labels.len(), all.len(), "each state reads apart");
+        assert_eq!(sync_item_state_text(Unavailable, false).label, "Unavailable");
+        assert_eq!(sync_item_state_text(ModifiedHere, true).label, "Only here", "a change no other device has, pinned or not");
+    }
+
+    #[test]
+    fn only_what_the_user_can_act_on_is_told_and_once_a_while() {
+        use crate::notify::{OD_QUIET_MS, ondemand_notice};
+        let mut told = std::collections::HashMap::new();
+        let n = ondemand_notice(&mut told, 0, "F", Some("Photos"), SyncErrorKind::Unavailable, "2026/beach.jpg").unwrap();
+        assert_eq!(n.title, "Can't open “beach.jpg”");
+        assert!(n.body.contains("“Photos”"), "{}", n.body);
+        assert!(n.key.as_ref().is_some_and(|k| k.len() <= 64));
+        assert_eq!(crate::notice_route(n.click.clone()), crate::NoticeRoute::Place { place: crate::LibraryPlace::FolderSync });
+        assert!(ondemand_notice(&mut told, 1000, "F", Some("Photos"), SyncErrorKind::Unavailable, "2026/beach.jpg").is_none(), "told already");
+        assert!(ondemand_notice(&mut told, 1000, "F", Some("Photos"), SyncErrorKind::NotHereYet, "2026/beach.jpg").is_some(), "another problem");
+        assert!(ondemand_notice(&mut told, OD_QUIET_MS + 1, "F", Some("Photos"), SyncErrorKind::Unavailable, "2026/beach.jpg").is_some(), "again later");
+        for quiet in [SyncErrorKind::NoItem, SyncErrorKind::NotOnDemand, SyncErrorKind::Gone, SyncErrorKind::NotRunning, SyncErrorKind::AnchorExpired, SyncErrorKind::Changed] {
+            assert!(ondemand_notice(&mut told, 0, "F", Some("Photos"), quiet, "x").is_none(), "{quiet:?}");
+        }
+        assert!(ondemand_notice(&mut told, 0, "G", None, SyncErrorKind::Unavailable, "x").is_none(), "a folder no longer here");
+    }
+
+    /// A folder kept in place, through the app's calls: the fetched file moves from the cache into the stand-in
+    /// placeholder, and the host's anchor is kept.
+    #[test]
+    fn the_real_core_keeps_a_folder_in_place() {
+        let home = tempfile::tempdir().unwrap();
+        let work = tempfile::tempdir().unwrap();
+        // SAFETY: set before the core starts any thread; nothing else here reads the environment.
+        unsafe { std::env::set_var("HOME", home.path()) };
+        let c = core(false, &work.path().join("state"));
+        let docs = work.path().join("Docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        std::fs::write(docs.join("a.txt"), b"hello").unwrap();
+        let f = c.sync_add_folder_on_demand(docs.display().to_string()).unwrap();
+        assert!(c.sync_hydrated(f.id.clone(), ROOT_ID.into(), String::new()).is_err(), "not kept in place yet, and the root is no file");
+        // The host's sync root is the folder's place.
+        std::fs::create_dir_all(&docs).unwrap();
+        c.sync_set_in_place(f.id.clone(), true).unwrap();
+        let end = Instant::now() + Duration::from_secs(20);
+        let a = loop {
+            if let Some(a) = c.sync_children(f.id.clone(), ROOT_ID.into(), None, 10).ok().and_then(|p| p.items.into_iter().find(|i| i.name == "a.txt")) {
+                break a;
+            }
+            assert!(Instant::now() < end, "a.txt is not listed after 20 s");
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        let got = c.sync_fetch(f.id.clone(), a.id.clone(), 1000).unwrap();
+        let cached = std::path::PathBuf::from(got.local_path.unwrap());
+        std::fs::copy(&cached, docs.join("a.txt")).unwrap();
+        let filled = c.sync_hydrated(f.id.clone(), a.id.clone(), a.content_version.clone()).unwrap();
+        assert!(filled.in_place && !cached.exists(), "stored once");
+        assert_eq!(c.sync_fetch(f.id.clone(), a.id.clone(), 1000).unwrap().local_path, None, "nothing in the cache to hand over");
+        assert_eq!(c.sync_local_change(f.id.clone(), a.id.clone()).unwrap(), SyncLocalChange::Unchanged);
+        std::thread::sleep(Duration::from_millis(20));
+        std::fs::write(docs.join("a.txt"), b"hello, edited").unwrap();
+        assert_eq!(c.sync_local_change(f.id.clone(), a.id.clone()).unwrap(), SyncLocalChange::Modified { base: Some(a.content_version.clone()) });
+        assert_eq!(c.sync_host_anchor(f.id.clone()).unwrap(), None);
+        c.sync_set_host_anchor(f.id.clone(), 42).unwrap();
+        assert_eq!(c.sync_host_anchor(f.id.clone()).unwrap(), Some(42));
+    }
+
     /// Adding a folder of this computer on demand whose switch is refused takes the add back (its files stay where
     /// they are), so Start can be tried again.
     #[cfg(unix)]
@@ -932,5 +1276,39 @@ mod tests {
         assert!(alert.as_ref().is_ok_and(Option::is_none), "{alert:?}");
         assert_eq!(std::fs::read(trash.join("Docs/a.txt")).unwrap(), b"held here");
         assert!(c.sync_snapshot().folders.is_empty());
+    }
+
+    /// Set in the copy of this test binary that [`the_cores_messages_reach_its_log_in_an_app_with_no_console`] starts:
+    /// its state folder.
+    const LOG_CHILD: &str = "TRS_FFI_TEST_CORE_LOG_STATE";
+
+    /// An app whose standard error goes nowhere (a Windows app has no console; a Mac app started from the Finder
+    /// writes to /dev/null) finds what the core says there in `<state>/logs/core.log`: here folder sync's word that
+    /// the QA throttle is on (build 58 printed it where no Windows log saw it).
+    #[test]
+    fn the_cores_messages_reach_its_log_in_an_app_with_no_console() {
+        let name = format!("{}::the_cores_messages_reach_its_log_in_an_app_with_no_console", module_path!().split_once("::").unwrap().1);
+        if let Some(state) = std::env::var_os(LOG_CHILD) {
+            // The copy: an app's standard error, then the core.
+            trs_platform::proc::test_stderr_to_nowhere();
+            let c = core(false, std::path::Path::new(&state));
+            assert!(c.sync_snapshot().running);
+            return;
+        }
+        let home = tempfile::tempdir().unwrap();
+        let work = tempfile::tempdir().unwrap();
+        let state = work.path().join("state");
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([name.as_str(), "--exact", "--nocapture", "--test-threads=1"])
+            .env(LOG_CHILD, &state)
+            .env("HOME", home.path())
+            .env(trs_sync_net::limit::QA_LIMIT_LAN, "1")
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "the copy failed: {}", String::from_utf8_lossy(&out.stdout));
+        let log = std::fs::read_to_string(state.join("logs").join(crate::CORE_LOG)).unwrap_or_default();
+        assert!(log.contains(&format!("Seedwell {} started (process ", env!("CARGO_PKG_VERSION"))), "{log}");
+        assert!(log.contains("seedwell sync: QA: the speed limits apply to LAN sessions too"), "{log}");
     }
 }

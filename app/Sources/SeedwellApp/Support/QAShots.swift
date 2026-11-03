@@ -91,6 +91,7 @@ import AppKit
     /// that sits far from the window (moved off the screens on its own) is left out.
     private static func windows(_ w: NSWindow, with extras: [NSWindow]) async -> Result<NSBitmapImageRep, ShotError> {
         guard w.contentView?.superview != nil else { return .failure("the window has no content") }
+        QuietRun.drawActive(w)
         let rep = await SnapshotWindow.settled {
             var parts: [(NSView, NSRect, Bool)] = []
             if let v = w.contentView?.superview { parts.append((v, w.frame, isPopover(w))) }
@@ -176,8 +177,12 @@ import AppKit
 
 /// Vibrancy drawn in the app. A vibrant layer (sidebar labels, icons, the selected row) carries a colour matrix the
 /// window server applies as it composites the window; an in-process drawing (`cacheDisplay`) skips it and gets the
-/// raw colours (black). Here the view is drawn with its vibrant layers hidden, then each of them on its own, through
-/// its colour matrix, over it in drawing order.
+/// raw colours (black). Here the view is drawn with its vibrant layers hidden, then each of them over it in drawing
+/// order the way Core Animation composites them: the matrix works on what is under the layer (its backdrop), and the
+/// layer's own drawing gives only where and how much (its coverage), never a colour. `SidebarDrawingTests` checks it
+/// against Core Animation's own renderer. Secondary text "+0.3" is 0.3 lighter than whatever it is on, so a word on a
+/// grey pill in a grey selected row stays readable; put through the matrix on its own (black + 0.3, one fixed grey)
+/// it took the grey of the pill, and the sidebar's "agents" pill came out empty in the shots.
 @MainActor enum VibrancyPass {
     private struct Vibrant {
         let layer: CALayer
@@ -202,19 +207,56 @@ import AppKit
         let base = SnapshotWindow.image(of: view)
         for (v, h) in zip(found, hidden) { v.layer.isHidden = h }
         CATransaction.commit()
-        guard let base, let ctx = NSGraphicsContext(bitmapImageRep: base) else { return base }
-        NSGraphicsContext.saveGraphicsState()
-        NSGraphicsContext.current = ctx
-        let cg = ctx.cgContext
+        guard let base, let data = base.bitmapData, base.bitsPerPixel == 32, base.samplesPerPixel == 4, !base.isPlanar,
+              base.size.width > 0 else { return base }
+        let width = base.pixelsWide, height = base.pixelsHigh, scale = CGFloat(width) / base.size.width
+        // Each layer's coverage, on a canvas of the picture's size with the same places (y up, in points).
+        guard let space = CGColorSpace(name: CGColorSpace.sRGB),
+              let coverage = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4, space: space,
+                                       bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue),
+              let mask = coverage.data?.bindMemory(to: UInt8.self, capacity: width * height * 4) else { return base }
+        coverage.scaleBy(x: scale, y: scale)
         for v in found {
-            guard let image = render(v) else { continue }
-            cg.saveGState()
-            cg.clip(to: v.visible)
-            cg.draw(image, in: v.frame)
-            cg.restoreGState()
+            let area = v.visible.intersection(v.frame)
+            guard !area.isEmpty, let image = render(v) else { continue }
+            coverage.saveGState()
+            coverage.clip(to: area)
+            coverage.clear(area)
+            coverage.draw(image, in: v.frame)
+            coverage.restoreGState()
+            // The pixels of `area`, rows counted from the top as in memory.
+            let x0 = max(0, Int((area.minX * scale).rounded(.down))), x1 = min(width, Int((area.maxX * scale).rounded(.up)))
+            let r0 = max(0, height - Int((area.maxY * scale).rounded(.up))), r1 = min(height, height - Int((area.minY * scale).rounded(.down)))
+            guard x0 < x1, r0 < r1 else { continue }
+            for row in r0..<r1 {
+                for x in x0..<x1 {
+                    let a = mask[(row * width + x) * 4 + 3]
+                    guard a > 0 else { continue }
+                    let i = row * base.bytesPerRow + x * 4
+                    var px = (data[i], data[i + 1], data[i + 2], data[i + 3])
+                    blend(&px, coverage: Float(a) / 255, matrix: v.matrix)
+                    (data[i], data[i + 1], data[i + 2], data[i + 3]) = px
+                }
+            }
         }
-        NSGraphicsContext.restoreGraphicsState()
         return base
+    }
+
+    /// A pixel of the picture (premultiplied RGBA) under a vibrant layer that covers `coverage` of it: the pixel moved
+    /// towards the layer's matrix applied to it, by the alpha the matrix gives times the coverage. As Core Animation
+    /// does it, the matrix's colour is not clamped before the mix (only the result is), so half a pixel of "-0.3" over
+    /// a dark grey is black, not half way to it. (At a soft edge over a light colour Core Animation clamps the plain
+    /// "+bias" matrices first; the pass is then within a tenth of it.)
+    static func blend(_ px: inout (UInt8, UInt8, UInt8, UInt8), coverage: Float, matrix m: [Float]) {
+        let da = Float(px.3) / 255
+        let unpremultiply: Float = da > 0 ? 1 / (da * 255) : 0
+        let d = (Float(px.0) * unpremultiply, Float(px.1) * unpremultiply, Float(px.2) * unpremultiply)
+        func row(_ k: Int) -> Float { m[k] * d.0 + m[k + 1] * d.1 + m[k + 2] * d.2 + m[k + 3] * da + m[k + 4] }
+        let k = min(1, max(0, row(15))) * coverage
+        guard k > 0 else { return }
+        // Source over, premultiplied: the matrix's colour with alpha k over the pixel.
+        func over(_ c: Float, _ under: UInt8) -> UInt8 { UInt8(min(255, max(0, c * k * 255 + Float(under) * (1 - k))).rounded()) }
+        px = (over(row(0), px.0), over(row(5), px.1), over(row(10), px.2), UInt8(min(255, (k + da * (1 - k)) * 255).rounded()))
     }
 
     private static func collect(_ layer: CALayer, root: CALayer, clip: CGRect, into found: inout [Vibrant]) {
@@ -237,7 +279,7 @@ import AppKit
         for s in layer.sublayers ?? [] { collect(s, root: root, clip: clip, into: &found) }
     }
 
-    /// The layer alone at 2x, its colours put through its matrix (on unpremultiplied colours).
+    /// The layer alone at 2x: its coverage (its colours are not used).
     private static func render(_ v: Vibrant) -> CGImage? {
         let b = v.layer.bounds
         let w = Int((b.width * 2).rounded(.up)), h = Int((b.height * 2).rounded(.up))
@@ -251,20 +293,6 @@ import AppKit
         }
         ctx.translateBy(x: -b.minX, y: -b.minY)
         v.layer.render(in: ctx)
-        guard let data = ctx.data else { return nil }
-        let px = data.bindMemory(to: UInt8.self, capacity: w * h * 4)
-        let m = v.matrix
-        for i in stride(from: 0, to: w * h * 4, by: 4) {
-            let a = Float(px[i + 3]) / 255
-            guard a > 0 else { continue }
-            let r = Float(px[i]) / 255 / a, g = Float(px[i + 1]) / 255 / a, bl = Float(px[i + 2]) / 255 / a
-            func row(_ k: Int) -> Float { min(1, max(0, m[k] * r + m[k + 1] * g + m[k + 2] * bl + m[k + 3] * a + m[k + 4])) }
-            let na = row(15)
-            px[i] = UInt8(row(0) * na * 255)
-            px[i + 1] = UInt8(row(5) * na * 255)
-            px[i + 2] = UInt8(row(10) * na * 255)
-            px[i + 3] = UInt8(na * 255)
-        }
         return ctx.makeImage()
     }
 }

@@ -222,7 +222,10 @@ impl From<io::Error> for SyncError {
 
 #[path = "service_ondemand.rs"]
 mod ondemand;
-pub use ondemand::{FetchProgress, Fetched};
+#[path = "service_placed.rs"]
+mod placed_api;
+pub use placed_api::LocalChange;
+pub use ondemand::{FETCH_GRACE, FETCH_STALL, FetchProgress, FetchWait, Fetched};
 
 pub(crate) fn invalid(why: impl Into<String>) -> SyncError {
     SyncError::Invalid(why.into())
@@ -320,6 +323,8 @@ pub(crate) struct Inner {
     pub(crate) dir: PathBuf,
     pub(crate) cfg_path: PathBuf,
     pub(crate) cfg: Mutex<SyncConfig>,
+    /// Taken by a save of `cfg` for its whole write ([`SyncHandle::save_config`]), never by a read.
+    pub(crate) cfg_saving: Mutex<()>,
     pub(crate) secrets: Arc<dyn SecretStore>,
     pub(crate) port: u16,
     /// The address the sync port is bound to ([`Options::bind`]).
@@ -464,6 +469,12 @@ impl SyncHandle {
             cfg.upgraded = false;
             cfg.save(&cfg_path)?;
         }
+        let limit_lan = crate::limit::qa_limit_lan(std::env::var_os(crate::limit::QA_LIMIT_LAN).as_deref(), &dir);
+        if limit_lan {
+            eprintln!("seedwell sync: QA: the speed limits apply to LAN sessions too ({})", crate::limit::QA_LIMIT_LAN);
+        } else if std::env::var_os(crate::limit::QA_LIMIT_LAN).is_some() {
+            eprintln!("seedwell sync: {} ignored: only an isolated run (a state folder in a temporary folder) limits the LAN", crate::limit::QA_LIMIT_LAN);
+        }
         let ctx = Arc::new(Ctx {
             me: key.device_id(),
             key,
@@ -474,6 +485,7 @@ impl SyncHandle {
             registry: Registry::default(),
             hub: hub_tx,
             limits: crate::limit::Limits::default(),
+            limit_lan: AtomicBool::new(limit_lan),
             secrets: opts.secrets.clone(),
             protocol: opts.protocol,
             features: opts.features,
@@ -492,6 +504,9 @@ impl SyncHandle {
             pairing: Mutex::new(Vec::new()),
             devices_wake: Notify::new(),
             devices_lock: tokio::sync::Mutex::new(()),
+            settling: Mutex::new(std::time::Instant::now() + FETCH_GRACE),
+            fetch_grace: Mutex::new(FETCH_GRACE),
+            fetch_stall: Mutex::new(FETCH_STALL),
         });
         ctx.limits.set_kib(cfg.settings.up_kib, cfg.settings.down_kib);
         if let Some(a) = opts.chat_agents {
@@ -504,6 +519,7 @@ impl SyncHandle {
             dir,
             cfg_path,
             cfg: Mutex::new(cfg),
+            cfg_saving: Mutex::new(()),
             secrets: opts.secrets,
             port,
             bind: opts.bind,
@@ -686,7 +702,12 @@ impl SyncHandle {
     }
 
     pub(crate) fn save_config(&self) -> io::Result<()> {
-        lock(&self.inner.cfg).save(&self.inner.cfg_path)
+        // The configuration is locked only while its text is made, never for the write: the app's calls read it, and
+        // a disk may take long to save (a virus scanner reads each new file first). The saves take turns, and each
+        // writes the configuration as it is at its turn, so the file never goes back to an older one.
+        let _turn = lock(&self.inner.cfg_saving);
+        let text = lock(&self.inner.cfg).text()?;
+        SyncConfig::write_text(&self.inner.cfg_path, &text)
     }
 
     fn index_path(&self, id: &FolderId) -> PathBuf {
@@ -696,6 +717,16 @@ impl SyncHandle {
     /// Where an on-demand folder keeps the content held on this device.
     pub(crate) fn cache_path(&self, id: &FolderId) -> PathBuf {
         self.inner.dir.join(format!("{id}.cache"))
+    }
+
+    /// Where a folder kept in place notes what is in its placeholders ([`crate::placed`]).
+    pub(crate) fn placed_path(&self, id: &FolderId) -> PathBuf {
+        self.inner.dir.join(format!("{id}.placed"))
+    }
+
+    /// Where an on-demand folder keeps its host's last change-feed anchor.
+    pub(crate) fn anchor_path(&self, id: &FolderId) -> PathBuf {
+        self.inner.dir.join(format!("{id}.anchor"))
     }
 
     pub(crate) fn members_path(&self, id: &FolderId) -> PathBuf {
@@ -769,6 +800,13 @@ impl SyncHandle {
         if e.on_demand {
             std::fs::create_dir_all(root.join(STATE_DIR))?;
         }
+        // Kept in place: the host's placeholders hold what is here, and the core reads them through the notes.
+        let placed = if e.on_demand && e.in_place {
+            Some(Arc::new(crate::placed::Placed::open(e.path.clone(), root.clone(), self.placed_path(&id))?))
+        } else {
+            None
+        };
+        let core_placed = placed.clone();
         let index = self.index_path(&id);
         let ctx = self.inner.ctx.clone();
         let entry = e.clone();
@@ -796,7 +834,11 @@ impl SyncHandle {
             };
             let ignore = load_ignore(&fs, &entry.ignore);
             let clock: Arc<dyn trs_sync::clock::Clock> = Arc::new(SystemClock);
-            let mut core = FolderCore::new(cfg, Box::new(store), Arc::new(fs), Some(ctx.key.clone()), clock, Arc::new(random_id), ignore)
+            let core_fs: Arc<dyn Fs> = match core_placed {
+                Some(p) => Arc::new(crate::placed::PlaceFs::new(p)),
+                None => Arc::new(fs),
+            };
+            let mut core = FolderCore::new(cfg, Box::new(store), core_fs, Some(ctx.key.clone()), clock, Arc::new(random_id), ignore)
                 .map_err(|e| invalid(e.to_string()))?;
             // A `.seedwellignore` that arrives or changes later applies at once (SPEC §7G.2).
             core.follow_ignore_file(&entry.ignore)?;
@@ -842,6 +884,7 @@ impl SyncHandle {
             items: Mutex::new(items),
             freeing: Mutex::new(BTreeMap::new()),
             ignore,
+            placed,
             core: Mutex::new(core),
             index: reader,
             local_seq: seq_tx,
@@ -852,6 +895,7 @@ impl SyncHandle {
             retention: Retention { max_age_s: i64::from(e.archive_days) * 86_400, ..Retention::default() },
             fetched: crate::limit::Meter::default(),
             served: crate::limit::Meter::default(),
+            fetches: Mutex::new(Default::default()),
             closed: crate::shared::Closed::default(),
         });
         // Devices met in this folder before are members to dial, at the addresses they had.
@@ -1245,6 +1289,8 @@ impl SyncHandle {
         if lock(&self.inner.held).contains_key(id) {
             return self.remove_held(id).await;
         }
+        // Kept in place: what the placeholders held comes back into the cache, so it goes where the cache goes.
+        self.take_back_placed(id).await?;
         // (An on-demand folder's root is its cache; its place is where the host shows it.)
         let cache = self.cache_path(id);
         let place = entry.as_ref().filter(|e| e.on_demand && cache.exists()).map(|e| e.path.clone());
@@ -1337,7 +1383,8 @@ impl SyncHandle {
     /// start finishes the move. Returns the error to report.
     pub(crate) fn hold_unfinished(&self, id: &FolderId, e: &io::Error) -> SyncError {
         let why = format!("A move could not be finished ({e}); it is finished when Seedwell starts again");
-        lock(&self.inner.held).insert(*id, Held { why: why.clone(), waiting: false });
+        let held = Held { why: why.clone(), waiting: false, role: self.held_role(id) };
+        lock(&self.inner.held).insert(*id, held);
         invalid(why)
     }
 
@@ -1393,6 +1440,9 @@ impl SyncHandle {
         }
         let _ = std::fs::remove_file(self.index_path(id));
         let _ = std::fs::remove_file(self.members_path(id));
+        // What the host kept of it goes with it.
+        crate::placed::Placed::remove_log(&self.placed_path(id));
+        let _ = std::fs::remove_file(self.anchor_path(id));
         self.forget_strangers();
         Ok(())
     }
@@ -1424,7 +1474,7 @@ impl SyncHandle {
             let j: Option<Journal> = std::fs::read(e.path()).ok().and_then(|b| serde_json::from_slice(&b).ok());
             if let Err(err) = self.recover(&id, j).await {
                 eprintln!("seedwell sync: folder {id}: an interrupted change could not be finished ({err}); it stays stopped, and it is tried again when a disk is mounted");
-                stopped.insert(id, held_of(&err));
+                stopped.insert(id, self.held_of(&id, &err));
                 continue;
             }
             self.drop_journal(&id);
@@ -1612,6 +1662,10 @@ impl SyncHandle {
         let entry = lock(&self.inner.cfg).folder(&id.to_string()).cloned().ok_or(SyncError::NotFound)?;
         let parent = entry.path.parent().ok_or_else(|| invalid("the folder has no parent"))?;
         let to = parent.join(name);
+        if entry.on_demand && entry.in_place {
+            // Its content is in the host's placeholders at its place: a new name would be a new place without them.
+            return Err(invalid("a folder whose files on demand are kept in place is renamed after it is switched to full"));
+        }
         if entry.on_demand {
             // Its files are in this device's cache, and its place is the host's: only the name it shows changes.
             if let Some(e) = lock(&self.inner.cfg).folder_mut(&id.to_string()) {
@@ -1731,7 +1785,6 @@ impl SyncHandle {
     /// scan reads changes from), with both versions here; what goes is kept in the cache's archive, as a full folder
     /// keeps it.
     async fn resolve_on_demand(&self, f: &Arc<FolderShared>, copy: String, original: String, keep: Keep) -> Result<(), SyncError> {
-        let root = f.root.clone();
         let refused = self
             .with_core(f, move |c| {
                 use trs_sync::ondemand::ItemState;
@@ -1743,10 +1796,11 @@ impl SyncHandle {
                         return Ok(Some("Download both versions first"));
                     }
                 }
-                let fs = StdFs::new(root);
+                // (Kept in place: through the notes, so content in a placeholder comes back into the cache first.)
+                let fs = c.fs();
                 match keep {
                     Keep::Original => {
-                        to_archive(&fs, &copy)?;
+                        to_archive(&*fs, &copy)?;
                         c.host_delete(&copy, &[])?;
                     }
                     // Checked as a whole first: a refusal changes nothing.
@@ -1772,6 +1826,18 @@ impl SyncHandle {
     pub fn rescan(&self, id: &FolderId) -> Result<(), SyncError> {
         self.inner.ctx.registry.folder(id).ok_or(SyncError::NotFound)?.rescan.notify_one();
         Ok(())
+    }
+
+    /// Every device that joined a folder or channel, also those that left, in the order they joined, each with when
+    /// and its user's name from its signed profile (empty: none): the same on every member device (a channel's
+    /// colours follow it). Never waits for the folder's core.
+    pub fn joined(&self, id: &FolderId) -> Result<Vec<(DeviceId, u64, String)>, SyncError> {
+        let f = self.inner.ctx.registry.user_space(id).ok_or(SyncError::NotFound)?;
+        let m = f.membership.read().unwrap_or_else(|e| e.into_inner());
+        Ok(m.joined()
+            .into_iter()
+            .map(|(pk, at)| (DeviceId::of_public_key(&pk), at, m.profile(&pk).map(|(_, user)| user.to_owned()).unwrap_or_default()))
+            .collect())
     }
 
     /// The devices of a folder (or channel) and their roles. Never waits for the folder's core.
@@ -1922,10 +1988,14 @@ impl SyncHandle {
             _ => l.format_as(kind),
         };
         {
-            let mut links = lock(&f.links);
-            links.insert(invite.id, link.clone());
-            let all: Vec<&str> = links.values().map(String::as_str).collect();
-            self.inner.secrets.put(&crate::roles::links_name(id), all.join("\n").as_bytes())?;
+            // (Kept with the links unlocked: the Share dialog reads them, and the secret store may be slow.)
+            let _turn = lock(&f.saving);
+            let all = {
+                let mut links = lock(&f.links);
+                links.insert(invite.id, link.clone());
+                links.values().map(String::as_str).collect::<Vec<_>>().join("\n")
+            };
+            self.inner.secrets.put(&crate::roles::links_name(id), all.as_bytes())?;
         }
         // Published, so every owner and admin can show and count it.
         let st = match issuer {
@@ -2437,7 +2507,8 @@ impl SyncHandle {
                     }
                 }
                 Err(err) => {
-                    lock(&self.inner.held).insert(id, held_of(&err));
+                    let held = self.held_of(&id, &err);
+                    lock(&self.inner.held).insert(id, held);
                 }
             }
         }
@@ -2455,8 +2526,7 @@ impl SyncHandle {
     /// A folder held back ([`Inner::held`]) as the UI shows it: missing, with why, from its entry.
     fn held_status(&self, id: &FolderId, held: &Held) -> Option<FolderStatus> {
         let e = lock(&self.inner.cfg).folder(&id.to_string()).cloned()?;
-        let pk = public_key_from_hex(&e.folder_pk);
-        let role = pk.and_then(|pk| crate::roles::load(&self.members_path(id), pk).ok()).and_then(|m| m.role(self.inner.ctx.key.public_key()));
+        let role = held.role;
         Some(FolderStatus {
             id: e.id.clone(),
             name: e.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
@@ -2839,11 +2909,27 @@ impl SyncHandle {
         *lock(&self.inner.ctx.scan_step_wait) = wait;
     }
 
+    /// **Tests only:** how long sessions may take to come up before a fetch whose file no connected device has gives
+    /// up ([`FETCH_GRACE`], counted again from now), and how long a fetch may get no byte further ([`FETCH_STALL`]).
+    #[doc(hidden)]
+    pub fn test_fetch_times(&self, grace: Duration, stall: Duration) {
+        *lock(&self.inner.ctx.fetch_grace) = grace;
+        *lock(&self.inner.ctx.fetch_stall) = stall;
+        *lock(&self.inner.ctx.settling) = std::time::Instant::now() + grace;
+    }
+
     /// **Tests only:** each fetch of a pull starts with a pause this long, the folder's core held (a round that takes
     /// long, as on a slow disk).
     #[doc(hidden)]
     pub fn test_fetch_wait(&self, wait: Duration) {
         *lock(&self.inner.ctx.fetch_wait) = wait;
+    }
+
+    /// **Tests only:** the speed limits apply to LAN sessions too, as [`crate::limit::QA_LIMIT_LAN`] makes them in an
+    /// isolated run (without changing the process's environment).
+    #[doc(hidden)]
+    pub fn test_limit_lan(&self, on: bool) {
+        self.inner.ctx.limit_lan.store(on, Ordering::Relaxed);
     }
 
     /// **Tests only:** files of a folder with a free in progress here.
@@ -3200,13 +3286,25 @@ pub(crate) struct Held {
     /// The original's disk is not there: tried again when volumes change and on a timer. Otherwise (any other error)
     /// the folder is shown in error with the reason, and not tried again until the next start.
     waiting: bool,
+    /// This device's role in it, read from its membership file when it was held back (it does not change while the
+    /// folder is not open): the app's calls show it without a read of the disk.
+    role: Option<Role>,
 }
 
-/// Why a folder is held back, for its row: the move cut off waits for the original's disk, or failed otherwise.
-fn held_of(err: &SyncError) -> Held {
-    let waiting = matches!(err, SyncError::Io(e) if e.kind() == io::ErrorKind::NotFound);
-    let why = if waiting { format!("Waiting for the disk with its original files ({err})") } else { format!("An interrupted move could not be finished: {err}") };
-    Held { why, waiting }
+impl SyncHandle {
+    /// Why folder `id` is held back, for its row: the move cut off waits for the original's disk, or failed otherwise.
+    fn held_of(&self, id: &FolderId, err: &SyncError) -> Held {
+        let waiting = matches!(err, SyncError::Io(e) if e.kind() == io::ErrorKind::NotFound);
+        let why = if waiting { format!("Waiting for the disk with its original files ({err})") } else { format!("An interrupted move could not be finished: {err}") };
+        Held { why, waiting, role: self.held_role(id) }
+    }
+
+    /// This device's role in folder `id`, which is not open: from its membership file (a read of the disk, so never on
+    /// the app's calls: [`Held::role`] keeps it).
+    fn held_role(&self, id: &FolderId) -> Option<Role> {
+        let pk = lock(&self.inner.cfg).folder(&id.to_string()).and_then(|e| public_key_from_hex(&e.folder_pk))?;
+        crate::roles::load(&self.members_path(id), pk).ok()?.role(self.inner.ctx.key.public_key())
+    }
 }
 
 /// Tries the held-back folders again every `every` (a headless daemon hears of no mounts).
@@ -3316,7 +3414,7 @@ pub(crate) fn write_journal_at(path: &Path, j: &Journal) -> io::Result<()> {
 }
 
 /// Moves `p` (if it is there) into the folder's archive, as a replaced file is kept.
-fn to_archive(fs: &StdFs, p: &str) -> io::Result<()> {
+fn to_archive(fs: &dyn Fs, p: &str) -> io::Result<()> {
     if fs.lstat(p)?.is_none() {
         return Ok(());
     }
@@ -3328,7 +3426,14 @@ fn to_archive(fs: &StdFs, p: &str) -> io::Result<()> {
         n += 1;
     }
     if let Some((dir, _)) = dest.rsplit_once('/') {
-        std::fs::create_dir_all(fs.root().join(dir))?;
+        let mut at = String::new();
+        for c in dir.split('/') {
+            if !at.is_empty() {
+                at.push('/');
+            }
+            at.push_str(c);
+            fs.create_dir(&at)?;
+        }
     }
     fs.rename(p, &dest)
 }

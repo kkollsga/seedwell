@@ -1786,3 +1786,336 @@ async fn a_file_changed_since_it_was_seen_is_not_deleted() {
     a.h.shutdown().await;
     b.h.shutdown().await;
 }
+
+/// The host's stand-in for Cloud Files filling a placeholder (`CfExecute` TRANSFER_DATA): the fetched content copied
+/// into the file at the folder's place, then the core told (as the Windows host does after the last transfer).
+async fn fill_placeholder(h: &SyncHandle, id: &FolderId, place: &std::path::Path, path: &str) -> String {
+    let cache = h.od_fetch(id, path, Duration::from_secs(30)).await.unwrap().path;
+    h.od_hand(id, path);
+    let to = place.join(path);
+    std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+    std::fs::copy(&cache, &to).unwrap();
+    let cv = h.od_item_at(id, path).unwrap().unwrap().content_version;
+    h.od_hydrated(id, path, &cv).await.unwrap();
+    cv
+}
+
+/// A folder kept in place (Windows' Cloud Files): a file's content is stored once, in its placeholder. Fetched, it
+/// moves from the cache into the placeholder; another device is served from there; freed, it goes; fetched again, it
+/// comes back; the user's edit in the placeholder is told from an earlier version, reported and filled in again; and
+/// switched to full, the folder takes everything back without losing a byte.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_folder_kept_in_place_stores_each_file_once_in_its_placeholder() {
+    let (a, b, fa, fb, id) = pair().await;
+    // A third device, on demand too, joins while the owner is there.
+    let c = device("Gamma").await;
+    let fc = tempfile::tempdir().unwrap();
+    let link = a.h.create_invite(&id, Role::ReadWrite, 1, 1).unwrap().link;
+    c.h.join_folder_on_demand(&link, fc.path().join("Shared")).await.unwrap();
+    c.h.add_address(&id, addr(&a)).unwrap();
+    c.h.add_address(&id, addr(&b)).unwrap();
+    until(30, "C lists the files", || c.h.od_item_at(&id, "docs/a.txt").ok().flatten().is_some()).await;
+
+    // The host keeps B's content in place: its sync root is the folder's place.
+    let place = fb.path().join("Shared");
+    std::fs::create_dir_all(&place).unwrap();
+    assert!(!b.h.od_in_place(&id).unwrap());
+    b.h.od_set_in_place(&id, true).await.unwrap();
+    assert!(b.h.od_in_place(&id).unwrap());
+    until(30, "B runs again", || b.h.od_item_at(&id, "docs/a.txt").is_ok()).await;
+
+    // Fetched and filled: the placeholder holds it, the cache does not.
+    let cv = fill_placeholder(&b.h, &id, &place, "docs/a.txt").await;
+    let cached = b.h.od_cache_path(&id, "docs/a.txt").unwrap();
+    assert!(!cached.exists(), "stored once");
+    assert!(b.h.od_held_in_place(&id, "docs/a.txt"));
+    assert_eq!(read(&place.join("docs/a.txt")).as_deref(), Some(&b"alpha"[..]));
+    assert_eq!(b.h.od_item_at(&id, "docs/a.txt").unwrap().unwrap().state, ItemState::Downloaded);
+    assert_eq!(b.h.od_local_change(&id, "docs/a.txt").await.unwrap(), trs_sync_net::LocalChange::Unchanged);
+    // Told again: nothing more to do.
+    b.h.od_hydrated(&id, "docs/a.txt", &cv).await.unwrap();
+
+    // Served from the placeholder: with A gone, B is the only device that has it.
+    a.h.shutdown().await;
+    until(30, "B and C connected, A gone", || b.h.snapshot().devices.len() == 1 && c.h.snapshot().devices.len() == 1).await;
+    let at = c.h.od_fetch(&id, "docs/a.txt", Duration::from_secs(30)).await.unwrap().path;
+    assert_eq!(read(&at).as_deref(), Some(&b"alpha"[..]));
+    assert!(!cached.exists(), "B served it from its placeholder");
+    c.h.shutdown().await;
+
+    // A back: B may free it. The note stays (the host dehydrates the placeholder: here it goes).
+    let ha = device_at("Alpha", a._state.path()).await;
+    b.h.add_address(&id, SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), ha.port())).unwrap();
+    until(60, "B frees it", || futures_now(b.h.od_evict(&id, "docs/a.txt")).files == 1).await;
+    assert!(!b.h.od_held_in_place(&id, "docs/a.txt"));
+    assert_eq!(b.h.od_item_at(&id, "docs/a.txt").unwrap().unwrap().state, ItemState::OnlineOnly);
+    assert_eq!(b.h.od_local_change(&id, "docs/a.txt").await.unwrap(), trs_sync_net::LocalChange::Stale, "let go of: the host may dehydrate it");
+    std::fs::remove_file(place.join("docs/a.txt")).unwrap();
+
+    // Fetched again, filled again.
+    fill_placeholder(&b.h, &id, &place, "docs/a.txt").await;
+    assert!(b.h.od_held_in_place(&id, "docs/a.txt") && !cached.exists());
+
+    // The user edits the placeholder: a change, from the version it held, reported and filled in again.
+    std::thread::sleep(Duration::from_millis(20));
+    std::fs::write(place.join("docs/a.txt"), b"alpha, edited on B").unwrap();
+    let base = b.h.od_item_at(&id, "docs/a.txt").unwrap().unwrap().content_version;
+    let change = b.h.od_local_change(&id, "docs/a.txt").await.unwrap();
+    assert_eq!(change, trs_sync_net::LocalChange::Modified { base: Some(base.clone()) });
+    b.h.od_write(&id, "docs/a.txt", &place.join("docs/a.txt"), Some(&base)).await.unwrap();
+    let edited = b.h.od_item_at(&id, "docs/a.txt").unwrap().unwrap();
+    assert!(edited.content_version != base && edited.state == ItemState::ModifiedHere, "{edited:?}");
+    assert!(cached.exists(), "the change is the cache's until the placeholder is filled with it");
+    b.h.od_hydrated(&id, "docs/a.txt", &edited.content_version).await.unwrap();
+    assert!(!cached.exists() && b.h.od_held_in_place(&id, "docs/a.txt"));
+    until(30, "A has B's edit", || read(&fa.path().join("docs/a.txt")).as_deref() == Some(&b"alpha, edited on B"[..])).await;
+
+    // A newer version from A: B fetches it (a downloaded file stays current) into its cache; the placeholder holds an
+    // earlier one, unchanged since: stale, for the host to fill anew.
+    std::fs::write(fa.path().join("docs/a.txt"), b"alpha, then A again").unwrap();
+    ha.rescan(&id).unwrap();
+    // (The file is in the cache a moment before its version is recorded: until then the placeholder still holds the
+    // current content.)
+    until(30, "B has A's version, recorded", || {
+        b.h.od_cache_path(&id, "docs/a.txt").is_ok_and(|p| read(&p).as_deref() == Some(&b"alpha, then A again"[..]))
+            && b.h.od_item_at(&id, "docs/a.txt").ok().flatten().is_some_and(|i| i.content_version != edited.content_version)
+    })
+    .await;
+    assert!(!b.h.od_held_in_place(&id, "docs/a.txt"));
+    assert_eq!(b.h.od_local_change(&id, "docs/a.txt").await.unwrap(), trs_sync_net::LocalChange::Stale);
+    std::fs::remove_file(place.join("docs/a.txt")).unwrap();
+    fill_placeholder(&b.h, &id, &place, "docs/a.txt").await;
+
+    // The user renames it: the host reports it before the placeholder moves; the content stays where it is, once.
+    b.h.od_rename(&id, "docs/a.txt", "docs/b.txt").await.unwrap();
+    assert!(b.h.od_held_in_place(&id, "docs/b.txt") && !b.h.od_cache_path(&id, "docs/b.txt").unwrap().exists());
+    std::fs::rename(place.join("docs/a.txt"), place.join("docs/b.txt")).unwrap();
+    assert_eq!(b.h.od_local_change(&id, "docs/b.txt").await.unwrap(), trs_sync_net::LocalChange::Unchanged);
+    until(30, "A took the rename", || read(&fa.path().join("docs/b.txt")).as_deref() == Some(&b"alpha, then A again"[..])).await;
+
+    // Switched to full: the content comes back from the placeholders (the host let go of them), and the place is the
+    // folder's.
+    b.h.set_on_demand(&id, false, None).await.unwrap();
+    until(30, "B is full at its place", || read(&place.join("docs/b.txt")).as_deref() == Some(&b"alpha, then A again"[..]) && place.join("big.bin").exists()).await;
+    assert!(!place.join("docs/a.txt").exists());
+    assert!(b.h.od_in_place(&id).is_err(), "not on demand any more");
+    ha.shutdown().await;
+    b.h.shutdown().await;
+}
+
+/// The host's change-feed anchor is kept with the folder and goes with it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_hosts_anchor_is_kept_with_the_folder() {
+    let (a, b, _fa, _fb, id) = pair().await;
+    assert_eq!(b.h.od_host_anchor(&id).unwrap(), None);
+    let now = b.h.od_anchor(&id).unwrap();
+    b.h.od_set_host_anchor(&id, now).unwrap();
+    assert_eq!(b.h.od_host_anchor(&id).unwrap(), Some(now));
+    b.h.od_set_host_anchor(&id, u64::MAX).unwrap();
+    assert_eq!(b.h.od_host_anchor(&id).unwrap(), Some(u64::MAX), "all 64 bits");
+    // Only an on-demand folder's.
+    let full: FolderId = a.h.snapshot().folders[0].id.parse().unwrap();
+    assert!(a.h.od_set_host_anchor(&full, 1).is_err());
+    b.h.remove_folder(&id).await.unwrap();
+    assert!(b.h.od_host_anchor(&id).is_err(), "gone with the folder");
+    a.h.shutdown().await;
+    b.h.shutdown().await;
+}
+
+fn not_here_yet(e: &trs_sync_net::SyncError) -> bool {
+    matches!(e, trs_sync_net::SyncError::OnDemand(trs_sync_net::OnDemandError::NotHereYet, _))
+}
+
+/// A fetch says itself when it cannot get further (SPEC §7G.11): a file only an offline device has fails at once past
+/// the grace, its request taken back; one asked for while sessions may be coming up waits, and comes when the device
+/// that has it connects.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_fetch_only_an_offline_device_can_serve_fails_at_once_and_one_waits_while_it_connects() {
+    let (a, b, _fa, _fb, id) = pair().await;
+    let Device { h: ha, _state: state_a } = a;
+    ha.shutdown().await;
+    until(30, "B sees A gone", || b.h.transports().is_empty()).await;
+    b.h.test_fetch_times(Duration::from_millis(300), Duration::from_secs(30));
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    let t = Instant::now();
+    let e = b.h.od_fetch_wait(&id, "docs/a.txt", Duration::from_secs(30)).await.unwrap_err();
+    assert!(not_here_yet(&e), "{e}");
+    assert!(t.elapsed() < Duration::from_secs(3), "at once, not after the wait: {:?}", t.elapsed());
+    until(10, "the request is taken back", || b.h.od_item_at(&id, "docs/a.txt").unwrap().unwrap().state == ItemState::OnlineOnly).await;
+    // Asked again (as a file manager does): the same at once.
+    let t = Instant::now();
+    assert!(not_here_yet(&b.h.od_fetch_wait(&id, "docs/a.txt", Duration::from_secs(30)).await.unwrap_err()));
+    assert!(t.elapsed() < Duration::from_secs(3), "{:?}", t.elapsed());
+
+    // Within the grace (just started, the network changed, a session began) it waits, and A coming up brings it.
+    b.h.test_fetch_times(Duration::from_secs(30), Duration::from_secs(30));
+    let (bh, fid) = (b.h.clone(), id);
+    let fetch = tokio::spawn(async move { bh.od_fetch_wait(&fid, "docs/a.txt", Duration::from_secs(60)).await });
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(!fetch.is_finished(), "waits while devices may be coming up");
+    let ha = crate::chat::start_at(state_a.path(), "Alpha", |_| {}).await;
+    b.h.add_address(&id, SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), ha.port())).unwrap();
+    match fetch.await.unwrap().unwrap() {
+        trs_sync_net::service::FetchWait::Here(f) => assert_eq!(read(&f.path).as_deref(), Some(&b"alpha"[..])),
+        other => panic!("not here: {other:?}"),
+    }
+    ha.shutdown().await;
+    b.h.shutdown().await;
+}
+
+/// A fetch from a connected device that has the file answers how far it is and from whom while it waits, until it is
+/// here; with no grace at all, the connected device alone keeps it going.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_fetch_from_a_connected_device_says_it_is_coming_until_it_is_here() {
+    let (a, b, _fa, _fb, id) = pair().await;
+    b.h.test_fetch_times(Duration::ZERO, Duration::from_secs(30));
+    // Each round of the pull starts late, so the fetch is seen on its way.
+    b.h.test_fetch_wait(Duration::from_millis(300));
+    let mut coming = 0;
+    let end = Instant::now() + Duration::from_secs(60);
+    loop {
+        assert!(Instant::now() < end, "not here after 60 s");
+        match b.h.od_fetch_wait(&id, "big.bin", Duration::from_millis(100)).await.unwrap() {
+            trs_sync_net::service::FetchWait::Here(f) => {
+                assert_eq!(read(&f.path).map(|d| d.len()), Some(2_000_000));
+                break;
+            }
+            trs_sync_net::service::FetchWait::Coming { from, .. } => {
+                assert_eq!(from, ["Alpha"]);
+                coming += 1;
+            }
+        }
+    }
+    assert!(coming > 0, "seen on its way");
+    assert_eq!(b.h.od_item_at(&id, "big.bin").unwrap().unwrap().state, ItemState::Downloaded);
+    a.h.shutdown().await;
+    b.h.shutdown().await;
+}
+
+/// A fetch the connected device that has the file sends nothing of gives up after the stall, its request taken back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_fetch_that_gets_none_of_the_file_gives_up() {
+    let (a, b, _fa, _fb, id) = pair().await;
+    b.h.test_fetch_times(Duration::ZERO, Duration::from_millis(500));
+    // The pull holds back longer than the stall: nothing comes.
+    b.h.test_fetch_wait(Duration::from_secs(3));
+    let t = Instant::now();
+    let e = b.h.od_fetch_wait(&id, "big.bin", Duration::from_secs(30)).await.unwrap_err();
+    assert!(not_here_yet(&e), "{e}");
+    assert!(t.elapsed() < Duration::from_secs(3), "{:?}", t.elapsed());
+    b.h.test_fetch_wait(Duration::ZERO);
+    // (The round under way may still bring it before the request is taken back: either way it is no longer on its way.)
+    until(30, "the request is taken back", || b.h.od_item_at(&id, "big.bin").unwrap().unwrap().state != ItemState::Downloading).await;
+    a.h.shutdown().await;
+    b.h.shutdown().await;
+}
+
+/// `len` bytes no two chunks of which are alike (each chunk is fetched, none found here already).
+fn noise(len: usize, seed: u64) -> Vec<u8> {
+    let mut x = seed | 1;
+    (0..len)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x as u8
+        })
+        .collect()
+}
+
+/// An on-demand device B joined to A's folder holding `slow.bin` (`len` bytes of noise), B's download limited to
+/// `down_kib` KiB/s on the LAN (as `SEEDWELL_QA_LIMIT_LAN` does in a QA run).
+async fn slow_pair(len: usize, down_kib: u32) -> (Device, Device, tempfile::TempDir, tempfile::TempDir, FolderId, Vec<u8>) {
+    let (a, b) = (device("Alpha").await, device("Beta").await);
+    let (fa, fb) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let data = noise(len, 58);
+    std::fs::write(fa.path().join("slow.bin"), &data).unwrap();
+    let st = a.h.add_folder(fa.path().to_path_buf()).await.unwrap();
+    let id: FolderId = st.id.parse().unwrap();
+    b.h.test_limit_lan(true);
+    b.h.set_settings(trs_sync_net::config::Settings { down_kib, ..b.h.settings() }).unwrap();
+    let link = a.h.create_invite(&id, Role::ReadWrite, 1, 1).unwrap().link;
+    b.h.join_folder_on_demand(&link, fb.path().join("Shared")).await.unwrap();
+    b.h.add_address(&id, addr(&a)).unwrap();
+    until(30, "B lists slow.bin", || b.h.od_item_at(&id, "slow.bin").ok().flatten().is_some()).await;
+    (a, b, fa, fb, id, data)
+}
+
+/// A fetch over a slow link (Windows build 58: 3 MB at 500 KB/s): each wait returns within its time while the pull
+/// downloads the file, and how far the file is rises as it comes, chunk by chunk. (Build 58: the second wait took
+/// the folder's core, which the pull holds for the whole file, so it returned only with the file; and the partial file
+/// grew only once the whole window had come.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_slow_fetch_answers_each_wait_in_time_and_shows_how_far_it_is() {
+    const LEN: usize = 1_500_000;
+    // 256 KiB/s: about 6 s for the file.
+    let (a, b, _fa, _fb, id, data) = slow_pair(LEN, 256).await;
+    let wait = Duration::from_millis(250);
+    let mut done = Vec::new();
+    let end = Instant::now() + Duration::from_secs(60);
+    loop {
+        assert!(Instant::now() < end, "not here after 60 s: {done:?}");
+        let t = Instant::now();
+        let got = b.h.od_fetch_wait(&id, "slow.bin", wait).await.unwrap();
+        let took = t.elapsed();
+        // A little slack for a slow test machine; build 58 took the rest of the file (seconds).
+        assert!(took < wait + Duration::from_millis(1500), "a wait of {wait:?} took {took:?} (done so far {done:?})");
+        let p = b.h.od_progress(&id, "slow.bin").unwrap();
+        assert_eq!(p.total, LEN as u64);
+        match got {
+            trs_sync_net::service::FetchWait::Here(f) => {
+                assert!(p.here && p.done == LEN as u64, "{p:?}");
+                assert!(read(&f.path) == Some(data.clone()), "the file is whole and the same");
+                break;
+            }
+            trs_sync_net::service::FetchWait::Coming { .. } => done.push(p.done),
+        }
+    }
+    assert!(done.windows(2).all(|w| w[0] <= w[1]), "never goes back: {done:?}");
+    let partial: std::collections::BTreeSet<u64> = done.iter().copied().filter(|&d| d > 0 && d < LEN as u64).collect();
+    assert!(partial.len() >= 2, "how far it is rises through partial values: {done:?}");
+    a.h.shutdown().await;
+    b.h.shutdown().await;
+}
+
+/// A fetch whose request finds the folder's core busy (a pull round that downloads, minutes on a slow link) still
+/// answers within its wait, and waits on the request without giving up; the request goes in once the core is free. A
+/// cancel meanwhile keeps it from going in.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_fetch_while_the_core_is_busy_answers_in_time_and_asks_once_it_is_free() {
+    let (a, b, _fa, _fb, id) = pair().await;
+    // No grace and a short stall: a request still waiting for the core must not be taken for a fetch that cannot get
+    // further.
+    b.h.test_fetch_times(Duration::ZERO, Duration::from_millis(500));
+    let wait = Duration::from_millis(300);
+    let coming = |r: &trs_sync_net::service::FetchWait| matches!(r, trs_sync_net::service::FetchWait::Coming { .. });
+
+    // Cancelled while its request waits for the core: never asked for.
+    b.h.test_lock_core(&id, Duration::from_secs(2));
+    let t = Instant::now();
+    assert!(coming(&b.h.od_fetch_wait(&id, "docs/a.txt", wait).await.unwrap()));
+    assert!(t.elapsed() < wait + Duration::from_millis(1500), "{:?}", t.elapsed());
+    b.h.od_cancel(&id, "docs/a.txt").await.unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(b.h.od_item_at(&id, "docs/a.txt").unwrap().unwrap().state, ItemState::OnlineOnly, "not asked for after the cancel");
+
+    // The core busy for 3 s: each wait answers in time, none gives up, and the file comes once the core is free.
+    b.h.test_lock_core(&id, Duration::from_secs(3));
+    let end = Instant::now() + Duration::from_secs(30);
+    let mut waits = 0;
+    loop {
+        assert!(Instant::now() < end, "not here after 30 s");
+        let t = Instant::now();
+        let r = b.h.od_fetch_wait(&id, "big.bin", wait).await.unwrap();
+        assert!(t.elapsed() < wait + Duration::from_millis(1500), "{:?}", t.elapsed());
+        waits += 1;
+        if !coming(&r) {
+            break;
+        }
+    }
+    assert!(waits >= 3, "waited while the core was busy: {waits}");
+    assert_eq!(b.h.od_item_at(&id, "big.bin").unwrap().unwrap().state, ItemState::Downloaded);
+    a.h.shutdown().await;
+    b.h.shutdown().await;
+}

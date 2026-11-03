@@ -24,6 +24,9 @@ async fn a_device_joins_through_the_rendezvous_alone_and_a_network_change_writes
     assert_eq!((st.url.as_str(), st.last_error.as_str()), (rv.url().as_str(), ""));
     assert!(st.last_publish_s > 0);
     assert_eq!(rv.count("PUT", "/v1/r/"), 1, "written at once");
+    // The loop's first look (and the same setting again) find the record just written: no second write.
+    a.h.set_rendezvous(&rv.url()).await.unwrap();
+    assert_eq!(rv.count("PUT", "/v1/r/"), 1, "a record moments old is not written again");
 
     // Anna's record there: sealed, signed, her address in it.
     let id = record_id_hex(&a.h.device_id());

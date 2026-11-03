@@ -26,8 +26,9 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = ["s
 # Named pipes for the control connection (`ipc::create_pipe`).
 tokio = { version = "1", default-features = false, features = ["net", "signal"] }
 # Wdk_System_Threading: another process's command line (`running::list`); Win32_Security_Cryptography: DPAPI
-# (`secrets::Dpapi`).
-windows-sys = { version = "0.61", features = ["Wdk_System_Threading", "Win32_Foundation", "Win32_Networking_WinSock", "Win32_Storage_FileSystem", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Cryptography", "Win32_Storage_CloudFilters", "Win32_System_Console", "Win32_System_Com", "Win32_System_Diagnostics_ToolHelp", "Win32_System_JobObjects", "Win32_System_Pipes", "Win32_System_ProcessStatus", "Win32_System_Registry", "Win32_System_Threading", "Win32_System_Time", "Win32_UI_Shell"] }
+# (`secrets::Dpapi`); Win32_System_SystemInformation and Win32_System_LibraryLoader: the PC's CPU and whether it emulates
+# x64 (`players::windows`).
+windows-sys = { version = "0.61", features = ["Wdk_System_Threading", "Win32_Foundation", "Win32_Networking_WinSock", "Win32_Storage_FileSystem", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Cryptography", "Win32_Storage_CloudFilters", "Win32_System_Console", "Win32_System_Com", "Win32_System_Diagnostics_ToolHelp", "Win32_System_JobObjects", "Win32_System_LibraryLoader", "Win32_System_Pipes", "Win32_System_ProcessStatus", "Win32_System_Registry", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_System_Time", "Win32_UI_Shell"] }
 
 [dev-dependencies]
 tempfile = "3"

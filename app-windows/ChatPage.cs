@@ -2,6 +2,7 @@ using Microsoft.UI.Text;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
+using Microsoft.UI.Xaml.Documents;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using uniffi.trs_ffi;
@@ -10,33 +11,50 @@ namespace Seedwell;
 
 /// <summary>
 /// A conversation on Windows (a channel's General, a topic, a private conversation; the Mac's ChatViews), drawn from the
-/// core's <c>chat_page_model</c> (trs-ffi chat_page.rs): the toolbar (the agents tag, Members, Share…, the ⋯ menu), the
-/// message cards (author runs, reply quotes, Markdown, mail banners, JSON, images, file cards, tags, Reply and Tag under
-/// the pointer), the members flyout and the composer (attach, paste and drop, pending sends, the reply line). Every
-/// word, rule and menu is the core's; this reads the page (<c>chat_page_read</c>, which marks it read) on each library
-/// refresh and after every send or command, draws it, and runs the <c>ChatPageCommand</c>s.
+/// core's <c>chat_page_model</c> (trs-ffi chat_page.rs) in the build-49 look: the toolbar (the agents mark, Members,
+/// Share, the ⋯ menu), the messages (a channel's runs as one block with a left edge in their author's colour, a private
+/// conversation's bubbles; who wrote a run on a quiet line under it; reply quotes that jump to the original; Markdown,
+/// mail banners, JSON, images on top with galleries, file cards, tags; the time, Tag and Reply in the row under the
+/// pointer, never moving anything), the members flyout and the composer (one rounded field: the reply bar, attachments,
+/// attach, the text, Send). Every word, rule and menu is the core's; this reads the page (<c>chat_page_read</c>, which
+/// marks it read) on each library refresh and after every send or command, draws it, and runs the
+/// <c>ChatPageCommand</c>s.
 /// </summary>
 sealed class ChatPage
 {
+    /// <summary>A channel's column, and a bubble, at their widest.</summary>
+    const double ColumnMax = 820, BubbleMax = 520;
+    /// <summary>A channel message's left edge, and the padding inside its block.</summary>
+    const double Edge = 2.5, BlockPadX = 12;
+    const string AgentGlyph = "";
+
     readonly App app;
     readonly LibraryPlace place;
     readonly ChatAttachments attachments;
     readonly Grid root = new();
-    readonly StackPanel toolbar = new() { Orientation = Orientation.Horizontal, Spacing = 8, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(20, 0, 20, 6) };
+    readonly StackPanel toolbar = new() { Orientation = Orientation.Horizontal, Spacing = 2, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(20, 0, 20, 6) };
     readonly ScrollViewer scroll = new() { HorizontalScrollMode = ScrollMode.Disabled };
-    readonly StackPanel cards = new() { Padding = new Thickness(20, 0, 20, 12) };
-    readonly StackPanel composer = new() { Spacing = 6, Padding = new Thickness(20, 8, 20, 14) };
+    readonly StackPanel cards = new() { Padding = new Thickness(20, 4, 20, 16) };
+    readonly StackPanel composer = new() { Spacing = 6, Padding = new Thickness(20, 4, 20, 14) };
     // The composer's field lives across redraws, so the caret and what is typed stay.
-    readonly TextBox draft = new() { AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, MaxHeight = 160 };
+    readonly TextBox draft = new() { AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, FontSize = Theme.Body, MaxHeight = 8 * Theme.BodyLine + 12, VerticalAlignment = VerticalAlignment.Center };
+    readonly Border field = new() { CornerRadius = new CornerRadius(Theme.ComposerRadius), BorderThickness = new Thickness(1) };
     readonly Button send = new();
     readonly Flyout membersFlyout = new();
     readonly List<(ChatImageInput Input, ChatImageDraft Draft)> attached = [];
+    // Each message drawn, by id: to jump to it (a reply quote), switch its gallery (an image reference) and show its controls (QA).
+    readonly Dictionary<string, Shown> shown = [];
+    // The image each gallery shows (view state).
+    readonly Dictionary<string, int> galleries = [];
     SyncMember[] members = [];
     ChatPageModel? model;
     string drawn = "";
     string? lastId;
     string? replyTo;
     bool sending;
+    double drawnWidth;
+
+    sealed record Shown(FrameworkElement Item, Action<bool> Hover, Action Light, Action<int> Gallery);
 
     public UIElement Root => root;
 
@@ -52,16 +70,28 @@ sealed class ChatPage
         root.RowDefinitions.Add(new RowDefinition());
         root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         root.Children.Add(toolbar);
-        scroll.Content = cards;
+        // In a grid, which centres the column at its widest (the scroll viewer itself places it by its desired width).
+        scroll.Content = new Grid { Children = { cards } };
         Grid.SetRow(scroll, 1);
         root.Children.Add(scroll);
-        var bottom = new Border { Child = composer, BorderThickness = new Thickness(0, 1, 0, 0), BorderBrush = Res("DividerStrokeColorDefaultBrush") };
-        Grid.SetRow(bottom, 2);
-        root.Children.Add(bottom);
+        Grid.SetRow(composer, 2);
+        root.Children.Add(composer);
+        Plain(draft);
+        RoundSend();
         draft.TextChanged += (_, _) => send.IsEnabled = CanSend();
         draft.PreviewKeyDown += DraftKey;
         draft.Paste += Paste;
+        draft.GotFocus += (_, _) => field.BorderBrush = Theme.Brush(Theme.Accent);
+        draft.LostFocus += (_, _) => field.BorderBrush = Theme.Faint(0.10);
         send.Click += (_, _) => _ = Send();
+        // A wider or narrower window fits the images again.
+        scroll.SizeChanged += (_, _) =>
+        {
+            if (Math.Abs(scroll.ActualWidth - drawnWidth) > 24 && model?.Messages.Any(m => m.Images.Length > 0) == true) Redraw();
+        };
+        root.ActualThemeChanged += (_, _) => Redraw();
+        // The first draw comes before the page has a size: the newest comes into view once it has.
+        root.Loaded += (_, _) => { scroll.UpdateLayout(); scroll.ChangeView(null, scroll.ScrollableHeight, null, true); };
         // Drop: images and files from Explorer become attachments.
         root.AllowDrop = true;
         root.DragOver += (_, e) =>
@@ -74,17 +104,45 @@ sealed class ChatPage
         root.Drop += async (_, e) =>
         {
             if (!e.DataView.Contains(Windows.ApplicationModel.DataTransfer.StandardDataFormats.StorageItems)) return;
-            foreach (var item in await e.DataView.GetStorageItemsAsync())
-            {
-                if (item is Windows.Storage.StorageFile f) Attach(new ChatImageInput(f.Name, f.Path, null));
-            }
+            // Dropped onto the field's text: the images' references go where they land (the core places them).
+            var point = e.GetPosition(draft);
+            uint? at = draft.Text.Length > 0 && point.X >= 0 && point.Y >= 0 && point.X <= draft.ActualWidth && point.Y <= draft.ActualHeight
+                ? IndexAt(draft, point) : null;
+            var inputs = (await e.DataView.GetStorageItemsAsync()).OfType<Windows.Storage.StorageFile>().Select(f => new ChatImageInput(f.Name, f.Path, null)).ToList();
+            await AttachDropped(inputs, at);
         };
         Update();
     }
 
-    static Brush Res(string key) => (Brush)Application.Current.Resources[key];
+    /// <summary>The text field without a box of its own: the composer's rounded field is its box.</summary>
+    static void Plain(TextBox box)
+    {
+        var none = new SolidColorBrush(Microsoft.UI.Colors.Transparent);
+        foreach (var state in new[] { "", "PointerOver", "Focused", "Disabled" })
+        {
+            box.Resources["TextControlBackground" + state] = none;
+            box.Resources["TextControlBorderBrush" + state] = none;
+        }
+        box.Resources["TextControlBorderThemeThickness"] = new Thickness(0);
+        box.Resources["TextControlBorderThemeThicknessFocused"] = new Thickness(0);
+    }
 
-    static TextBlock Faint(string text, double size = 12) => new() { Text = text, FontSize = size, Foreground = Res("TextFillColorSecondaryBrush"), TextWrapping = TextWrapping.Wrap };
+    /// <summary>Send: a filled arrow-up circle, the accent when it can send and grey when not; its title is its name.</summary>
+    void RoundSend()
+    {
+        send.Width = send.Height = 28;
+        send.Padding = new Thickness(0);
+        send.CornerRadius = new CornerRadius(14);
+        send.VerticalAlignment = VerticalAlignment.Bottom;
+        send.Margin = new Thickness(0, 0, 0, 4);
+        send.Content = new FontIcon { Glyph = "", FontSize = 13 };
+        // The accent button: the accent while it can send, the system's grey while it cannot.
+        send.Style = (Style)Application.Current.Resources["AccentButtonStyle"];
+    }
+
+    static Brush Res(string key) => Theme.Res(key);
+
+    static TextBlock Faint(string text, double size = Theme.Secondary) => new() { Text = text, FontSize = size, Foreground = Res("TextFillColorSecondaryBrush"), TextWrapping = TextWrapping.Wrap };
 
     SyncChannel? Channel => place is LibraryPlace.Chat c ? app.Core.ChatChannels().FirstOrDefault(x => x.Id == c.ChannelId) : null;
 
@@ -144,13 +202,28 @@ sealed class ChatPage
 
     // ------------------------------------------------------------------------------------------------ drawing
 
+    bool Dark => root.ActualTheme == ElementTheme.Dark;
+
+    double Scale => root.XamlRoot?.RasterizationScale ?? 1;
+
+    /// <summary>The width of the column the messages stand in: a channel's at most 820, a private conversation's the page's.</summary>
+    double ColumnWidth(bool bubbles)
+    {
+        var page = Math.Max(280, (scroll.ActualWidth > 0 ? scroll.ActualWidth : 900) - 40);
+        return bubbles ? page : Math.Min(ColumnMax, page);
+    }
+
     void Draw(ChatPageModel m)
     {
         DrawToolbar(m.Toolbar);
         cards.Children.Clear();
+        shown.Clear();
+        drawnWidth = scroll.ActualWidth;
+        // A channel's column is centred; the composer stands under it.
+        cards.MaxWidth = composer.MaxWidth = m.Bubbles ? double.PositiveInfinity : ColumnMax + 40;
         if (m.Empty is string empty)
         {
-            var e = Faint(empty, 13);
+            var e = Faint(empty, Theme.Body);
             e.HorizontalAlignment = HorizontalAlignment.Center;
             e.Margin = new Thickness(0, 40, 0, 0);
             cards.Children.Add(e);
@@ -158,9 +231,9 @@ sealed class ChatPage
         bool first = true;
         foreach (var card in m.Messages)
         {
-            var c = Card(card);
-            // 10 points above a run's first card, 4 above the others.
-            c.Margin = new Thickness(0, first ? 4 : card.Author is null ? 4 : 10, 0, 0);
+            var c = m.Bubbles ? Bubble(card) : Block(card);
+            // Apart above a run's first message; a run's messages touch (a little air between bubbles).
+            c.Margin = new Thickness(0, first ? 4 : card.StartsRun ? Theme.RunGap : m.Bubbles ? 2 : Theme.InRunGap, 0, 0);
             first = false;
             cards.Children.Add(c);
         }
@@ -185,26 +258,376 @@ sealed class ChatPage
         toolbar.Children.Clear();
         if (t.Tag is SidebarTag tag)
         {
-            var capsule = new Border { CornerRadius = new CornerRadius(8), Padding = new Thickness(7, 1, 7, 2), Background = Res("SubtleFillColorSecondaryBrush"), VerticalAlignment = VerticalAlignment.Center, Child = new TextBlock { Text = tag.Text, FontSize = 11, Foreground = Res("TextFillColorSecondaryBrush") } };
-            Help(capsule, tag.Help);
-            toolbar.Children.Add(capsule);
+            // The agents mark: the agent symbol, the tag's help as its tooltip.
+            var mark = new FontIcon { Glyph = AgentGlyph, FontSize = 15, Margin = new Thickness(6, 0, 6, 0), VerticalAlignment = VerticalAlignment.Center, Foreground = Res("TextFillColorSecondaryBrush") };
+            Help(mark, tag.Help);
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(mark, tag.Text);
+            toolbar.Children.Add(mark);
         }
         if (t.Members is ChatPageButton members)
         {
-            var b = PageButton(members);
+            var b = ToolbarButton("", members);
             FlyoutBase.SetAttachedFlyout(b, membersFlyout);
             toolbar.Children.Add(b);
         }
         if (t.Share is ChatPageButton share)
         {
-            toolbar.Children.Add(PageButton(share));
+            toolbar.Children.Add(ToolbarButton("", share));
         }
-        var more = new DropDownButton { Content = new FontIcon { Glyph = "", FontSize = 14 }, Flyout = Menu(t.Menu.Entries) };
+        var more = Glyph("", 15, new Thickness(8, 6, 8, 6));
+        more.Flyout = Menu(t.Menu.Entries);
         Help(more, t.Menu.Help);
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(more, t.Menu.Help);
         toolbar.Children.Add(more);
     }
 
+    /// <summary>A toolbar symbol: its help is its tooltip, its title its accessibility name.</summary>
+    Button ToolbarButton(string glyph, ChatPageButton b)
+    {
+        var button = Glyph(glyph, 15, new Thickness(8, 6, 8, 6));
+        Help(button, b.Help.Length > 0 ? b.Help : b.Title);
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(button, b.AccessibilityLabel ?? b.Title);
+        button.Click += (_, _) => Press(b);
+        return button;
+    }
+
+    /// <summary>A symbol on no background (the toolbar's, the hover row's, the composer's).</summary>
+    static Button Glyph(string glyph, double size, Thickness padding, Brush? ink = null) => new()
+    {
+        Content = new FontIcon { Glyph = glyph, FontSize = size, Foreground = ink ?? Res("TextFillColorSecondaryBrush") },
+        Padding = padding,
+        MinWidth = 0,
+        MinHeight = 0,
+        VerticalAlignment = VerticalAlignment.Center,
+        Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent),
+        BorderThickness = new Thickness(0),
+    };
+
+    /// <summary>The colour of a message's edge, and of a quote's: the accent, the muted accent, or the person's.</summary>
+    Windows.UI.Color EdgeColor(ChatAuthorKind who, uint? palette) => who switch
+    {
+        ChatAuthorKind.Mine => Theme.Accent,
+        ChatAuthorKind.OurAgent => Theme.MutedAccent,
+        _ => Theme.Person(palette ?? 0, who == ChatAuthorKind.TheirAgent, Dark),
+    };
+
+    /// <summary>
+    /// A channel's message: a block with its author's left edge (the user's tinted with the accent), the run's ends
+    /// rounded; under a run's last message its meta line with the controls at the right end (kept while hidden); inside a
+    /// run the controls float over the boundary to the next message.
+    /// </summary>
+    FrameworkElement Block(ChatMessageCard c)
+    {
+        var last = c.Meta is not null;
+        var mine = c.Who == ChatAuthorKind.Mine;
+        var ink = new MarkdownInk(OpenLink, i => ShowImage(c.Id, (int)i));
+        var content = new StackPanel { Spacing = 6 };
+        if (c.ReplyQuote is ChatQuote q) content.Children.Add(Quote(q, false));
+        var gallery = AddImages(content, c, ColumnWidth(false) - Edge - 2 * BlockPadX, HorizontalAlignment.Center);
+        if (Body(c.Body, ink) is UIElement body) content.Children.Add(body);
+        if (c.Files.Length > 0) content.Children.Add(attachments.Files(c.Place, c.Files, Redraw));
+        if (Tags(c) is UIElement tags) content.Children.Add(tags);
+        var top = c.StartsRun ? 6 : 0;
+        var bottom = last ? 6 : 0;
+        Brush rest = mine ? Theme.Brush(Theme.Accent, 0.07) : new SolidColorBrush(Microsoft.UI.Colors.Transparent);
+        Brush hover = mine ? Theme.Brush(Theme.Accent, 0.11) : Theme.Faint(0.045);
+        var block = new Border
+        {
+            Child = content,
+            Padding = new Thickness(BlockPadX, 7, BlockPadX, 7),
+            BorderThickness = new Thickness(Edge, 0, 0, 0),
+            BorderBrush = Theme.Brush(EdgeColor(c.Who, c.Palette)),
+            CornerRadius = new CornerRadius(top, top, bottom, bottom),
+            Background = rest,
+        };
+        var pill = Controls(c);
+        var item = new Grid();
+        item.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        item.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        var cell = new Grid();
+        cell.Children.Add(block);
+        item.Children.Add(cell);
+        pill.HorizontalAlignment = HorizontalAlignment.Right;
+        if (c.Meta is ChatMessageMeta meta)
+        {
+            var row = new Grid { Margin = new Thickness(Edge + BlockPadX, 4, 0, 0), MinHeight = 18 };
+            row.Children.Add(Meta(meta, c.Who));
+            pill.VerticalAlignment = VerticalAlignment.Center;
+            row.Children.Add(pill);
+            Grid.SetRow(row, 1);
+            item.Children.Add(row);
+        }
+        else
+        {
+            // Over the boundary to the next message, centred on it; it never pushes the next one down.
+            pill.VerticalAlignment = VerticalAlignment.Bottom;
+            pill.Margin = new Thickness(0, 0, 8, 0);
+            pill.RenderTransform = new TranslateTransform { Y = 10 };
+            cell.Children.Add(pill);
+        }
+        void Hover(bool on)
+        {
+            pill.Opacity = on ? 1 : 0;
+            block.Background = on ? hover : rest;
+            Canvas.SetZIndex(item, on ? 1 : 0);
+        }
+        item.PointerEntered += (_, _) => Hover(true);
+        item.PointerExited += (_, _) => Hover(false);
+        shown[c.Id] = new Shown(item, Hover, () => Light(block, rest), gallery);
+        return item;
+    }
+
+    /// <summary>
+    /// A private conversation's message: a bubble (the user's on the right in the accent, their agents' in the muted
+    /// accent, the other person's on the left in grey); images above it and file cards under it, outside it, on its
+    /// side (an image- or file-only message has no bubble); the meta line under the run's last bubble with the controls
+    /// beside it on the side away from the edge; inside a run the controls hang under the bubble's far end.
+    /// </summary>
+    FrameworkElement Bubble(ChatMessageCard c)
+    {
+        var right = c.Who is ChatAuthorKind.Mine or ChatAuthorKind.OurAgent;
+        var side = right ? HorizontalAlignment.Right : HorizontalAlignment.Left;
+        var ink = new MarkdownInk(OpenLink, i => ShowImage(c.Id, (int)i), OnAccent: right);
+        var stack = new StackPanel { Spacing = 4, HorizontalAlignment = side };
+        var gallery = AddImages(stack, c, Math.Min(BubbleMax, ColumnWidth(true)), side);
+        var text = new StackPanel { Spacing = 6 };
+        if (c.ReplyQuote is ChatQuote q) text.Children.Add(Quote(q, right));
+        if (Body(c.Body, ink) is UIElement body) text.Children.Add(body);
+        Border? bubble = null;
+        Brush rest = new SolidColorBrush(Microsoft.UI.Colors.Transparent);
+        if (text.Children.Count > 0)
+        {
+            rest = c.Who switch
+            {
+                ChatAuthorKind.Mine => Theme.Brush(Theme.Accent),
+                ChatAuthorKind.OurAgent => Theme.Brush(Theme.MutedAccent),
+                _ => Theme.Faint(0.08),
+            };
+            bubble = new Border { Child = text, Padding = new Thickness(12, 7, 12, 7), CornerRadius = new CornerRadius(Theme.BubbleRadius), Background = rest, MaxWidth = BubbleMax, HorizontalAlignment = side };
+            stack.Children.Add(bubble);
+        }
+        if (c.Files.Length > 0)
+        {
+            var files = attachments.Files(c.Place, c.Files, Redraw);
+            files.HorizontalAlignment = side;
+            stack.Children.Add(files);
+        }
+        if (Tags(c) is FrameworkElement tags)
+        {
+            tags.HorizontalAlignment = side;
+            stack.Children.Add(tags);
+        }
+        var pill = Controls(c);
+        var item = new Grid();
+        item.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        item.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        var cell = new Grid { HorizontalAlignment = side };
+        cell.Children.Add(stack);
+        item.Children.Add(cell);
+        if (c.Meta is ChatMessageMeta meta)
+        {
+            var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, HorizontalAlignment = side, Margin = new Thickness(6, 4, 6, 0), MinHeight = 18 };
+            var line = Meta(meta, c.Who);
+            if (right) { row.Children.Add(pill); row.Children.Add(line); }
+            else { row.Children.Add(line); row.Children.Add(pill); }
+            Grid.SetRow(row, 1);
+            item.Children.Add(row);
+        }
+        else
+        {
+            pill.HorizontalAlignment = right ? HorizontalAlignment.Left : HorizontalAlignment.Right;
+            pill.VerticalAlignment = VerticalAlignment.Bottom;
+            pill.RenderTransform = new TranslateTransform { X = right ? -8 : 8, Y = 12 };
+            cell.Children.Add(pill);
+        }
+        void Hover(bool on)
+        {
+            pill.Opacity = on ? 1 : 0;
+            Canvas.SetZIndex(item, on ? 1 : 0);
+        }
+        item.PointerEntered += (_, _) => Hover(true);
+        item.PointerExited += (_, _) => Hover(false);
+        shown[c.Id] = new Shown(item, Hover, () => { if (bubble is not null) Light(bubble, rest); }, gallery);
+        return item;
+    }
+
+    /// <summary>A message's images at its top (one, or a gallery); returns what switches its gallery.</summary>
+    Action<int> AddImages(Panel into, ChatMessageCard c, double maxWidth, HorizontalAlignment side)
+    {
+        if (c.Images.Length == 0) return _ => { };
+        var id = c.Id;
+        var (view, show) = attachments.Images(c.Place, c.Images, c.Gallery, Math.Max(120, maxWidth), Scale, side,
+            galleries.GetValueOrDefault(id), i => galleries[id] = i, Redraw);
+        into.Children.Add(view);
+        return show;
+    }
+
+    /// <summary>Lights a message for a moment (a reply quote jumped to it): the accent at 16 % behind it, about 1.4 s.</summary>
+    void Light(Border target, Brush rest)
+    {
+        target.Background = Theme.Brush(Theme.Accent, 0.16);
+        var timer = root.DispatcherQueue.CreateTimer();
+        timer.Interval = TimeSpan.FromSeconds(1.4);
+        timer.IsRepeating = false;
+        timer.Tick += (_, _) => target.Background = rest;
+        timer.Start();
+    }
+
+    /// <summary>The message's body: Markdown, a mail (its banner over its text), JSON, or what cannot be shown.</summary>
+    UIElement? Body(ChatMessageBody b, MarkdownInk ink)
+    {
+        switch (b)
+        {
+            case ChatMessageBody.Markdown md when md.Blocks.Length > 0:
+                return ChatMarkdown.Blocks(md.Blocks, ink);
+            case ChatMessageBody.Mail mail:
+                var s = new StackPanel { Spacing = 6 };
+                s.Children.Add(Banner(mail.Banner));
+                if (mail.Blocks.Length > 0) s.Children.Add(ChatMarkdown.Blocks(mail.Blocks, ink));
+                return s;
+            case ChatMessageBody.Json json:
+                var j = new TextBlock { Text = json.Text, FontFamily = Theme.MonoFont, FontSize = Theme.Mono, IsTextSelectionEnabled = true, TextWrapping = TextWrapping.Wrap };
+                if (ink.OnAccent) j.Foreground = new SolidColorBrush(Microsoft.UI.Colors.White);
+                return new Border { Child = j, Padding = new Thickness(10, 6, 10, 6), CornerRadius = new CornerRadius(Theme.CodeRadius), Background = Res("SubtleFillColorSecondaryBrush"), HorizontalAlignment = HorizontalAlignment.Left };
+            case ChatMessageBody.Unsupported u:
+                return Faint(u.Text);
+            default:
+                return null;
+        }
+    }
+
+    /// <summary>Its tags by owner, one quiet line.</summary>
+    static FrameworkElement? Tags(ChatMessageCard c)
+    {
+        if (c.Tags.Length == 0) return null;
+        var tags = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10 };
+        foreach (var t in c.Tags)
+        {
+            var one = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4 };
+            one.Children.Add(new FontIcon { Glyph = t.Seen ? "" : "", FontSize = 10, Foreground = Res("TextFillColorTertiaryBrush") });
+            one.Children.Add(new TextBlock { Text = t.Text, FontSize = Theme.Caption, Foreground = Res("TextFillColorTertiaryBrush") });
+            tags.Children.Add(one);
+        }
+        return tags;
+    }
+
+    /// <summary>
+    /// A reply quote: an inset block with the quoted author's edge (white for the user's own on an accent bubble), the
+    /// name and one line of the text; a click scrolls the original to the middle and lights it.
+    /// </summary>
+    FrameworkElement Quote(ChatQuote q, bool onAccent)
+    {
+        var white = Microsoft.UI.Colors.White;
+        var edge = onAccent && q.Who == ChatAuthorKind.Mine ? white : EdgeColor(q.Who, q.Palette);
+        var g = new Grid
+        {
+            ColumnSpacing = 8,
+            Padding = new Thickness(8, 5, 10, 5),
+            CornerRadius = new CornerRadius(Theme.ChipRadius),
+            Background = onAccent ? Theme.Brush(white, 0.16) : Theme.Faint(0.05),
+            HorizontalAlignment = HorizontalAlignment.Left,
+        };
+        g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        g.ColumnDefinitions.Add(new ColumnDefinition());
+        g.Children.Add(new Microsoft.UI.Xaml.Shapes.Rectangle { Width = Edge, RadiusX = 1.25, RadiusY = 1.25, Fill = Theme.Brush(edge) });
+        var s = new StackPanel();
+        s.Children.Add(new TextBlock { Text = q.Title, FontSize = Theme.Caption, Foreground = onAccent ? Theme.Brush(white, 0.85) : Res("TextFillColorSecondaryBrush") });
+        s.Children.Add(new TextBlock { Text = q.Text, FontSize = Theme.Caption, MaxLines = 1, TextTrimming = TextTrimming.CharacterEllipsis, Foreground = onAccent ? Theme.Brush(white) : Res("TextFillColorPrimaryBrush") });
+        Grid.SetColumn(s, 1);
+        g.Children.Add(s);
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(g, $"{q.Title}: {q.Text}");
+        g.Tapped += (_, e) => { e.Handled = true; JumpTo(q.MessageId); };
+        return g;
+    }
+
+    /// <summary>Scrolls a message to the middle and lights it (a reply quote's click).</summary>
+    internal bool JumpTo(string id)
+    {
+        if (!shown.TryGetValue(id, out var s)) return false;
+        var y = s.Item.TransformToVisual(cards).TransformPoint(new Windows.Foundation.Point(0, 0)).Y;
+        scroll.ChangeView(null, Math.Max(0, y + s.Item.ActualHeight / 2 - scroll.ViewportHeight / 2), null, Quiet.On);
+        s.Light();
+        AppLog.Write("chat quote: jumped to the original");
+        return true;
+    }
+
+    /// <summary>An image reference's chip: the message's gallery shows that image, and the message's top comes into view.</summary>
+    void ShowImage(string id, int index)
+    {
+        galleries[id] = index;
+        if (!shown.TryGetValue(id, out var s)) return;
+        s.Gallery(index);
+        var y = s.Item.TransformToVisual(cards).TransformPoint(new Windows.Foundation.Point(0, 0)).Y;
+        if (y < scroll.VerticalOffset || y > scroll.VerticalOffset + scroll.ViewportHeight - 40)
+        {
+            scroll.ChangeView(null, Math.Max(0, y - 8), null, Quiet.On);
+        }
+    }
+
+    /// <summary>
+    /// Who wrote a run, one quiet line under it: a round initial (another person), the same circle with the agent symbol
+    /// (another person's agent) or the bare agent symbol (your agent), then the name and the detail; its tooltip the core's.
+    /// </summary>
+    static FrameworkElement Meta(ChatMessageMeta m, ChatAuthorKind who)
+    {
+        var tertiary = Res("TextFillColorTertiaryBrush");
+        var s = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 5, VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Left };
+        Border Circle(UIElement inner) => new() { Width = 13, Height = 13, CornerRadius = new CornerRadius(6.5), BorderThickness = new Thickness(1), BorderBrush = tertiary, Child = inner, VerticalAlignment = VerticalAlignment.Center };
+        switch (who)
+        {
+            case ChatAuthorKind.Theirs:
+                s.Children.Add(Circle(new TextBlock { Text = m.Initial, FontSize = 7.5, FontWeight = FontWeights.SemiBold, Foreground = tertiary, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center }));
+                break;
+            case ChatAuthorKind.TheirAgent:
+                s.Children.Add(Circle(new FontIcon { Glyph = AgentGlyph, FontSize = 7, Foreground = tertiary }));
+                break;
+            case ChatAuthorKind.OurAgent:
+                s.Children.Add(new FontIcon { Glyph = AgentGlyph, FontSize = 11, Foreground = tertiary, VerticalAlignment = VerticalAlignment.Center });
+                break;
+        }
+        var line = new TextBlock { FontSize = Theme.Caption, Foreground = tertiary, VerticalAlignment = VerticalAlignment.Center, TextTrimming = TextTrimming.CharacterEllipsis };
+        line.Inlines.Add(new Run { Text = m.Name });
+        if (m.Detail.Length > 0) line.Inlines.Add(new Run { Text = " · " + m.Detail });
+        s.Children.Add(line);
+        Help(s, m.Help);
+        return s;
+    }
+
+    /// <summary>The time, Tag (its menu) and Reply, small and quiet on a faint capsule, hidden until the pointer is on the message.</summary>
+    Border Controls(ChatMessageCard c)
+    {
+        var s = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 0, VerticalAlignment = VerticalAlignment.Center };
+        s.Children.Add(new TextBlock { Text = c.Time, FontSize = Theme.Caption, Foreground = Res("TextFillColorTertiaryBrush"), VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(6, 0, 4, 1) });
+        if (c.TagMenu is ChatPageMenu tagMenu)
+        {
+            var tag = Glyph("", 11, new Thickness(5, 3, 5, 3));
+            tag.Flyout = Menu(tagMenu.Entries);
+            Help(tag, tagMenu.Help);
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(tag, tagMenu.Help);
+            s.Children.Add(tag);
+        }
+        if (c.Reply is ChatPageButton reply)
+        {
+            var b = Glyph("", 11, new Thickness(5, 3, 5, 3));
+            Help(b, reply.Help.Length > 0 ? reply.Help : reply.Title);
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(b, reply.AccessibilityLabel ?? reply.Title);
+            b.Click += (_, _) => Press(reply);
+            s.Children.Add(b);
+        }
+        return new Border
+        {
+            Child = s,
+            Height = 22,
+            Padding = new Thickness(2, 0, 2, 0),
+            CornerRadius = new CornerRadius(11),
+            Background = Res("SolidBackgroundFillColorSecondaryBrush"),
+            BorderBrush = Res("CardStrokeColorDefaultBrush"),
+            BorderThickness = new Thickness(1),
+            Opacity = 0,
+        };
+    }
+
+    /// <summary>A text button of the page (a gone device's Remove from Channel…).</summary>
     Button PageButton(ChatPageButton b)
     {
         var button = new Button { Content = b.Title, VerticalAlignment = VerticalAlignment.Center };
@@ -222,88 +645,6 @@ sealed class ChatPage
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(button, b.AccessibilityLabel ?? b.Title);
         button.Click += (_, _) => Press(b);
         return button;
-    }
-
-    FrameworkElement Card(ChatMessageCard c)
-    {
-        var s = new StackPanel { Spacing = 3 };
-        if (c.Author is ChatMessageAuthor a)
-        {
-            var line = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
-            line.Children.Add(new TextBlock { Text = a.Name, FontSize = 13, FontWeight = FontWeights.SemiBold, VerticalAlignment = VerticalAlignment.Center });
-            if (a.Badge is SidebarTag badge)
-            {
-                var capsule = new Border { CornerRadius = new CornerRadius(7), Padding = new Thickness(6, 0, 6, 1), Background = Res("SubtleFillColorTertiaryBrush"), VerticalAlignment = VerticalAlignment.Center, Child = new TextBlock { Text = badge.Text, FontSize = 10.5, Foreground = Res("TextFillColorSecondaryBrush") } };
-                Help(capsule, badge.Help);
-                line.Children.Add(capsule);
-            }
-            if (a.Computer is string computer)
-            {
-                line.Children.Add(new FontIcon { Glyph = "", FontSize = 10, Foreground = Res("TextFillColorSecondaryBrush"), VerticalAlignment = VerticalAlignment.Center });
-                line.Children.Add(new TextBlock { Text = computer, FontSize = 11.5, Foreground = Res("TextFillColorSecondaryBrush"), VerticalAlignment = VerticalAlignment.Center });
-            }
-            line.Children.Add(new TextBlock { Text = a.Time, FontSize = 11.5, Foreground = Res("TextFillColorSecondaryBrush"), VerticalAlignment = VerticalAlignment.Center });
-            s.Children.Add(line);
-        }
-        if (c.ReplyQuote is string quote)
-        {
-            s.Children.Add(new TextBlock { Text = quote, FontSize = 12, Foreground = Res("TextFillColorSecondaryBrush"), TextTrimming = TextTrimming.CharacterEllipsis });
-        }
-        switch (c.Body)
-        {
-            case ChatMessageBody.Markdown md when md.Blocks.Length > 0:
-                s.Children.Add(ChatMarkdown.Blocks(md.Blocks, OpenLink));
-                break;
-            case ChatMessageBody.Mail mail:
-                s.Children.Add(Banner(mail.Banner));
-                if (mail.Blocks.Length > 0) s.Children.Add(ChatMarkdown.Blocks(mail.Blocks, OpenLink));
-                break;
-            case ChatMessageBody.Json json:
-                s.Children.Add(new TextBlock { Text = json.Text, FontFamily = new FontFamily("Consolas"), FontSize = 12, IsTextSelectionEnabled = true, TextWrapping = TextWrapping.Wrap });
-                break;
-            case ChatMessageBody.Unsupported u:
-                s.Children.Add(Faint(u.Text));
-                break;
-        }
-        if (c.Images.Length > 0) s.Children.Add(attachments.Images(c.Place, c.Images, Redraw));
-        if (c.Files.Length > 0) s.Children.Add(attachments.Files(c.Place, c.Files, Redraw));
-        if (c.Tags.Length > 0)
-        {
-            var tags = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10 };
-            foreach (var t in c.Tags)
-            {
-                var one = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4 };
-                one.Children.Add(new FontIcon { Glyph = t.Seen ? "" : "", FontSize = 10, Foreground = Res("TextFillColorSecondaryBrush") });
-                one.Children.Add(new TextBlock { Text = t.Text, FontSize = 11.5, Foreground = Res("TextFillColorSecondaryBrush") });
-                tags.Children.Add(one);
-            }
-            s.Children.Add(tags);
-        }
-        // Reply and Tag, shown while the pointer is on the card.
-        var hover = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 2, HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Top, Opacity = 0 };
-        if (c.TagMenu is ChatPageMenu tagMenu)
-        {
-            var tag = new DropDownButton { Content = new FontIcon { Glyph = "", FontSize = 12 }, Padding = new Thickness(6, 4, 6, 4), Flyout = Menu(tagMenu.Entries) };
-            Help(tag, tagMenu.Help);
-            hover.Children.Add(tag);
-        }
-        if (c.Reply is ChatPageButton reply)
-        {
-            hover.Children.Add(Symbol("", reply));
-        }
-        var g = new Grid();
-        g.Children.Add(s);
-        g.Children.Add(hover);
-        var border = new Border { Child = g, CornerRadius = new CornerRadius(10), Padding = new Thickness(12, 8, 12, 8) };
-        // Mine: tinted with the accent colour (a brush of its own; the theme's is shared).
-        border.Background = c.Mine
-            ? new SolidColorBrush(((SolidColorBrush)Res("AccentFillColorDefaultBrush")).Color) { Opacity = 0.14 }
-            : new SolidColorBrush(Microsoft.UI.Colors.Transparent);
-        if (c.Id == replyTo) border.BorderBrush = Res("AccentFillColorDefaultBrush");
-        if (c.Id == replyTo) border.BorderThickness = new Thickness(1);
-        border.PointerEntered += (_, _) => hover.Opacity = 1;
-        border.PointerExited += (_, _) => hover.Opacity = 0;
-        return border;
     }
 
     UIElement Banner(ChatMailBanner b)
@@ -351,6 +692,10 @@ sealed class ChatPage
         _ => Windows.UI.Color.FromArgb(255, 0x6E, 0x6E, 0x6E),
     };
 
+    /// <summary>
+    /// The composer: the pending sends over one rounded field (a faint fill, the accent border while it has focus) that
+    /// holds the reply bar, the attachments, then attach, the text and Send; tooltips only, no captions.
+    /// </summary>
     void DrawComposer(ChatComposer c)
     {
         (draft.Parent as Panel)?.Children.Remove(draft);
@@ -358,40 +703,38 @@ sealed class ChatPage
         composer.Children.Clear();
         if (!c.CanPost)
         {
-            composer.Children.Add(Faint(c.CannotPost ?? ""));
+            var cannot = Faint(c.CannotPost ?? "");
+            cannot.HorizontalAlignment = HorizontalAlignment.Center;
+            cannot.Margin = new Thickness(0, 6, 0, 4);
+            composer.Children.Add(cannot);
             return;
         }
         var place = model?.Place ?? "";
         if (c.Pending.Length > 0) composer.Children.Add(attachments.Pending(place, c.Pending, Redraw));
+        var inside = new StackPanel();
         if (replyTo is string id && model?.Messages.FirstOrDefault(m => m.Id == id) is ChatMessageCard replying)
         {
-            var line = new Grid { ColumnSpacing = 6 };
-            line.ColumnDefinitions.Add(new ColumnDefinition());
-            line.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            line.Children.Add(Faint(replying.Replying));
-            var close = new Button { Content = new FontIcon { Glyph = "", FontSize = 10 }, Padding = new Thickness(4), Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent), BorderThickness = new Thickness(0) };
-            Help(close, c.ReplyCancelHelp);
-            close.Click += (_, _) => { replyTo = null; Redraw(); };
-            Grid.SetColumn(close, 1);
-            line.Children.Add(close);
-            composer.Children.Add(line);
+            inside.Children.Add(ReplyBar(replying.Replying, c.ReplyCancelHelp));
         }
         if (attached.Count > 0)
         {
             var chips = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
-            foreach (var a in attached.ToArray())
+            for (int n = 0; n < attached.Count; n++)
             {
-                chips.Children.Add(attachments.Draft(a.Draft, () => { attached.Remove(a); Redraw(); }));
+                var at = n;
+                chips.Children.Add(attachments.Draft(attached[n].Draft, () => RemoveAttached(at)));
             }
-            composer.Children.Add(new ScrollViewer { Content = chips, HorizontalScrollBarVisibility = ScrollBarVisibility.Auto, VerticalScrollBarVisibility = ScrollBarVisibility.Disabled, HorizontalScrollMode = ScrollMode.Auto });
+            inside.Children.Add(new ScrollViewer { Content = chips, Padding = new Thickness(10, 8, 10, 0), HorizontalScrollBarVisibility = ScrollBarVisibility.Auto, VerticalScrollBarVisibility = ScrollBarVisibility.Disabled, HorizontalScrollMode = ScrollMode.Auto });
         }
-        var row = new Grid { ColumnSpacing = 8 };
+        var row = new Grid { ColumnSpacing = 2, Padding = new Thickness(4, 0, 6, 0) };
         row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         row.ColumnDefinitions.Add(new ColumnDefinition());
         row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         if (c.Attach)
         {
-            var attach = new Button { Content = new FontIcon { Glyph = "", FontSize = 14 }, VerticalAlignment = VerticalAlignment.Bottom };
+            var attach = Glyph("", 15, new Thickness(8, 7, 6, 7));
+            attach.VerticalAlignment = VerticalAlignment.Bottom;
+            attach.Margin = new Thickness(0, 0, 0, 2);
             Help(attach, attachments.Texts.AttachHelp);
             Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(attach, attachments.Texts.Attach);
             attach.Click += (_, _) => PickAttachments();
@@ -401,14 +744,57 @@ sealed class ChatPage
         draft.IsEnabled = !sending;
         Grid.SetColumn(draft, 1);
         row.Children.Add(draft);
-        send.Content = c.SendTitle;
-        send.Style = (Style)Application.Current.Resources["AccentButtonStyle"];
-        send.VerticalAlignment = VerticalAlignment.Bottom;
         send.IsEnabled = CanSend();
         Help(send, c.SendHelp);
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(send, c.SendTitle);
         Grid.SetColumn(send, 2);
         row.Children.Add(send);
-        composer.Children.Add(row);
+        inside.Children.Add(row);
+        field.Child = inside;
+        field.Background = Theme.Faint(0.045);
+        field.BorderBrush = draft.FocusState != FocusState.Unfocused ? Theme.Brush(Theme.Accent) : Theme.Faint(0.10);
+        composer.Children.Add(field);
+    }
+
+    /// <summary>The reply being written, docked on top of the field: the accent bar, "Replying to Kari", one line of it, and ×.</summary>
+    UIElement ReplyBar(ChatQuote q, string cancelHelp)
+    {
+        var g = new Grid { ColumnSpacing = 8, Padding = new Thickness(12, 8, 6, 2) };
+        g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        g.ColumnDefinitions.Add(new ColumnDefinition());
+        g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        g.Children.Add(new Microsoft.UI.Xaml.Shapes.Rectangle { Width = 3, RadiusX = 1.5, RadiusY = 1.5, Fill = Theme.Brush(Theme.Accent) });
+        var s = new StackPanel();
+        s.Children.Add(new TextBlock { Text = q.Title, FontSize = Theme.Caption, FontWeight = FontWeights.SemiBold, Foreground = Res("AccentTextFillColorPrimaryBrush") });
+        s.Children.Add(new TextBlock { Text = q.Text, FontSize = Theme.Caption, MaxLines = 1, TextTrimming = TextTrimming.CharacterEllipsis, Foreground = Res("TextFillColorSecondaryBrush") });
+        Grid.SetColumn(s, 1);
+        g.Children.Add(s);
+        var close = Glyph("", 10, new Thickness(6));
+        Help(close, cancelHelp);
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(close, cancelHelp);
+        close.Click += (_, _) => CancelReply();
+        Grid.SetColumn(close, 2);
+        g.Children.Add(close);
+        return g;
+    }
+
+    void CancelReply()
+    {
+        replyTo = null;
+        Redraw();
+    }
+
+    /// <summary>A chip removed from the composer: an image's references go from the text with it, the later ones renumbered (the core's).</summary>
+    void RemoveAttached(int at)
+    {
+        if (at >= attached.Count) return;
+        if (!attached[at].Draft.File)
+        {
+            var index = attached.Take(at).Count(a => !a.Draft.File);
+            draft.Text = TrsFfiMethods.ChatComposerWithoutImage(draft.Text, (uint)index);
+        }
+        attached.RemoveAt(at);
+        Redraw();
     }
 
     UIElement Members(ChatMembersPanel p)
@@ -646,8 +1032,14 @@ sealed class ChatPage
 
     bool CanSend() => !sending && TrsFfiMethods.ChatComposerCanSend(draft.Text, (uint)attached.Count);
 
+    /// <summary>Return sends (the core's rule for the modifiers); Escape cancels the reply being written, else goes on.</summary>
     void DraftKey(object sender, KeyRoutedEventArgs e)
     {
+        if (e.Key == Windows.System.VirtualKey.Escape)
+        {
+            if (Escape()) e.Handled = true;
+            return;
+        }
         if (e.Key != Windows.System.VirtualKey.Enter) return;
         bool Down(Windows.System.VirtualKey k) => Microsoft.UI.Input.InputKeyboardSource.GetKeyStateForCurrentThread(k).HasFlag(Windows.UI.Core.CoreVirtualKeyStates.Down);
         if (TrsFfiMethods.ChatComposerKey(Down(Windows.System.VirtualKey.Shift), Down(Windows.System.VirtualKey.Menu)) == ChatComposerKey.Send)
@@ -657,17 +1049,31 @@ sealed class ChatPage
         }
     }
 
-    /// <summary>Paste: an image or files on the clipboard become attachments; text goes into the field as usual.</summary>
+    /// <summary>Escape in the field: cancels the reply being written (true), else it goes on.</summary>
+    internal bool Escape()
+    {
+        if (replyTo is null) return false;
+        CancelReply();
+        return true;
+    }
+
+    /// <summary>
+    /// Paste: an image or files on the clipboard become attachments; text goes into the field as usual. An image pasted
+    /// into a field that has text leaves its reference at the caret (<c>chat_image_marker</c>).
+    /// </summary>
     async void Paste(object sender, TextControlPasteEventArgs e)
     {
         if (model?.Composer is not { Attach: true }) return;
         var clip = Windows.ApplicationModel.DataTransfer.Clipboard.GetContent();
+        int? caret = draft.Text.Length > 0 ? draft.SelectionStart : null;
         if (clip.Contains(Windows.ApplicationModel.DataTransfer.StandardDataFormats.StorageItems))
         {
             e.Handled = true;
-            foreach (var item in await clip.GetStorageItemsAsync())
+            var items = await clip.GetStorageItemsAsync();
+            foreach (var item in items)
             {
-                if (item is Windows.Storage.StorageFile f) Attach(new ChatImageInput(f.Name, f.Path, null));
+                // A reference only for one image: several would land in an order the checks finish in.
+                if (item is Windows.Storage.StorageFile f) Attach(new ChatImageInput(f.Name, f.Path, null), items.Count == 1 ? caret : null);
             }
         }
         else if (clip.Contains(Windows.ApplicationModel.DataTransfer.StandardDataFormats.Bitmap))
@@ -679,7 +1085,7 @@ sealed class ChatPage
             using var reader = new Windows.Storage.Streams.DataReader(stream);
             await reader.LoadAsync((uint)stream.Size);
             reader.ReadBytes(bytes);
-            Attach(new ChatImageInput(attachments.Texts.PastedName, null, bytes));
+            Attach(new ChatImageInput(attachments.Texts.PastedName, null, bytes), caret);
         }
     }
 
@@ -691,8 +1097,11 @@ sealed class ChatPage
         }
     }
 
-    /// <summary>An image or file for the next message: the core checks it and makes its chip; a refusal is an alert.</summary>
-    internal void Attach(ChatImageInput input)
+    /// <summary>
+    /// An image or file for the next message: the core checks it and makes its chip; a refusal is an alert. With
+    /// <paramref name="marker"/> (a paste into text), an image's reference goes into the text there.
+    /// </summary>
+    internal void Attach(ChatImageInput input, int? marker = null)
     {
         if (attached.Count >= attachments.Texts.MaxImages)
         {
@@ -705,6 +1114,13 @@ sealed class ChatPage
             {
                 attached.Add((input, t.Result));
                 AppLog.Write($"chat attach: {t.Result.Caption}");
+                if (marker is int at && !t.Result.File)
+                {
+                    var reference = TrsFfiMethods.ChatImageMarker((uint)(attached.Count(a => !a.Draft.File) - 1));
+                    var where = Math.Min(at, draft.Text.Length);
+                    draft.Text = draft.Text.Insert(where, reference);
+                    draft.SelectionStart = where + reference.Length;
+                }
             }
             else
             {
@@ -713,6 +1129,59 @@ sealed class ChatPage
             }
             Redraw();
         }));
+    }
+
+    /// <summary>
+    /// The character a point over the field falls on (UTF-16 index): the nearest character edge on the line under it,
+    /// from the field's own layout (GetRectFromCharacterIndex); the end of the text past the last line.
+    /// </summary>
+    static uint IndexAt(TextBox box, Windows.Foundation.Point p)
+    {
+        int best = box.Text.Length;
+        double bestScore = double.MaxValue;
+        for (int i = 0; i <= box.Text.Length; i++)
+        {
+            var r = i < box.Text.Length ? box.GetRectFromCharacterIndex(i, false) : box.GetRectFromCharacterIndex(i - 1, true);
+            double dy = p.Y < r.Top ? r.Top - p.Y : p.Y > r.Bottom ? p.Y - r.Bottom : 0;
+            double score = dy * 10_000 + Math.Abs(p.X - r.X);
+            if (score < bestScore) { bestScore = score; best = i; }
+        }
+        return (uint)best;
+    }
+
+    /// <summary>
+    /// Files dropped on the conversation: each checked by the core and added; with <paramref name="at"/> (they landed on
+    /// the field's text) the images' references go in there (<c>chat_composer_with_images</c>: spacing and caret the core's).
+    /// </summary>
+    internal async Task AttachDropped(IReadOnlyList<ChatImageInput> inputs, uint? at)
+    {
+        var first = (uint)attached.Count(a => !a.Draft.File);
+        uint images = 0;
+        foreach (var input in inputs)
+        {
+            if (attached.Count >= attachments.Texts.MaxImages)
+            {
+                app.Alert(new SyncAlert(attachments.Texts.TooMany, ""));
+                break;
+            }
+            try
+            {
+                var d = await Task.Run(() => app.Core.ChatImageCheck(input));
+                attached.Add((input, d));
+                AppLog.Write($"chat attach: {d.Caption}");
+                if (!d.File) images++;
+            }
+            catch (Exception e)
+            {
+                app.Alert(new SyncAlert(e is CoreException ce ? TrsFfiMethods.CoreErrorMessage(ce) : e.Message, ""));
+            }
+        }
+        if (at is uint point && images > 0 && TrsFfiMethods.ChatComposerWithImages(draft.Text, first, images, new ChatTextRange(point, 0)) is ChatComposerEdit edit)
+        {
+            draft.Text = edit.Text;
+            draft.SelectionStart = (int)Math.Min(edit.Caret, (uint)edit.Text.Length);
+        }
+        Redraw();
     }
 
     /// <summary>Send: the field and the attachments, to the conversation (as a reply when one is being written).</summary>
@@ -782,6 +1251,22 @@ sealed class ChatPage
 
     internal void QaType(string text) => draft.Text = text;
 
+    /// <summary>QA: a file dropped on the field's text at <paramref name="at"/> (what a drop there does).</summary>
+    internal Task QaDropAt(string path, uint at) => AttachDropped([new ChatImageInput(Path.GetFileName(path), path, null)], at);
+
+    /// <summary>
+    /// QA: a drop at a point over the field: the point just inside the leading edge of character <paramref name="ch"/>
+    /// (from the field's layout), hit-tested as a real drop is (IndexAt), then dropped there. Answers the index it found.
+    /// </summary>
+    internal async Task<uint> QaDropOver(int ch, string path)
+    {
+        var r = draft.GetRectFromCharacterIndex(ch, false);
+        var at = IndexAt(draft, new Windows.Foundation.Point(r.X + 0.5, r.Y + r.Height / 2));
+        await AttachDropped([new ChatImageInput(Path.GetFileName(path), path, null)], at);
+        return at;
+    }
+    internal bool SendEnabled => send.IsEnabled;
+
     /// <summary>The visual QA run: the ⋯ menu as a click opens it.</summary>
     internal MenuFlyout RenderMenu() => Menu(model?.Toolbar.Menu.Entries ?? []);
     internal void QaReply(int n)
@@ -789,6 +1274,28 @@ sealed class ChatPage
         if (model?.Messages.ElementAtOrDefault(n)?.Reply is ChatPageButton b) Run(b.Command);
     }
     internal void QaMembers() => Run(new ChatPageCommand.ShowMembers());
+
+    /// <summary>QA: message <paramref name="n"/>'s controls shown (or hidden) as the pointer on it does.</summary>
+    internal bool QaHover(int n, bool on)
+    {
+        if (model?.Messages.ElementAtOrDefault(n) is not ChatMessageCard c || !shown.TryGetValue(c.Id, out var s)) return false;
+        s.Hover(on);
+        return true;
+    }
+
+    /// <summary>QA: a click on message <paramref name="n"/>'s reply quote.</summary>
+    internal string QaQuote(int n) => model?.Messages.ElementAtOrDefault(n)?.ReplyQuote is ChatQuote q
+        ? JumpTo(q.MessageId) ? $"jumped to {model.Messages.ToList().FindIndex(m => m.Id == q.MessageId)}" : "not drawn"
+        : "no quote";
+
+    /// <summary>QA: an image reference's click on message <paramref name="n"/> (its gallery shows image <paramref name="index"/>).</summary>
+    internal void QaShowImage(int n, int index)
+    {
+        if (model?.Messages.ElementAtOrDefault(n) is ChatMessageCard c) ShowImage(c.Id, index);
+    }
+
+    /// <summary>QA: the image message <paramref name="n"/>'s gallery shows (view state), -1 when none was chosen.</summary>
+    internal int GalleryShown(int n) => model?.Messages.ElementAtOrDefault(n) is ChatMessageCard c && galleries.TryGetValue(c.Id, out var i) ? i : -1;
     internal string Draft => draft.Text;
     internal int Attached => attached.Count;
     internal string? ReplyingTo => replyTo;

@@ -190,4 +190,32 @@ mod tests {
         assert!(core.agent_requests(now).rows.is_empty());
         assert!(!core.agent_request_decide(id, false).ok, "answered once");
     }
+
+    /// The menu bar icon's dot and the menu's line come from the same requests: both while one waits, neither once it
+    /// is answered.
+    #[test]
+    fn the_icons_dot_and_the_menus_line_agree() {
+        let dir = tempfile::tempdir().unwrap();
+        let core = crate::Core::new(crate::CoreOptions {
+            config_dir: dir.path().display().to_string(),
+            mock: true,
+            allow_loopback_trackers: false,
+            forbidden_root: None,
+        })
+        .unwrap();
+        let icon = crate::menu::IconState::new();
+        let now = 1_900_000_000_000;
+        let s = core.snapshot();
+        let m = core.agent_requests(now);
+        assert_eq!((s.agent_requests, m.line.is_some()), (1, true));
+        assert_eq!(s.agent_requests_expire_ms, core.backend.agent_requests().first().map(|e| e.expires_ms));
+        let look = icon.icon(s, now, false).look;
+        assert_eq!((look.needs_answer, look.attention), (Some(crate::menu::AttentionKind::AgentRequest), true), "the icon's one dot");
+        assert!(core.agent_request_decide(m.rows[0].id.clone(), false).ok);
+        let s = core.snapshot();
+        assert_eq!((s.agent_requests, s.agent_requests_expire_ms, core.agent_requests(now).line), (0, None, None));
+        let problem = s.attention;
+        let look = icon.icon(s, now, false).look;
+        assert_eq!((look.needs_answer, look.attention), (None, problem), "answered: the dot is the problems' alone again");
+    }
 }

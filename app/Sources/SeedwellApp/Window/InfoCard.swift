@@ -69,8 +69,8 @@ struct InfoCard: View {
         HStack(spacing: 12) {
             FileIconView(ext: m.iconExt, linked: m.linked, size: 40)
             VStack(alignment: .leading, spacing: 2) {
-                Text(m.title).font(.system(size: 15, weight: .semibold)).lineLimit(2).truncationMode(.middle)
-                Text(m.subtitle).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
+                Text(m.title).font(Theme.heading).lineLimit(2).truncationMode(.middle)
+                Text(m.subtitle).font(Theme.secondary).foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
             }
             Spacer(minLength: 0)
         }
@@ -88,7 +88,7 @@ struct InfoCard: View {
                         .controlSize(.small)
                         .help(ask.help)
                     if let note = s.askAgainNote {
-                        Text(note).font(.system(size: 11.5)).foregroundStyle(.secondary)
+                        Text(note).font(Theme.caption).foregroundStyle(.secondary)
                     }
                 }
             }
@@ -151,7 +151,7 @@ struct InfoCard: View {
         switch r.style {
         case .text: text.hoverHelp(r.help)
         case .long: text.lineLimit(3).truncationMode(.middle).hoverHelp(r.help)
-        case .code: text.font(.system(size: 11, design: .monospaced)).hoverHelp(r.help)
+        case .code: text.font(Theme.monoSmall).hoverHelp(r.help)
         }
     }
 
@@ -268,7 +268,7 @@ private struct InfoSectionView<Content: View>: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
-            Text(title).font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
+            Text(title).font(Theme.caption.weight(.semibold)).foregroundStyle(.secondary)
             content
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -301,7 +301,7 @@ private struct InfoRowView<Value: View>: View {
                 value.fixedSize(horizontal: false, vertical: true).frame(maxWidth: .infinity, alignment: .leading)
             }
         }
-        .font(.system(size: 12.5))
+        .font(Theme.secondary)
     }
 }
 
@@ -317,12 +317,12 @@ private struct TrackerLineView: View {
             HStack(alignment: .firstTextBaseline, spacing: 6) {
                 // One line, cut in the middle: the host and the end stay readable, the masked URL is in the tooltip.
                 Text(line.url)
-                    .font(.system(size: 11.5, design: .monospaced))
+                    .font(Theme.monoSmall)
                     .lineLimit(1)
                     .truncationMode(.middle)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .help(line.url)
-                Button(action: copy) { Image(systemName: "doc.on.doc").font(.system(size: 11)) }
+                Button(action: copy) { Image(systemName: "doc.on.doc").font(.system(size: Theme.Icon.small)) }
                     .buttonStyle(.plain)
                     .foregroundStyle(.secondary)
                     .opacity(hovering ? 1 : 0)
@@ -341,9 +341,9 @@ private struct TrackerLineView: View {
                     }
                 }
             }
-            .font(.system(size: 11.5)).foregroundStyle(.secondary).monospacedDigit()
+            .font(Theme.caption).foregroundStyle(.secondary).monospacedDigit()
             .frame(maxWidth: .infinity, alignment: .leading)
-            Text(line.detail).font(.system(size: 11.5)).foregroundStyle(.secondary).monospacedDigit()
+            Text(line.detail).font(Theme.caption).foregroundStyle(.secondary).monospacedDigit()
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }

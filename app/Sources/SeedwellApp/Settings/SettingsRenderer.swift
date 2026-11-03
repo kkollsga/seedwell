@@ -116,9 +116,9 @@ struct ModelRowView: View {
         case .described:
             HStack(alignment: .center, spacing: 12) {
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(row.label).font(.system(size: 13))
+                    Text(row.label).font(Theme.body)
                     if let hint = row.hint {
-                        Text(hint).font(.system(size: 11.5)).foregroundStyle(.secondary)
+                        Text(hint).font(Theme.caption).foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
@@ -126,7 +126,7 @@ struct ModelRowView: View {
                 HStack(spacing: 8) { ModelControls(controls: row.controls, act: act) }.fixedSize()
                     .accessibilityLabel(row.label)
             }
-            .font(.system(size: 13))
+            .font(Theme.body)
             .padding(.horizontal, 14).padding(.vertical, 9)
             .frame(minHeight: 40)
         case .wide:
@@ -135,26 +135,26 @@ struct ModelRowView: View {
                     // Controls across the row (an address and its button, Add Address and its hint, a lone button).
                     ModelControls(controls: row.controls, act: act)
                     Spacer(minLength: 0)
-                    if let hint = row.hint { Text(hint).font(.system(size: 11.5)).foregroundStyle(.secondary) }
+                    if let hint = row.hint { Text(hint).font(Theme.caption).foregroundStyle(.secondary) }
                 } else {
                     Text(row.label)
                     Spacer(minLength: 12)
                     ModelControls(controls: row.controls, act: act)
                 }
             }
-            .font(.system(size: 13))
+            .font(Theme.body)
             .padding(.horizontal, 14).padding(.vertical, 9)
             .frame(minHeight: 40)
             // A quiet switch row is one that is not available yet: faded whole.
             .opacity(row.quiet ? 0.5 : 1)
         case .note:
             Text(row.label)
-                .font(.system(size: 12)).foregroundStyle(.secondary)
+                .font(Theme.secondary).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 14).padding(.vertical, 9)
         case .empty:
-            Text(row.label).font(.system(size: 12.5)).foregroundStyle(.secondary).padding(14)
+            Text(row.label).font(Theme.secondary).foregroundStyle(.secondary).padding(14)
         case .warning:
             DifferentDisksWarning(text: row.label)
         case let .item(icon, detail, selected, select, menus):
@@ -166,13 +166,13 @@ struct ModelRowView: View {
                     .lineLimit(2)
                 Spacer()
             }
-            .font(.system(size: 13.5))
+            .font(Theme.body)
             .padding(.horizontal, 14).padding(.vertical, 10)
         case let .disclosure(icon, expanded, toggle, toggleHelp, status, statusAccent, warning, children):
             VStack(spacing: 0) {
                 HStack(spacing: 10) {
                     Button { act(toggle) } label: {
-                        Image(systemName: "chevron.right").font(.system(size: 10, weight: .semibold))
+                        Image(systemName: "chevron.right").font(Theme.micro.weight(.semibold))
                             .rotationEffect(.degrees(expanded ? 90 : 0))
                             .foregroundStyle(.secondary).frame(width: 14)
                     }
@@ -182,15 +182,15 @@ struct ModelRowView: View {
                     Text(row.label).fontWeight(.semibold).frame(width: 82, alignment: .leading)
                     Spacer(minLength: 8)
                     if statusAccent {
-                        Text(status).font(.system(size: 11.5)).foregroundStyle(Color.accentColor)
+                        Text(status).font(Theme.caption).foregroundStyle(Color.accentColor)
                     } else {
-                        Text(status).font(.system(size: 12)).foregroundStyle(.secondary)
+                        Text(status).font(Theme.secondary).foregroundStyle(.secondary)
                     }
                     if let warning {
                         Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Color.orange).help(warning)
                     }
                 }
-                .font(.system(size: 13))
+                .font(Theme.body)
                 .padding(.horizontal, 14).padding(.vertical, 8)
                 if expanded {
                     VStack(spacing: 0) {
@@ -234,10 +234,10 @@ private struct ModelItemRow: View {
     var body: some View {
         HStack(spacing: 12) {
             Image(systemName: icon.symbol)
-                .font(.system(size: 20)).foregroundStyle(Color.accentColor).frame(width: 30)
+                .font(.system(size: Theme.Icon.large)).foregroundStyle(Color.accentColor).frame(width: 30)
             VStack(alignment: .leading, spacing: 1) {
-                Text(row.label).font(.system(size: 14, weight: .semibold)).lineLimit(1).truncationMode(.middle)
-                Text(detail).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
+                Text(row.label).font(Theme.headline).lineLimit(1).truncationMode(.middle)
+                Text(detail).font(Theme.secondary).foregroundStyle(.secondary).lineLimit(1)
             }
             Spacer()
             ModelControls(controls: row.controls, spacing: 12, act: act)
@@ -267,7 +267,7 @@ struct DifferentDisksWarning: View {
 
     var body: some View {
         Label(text, systemImage: "exclamationmark.triangle.fill")
-            .font(.system(size: 12))
+            .font(Theme.secondary)
             .foregroundStyle(Color.orange)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 14).padding(.vertical, 9)
@@ -362,7 +362,7 @@ struct ModelControlView: View {
             HStack(spacing: 2) {
                 ForEach(checks, id: \.id) { c in
                     Button { act(.set(key, .choice(id: c.id))) } label: {
-                        Text(c.title).font(.system(size: 12.5))
+                        Text(c.title).font(Theme.secondary)
                             .padding(.horizontal, 9).padding(.vertical, 4)
                             .background(RoundedRectangle(cornerRadius: 6).fill(c.checked ? Color.primary.opacity(0.16) : .clear))
                     }
@@ -465,7 +465,7 @@ struct ModelLabel: View {
                 Text(text)
             }
         }
-        .font(small ? .system(size: 12) : .system(size: 13))
+        .font(small ? Theme.secondary : Theme.body)
         .foregroundStyle(tone.color)
         .monospacedDigit(monospacedDigits)
     }
@@ -530,7 +530,7 @@ struct ModelField: View {
             TextField(placeholder, text: $typed)
                 .textFieldStyle(.roundedBorder)
                 .multilineTextAlignment(trailing ? .trailing : .leading)
-                .font(kind == .address ? .system(size: 12.5, design: .monospaced) : nil)
+                .font(kind == .address ? Theme.mono : nil)
                 .frame(width: width > 0 ? width : nil)
                 .frame(maxWidth: width > 0 ? nil : .infinity)
                 .modifier(Refused(on: !settingsFieldValid(kind: kind, text: typed, unit: picked)))

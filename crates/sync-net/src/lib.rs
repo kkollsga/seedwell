@@ -17,6 +17,7 @@
 //! * [`netchange`]: network changes (the system's signal, or a check of its own) find the devices again at once.
 //! * [`rendezvous`]: the user's own address book on Cloudflare: this device's sealed record, and lookups.
 //! * [`config`], [`secrets`]: `sync.toml`, and where keys are kept; `at_rest`: messages encrypted on disk.
+//! * [`placed`]: on-demand content kept in the host's placeholders (Windows' Cloud Files), stored once.
 //! * [`status`]: what the UI sees.
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -38,6 +39,7 @@ pub mod lan;
 pub mod limit;
 pub mod netchange;
 pub mod peer;
+pub mod placed;
 pub mod punch;
 pub mod relay;
 pub mod relay_server;
@@ -54,4 +56,4 @@ pub mod tls;
 
 pub use relay_server::{RelayOptions, run_relay};
 pub use rendezvous::RendezvousStatus;
-pub use service::{Activity, DeleteSeen, FULL_HERE, InviteInfo, Keep, MemberInfo, OnDemandError, OnDemandHost, OnDemandHostCell, Options, PublicDiscovery, SyncError, SyncHandle};
+pub use service::{Activity, DeleteSeen, FULL_HERE, InviteInfo, Keep, LocalChange, MemberInfo, OnDemandError, OnDemandHost, OnDemandHostCell, Options, PublicDiscovery, SyncError, SyncHandle};

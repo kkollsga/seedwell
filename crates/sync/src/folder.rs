@@ -1476,7 +1476,7 @@ impl FolderCore {
                 return Ok(());
             }
             let why = if ondemand::pinned(&pins_here, &i.path) {
-                Some("kept on this device (pinned): unpin it first")
+                Some(ondemand::KEPT_PINNED)
             } else if confirmed.as_ref().is_some_and(|c| !c.get(i.path.as_str()).is_some_and(|h| h.version == i.version && h.content == i.content_digest())) {
                 Some(ondemand::NOT_HELD_ELSEWHERE)
             } else if let Ok(Some(m)) = self.fs.lstat(&i.path)
@@ -1484,7 +1484,7 @@ impl FolderCore {
             {
                 // Only the file we recorded: one changed since (not scanned yet) is a change. (A disk that cannot be
                 // read now is reported when the file is removed.)
-                Some("changed here since it was recorded")
+                Some(ondemand::KEPT_CHANGED)
             } else {
                 None
             };

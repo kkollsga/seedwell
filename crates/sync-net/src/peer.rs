@@ -16,7 +16,6 @@ use tokio::io::{ReadHalf, WriteHalf};
 use tokio::sync::{Semaphore, mpsc, oneshot};
 use tokio_rustls::TlsStream;
 use trs_sync::folder::RemoteIndex;
-use trs_sync::fs::{Fs, StdFs};
 use trs_sync_proto::ids::{DeviceId, FolderId, ShortId};
 use trs_sync_proto::keys::Access;
 use trs_sync_proto::model::FileKind;
@@ -251,6 +250,8 @@ pub async fn run(ctx: Arc<Ctx>, conn: Connected, candidates: Vec<FolderId>) -> i
         return Ok(());
     }
     let _ = ctx.hub.send(HubMsg::PeerUp(device));
+    // Its folders link and its index comes next: a fetch waits for that.
+    ctx.settle();
     ctx.sessions.fetch_add(1, Ordering::SeqCst);
 
     let writer_task = tokio::spawn(write_loop(writer, crx, drx, peer.clone()));
@@ -833,7 +834,7 @@ async fn read_loop(
                         .await
                         .unwrap_or(Response { id, code: ResponseCode::Generic, data: vec![] });
                     let n = resp.data.len() as u64;
-                    if !peer2.lan {
+                    if ctx2.limited(peer2.lan) {
                         ctx2.limits.up.take(n).await;
                     }
                     f.served.add(n);
@@ -867,9 +868,9 @@ async fn read_loop(
                     let writer = f.as_ref().is_some_and(|f| f.role_of(ctx2.key.public_key()).is_some_and(|r| r.access() == Access::Write));
                     let held = match f {
                         Some(f) => tokio::task::spawn_blocking(move || {
-                            let (view, fs, ignore) = (f.index.view(), StdFs::new(f.root.clone()), f.ignore.get());
+                            let (view, fs, ignore) = (f.index.view(), f.fs(), f.ignore.get());
                             let freeing = |p: &str| lock(&f.freeing).contains_key(p);
-                            let holder = trs_sync::ondemand::Holder { store: &view, fs: &fs, me, writer, on_demand: f.on_demand, freeing: &freeing, ignore: &ignore };
+                            let holder = trs_sync::ondemand::Holder { store: &view, fs: &*fs, me, writer, on_demand: f.on_demand, freeing: &freeing, ignore: &ignore };
                             holder.answer(asker, &q.files)
                         })
                         .await
@@ -898,7 +899,7 @@ async fn read_loop(
                         None => refused,
                     };
                     let n = d.data.len() as u64;
-                    if !peer2.lan {
+                    if ctx2.limited(peer2.lan) {
                         ctx2.limits.up.take(n).await;
                     }
                     peer2.tx_bytes.fetch_add(n, Ordering::Relaxed);
@@ -1218,7 +1219,7 @@ fn serve_chunk(f: &FolderShared, req: &Request) -> Response {
     if !listed {
         return fail(ResponseCode::Invalid);
     }
-    let fs = StdFs::new(f.root.clone());
+    let fs = f.fs();
     let Ok(fh) = fs.open_read(&req.path) else { return fail(ResponseCode::NoSuchFile) };
     let mut buf = vec![0u8; req.len as usize];
     let mut got = 0;
