@@ -535,9 +535,9 @@ pub(crate) fn reach(h: &SyncHandle, target: DeviceId) {
     }
     let h = h.clone();
     tokio::spawn(async move {
-        // A direct dial started just now may still win.
+        // A direct dial started just now may still win; one that connected and is setting its session up has.
         tokio::time::sleep(Duration::from_secs(2)).await;
-        if h.ctx().registry.peer(&target).is_some() {
+        if h.ctx().registry.peer(&target).is_some() || !h.direct_failing(target) {
             lock(&h.net().attempts).remove(&target);
             return;
         }

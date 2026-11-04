@@ -1095,7 +1095,12 @@ impl Connection {
                         probe_d = Some(d);
                     }
                 }
-            if probing || self.cur_window as u64 + want as u64 <= limit {
+            // With nothing in flight one packet may go whatever the congestion window says, as a
+            // retransmission may: no ack and no timeout would come to open it. (The peer's window
+            // still holds: a closed one is what the persist probe below is for.)
+            let fits = self.cur_window as u64 + want as u64 <= limit
+                || (self.cur_window == 0 && want as u64 <= self.peer_wnd as u64);
+            if probing || fits {
                 self.persist_deadline = 0;
                 self.inflight.push_back(Sent {
                     sent_at: 0,
@@ -1415,6 +1420,36 @@ mod tests {
         let st = c.stats();
         assert_eq!((st.path_mtu, st.in_flight), (4000, 0), "the probe was confirmed, nothing in flight");
         assert!(!sent(&mut c, 1_030_000).is_empty(), "nothing in flight: the next packet must go ({st:?})");
+    }
+
+    /// Fails if any window value can stall a stream with nothing in flight: the congestion window
+    /// is below one packet (however it got there), no packet is out, so no ack and no timeout will
+    /// ever come; one packet must go, as a retransmission would.
+    #[test]
+    fn a_window_below_one_packet_with_nothing_in_flight_still_sends() {
+        let cfg = Config { mtu_discovery: false, ..Config::default() };
+        let mut c = Connection::connect(&cfg, 1_000_000, 10);
+        let mut buf = vec![0u8; cfg.max_datagram()];
+        assert!(c.poll_transmit(&cfg, 1_000_000, &mut buf).is_some()); // SYN
+        let state = Header {
+            ty: PacketType::State,
+            conn_id: 10,
+            timestamp: 1,
+            timestamp_diff: 0,
+            wnd_size: 1 << 20,
+            seq_nr: 50,
+            ack_nr: 1,
+        };
+        c.handle_packet(&cfg, 1_010_000, 20, &Packet { header: state, sack: None, payload: &[] });
+        assert_eq!(c.state(), State::Connected);
+        while c.poll_transmit(&cfg, 1_010_000, &mut buf).is_some() {} // the handshake's ack
+        c.cc = Ledbat::new(500);
+        assert_eq!(c.write(&cfg, &[7u8; 64 * 1024]), WriteOutcome::Wrote(64 * 1024));
+        let n = c.poll_transmit(&cfg, 1_010_000, &mut buf).expect("nothing in flight: a packet must go");
+        let p = Packet::parse(&buf[..n]).unwrap();
+        assert_eq!((p.header.ty, p.payload.len()), (PacketType::Data, 1400));
+        // One packet, not a burst: the window gates the next while that one is out.
+        assert!(c.poll_transmit(&cfg, 1_010_000, &mut buf).is_none());
     }
 
     #[test]

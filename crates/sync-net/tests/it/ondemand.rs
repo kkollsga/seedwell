@@ -2473,3 +2473,98 @@ async fn a_kept_folder_stays_out_empty_and_a_new_one_at_a_deleted_name_is_synced
     a.h.shutdown().await;
     b.h.shutdown().await;
 }
+
+/// One device with an on-demand folder holding `docs/a.txt` ("alpha", downloaded): a host with no other device.
+async fn solo_on_demand() -> (Device, tempfile::TempDir, FolderId) {
+    let d = device("Solo").await;
+    let files = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(files.path().join("Shared/docs")).unwrap();
+    std::fs::write(files.path().join("Shared/docs/a.txt"), b"alpha").unwrap();
+    let id: FolderId = d.h.add_folder(files.path().join("Shared")).await.unwrap().id.parse().unwrap();
+    until(30, "the folder is scanned", || d.h.snapshot().folders.iter().any(|f| f.files >= 1)).await;
+    d.h.set_on_demand(&id, true, None).await.unwrap();
+    (d, files, id)
+}
+
+/// The failure: the host's file changes while the core copies it into the cache (a save landing during the copy), and
+/// the copy, which may hold old and new bytes mixed, is recorded as the file's content and sent to other devices.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_host_file_changed_during_its_copy_is_never_recorded_as_its_content() {
+    let (d, files, id) = solo_on_demand().await;
+    let base = d.h.od_item_at(&id, "docs/a.txt").unwrap().unwrap().content_version;
+    let src = files.path().join("edit.txt");
+    std::fs::write(&src, b"first save").unwrap();
+
+    // Saved again during the first copy: the copy is made again, and the second save is the content.
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (s, f) = (seen.clone(), src.clone());
+    let hook = move |attempt| {
+        s.lock().unwrap().push(attempt);
+        if attempt == 0 {
+            std::fs::write(&f, b"second save, longer").unwrap();
+        }
+    };
+    trs_platform::fs::test_while_copying(&src, Some(Box::new(hook)));
+    let written = d.h.od_write(&id, "docs/a.txt", &src, Some(&base)).await;
+    trs_platform::fs::test_while_copying(&src, None);
+    assert_eq!(written.unwrap(), "docs/a.txt");
+    assert_eq!(*seen.lock().unwrap(), [0, 1], "copied a second time");
+    assert_eq!(read(&d.h.od_cache_path(&id, "docs/a.txt").unwrap()).as_deref(), Some(&b"second save, longer"[..]));
+    let item = d.h.od_item_at(&id, "docs/a.txt").unwrap().unwrap();
+    assert_eq!(item.size, 19, "the record is the second save's");
+
+    // Changed during every copy: refused for now (the host offers it again), and nothing is recorded.
+    let f = src.clone();
+    trs_platform::fs::test_while_copying(&src, Some(Box::new(move |n| std::fs::write(&f, vec![b'x'; 30 + n as usize]).unwrap())));
+    let refused = d.h.od_write(&id, "docs/a.txt", &src, Some(&item.content_version)).await;
+    trs_platform::fs::test_while_copying(&src, None);
+    match refused {
+        Err(trs_sync_net::SyncError::Io(e)) => assert_eq!(e.kind(), std::io::ErrorKind::ResourceBusy, "{e}"),
+        other => panic!("not refused for now: {other:?}"),
+    }
+    let after = d.h.od_item_at(&id, "docs/a.txt").unwrap().unwrap();
+    assert_eq!((after.content_version, after.size), (item.content_version, 19), "the record stays");
+    assert_eq!(read(&d.h.od_cache_path(&id, "docs/a.txt").unwrap()).as_deref(), Some(&b"second save, longer"[..]));
+    d.h.shutdown().await;
+}
+
+/// The failure (Windows, seen on the PC: 8 to 13 of 40 saves refused each run): the core's copy of a user's file
+/// opens it without `FILE_SHARE_WRITE` (`CopyFileExW`), so another program's save during the copy fails with "being
+/// used by another process". As the host does: files adopted one after another (`sync_create_item`) while a program
+/// keeps saving one of them. On Unix nothing locks a file, so it can fail only on Windows.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_program_saving_a_file_is_never_refused_while_the_core_copies_it() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let (d, files, id) = solo_on_demand().await;
+    let src = files.path().join("busy.bin");
+    std::fs::write(&src, vec![3u8; 8 << 20]).unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let (st, f) = (stop.clone(), src.clone());
+    let writer = std::thread::spawn(move || {
+        let (mut saves, mut refused) = (0, Vec::new());
+        while !st.load(Ordering::Relaxed) {
+            match std::fs::OpenOptions::new().write(true).open(&f) {
+                // The same bytes again: the opens are what is tested.
+                Ok(file) => {
+                    trs_platform::fs::write_all_at(&file, &[3u8; 4096], 0).unwrap();
+                    saves += 1;
+                }
+                Err(e) => refused.push(e.to_string()),
+            }
+        }
+        (saves, refused)
+    });
+    for n in 0..40 {
+        // A copy that overlapped a save may be refused for now; never with another error.
+        match d.h.od_write(&id, &format!("adopted/{n}.bin"), &src, None).await {
+            Ok(_) => {}
+            Err(trs_sync_net::SyncError::Io(e)) if e.kind() == std::io::ErrorKind::ResourceBusy => {}
+            Err(e) => panic!("adopting {n}: {e}"),
+        }
+    }
+    stop.store(true, Ordering::Relaxed);
+    let (saves, refused) = writer.join().unwrap();
+    assert!(saves > 0);
+    assert!(refused.is_empty(), "{} of {} saves refused: {:?}", refused.len(), saves + refused.len(), refused.first());
+    d.h.shutdown().await;
+}

@@ -75,7 +75,11 @@ impl SyncHandle {
                 let _ = p.control.try_send(Message::Ping);
             }
         }
-        lock(&self.inner.book).tried.clear();
+        {
+            let mut book = lock(&self.inner.book);
+            book.tried.clear();
+            book.refused.clear();
+        }
         self.inner.net.clear_backoffs();
         crate::rendezvous::network_changed(self);
         self.inner.lan.wake.notify_one();

@@ -47,6 +47,9 @@ sealed class CloudHost : SyncHostListener
         public Dictionary<string, uint> Seen { get; } = new(StringComparer.OrdinalIgnoreCase);
         /// <summary>Item ids being filled because they are kept here (one fill each).</summary>
         public HashSet<string> Filling { get; } = [];
+
+        /// <summary>The files looked at again a moment later (one wait per file, however many events come).</summary>
+        public HashSet<string> Waiting { get; } = [];
         /// <summary>Paths the system was allowed to free (NOTIFY_DEHYDRATE), and when: the mark it leaves is not the user's choice.</summary>
         public Dictionary<string, DateTime> SystemAsked { get; } = new(StringComparer.OrdinalIgnoreCase);
 
@@ -351,9 +354,11 @@ sealed class CloudHost : SyncHostListener
     {
         foreach (var entry in Directory.EnumerateFileSystemEntries(folder))
         {
-            if (RelativeTo(root, entry) is string rel && root.IdAt(rel) is not null)
+            if (RelativeTo(root, entry) is string rel && root.IdAt(rel) is string id)
             {
                 if (Directory.Exists(entry)) Sweep(root, entry);
+                // Saved to while the app was not running: no notification told of it.
+                else LookAt(root, id);
             }
             else
             {
@@ -431,19 +436,27 @@ sealed class CloudHost : SyncHostListener
             refill = Update(root, full, item, dir);
         }
         root.Mark(item.Id, item.Path);
+        // Overwritten and still being written: nothing to set on a plain file; it becomes a placeholder when it closes.
+        if (!CloudFiles.IsPlaceholder(full)) return;
         using var h = CloudFiles.Open(full);
         // In sync: online only, or here as the core has it; not: on its way, only here, unavailable.
         var inSync = item.State is SyncItemState.Downloaded or SyncItemState.OnlineOnly;
-        CloudFiles.CfSetInSyncState(h, inSync ? 1u : 0u, 0, IntPtr.Zero);
+        Refused(CloudFiles.CfSetInSyncState(h, inSync ? 1u : 0u, 0, IntPtr.Zero), "in-sync state", item.Path);
         // The pin as the core has it, set only when it differs (each change is an event for the watcher); the user's
         // "Free up space" mark stays on a file the core does not keep.
         var a = (uint)File.GetAttributes(full);
         if (item.Pinned != ((a & PinnedAttribute) != 0))
         {
-            CloudFiles.CfSetPinState(h, item.Pinned ? CloudFiles.PinState.Pinned : CloudFiles.PinState.Unspecified, 0, IntPtr.Zero);
+            Refused(CloudFiles.CfSetPinState(h, item.Pinned ? CloudFiles.PinState.Pinned : CloudFiles.PinState.Unspecified, 0, IntPtr.Zero), "pin", item.Path);
         }
         // Kept here, or an earlier version just let go of that is wanted here: filled (through FETCH_DATA, as a read would).
         if (!dir && (item.Pinned || refill) && (a & RecallOnDataAccess) != 0) Fill(root, item.Id, full);
+    }
+
+    /// <summary>A call on a placeholder the system refused: said in the log, as the placeholder now differs from the item.</summary>
+    static void Refused(int hr, string what, string path)
+    {
+        if (hr < 0) AppLog.Write($"on-demand: {path}: {what} refused (0x{hr:X8})");
     }
 
     /// <summary>Fills a placeholder kept on this PC, off the feed's queue (a fetch can take long); one fill per item.</summary>
@@ -472,10 +485,14 @@ sealed class CloudHost : SyncHostListener
         var w = new FileSystemWatcher(root.Path)
         {
             IncludeSubdirectories = true,
-            NotifyFilter = NotifyFilters.Attributes | NotifyFilters.FileName | NotifyFilters.DirectoryName,
+            NotifyFilter = NotifyFilters.Attributes | NotifyFilters.FileName | NotifyFilters.DirectoryName | NotifyFilters.LastWrite,
             InternalBufferSize = 64 * 1024,
         };
-        w.Changed += (_, e) => Queue(root, () => Attributes(root, e.FullPath));
+        w.Changed += (_, e) =>
+        {
+            Queue(root, () => Attributes(root, e.FullPath));
+            Queue(root, () => Overwritten(root, e.FullPath));
+        };
         // Something new (made, copied or moved in): the core takes it unless it is a placeholder.
         w.Created += (_, e) => Queue(root, () => Adopt(root, e.FullPath));
         w.Renamed += (_, e) => Queue(root, () => Adopt(root, e.FullPath));
@@ -569,13 +586,19 @@ sealed class CloudHost : SyncHostListener
     /// </summary>
     bool Update(Root root, string full, SyncItem item, bool dir)
     {
+        // Overwritten: its change first, and it is a placeholder again (or will be, when it closes).
+        if (!dir && !CloudFiles.IsPlaceholder(full))
+        {
+            Overwritten(root, full);
+            if (!CloudFiles.IsPlaceholder(full)) return false;
+        }
         var dehydrate = false;
         if (!dir && ((uint)File.GetAttributes(full) & RecallOnDataAccess) == 0)
         {
             switch (app.Core.SyncLocalChange(root.Id, item.Id))
             {
-                case SyncLocalChange.Modified m:
-                    Report(root, item.Id, item.Path, m.Base);
+                case SyncLocalChange.Modified:
+                    LookAt(root, item.Id);
                     return false;
                 case SyncLocalChange.Stale:
                     dehydrate = true;
@@ -588,7 +611,7 @@ sealed class CloudHost : SyncHostListener
         {
             Marshal.StructureToPtr(meta, ptr, false);
             using var h = CloudFiles.Open(full);
-            CloudFiles.CfUpdatePlaceholder(h, ptr, IntPtr.Zero, 0, IntPtr.Zero, 0, dehydrate ? CloudFiles.UpdateDehydrate : 0, IntPtr.Zero, IntPtr.Zero);
+            Refused(CloudFiles.CfUpdatePlaceholder(h, ptr, IntPtr.Zero, 0, IntPtr.Zero, 0, dehydrate ? CloudFiles.UpdateDehydrate : 0, IntPtr.Zero, IntPtr.Zero), "update", item.Path);
         }
         finally { Marshal.FreeHGlobal(ptr); }
         return dehydrate && item.State is SyncItemState.Downloaded or SyncItemState.ModifiedHere or SyncItemState.Downloading;
@@ -944,13 +967,34 @@ sealed class CloudHost : SyncHostListener
         if (RootOf(info) is not Root root) return;
         var item = Encoding.UTF8.GetString(Bytes(info.FileIdentity, (int)info.FileIdentityLength));
         if (!PlacedAt(root, info, item)) return;
-        Queue(root, () =>
+        Queue(root, () => LookAt(root, item));
+    }
+
+    /// <summary>
+    /// What a filled file holds against the core: a change of the user's is reported. A report the core could not take
+    /// (the file was written while it was copied, or is still changing) is offered again a moment later: nothing else
+    /// would tell of it, and the save would stay on this PC.
+    /// </summary>
+    void LookAt(Root root, string item, int tries = 0)
+    {
+        var path = root.PathOf(item);
+        var full = Full(root, path);
+        if (!File.Exists(full) || ((uint)File.GetAttributes(full) & RecallOnDataAccess) != 0) return;
+        if (!CloudFiles.IsPlaceholder(full))
         {
-            var path = root.PathOf(item);
-            var full = Full(root, path);
-            if (!File.Exists(full) || ((uint)File.GetAttributes(full) & RecallOnDataAccess) != 0) return;
+            Overwritten(root, full);
+            return;
+        }
+        try
+        {
             if (app.Core.SyncLocalChange(root.Id, item) is SyncLocalChange.Modified m) Report(root, item, path, m.Base);
-        });
+        }
+        // A busy copy is a plain core error (no on-demand kind of its own).
+        catch (CoreException e) when (tries < 120)
+        {
+            if (tries == 0) AppLog.Write($"on-demand: {path} offered again ({Words(e)})");
+            Later(root, full, 500, () => LookAt(root, item, tries + 1));
+        }
     }
 
     /// <summary>
@@ -973,13 +1017,52 @@ sealed class CloudHost : SyncHostListener
     }
 
     /// <summary>
+    /// A placeholder a program overwrote: CREATE_ALWAYS takes the placeholder away, so it is a plain file, and a plain file
+    /// sends no close notification: without this the save would never leave this PC. Once no one has it open, its change is
+    /// reported and it is a placeholder again. Looked at once more after that: a write that came between the two told no one.
+    /// </summary>
+    void Overwritten(Root root, string full, int tries = 0)
+    {
+        if (RelativeTo(root, full) is not string rel || rel.Length == 0 || root.IdAt(rel) is not string id) return;
+        if (!File.Exists(full) || CloudFiles.IsPlaceholder(full)) return;
+        if (!Closed(full))
+        {
+            Later(root, full, 500, () => Overwritten(root, full));
+            return;
+        }
+        try
+        {
+            if (app.Core.SyncLocalChange(root.Id, id) is SyncLocalChange.Modified m) Report(root, id, rel, m.Base);
+            CloudFiles.Convert(full, id, false);
+            if (app.Core.SyncLocalChange(root.Id, id) is SyncLocalChange.Modified again) Report(root, id, rel, again.Base);
+        }
+        // Written again meanwhile, or the system not done with it: looked at again while it comes to rest.
+        catch (Exception e) when (tries < 120)
+        {
+            if (tries == 0) AppLog.Write($"on-demand: {rel} overwritten, looked at again ({Words(e)})");
+            Later(root, full, 500, () => Overwritten(root, full, tries + 1));
+        }
+    }
+
+    /// <summary>Looks at a file again a moment later, off the queue while it waits; one wait per file.</summary>
+    void Later(Root root, string full, int ms, Action look)
+    {
+        lock (root.Waiting) if (!root.Waiting.Add(full)) return;
+        _ = Task.Delay(ms).ContinueWith(_ =>
+        {
+            lock (root.Waiting) root.Waiting.Remove(full);
+            Queue(root, look);
+        });
+    }
+
+    /// <summary>
     /// Something not a placeholder appeared in the folder (made here, copied or moved in): the core takes it
     /// (sync_create_item: a file with its content copied; a folder, then what is in it) and it becomes a placeholder in
     /// sync. A name the folder does not sync stays a plain file of this PC. A file still being written is looked at again
     /// a moment later (sooner where a file just left: a save by replace, and the core waits only so long for it). Where the
     /// core names it otherwise (a conflict copy: something else is at that name now), it is renamed so.
     /// </summary>
-    void Adopt(Root root, string full, int tries = 0)
+    void Adopt(Root root, string full, int failures = 0)
     {
         if (RelativeTo(root, full) is not string rel || rel.Length == 0 || root.IdAt(rel) is not null) return;
         var dir = Directory.Exists(full);
@@ -998,7 +1081,7 @@ sealed class CloudHost : SyncHostListener
         if (FolderId(root, ParentOf(rel)) is not string parent) return;
         if (!dir && !Closed(full))
         {
-            if (tries < 120) _ = Task.Delay(root.JustLeft(rel) ? 50 : 500).ContinueWith(_ => Queue(root, () => Adopt(root, full, tries + 1)));
+            Later(root, full, root.JustLeft(rel) ? 50 : 500, () => Adopt(root, full, failures));
             return;
         }
         SyncItem item;
@@ -1009,6 +1092,13 @@ sealed class CloudHost : SyncHostListener
         catch (CoreException.OnDemand e) when (e.kind == SyncErrorKind.Ignored)
         {
             AppLog.Write($"on-demand: {rel} not synced ({Words(e)})");
+            return;
+        }
+        // Written while the core copied it (a plain core error): offered again, or a new file would stay on this PC.
+        catch (CoreException e) when (e is not CoreException.OnDemand && failures < 120)
+        {
+            if (failures == 0) AppLog.Write($"on-demand: {rel} offered again ({Words(e)})");
+            Later(root, full, 500, () => Adopt(root, full, failures + 1));
             return;
         }
         if (item.Path != rel)
@@ -1024,19 +1114,8 @@ sealed class CloudHost : SyncHostListener
         if (dir) foreach (var child in Directory.EnumerateFileSystemEntries(full)) Adopt(root, child);
     }
 
-    /// <summary>Whether no one is writing the file any more (it opens with others allowed to read only).</summary>
-    static bool Closed(string full)
-    {
-        try
-        {
-            using var f = new FileStream(full, FileMode.Open, FileAccess.Read, FileShare.Read);
-            return true;
-        }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
-        {
-            return false;
-        }
-    }
+    /// <summary>Whether no one has the file open any more; looking never stands in the way of another program's write.</summary>
+    static bool Closed(string full) => CloudFiles.NobodyHasOpen(full);
 
     // ------------------------------------------------------------------------------------------------------ QA
 

@@ -735,6 +735,8 @@ impl SyncHandle {
         let st = crate::roles::by_owner(&g, Body::Grant { device: req.device_pk, role: Role::Owner, serial, at_s: now, invite: Some(req.invite) })
             .ok_or_else(|| invalid("the user key is missing on this device"))?;
         crate::roles::add(&g, [st]);
+        // Sessions turned down before (it was not admitted yet) are tried again at once.
+        self.forget_refusals();
         // Connected (it waits on a session): the group is shared over it from now on, and it gets the key.
         if let Some(p) = ctx.registry.peer(device) {
             p.folders.write().unwrap_or_else(|e| e.into_inner()).insert(g.id, Access::Write);

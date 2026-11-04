@@ -664,8 +664,10 @@ impl SyncHandle {
                 make_parents(c, &root, &to)?;
                 let target = abs(&root, &to);
                 let tmp = abs(&root, &trs_sync::pull::temp_path(&to));
-                // `std::fs::copy` clones on APFS: the host's copy and the cache share their blocks.
-                std::fs::copy(&from, &tmp)?;
+                // The user's file, which another program may be writing: never locked against it (Windows), and a copy
+                // that overlapped a write is made again or refused for now, never recorded. On APFS a clone: the
+                // host's copy and the cache share their blocks.
+                trs_platform::fs::copy_shared(&from, &tmp)?;
                 // Kept in place: the new content is the cache's until the host fills the placeholder with it
                 // (`od_hydrated`), whose note stays as a record of what it held.
                 if let Some(pl) = &placed {

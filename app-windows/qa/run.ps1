@@ -12,7 +12,7 @@
   the network either (no DHT, PEX, LSD, UPnP or NAT-PMP).
 
   Checks: render, handoff, separate, gate, selection, keys, removal, info, alert, trash, choice, move, add, chat,
-  dialogs, newchannel, links, tray, scheme, rendezvous, follow, folders, chatpage, chatslowdisk, platform, slowstart, damaged, notices, settingspage, requests, files, chooser, play, favorites, rules, cloudfiles, ondemand, ondemandfetch, ondemandpin, ondemandchanges, notray, settings, quit (all of them: all, the default).
+  dialogs, newchannel, links, tray, scheme, rendezvous, follow, folders, chatpage, chatslowdisk, platform, slowstart, damaged, notices, settingspage, requests, files, chooser, play, favorites, rules, cloudfiles, ondemand, ondemandfetch, ondemandpin, ondemandchanges, ondemandwrites, notray, settings, quit (all of them: all, the default).
   -Build builds the app first (build.ps1; -CoreProfile Debug builds its core from the debug test build, as CI does).
   -Out keeps the pictures in <dir> (default: a temp folder, printed).
   Flyouts (menus, the members panel and its role menus) are drawn by the render run (SnapshotRenderer.cs, check
@@ -34,7 +34,7 @@ $Repo = Split-Path $App -Parent
 $Exe = Join-Path $App 'bin\x64\Release\net10.0-windows10.0.19041.0\win-x64\Seedwell.exe'
 $Cli = Join-Path $Repo 'target\debug\seedwell.exe'
 $Fixtures = Join-Path $Repo 'crates\metainfo\tests\fixtures'
-$All = @('render', 'handoff', 'separate', 'gate', 'selection', 'keys', 'removal', 'info', 'alert', 'trash', 'choice', 'move', 'add', 'chat', 'dialogs', 'newchannel', 'links', 'tray', 'scheme', 'rendezvous', 'follow', 'folders', 'chatpage', 'chatslowdisk', 'platform', 'slowstart', 'damaged', 'notices', 'settingspage', 'requests', 'files', 'chooser', 'play', 'favorites', 'rules', 'cloudfiles', 'ondemand', 'ondemandfetch', 'ondemandpin', 'ondemandchanges', 'notray', 'settings', 'quit')
+$All = @('render', 'handoff', 'separate', 'gate', 'selection', 'keys', 'removal', 'info', 'alert', 'trash', 'choice', 'move', 'add', 'chat', 'dialogs', 'newchannel', 'links', 'tray', 'scheme', 'rendezvous', 'follow', 'folders', 'chatpage', 'chatslowdisk', 'platform', 'slowstart', 'damaged', 'notices', 'settingspage', 'requests', 'files', 'chooser', 'play', 'favorites', 'rules', 'cloudfiles', 'ondemand', 'ondemandfetch', 'ondemandpin', 'ondemandchanges', 'ondemandwrites', 'notray', 'settings', 'quit')
 
 if ($Build) {
   & powershell -NoProfile -File (Join-Path $App 'build.ps1') -CoreProfile $CoreProfile | Out-Host
@@ -55,6 +55,34 @@ public static class QaForeground {
   [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
   [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
   public static uint Pid() { uint p; GetWindowThreadProcessId(GetForegroundWindow(), out p); return p; }
+}
+// Which processes hold a file open (Restart Manager): a refused write names who refused it.
+public static class QaHolder {
+  [StructLayout(LayoutKind.Sequential)] struct Unique { public uint Pid; public System.Runtime.InteropServices.ComTypes.FILETIME Start; }
+  [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)] struct Info {
+    public Unique Process;
+    [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 256)] public string App;
+    [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 64)] public string Service;
+    public uint Type, Status, Session;
+    [MarshalAs(UnmanagedType.Bool)] public bool Restartable;
+  }
+  [DllImport("rstrtmgr.dll", CharSet = CharSet.Unicode)] static extern int RmStartSession(out uint session, int flags, System.Text.StringBuilder key);
+  [DllImport("rstrtmgr.dll")] static extern int RmEndSession(uint session);
+  [DllImport("rstrtmgr.dll", CharSet = CharSet.Unicode)] static extern int RmRegisterResources(uint session, uint files, string[] names, uint apps, IntPtr unique, uint services, string[] serviceNames);
+  [DllImport("rstrtmgr.dll")] static extern int RmGetList(uint session, out uint needed, ref uint count, [In, Out] Info[] infos, out uint reasons);
+  public static string Of(string path) {
+    uint session;
+    if (RmStartSession(out session, 0, new System.Text.StringBuilder(64)) != 0) return "unknown";
+    try {
+      RmRegisterResources(session, 1, new[] { path }, 0, IntPtr.Zero, 0, null);
+      uint needed, count = 16, reasons;
+      var infos = new Info[16];
+      if (RmGetList(session, out needed, ref count, infos, out reasons) != 0) return "unknown";
+      var names = new System.Collections.Generic.List<string>();
+      for (var i = 0; i < count; i++) names.Add(infos[i].Process.Pid + " " + infos[i].App);
+      return names.Count == 0 ? "nobody by then" : string.Join(", ", names);
+    } finally { RmEndSession(session); }
+  }
 }
 // Another process freeing a placeholder's space, as Storage Sense does (the app's NOTIFY_DEHYDRATE decides).
 public static class QaCloud {
@@ -1659,7 +1687,7 @@ $checks.ondemandchanges = {
   $pa = Start-App $a -QaControl
   $pb = $null
   # A folder's files and their text, for comparing (the folder's own .seedwell left out).
-  $tree = { param($root) (Get-ChildItem -Recurse -File $root -ErrorAction SilentlyContinue | Where-Object { $_.FullName -notlike '*\.seedwell\*' } | Sort-Object FullName | ForEach-Object { "$($_.FullName.Substring($root.Length + 1).Replace('\', '/'))=$(Get-Content -Raw $_.FullName)" }) -join ', ' }
+  $tree = { param($root) (Get-ChildItem -Recurse -File $root -ErrorAction SilentlyContinue | Where-Object { $_.FullName -notlike '*\.seedwell\*' } | Sort-Object FullName | ForEach-Object { "$($_.FullName.Substring($root.Length + 1).Replace('\', '/'))=$(Get-Content -Raw $_.FullName -ErrorAction SilentlyContinue)" }) -join ', ' }
   $mine = { @(Log $b | Where-Object { $_ -match 'on-demand: .* (moved here|deleted here|changed here|added here)' }) }
   try {
     $pb = Start-App $b -QaControl
@@ -1840,6 +1868,102 @@ $checks.settings = {
     # A change outside Settings (here a hand edit) reaches the updater too: it plans its next check again.
     WaitFor { @(Log $dir | Where-Object { $_ -like '*update: *automatic check*' }).Count -gt $before } 5000 'the updater to plan again' | Out-Null
   } finally { Stop-App $dir $p; Remove-Item -Recurse -Force $dir }
+  @()
+}
+
+# The failure: another program's save of a file in an on-demand folder is refused ("being used by another process")
+# because of something Seedwell holds open while it fills, checks or adopts that file (CI saw it on f1f5245). Another
+# process writes straight after reading a placeholder, and again and again into a new file while the host adopts it;
+# a refused write fails this check, and says who held the file. Every last write reaches the other device.
+$checks.ondemandwrites = {
+  $a = New-State 'full'
+  $b = New-State 'full'
+  $docs = "$a\state\od\Docs"
+  New-Item -ItemType Directory -Force $docs | Out-Null
+  $count = 40
+  1..$count | ForEach-Object { "text $_" | Set-Content -NoNewline "$docs\p$_.txt" }
+  'one' | Set-Content -NoNewline "$docs\one.txt"
+  $sa = "$a\state\control.sock"; $sb = "$b\state\control.sock"
+  $bd = "$b\state\od\Docs"
+  $pa = Start-App $a -QaControl
+  $pb = $null
+  $refused = [System.Collections.Generic.List[string]]::new()
+  # One write as a program makes it (others may read while it writes); a refusal is noted with who held the file.
+  $write = {
+    param($path, $text)
+    try { [IO.File]::WriteAllText($path, $text) }
+    catch [IO.IOException] {
+      $holder = [QaHolder]::Of($path)
+      $at = [Diagnostics.Stopwatch]::StartNew()
+      while ($at.ElapsedMilliseconds -lt 5000) { try { [IO.File]::WriteAllText($path, $text); break } catch [IO.IOException] { } }
+      $refused.Add("$(Split-Path -Leaf $path): held by $holder; free after $($at.ElapsedMilliseconds) ms; $($_.Exception.Message)")
+    }
+  }
+  try {
+    $pb = Start-App $b -QaControl
+    WaitForSync $a; WaitForSync $b
+    $added = (& $Cli --socket $sa sync add $docs 2>&1) -join ' '
+    if ($added -notlike 'Sharing Docs*') { throw "sync add: $added" }
+    $link = ((& $Cli --socket $sa sync share Docs --json 2>&1) -join '' | ConvertFrom-Json).link
+    $link | & $Cli --socket $sb sync join - --on-demand --to $bd 2>&1 | Out-Null
+    WaitFor { (Qa $b @('ondemand')) -match "placed $($count + 1) files" } 60000 'the placeholders on B' | Out-Null
+
+    # The last save lost: overwriting a file (CREATE_ALWAYS, as File.WriteAllText and many programs do) takes its
+    # placeholder away, and a plain file sends no close notification, so with nothing else going on the write would never
+    # leave this PC. With all quiet: it reaches A, the file is a placeholder again, and so does the next one.
+    $one = "$bd\one.txt"
+    if ([IO.File]::ReadAllText($one) -ne 'one') { Fail 'one.txt did not read on B' }
+    Start-Sleep -Seconds 3
+    foreach ($text in 'overwritten once', 'overwritten twice') {
+      [IO.File]::WriteAllText($one, $text)
+      try { WaitFor { (Get-Content -Raw "$docs\one.txt" -ErrorAction SilentlyContinue) -eq $text } 20000 "'$text' on A" | Out-Null }
+      catch { Fail "the overwrite was lost: B has '$([IO.File]::ReadAllText($one))', A has '$(Get-Content -Raw "$docs\one.txt")', placeholder on B: $(Qa $b @('ondemand', 'placeholder', $one))" }
+      WaitFor { (Qa $b @('ondemand', 'placeholder', $one)) -match 'placeholder True' } 20000 "one.txt a placeholder again after '$text'" | Out-Null
+      Start-Sleep -Seconds 3
+    }
+
+    # The same while the app is not running: no notification and no watcher, so it must look when it comes back. One
+    # save that overwrites (a plain file by then) and one that writes in place (a placeholder still, its change unseen).
+    if ([IO.File]::ReadAllText("$bd\p40.txt") -ne 'text 40') { Fail 'p40.txt did not read on B' }
+    Start-Sleep -Seconds 3
+    Stop-App $b $pb
+    [IO.File]::WriteAllText($one, 'overwritten away')
+    $inplace = [IO.File]::Open("$bd\p40.txt", 'Open', 'Write', 'Read')
+    $bytes = [Text.Encoding]::ASCII.GetBytes('in place 40')
+    $inplace.Write($bytes, 0, $bytes.Length); $inplace.Dispose()
+    $pb = Start-App $b -QaControl
+    foreach ($was in @{ f = 'one.txt'; t = 'overwritten away' }, @{ f = 'p40.txt'; t = 'in place 40' }) {
+      try { WaitFor { (Get-Content -Raw "$docs\$($was.f)" -ErrorAction SilentlyContinue) -eq $was.t } 30000 "'$($was.t)' on A" | Out-Null }
+      catch { Fail "the save made while the app was not running was lost: $($was.f) on B has '$([IO.File]::ReadAllText("$bd\$($was.f)"))', on A '$(Get-Content -Raw "$docs\$($was.f)")'" }
+    }
+    WaitFor { (Qa $b @('ondemand', 'placeholder', $one)) -match 'placeholder True' } 20000 'one.txt a placeholder again after the restart' | Out-Null
+
+    # A read that fills the placeholder, and writes straight after it, on through the moment the feed says the file is
+    # here and the host updates the placeholder (the save that was refused on CI).
+    1..($count - 1) | ForEach-Object {
+      $f = "$bd\p$_.txt"
+      if ([IO.File]::ReadAllText($f) -ne "text $_") { Fail "p$_.txt did not read on B" }
+      $for = [Diagnostics.Stopwatch]::StartNew()
+      while ($for.ElapsedMilliseconds -lt 700) { & $write $f "edited $_ at $($for.ElapsedTicks)" }
+      & $write $f "edited $_"
+    }
+    # A new file written again and again: the host looks at it and adopts it meanwhile.
+    1..$count | ForEach-Object {
+      $f = "$bd\n$_.txt"
+      foreach ($w in 1..12) { & $write $f "new $_ write $w"; Start-Sleep -Milliseconds 25 }
+    }
+    if ($refused.Count -gt 0) { Fail "$($refused.Count) writes refused: $(($refused | Select-Object -First 8) -join ' || ')" }
+
+    $missing = { @(1..$count | ForEach-Object { if ($_ -lt $count -and (Get-Content -Raw "$docs\p$_.txt" -ErrorAction SilentlyContinue) -ne "edited $_") { "p$_" }; if ((Get-Content -Raw "$docs\n$_.txt" -ErrorAction SilentlyContinue) -ne "new $_ write 12") { "n$_" } }) }
+    try { WaitFor { (& $missing).Count -eq 0 } 60000 'every last write on A' | Out-Null }
+    catch {
+      $late = & $missing
+      $said = $late | Select-Object -First 3 | ForEach-Object { "$_ on B says '$(Get-Content -Raw "$bd\$_.txt")', placeholder $((Qa $b @('ondemand', 'placeholder', "$bd\$_.txt")) -match 'placeholder True'); on A '$(Get-Content -Raw "$docs\$_.txt" -ErrorAction SilentlyContinue)'" }
+      Fail "not on A within 60 s: $($late -join ', '). $($said -join ' || ')"
+    }  } finally {
+    Stop-App $b $pb; Stop-App $a $pa
+    Remove-Item -Recurse -Force $a, $b -ErrorAction SilentlyContinue
+  }
   @()
 }
 

@@ -320,6 +320,13 @@ pub(crate) struct AddressBook {
     pub(crate) hints: HashMap<FolderId, BTreeSet<SocketAddr>>,
     /// Last dial attempt per address, for backoff.
     pub(crate) tried: HashMap<SocketAddr, (Instant, u32)>,
+    /// Addresses whose last dial connected and whose session the device there turned down in its setup (nothing in
+    /// common, a refused link, the device stopping): what made it refuse may change at any moment, so their wait is
+    /// at most [`REFUSED_WAIT_MAX`], and it goes when a folder opens or closes here or a device is admitted.
+    pub(crate) refused: BTreeSet<SocketAddr>,
+    /// Addresses whose dial connected and whose session is being set up: not dialed again meanwhile, and not failing
+    /// (no relay or hole punch for a device that answered).
+    pub(crate) in_setup: BTreeSet<SocketAddr>,
     /// The newest signed address record of each device (passed on to other members).
     pub(crate) records: HashMap<DeviceId, AddressRecord>,
 }
@@ -1042,9 +1049,22 @@ impl SyncHandle {
         self.inner.ctx.plays_0_1_11()
     }
 
-    /// A folder opened or closed here: sessions being set up check their folders again.
+    /// A folder opened or closed here: sessions being set up check their folders again, and devices that turned our
+    /// sessions down are dialed again at once (what we offer them changed).
     fn folders_moved(&self) {
         self.inner.ctx.folder_gen.fetch_add(1, Ordering::SeqCst);
+        self.forget_refusals();
+    }
+
+    /// The addresses whose sessions were turned down in their setup lose their backoff, and the dial loop runs.
+    pub(crate) fn forget_refusals(&self) {
+        {
+            let mut book = lock(&self.inner.book);
+            for a in std::mem::take(&mut book.refused) {
+                book.tried.remove(&a);
+            }
+        }
+        self.inner.wake_dialer.notify_one();
     }
 
     /// The folder closes here (paused, stopped): every session that has it linked marks it stale at this moment
@@ -2350,7 +2370,13 @@ impl SyncHandle {
     /// Adds an address (`host:port`) where devices of this folder (or channel) can be reached.
     pub fn add_address(&self, id: &FolderId, addr: SocketAddr) -> Result<(), SyncError> {
         self.inner.ctx.registry.user_space(id).ok_or(SyncError::NotFound)?;
-        lock(&self.inner.book).hints.entry(*id).or_default().insert(addr);
+        {
+            // Given now (by the user, an agent): dialed at once, whatever an earlier dial there met.
+            let mut book = lock(&self.inner.book);
+            book.hints.entry(*id).or_default().insert(addr);
+            book.tried.remove(&addr);
+            book.refused.remove(&addr);
+        }
         {
             let mut cfg = lock(&self.inner.cfg);
             let a = addr.to_string();
@@ -2908,7 +2934,8 @@ impl SyncHandle {
             return true;
         }
         let book = lock(&self.inner.book);
-        book.by_device.get(&device).is_none_or(|addrs| addrs.iter().all(|a| book.tried.get(a).is_some_and(|t| t.1 > 0)))
+        let failing = |a: &SocketAddr| book.tried.get(a).is_some_and(|t| t.1 > 0) && !book.in_setup.contains(a);
+        book.by_device.get(&device).is_none_or(|addrs| addrs.iter().all(failing))
     }
 
     /// The addresses `device`'s signed record lists.
@@ -3185,7 +3212,16 @@ impl SyncHandle {
             return;
         }
         space.members.write().unwrap_or_else(|e| e.into_inner()).insert(r.device);
-        lock(&self.inner.book).by_device.entry(r.device).or_default().extend(r.addresses());
+        {
+            // A link just put to use (joined, or its folder opened again): its addresses are dialed at once, whatever
+            // an earlier dial there met (a link used up or revoked, the folder closed there).
+            let mut book = lock(&self.inner.book);
+            book.by_device.entry(r.device).or_default().extend(r.addresses());
+            for a in r.addresses() {
+                book.tried.remove(&a);
+                book.refused.remove(&a);
+            }
+        }
         self.inner.wake_dialer.notify_one();
     }
 
@@ -3273,12 +3309,13 @@ impl SyncHandle {
         }
         {
             let mut book = lock(&self.inner.book);
+            // Connected, its session being set up: the end of the setup wakes the dial loop.
+            if book.in_setup.contains(&addr) {
+                return None;
+            }
             let now = Instant::now();
-            if let Some((last, fails)) = book.tried.get(&addr).copied() {
-                let due = last + retry_after(fails);
-                if now < due {
-                    return Some(due);
-                }
+            if let Some(due) = held_until(&book, addr, now) {
+                return Some(due);
             }
             let fails = book.tried.get(&addr).map_or(0, |t| t.1);
             book.tried.insert(addr, (now, fails + 1));
@@ -3309,21 +3346,38 @@ impl SyncHandle {
                         return;
                     }
                     let dev = conn.device();
+                    // Marked before anything wakes the dial loop (learning the address does): while the session is
+                    // set up the address is neither dialed again nor failing.
+                    lock(&h.inner.book).in_setup.insert(addr);
                     h.learn_address(Some(dev), None, addr);
                     h.remember_device(dev, None, None, Some(addr));
                     // The backoff goes once the session is up: one that ends after that is dialed again at once. A
                     // session turned down in its setup (nothing in common, a refused link, the device stopping) waits
-                    // as a dial that did not connect does; it was dialed again at once, forever (hundreds of times a
-                    // second, each successful dial waking the dial loop), and a device starting a session sent dozens.
-                    let h2 = h.clone();
+                    // as a dial that did not connect does, at most [`REFUSED_WAIT_MAX`]; it was dialed again at once,
+                    // forever (hundreds of times a second, each successful dial waking the dial loop).
+                    let up = Arc::new(AtomicBool::new(false));
+                    let (h2, up2) = (h.clone(), up.clone());
                     h.run_session_then(conn, candidates, move || {
-                        lock(&h2.inner.book).tried.remove(&addr);
+                        let mut book = lock(&h2.inner.book);
+                        book.tried.remove(&addr);
+                        book.refused.remove(&addr);
+                        book.in_setup.remove(&addr);
+                        up2.store(true, Ordering::SeqCst);
                     })
                     .await;
-                    // Turned down as a second session with a device that is connected: no backoff for it either.
-                    if h.inner.ctx.registry.peer(&dev).is_some() {
-                        lock(&h.inner.book).tried.remove(&addr);
+                    {
+                        let mut book = lock(&h.inner.book);
+                        book.in_setup.remove(&addr);
+                        // Turned down as a second session with a device that is connected: no backoff for it either.
+                        if up.load(Ordering::SeqCst) || h.inner.ctx.registry.peer(&dev).is_some() {
+                            book.tried.remove(&addr);
+                            book.refused.remove(&addr);
+                        } else {
+                            book.refused.insert(addr);
+                        }
                     }
+                    // The dial loop skipped the address during the setup: it learns its wait now.
+                    h.inner.wake_dialer.notify_one();
                 }
                 Err(e) => h.note_dial_failed(addr, device, &joining, &e),
             }
@@ -3356,8 +3410,21 @@ impl SyncHandle {
     }
 }
 
+/// The longest an address whose sessions were turned down in their setup waits: a refused dial costs only a
+/// handshake, and what made the device refuse (a link used up, its folder paused or still opening) may be over at
+/// any moment; over the internet only the joining device dials.
+pub(crate) const REFUSED_WAIT_MAX: Duration = Duration::from_secs(30);
+
 /// How long an address waits after `fails` dials that did not connect: a second at first (a device that is just
 /// starting, a busy Mac), then longer, at most five minutes.
+/// When `addr` may be dialed again, if not now.
+pub(crate) fn held_until(book: &AddressBook, addr: SocketAddr, now: Instant) -> Option<Instant> {
+    let (last, fails) = book.tried.get(&addr).copied()?;
+    let wait = retry_after(fails);
+    let due = last + if book.refused.contains(&addr) { wait.min(REFUSED_WAIT_MAX) } else { wait };
+    (now < due).then_some(due)
+}
+
 fn retry_after(fails: u32) -> Duration {
     const STEPS: [u64; 8] = [0, 1, 2, 5, 10, 30, 60, 120];
     Duration::from_secs(STEPS.get(fails as usize).copied().unwrap_or(300))
@@ -4244,7 +4311,8 @@ fn copy_entry(src: &Path, dst: &Path, t: std::fs::FileType) -> io::Result<()> {
     if t.is_symlink() {
         trs_platform::fs::symlink(&trs_platform::fs::read_link(src)?, dst)?;
     } else {
-        std::fs::copy(src, dst)?;
+        // A user's file, which a program may be writing during the move: never locked against it (Windows).
+        trs_platform::fs::copy_shared(src, dst)?;
         let m = std::fs::metadata(src)?;
         if let Ok(t) = m.modified() {
             std::fs::File::options().write(true).open(dst)?.set_modified(t)?;

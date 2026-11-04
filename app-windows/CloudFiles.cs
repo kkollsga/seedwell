@@ -210,6 +210,25 @@ static class CloudFiles
     [DllImport("cldapi.dll", ExactSpelling = true)]
     internal static extern int CfRevertPlaceholder(Microsoft.Win32.SafeHandles.SafeFileHandle file, uint flags, IntPtr overlapped);
 
+    [DllImport("cldapi.dll", CharSet = CharSet.Unicode, ExactSpelling = true)]
+    static extern int CfOpenFileWithOplock(string filePath, uint flags, out IntPtr protectedHandle);
+
+    [DllImport("cldapi.dll", ExactSpelling = true)]
+    static extern void CfCloseHandle(IntPtr fileHandle);
+
+    const uint OpenExclusive = 0x1;   // CF_OPEN_FILE_FLAG_EXCLUSIVE
+
+    /// <summary>
+    /// Whether no one has the file open: it opens with no sharing at all. Under its oplock, another program's open while
+    /// this looks breaks the oplock and goes on: unlike a plain open, looking never refuses anyone's write.
+    /// </summary>
+    internal static bool NobodyHasOpen(string path)
+    {
+        if (CfOpenFileWithOplock(path, OpenExclusive, out var h) < 0) return false;
+        CfCloseHandle(h);
+        return true;
+    }
+
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     static extern Microsoft.Win32.SafeHandles.SafeFileHandle CreateFileW(string name, uint access, uint share, IntPtr security, uint disposition, uint flags, IntPtr template);
 

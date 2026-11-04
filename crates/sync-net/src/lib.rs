@@ -54,6 +54,8 @@ pub mod shared;
 pub mod source;
 pub mod status;
 pub mod tls;
+#[cfg(test)]
+mod dial_tests;
 
 pub use relay_server::{RelayOptions, run_relay};
 pub use rendezvous::RendezvousStatus;

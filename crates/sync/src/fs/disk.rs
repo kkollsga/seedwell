@@ -200,9 +200,11 @@ impl Fs for StdFs {
     }
 
     fn copy(&self, from: &str, to: &str) -> io::Result<()> {
-        // `std::fs::copy` clones (`fclonefileat`) on APFS and falls back to `fcopyfile`; on Linux it
-        // uses `copy_file_range`, which reflinks on Btrfs and XFS.
-        fs::copy(self.join_checked(from)?, self.join_checked(to)?).map(|_| ())
+        // The source is a user's file (a pull's starting copy, an archived version), which a program may be writing:
+        // never locked against it (Windows), and a copy that overlapped a write is made again or fails for now. On Unix
+        // `std::fs::copy`: a clone (`fclonefileat`) on APFS, else `fcopyfile`; on Linux `copy_file_range`, which
+        // reflinks on Btrfs and XFS.
+        trs_platform::fs::copy_shared(&self.join_checked(from)?, &self.join_checked(to)?).map(|_| ())
     }
 
     fn set_mtime(&self, rel: &str, mtime_ns: i64) -> io::Result<()> {

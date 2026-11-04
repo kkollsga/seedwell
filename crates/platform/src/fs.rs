@@ -312,6 +312,93 @@ pub fn copy_metadata(src: &File, dst: &File) -> io::Result<()> {
     }
 }
 
+/// How many times [`copy_shared`] copies a file that changes while it is read before it gives up.
+pub const COPY_TRIES: u32 = 4;
+
+/// Copies the file `from` to `to` (made or replaced) as `std::fs::copy` does (the permissions; on macOS and Windows the
+/// modification time too), while other programs may be writing `from` (a user's file): returns the bytes copied.
+///
+/// - **Never stands in a writer's way.** Windows' own copy (`CopyFileExW`, which `std::fs::copy` is) opens the source
+///   without `FILE_SHARE_WRITE`, so another program's save during the copy fails with "being used by another process".
+///   Here the source is opened as [`File::open`] opens it, sharing read, write and delete, and streamed to `to`. On Unix
+///   nothing locks a file: `std::fs::copy` stays (on APFS a clone, sharing the blocks; on Linux `copy_file_range`).
+/// - **Never hands back a copy that overlapped a write**, which may hold old and new bytes mixed: the source's size,
+///   modification and change times and file id are read before and after, and a copy during which they moved is made
+///   again, [`COPY_TRIES`] times in all. Then it fails with [`io::ErrorKind::ResourceBusy`] ("changed while it was
+///   copied"), `to` removed, and the caller takes the file later (the writer's close tells the host to offer it
+///   again). A write within the same tick of the system's clock as the file's last change, of the same size, is not
+///   seen: the host's notice of the writer's close is what catches that one.
+///
+/// Windows copies no alternate data streams (the Mark of the Web among them), which `CopyFileExW` did.
+pub fn copy_shared(from: &Path, to: &Path) -> io::Result<u64> {
+    for attempt in 0..COPY_TRIES {
+        let before = copy_stamp(from)?;
+        let n = copy_once(from, to)?;
+        test_hook_fire(from, attempt);
+        if copy_stamp(from)? == before {
+            #[cfg(windows)]
+            std::fs::set_permissions(to, std::fs::metadata(from)?.permissions())?;
+            return Ok(n);
+        }
+    }
+    let _ = std::fs::remove_file(to);
+    Err(io::Error::new(io::ErrorKind::ResourceBusy, format!("{} changed while it was copied; try again", from.display())))
+}
+
+/// What tells [`copy_shared`] the source changed: its length and [`FileStamp`].
+fn copy_stamp(path: &Path) -> io::Result<(u64, FileStamp)> {
+    let meta = std::fs::metadata(path)?;
+    Ok((meta.len(), file_stamp(path, &meta)?))
+}
+
+/// One copy of [`copy_shared`]'s; on Windows without the permissions yet (a read-only copy could not be made again).
+fn copy_once(from: &Path, to: &Path) -> io::Result<u64> {
+    #[cfg(unix)]
+    {
+        std::fs::copy(from, to)
+    }
+    #[cfg(windows)]
+    {
+        // `File::open` shares read, write and delete (std's default share mode on Windows).
+        let mut src = File::open(from)?;
+        let modified = src.metadata()?.modified();
+        let dst = File::create(to)?;
+        // `io::copy` reads straight into a `BufWriter`'s buffer: 1 MiB at a time, not 8 KiB.
+        let mut w = io::BufWriter::with_capacity(1 << 20, dst);
+        let n = io::copy(&mut src, &mut w)?;
+        let dst = w.into_inner().map_err(io::IntoInnerError::into_error)?;
+        // As `CopyFileExW`: the copy keeps the source's last-write time.
+        if let Ok(t) = modified {
+            dst.set_modified(t)?;
+        }
+        Ok(n)
+    }
+}
+
+type CopyHook = (std::path::PathBuf, Box<dyn FnMut(u32) + Send>);
+static COPY_HOOKS: std::sync::Mutex<Vec<CopyHook>> = std::sync::Mutex::new(Vec::new());
+static COPY_HOOKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// **Tests:** `hook(attempt)` runs in each [`copy_shared`] of `from`, after the bytes are copied and before the source is
+/// looked at again (as a write landing during the copy); `None` takes `from`'s away. A hook must not copy.
+#[doc(hidden)]
+pub fn test_while_copying(from: &Path, hook: Option<Box<dyn FnMut(u32) + Send>>) {
+    let mut hooks = COPY_HOOKS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    hooks.retain(|(p, _)| p != from);
+    hooks.extend(hook.map(|f| (from.to_path_buf(), f)));
+    COPY_HOOKED.store(!hooks.is_empty(), std::sync::atomic::Ordering::SeqCst);
+}
+
+fn test_hook_fire(from: &Path, attempt: u32) {
+    if !COPY_HOOKED.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    let mut hooks = COPY_HOOKS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some((_, f)) = hooks.iter_mut().find(|(p, _)| p == from) {
+        f(attempt);
+    }
+}
+
 /// Whether entries can be created in and removed from folder `dir`. On Unix `access(W_OK)`, which
 /// also reports a locked folder (`uchg`) and a read-only volume; on Windows the read-only attribute
 /// of the folder and of its volume are not reliable signs, so only a missing folder says no.
@@ -851,6 +938,81 @@ mod tests {
         } else {
             assert_eq!(clean_name(r#"a\b*?"<>|c. ."#), r#"a\b*?"<>|c. ."#);
         }
+    }
+
+    /// The failure: a copy that overlapped a write (old and new bytes mixed) is handed back as the file's content.
+    #[test]
+    fn a_copy_that_overlapped_a_write_is_made_again() {
+        let t = tempfile::tempdir().unwrap();
+        let (from, to) = (t.path().join("doc.txt"), t.path().join("copy"));
+        std::fs::write(&from, b"before").unwrap();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (s, f) = (seen.clone(), from.clone());
+        let hook = move |attempt| {
+            s.lock().unwrap().push(attempt);
+            if attempt == 0 {
+                std::fs::write(&f, b"after, and longer").unwrap();
+            }
+        };
+        test_while_copying(&from, Some(Box::new(hook)));
+        let n = copy_shared(&from, &to);
+        test_while_copying(&from, None);
+        assert_eq!(n.unwrap(), 17);
+        assert_eq!(std::fs::read(&to).unwrap(), b"after, and longer", "the copy is the file as it is now");
+        assert_eq!(*seen.lock().unwrap(), [0, 1], "copied again once");
+    }
+
+    /// The failure: a source that changes during every copy is handed back anyway, or its partial copy left behind.
+    #[test]
+    fn a_source_that_keeps_changing_is_refused_for_now() {
+        let t = tempfile::tempdir().unwrap();
+        let (from, to) = (t.path().join("log.txt"), t.path().join("copy"));
+        std::fs::write(&from, b"x").unwrap();
+        let f = from.clone();
+        test_while_copying(&from, Some(Box::new(move |attempt| std::fs::write(&f, vec![b'y'; attempt as usize + 2]).unwrap())));
+        let e = copy_shared(&from, &to).unwrap_err();
+        test_while_copying(&from, None);
+        assert_eq!(e.kind(), io::ErrorKind::ResourceBusy, "{e}");
+        assert!(!to.exists(), "no torn copy is left");
+    }
+
+    /// The failure (Windows): the copy opens its source without `FILE_SHARE_WRITE`, as `CopyFileExW` does, and another
+    /// program's save meanwhile fails with "being used by another process". Unix has no such locks.
+    #[cfg(windows)]
+    #[test]
+    fn a_writer_is_never_refused_while_copying() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let t = tempfile::tempdir().unwrap();
+        let (from, to) = (t.path().join("big.bin"), t.path().join("copy"));
+        let data = vec![7u8; 16 << 20];
+        std::fs::write(&from, &data).unwrap();
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let (st, f) = (stop.clone(), from.clone());
+        let writer = std::thread::spawn(move || {
+            let (mut opened, mut refused) = (0, Vec::new());
+            while !st.load(Ordering::Relaxed) {
+                match std::fs::OpenOptions::new().write(true).open(&f) {
+                    // The same bytes again: the opens are what is tested.
+                    Ok(file) => {
+                        opened += 1;
+                        write_all_at(&file, &[7u8; 4096], 0).unwrap();
+                    }
+                    Err(e) => refused.push(e.to_string()),
+                }
+            }
+            (opened, refused)
+        });
+        for _ in 0..20 {
+            // A write moves the times: a copy may give up for now, but never locks the writer out.
+            match copy_shared(&from, &to) {
+                Ok(n) => assert_eq!(n, data.len() as u64),
+                Err(e) => assert_eq!(e.kind(), io::ErrorKind::ResourceBusy, "{e}"),
+            }
+        }
+        stop.store(true, Ordering::Relaxed);
+        let (opened, refused) = writer.join().unwrap();
+        assert!(opened > 0);
+        assert!(refused.is_empty(), "the writer was refused {} times ({opened} opens): {:?}", refused.len(), refused.first());
     }
 
     #[test]

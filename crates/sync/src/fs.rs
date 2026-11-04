@@ -98,7 +98,9 @@ pub trait Fs: Send + Sync {
     fn rename(&self, from: &str, to: &str) -> io::Result<()>;
     /// A second name for the same file (for the archive: costs nothing until the file is replaced).
     fn hard_link(&self, from: &str, to: &str) -> io::Result<()>;
-    /// Copies a file; a clone (copy on write) where the filesystem supports it (APFS).
+    /// Copies a file; a clone (copy on write) where the filesystem supports it (APFS). A program writing `from`
+    /// meanwhile is never refused, and a copy that overlapped a write is never handed back: it is made again, or fails
+    /// with `ResourceBusy` (`trs_platform::fs::copy_shared`).
     fn copy(&self, from: &str, to: &str) -> io::Result<()>;
     /// Sets the modification time.
     fn set_mtime(&self, rel: &str, mtime_ns: i64) -> io::Result<()>;
