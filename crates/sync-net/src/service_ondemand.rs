@@ -43,7 +43,9 @@ pub enum FetchWait {
     Here(Fetched),
     /// Still on its way.
     Coming {
-        /// The connected devices it comes from (their names; none while devices may still be coming up).
+        /// The connected devices it comes from (their names; none while devices may still be coming up, or while its
+        /// request is still on its way to the folder's busy core: a pull round holds it, and on a slow disk the
+        /// request's own commit can outlast a short wait).
         from: Vec<String>,
         /// A folder's files no device can give right now (not waited for).
         unavailable: Vec<String>,
@@ -92,6 +94,8 @@ fn host_err(e: HostError) -> SyncError {
         HostError::NotOnDemand => super::on_demand(OnDemandError::NotOnDemand, e.to_string()),
         HostError::NotFound(_) => super::on_demand(OnDemandError::NoItem, e.to_string()),
         HostError::Changed(_) => super::on_demand(OnDemandError::Changed, e.to_string()),
+        HostError::Ignored(_) => super::on_demand(OnDemandError::Ignored, e.to_string()),
+        HostError::IgnoredNotHere(_) => super::on_demand(OnDemandError::IgnoredNotHere, e.to_string()),
         other => invalid(other.to_string()),
     }
 }
@@ -279,7 +283,7 @@ impl SyncHandle {
             return Err(super::on_demand(OnDemandError::Unavailable, format!("{path}: {}", trs_sync::ondemand::UNAVAILABLE)));
         }
         let f = self.on_demand_folder(id)?;
-        let (ask, requesting) = {
+        let (ask, requesting, stands) = {
             let mut x = lock(&f.fetches);
             x.asked += 1;
             let n = x.asked;
@@ -289,9 +293,12 @@ impl SyncHandle {
                 // (A failure nobody waited on: this call makes the request again and finds out itself.)
                 x.request_failed.remove(path);
             }
-            (n, requesting)
+            // Read with this ask noted, under the same lock a give-up's take-back holds while it takes the request back:
+            // a request seen standing here is never taken back for an earlier ask after all.
+            let stands = requesting || self.request_stands(&f, path)?;
+            (n, requesting, stands)
         };
-        if !requesting && !self.request_stands(&f, path)? {
+        if !requesting && !stands {
             lock(&f.fetches).requesting.insert(path.to_string(), ask);
             let (h, f2, p) = (self.clone(), f.clone(), path.to_string());
             let made = tokio::spawn(async move {
@@ -382,7 +389,10 @@ impl SyncHandle {
                     let f3 = f2.clone();
                     let _ = h
                         .with_core(&f2, move |c| {
-                            if lock(&f3.fetches).asks.get(&p) == Some(&ask) {
+                            // Held while it is taken back: a fetch asked meanwhile sees it either standing (and this
+                            // leaves it) or gone (and makes it again), never standing and then gone.
+                            let x = lock(&f3.fetches);
+                            if x.asks.get(&p) == Some(&ask) {
                                 c.cancel_request(&p)?;
                             }
                             Ok(())
@@ -491,7 +501,10 @@ impl SyncHandle {
         Ok(st)
     }
 
-    /// How far the fetch of the file at `path` is (its partial copy in the cache).
+    /// How far the fetch of the file at `path` is (its partial copy in the cache). Never goes back while it comes: once
+    /// whole, the copy is renamed into place and its record says so only when the pull's round is committed (a flush,
+    /// long on a slow disk: Windows' CI showed the 0 of a copy that was gone); meanwhile the file in place, of this
+    /// version's size, counts as whole (`done == total`, not `here` yet).
     pub fn od_progress(&self, id: &FolderId, path: &str) -> Result<FetchProgress, SyncError> {
         check(path)?;
         let f = self.on_demand_folder(id)?;
@@ -501,7 +514,11 @@ impl SyncHandle {
             return Ok(FetchProgress { done: total, total, here: true, fetching: false });
         }
         let tmp = abs(&f.root, &trs_sync::pull::temp_path(path));
-        let done = std::fs::metadata(tmp).map(|m| m.len().min(total)).unwrap_or(0);
+        let done = match std::fs::metadata(tmp) {
+            Ok(m) => m.len().min(total),
+            Err(_) if std::fs::metadata(abs(&f.root, path)).is_ok_and(|m| m.is_file() && m.len() == total) => total,
+            Err(_) => 0,
+        };
         Ok(FetchProgress { done, total, here: false, fetching: r.want })
     }
 
@@ -650,6 +667,20 @@ impl SyncHandle {
         .await
     }
 
+    /// Why `path` (a directory with `dir`) is a name on-demand folder `id` does not sync, if it is: the line that decides
+    /// and whether it is deletable (SPEC §7G.2). From the patterns as the core last read them (never waiting for it).
+    pub fn od_ignored(&self, id: &FolderId, path: &str, dir: bool) -> Result<Option<trs_sync::ignore::Why>, SyncError> {
+        check(path)?;
+        let f = self.on_demand_folder(id)?;
+        Ok(f.ignore.get().why(path, dir))
+    }
+
+    /// How long announcing folder `id`'s changes still waits for a save by replace (a delete the host made a moment
+    /// ago, SPEC §7G.11): `None` when nothing waits.
+    pub fn od_replace_hold(&self, id: &FolderId) -> Option<Duration> {
+        self.inner.ctx.registry.folder(id)?.replacing.hold()
+    }
+
     /// The user's new folder at `path` (with any missing folders above it).
     pub async fn od_mkdir(&self, id: &FolderId, path: &str) -> Result<(), SyncError> {
         check(path)?;
@@ -714,6 +745,14 @@ impl SyncHandle {
                         .map(|_| format!("{p}: a newer version arrived from another device, so it was not deleted")),
                     None => None,
                 };
+                // The file that left under a name the folder does not sync, as the host saw it then, while a new file
+                // took its place (a save by replace): the host lets go of it; the item there now stays.
+                // Asked first: a save that changed nothing has the content version the host saw.
+                if let Some(super::DeleteSeen::File(seen)) = &seen
+                    && c.host_left(&p, seen)?
+                {
+                    return Ok((Ok(Deleted::Deleted { items: 0, failed: Vec::new() }), c.pins().clone()));
+                }
                 if let Some(why) = changed {
                     return Ok((Err(HostError::Changed(why)), c.pins().clone()));
                 }
@@ -737,22 +776,43 @@ impl SyncHandle {
         let (from2, to2) = (from.to_string(), to.to_string());
         // Kept in place: the user's placeholders move with the rename, and so do the notes of what is in them.
         let placed = f.placed.clone();
+        enum Renamed {
+            Here(u64),
+            /// Onto a name the folder does not sync: the item left the folder (deleted everywhere), its content the host's.
+            Left(String),
+            ByHolder([u8; 32], Vec<ShortId>, String),
+        }
+        // One step on the folder's core: the name it lands at is checked against the ignore rules and renamed to, or
+        // left by, with nothing in between (the rules cannot change, nor the name land elsewhere).
         let here = self
-            .with_core(&f, move |c| match match &placed {
-                Some(p) => p.host_rename(&from2, &to2, || c.host_rename(&from2, &to2)),
-                None => c.host_rename(&from2, &to2),
-            } {
-                Ok(n) => Ok(Ok((n, c.pins().clone()))),
-                Err(HostError::NeedsHolder) => Ok(Err((c.rename_seen(&from2)?, c.rename_holders(&from2)?, c.rename_target(&to2)?))),
-                Err(e) => Err(e),
+            .with_core(&f, move |c| {
+                let in_place = placed.as_ref().map(|p| move |path: &str| p.is_held(path));
+                if let Some(words) = c.host_leave(&from2, &to2, in_place.as_ref().map(|h| h as &dyn Fn(&str) -> bool))? {
+                    return Ok((Renamed::Left(words), c.pins().clone()));
+                }
+                let r = match &placed {
+                    Some(p) => p.host_rename(&from2, &to2, || c.host_rename(&from2, &to2)),
+                    None => c.host_rename(&from2, &to2),
+                };
+                match r {
+                    Ok(n) => Ok((Renamed::Here(n), c.pins().clone())),
+                    Err(HostError::NeedsHolder) => {
+                        Ok((Renamed::ByHolder(c.rename_seen(&from2)?, c.rename_holders(&from2)?, c.rename_target(&to2)?), c.pins().clone()))
+                    }
+                    Err(e) => Err(e),
+                }
             })
             .await?;
         match here {
-            Ok((n, pins)) => {
+            (Renamed::Here(n), pins) => {
                 self.save_pins(id, &f, pins)?;
                 Ok(n)
             }
-            Err((seen, holders, to)) => self.rename_by_holder(id, &f, from, &to, seen, holders).await,
+            (Renamed::Left(words), pins) => {
+                self.save_pins(id, &f, pins)?;
+                Err(super::on_demand(OnDemandError::Ignored, words))
+            }
+            (Renamed::ByHolder(seen, holders, to), _) => self.rename_by_holder(id, &f, from, &to, seen, holders).await,
         }
     }
 
@@ -879,7 +939,10 @@ impl SyncHandle {
         // they hold comes back into the cache first (so the place is checked after that).
         let own_place = entry.in_place && place == entry.path;
         if !on {
-            super::refuse_cloud_root(&place)?;
+            // At its own place, kept in place, the folder is Seedwell's own sync root until the host lets go of it below
+            // (Windows' Cloud Files; the system's check calls every sync root cloud storage): what counts is the folder
+            // it is in. (A Mac's File Provider domain is never a folder's place: it lives in ~/Library/CloudStorage.)
+            super::refuse_cloud_root(if own_place { place.parent().unwrap_or(&place) } else { &place })?;
             self.refuse_forbidden(&place)?;
             self.refuse_overlap_other(&place, Some(id))?;
             // The place must be free (an empty folder there, the host's, is taken over).

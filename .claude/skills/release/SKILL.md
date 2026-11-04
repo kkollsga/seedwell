@@ -13,9 +13,10 @@ Read `AGENTS.md` and `docs/RELEASING.md` first. Their rules win over anything he
 - Never touch the installed `/Applications/Seedwell.app` or its data. Do not run `tools/install-local.sh` unless the
   user asks.
 
-The gate for the tag is CI (Mac and Windows) and the release workflow. Before the public commit the PC runs
-`qa\run.ps1 all` and `qa\rust-tests.ps1` on the exact source bundle when it can (step 4), to find Windows failures
-before a CI round; it never blocks a release, and no other manual acceptance run is waited for. The rules behind this are docs/RELEASING.md's "Release discipline":
+The gate for the tag is CI (Mac and Windows) and the release workflow. **No full test run happens locally**, on the
+Mac or the PC (the user's decision, 2026-11-03): the work was tested with targeted tests as it was made (AGENTS.md,
+*Catching bugs early*), and GitHub CI is the thorough run. No manual acceptance run is waited for. A CI failure is a
+bug that escaped: fix it and add the guard that would have caught it locally (AGENTS.md). The rules behind this are docs/RELEASING.md's "Release discipline":
 
 - **Scope is fixed once the release has started.** Anything the user asks for after that goes to the next release,
   unless the user decides otherwise when asked ("Add it to X.Y.Z, or the next release?").
@@ -93,17 +94,11 @@ gh pr list --state open --json number,title,author,headRefName,statusCheckRollup
 1. **Bump** `Cargo.toml` (`Cargo.lock` follows on the next cargo command) and commit on master: `Seedwell X.Y.Z`,
    with the session's attribution trailer.
 2. **Clean tree:** `git status --short` must be empty.
-3. **Check locally** what changed since the last release (GitHub CI runs the full suite, so don't duplicate it):
-   ```sh
-   tools/check.sh --base public
-   ```
-   It includes the timing tests at utility priority (as CI's slower Mac) and the test-portability scan; both must
-   pass, neither is skipped.
-4. **The PC on the exact source.** Make the bundle of master as it is now (`windows-bridge` skill), send it with the
-   one checklist of everything Windows still needs for this release, and wait for the PC's report: `qa\run.ps1 all`
-   and `qa\rust-tests.ps1` both PASS on that bundle's ref. A failure is fixed on master (Rust here, `app-windows`
-   through the PC's patch), and the bundle and both runs are made again. A commit after the bundle means a new
-   bundle. If the PC is busy, off or does not answer within the time CI would take, go on: CI stays the gate.
+3. **No local full check.** Every change was tested when it was made (`tools/check.sh --quick`); GitHub CI runs
+   everything on the pushed commit. Only when master has commits nobody tested (a hand edit, a merge with
+   conflicts), run `tools/check.sh --quick` over them.
+4. **Tell the PC** in the agent channel that the release is going and from which commit, so it can stand by for a CI
+   log. Don't wait for it.
 5. **Build the public commit.** Its message becomes the release notes, so write what changed for users: a title
    plus a short bullet list.
    ```sh

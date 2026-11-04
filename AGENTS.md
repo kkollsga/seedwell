@@ -52,11 +52,10 @@ release procedure.
 - **The Mac and the PC work together as the `windows-bridge` skill says** (`.claude/skills/windows-bridge/SKILL.md`):
   git bundles from the Mac, patches from the PC, both as attachments in "Seedwell Development"; the Mac owns Rust and
   merges, the PC owns `app-windows/` and never commits.
-- **The PC tests every bundle twice:** `app-windows\qa\run.ps1 all` (the app) and `app-windows\qa\rust-tests.ps1` (the
-  Rust tests exactly as CI's Windows job runs them, with a time limit and a summary to paste). From bash:
-  `powershell.exe -NoProfile -ExecutionPolicy Bypass -File app-windows/qa/run.ps1 all` and the same with
-  `app-windows/qa/rust-tests.ps1`. Every batch the PC sends reports both results, and a Mac bundle is not good until
-  the PC has run both on it.
+- **The PC tests what it changed, not everything** (the user's decision, 2026-11-03: no full local runs; GitHub CI
+  runs `run.ps1 all` and the Rust tests on Windows). It compiles the C# and, when it has a core to run against, runs
+  the QA checks its change touches (`app-windows\qa\run.ps1 <check>...`). Every batch says which checks ran and
+  which only CI will run.
 
 ## Bugs
 
@@ -66,7 +65,9 @@ release procedure.
 
 ## Catching bugs early
 
-A bug the PC finds costs a round trip of an hour or more; most can be caught in the first minutes on the Mac.
+**We don't run full test suites locally; GitHub CI is the thorough run. The goal is still that no bug reaches
+GitHub.** Locally we run targeted tests and do everything cheap that finds bugs early. A bug the PC or CI finds costs
+a round trip of an hour or more; most can be caught in the first minutes on the Mac.
 
 - **Every core call a host uses gets a test that acts like the host,** in the same change. It calls it the way
   Finder, Explorer or the app will (repeated calls, the `wait_ms` they pass, the threads they call from) and asserts
@@ -79,7 +80,11 @@ A bug the PC finds costs a round trip of an hour or more; most can be caught in 
 - **A review that builds nothing:** before a worker's branch goes into a bundle, the coordinator has its diff read by
   a reviewer agent (the `code-review` skill, medium) against the call's promise and the platform differences above.
   It takes a few minutes and can run while something else builds.
-- **Test what you changed; the full check runs once per release** (see *Heavy work*).
+- **Test what you changed** with `tools/check.sh --quick` (see *Heavy work*); never a full suite locally.
+- **Every CI failure is a bug that escaped.** Fix it, then find why the targeted tests missed it and add the
+  cheapest guard that catches that kind locally next time: a host-like test, a line in `tools/timing-tests.txt`, a
+  rule in `tools/test-portability.py` or `tools/ffi-names.py`, a step in `tools/check.sh --quick`. Say in the fix's
+  commit which guard was added.
 
 ## Heavy work (16 GB Mac)
 
@@ -95,11 +100,9 @@ A bug the PC finds costs a round trip of an hour or more; most can be caught in 
   - **A worker hands back once `tools/check.sh --quick` passes.** It runs the tests of the crates that changed
     only (not of the crates that depend on them), clippy over those and their dependents (which compiles them, no
     tests), the app and Swift tests only when `app/` or `trs-ffi` itself changed, and the Windows compile check.
-  - The plain `tools/check.sh` (every affected crate and its dependents) runs once on master before a release's
-    public commit (`--base public`, the coordinator), not once per worker. The coordinator asks a worker for it only
-    when a change is wide (many crates, a shared type).
-  - `tools/check.sh --full` is the whole workspace, which is what GitHub CI runs on every push to `main`. Do not run
-    it locally unless the coordinator asks; never run the whole suite more than once per task.
+  - **No broad runs locally:** not the plain `tools/check.sh` over many crates, not `--base public`, not `--full`.
+    GitHub CI runs the whole workspace on the Mac and Windows on every push to `main`. Run a broad check only when the
+    user asks.
 - **Clear the build cache as you go.** `tools/check.sh` removes, once a day, the build artifacts no build has
   used for 3 days (`cargo sweep --time 3`, plus the `target/*/incremental` folders of that age, which cargo sweep
   leaves; it says so if cargo-sweep is missing). After a toolchain or dependency change, or when `target/` grows

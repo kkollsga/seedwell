@@ -306,7 +306,19 @@ pub(crate) fn ondemand_notice(
             format!("“{name}” isn't here yet"),
             format!("No device that has it is connected. Open it again once one is (“{folder}” in Folder Sync shows the devices)."),
         ),
-        K::NoItem | K::NotOnDemand | K::Gone | K::NotRunning | K::AnchorExpired | K::Changed => return None,
+        // A rename the file manager refused: it cannot say why itself.
+        K::IgnoredNotHere => (
+            format!("“{name}” wasn't renamed"),
+            format!(
+                concat!(
+                    "Seedwell doesn't sync the new name, so the file would stay on this ",
+                    trs_platform::computer!(),
+                    " only, and it isn't here yet. Download it first, then rename it (“{}” in Folder Sync)."
+                ),
+                folder
+            ),
+        ),
+        K::NoItem | K::NotOnDemand | K::Gone | K::NotRunning | K::AnchorExpired | K::Changed | K::Ignored => return None,
     };
     // One notification per file and problem (Windows' tag holds 64 characters: the path is hashed).
     let key = {

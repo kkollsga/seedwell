@@ -663,6 +663,14 @@ pub trait SyncBackend: Send + Sync {
     fn od_set_host_anchor(&self, _id: &str, _anchor: u64) -> Result<(), ondemand::OdError> {
         Err(ondemand::not_on_demand())
     }
+    /// Why a path is a name an on-demand folder does not sync, if it is.
+    fn od_ignored(&self, _id: &str, _path: &str, _dir: bool) -> Result<Option<ondemand::SyncIgnored>, ondemand::OdError> {
+        Err(ondemand::not_on_demand())
+    }
+    /// Whether a folder's announcements wait for a save by replace now (a delete the host made a moment ago).
+    fn od_replace_hold(&self, _id: &str) -> bool {
+        false
+    }
     /// Adds a folder of this computer on demand, whole or not at all (the mock: added, then switched).
     fn add_folder_on_demand(&self, path: &str) -> Result<SyncFolder, CoreError> {
         let f = self.add_folder(path)?;
@@ -1185,6 +1193,12 @@ impl SyncBackend for RealSync {
     }
     fn od_set_host_anchor(&self, id: &str, anchor: u64) -> Result<(), ondemand::OdError> {
         RealSync::od_set_host_anchor(self, id, anchor)
+    }
+    fn od_ignored(&self, id: &str, path: &str, dir: bool) -> Result<Option<ondemand::SyncIgnored>, ondemand::OdError> {
+        RealSync::od_ignored(self, id, path, dir)
+    }
+    fn od_replace_hold(&self, id: &str) -> bool {
+        RealSync::od_replace_hold(self, id)
     }
 
 
@@ -1907,12 +1921,12 @@ fn mock_gone(members: &[SyncMember], days: u64) -> Vec<SyncGoneDevice> {
 
 impl MockSync {
     pub fn new() -> Arc<Self> {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/Users/me".into());
-        let base = format!("{home}/Seedwell");
+        let home = PathBuf::from(crate::mock::home());
+        let base = home.join("Seedwell");
         let mk = |n: u32, name: &str, access: SyncAccess, state: SyncState, members: u32, connected: u32| SyncFolder {
             id: mock_id(n),
             name: name.into(),
-            path: format!("{base}/{name}"),
+            path: base.join(name).display().to_string(),
             access,
             role: if access == SyncAccess::ReadOnly { SyncRole::ReadOnly } else { SyncRole::ReadWrite },
             share_until_s: None,
@@ -1944,7 +1958,7 @@ impl MockSync {
         photos.role = SyncRole::Owner;
         // A folder with a chat: the Family channel goes with it.
         photos.channel_id = Some(mock_id(11));
-        photos.path = format!("{home}/Pictures/Photos");
+        photos.path = home.join("Pictures").join("Photos").display().to_string();
         let mut docs = mk(2, "Documents", SyncAccess::ReadWrite, SyncState::Syncing, 2, 2);
         docs.need_files = 312;
         docs.role = SyncRole::Owner;
@@ -2333,6 +2347,9 @@ impl SyncBackend for MockSync {
     }
     fn od_set_host_anchor(&self, id: &str, anchor: u64) -> Result<(), ondemand::OdError> {
         MockSync::od_set_host_anchor(self, id, anchor)
+    }
+    fn od_ignored(&self, id: &str, path: &str, dir: bool) -> Result<Option<ondemand::SyncIgnored>, ondemand::OdError> {
+        MockSync::od_ignored(self, id, path, dir)
     }
 
 

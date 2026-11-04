@@ -363,7 +363,11 @@ mod tests {
         // While that read runs, no other starts.
         assert_eq!(p.get("a", Duration::ZERO, slow(&reads, 3, 0)), Some(1));
         assert_eq!(reads.load(Ordering::SeqCst), 2);
-        std::thread::sleep(Duration::from_millis(500));
+        // Kept once the slow read ends (waited for, not slept past: at utility priority its 400 ms run late).
+        let end = Instant::now() + Duration::from_secs(10);
+        while p.kept(&"a") != Some(2) && Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(20));
+        }
         assert_eq!(p.kept(&"a"), Some(2), "the slow read's value is kept");
         assert_eq!(p.get("b", Duration::ZERO, slow(&reads, 9, 100)), None, "nothing to show yet");
         p.forget(&"a");

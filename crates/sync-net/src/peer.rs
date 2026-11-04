@@ -626,6 +626,12 @@ async fn send_index(f: &Arc<FolderShared>, peer: &Arc<PeerHandle>, their: JoinFo
             return Ok(());
         }
         loop {
+            let pause = *lock(&f.announce_pause);
+            if !pause.is_zero() {
+                tokio::time::sleep(pause).await;
+            }
+            // Before every batch: a delete made while this session announces waits for a save too.
+            replace_hold(f).await;
             let f2 = f.clone();
             let batch = tokio::task::spawn_blocking(move || f2.announce_since(sent, MAX_INDEX_ENTRIES))
                 .await
@@ -659,6 +665,21 @@ async fn send_index(f: &Arc<FolderShared>, peer: &Arc<PeerHandle>, their: JoinFo
             // The folder is stopping here: let go of it (the peer stays connected for the others).
             _ = stopped.wait_for(|s| *s) => return Ok(()),
         }
+    }
+}
+
+/// Waits, before announcing, while a delete the host made a moment ago may still turn out to be a save by replace (SPEC
+/// §7G.11): a new file at its path then replaces the delete in the index, and the peer is sent one edit instead of a
+/// delete and a new file. Asked before every batch, and at most one window each time, so a run of deletes never holds
+/// the folder's announcements up for longer than that; nothing waits in a folder without such deletes.
+async fn replace_hold(f: &FolderShared) {
+    let end = std::time::Instant::now() + f.replacing.window();
+    while let Some(left) = f.replacing.hold() {
+        let now = std::time::Instant::now();
+        if now >= end || *f.stopped.borrow() {
+            return;
+        }
+        tokio::time::sleep(left.min(end - now).min(std::time::Duration::from_millis(50))).await;
     }
 }
 

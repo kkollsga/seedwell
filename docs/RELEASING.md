@@ -143,14 +143,11 @@ more in Windows follow-ups asked one at a time and work added halfway. So:
    otherwise when asked.
 2. **Windows work for a release goes to the PC as one checklist:** everything at once (compile, follow-ups, platform
    checks), in one message with the bundle (`.claude/skills/windows-bridge`), not one item at a time.
-3. **Before the public commit, the PC runs both on the exact source bundle when it can:** `app-windows\qa\run.ps1 all`
-   and `app-windows\qa\rust-tests.ps1` (the Rust tests as CI's Windows job runs them), on the bundle whose ref is the
-   commit whose tree is published, so a Windows failure is found before a CI round, not in it. A change after that
-   bundle means a new bundle and both runs again. The PC never blocks a release: if it is busy, off or not answering,
-   go on; CI (Mac and Windows) stays the gate.
-4. **The local check includes the slow-priority pass and the portability scan:** `tools/check.sh --base public` runs
-   the timing tests a second time at utility priority (as CI's slower Mac) and `tools/test-portability.py` over the
-   tests (docs/ENGINEERING.md §5). Neither is skipped for a release.
+3. **No full test run locally, on the Mac or the PC** (the user's decision, 2026-11-03). Changes are tested with
+   targeted tests as they are made (`tools/check.sh --quick`, AGENTS.md *Catching bugs early*); GitHub CI (Mac and
+   Windows) is the thorough run and the gate.
+4. **No bug should reach GitHub, even so.** A CI failure is a bug that escaped: fix it, then add the cheapest guard
+   that would have caught it locally (a host-like test, the timing list, the portability scan, `check.sh --quick`).
 
 ## Version
 

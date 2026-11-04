@@ -303,6 +303,9 @@ pub struct FolderShared {
     pub freeing: Mutex<BTreeMap<String, u32>>,
     /// The ignore patterns as they are now (the core keeps them up to date), for answers given without the core.
     pub ignore: trs_sync::ignore::Current,
+    /// On demand: the deletes the host made a moment ago (the core notes them): the index sessions and the host's change
+    /// feed wait for them before announcing, so a save by replace reaches them as one edit (SPEC §7G.11).
+    pub replacing: trs_sync::ondemand::Replacing,
     /// On demand and kept in place: the files whose content is in the host's placeholders ([`crate::placed`]).
     pub placed: Option<Arc<crate::placed::Placed>>,
     /// The core. Lock only on a blocking thread.
@@ -329,6 +332,8 @@ pub struct FolderShared {
     pub served: crate::limit::Meter,
     /// On demand: the fetches being waited for (SPEC §7G.11).
     pub fetches: Mutex<Fetches>,
+    /// Tests only: each batch an index session announces starts with this pause.
+    pub announce_pause: Mutex<std::time::Duration>,
     /// Set once everything above is dropped, the index included. Last, because fields drop in order: the last
     /// `Arc` of a folder counts as gone before its fields are, so only this says the index file is closed.
     pub closed: Closed,

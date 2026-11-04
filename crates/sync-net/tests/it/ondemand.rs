@@ -614,6 +614,29 @@ async fn a_switch_or_removal_that_cannot_be_noted_changes_nothing() {
     h.shutdown().await;
 }
 
+/// Back to full at its own place, kept in place: until the host lets go of it the place is Seedwell's own sync root,
+/// which Windows' cloud-storage check (any Cloud Files sync root) calls cloud storage, and the switch was refused
+/// (0.1.18, the Windows QA). What counts is the folder it is in. A place the Mac's check calls cloud storage stands in
+/// for the registered root here (on Windows nothing is registered there: a plain folder).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_folder_kept_in_place_goes_back_to_full_at_its_own_place() {
+    let (state, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let docs = work.path().join("Docs");
+    std::fs::create_dir_all(&docs).unwrap();
+    std::fs::write(docs.join("a.txt"), b"held here").unwrap();
+    let h = device_at("Beta", state.path()).await;
+    let id: FolderId = h.add_folder(docs.clone()).await.unwrap().id.parse().unwrap();
+    let place = work.path().join("Library").join("CloudStorage");
+    h.set_on_demand(&id, true, Some(place.clone())).await.unwrap();
+    std::fs::create_dir_all(&place).unwrap();
+    h.od_set_in_place(&id, true).await.unwrap();
+    until(30, "it runs kept in place", || h.od_item_at(&id, "a.txt").ok().flatten().is_some()).await;
+    let full = h.set_on_demand(&id, false, None).await.unwrap();
+    assert!(!full.on_demand && full.path == place.display().to_string(), "{full:?}");
+    assert_eq!(read(&place.join("a.txt")).as_deref(), Some(&b"held here"[..]));
+    h.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_move_cut_off_after_its_copy_was_whole_is_finished_at_the_next_start() {
     let (state, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
@@ -1953,7 +1976,9 @@ async fn a_fetch_only_an_offline_device_can_serve_fails_at_once_and_one_waits_wh
     let (bh, fid) = (b.h.clone(), id);
     let fetch = tokio::spawn(async move { bh.od_fetch_wait(&fid, "docs/a.txt", Duration::from_secs(60)).await });
     tokio::time::sleep(Duration::from_millis(500)).await;
-    assert!(!fetch.is_finished(), "waits while devices may be coming up");
+    if fetch.is_finished() {
+        panic!("waits while devices may be coming up: {:?}", fetch.await.unwrap().map(|_| ()));
+    }
     let ha = crate::chat::start_at(state_a.path(), "Alpha", |_| {}).await;
     b.h.add_address(&id, SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), ha.port())).unwrap();
     match fetch.await.unwrap().unwrap() {
@@ -1965,14 +1990,20 @@ async fn a_fetch_only_an_offline_device_can_serve_fails_at_once_and_one_waits_wh
 }
 
 /// A fetch from a connected device that has the file answers how far it is and from whom while it waits, until it is
-/// here; with no grace at all, the connected device alone keeps it going.
+/// here; with no grace at all, the connected device alone keeps it going. While its request is still on its way to
+/// the folder's core it comes from nobody named yet; once the request stands, from the device that has it. (0.1.18:
+/// on Windows' CI the request outlasted the 100 ms wait, its commit a flush on a slow disk, and the test expected a
+/// name at once. Here a pull round holds the core first, so every system sees the request wait.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_fetch_from_a_connected_device_says_it_is_coming_until_it_is_here() {
     let (a, b, _fa, _fb, id) = pair().await;
     b.h.test_fetch_times(Duration::ZERO, Duration::from_secs(30));
     // Each round of the pull starts late, so the fetch is seen on its way.
     b.h.test_fetch_wait(Duration::from_millis(300));
-    let mut coming = 0;
+    // A round for another file holds the folder's core (for its 300 ms and more) when the fetch is asked for.
+    b.h.od_request(&id, "docs/a.txt").await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let (mut unnamed, mut named) = (0, 0);
     let end = Instant::now() + Duration::from_secs(60);
     loop {
         assert!(Instant::now() < end, "not here after 60 s");
@@ -1981,13 +2012,17 @@ async fn a_fetch_from_a_connected_device_says_it_is_coming_until_it_is_here() {
                 assert_eq!(read(&f.path).map(|d| d.len()), Some(2_000_000));
                 break;
             }
+            trs_sync_net::service::FetchWait::Coming { from, .. } if from.is_empty() => {
+                assert_eq!(named, 0, "once named, always named while it comes");
+                unnamed += 1;
+            }
             trs_sync_net::service::FetchWait::Coming { from, .. } => {
                 assert_eq!(from, ["Alpha"]);
-                coming += 1;
+                named += 1;
             }
         }
     }
-    assert!(coming > 0, "seen on its way");
+    assert!(named > 0, "seen on its way, from Alpha (unnamed first: {unnamed})");
     assert_eq!(b.h.od_item_at(&id, "big.bin").unwrap().unwrap().state, ItemState::Downloaded);
     a.h.shutdown().await;
     b.h.shutdown().await;
@@ -2079,6 +2114,22 @@ async fn a_slow_fetch_answers_each_wait_in_time_and_shows_how_far_it_is() {
     b.h.shutdown().await;
 }
 
+/// The pull's last step: the whole copy renamed into place, its record committed only at the end of the round (a
+/// flush, long on a slow disk). Meanwhile how far it is says the whole file, never the 0 of a partial copy that is
+/// gone (0.1.18: the slow fetch's last value fell to 0 on Windows' CI).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_file_renamed_into_place_but_not_recorded_yet_counts_as_whole() {
+    let (a, b, _fa, _fb, id) = pair().await;
+    assert_eq!(b.h.od_progress(&id, "big.bin").unwrap().done, 0, "nothing of it here");
+    let cached = b.h.od_cache_path(&id, "big.bin").unwrap();
+    std::fs::create_dir_all(cached.parent().unwrap()).unwrap();
+    std::fs::write(&cached, vec![5u8; 2_000_000]).unwrap();
+    let p = b.h.od_progress(&id, "big.bin").unwrap();
+    assert_eq!((p.done, p.total), (2_000_000, 2_000_000), "{p:?}");
+    a.h.shutdown().await;
+    b.h.shutdown().await;
+}
+
 /// A fetch whose request finds the folder's core busy (a pull round that downloads, minutes on a slow link) still
 /// answers within its wait, and waits on the request without giving up; the request goes in once the core is free. A
 /// cancel meanwhile keeps it from going in.
@@ -2116,6 +2167,157 @@ async fn a_fetch_while_the_core_is_busy_answers_in_time_and_asks_once_it_is_free
     }
     assert!(waits >= 3, "waited while the core was busy: {waits}");
     assert_eq!(b.h.od_item_at(&id, "big.bin").unwrap().unwrap().state, ItemState::Downloaded);
+    a.h.shutdown().await;
+    b.h.shutdown().await;
+}
+
+/// Watches `path` every 2 ms on its own thread until dropped: whether it was ever missing meanwhile.
+struct Watch {
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    missed: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Watch {
+    fn new(path: std::path::PathBuf) -> Watch {
+        let (stop, missed) = (Arc::new(std::sync::atomic::AtomicBool::new(false)), Arc::new(std::sync::atomic::AtomicBool::new(false)));
+        let (s, m) = (stop.clone(), missed.clone());
+        std::thread::spawn(move || {
+            let t0 = Instant::now();
+            let mut was = true;
+            while !s.load(std::sync::atomic::Ordering::Relaxed) {
+                let is = path.exists();
+                if is != was {
+                    eprintln!("DIAG watch {} at {} ms", if is { "back" } else { "missing" }, t0.elapsed().as_millis());
+                    was = is;
+                }
+                if !is {
+                    m.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        });
+        Watch { stop, missed }
+    }
+
+    fn missed(&self) -> bool {
+        self.missed.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+impl Drop for Watch {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// A save by replace as Windows' host reports it (SPEC §7G.11): the document's delete (NOTIFY_DELETE), the program's
+/// temp file (refused: a name the folder does not sync), then, once the host's watcher found the new file closed (it
+/// looks every half second), the new file at the document's name. The item keeps its identifier, and the full device
+/// sees one edit: its file is never missing meanwhile (the delete waited to be announced) and no conflict copy is made.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_save_by_replace_reaches_the_other_device_as_one_edit() {
+    let (a, b, fa, fb, id) = pair().await;
+    let doc = b.h.od_item_at(&id, "docs/a.txt").unwrap().unwrap();
+    let watch = Watch::new(fa.path().join("docs/a.txt"));
+    b.h.od_delete(&id, "docs/a.txt").await.unwrap();
+    assert!(b.h.od_replace_hold(&id).is_some(), "announcing waits for a save");
+    let src = fb.path().join("saved.txt");
+    std::fs::write(&src, b"alpha, saved by replace").unwrap();
+    let temp = b.h.od_write(&id, "docs/~WRD0001.tmp", &src, None).await;
+    assert!(matches!(temp, Err(trs_sync_net::SyncError::OnDemand(trs_sync_net::OnDemandError::Ignored, _))), "{temp:?}");
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert_eq!(b.h.od_write(&id, "docs/a.txt", &src, None).await.unwrap(), "docs/a.txt");
+    let now = b.h.od_item_at(&id, "docs/a.txt").unwrap().unwrap();
+    assert_eq!(now.id, doc.id, "the same item");
+    assert!(b.h.od_replace_hold(&id).is_none());
+    until(30, "A has the saved version", || read(&fa.path().join("docs/a.txt")).as_deref() == Some(&b"alpha, saved by replace"[..])).await;
+    assert!(!watch.missed(), "A's file was never deleted meanwhile");
+    assert!(b.h.od_item_at(&id, "docs/~WRD0001.tmp").unwrap().is_none());
+    assert!(!fa.path().join("docs/~WRD0001.tmp").exists());
+    let names: Vec<String> = std::fs::read_dir(fa.path().join("docs")).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+    assert!(!names.iter().any(|n| n.contains("conflict")), "{names:?}");
+    a.h.shutdown().await;
+    b.h.shutdown().await;
+}
+
+/// Word's own save, as the hosts report it: the document renamed aside to `~WRL0001.tmp` (it leaves the folder; its
+/// content is here, so the core takes it out at once), the new document at its name (the same item, changed), then the
+/// Mac's delete of the item it excluded, as it saw it (letting go of that file: the saved document stays). The full
+/// device sees one edit. A delete with nothing after it reaches the other device once the window is over.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn words_save_and_a_plain_delete_reach_the_other_device_as_they_should() {
+    let (a, b, fa, fb, id) = pair().await;
+    b.h.od_fetch(&id, "docs/a.txt", Duration::from_secs(30)).await.unwrap();
+    let doc = b.h.od_item_at(&id, "docs/a.txt").unwrap().unwrap();
+    let watch = Watch::new(fa.path().join("docs/a.txt"));
+    let aside = b.h.od_rename(&id, "docs/a.txt", "docs/~WRL0001.tmp").await;
+    assert!(matches!(&aside, Err(trs_sync_net::SyncError::OnDemand(trs_sync_net::OnDemandError::Ignored, _))), "{aside:?}");
+    assert!(b.h.od_item_at(&id, "docs/a.txt").unwrap().is_none(), "it left the folder");
+    // An online-only file renamed so: nothing changes until its content is here.
+    let far = b.h.od_rename(&id, "docs/old/c.txt", "docs/old/~c.tmp").await;
+    assert!(matches!(&far, Err(trs_sync_net::SyncError::OnDemand(trs_sync_net::OnDemandError::IgnoredNotHere, _))), "{far:?}");
+    assert!(b.h.od_item_at(&id, "docs/old/c.txt").unwrap().is_some());
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    let src = fb.path().join("saved.txt");
+    std::fs::write(&src, b"alpha, saved by Word").unwrap();
+    assert_eq!(b.h.od_write(&id, "docs/a.txt", &src, None).await.unwrap(), "docs/a.txt");
+    assert_eq!(b.h.od_item_at(&id, "docs/a.txt").unwrap().unwrap().id, doc.id);
+    let gone = b.h.od_delete_seen(&id, "docs/a.txt", Some(trs_sync_net::DeleteSeen::File(doc.content_version.clone()))).await.unwrap();
+    assert_eq!(gone, trs_sync::ondemand::Deleted::Deleted { items: 0, failed: vec![] }, "the file that left, let go of");
+    until(30, "A has the saved version", || read(&fa.path().join("docs/a.txt")).as_deref() == Some(&b"alpha, saved by Word"[..])).await;
+    assert!(!watch.missed(), "A's file was never deleted meanwhile");
+    drop(watch);
+
+    // A delete with nothing after it: announced once the window is over.
+    let t0 = Instant::now();
+    b.h.od_delete(&id, "big.bin").await.unwrap();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(fa.path().join("big.bin").exists(), "not yet: it may still be a save");
+    until(30, "A deleted big.bin", || !fa.path().join("big.bin").exists()).await;
+    assert!(t0.elapsed() >= trs_sync::ondemand::REPLACE_WINDOW, "{:?}", t0.elapsed());
+    a.h.shutdown().await;
+    b.h.shutdown().await;
+}
+
+/// A delete made while a session is already announcing (a slow link: it was woken by an earlier change and is still at
+/// its batches) waits for the save as well: the full device still sees one edit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_delete_made_while_a_session_announces_still_waits_for_the_save() {
+    let (a, b, fa, fb, id) = pair().await;
+    b.h.test_announce_pause(&id, Duration::from_millis(500));
+    let watch = Watch::new(fa.path().join("docs/a.txt"));
+    // A change wakes B's session, which goes on to announce after its pause.
+    b.h.od_mkdir(&id, "made").await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    b.h.od_delete(&id, "docs/a.txt").await.unwrap();
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    let src = fb.path().join("saved.txt");
+    std::fs::write(&src, b"alpha, saved while announcing").unwrap();
+    assert_eq!(b.h.od_write(&id, "docs/a.txt", &src, None).await.unwrap(), "docs/a.txt");
+    until(30, "A has the saved version", || read(&fa.path().join("docs/a.txt")).as_deref() == Some(&b"alpha, saved while announcing"[..])).await;
+    until(30, "A has the new folder", || fa.path().join("made").is_dir()).await;
+    assert!(!watch.missed(), "A's file was never deleted meanwhile");
+    a.h.shutdown().await;
+    b.h.shutdown().await;
+}
+
+/// A big document saved by replace: the new file takes a while to read in (hashed on the folder's core), and the delete
+/// keeps waiting all that time. It stops waiting only once the new record is stored, so the full device never sees
+/// the file missing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_big_document_saved_by_replace_reaches_the_other_device_as_one_edit() {
+    let (a, b, fa, fb, id) = pair().await;
+    let doc = b.h.od_item_at(&id, "big.bin").unwrap().unwrap();
+    let watch = Watch::new(fa.path().join("big.bin"));
+    b.h.od_delete(&id, "big.bin").await.unwrap();
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    let src = fb.path().join("saved.bin");
+    let big: Vec<u8> = (0..48_000_000u32).map(|i| (i.wrapping_mul(2_654_435_761) >> 24) as u8).collect();
+    std::fs::write(&src, &big).unwrap();
+    assert_eq!(b.h.od_write(&id, "big.bin", &src, None).await.unwrap(), "big.bin");
+    assert_eq!(b.h.od_item_at(&id, "big.bin").unwrap().unwrap().id, doc.id, "the same item");
+    until(60, "A has the saved version", || std::fs::metadata(fa.path().join("big.bin")).is_ok_and(|m| m.len() == big.len() as u64)).await;
+    assert!(!watch.missed(), "A's file was never deleted meanwhile");
     a.h.shutdown().await;
     b.h.shutdown().await;
 }

@@ -208,6 +208,11 @@ pub enum OnDemandError {
     NotHereYet,
     /// Something there changed since the host saw it (a folder deleted with a version that is not its newest).
     Changed,
+    /// A name the folder does not sync (SPEC §7G.2): nothing at it was recorded; a rename onto it took the item out of
+    /// the folder (deleted on every device; the content stays the host's).
+    Ignored,
+    /// A rename onto a name the folder does not sync, of content not on this device: nothing changed.
+    IgnoredNotHere,
 }
 
 pub(crate) fn on_demand(kind: OnDemandError, why: impl Into<String>) -> SyncError {
@@ -810,7 +815,7 @@ impl SyncHandle {
         let index = self.index_path(&id);
         let ctx = self.inner.ctx.clone();
         let entry = e.clone();
-        let core = tokio::task::spawn_blocking(move || -> Result<(FolderCore, RedbReader, trs_sync::ignore::Current), SyncError> {
+        let core = tokio::task::spawn_blocking(move || -> Result<(FolderCore, RedbReader, trs_sync::ignore::Current, trs_sync::ondemand::Replacing), SyncError> {
             let fs = StdFs::new(root.clone());
             let (case_insensitive, exec_bits) = match fs.lstat(STATE_DIR) {
                 Ok(Some(_)) => (
@@ -843,6 +848,7 @@ impl SyncHandle {
             // A `.seedwellignore` that arrives or changes later applies at once (SPEC §7G.2).
             core.follow_ignore_file(&entry.ignore)?;
             let ignore = core.ignore();
+            let replacing = core.replacing();
             core.set_membership(&writers, access).map_err(|e| invalid(e.to_string()))?;
             core.set_awaiting_write(awaiting);
             // Who is no member any more is no source or holder (as `roles::changed` keeps it).
@@ -855,11 +861,11 @@ impl SyncHandle {
                 // announced again as an on-demand device's.
                 core.set_on_demand(entry.on_demand)?;
             }
-            Ok((core, reader, ignore))
+            Ok((core, reader, ignore, replacing))
         })
         .await
         .map_err(io::Error::other)??;
-        let (core, reader, ignore) = core;
+        let (core, reader, ignore, replacing) = core;
         if e.mode_switched {
             if let Some(c) = lock(&self.inner.cfg).folder_mut(&e.id) {
                 c.mode_switched = false;
@@ -884,6 +890,7 @@ impl SyncHandle {
             items: Mutex::new(items),
             freeing: Mutex::new(BTreeMap::new()),
             ignore,
+            replacing,
             placed,
             core: Mutex::new(core),
             index: reader,
@@ -896,6 +903,7 @@ impl SyncHandle {
             fetched: crate::limit::Meter::default(),
             served: crate::limit::Meter::default(),
             fetches: Mutex::new(Default::default()),
+            announce_pause: Mutex::new(Duration::ZERO),
             closed: crate::shared::Closed::default(),
         });
         // Devices met in this folder before are members to dial, at the addresses they had.
@@ -2916,6 +2924,15 @@ impl SyncHandle {
         *lock(&self.inner.ctx.fetch_grace) = grace;
         *lock(&self.inner.ctx.fetch_stall) = stall;
         *lock(&self.inner.ctx.settling) = std::time::Instant::now() + grace;
+    }
+
+    /// **Tests only:** each batch folder `id`'s index sessions announce starts with a pause this long (a slow link: a
+    /// session is still at it when the next change comes).
+    #[doc(hidden)]
+    pub fn test_announce_pause(&self, id: &FolderId, pause: Duration) {
+        if let Some(f) = self.inner.ctx.registry.folder(id) {
+            *lock(&f.announce_pause) = pause;
+        }
     }
 
     /// **Tests only:** each fetch of a pull starts with a pause this long, the folder's core held (a round that takes

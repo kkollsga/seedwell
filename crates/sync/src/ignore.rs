@@ -54,6 +54,29 @@ pub struct Match {
     pub deletable: bool,
 }
 
+/// Why a path is ignored: the line that decides ([`Ignore::why`]), for a host's log and a refusal's words.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Why {
+    /// The line as written (without its prefixes; a built-in pattern as listed).
+    pub pattern: String,
+    /// One of Seedwell's built-in ignores (SPEC §7G.2), not the folder's own patterns.
+    pub built_in: bool,
+    /// The line has `(?d)` (or is built-in OS metadata): it does not keep a directory another device deleted.
+    pub deletable: bool,
+}
+
+impl Why {
+    /// The reason in a sentence's words: `matches “~$*” in Seedwell's built-in list`.
+    pub fn words(&self) -> String {
+        let pattern: String = self.pattern.chars().map(|c| if c.is_control() { '?' } else { c }).collect();
+        if self.built_in {
+            format!("it matches “{pattern}” in Seedwell's built-in list")
+        } else {
+            format!("it matches “{pattern}” in the folder's ignore patterns")
+        }
+    }
+}
+
 /// A compiled ignore list: the defaults, then the patterns in file order.
 #[derive(Clone, Debug)]
 pub struct Ignore {
@@ -76,6 +99,9 @@ struct Rule {
     case_insensitive: bool,
     anchored: bool,
     dir_only: bool,
+    /// The pattern as written (prefixes left out), and whether it is a built-in one ([`Why`]).
+    text: Box<str>,
+    built_in: bool,
 }
 
 /// One default ignore: the pattern, anchored at the root, deletable (pure OS metadata: it never keeps a directory
@@ -123,6 +149,30 @@ const DEFAULTS: &[&[BuiltIn]] = &[
         (".seedwell", true, false),
         (".seedwell.*.tmp", false, false),
     ],
+    // 3 (0.1.19): the temp files that Word and many other Windows programs save through (`~WRL0001.tmp`, `~DF12.tmp`),
+    // as Dropbox leaves them out. Not every `*.tmp`: that is a name people give their own files too, and a built-in
+    // line applies to existing folders as newly ignored; a folder that wants it says so in `.seedwellignore`.
+    &[
+        (".DS_Store", false, true),
+        ("._*", false, true),
+        ("Icon\r", false, true),
+        (".Spotlight-V100", false, true),
+        (".Trashes", false, true),
+        (".fseventsd", false, true),
+        (".TemporaryItems", false, true),
+        (".DocumentRevisions-V100", false, true),
+        ("Thumbs.db", false, true),
+        ("ehthumbs.db", false, true),
+        ("desktop.ini", false, true),
+        // Word, Excel and PowerPoint owner files, LibreOffice lock files: a document is open, not deletable.
+        ("~$*", false, false),
+        (".~lock.*#", false, false),
+        // A program's temp file while it saves: it may still be writing it, so not deletable either.
+        ("~*.tmp", false, false),
+        // The folder's own state (marker, archive) at the root, and temp files of the puller anywhere.
+        (".seedwell", true, false),
+        (".seedwell.*.tmp", false, false),
+    ],
 ];
 
 /// The version of [`DEFAULTS`] this build uses (1-based).
@@ -140,7 +190,7 @@ impl Ignore {
         let mut ig = Ignore { defaults: v, source: String::new(), rules: Vec::new(), negations: false, max_states: 0 };
         for &(pattern, anchored, deletable) in DEFAULTS[v - 1] {
             let nfa = Nfa::compile(pattern, true).expect("the defaults compile");
-            ig.push(Rule { nfa, negated: false, deletable, case_insensitive: true, anchored, dir_only: false });
+            ig.push(Rule { nfa, negated: false, deletable, case_insensitive: true, anchored, dir_only: false, text: pattern.into(), built_in: true });
         }
         ig
     }
@@ -217,6 +267,16 @@ impl Ignore {
             .map(|r| Match { ignored: !r.negated, deletable: r.deletable })
     }
 
+    /// The line that ignores the path, or `None` when it is not ignored (no line matches, or a negated one decides).
+    pub fn why(&self, wire_path: &str, is_dir: bool) -> Option<Why> {
+        if wire_path.is_empty() {
+            return None;
+        }
+        let mut scratch = Scratch::new(self.max_states);
+        let r = self.rules.iter().find(|r| r.matches(wire_path, is_dir, &mut scratch))?;
+        (!r.negated).then(|| Why { pattern: r.text.to_string(), built_in: r.built_in, deletable: r.deletable })
+    }
+
     /// Is the path ignored?
     pub fn is_ignored(&self, wire_path: &str, is_dir: bool) -> bool {
         self.matches(wire_path, is_dir).is_some_and(|m| m.ignored)
@@ -281,6 +341,7 @@ fn parse_line(line: &str) -> Result<Option<Rule>, String> {
             break;
         }
     }
+    let text: Box<str> = l.into();
     let anchored = l.starts_with('/');
     if anchored {
         l = &l[1..];
@@ -293,7 +354,7 @@ fn parse_line(line: &str) -> Result<Option<Rule>, String> {
         return Err("empty pattern".into());
     }
     let nfa = Nfa::compile(&wire_name(l), ci)?;
-    Ok(Some(Rule { nfa, negated, deletable, case_insensitive: ci, anchored, dir_only }))
+    Ok(Some(Rule { nfa, negated, deletable, case_insensitive: ci, anchored, dir_only, text, built_in: false }))
 }
 
 impl Rule {
@@ -587,10 +648,12 @@ mod tests {
             ".seedwell/Archive/a.txt",
             "a/.seedwell.report.pdf.tmp",
             ".ds_store",
+            "Docs/~WRL0001.tmp",
+            "~DF3A1C.TMP",
         ] {
             assert!(d.is_ignored(p, false), "{p:?}");
         }
-        for p in ["a/.seedwell", "Icon", "photo.jpg", ".seedwellignore", "report~$", ".seedwell.tmp"] {
+        for p in ["a/.seedwell", "Icon", "photo.jpg", ".seedwellignore", "report~$", ".seedwell.tmp", "data/run.tmp", "~notes.txt"] {
             assert!(!d.is_ignored(p, false), "{p:?}");
         }
     }
@@ -602,7 +665,7 @@ mod tests {
         for p in [".DS_Store", "a/._x.jpg", "a/Icon\r", "Thumbs.db", "a/b/thumbs.db", "ehthumbs.db", "a/desktop.ini", "Desktop.ini", ".Trashes/501/x"] {
             assert!(deletable(p), "{p:?}");
         }
-        for p in ["Docs/~$Report.docx", "Docs/.~lock.Budget.ods#", ".seedwell", "a/.seedwell.x.tmp"] {
+        for p in ["Docs/~$Report.docx", "Docs/.~lock.Budget.ods#", ".seedwell", "a/.seedwell.x.tmp", "Docs/~WRD0000.tmp"] {
             assert!(d.is_ignored(p, false) && !deletable(p), "{p:?}");
         }
         // A user's `(?d)` line, and the first line that matches decides: a plain `*.pyc` before it keeps a .pyc.
@@ -610,6 +673,20 @@ mod tests {
         assert_eq!(i.matches("s/__pycache__/m.pyc", false), Some(Match { ignored: true, deletable: true }));
         let j = ig("*.pyc\n(?d)__pycache__/\n");
         assert_eq!(j.matches("s/__pycache__/m.pyc", false), Some(Match { ignored: true, deletable: false }));
+    }
+
+    #[test]
+    fn why_names_the_deciding_line() {
+        let i = ig("!keep.tmp\n(?d)(?i)/Build/\n*.tmp\n");
+        let why = i.why("Docs/~$Report.docx", false).unwrap();
+        assert_eq!((why.pattern.as_str(), why.built_in, why.deletable), ("~$*", true, false));
+        assert_eq!(why.words(), "it matches “~$*” in Seedwell's built-in list");
+        let why = i.why("build/out.o", false).unwrap();
+        assert_eq!((why.pattern.as_str(), why.built_in, why.deletable), ("/Build/", false, true));
+        assert_eq!(i.why("a/x.tmp", false).unwrap().words(), "it matches “*.tmp” in the folder's ignore patterns");
+        assert_eq!(i.why("keep.tmp", false), None, "a negated line decides");
+        assert_eq!(i.why("photo.jpg", false), None);
+        assert_eq!(Ignore::defaults().why("Icon\r", false).unwrap().words(), "it matches “Icon?” in Seedwell's built-in list");
     }
 
     #[test]
@@ -622,6 +699,8 @@ mod tests {
         let old = Ignore::from_identity("/synced/");
         assert!(old.is_ignored("synced/x", false) && old.is_ignored(".DS_Store", false));
         assert!(!old.is_ignored("Thumbs.db", false), "not in the first defaults");
+        assert!(!Ignore::from_identity("\0defaults 2\n").is_ignored("~WRL0001.tmp", false), "not in the second");
+        assert!(Ignore::defaults().is_ignored("~WRL0001.tmp", false));
         assert_eq!(old.source(), "/synced/");
         assert_ne!(old.identity(), Ignore::parse("/synced/").0.identity(), "the defaults changed since");
         assert!(!Ignore::from_identity("").is_ignored("desktop.ini", false));

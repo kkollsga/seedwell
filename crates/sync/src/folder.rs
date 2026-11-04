@@ -195,6 +195,8 @@ pub struct FolderCore {
     /// Devices whose index is stored here but that are no members any more ([`Self::set_members`]): their entries
     /// still decide which version is current, but they are no source or holder of anything.
     not_members: BTreeSet<ShortId>,
+    /// On demand: this device's deletes through the host a moment ago (SPEC §7G.11, *Save by replace*).
+    replacing: ondemand::Replacing,
 }
 
 impl FolderCore {
@@ -244,6 +246,7 @@ impl FolderCore {
             online_only: Default::default(),
             avail_seq: 0,
             not_members: BTreeSet::new(),
+            replacing: ondemand::Replacing::default(),
         };
         if core.cfg.access == Access::Write
             && let Some(key) = core.device_key.clone()
@@ -479,14 +482,26 @@ impl FolderCore {
     }
 
     fn scan_with(&mut self, scope: &str, host_write: bool) -> Result<ScanReport, ScanError> {
+        self.scan_reusing(scope, host_write, None)
+    }
+
+    /// [`Self::scan_with`]; `reuse`: the file id the first new record gets (a host's new item that takes the place of
+    /// one it deleted a moment ago, [`Self::replaced_at`]).
+    fn scan_reusing(&mut self, scope: &str, host_write: bool, reuse: Option<[u8; 16]>) -> Result<ScanReport, ScanError> {
         self.refresh_ignore()?;
-        let report = self.with_scanner(host_write, |s, store| s.scan(store, scope))?;
+        let report = self.with_scanner_reusing(host_write, reuse, |s, store| s.scan(store, scope))?;
         self.scanned(scope)?;
         Ok(report)
     }
 
     fn with_scanner<T>(&mut self, host_write: bool, f: impl FnOnce(&Scanner<'_>, &mut dyn IndexStore) -> T) -> T {
-        let new_id = self.new_file_id.clone();
+        self.with_scanner_reusing(host_write, None, f)
+    }
+
+    fn with_scanner_reusing<T>(&mut self, host_write: bool, reuse: Option<[u8; 16]>, f: impl FnOnce(&Scanner<'_>, &mut dyn IndexStore) -> T) -> T {
+        let made = self.new_file_id.clone();
+        let reuse = std::cell::Cell::new(reuse);
+        let new_id = move || reuse.take().unwrap_or_else(|| made());
         let pins = &self.pins;
         let pinned = |p: &str| ondemand::pinned(pins, p);
         let ignore = self.ignore.get();
@@ -499,7 +514,7 @@ impl FolderCore {
             case_insensitive: self.cfg.case_insensitive,
             exec_bits: self.cfg.exec_bits,
             now_s: (self.clock.now_ns() / 1_000_000_000).max(0) as u64,
-            new_file_id: &*new_id,
+            new_file_id: &new_id,
             batch_size: 1000,
             on_demand: self.cfg.on_demand.then_some(&pinned as &dyn Fn(&str) -> bool),
             host_write,
@@ -907,6 +922,13 @@ pub enum HostError {
     NeedsHolder,
     /// The files changed since the request was made: refused.
     Changed(String),
+    /// A name this folder does not sync (SPEC §7G.2: the built-in list, `.seedwellignore`, this device's own
+    /// patterns): nothing at it is recorded. For a rename onto it, the item left the folder (deleted, on every device,
+    /// as a full folder sees a file renamed to such a name). The words say which line.
+    Ignored(String),
+    /// A rename onto a name this folder does not sync of content not on this device: nothing changed (the file would
+    /// be this device's alone, so its content must be here first).
+    IgnoredNotHere(String),
 }
 
 impl From<io::Error> for HostError {
@@ -935,6 +957,7 @@ impl std::fmt::Display for HostError {
             HostError::Io(e) => write!(f, "{e}"),
             HostError::NeedsHolder => write!(f, "{}", RENAME_NEEDS_HOLDER),
             HostError::Changed(p) => write!(f, "{p}: changed meanwhile on the device that has it; try again"),
+            HostError::Ignored(why) | HostError::IgnoredNotHere(why) => write!(f, "{why}"),
         }
     }
 }
@@ -1561,9 +1584,36 @@ impl FolderCore {
         Ok(())
     }
 
+    /// The deletes this device made through the host a moment ago (SPEC §7G.11, *Save by replace*), shared with the
+    /// driver: its index sessions and the host's change feed wait for them ([`ondemand::Replacing::hold`]).
+    pub fn replacing(&self) -> ondemand::Replacing {
+        self.replacing.clone()
+    }
+
+    /// Why the host's change at `path` (a directory with `dir`) is one this folder does not sync, if it is: the very
+    /// patterns a scan applies (the built-in list, the `.seedwellignore`, read again if it changed, this device's own).
+    pub fn host_ignored(&mut self, path: &str, dir: bool) -> io::Result<Option<crate::ignore::Why>> {
+        self.refresh_ignore()?;
+        Ok(self.ignore.get().why(path, dir))
+    }
+
+    /// Refuses a new item or new content at a path this folder does not sync ([`HostError::Ignored`]): nothing is
+    /// recorded or touched, and the host keeps it as an ordinary file of this device (SPEC §7G.11).
+    pub fn host_refuse_ignored(&mut self, path: &str, dir: bool) -> Result<(), HostError> {
+        if !self.cfg.on_demand {
+            return Err(HostError::NotOnDemand);
+        }
+        match self.host_ignored(path, dir)? {
+            Some(why) => Err(HostError::Ignored(format!("“{}” is not synced: {}", ondemand::name_of(path), why.words()))),
+            None => Ok(()),
+        }
+    }
+
     /// Would [`Self::host_written`] take `path` (a directory with `dir`)? The driver asks before it touches the cache,
-    /// so a refused change leaves nothing behind.
-    pub fn host_check_write(&self, path: &str, dir: bool) -> Result<(), HostError> {
+    /// so a refused change leaves nothing behind. A name the folder does not sync is [`HostError::Ignored`] (also on a
+    /// read-only member: it is the host's own file either way).
+    pub fn host_check_write(&mut self, path: &str, dir: bool) -> Result<(), HostError> {
+        self.host_refuse_ignored(path, dir)?;
         self.host_check(path)?;
         if path.is_empty() || path.split('/').next() == Some(STATE_DIR) {
             return Err(HostError::BadName(path.to_string()));
@@ -1579,9 +1629,31 @@ impl FolderCore {
     /// version, as a scan of it would make. The driver puts the content in place first (written aside and renamed).
     pub fn host_written(&mut self, path: &str) -> Result<(), HostError> {
         self.host_check(path)?;
-        self.scan_with(path, true)?;
+        let kind = self.fs.lstat(path)?.map(|m| m.kind);
+        let reuse = match kind {
+            Some(k) => self.replaced_at(path, k)?,
+            None => None,
+        };
+        let scanned = self.scan_reusing(path, true, reuse);
+        // The name is taken now (stored above): a delete there no longer waits to be announced. Not before: an
+        // announcement made between would find the delete as the record there, and send it.
+        self.replacing.forget(path);
+        scanned?;
         self.follow_availability(&[])?;
         Ok(())
+    }
+
+    /// The file id of the item of `kind` the host deleted at `path` a moment ago, while that delete is still the record
+    /// there: a new item there is that one, changed (SPEC §7G.11, *Save by replace*: same identifier, its version
+    /// following the delete's, so following the deleted version too). The caller forgets the delete once the new
+    /// record is stored ([`ondemand::Replacing::forget`]).
+    fn replaced_at(&mut self, path: &str, kind: FileKind) -> io::Result<Option<[u8; 16]>> {
+        let Some(r) = self.replacing.get(path) else { return Ok(None) };
+        let still = self.store.local(path)?.is_some_and(|rec| {
+            let i = &rec.file.info;
+            i.deleted && i.version == r.version && i.file_id == r.file_id && i.modified_by == self.me
+        });
+        Ok((still && r.kind == kind).then_some(r.file_id))
     }
 
     /// The host made the directory `path` in the cache: it becomes this device's version. Only the directory itself is the
@@ -1601,6 +1673,7 @@ impl FolderCore {
         if base.as_ref().is_some_and(|b| !b.deleted && b.kind == FileKind::Dir) {
             return Ok(());
         }
+        let reuse = self.replaced_at(path, FileKind::Dir)?;
         let signer = self.signer.as_ref().ok_or(HostError::ReadOnly)?;
         let info = FileInfo {
             path: path.to_string(),
@@ -1611,7 +1684,7 @@ impl FolderCore {
             deleted: false,
             version: base.as_ref().map(|b| b.version.clone()).unwrap_or_default().bump(self.me, self.now_s()),
             modified_by: self.me,
-            file_id: (self.new_file_id)(),
+            file_id: reuse.unwrap_or_else(|| (self.new_file_id)()),
             symlink_target: String::new(),
             conflict_of: None,
             chunks: Vec::new(),
@@ -1621,6 +1694,8 @@ impl FolderCore {
         batch.put_local(LocalRecord { file: signer.sign(info), sequence: 0, invalid: false, stamp: Some(stamp), tier: None, dataless: false, want: false });
         let ops = batch.finish()?;
         self.store.apply(ops)?;
+        // The name is taken now that the record is stored: a delete there no longer waits to be announced.
+        self.replacing.forget(path);
         Ok(())
     }
 
@@ -1673,14 +1748,21 @@ impl FolderCore {
         let (now_s, me) = (self.now_s(), self.me);
         let signer = self.signer.as_ref().map(|s| s as &dyn crate::scan::Signer);
         let items = gone.len() as u64;
+        let at = std::time::Instant::now();
+        let mut recent = Vec::with_capacity(gone.len());
         for chunk in gone.chunks(1000) {
             let mut batch = Batch::new(&*self.store, self.me)?;
             for r in chunk {
-                batch.put_local(crate::scan::tombstone(signer, me, now_s, r.clone()));
+                let t = crate::scan::tombstone(signer, me, now_s, r.clone());
+                let i = &t.file.info;
+                recent.push((i.path.clone(), ondemand::Recent { file_id: i.file_id, kind: r.file.info.kind, version: i.version.clone(), at }));
+                batch.put_local(t);
             }
             let ops = batch.finish()?;
             self.store.apply(ops)?;
         }
+        // A new item at one of these paths a moment from now is the deleted one, changed (a save by replace).
+        self.replacing.note_all(recent);
         // A pin of what went goes with it.
         let deleted: BTreeSet<&str> = gone.iter().map(|r| r.file.info.path.as_str()).collect();
         self.pins.retain(|p| !deleted.contains(p.as_str()));
@@ -1715,7 +1797,7 @@ impl FolderCore {
     /// absorbed delete) is no conflict. `path` itself, unless the item moved on since (another device's
     /// version arrived first) or a new file's path is taken now: then a conflict copy, named as a full folder names
     /// one (`device`: this device's name), and the version there stays. Checked as [`Self::host_check_write`].
-    pub fn host_target(&self, path: &str, base: Option<&str>, device: &str) -> Result<String, HostError> {
+    pub fn host_target(&mut self, path: &str, base: Option<&str>, device: &str) -> Result<String, HostError> {
         self.host_check_write(path, false)?;
         let Some(r) = self.store.local(path)?.filter(ondemand::live) else { return Ok(path.to_string()) };
         if base.is_some_and(|b| b == ondemand::content_version(&r.file.info)) {
@@ -1886,10 +1968,79 @@ impl FolderCore {
     pub fn host_rename(&mut self, from: &str, to: &str) -> Result<u64, HostError> {
         let to = &self.rename_target(to)?;
         let recs = self.host_check_rename(from, to)?;
+        let dir = recs.first().is_some_and(|r| r.file.info.kind == FileKind::Dir);
+        if let Some(why) = self.host_ignored(to, dir)? {
+            // Never a record at a name this folder does not sync: a rename onto one leaves the folder
+            // ([`Self::host_leave`], asked first). Refused as a name, never "ignored", which tells the host the item left.
+            return Err(HostError::BadName(format!("{to} ({})", why.words())));
+        }
         if !self.holds_all(&recs)? {
             return Err(HostError::NeedsHolder);
         }
         self.rename_held(from, to, recs, true)
+    }
+
+    /// The host renamed or moved `from` onto `to`, a name this folder does not sync, if it is (`Ok(None)` when it is
+    /// not: an ordinary rename, [`Self::host_rename`]). The item leaves the folder as a full folder sees a file renamed to
+    /// such a name: it is deleted, on every device ([`Self::host_delete`]), and its content stays the host's, an
+    /// ordinary file of this device (SPEC §7G.11). Only when that content is here: every file there held, as recorded
+    /// (`held`, for a folder whose content is in the host's placeholders: in its placeholder); otherwise nothing changes
+    /// ([`HostError::IgnoredNotHere`]). Returns the words for the host's log. The delete counts as one of the host's
+    /// a moment ago (a new file at `from` is that item, changed), and a later delete of the file that left, as the
+    /// host saw it then, is the host letting go of it ([`Self::host_left`]).
+    pub fn host_leave(&mut self, from: &str, to: &str, held: Option<&dyn Fn(&str) -> bool>) -> Result<Option<String>, HostError> {
+        if !self.cfg.on_demand {
+            return Err(HostError::NotOnDemand);
+        }
+        // The new name first, as the rename would land (on a disk that folds case, the folders above it as recorded):
+        // an ordinary rename reads nothing more here.
+        let to = &self.rename_target(to)?;
+        let dir = self.store.local(from)?.filter(ondemand::live).is_some_and(|r| r.file.info.kind == FileKind::Dir);
+        let Some(why) = self.host_ignored(to, dir)? else { return Ok(None) };
+        self.host_check(from)?;
+        let recs: Vec<LocalRecord> = self.records_under(from)?.into_iter().filter(ondemand::live).collect();
+        if from.is_empty() || recs.is_empty() {
+            return Err(HostError::NotFound(from.to_string()));
+        }
+        let (from_name, to_name) = (ondemand::name_of(from), ondemand::name_of(to));
+        let in_place = |r: &LocalRecord| r.file.info.kind != FileKind::File || held.is_none_or(|h| h(&r.file.info.path));
+        if !self.holds_all(&recs)? || !recs.iter().all(in_place) {
+            return Err(HostError::IgnoredNotHere(format!(
+                "“{to_name}” is not synced ({}), so “{from_name}” would stay on this device only, and it is not on this device yet: download it first",
+                why.words()
+            )));
+        }
+        let files: Vec<(String, [u8; 16], String)> = recs
+            .iter()
+            .filter(|r| r.file.info.kind == FileKind::File)
+            .map(|r| (r.file.info.path.clone(), r.file.info.file_id, ondemand::content_version(&r.file.info)))
+            .collect();
+        match self.host_delete(from, &[])? {
+            Deleted::Deleted { failed, .. } if !failed.is_empty() => {
+                let (p, e) = &failed[0];
+                return Err(HostError::Io(io::Error::other(format!("{p}: {e}"))));
+            }
+            _ => {}
+        }
+        let mut left = Vec::with_capacity(files.len());
+        for (p, fid, cv) in files {
+            if let Some(t) = self.store.local(&p)?.filter(|t| t.file.info.deleted && t.file.info.file_id == fid) {
+                left.push((fid, t.file.info.version, cv));
+            }
+        }
+        self.replacing.note_left(left);
+        Ok(Some(format!(
+            "“{to_name}” is not synced ({}): “{from_name}” left the folder, deleted on every device, and stays on this device as an ordinary file",
+            why.words()
+        )))
+    }
+
+    /// Whether the host's delete of the live file at `path`, as it saw it (`content_version`), is of a file that left the
+    /// folder under a name it does not sync ([`Self::host_leave`]) and whose place a new file has taken since (a save
+    /// by replace): the host letting go of that file, not a delete of the item there now. Taken once.
+    pub fn host_left(&self, path: &str, content_version: &str) -> io::Result<bool> {
+        let Some(r) = self.store.local(path)?.filter(ondemand::live) else { return Ok(false) };
+        Ok(self.replacing.take_left(r.file.info.file_id, &r.file.info.version, content_version))
     }
 
     /// The user keeps the file `from` in place of the file `to` (a conflict resolved for its copy): `to` goes to the
@@ -1978,6 +2129,12 @@ impl FolderCore {
             }
             let ops = batch.finish()?;
             self.store.apply(ops)?;
+        }
+        // A name a delete made through the host freed a moment ago is this item's now (its file id stays the renamed
+        // item's: the host names it so; its version follows the delete's, so the history there goes on). Forgotten
+        // once stored, so the delete is never announced before the record that replaces it.
+        for (new, _) in &pairs {
+            self.replacing.forget(&new.file.info.path);
         }
         self.follow_availability(&[])?;
         if pins {

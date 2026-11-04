@@ -57,7 +57,7 @@ A bug the PC finds costs a round trip; the Mac catches what it can first (AGENTS
 - the worker's `tools/check.sh --quick` passed, which includes the Windows compile check;
 - a reviewer agent that builds nothing has read the diff against those promises and the platform differences.
 
-The full `tools/check.sh` is not needed per bundle: it runs once on master before the release's public commit.
+No full test run goes with a bundle, on either machine: GitHub CI is the thorough run (AGENTS.md).
 A bundle's note says which host-like tests it added, so the PC knows what is already covered and what only its QA
 can show.
 
@@ -77,27 +77,28 @@ attachments, and the README as the message text:
 0002 ...
 
 HOW TO QA
-qa\run.ps1 all: <passed> of <checks> PASS (<s> s), <warnings>; the new or changed checks and what they showed
-qa\rust-tests.ps1: <the summary it prints: PASS/FAIL, time, source, nextest's Summary line, failing or flaky tests>
+compiled: <dotnet build result>
+ran: <the QA checks run here, PASS/FAIL, what they showed>
+CI only: <the checks that will first run on CI>
 
 OPEN
 <questions for the Mac, Rust the PC needs, NEED: placeholders left>
 ```
 
 On the Mac: check each sha256, read the patches, `git am -3` them (the author stays; replace a session trailer with
-this session's attribution), build and test (`tools/check.sh`), and answer in the chat with what was merged.
+this session's attribution), run `tools/check.sh --quick` when the patches touch Rust, and answer in the chat with
+what was merged.
 
-## Every bundle is tested on the PC
+## What the PC tests
 
-- The PC runs both on every bundle it receives, and every batch reports both results:
-  - `app-windows\qa\run.ps1 all -Build` (the app, its renders and its behaviour checks);
-  - `app-windows\qa\rust-tests.ps1` (the Rust tests exactly as CI's Windows job runs them, with a time limit; paste
-    the summary it prints).
-  From bash: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File app-windows/qa/run.ps1 all -Build`, and the
-  same with `app-windows/qa/rust-tests.ps1`.
-- A Mac bundle is not good until the PC has run both on it. A failure goes in the chat at once, with the summary: a
-  Rust test is the Mac's to fix, an `app-windows` one the PC's.
-- Before a release's public commit, both must have passed on the exact source bundle (`/release`, step 4).
+- **Targeted, never everything** (the user's decision, 2026-11-03): no local `run.ps1 all` or `rust-tests.ps1`, no
+  local release build of the core. GitHub CI's Windows job runs both on every push to `main`.
+- The PC compiles the C# (`dotnet build`) and, when it has a core to run against, runs the QA checks its change
+  touches: `app-windows\qa\run.ps1 <check>...` (from bash:
+  `powershell.exe -NoProfile -ExecutionPolicy Bypass -File app-windows/qa/run.ps1 <check>...`).
+- Each batch's HOW TO QA says which checks ran and which only CI will run.
+- A CI failure in Windows is sent to the PC with its log at once: a Rust test is the Mac's to fix, an
+  `app-windows` one the PC's. Either way, add the guard that would have caught it before CI.
 
 ## Rules for app-windows code
 

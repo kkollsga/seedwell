@@ -925,7 +925,8 @@ fn the_hosts_changes_are_checked_before_anything_is_touched() {
     assert!(matches!(b.core.host_check_write("docs", false), Err(HostError::Exists(_))), "a file over a folder");
     assert!(matches!(b.core.host_check_write("top.txt", true), Err(HostError::Exists(_))), "a folder over a file");
     assert!(matches!(b.core.host_check_write("top.txt/x", false), Err(HostError::Exists(_))), "below a file");
-    assert!(matches!(b.core.host_check_write(".seedwell/x", false), Err(HostError::BadName(_))));
+    // The folder's own state name is in the built-in list: the host keeps what it has there as its own files.
+    assert!(matches!(b.core.host_check_write(".seedwell/x", false), Err(HostError::Ignored(_))));
     assert!(b.core.host_check_write("docs/new.txt", false).is_ok());
     assert!(matches!(b.core.host_check_rename("nope", "x"), Err(HostError::NotFound(_))));
     assert!(matches!(b.core.host_check_rename("docs", "top.txt"), Err(HostError::Exists(_))));
@@ -1860,4 +1861,213 @@ fn the_folder_above_a_deleted_or_moved_item_is_reported() {
     let ch = b.core.changes(anchor, 1000).unwrap();
     let paths: Vec<&str> = ch.items.iter().map(|i| i.path.as_str()).collect();
     assert!(paths.contains(&"docs/old") && paths.contains(&"media/c.txt"), "{paths:?}");
+}
+
+/// What the service does for a host's new file (`od_write` with no base): where it goes, the content put there, then
+/// recorded. Returns the path written.
+fn host_create(d: &mut Dev, path: &str, bytes: &[u8]) -> Result<String, HostError> {
+    let to = d.core.host_target(path, None, d.name)?;
+    write_all(&d.fs, &to, bytes).unwrap();
+    d.core.host_written(&to)?;
+    Ok(to)
+}
+
+/// A save by replace as the hosts report it (SPEC §7G.11): the item deleted, a program's temp file made at a name the
+/// folder does not sync (refused, nothing recorded), then a new file at the deleted item's name. It is the same item
+/// (identifier kept, the feed reports it changed, not deleted), its version follows the deleted one, and the other
+/// device takes it as an edit: no conflict, nothing kept apart.
+#[test]
+fn a_new_file_where_the_host_just_deleted_one_is_that_item_changed() {
+    let mut a = full_with_files();
+    a.core.scan("").unwrap();
+    let mut b = dev("B", 2, &rw(), true);
+    sync(&mut a, &mut b);
+    let before = item(&mut b, "docs/b.txt");
+    let anchor = b.core.anchor().unwrap();
+    assert_eq!(host_delete(&mut b, "docs/b.txt", &[]), Deleted::Deleted { items: 1, failed: vec![] });
+    assert!(b.core.replacing().hold().is_some(), "announcing waits for a save");
+    for temp in ["docs/~$b.txt", "docs/~WRD0001.tmp", "docs/Thumbs.db"] {
+        assert!(matches!(host_create(&mut b, temp, b"temp"), Err(HostError::Ignored(_))), "{temp}");
+        assert!(b.core.item_at(temp).unwrap().is_none() && b.fs.lstat(temp).unwrap().is_none(), "{temp}: nothing taken");
+    }
+    assert_eq!(host_create(&mut b, "docs/b.txt", b"bravo, saved again").unwrap(), "docs/b.txt");
+    let after = item(&mut b, "docs/b.txt");
+    assert_eq!(after.id, before.id, "the same item");
+    assert_ne!(after.content_version, before.content_version);
+    assert!(b.core.replacing().hold().is_none(), "nothing waits once the save is in");
+    let rec = b.core.store().local("docs/b.txt").unwrap().unwrap();
+    let old = a.core.store().local("docs/b.txt").unwrap().unwrap();
+    assert_eq!(rec.file.info.version.compare(&old.file.info.version), trs_sync_proto::model::Causality::Greater, "it follows the deleted version");
+    let ch = b.core.changes(anchor, 1000).unwrap();
+    assert!(!ch.deleted.contains(&before.id), "{ch:?}");
+    assert!(ch.items.iter().any(|i| i.id == before.id && i.path == "docs/b.txt"));
+    sync(&mut a, &mut b);
+    assert_eq!(read_all(&a.fs, "docs/b.txt").unwrap(), b"bravo, saved again");
+    assert!(a.core.conflicts().unwrap().is_empty());
+    assert_eq!(a.core.store().local("docs/b.txt").unwrap().unwrap().file.info.file_id, old.file.info.file_id, "A's file keeps its id");
+}
+
+/// Not a save by replace: a new file at another name, at the name of a delete of the other kind, or after the window, is
+/// a new item (its version still follows the delete there, as always).
+#[test]
+fn a_new_file_elsewhere_or_later_is_a_new_item() {
+    let mut a = full_with_files();
+    a.core.scan("").unwrap();
+    let mut b = dev("B", 2, &rw(), true);
+    sync(&mut a, &mut b);
+    let b_txt = item(&mut b, "docs/b.txt").id;
+    host_delete(&mut b, "docs/b.txt", &[]);
+    host_create(&mut b, "docs/c.txt", b"another name").unwrap();
+    assert_ne!(item(&mut b, "docs/c.txt").id, b_txt, "another name");
+    // A folder where the file was: not the file.
+    b.fs.create_dir("docs/b.txt").unwrap();
+    b.core.host_made_dir("docs/b.txt").unwrap();
+    assert_ne!(item(&mut b, "docs/b.txt").id, b_txt, "another kind");
+    // After the window (here: none).
+    b.core.replacing().set_window(std::time::Duration::ZERO);
+    let top = item(&mut b, "top.txt").id;
+    host_delete(&mut b, "top.txt", &[]);
+    assert!(b.core.replacing().hold().is_none());
+    host_create(&mut b, "top.txt", b"made anew").unwrap();
+    assert_ne!(item(&mut b, "top.txt").id, top, "too late: a new item");
+    sync(&mut a, &mut b);
+    assert_eq!(read_all(&a.fs, "top.txt").unwrap(), b"made anew");
+    let conflicts = a.core.conflicts().unwrap();
+    assert!(!conflicts.iter().any(|c| format!("{c:?}").contains("top")), "{conflicts:?}");
+}
+
+/// Word's save as the host reports it: the document renamed aside to a temp name the folder does not sync (it leaves
+/// the folder, its content the host's), the new document made at its name (the same item, changed), and the host's
+/// delete of the file that left, as it saw it then (letting go of it: the item stays). A rename onto such a name of
+/// content that is not here changes nothing; an ordinary rename never lands on one.
+#[test]
+fn a_rename_to_a_name_not_synced_takes_the_item_out_of_the_folder() {
+    let mut a = full_with_files();
+    a.core.scan("").unwrap();
+    let mut b = dev("B", 2, &rw(), true);
+    sync(&mut a, &mut b);
+    b.core.request("docs/a.txt").unwrap();
+    pull(&mut b, &[&a]);
+    let doc = item(&mut b, "docs/a.txt");
+    // Online only: nothing changes, the content must be here first.
+    assert!(matches!(b.core.host_leave("docs/b.txt", "docs/~WRL0001.tmp", None), Err(HostError::IgnoredNotHere(_))));
+    assert!(b.core.item_at("docs/b.txt").unwrap().is_some());
+    // Kept in place and not in its placeholder: neither.
+    assert!(matches!(b.core.host_leave("docs/a.txt", "docs/~WRL0001.tmp", Some(&|_: &str| false)), Err(HostError::IgnoredNotHere(_))));
+    assert!(matches!(b.core.host_rename("docs/a.txt", "docs/~WRL0001.tmp"), Err(HostError::BadName(_))), "never recorded at such a name");
+    assert_eq!(b.core.host_leave("docs/a.txt", "docs/z.txt", None).unwrap(), None, "an ordinary name: a rename");
+    let words = b.core.host_leave("docs/a.txt", "docs/~WRL0001.tmp", None).unwrap().unwrap();
+    assert!(words.contains("~WRL0001.tmp") && words.contains("built-in"), "{words}");
+    assert!(b.core.item_at("docs/a.txt").unwrap().is_none(), "it left the folder");
+    assert!(b.core.item_at("docs/~WRL0001.tmp").unwrap().is_none());
+    assert_eq!(host_create(&mut b, "docs/a.txt", b"alpha, saved by Word").unwrap(), "docs/a.txt");
+    assert_eq!(item(&mut b, "docs/a.txt").id, doc.id, "the same item");
+    // The host lets go of the file that left, as it saw it: once; a delete of the item as it is now is a delete.
+    assert!(b.core.host_left("docs/a.txt", &doc.content_version).unwrap());
+    assert!(!b.core.host_left("docs/a.txt", &doc.content_version).unwrap(), "once");
+    sync(&mut a, &mut b);
+    assert_eq!(read_all(&a.fs, "docs/a.txt").unwrap(), b"alpha, saved by Word");
+    assert!(a.fs.lstat("docs/~WRL0001.tmp").unwrap().is_none(), "the temp name never reaches A");
+    assert!(a.core.conflicts().unwrap().is_empty());
+}
+
+/// A rename of a new file over a name the host just deleted (a program that saves through a temp file of an ordinary
+/// name): the renamed item keeps its own identifier (a host cannot change one in a rename), and its version follows the
+/// delete, so the other device takes an edit of that name, without a conflict.
+#[test]
+fn a_temp_file_renamed_over_a_just_deleted_name_continues_its_history() {
+    let mut a = full_with_files();
+    a.core.scan("").unwrap();
+    let mut b = dev("B", 2, &rw(), true);
+    sync(&mut a, &mut b);
+    let old = a.core.store().local("docs/b.txt").unwrap().unwrap();
+    host_create(&mut b, "docs/A1B2C3D4", b"bravo, the new version").unwrap();
+    let temp = item(&mut b, "docs/A1B2C3D4").id;
+    host_delete(&mut b, "docs/b.txt", &[]);
+    assert!(b.core.replacing().hold().is_some(), "the delete waits to be announced");
+    let tomb = b.core.store().local("docs/b.txt").unwrap().unwrap();
+    assert!(tomb.file.info.deleted);
+    b.core.host_rename("docs/A1B2C3D4", "docs/b.txt").unwrap();
+    assert_eq!(item(&mut b, "docs/b.txt").id, temp, "the renamed item's own identifier");
+    assert!(b.core.replacing().hold().is_none(), "the name is taken: nothing waits any more");
+    let rec = b.core.store().local("docs/b.txt").unwrap().unwrap();
+    assert_eq!(rec.file.info.version.compare(&tomb.file.info.version), trs_sync_proto::model::Causality::Greater, "it follows the delete");
+    let rec = b.core.store().local("docs/b.txt").unwrap().unwrap();
+    assert_eq!(rec.file.info.version.compare(&old.file.info.version), trs_sync_proto::model::Causality::Greater);
+    sync(&mut a, &mut b);
+    assert_eq!(read_all(&a.fs, "docs/b.txt").unwrap(), b"bravo, the new version");
+    assert!(a.core.conflicts().unwrap().is_empty());
+}
+
+/// A save by replace that writes the same bytes back (Emacs renames the file to `name~` and writes it anew; a save
+/// with nothing changed): the new file is the item again with the same content version, and the Mac's later delete of
+/// the item it excluded, as it saw it, is still the host letting go of the file that left, never a delete of the
+/// saved document.
+#[test]
+fn a_save_by_replace_with_the_same_bytes_is_never_taken_for_a_delete() {
+    let mut a = full_with_files();
+    a.core.scan("").unwrap();
+    let mut b = dev("B", 2, &rw(), true);
+    sync(&mut a, &mut b);
+    b.core.set_local_ignore(&["*~".to_string()]).unwrap();
+    b.core.request("docs/a.txt").unwrap();
+    pull(&mut b, &[&a]);
+    let doc = item(&mut b, "docs/a.txt");
+    let bytes = read_all(&b.fs, "docs/a.txt").unwrap();
+    assert!(b.core.host_leave("docs/a.txt", "docs/a.txt~", None).unwrap().is_some());
+    host_create(&mut b, "docs/a.txt", &bytes).unwrap();
+    let saved = item(&mut b, "docs/a.txt");
+    assert_eq!((saved.id.as_str(), saved.content_version.as_str()), (doc.id.as_str(), doc.content_version.as_str()));
+    assert!(b.core.host_left("docs/a.txt", &doc.content_version).unwrap(), "the file that left, not the saved one");
+    assert!(!b.core.host_left("docs/a.txt", &doc.content_version).unwrap(), "once: a delete after it is a delete");
+}
+
+/// A whole tree deleted through the host at once (20 000 files) is noted for a save by replace in one go: the delete
+/// holds the folder's core about as long as the same delete with nothing noted, not seconds more.
+#[test]
+fn a_large_tree_deleted_through_the_host_is_quick() {
+    let mut b = dev("B", 2, &rw(), true);
+    for dir in ["one", "two"] {
+        b.fs.create_dir(dir).unwrap();
+        for i in 0..20_000 {
+            write_all(&b.fs, &format!("{dir}/f{i:05}"), b"x").unwrap();
+        }
+    }
+    b.core.scan("").unwrap();
+    let r = b.core.replacing();
+    r.set_window(std::time::Duration::ZERO);
+    let t = std::time::Instant::now();
+    assert_eq!(host_delete(&mut b, "one", &[]), Deleted::Deleted { items: 20_001, failed: vec![] });
+    let bare = t.elapsed();
+    // A long window: the deletes are still noted when the check below looks, however slow a loaded machine is.
+    r.set_window(std::time::Duration::from_secs(600));
+    let t = std::time::Instant::now();
+    assert_eq!(host_delete(&mut b, "two", &[]), Deleted::Deleted { items: 20_001, failed: vec![] });
+    let noted = t.elapsed();
+    assert!(noted < bare * 2 + std::time::Duration::from_millis(300), "noting took the delete from {bare:?} to {noted:?}");
+    assert!(r.hold().is_some(), "noted");
+}
+
+/// On a disk that folds case, a rename names the folders above the new name as they are recorded: the name checked
+/// against the ignore rules is that one too, so a rename onto a name not synced is always taken out of the folder, and
+/// an ordinary rename never ends as "not synced" (which tells the host the item left).
+#[test]
+fn a_rename_onto_a_name_not_synced_is_checked_as_it_lands() {
+    let mut a = full_with_files();
+    a.core.scan("").unwrap();
+    let mut b = dev_on("B", 2, &rw(), true, true);
+    sync(&mut a, &mut b);
+    b.core.set_local_ignore(&["/docs/*~".to_string()]).unwrap();
+    for f in ["docs/a.txt", "docs/b.txt"] {
+        b.core.request(f).unwrap();
+    }
+    pull(&mut b, &[&a]);
+    let left = b.core.host_leave("docs/a.txt", "Docs/a.txt~", None).unwrap();
+    assert!(left.is_some(), "lands at docs/a.txt~, which is not synced");
+    assert!(b.core.item_at("docs/a.txt").unwrap().is_none());
+    match b.core.host_rename("docs/b.txt", "Docs/b.txt~") {
+        Err(HostError::BadName(_)) => {}
+        other => panic!("an ordinary rename onto a name not synced is refused, never \"left\": {other:?}"),
+    }
+    assert!(b.core.item_at("docs/b.txt").unwrap().is_some());
 }

@@ -95,5 +95,5 @@ imitates them, so a test fails here first:
   drive, and a helper only `#[cfg(unix)]` tests use without that cfg itself (dead code fails Windows clippy).
   Code under `#[cfg(unix)]`, `#[cfg(not(windows))]`, `if cfg!(unix) { … }` and any line naming `cfg!(` is left alone.
   When a hit holds on every system, say why on it: `// portable: <why>` before the statement (or at the end of its
-  line). What it cannot see (a platform default, a parser that wants an absolute path) the PC's
-  `app-windows\qa\rust-tests.ps1` run finds before CI does.
+  line). What it cannot see (a platform default, a parser that wants an absolute path) Windows CI finds; when it
+  does, add what it found to the scan (AGENTS.md: every CI failure is a bug that escaped).

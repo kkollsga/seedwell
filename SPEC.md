@@ -1063,7 +1063,10 @@ baseline every later version must still sync with:
 - **Not synced:**
   - `.DS_Store`, `._*`, `Icon\r`, `.Spotlight-V100`, `.Trashes`, `.fseventsd`, `.TemporaryItems`,
     `.DocumentRevisions-V100`, `Thumbs.db`, `ehthumbs.db`, `desktop.ini` (OS metadata, deletable as if marked `(?d)`),
-    Office lock files and the quarantine attribute. A later build's list applies to an existing index as changed
+    Office lock files, the temp files Word and many Windows programs save through (`~*.tmp`, as Dropbox; since 0.1.19,
+    not deletable: a program may still be writing one) and the quarantine attribute. Not every `*.tmp`: people name
+    their own files so too, and a built-in line applies to existing folders as newly ignored; a folder that wants it
+    adds it to its `.seedwellignore`. A later build's list applies to an existing index as changed
     patterns do (each index notes the list and patterns its needs were worked out with).
   - Patterns in a synced `.seedwellignore` (`**`, `!`, `(?i)`, `//` comments), plus local-only patterns per folder.
     Ignored files are left alone on disk.
@@ -2113,6 +2116,43 @@ an app group shared by the app and its extension), a Cloud Files sync root on Wi
   - A device never deletes content it holds while that content is needed under another name: an on-demand device
     that takes a rename moves its copy to the new name (downloaded, as it was), also when the new name arrived first
     and was taken online only.
+  - **Names not synced.** The host's changes follow the folder's ignore rules exactly as a full folder's scanner does
+    (§7G.2: the built-in list, the `.seedwellignore`, read again first if it changed, this device's own patterns; the
+    host keeps no list of its own). A new file or folder, or new content, at such a name is refused as *ignored*
+    (`SyncErrorKind::Ignored`, with the deciding line in its words, for the host's log): nothing is recorded, the cache
+    is not touched, nothing reaches another device, and the host leaves it an ordinary file of this device (the Mac
+    answers `excludedFromSync`, so the system keeps it and stops asking; Windows does not make it a placeholder). A
+    rename or move onto such a name takes the item out of the folder, as a full folder sees a file renamed so: it is
+    deleted on every device and its content stays the host's ordinary file. Only with that content here (every file
+    there held, in its placeholder for a folder kept in place); otherwise nothing changes (`IgnoredNotHere`: Windows
+    refuses the rename and the user is told why; the Mac answers `excludedFromSync` for a file, and the system downloads
+    it and deletes it after). The name checked is the one the rename lands at (on a disk that folds case, the folders
+    above it as recorded), in the same step on the folder's core as the rename. On the Mac the server asks the core only
+    when the system has the item on disk: a file it has not got is answered `excludedFromSync` at once (the system
+    downloads it, then deletes it); a folder with any file below it not on the system's disk (or before the system
+    said) is refused (`Failed`, "download it first"), never excluded, since the system deletes an excluded folder with
+    whatever it did not download. An ordinary rename never records anything at such a name (refused as a bad name, never
+    "ignored", which tells a host the item left). `sync_ignored` answers for any
+    path (with whether its line is deletable), for a host deciding about its own ordinary files. Newly ignored paths are
+    as in a full folder: an item already there stays, announced invalid.
+  - **Save by replace.** Programs save by replacing a file: the original deleted or renamed aside (often to a temp name
+    not synced), the new content written to a temp file and renamed to the original's name. The host reports a delete
+    and a new file, so a new file (or folder) at the path of an item of its kind this device deleted through the host
+    within `REPLACE_WINDOW` (5 s) is that item, changed: the same identifier (the file id), a version that follows the
+    delete's and so the deleted one's, the new content. The window covers the programs (a fraction of a second) and
+    the hosts' own lag (Windows' watcher and its half-second check that the new file is closed, the File Provider's
+    batching). Until it is over or the new file came, the folder's announcements wait (to the other devices' sessions,
+    asked before every batch, and to the host's change feed; at most one window each time, so a run of deletes never
+    keeps either from hearing of changes), so the other devices and the host see one edit, not a
+    delete and a new file; a delete with nothing after it reaches them that much later. A new file at that name within
+    the window that is not a save is taken as an edit too, which costs nothing (versions go by path). A rename of
+    another item over that name keeps the renamed item's identifier (a host cannot change one in a rename) and its
+    version follows the delete, so the history there goes on and no conflict copy is made. The file that left under a
+    name not synced is still that item to a host that reports its delete later (the Mac deletes an excluded item once it
+    is downloaded): a delete as it was seen then (its content version), while the item holds the name again with a
+    version that follows the delete it left by, is the host letting go of it, answered done, nothing deleted (taken
+    once, kept ten minutes). That holds when the saved file has the same content too (a save that changed nothing, an
+    editor that renames the file to `name~` and writes it anew): the delete is never taken for one of the saved file.
   - The host's changes are checked (mode, role, names, what is there) before the cache is touched, so a refused one
     leaves nothing behind. A delete that cannot remove a file (open elsewhere) keeps it and the folders above it, and
     reports it; the rest go. Files in a deleted folder the host never saw (ignored, unknown, temps) are never deleted

@@ -8,10 +8,12 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 use trs_sync_proto::ids::ShortId;
-use trs_sync_proto::model::{Causality, FileInfo, FileKind};
+use trs_sync_proto::model::{Causality, FileInfo, FileKind, Version};
 use trs_sync_proto::msg::HeldFile;
 use trs_sync_proto::msg::encode_entry;
 
@@ -77,6 +79,134 @@ pub struct Item {
     pub pinned: bool,
     /// A conflict copy: the path it is a conflict of.
     pub conflict_of: Option<String>,
+}
+
+/// How long after the host deleted an item a new one at the same path is taken for that item, changed (SPEC §7G.11,
+/// *Save by replace*). Programs that save by replacing (Word, Excel, many editors: the original deleted or renamed
+/// aside, a temp file renamed to its name) do it within a fraction of a second, and the hosts report it a little later
+/// (Windows' watcher and its check every half second that the new file is closed, the File Provider's own batching), so
+/// a few seconds cover them with room. Until then the delete waits to be announced, to the other devices and to the
+/// host's change feed, so they see one edit; a delete with nothing after it reaches them that much later. A new file
+/// at the name within the window that is not a save at all is taken as an edit too, which costs nothing: versions go
+/// by path, and the item keeps its history.
+pub const REPLACE_WINDOW: Duration = Duration::from_secs(5);
+
+/// How long the version a file had when it was renamed onto a name the folder does not sync is remembered: the host
+/// may report that file's delete only after the file left (the Mac's File Provider deletes an excluded item once it
+/// made sure it is downloaded), when the item may be the saved file at the old name already.
+const LEFT_KEPT: Duration = Duration::from_secs(600);
+
+/// Recent deletes made through the host kept apart, at most (a whole tree deleted at once: the rest are plain deletes).
+const RECENT_MAX: usize = 10_000;
+
+/// A delete made through the host a moment ago ([`Replacing`]).
+#[derive(Clone, Debug)]
+pub(crate) struct Recent {
+    /// The deleted item's file id (its identifier) and kind.
+    pub file_id: [u8; 16],
+    pub kind: FileKind,
+    /// The delete's version: a new record that follows it is the same item, changed.
+    pub version: Version,
+    pub at: Instant,
+}
+
+#[derive(Default)]
+struct ReplacingState {
+    /// [`REPLACE_WINDOW`] unless a test sets another.
+    window: Option<Duration>,
+    recent: HashMap<String, Recent>,
+    /// Files renamed onto a name the folder does not sync: file id → what they were when they left.
+    left: HashMap<[u8; 16], Left>,
+}
+
+/// A file that left the folder under a name it does not sync ([`Replacing::note_left`]).
+struct Left {
+    /// The delete it left by: a live record that follows it is the item again (a save by replace).
+    tombstone: Version,
+    /// Its content version then: what the host saw.
+    content_version: String,
+    at: Instant,
+}
+
+/// This device's recent deletes through the host (SPEC §7G.11, *Save by replace*): by path, for a new item there to
+/// take the deleted one's place, and for the folder's index sessions and the host's feed to wait on before announcing
+/// them. Shared by the folder's core (which notes and takes them) and whoever announces without it.
+#[derive(Clone, Default)]
+pub struct Replacing(Arc<Mutex<ReplacingState>>);
+
+impl Replacing {
+    fn state(&self) -> std::sync::MutexGuard<'_, ReplacingState> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The window (a test may shorten it, or set zero: nothing is taken for a replacement then).
+    pub fn window(&self) -> Duration {
+        self.state().window.unwrap_or(REPLACE_WINDOW)
+    }
+
+    /// Sets the window (tests).
+    pub fn set_window(&self, window: Duration) {
+        self.state().window = Some(window);
+    }
+
+    /// Notes the deletes of a host's change, by path: in one go, so a tree of many thousand files costs one pass.
+    pub(crate) fn note_all(&self, deletes: Vec<(String, Recent)>) {
+        let mut s = self.state();
+        let window = s.window.unwrap_or(REPLACE_WINDOW);
+        s.recent.retain(|_, r| r.at.elapsed() < window);
+        if window.is_zero() {
+            return;
+        }
+        let room = RECENT_MAX.saturating_sub(s.recent.len());
+        s.recent.extend(deletes.into_iter().take(room));
+    }
+
+    /// The delete of `path`, if one was made within the window (a new item there is the deleted one). It stays noted,
+    /// and so holds announcing, until [`Self::forget`]: the caller forgets it once the record that takes the name is
+    /// stored, so no announcement in between finds the delete as the record there and sends it.
+    pub(crate) fn get(&self, path: &str) -> Option<Recent> {
+        let s = self.state();
+        let window = s.window.unwrap_or(REPLACE_WINDOW);
+        s.recent.get(path).filter(|r| r.at.elapsed() < window).cloned()
+    }
+
+    /// Forgets the delete of `path` (something took the name: call it once that record is stored).
+    pub(crate) fn forget(&self, path: &str) {
+        self.state().recent.remove(path);
+    }
+
+    /// How long until the last recent delete leaves the window (`None`: there is none): announcing waits that long.
+    pub fn hold(&self) -> Option<Duration> {
+        let mut s = self.state();
+        let window = s.window.unwrap_or(REPLACE_WINDOW);
+        s.recent.retain(|_, r| r.at.elapsed() < window);
+        s.recent.values().map(|r| window.saturating_sub(r.at.elapsed())).max().filter(|d| !d.is_zero())
+    }
+
+    /// Notes that files left under a name the folder does not sync: each file id, the delete it left by, and its
+    /// content version then.
+    pub(crate) fn note_left(&self, left: Vec<([u8; 16], Version, String)>) {
+        let mut s = self.state();
+        s.left.retain(|_, l| l.at.elapsed() < LEFT_KEPT);
+        let room = RECENT_MAX.saturating_sub(s.left.len());
+        let at = Instant::now();
+        s.left.extend(left.into_iter().take(room).map(|(fid, tombstone, content_version)| (fid, Left { tombstone, content_version, at })));
+    }
+
+    /// Whether a delete of the live record of `file_id` (its version `live`), as the host saw it (`content_version`),
+    /// is of the file that left under a name the folder does not sync while a new file took its place: the record
+    /// follows the delete the file left by, and the host saw the content the file had then (the same as the new
+    /// file's, for a save that changed nothing). Taken once.
+    pub(crate) fn take_left(&self, file_id: [u8; 16], live: &Version, content_version: &str) -> bool {
+        let mut s = self.state();
+        let ours = s.left.get(&file_id).is_some_and(|l| {
+            l.content_version == content_version && l.at.elapsed() < LEFT_KEPT && live.compare(&l.tombstone) == Causality::Greater
+        });
+        if ours {
+            s.left.remove(&file_id);
+        }
+        ours
+    }
 }
 
 /// A page of a directory's children, in path order.
@@ -322,6 +452,11 @@ pub(crate) fn metadata_version(rec: &LocalRecord) -> String {
     let mut out = Vec::new();
     encode_entry(&mut out, 0, false, &rec.file);
     hex(&Sha256::digest(&out)[..16])
+}
+
+/// The last name of a wire path.
+pub(crate) fn name_of(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
 }
 
 /// `path` is `pin` or below it (`""` pins the whole folder).

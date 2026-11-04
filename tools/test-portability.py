@@ -14,6 +14,10 @@ Each check below is a failure Windows CI found in 0.1.15 or 0.1.16. A test must 
   (`?path=/Users/…`): it is not absolute on Windows.
 - `unix-only-helper`: a test helper that only `#[cfg(unix)]` (or `not(windows)`) code uses, without that cfg itself:
   dead code on Windows, which fails clippy's `-D warnings` there.
+- `home-env` (0.1.18; code that is not a test, the mock included): `$HOME` read directly. GitHub's Windows runner and a
+  Windows app have none (a mock's `/Users/me` fallback has no drive there, so it is no absolute path): use
+  `trs_platform::dirs::home()`, which reads `%USERPROFILE%` on Windows. The platform crate itself is where that is
+  decided.
 
 Allowed: code under `#[cfg(unix)]`, `#[cfg(not(windows))]`, `#[cfg(target_os = "macos")]` and the like,
 `#[cfg_attr(windows, ignore)]`, an `if cfg!(unix) { … }` block (or the `else` of `if cfg!(windows)`), any line that
@@ -417,6 +421,25 @@ class Tree:
         return out
 
 
+HOME_ENV = re.compile(r"\benv::var(?:_os)?\s*\(\s*\"HOME\"\s*\)")
+
+
+def home_env(tree):
+    """`home-env`: `$HOME` read directly by code that is not a test, outside the platform crate."""
+    hits = []
+    for f in tree.files:
+        if crate_of(f).name == "platform" or not HOME_ENV.search(tree.texts[f]):
+            continue
+        pf = tree.parsed.get(f)
+        if pf is None:
+            pf = File(f, tree.texts[f])
+            pf.scan_cfg(*tree.flags[f])
+        for m in HOME_ENV.finditer(pf.code):
+            if not pf.test[m.start()] and not pf.guard[m.start()]:
+                hits.append((f, pf.line(m.start()), "home-env", "$HOME read directly: Windows has none; use trs_platform::dirs::home()"))
+    return hits
+
+
 def main(args):
     roots = [pathlib.Path(a) for a in args] or [pathlib.Path("crates")]
     files = sorted({p for r in roots for p in ([r] if r.is_file() else r.rglob("*.rs")) if "target" not in p.parts})
@@ -426,6 +449,9 @@ def main(args):
         for line, kind, why in check(pf, tree):
             print(f"{f}:{line}: {kind}: {why}", file=sys.stderr)
             found += 1
+    for f, line, kind, why in home_env(tree):
+        print(f"{f}:{line}: {kind}: {why}", file=sys.stderr)
+        found += 1
     if found:
         print(f"test-portability: {found} place(s) in tests assume the Mac: fix them, guard them with cfg, or mark them"
               f" `{MARK} <why>`", file=sys.stderr)

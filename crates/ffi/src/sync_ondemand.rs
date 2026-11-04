@@ -173,6 +173,31 @@ pub enum SyncErrorKind {
     NotHereYet,
     /// Something changed since the host saw it (a newer version arrived; a placeholder holds something else).
     Changed,
+    /// A name the folder does not sync (SPEC §7G.2: Seedwell's built-in list, the folder's `.seedwellignore`, this
+    /// device's own patterns), as a full folder would not: the message says which line, for the host's log. From
+    /// `sync_create_item`: nothing was taken, nothing is sent to other devices; the host leaves the file or folder as an
+    /// ordinary one of this computer (Windows: not made a placeholder; the Mac answers `excludedFromSync`). From
+    /// `sync_modify_item` (a rename or move onto such a name): the item left the folder, deleted on every device as a
+    /// full folder sees a file renamed so, and its content (here: the core checked) stays the host's ordinary file; the
+    /// host lets the rename happen and no longer counts the file as the item (Windows: takes the placeholder at the new
+    /// name back to a plain file; the Mac answers `excludedFromSync`). Also from a write of new content at such a name.
+    Ignored,
+    /// A rename or move onto a name the folder does not sync, of an item whose content is not all on this computer
+    /// (online only): nothing changed. The file would be this computer's alone, so its content must be here first:
+    /// Windows refuses the rename (`sync_ondemand_notice` says why); the Mac answers `excludedFromSync`, and the system
+    /// downloads the item, then deletes it with `deleteItem`.
+    IgnoredNotHere,
+}
+
+/// Why a path is a name an on-demand folder does not sync (`sync_ignored`).
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct SyncIgnored {
+    /// The reason, for the host's log: "it matches “~$*” in Seedwell's built-in list".
+    pub reason: String,
+    /// It does not keep a folder another device deleted (OS metadata, a `(?d)` line): when the feed deletes a folder
+    /// that holds such an ordinary file of this computer, the host deletes the file with it; one that is not
+    /// deletable keeps the folder, as in a full folder (SPEC §7G.2).
+    pub deletable: bool,
 }
 
 impl OdKind {
@@ -187,6 +212,8 @@ impl OdKind {
             OdKind::Unavailable => SyncErrorKind::Unavailable,
             OdKind::NotHereYet => SyncErrorKind::NotHereYet,
             OdKind::Changed => SyncErrorKind::Changed,
+            OdKind::Ignored => SyncErrorKind::Ignored,
+            OdKind::IgnoredNotHere => SyncErrorKind::IgnoredNotHere,
             OdKind::Other => return None,
         })
     }
@@ -302,6 +329,10 @@ pub enum OdKind {
     NotHereYet,
     /// Something changed since the host saw it (a folder deleted with an older version).
     Changed,
+    /// A name the folder does not sync ([`SyncErrorKind::Ignored`]).
+    Ignored,
+    /// A rename onto such a name of content not here ([`SyncErrorKind::IgnoredNotHere`]).
+    IgnoredNotHere,
     /// Anything else (the words say what).
     Other,
 }
@@ -346,6 +377,8 @@ pub(crate) fn od_err(e: trs_sync_net::SyncError) -> OdError {
         SyncError::OnDemand(E::Unavailable, _) => OdKind::Unavailable,
         SyncError::OnDemand(E::NotHereYet, _) => OdKind::NotHereYet,
         SyncError::OnDemand(E::Changed, _) => OdKind::Changed,
+        SyncError::OnDemand(E::Ignored, _) => OdKind::Ignored,
+        SyncError::OnDemand(E::IgnoredNotHere, _) => OdKind::IgnoredNotHere,
         SyncError::Invalid(_) | SyncError::Io(_) => OdKind::Other,
     };
     OdError { kind, error: sync_err(e) }
@@ -567,6 +600,16 @@ impl RealSync {
         self.handle().map_err(not_running)?.od_set_host_anchor(&folder_id(id)?, anchor).map_err(od_err)
     }
 
+    pub(super) fn od_ignored(&self, id: &str, path: &str, dir: bool) -> Result<Option<SyncIgnored>, OdError> {
+        let h = self.handle().map_err(not_running)?;
+        Ok(h.od_ignored(&folder_id(id)?, path, dir).map_err(od_err)?.map(|w| SyncIgnored { reason: w.words(), deletable: w.deletable }))
+    }
+
+    pub(super) fn od_replace_hold(&self, id: &str) -> bool {
+        let (Ok(h), Ok(fid)) = (self.handle(), folder_id(id)) else { return false };
+        h.od_replace_hold(&fid).is_some()
+    }
+
     pub(super) fn od_delete(&self, id: &str, item: &str, seen: Option<trs_sync_net::DeleteSeen>) -> Result<SyncDeleted, OdError> {
         let h = self.handle().map_err(not_running)?;
         let fid = folder_id(id)?;
@@ -746,11 +789,18 @@ impl MockSync {
         })
     }
 
+    pub(super) fn od_ignored(&self, id: &str, path: &str, dir: bool) -> Result<Option<SyncIgnored>, OdError> {
+        self.with_od(id, |_| Ok(mock_ignored(path, dir)))
+    }
+
     pub(super) fn od_create(&self, id: &str, parent: &str, name: &str, dir: bool) -> Result<SyncItem, OdError> {
         check_name(name)?;
         self.with_od(id, |od| {
             let parent_path = if parent == ROOT_ID { String::new() } else { od.get(parent)?.path };
             let path = join(&parent_path, name);
+            if let Some(i) = mock_ignored(&path, dir) {
+                return Err(OdError { kind: OdKind::Ignored, error: failed(format!("“{name}” is not synced: {}", i.reason)) });
+            }
             let i = SyncItem {
                 id: format!("m:{path}"),
                 parent_id: parent.to_string(),
@@ -787,6 +837,16 @@ impl MockSync {
             }
             let parent_path = if x.parent_id == ROOT_ID { String::new() } else { od.get(&x.parent_id)?.path };
             x.path = join(&parent_path, &x.name);
+            if let Some(i) = mock_ignored(&x.path, x.kind == SyncItemKind::Dir) {
+                // Onto a name not synced: the item leaves the folder.
+                for gone in od.under(item) {
+                    od.items.remove(&gone);
+                    od.changed.remove(&gone);
+                    od.seq += 1;
+                    od.deleted.push((od.seq, gone));
+                }
+                return Err(OdError { kind: OdKind::Ignored, error: failed(format!("“{}” is not synced: {}", x.name, i.reason)) });
+            }
             od.put(x.clone());
             Ok(x)
         })
@@ -849,6 +909,11 @@ impl MockSync {
             Ok(SyncDeleted { deleted: ids.len() as u64, ..SyncDeleted::default() })
         })
     }
+}
+
+/// The mock's ignores: the built-in list.
+fn mock_ignored(path: &str, dir: bool) -> Option<SyncIgnored> {
+    trs_sync::ignore::Ignore::defaults().why(path, dir).map(|w| SyncIgnored { reason: w.words(), deletable: w.deletable })
 }
 
 // ------------------------------------------------------------------------------------------ the app's calls
@@ -933,12 +998,18 @@ impl Core {
         self.backend.sync().od_evict(&id, &item).map_err(CoreError::from)
     }
 
-    /// The user made a file (its content at `contents`, copied) or folder in `parent`.
+    /// The user made a file (its content at `contents`, copied) or folder in `parent`. A name the folder does not sync
+    /// (Office's `~$…` owner files, `~….tmp`, `Thumbs.db`, `desktop.ini`, the folder's `.seedwellignore`) fails with
+    /// `SyncErrorKind::Ignored`: nothing is taken, and the host leaves it as an ordinary file. At the name of an item the
+    /// host deleted a moment ago (within `REPLACE_WINDOW`, 5 s: a save by replace) the new file is that item, changed:
+    /// its identifier is returned, and other devices see an edit (SPEC §7G.11).
     pub fn sync_create_item(&self, id: String, parent: String, name: String, is_dir: bool, contents: Option<String>) -> Result<SyncItem, CoreError> {
         self.backend.sync().od_create(&id, &parent, &name, is_dir, contents.as_deref()).map_err(CoreError::from)
     }
 
-    /// The user moved (`parent`), renamed (`name`) or changed (`contents`, copied) an item. `base_version` is the
+    /// The user moved (`parent`), renamed (`name`) or changed (`contents`, copied) an item. Onto a name the folder does
+    /// not sync it fails with `SyncErrorKind::Ignored` once the item left the folder (deleted everywhere, its content
+    /// the host's ordinary file now), or `IgnoredNotHere` when its content is not here (nothing changed). `base_version` is the
     /// item's `content_version` the change of content started from (checked before a rename in the same call): when the item moved on
     /// since (another device's version came first), the content becomes a conflict copy, named as a full folder names
     /// one, whose item is returned; the other version stays. A new file (`sync_create_item`) where something is now
@@ -956,7 +1027,8 @@ impl Core {
     }
 
     /// The user deleted an item (and everything below it), on every device; on a read-only member the delete frees the
-    /// content instead (`freed`: the host puts the item back, online only).
+    /// content instead (`freed`: the host puts the item back, online only). Other devices and the host's change feed
+    /// hear of it after `REPLACE_WINDOW` (5 s), so a new file at its name meanwhile reaches them as one edit.
     pub fn sync_delete_item(&self, id: String, item: String) -> Result<SyncDeleted, CoreError> {
         self.backend.sync().od_delete(&id, &item, None).map_err(CoreError::from)
     }
@@ -988,6 +1060,13 @@ impl Core {
     /// thread.
     pub fn sync_local_change(&self, id: String, item: String) -> Result<SyncLocalChange, CoreError> {
         self.backend.sync().od_local_change(&id, &item).map_err(CoreError::from)
+    }
+
+    /// Why `path` (a folder with `is_dir`; `/` between names) is a name on-demand folder `id` does not sync, if it is (the
+    /// rules a full folder applies, SPEC §7G.2). For a host deciding about an ordinary file of its own, such as one left
+    /// in a folder the feed deletes (`deletable`). Never waits for the folder's core.
+    pub fn sync_ignored(&self, id: String, path: String, is_dir: bool) -> Result<Option<SyncIgnored>, CoreError> {
+        self.backend.sync().od_ignored(&id, &path, is_dir).map_err(CoreError::from)
     }
 
     /// The host's last change-feed anchor of on-demand folder `id`, kept with the folder (`None`: none yet, or the
@@ -1176,10 +1255,84 @@ mod tests {
         assert!(ondemand_notice(&mut told, 1000, "F", Some("Photos"), SyncErrorKind::Unavailable, "2026/beach.jpg").is_none(), "told already");
         assert!(ondemand_notice(&mut told, 1000, "F", Some("Photos"), SyncErrorKind::NotHereYet, "2026/beach.jpg").is_some(), "another problem");
         assert!(ondemand_notice(&mut told, OD_QUIET_MS + 1, "F", Some("Photos"), SyncErrorKind::Unavailable, "2026/beach.jpg").is_some(), "again later");
-        for quiet in [SyncErrorKind::NoItem, SyncErrorKind::NotOnDemand, SyncErrorKind::Gone, SyncErrorKind::NotRunning, SyncErrorKind::AnchorExpired, SyncErrorKind::Changed] {
+        // A rename the file manager refused because the new name is not synced and the file not here: it cannot say why.
+        let n = ondemand_notice(&mut told, 0, "F", Some("Photos"), SyncErrorKind::IgnoredNotHere, "2026/beach.jpg").unwrap();
+        assert_eq!(n.title, "“beach.jpg” wasn't renamed");
+        assert!(n.body.contains("Download it first") && n.body.contains("“Photos”"), "{}", n.body);
+        for quiet in [
+            SyncErrorKind::NoItem,
+            SyncErrorKind::NotOnDemand,
+            SyncErrorKind::Gone,
+            SyncErrorKind::NotRunning,
+            SyncErrorKind::AnchorExpired,
+            SyncErrorKind::Changed,
+            SyncErrorKind::Ignored,
+        ] {
             assert!(ondemand_notice(&mut told, 0, "F", Some("Photos"), quiet, "x").is_none(), "{quiet:?}");
         }
         assert!(ondemand_notice(&mut told, 0, "G", None, SyncErrorKind::Unavailable, "x").is_none(), "a folder no longer here");
+    }
+
+    /// What Windows' host does when Word saves, call by call and with its timing, through the app's calls: Word's owner
+    /// file and temp file appear (the watcher's `sync_create_item`: ignored, left ordinary files), the document is renamed
+    /// aside to a temp name (NOTIFY_RENAME: `sync_modify_item` answers ignored, the item left the folder), and half a
+    /// second later the watcher finds the new document closed at the old name (`sync_create_item`: the same item,
+    /// changed). `sync_ignored` names the rule and whether it is deletable. The mock answers the same way.
+    #[test]
+    fn a_save_by_replace_through_the_app_keeps_the_item_and_leaves_temp_files_alone() {
+        let home = tempfile::tempdir().unwrap();
+        let work = tempfile::tempdir().unwrap();
+        // SAFETY: set before the core starts any thread; nothing else here reads the environment.
+        unsafe { std::env::set_var("HOME", home.path()) };
+        let c = core(false, &work.path().join("state"));
+        let docs = work.path().join("Docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        std::fs::write(docs.join("Report.docx"), b"version one").unwrap();
+        let f = c.sync_add_folder(docs.display().to_string()).unwrap();
+        let f = c.sync_set_on_demand(f.id.clone(), true, None).unwrap();
+        let end = Instant::now() + Duration::from_secs(20);
+        let doc = loop {
+            if let Some(i) = c.sync_children(f.id.clone(), ROOT_ID.into(), None, 100).unwrap().items.into_iter().next() {
+                break i;
+            }
+            assert!(Instant::now() < end, "the document is not listed");
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        let kind = |e: CoreError| match e {
+            CoreError::OnDemand { kind, message } => (kind, message),
+            other => panic!("not typed: {other:?}"),
+        };
+        let src = work.path().join("written.docx");
+        std::fs::write(&src, b"owner").unwrap();
+        for name in ["~$Report.docx", "~WRD0000.tmp", "desktop.ini"] {
+            let (k, why) = kind(c.sync_create_item(f.id.clone(), ROOT_ID.into(), name.into(), false, Some(src.display().to_string())).unwrap_err());
+            assert_eq!(k, SyncErrorKind::Ignored, "{name}");
+            assert!(why.contains(name) && why.contains("built-in"), "{why}");
+        }
+        let lock = c.sync_ignored(f.id.clone(), "~$Report.docx".into(), false).unwrap().unwrap();
+        assert!(!lock.deletable && lock.reason.contains("~$*"), "{lock:?}");
+        assert!(c.sync_ignored(f.id.clone(), "Thumbs.db".into(), false).unwrap().unwrap().deletable);
+        assert_eq!(c.sync_ignored(f.id.clone(), "Report.docx".into(), false).unwrap(), None);
+        let (k, _) = kind(c.sync_modify_item(f.id.clone(), doc.id.clone(), None, Some("~WRL0001.tmp".into()), None, None).unwrap_err());
+        assert_eq!(k, SyncErrorKind::Ignored);
+        assert!(c.sync_item(f.id.clone(), doc.id.clone()).unwrap().is_none(), "the item left the folder");
+        std::thread::sleep(Duration::from_millis(500));
+        std::fs::write(&src, b"version two").unwrap();
+        let saved = c.sync_create_item(f.id.clone(), ROOT_ID.into(), "Report.docx".into(), false, Some(src.display().to_string())).unwrap();
+        assert_eq!((saved.id.as_str(), saved.size), (doc.id.as_str(), 11), "the same item, changed");
+        assert_ne!(saved.content_version, doc.content_version);
+        let names: Vec<String> = c.sync_children(f.id.clone(), ROOT_ID.into(), None, 100).unwrap().items.into_iter().map(|i| i.name).collect();
+        assert_eq!(names, ["Report.docx"], "no temp file taken");
+
+        let m = tempfile::tempdir().unwrap();
+        let mock = core(true, m.path());
+        let mf = mock.sync_snapshot().folders[0].clone();
+        mock.sync_set_on_demand(mf.id.clone(), true, None).unwrap();
+        let (k, _) = kind(mock.sync_create_item(mf.id.clone(), ROOT_ID.into(), "~$notes.txt".into(), false, None).unwrap_err());
+        assert_eq!(k, SyncErrorKind::Ignored);
+        let (k, _) = kind(mock.sync_modify_item(mf.id.clone(), "m:notes.txt".into(), None, Some("~WRL1.tmp".into()), None, None).unwrap_err());
+        assert_eq!(k, SyncErrorKind::Ignored);
+        assert!(mock.sync_item(mf.id.clone(), "m:notes.txt".into()).unwrap().is_none());
     }
 
     /// A folder kept in place, through the app's calls: the fetched file moves from the cache into the stand-in

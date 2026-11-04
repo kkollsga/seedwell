@@ -119,8 +119,18 @@ fn now() -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
-fn home() -> String {
-    std::env::var("HOME").unwrap_or_else(|_| "/Users/me".into())
+/// The mock's home folder: the system's ([`trs_platform::dirs::home`]), else a made-up one that is absolute on this
+/// system (`/Users/me`; `C:\Users\me` on Windows). Never `$HOME` alone: GitHub's Windows runner sets none, and a
+/// `/Users/me` there has no drive, so it is no absolute path (an on-demand host confined to a folder hosted nothing).
+pub(crate) fn home() -> String {
+    trs_platform::dirs::home().map_or_else(
+        || {
+            let temp = std::env::temp_dir();
+            let root = temp.ancestors().last().unwrap_or(std::path::Path::new("/"));
+            root.join("Users").join("me").display().to_string()
+        },
+        |h| h.display().to_string(),
+    )
 }
 
 fn fake_id(seed: &str) -> String {

@@ -182,7 +182,10 @@ async fn a_device_not_connected_shows_when_it_was_last_seen_and_why_it_cannot_be
     hold.bind(SocketAddr::from((Ipv4Addr::LOCALHOST, port))).unwrap();
     let shown = |a: &Device| a.h.snapshot().offline.into_iter().find(|d| d.id == bid);
     let end = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    while !shown(&a).is_some_and(|d| d.name == "Bo" && d.last_seen_s.is_some() && d.problem.as_deref().is_some_and(|p| p.starts_with("nothing answers at "))) {
+    // Why, in either form: refused ("nothing answers"), or timed out ("no answer": a dial made while Bo shut down, or
+    // one that a loaded machine let run past its time, and the next dial is only after the retry wait).
+    let why = |p: &str| p.starts_with("nothing answers at ") || p.starts_with("no answer at ");
+    while !shown(&a).is_some_and(|d| d.name == "Bo" && d.last_seen_s.is_some() && d.problem.as_deref().is_some_and(why)) {
         assert!(std::time::Instant::now() < end, "Anna lists Bo as not connected, with why; she shows {:?}", shown(&a));
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }

@@ -39,6 +39,8 @@ struct Fake {
     pages: AtomicU64,
     /// The anchor cannot be read.
     no_anchor: AtomicBool,
+    /// A delete was made a moment ago: the feed waits (a save by replace may follow).
+    hold: AtomicBool,
 }
 
 fn item(id: &str, parent: &str, name: &str, kind: SyncItemKind, state: SyncItemState) -> SyncItem {
@@ -206,6 +208,13 @@ impl HostCore for Fake {
         }
         Ok(SyncDeleted { deleted: 1, ..SyncDeleted::default() })
     }
+    /// The fake ignores `*.tmp` names.
+    fn ignored(&self, _: &str, path: &str, _: bool) -> Result<Option<crate::sync::ondemand::SyncIgnored>, OdError> {
+        Ok(path.ends_with(".tmp").then(|| crate::sync::ondemand::SyncIgnored { reason: "it matches “*.tmp”".into(), deletable: false }))
+    }
+    fn replace_hold(&self, _: &str) -> bool {
+        self.hold.load(Ordering::Relaxed)
+    }
 }
 
 fn host(fake: &Arc<Fake>, dir: &Path) -> Host {
@@ -277,6 +286,9 @@ fn core_errors_get_the_kind_the_system_needs() {
     assert_eq!(kind(SyncError::OnDemand(E::AnchorExpired, "anchor expired".into())), ErrKind::AnchorExpired);
     assert_eq!(kind(SyncError::OnDemand(E::Unavailable, "x".into())), ErrKind::Unreachable);
     assert_eq!(kind(SyncError::NotFound), ErrKind::Unreachable);
+    // A name the folder does not sync: kept here, never retried (Finder's excludedFromSync), with or without the content.
+    assert_eq!(kind(SyncError::OnDemand(E::Ignored, "“~$a.docx” is not synced".into())), ErrKind::Excluded);
+    assert_eq!(kind(SyncError::OnDemand(E::IgnoredNotHere, "download it first".into())), ErrKind::Excluded);
     // A rename that needs a device which holds the files, and one that answered busy: shown in the core's words.
     let e = HostError::from(crate::sync::ondemand::od_err(SyncError::Invalid("Renaming needs a device that has these files to be connected".into())));
     assert_eq!((e.kind, e.message.as_str()), (ErrKind::Failed, "Renaming needs a device that has these files to be connected."));
@@ -515,6 +527,79 @@ fn the_host_hears_of_domains_and_of_moved_feeds() {
     fake.anchor.store(7, Ordering::Relaxed);
     h.watch_once(&told, &mut anchors, &mut shown);
     assert_eq!(*told.moved.lock().unwrap(), ["F", "F"]);
+    // A delete a moment ago (a save by replace may follow): the system hears of the move once that is settled.
+    fake.hold.store(true, Ordering::Relaxed);
+    fake.anchor.store(8, Ordering::Relaxed);
+    h.watch_once(&told, &mut anchors, &mut shown);
+    assert_eq!(told.moved.lock().unwrap().len(), 2, "held");
+    fake.hold.store(false, Ordering::Relaxed);
+    h.watch_once(&told, &mut anchors, &mut shown);
+    assert_eq!(*told.moved.lock().unwrap(), ["F", "F", "F"]);
+}
+
+/// A run of deletes, each inside the window of the one before, never keeps the system from hearing of changes: the
+/// signal waits one window at most.
+#[test]
+fn a_run_of_deletes_never_keeps_the_feed_from_the_system() {
+    let d = tempfile::tempdir().unwrap();
+    let fake = Fake::new(&d.path().join("cache"));
+    let mut h = host(&fake, d.path());
+    h.replace_cap = Duration::from_millis(300);
+    let told = Told::default();
+    let (mut anchors, mut shown) = (HashMap::new(), None);
+    h.watch_once(&told, &mut anchors, &mut shown);
+    assert_eq!(told.moved.lock().unwrap().len(), 1);
+    fake.hold.store(true, Ordering::Relaxed);
+    fake.anchor.store(9, Ordering::Relaxed);
+    h.watch_once(&told, &mut anchors, &mut shown);
+    assert_eq!(told.moved.lock().unwrap().len(), 1, "held");
+    std::thread::sleep(Duration::from_millis(350));
+    h.watch_once(&told, &mut anchors, &mut shown);
+    assert_eq!(told.moved.lock().unwrap().len(), 2, "still held after a window: signalled all the same");
+    fake.anchor.store(10, Ordering::Relaxed);
+    h.watch_once(&told, &mut anchors, &mut shown);
+    assert_eq!(told.moved.lock().unwrap().len(), 2, "a new window");
+    std::thread::sleep(Duration::from_millis(350));
+    h.watch_once(&told, &mut anchors, &mut shown);
+    assert_eq!(told.moved.lock().unwrap().len(), 3);
+}
+
+/// A folder renamed onto a name the folder does not sync, on the Mac: answered `excluded` (the system then deletes it
+/// recursively) only when every file below it is on disk; otherwise refused, so no online-only file is deleted
+/// everywhere on the strength of a download the system may not make.
+#[test]
+fn a_folder_renamed_to_a_name_not_synced_needs_its_files_on_disk() {
+    let d = tempfile::tempdir().unwrap();
+    let fake = Fake::new(&d.path().join("cache"));
+    let h = host(&fake, d.path());
+    // No report from the system yet: not known, refused.
+    assert_eq!(err(&h, json!({"v":1,"op":"modify","folder":"F","item":"d","name":"Docs.tmp"})).0, "failed");
+    ok(&h, json!({"v":1,"op":"materialized","folder":"F","ids":["root","d","b"]}));
+    let (kind, why) = err(&h, json!({"v":1,"op":"modify","folder":"F","item":"d","name":"Docs.tmp"}));
+    assert_eq!(kind, "failed", "a.txt below it is online only: {why}");
+    assert_eq!(fake.modifies.load(Ordering::Relaxed), 0, "nothing changed");
+    // Everything below on disk: the core takes it out of the folder.
+    ok(&h, json!({"v":1,"op":"materialized","folder":"F","ids":["root","d","a","b"]}));
+    ok(&h, json!({"v":1,"op":"modify","folder":"F","item":"d","name":"Docs.tmp"}));
+    assert_eq!(fake.modifies.load(Ordering::Relaxed), 1);
+}
+
+/// A rename onto a name the folder does not sync, of a file the system has not got on disk: the core is not asked (it
+/// would delete what the system still has to download); excluded, the system downloads it and deletes it after.
+#[test]
+fn a_rename_to_a_name_not_synced_waits_for_the_systems_download() {
+    let d = tempfile::tempdir().unwrap();
+    let fake = Fake::new(&d.path().join("cache"));
+    let h = host(&fake, d.path());
+    ok(&h, json!({"v":1,"op":"materialized","folder":"F","ids":["root","d","b"]}));
+    assert_eq!(err(&h, json!({"v":1,"op":"modify","folder":"F","item":"a","name":"a.tmp"})).0, "excluded");
+    assert_eq!(fake.modifies.load(Ordering::Relaxed), 0, "not asked");
+    // On disk: the core decides (it deletes the item when its content is here).
+    ok(&h, json!({"v":1,"op":"modify","folder":"F","item":"b","name":"b.tmp"}));
+    assert_eq!(fake.modifies.load(Ordering::Relaxed), 1);
+    // An ordinary rename of a file not on disk goes to the core as always.
+    ok(&h, json!({"v":1,"op":"modify","folder":"F","item":"a","name":"z.txt"}));
+    assert_eq!(fake.modifies.load(Ordering::Relaxed), 2);
 }
 
 #[test]
@@ -618,6 +703,111 @@ fn the_app_serves_the_extension_from_the_real_core() {
     }
     c.sync_host_stop();
     assert!(!Path::new(&socket).exists());
+}
+
+/// Word saving in the Finder, as the File Provider reports it to the extension, one request after the other: its temp
+/// file made (excluded), the document renamed aside to a temp name (excluded, and the item leaves the folder), the new
+/// document made at the old name (the same item, changed), and the system's delete of the item it excluded, as it saw
+/// it then (the host letting go of that file: the saved document stays).
+#[test]
+fn a_save_by_replace_through_the_extension_keeps_the_item() {
+    let home = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    // SAFETY: set before the core starts any thread; nothing else here reads the environment.
+    unsafe { std::env::set_var("HOME", home.path()) };
+    let state = work.path().join("state");
+    let store = crate::SettingsStore::new(&state);
+    let mut st = store.load_settings();
+    st.folders.download_dir = work.path().join("done").display().to_string();
+    st.folders.incomplete_dir = work.path().join("incomplete").display().to_string();
+    st.folders.watch.clear();
+    st.network.port_mapping = false;
+    st.network.dht = false;
+    store.save_settings(&st).unwrap();
+    let c = crate::Core::new(crate::CoreOptions { config_dir: state.display().to_string(), mock: false, allow_loopback_trackers: false, forbidden_root: None }).unwrap();
+    let t0 = Instant::now();
+    while !c.sync_snapshot().running {
+        assert!(t0.elapsed().as_secs() < 20, "sync did not start");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let docs = work.path().join("Docs");
+    std::fs::create_dir_all(&docs).unwrap();
+    std::fs::write(docs.join("Report.docx"), b"version one").unwrap();
+    let f = c.sync_add_folder(docs.display().to_string()).unwrap();
+    c.sync_set_on_demand(f.id.clone(), true, None).unwrap();
+    let group = work.path().join("group");
+    let told = Arc::new(Told::default());
+    let socket = c.sync_host_start(group.display().to_string(), told.clone()).unwrap();
+    let ask = |req: Value| -> Value {
+        let mut s = UnixStream::connect(&socket).unwrap();
+        s.write_all(format!("{req}\n").as_bytes()).unwrap();
+        let mut out = String::new();
+        s.read_to_string(&mut out).unwrap();
+        serde_json::from_str(out.lines().last().unwrap()).unwrap()
+    };
+    let upload = |name: &str, bytes: &[u8]| {
+        std::fs::create_dir_all(group.join(UPLOADS)).unwrap();
+        std::fs::write(group.join(UPLOADS).join(name), bytes).unwrap();
+    };
+    let t0 = Instant::now();
+    let doc = loop {
+        let kids = ask(json!({"v":1,"op":"children","folder":f.id,"item":"root"}));
+        if let Some(i) = kids["ok"]["items"].as_array().and_then(|a| a.first()).cloned() {
+            break i;
+        }
+        assert!(t0.elapsed().as_secs() < 20, "the document is not listed");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let (id, seen) = (doc["id"].as_str().unwrap().to_string(), doc["content_version"].as_str().unwrap().to_string());
+
+    upload("u1", b"the new version, being written");
+    let tmp = ask(json!({"v":1,"op":"create","folder":f.id,"parent":"root","name":"~WRD0000.tmp","kind":"file","contents":"u1"}));
+    assert_eq!(tmp["err"]["kind"], "excluded", "{tmp}");
+    let aside = ask(json!({"v":1,"op":"modify","folder":f.id,"item":id,"name":"~WRL0001.tmp"}));
+    assert_eq!(aside["err"]["kind"], "excluded", "{aside}");
+    assert!(ask(json!({"v":1,"op":"item","folder":f.id,"item":id}))["err"]["kind"] == "no_such_item", "the item left the folder");
+    upload("u2", b"version two");
+    let saved = ask(json!({"v":1,"op":"create","folder":f.id,"parent":"root","name":"Report.docx","kind":"file","contents":"u2"}));
+    assert_eq!(saved["ok"]["item"]["id"].as_str(), Some(id.as_str()), "the same item: {saved}");
+    assert_ne!(saved["ok"]["item"]["content_version"].as_str(), Some(seen.as_str()));
+    // The system deletes the item it excluded, as it saw it before: that file let go of, the saved document stays.
+    let gone = ask(json!({"v":1,"op":"delete","folder":f.id,"item":id,"base":seen}));
+    assert_eq!(gone["ok"]["deleted"], 0, "{gone}");
+    let got = ask(json!({"v":1,"op":"fetch","folder":f.id,"item":id}));
+    assert_eq!(std::fs::read(got["ok"]["path"].as_str().unwrap()).unwrap(), b"version two");
+    // Taken once: a delete of that old version again is refused as any stale delete is.
+    assert_eq!(ask(json!({"v":1,"op":"delete","folder":f.id,"item":id,"base":seen}))["err"]["kind"], "deletion_rejected");
+
+    // Saved again with nothing changed (the same bytes): the system's delete of the excluded item, as it saw it, is
+    // still the file that left (its content version is the saved document's too), never a delete of the document.
+    let seen = saved["ok"]["item"]["content_version"].as_str().unwrap().to_string();
+    assert_eq!(ask(json!({"v":1,"op":"modify","folder":f.id,"item":id,"name":"~WRL0002.tmp"}))["err"]["kind"], "excluded");
+    upload("u3", b"version two");
+    let again = ask(json!({"v":1,"op":"create","folder":f.id,"parent":"root","name":"Report.docx","kind":"file","contents":"u3"}));
+    assert_eq!((again["ok"]["item"]["id"].as_str(), again["ok"]["item"]["content_version"].as_str()), (Some(id.as_str()), Some(seen.as_str())));
+    let gone = ask(json!({"v":1,"op":"delete","folder":f.id,"item":id,"base":seen}));
+    assert_eq!(gone["ok"]["deleted"], 0, "the saved document stays: {gone}");
+    assert!(ask(json!({"v":1,"op":"item","folder":f.id,"item":id}))["ok"].is_object(), "still there");
+
+    // A plain delete reaches the system's working set only once the window for a save is over (one signal, late).
+    let moved = || told.moved.lock().unwrap().iter().filter(|m| **m == f.id).count();
+    // The changes so far signalled (the watcher looks every second): none for 1.5 s.
+    let mut before = moved();
+    loop {
+        std::thread::sleep(Duration::from_millis(1500));
+        if moved() == before {
+            break;
+        }
+        before = moved();
+    }
+    let at = Instant::now();
+    assert_eq!(ask(json!({"v":1,"op":"delete","folder":f.id,"item":id,"base":seen}))["ok"]["deleted"], 1);
+    while moved() == before {
+        assert!(at.elapsed() < Duration::from_secs(20), "the delete never reached the system");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(at.elapsed() >= Duration::from_secs(4), "signalled after {:?}, inside the window", at.elapsed());
+    c.sync_host_stop();
 }
 
 /// Tests, QA and other isolated runs never serve the extension (nor register a domain).
@@ -852,12 +1042,13 @@ fn big_reports_come_in_parts_and_stale_ones_are_ignored() {
 }
 
 /// Long work keeps the connection alive: the extension waits for a line at most a minute, and a delegated rename may
-/// take longer.
+/// take longer. The work lasts 30 keep-alive periods, so three lines come even when a slow machine's timers wake each
+/// one several times late (CI's Mac sent two in 400 ms of 50 ms periods).
 #[test]
 fn long_work_keeps_alive() {
     let d = tempfile::tempdir().unwrap();
     let fake = Fake::new(&d.path().join("cache"));
-    fake.modify_ms.store(400, Ordering::Relaxed);
+    fake.modify_ms.store(1_500, Ordering::Relaxed);
     let mut h = host(&fake, d.path());
     h.keepalive = Duration::from_millis(50);
     let lines = ask(&h, json!({"v":1,"op":"modify","folder":"F","item":"a","name":"z.txt"}));

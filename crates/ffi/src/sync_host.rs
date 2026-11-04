@@ -190,7 +190,7 @@ pub(crate) fn keep_preserved(name: &str, place: Option<&Path>, preserved: &Path)
     let dir = place
         .and_then(Path::parent)
         .map(Path::to_path_buf)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Seedwell")))?;
+        .or_else(|| trs_platform::dirs::home().map(|h| h.join("Seedwell")))?;
     let _ = std::fs::create_dir_all(&dir);
     let base = format!("{name} (changes not synced)");
     let mut to = dir.join(&base);
@@ -384,6 +384,14 @@ pub(crate) trait HostCore: Send + Sync {
     fn modify(&self, f: &str, id: &str, parent: Option<&str>, name: Option<&str>, contents: Option<&str>, base: Option<&str>) -> Result<SyncItem, OdError>;
     /// `seen`: the folder's version the host saw (a folder's delete is refused when something below is newer).
     fn delete(&self, f: &str, id: &str, seen: Option<trs_sync_net::DeleteSeen>) -> Result<SyncDeleted, OdError>;
+    /// Why `path` is a name the folder does not sync, if it is.
+    fn ignored(&self, _f: &str, _path: &str, _dir: bool) -> Result<Option<crate::sync::ondemand::SyncIgnored>, OdError> {
+        Ok(None)
+    }
+    /// Whether the folder's changes wait to be reported (a delete a moment ago may be a save by replace).
+    fn replace_hold(&self, _f: &str) -> bool {
+        false
+    }
 
 }
 
@@ -503,6 +511,12 @@ impl HostCore for BackendCore {
     fn modify(&self, f: &str, id: &str, parent: Option<&str>, name: Option<&str>, contents: Option<&str>, base: Option<&str>) -> Result<SyncItem, OdError> {
         self.0.od_modify(f, id, parent, name, contents, base)
     }
+    fn ignored(&self, f: &str, path: &str, dir: bool) -> Result<Option<crate::sync::ondemand::SyncIgnored>, OdError> {
+        self.0.od_ignored(f, path, dir)
+    }
+    fn replace_hold(&self, f: &str) -> bool {
+        self.0.od_replace_hold(f)
+    }
     fn delete(&self, f: &str, id: &str, seen: Option<trs_sync_net::DeleteSeen>) -> Result<SyncDeleted, OdError> {
         self.0.od_delete(f, id, seen)
     }
@@ -554,7 +568,7 @@ pub(crate) enum ErrKind {
     DeletionRejected,
     /// A folder deleted without its contents that has some.
     NotEmpty,
-    /// Not synced at all (a link): the system keeps it here and stops asking.
+    /// Not synced at all (a link, a name the folder does not sync): the system keeps it here and stops asking.
     Excluded,
     /// A request this server does not understand (another protocol version).
     BadRequest,
@@ -582,6 +596,9 @@ pub(crate) fn kind_of(k: OdKind) -> ErrKind {
         OdKind::AnchorExpired => ErrKind::AnchorExpired,
         OdKind::NotOnDemand | OdKind::Gone | OdKind::NotRunning | OdKind::Unavailable | OdKind::NotHereYet => ErrKind::Unreachable,
         OdKind::Other | OdKind::Changed => ErrKind::Failed,
+        // A name the folder does not sync: the system keeps the item here and stops asking (a rename: it downloads the
+        // item first, if it has to, then deletes it; the core deleted it already when its content was here).
+        OdKind::Ignored | OdKind::IgnoredNotHere => ErrKind::Excluded,
     }
 }
 
@@ -715,6 +732,10 @@ pub(crate) struct Host {
     /// Report the domains on the next look even if nothing changed (a release ended: one refused shows again).
     pub(crate) force_report: AtomicBool,
     pub(crate) keepalive: Duration,
+    /// The host hears of a folder's changes after a delete at most this long later (a save by replace may follow).
+    pub(crate) replace_cap: Duration,
+    /// Since when each folder's feed signal has waited for a save by replace.
+    held_since: Mutex<HashMap<String, Instant>>,
     /// [`REQUEST_WAIT`], [`SEND_WAIT`], [`MAX_CONNECTIONS`] (shorter in tests).
     pub(crate) request_wait: Duration,
     pub(crate) send_wait: Duration,
@@ -747,6 +768,19 @@ pub struct SyncHostBatch {
     pub left: u64,
 }
 
+/// A rename as [`Host::rename_aside`] sees it.
+enum Aside {
+    /// Onto a name the folder syncs: an ordinary rename.
+    Synced,
+    /// Onto a name it does not sync, and everything there is on the system's disk (or, for a file, not known): the core
+    /// decides (it takes the item out of the folder when its content is here).
+    OnDisk,
+    /// A file not on the system's disk.
+    FileNotOnDisk,
+    /// A folder with a file not on the system's disk (or not known): its name.
+    FolderNotOnDisk(String),
+}
+
 /// Held here: the content is in the cache (this device's own change, or another device's version too).
 fn held(i: &SyncItem) -> bool {
     i.kind == SyncItemKind::File && matches!(i.state, SyncItemState::Downloaded | SyncItemState::ModifiedHere)
@@ -769,7 +803,9 @@ impl Host {
             dir_versions: Mutex::new(HashMap::new()),
             releasing: Mutex::new(HashSet::new()),
             force_report: AtomicBool::new(false),
+            held_since: Mutex::new(HashMap::new()),
             keepalive: KEEPALIVE,
+            replace_cap: trs_sync::ondemand::REPLACE_WINDOW,
             request_wait: REQUEST_WAIT,
             send_wait: SEND_WAIT,
             max_connections: MAX_CONNECTIONS,
@@ -1176,6 +1212,22 @@ impl Host {
             let i = self.item_or_gone(f, id)?;
             return Ok(json!({ "item": self.wire(f, &i)?, "fetch_content": false, "conflict_copy": Value::Null }));
         }
+        if r.parent.is_some() || r.name.is_some() {
+            match self.rename_aside(f, id, r)? {
+                Aside::Synced | Aside::OnDisk => {}
+                // A file the system has not got on disk: nothing changes here yet. Excluded, the system downloads it,
+                // then deletes it (deleteItem), and the core deletes it then.
+                Aside::FileNotOnDisk => return Err(HostError::new(ErrKind::Excluded, "The new name is not synced; the file stays on this Mac only.")),
+                // A folder with files the system has not got on disk (or has not said): refused, nothing changes.
+                // (Excluded, the system would delete the folder with whatever it did not download.)
+                Aside::FolderNotOnDisk(name) => {
+                    return Err(HostError::new(
+                        ErrKind::Failed,
+                        format!("Seedwell doesn't sync the new name, so “{name}” would stay on this Mac only, and some of its files aren't on this Mac yet. Download it first, then rename it."),
+                    ));
+                }
+            }
+        }
         let upload = r.contents.as_deref().map(|c| self.upload(c)).transpose()?;
         let got = self.core.modify(f, id, r.parent.as_deref(), r.name.as_deref(), upload.as_ref().map(Self::via).as_deref(), r.base.as_deref())?;
         if got.id == id {
@@ -1185,6 +1237,50 @@ impl Host {
         // item keeps the other version, which the system fetches again.
         let now = self.item_or_gone(f, id)?;
         Ok(json!({ "item": self.wire(f, &now)?, "fetch_content": true, "conflict_copy": self.wire(f, &got)? }))
+    }
+
+    /// Where the rename in `r` takes item `id`, against the system's set of items on disk: the core must not delete what
+    /// the system still has to download, and only a file is certain to be downloaded before the system deletes it.
+    fn rename_aside(&self, f: &str, id: &str, r: &Request) -> Result<Aside, HostError> {
+        let i = self.item_or_gone(f, id)?;
+        let parent = match r.parent.as_deref() {
+            Some(p) if p != trs_sync::ondemand::ROOT_ID => self.item_or_gone(f, p)?.path,
+            Some(_) => String::new(),
+            None => i.path.rsplit_once('/').map_or(String::new(), |(p, _)| p.to_string()),
+        };
+        let name = r.name.as_deref().unwrap_or(&i.name);
+        let to = if parent.is_empty() { name.to_string() } else { format!("{parent}/{name}") };
+        let dir = i.kind == SyncItemKind::Dir;
+        if self.core.ignored(f, &to, dir)?.is_none() {
+            return Ok(Aside::Synced);
+        }
+        let Some(on_disk) = lock(&self.materialized).get(f).cloned() else {
+            // No report from the system yet: for a file the core's own check (its cache) decides; a folder is not known.
+            return Ok(if dir { Aside::FolderNotOnDisk(i.name) } else { Aside::OnDisk });
+        };
+        if !dir {
+            return Ok(if on_disk.contains(id) { Aside::OnDisk } else { Aside::FileNotOnDisk });
+        }
+        // Every file below it, folder by folder.
+        let mut dirs = vec![id.to_string()];
+        while let Some(d) = dirs.pop() {
+            let mut cursor: Option<String> = None;
+            loop {
+                let page = self.core.children(f, &d, cursor.as_deref(), PAGE_MAX)?;
+                for c in page.items {
+                    match c.kind {
+                        SyncItemKind::Dir => dirs.push(c.id),
+                        SyncItemKind::File if !on_disk.contains(&c.id) => return Ok(Aside::FolderNotOnDisk(i.name)),
+                        _ => {}
+                    }
+                }
+                match page.next {
+                    Some(n) => cursor = Some(n),
+                    None => break,
+                }
+            }
+        }
+        Ok(Aside::OnDisk)
     }
 
     fn delete(&self, f: &str, id: &str, r: &Request) -> Result<Value, HostError> {
@@ -1333,6 +1429,19 @@ impl Host {
         lock(&self.last_report).retain(|id, _| folders.iter().any(|f| &f.id == id));
         lock(&self.dir_versions).retain(|id, _| folders.iter().any(|f| &f.id == id));
         for f in &folders {
+            // A delete a moment ago may turn out to be a save by replace: the system hears of it once that is settled
+            // (one edit), as the other devices do.
+            // At most one window, though: a run of deletes never keeps the system from hearing of changes.
+            if self.core.replace_hold(&f.id) {
+                let mut held = lock(&self.held_since);
+                let since = *held.entry(f.id.clone()).or_insert_with(Instant::now);
+                if since.elapsed() < self.replace_cap {
+                    continue;
+                }
+                held.insert(f.id.clone(), Instant::now());
+            } else {
+                lock(&self.held_since).remove(&f.id);
+            }
             let Ok(a) = self.core.anchor(&f.id) else { continue };
             if anchors.insert(f.id.clone(), a) != Some(a) {
                 listener.feed_moved(f.id.clone());
@@ -1969,6 +2078,8 @@ mod attached_tests {
         drop(a);
         // Confined to a root (an isolated run's state folder): only the on-demand folders inside it are shown.
         let path = core.sync_snapshot().folders.into_iter().find(|f| f.id == id).unwrap().path;
+        // (0.1.18: the mock's folders were at `/Users/me/…` where `HOME` is unset, which has no drive on Windows.)
+        assert!(Path::new(&path).is_absolute(), "the mock's folder is at an absolute path on every system: {path}");
         let elsewhere = BackendCore(core.backend.sync(), Some(dir.path().join("state")));
         assert_eq!(elsewhere.folders().unwrap().len(), 0, "a folder outside the run's own state is never hosted");
         let within = BackendCore(core.backend.sync(), Path::new(&path).parent().map(Path::to_path_buf));
