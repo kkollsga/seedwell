@@ -4,7 +4,7 @@ import Testing
 
 /// A QA-control run keeps every window off the screens (QuietRun): the rule that moves a frame, checked without a
 /// window (the run's hooks are never installed in the tests; the normal app never installs them).
-@Suite struct QuietRunTests {
+@Suite(.timeLimit(.minutes(1))) struct QuietRunTests {
     // A laptop screen and an external display to its left and above, as macOS arranges them.
     private let screens = [CGRect(x: 0, y: 0, width: 1512, height: 982), CGRect(x: -2560, y: 400, width: 2560, height: 1440)]
 

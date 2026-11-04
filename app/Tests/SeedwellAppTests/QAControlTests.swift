@@ -2,7 +2,7 @@ import Testing
 @testable import SeedwellApp
 
 /// The QA control file's protocol (QAControl): the lines a script appended, and `wait`'s argument.
-@MainActor @Suite struct QAControlTests {
+@MainActor @Suite(.timeLimit(.minutes(1))) struct QAControlTests {
     /// QA commands read the windows, chats among them: only an isolated copy takes them, never the user's Seedwell.
     @Test func qaControlNeedsAnIsolatedRun() {
         #expect(LaunchOptions(["--qa-control", "/tmp/ctl"]).configurationError == "--qa-control needs --state-dir and --home-root.")

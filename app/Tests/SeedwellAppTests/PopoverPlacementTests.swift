@@ -6,7 +6,7 @@ import Testing
 
 // Get Info stays inside its popover and the screen (the Remove… question's rules are the core's: library_window_tests.rs).
 
-@Suite("Get Info placement")
+@Suite("Get Info placement", .timeLimit(.minutes(1)))
 struct PopoverPlacementTests {
     // A 1440 x 900 screen (menu bar 24 pt: visible frame 0...876), a window filling it.
     private let screen = CGRect(x: 0, y: 0, width: 1440, height: 876)

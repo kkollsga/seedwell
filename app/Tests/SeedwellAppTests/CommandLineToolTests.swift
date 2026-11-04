@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import SeedwellApp
 
-@Suite struct CommandLineToolTests {
+@Suite(.timeLimit(.minutes(1))) struct CommandLineToolTests {
     private func temp() throws -> String {
         let d = NSTemporaryDirectory() + "seedwell-cli-test-\(UUID().uuidString)"
         try FileManager.default.createDirectory(atPath: d, withIntermediateDirectories: true)

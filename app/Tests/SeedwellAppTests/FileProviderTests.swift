@@ -6,7 +6,7 @@ import Testing
 
 /// On-demand folders in the Finder (SPEC 7G.11): the extension's wire and its mapping onto File Provider's types, the
 /// socket client against a fake app, and the app's domains against fake ones. No domain is ever registered here.
-@Suite struct FileProviderTests {
+@Suite(.timeLimit(.minutes(1))) struct FileProviderTests {
     /// The item `sync_host_tests.rs` (`an_item_on_the_wire`) writes: the two sides must stay in step.
     static let rustItem = #"{"id":"a","parent":"d","name":"a.txt","kind":"file","size":5,"mtime_ns":1792000000000000000,"content_version":"c-a","metadata_version":"m-a","state":"online_only","keep":true,"pinned":true,"exec":false,"symlink_target":null,"caps":["read","write","rename","reparent","delete"]}"#
 
@@ -225,19 +225,15 @@ import Testing
         await fake.set([FileProviderDomainState(id: "F", name: "Team", enabled: true)])
         await fake.hold(.handOver)
         let cutoff = DispatchSemaphore(value: 0)
-        let listener = FileProviderListener(host, waitForHost: { _ in cutoff.wait(); return .timedOut })
-        let call = Task.detached { listener.removeDomain(folderId: "F") }
-        await fake.started(.handOver)
+        let listener = FileProviderListener(host, waitForHost: { _ in _ = cutoff.wait(timeout: .now() + 30); return .timedOut })
+        let call = Task { await Self.fromCoreThread { listener.removeDomain(folderId: "F") } }
+        let began = await Self.within("the hand-over started") { await fake.hasStarted(.handOver) }
         cutoff.signal()
         #expect(await call.value.error == syncHostText(t: .noAnswer))
         await fake.finish(.handOver)
+        guard began else { return host.stop() }
         // The late hand-over finishes (the note of the removal goes with it), however busy the main actor is.
-        var finished = false
-        for _ in 0..<1200 {
-            if core.syncHostUnfinishedReleases().isEmpty { finished = true; break }
-            try await Task.sleep(nanoseconds: 50_000_000)
-        }
-        #expect(finished, "the note of the removal went with it")
+        _ = await Self.within("the note of the removal went with it") { core.syncHostUnfinishedReleases().isEmpty }
         #expect(await fake.domains.map(\.id) == ["F"], "still there")
         #expect(await fake.removals == 0, "nothing was removed late")
         host.stop()
@@ -253,17 +249,15 @@ import Testing
         await fake.set([FileProviderDomainState(id: "F", name: "Team", enabled: true)])
         await fake.hold(.removal)
         let cutoff = DispatchSemaphore(value: 0)
-        let listener = FileProviderListener(host, waitForHost: { _ in cutoff.wait(); return .timedOut })
-        let call = Task.detached { listener.removeDomain(folderId: "F") }
-        await fake.started(.removal)
+        let listener = FileProviderListener(host, waitForHost: { _ in _ = cutoff.wait(timeout: .now() + 30); return .timedOut })
+        let call = Task { await Self.fromCoreThread { listener.removeDomain(folderId: "F") } }
+        let began = await Self.within("the removal started") { await fake.hasStarted(.removal) }
         cutoff.signal()
         #expect(await call.value.error == syncHostText(t: .noAnswer))
         await fake.finish(.removal)
+        guard began else { return host.stop() }
         // The host adds it back once the removal returns (a liveness bound, not an ordering: the order is fixed above).
-        for _ in 0..<1200 {
-            if await fake.adds == 1 { break }
-            try await Task.sleep(nanoseconds: 50_000_000)
-        }
+        _ = await Self.within("the domain added back") { await fake.adds == 1 }
         #expect(await fake.removals == 1, "it did go")
         #expect(await fake.domains.map(\.id) == ["F"], "and came back")
         host.stop()
@@ -277,8 +271,8 @@ import Testing
         let host = FileProviderHost(core: core, domains: fake)
         await fake.set([FileProviderDomainState(id: "F", name: "Team", enabled: true)])
         // The host signals first; the core's wait reports a timeout all the same (the two crossed).
-        let listener = FileProviderListener(host, waitForHost: { done in done.wait(); return .timedOut })
-        let r = await Task.detached { listener.removeDomain(folderId: "F") }.value
+        let listener = FileProviderListener(host, waitForHost: { done in _ = done.wait(timeout: .now() + 30); return .timedOut })
+        let r = await Self.fromCoreThread { listener.removeDomain(folderId: "F") }
         #expect(r.error == nil, "the domain went: the core removes or switches the folder")
         #expect(await fake.removals == 1)
         #expect(await fake.domains.isEmpty)
@@ -400,6 +394,25 @@ import Testing
         host.stop()
     }
 
+    /// Waits until `ok` holds, polling, at most `seconds`: when it does not, an issue names `what` (no wait in a test
+    /// is unbounded: a signal that never comes fails the test instead of hanging the run).
+    @MainActor static func within(_ what: String, seconds: Double = 30, _ ok: () async -> Bool) async -> Bool {
+        let end = Date().addingTimeInterval(seconds)
+        while Date() < end {
+            if await ok() { return true }
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        Issue.record("timed out after \(Int(seconds)) s waiting for: \(what)")
+        return false
+    }
+
+    /// Calls the listener as the core's server does: from a thread of its own. Never from a thread of Swift's
+    /// cooperative pool: the call blocks its thread until the host answers, and the host's work (the main actor, the
+    /// fake's actor) runs on that pool. CI's Mac has three such threads; three tests blocking one each hung the run.
+    static func fromCoreThread(_ call: @escaping @Sendable () -> SyncHostRemoval) async -> SyncHostRemoval {
+        await withCheckedContinuation { c in Thread { c.resume(returning: call()) }.start() }
+    }
+
     static func host() throws -> (Core, FakeDomains) {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("seedwell-fp-\(UUID().uuidString)").path
         let core = try Core(options: CoreOptions(configDir: dir, mock: true, allowLoopbackTrackers: false, forbiddenRoot: nil))
@@ -428,33 +441,30 @@ actor FakeDomains: FileProviderDomains {
         await pass(.handOver)
     }
 
-    /// The system's steps a test holds: a held step waits for `finish`, and `started` waits for it to begin. All in
-    /// the actor, so the step and the test meet in a fixed order whatever the scheduling.
+    /// The system's steps a test holds: a held step waits for `finish` (30 s at most), and `hasStarted` says when it
+    /// began. All in the actor, so the step and the test meet in a fixed order whatever the scheduling.
     enum Step { case handOver, removal }
     private struct Gate {
         var held = false
         var started = false
         var waiting: CheckedContinuation<Void, Never>?
-        var watchers: [CheckedContinuation<Void, Never>] = []
     }
     private var gates: [Step: Gate] = [:]
     func hold(_ step: Step) { gates[step, default: Gate()].held = true }
-    func started(_ step: Step) async {
-        if gates[step]?.started == true { return }
-        await withCheckedContinuation { gates[step, default: Gate()].watchers.append($0) }
-    }
+    func hasStarted(_ step: Step) -> Bool { gates[step]?.started == true }
     func finish(_ step: Step) {
         gates[step, default: Gate()].held = false
         gates[step]?.waiting?.resume()
         gates[step]?.waiting = nil
     }
     private func pass(_ step: Step) async {
-        var g = gates[step, default: Gate()]
-        g.started = true
-        for w in g.watchers { w.resume() }
-        g.watchers = []
-        gates[step] = g
-        guard g.held else { return }
+        gates[step, default: Gate()].started = true
+        guard gates[step]?.held == true else { return }
+        // Let go after 30 s whatever the test does (one that failed before it said so).
+        Task {
+            try? await Task.sleep(nanoseconds: 30_000_000_000)
+            self.finish(step)
+        }
         await withCheckedContinuation { gates[step]?.waiting = $0 }
     }
 
@@ -502,7 +512,7 @@ final class QuietListener: SyncHostListener, @unchecked Sendable {
 }
 
 /// Only the app's own extension may use the socket.
-@Suite struct PeerVerifierTests {
+@Suite(.timeLimit(.minutes(1))) struct PeerVerifierTests {
     @Test func theRequirementIsTheTeamsExtensionOrThisVeryOne() {
         #expect(PeerVerifier.requirementText(teamSigned: true, cdhash: nil)
             == #"identifier "io.github.kkollsga.Seedwell.FileProvider" and anchor apple generic and certificate leaf[subject.OU] = "6GND8Z2C7Z""#)

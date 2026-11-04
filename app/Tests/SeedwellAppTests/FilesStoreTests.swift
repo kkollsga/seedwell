@@ -3,7 +3,7 @@ import Testing
 
 /// The window's file lists draw what the core's `FileLists` says (its rules are tested in Rust: file_list_tests.rs,
 /// chooser_tests.rs, starting_tests.rs). These check that the app passes clicks through and redraws from the core.
-@MainActor @Suite struct FilesStoreTests {
+@MainActor @Suite(.timeLimit(.minutes(1))) struct FilesStoreTests {
     @Test func anOpenListShowsTheCoresLinesAndTheSelectionIsTheCores() {
         let s = FilesStore(place: .window)
         s.expand("a")

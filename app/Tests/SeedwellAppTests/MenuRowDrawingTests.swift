@@ -4,7 +4,7 @@ import Testing
 
 /// The menu bar's torrent row draws its progress ring (a template image) in the row's ink, as NSMenu draws an item's
 /// image: light in a dark menu, white on the hover highlight. Drawn as it is, a template is black.
-@MainActor @Suite struct MenuRowDrawingTests {
+@MainActor @Suite(.timeLimit(.minutes(1))) struct MenuRowDrawingTests {
     /// The brightest opaque pixel of the ring's column, 0 (black) to 1 (white).
     static func ringBrightness(dark: Bool, hovered: Bool) -> CGFloat {
         let item = NSMenuItem(title: "ubuntu.iso", action: nil, keyEquivalent: "")

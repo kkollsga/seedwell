@@ -5,7 +5,7 @@ import Testing
 // A row's commands (SPEC §8.5) are the core's list (`rowCommands`, tested in trs-ffi's row_commands); the app draws
 // it as menu entries and runs each command. These check the drawing and the running against a mock core.
 
-@MainActor @Suite("Row commands")
+@MainActor @Suite("Row commands", .timeLimit(.minutes(1)))
 struct RowCommandsTests {
     /// One mock core for the suite (it holds its state directory open).
     static let core: Core? = {

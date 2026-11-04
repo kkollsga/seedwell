@@ -8,7 +8,7 @@ import Testing
 /// misses once fell through to the row's tick. No event is sent: SwiftUI's accessibility hit test says which control
 /// holds a point, from the same content shapes (without a `contentShape` the corners of the frame hold nothing; the
 /// last test shows the probe can tell).
-@MainActor @Suite struct HitAreaTests {
+@MainActor @Suite(.timeLimit(.minutes(1))) struct HitAreaTests {
     /// The role and label of the element at each point of `view`, laid out alone in `size` (view points, origin bottom left).
     static func hits(_ view: some View, size: NSSize, at points: [NSPoint]) -> [String] {
         _ = NSApplication.shared

@@ -5,7 +5,7 @@ import Testing
 /// Folder sync in the app (SPEC 7G.5, 8.2 item 5). The words, states and the submenu are the core's (trs-ffi
 /// `sync_text.rs`, `sync_menu.rs`, tested there); these check that the app reaches them, and what stays here: the date
 /// in the user's style and the Share dialog's target.
-@Suite struct SyncTests {
+@Suite(.timeLimit(.minutes(1))) struct SyncTests {
     static func folder(_ name: String = "Photos", _ state: SyncState = .upToDate, id: String? = nil, bytes: UInt64 = 1_000_000_000,
                        need: UInt64 = 0, rate: UInt64 = 0, connected: UInt32 = 0, conflicts: UInt32 = 0,
                        access: SyncAccess = .readWrite, role: SyncRole = .owner) -> SyncFolder {

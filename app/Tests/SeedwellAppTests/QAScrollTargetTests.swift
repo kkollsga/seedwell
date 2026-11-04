@@ -7,7 +7,7 @@ import Testing
 // stopped at the outer list and reported "nothing to scroll" for the 2,000-file archive).
 
 @MainActor
-@Suite("QA scroll target")
+@Suite("QA scroll target", .timeLimit(.minutes(1)))
 struct QAScrollTargetTests {
     private func scrollView(width: CGFloat, height: CGFloat, content: CGFloat) -> NSScrollView {
         let sv = NSScrollView(frame: NSRect(x: 0, y: 0, width: width, height: height))

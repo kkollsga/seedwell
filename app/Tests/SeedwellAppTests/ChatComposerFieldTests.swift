@@ -14,7 +14,7 @@ import Testing
     RunLoop.main.run(until: Date().addingTimeInterval(seconds))
 }
 
-@MainActor @Suite(.serialized) struct ChatComposerFieldTests {
+@MainActor @Suite(.serialized, .timeLimit(.minutes(1))) struct ChatComposerFieldTests {
     /// A conversation page in a window, with its model, the core and the field.
     @MainActor final class Page {
         let core: Core

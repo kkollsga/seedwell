@@ -8,7 +8,7 @@ import Testing
 /// out renumbers them; Return sends and Escape cancels a reply. The drops are made by calling the text view's drag
 /// destination methods with a drag that stands for AppKit's (no synthetic events); the core says where references go
 /// (`chatComposerWithImages`, crates/ffi/src/chat_markdown.rs).
-@MainActor @Suite struct ChatComposerTests {
+@MainActor @Suite(.timeLimit(.minutes(1))) struct ChatComposerTests {
     /// The conversation's draft and selection, as its `@State` holds them.
     @MainActor final class Draft {
         var text: String

@@ -5,7 +5,7 @@ import Testing
 /// Channels (SPEC 7G.7): the conversation page is the core's (crates/ffi/src/chat_page.rs, chat_markdown.rs, with their
 /// own tests); these check what the app does with it: the runs draw as Foundation's Markdown drew them, the page and
 /// banners carry the core's words, and the dialogs' checks.
-@Suite struct ChatTests {
+@Suite(.timeLimit(.minutes(1))) struct ChatTests {
     static func channel(_ name: String = "Team", unread: UInt32 = 0, members: UInt32 = 3, online: UInt32 = 2, muted: Bool = false,
                         agents: Bool = false, role: SyncRole = .owner) -> SyncChannel {
         SyncChannel(id: "C-\(name)", name: name, role: role, shareUntilS: nil, members: members, online: online, unread: unread,

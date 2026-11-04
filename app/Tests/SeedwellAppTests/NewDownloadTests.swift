@@ -28,7 +28,7 @@ extension Snapshot {
     static var empty: Snapshot { snap() }
 }
 
-@MainActor @Suite("New download")
+@MainActor @Suite("New download", .timeLimit(.minutes(1)))
 struct NewDownloadTests {
     // MARK: Which torrents count as a new download (the core's `Arrivals`; its rules are tested in menu.rs)
 

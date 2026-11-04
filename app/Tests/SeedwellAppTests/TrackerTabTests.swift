@@ -5,7 +5,7 @@ import Testing
 // The tracker tab and the window (SPEC 8.3): what the window does with the core's model (its groups, folds, texts,
 // selection, keys and takeover are tested in the core, library_tests.rs and library_window_tests.rs).
 
-@MainActor @Suite("Tracker tab")
+@MainActor @Suite("Tracker tab", .timeLimit(.minutes(1)))
 struct TrackerTabTests {
     @MainActor @Test func theCategoryPillFiltersAndClears() throws {
         let m = try #require(Self.model())

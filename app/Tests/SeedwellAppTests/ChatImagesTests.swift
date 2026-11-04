@@ -5,7 +5,7 @@ import Testing
 
 /// Images in chat (SPEC 7G.7 Attachments): how they fit the column and what a paste or a drop hands the core. The
 /// composer's field: ChatComposerTests. What an image is and says is the core's (crates/ffi/src/chat_images.rs).
-@MainActor @Suite struct ChatImagesTests {
+@MainActor @Suite(.timeLimit(.minutes(1))) struct ChatImagesTests {
     @Test func imagesFitTheColumnWithTheirAspectRatioKept() {
         // On a Retina display (2 pixels a point): a picture is never drawn larger than its own pixels.
         let fit = { (w: UInt32, h: UInt32, available: CGFloat) in ChatImageLayout.fit(width: w, height: h, available: available, scale: 2) }

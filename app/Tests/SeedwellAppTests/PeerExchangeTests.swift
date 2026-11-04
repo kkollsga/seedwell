@@ -5,7 +5,7 @@ import Testing
 // Peer exchange per private tracker (SPEC 7B.4): nothing is on by default. What Get Info's hover text says of the known
 // peers is the core's (info_card_tests.rs).
 
-@Suite("Peer exchange")
+@Suite("Peer exchange", .timeLimit(.minutes(1)))
 struct PeerExchangeTests {
     @Test func aTrackerHasNoPeerExchangeSettingUntilItIsPrivate() {
         let t = TrackerSummary(id: "debian.org", name: "Debian", count: 3, favorite: false)

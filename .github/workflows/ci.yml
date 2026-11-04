@@ -56,7 +56,10 @@ jobs:
         env:
           SEEDWELL_PROFILE: dev
       - name: Swift tests (reuse the app build)
-        run: mkdir -p "$SIDEBAR_DRAWING_OUT" && swift test --package-path app
+        # Under a pseudo-terminal the results are written as they happen, not in blocks when a buffer fills (a run that
+        # hung showed no result at all). Each suite has a one-minute time limit per test; this bounds the step.
+        timeout-minutes: 20
+        run: mkdir -p "$SIDEBAR_DRAWING_OUT" && script -q /dev/null swift test --package-path app
         env:
           # SidebarDrawingTests' pictures and layer trees: what this macOS drew, kept when the run fails.
           SIDEBAR_DRAWING_OUT: ${{ runner.temp }}/sidebar-drawing

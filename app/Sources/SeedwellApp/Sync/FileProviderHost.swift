@@ -358,7 +358,8 @@ final class FileProviderListener: SyncHostListener, @unchecked Sendable {
     }
 
     /// The core is about to remove or switch a folder: blocks its thread until the domain is gone (never the main
-    /// thread's: the core's removals run off it).
+    /// thread's: the core's removals run off it, on a thread of the core's own). Never called from a thread of Swift's
+    /// cooperative pool either: the host's work runs there, and a blocked pool thread can starve it.
     func removeDomain(folderId: String) -> SyncHostRemoval {
         guard !Thread.isMainThread else { return SyncHostRemoval(error: syncHostText(t: .busy)) }
         let result = RemovalBox()

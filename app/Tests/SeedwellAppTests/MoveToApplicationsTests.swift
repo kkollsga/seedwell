@@ -6,7 +6,7 @@ import Testing
 // crates/ffi/src/app_place.rs tests them). Here: the host's part, in temporary folders only (never the real
 // Applications folder, and never a replacement, which would put an app in the user's Trash).
 
-@Suite("Move to Applications")
+@Suite("Move to Applications", .timeLimit(.minutes(1)))
 @MainActor
 struct MoveToApplicationsTests {
     private func tempDir() throws -> URL {

@@ -8,7 +8,7 @@ import UserNotifications
 /// a click on an image reference, a code block's copy button, a notification's Approve and Deny, and the menu bar
 /// menu's request line. Each is checked through the call its click or key makes (the same calls QA's `chat`,
 /// `notice-action` and `menu-requests` make in a running app); no event is sent.
-@MainActor @Suite(.serialized) struct ChatControlsTests {
+@MainActor @Suite(.serialized, .timeLimit(.minutes(1))) struct ChatControlsTests {
     // MARK: Gallery
 
     @Test func theGalleryStepsWithinItsImages() {

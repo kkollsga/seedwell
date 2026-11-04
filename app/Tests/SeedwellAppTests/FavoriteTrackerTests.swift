@@ -9,7 +9,7 @@ import Testing
 
 // The editing itself (fields, validation, texts, the removal question) is the core's `FavoriteEditor`, tested in
 // trs-ffi's favorite_editor.rs and tracker_page_tests.rs. This checks what the window does with its answers.
-@MainActor @Suite("Favorite editing")
+@MainActor @Suite("Favorite editing", .timeLimit(.minutes(1)))
 struct FavoriteEditingTests {
     static let core: Core? = {
         let dir = NSTemporaryDirectory() + "seedwell-favorites-\(getpid())"

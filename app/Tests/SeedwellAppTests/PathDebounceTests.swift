@@ -34,7 +34,7 @@ private final class Clock {
 
 private func path(_ ok: Bool, _ ifaces: String = "en0") -> PathDebounce.Path { .init(satisfied: ok, interfaces: ifaces) }
 
-@Suite("Path monitor debounce")
+@Suite("Path monitor debounce", .timeLimit(.minutes(1)))
 @MainActor
 struct PathDebounceTests {
     @Test func aLaunchThatStartsOnlineTellsTheEngineNothing() {

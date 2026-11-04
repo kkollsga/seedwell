@@ -28,7 +28,7 @@ private func view(_ kind: DevicesKind, rows: [DeviceRow] = [], requests: [PairRe
 
 private let link = PairLinkView(link: "seedwell://devices/X", expiresS: 1_000 + 872, title: "Pair a Device", text: "", copyTitle: "Copy")
 
-@MainActor @Suite("Settings › Devices")
+@MainActor @Suite("Settings › Devices", .timeLimit(.minutes(1)))
 struct DevicesTests {
     @Test func aMockCoreIsUnpairedAndCannotPair() async throws {
         let (core, dir) = try makeCore()

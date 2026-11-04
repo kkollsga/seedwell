@@ -157,7 +157,14 @@ if [[ " $affected " == *" trs-rendezvous "* ]] && [ ${#extra[@]} -eq 0 ]; then
 fi
 if [ "$CHECK_APP" = 1 ]; then
   SEEDWELL_PROFILE=dev bash app/build.sh >/dev/null
-  SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk swift test --package-path app -q \
+  # Every suite has a time limit for each of its tests: a test that hangs is named, instead of using up CI's 60 minutes.
+  if grep -rn '@Suite' app/Tests --include='*.swift' | grep -v '^[^:]*:[0-9]*: *///' | grep -v 'timeLimit'; then
+    echo "check: the suites above have no .timeLimit(.minutes(1))" >&2
+    exit 1
+  fi
+  # One thread in Swift's cooperative pool (CI's Mac has three, shared by the tests running at once): a test that
+  # blocks a pool thread while it waits for an actor hangs here, not only on CI (the 0.1.18 run that hung for 60 min).
+  LIBDISPATCH_COOPERATIVE_POOL_STRICT=1 SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk swift test --package-path app -q \
     -Xswiftc -plugin-path -Xswiftc /Library/Developer/CommandLineTools/usr/lib/swift/host/plugins/testing
 fi
 # CI builds the app with Xcode's Swift, which is stricter than the Command Line Tools' in places (it refused a

@@ -44,7 +44,7 @@ private func held(_ q: DispatchQueue, seconds: Double, marking action: String, i
     }
 }
 
-@Suite("Hang watchdog")
+@Suite("Hang watchdog", .timeLimit(.minutes(1)))
 struct HangWatchdogTests {
     @Test func aLateBeatIsAStallAndAnOnTimeOneIsNot() {
         var d = HangDetector(report: 1.0, fail: nil)

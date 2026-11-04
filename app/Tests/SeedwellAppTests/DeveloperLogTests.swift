@@ -22,7 +22,7 @@ private func makeCore(log: [String]) throws -> (Core, URL) {
     return (core, dir)
 }
 
-@Suite("Developer mode")
+@Suite("Developer mode", .timeLimit(.minutes(1)))
 struct DeveloperLogTests {
     @Test func theViewerGetsRowsWithSummariesAndDetails() throws {
         let (core, dir) = try makeCore(log: [line(1_700_000_000_000, event: "started", error: false), line(1_700_000_100_000, event: "regular", error: true)])

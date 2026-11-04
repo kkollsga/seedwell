@@ -5,7 +5,7 @@ import Testing
 
 /// Finder badges (SPEC 7G.5): a folder's own badge from its state, the badge of each item inside it, and the
 /// status file the app and the extension share.
-@Suite struct FinderBadgeTests {
+@Suite(.timeLimit(.minutes(1))) struct FinderBadgeTests {
     typealias Folder = FinderStatus.Folder
 
     static func status(_ folders: [Folder], running: Bool = true) -> FinderBadges {

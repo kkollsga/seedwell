@@ -5,7 +5,7 @@ import UserNotifications
 
 /// The menu bar icon's one dot (something needs the user: a problem, or an agent's request waiting for an answer): small,
 /// orange, lower right, the same for both; the icon keeps its width. And a request's notice is time-sensitive.
-@MainActor @Suite struct StatusIconTests {
+@MainActor @Suite(.timeLimit(.minutes(1))) struct StatusIconTests {
     /// The icon drawn at 2x in `dark` or light.
     static func pixels(dot: Bool, dark: Bool) -> NSBitmapImageRep {
         let image = Drawing.statusIcon(down: 0, up: 0, progress: nil, attention: dot)

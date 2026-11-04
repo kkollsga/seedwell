@@ -4,7 +4,7 @@ import Testing
 
 /// Files in chat (SPEC 7G.7 Files): the pictures cards draw and the previews of a message of files alone. What a file
 /// is, says and offers is the core's (crates/ffi/src/chat_files.rs).
-@MainActor @Suite struct ChatFilesTests {
+@MainActor @Suite(.timeLimit(.minutes(1))) struct ChatFilesTests {
     @Test func everyIconIsASymbolTheSystemHas() {
         let all: [ChatFileIcon] = [.document, .text, .pdf, .image, .audio, .video, .archive, .code, .app, .diskImage, .spreadsheet, .presentation, .other]
         for icon in all {

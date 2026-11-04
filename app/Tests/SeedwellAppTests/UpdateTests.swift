@@ -4,7 +4,7 @@ import Testing
 
 /// The updater's rules (versions, latest.json, the schedule, when to install, the installer command) are the core's
 /// and tested there (crates/ffi/src/updates_tests.rs). What stays here is the host's part: starting the installer.
-@Suite struct UpdateTests {
+@Suite(.timeLimit(.minutes(1))) struct UpdateTests {
     @Test func spawnedShellGetsItsArgumentsAndVariablesIntactAndLogs() throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("seedwell-spawn-\(getpid())")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)

@@ -8,7 +8,7 @@ import Testing
 ///
 /// `SIDEBAR_DRAWING_OUT=<folder>` keeps the pictures (as drawn for QA, with and without the marks, and drawn
 /// in-process without the pass), the windows' layer trees and the contrast report; CI keeps them of a failed run.
-@MainActor @Suite(.serialized) struct SidebarDrawingTests {
+@MainActor @Suite(.serialized, .timeLimit(.minutes(1))) struct SidebarDrawingTests {
     final class Selection: ObservableObject {
         @Published var rows: Set<String> = []
     }
