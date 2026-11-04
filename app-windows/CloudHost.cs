@@ -290,7 +290,7 @@ sealed class CloudHost : SyncHostListener
             root.Work = root.Work.ContinueWith(_ =>
             {
                 try { work(); }
-                catch (Exception e) { AppLog.Write($"on-demand {Short(root.Id)}: {Words(e)}"); }
+                catch (Exception e) { AppLog.Write($"on-demand {Short(root.Id)}: {Words(e)} ({e.StackTrace?.Split('\n')[0].Trim()})"); }
             }, TaskScheduler.Default);
         }
     }
@@ -993,6 +993,8 @@ sealed class CloudHost : SyncHostListener
             return;
         }
         if (FolderId(root, ParentOf(rel)) is null) Adopt(root, Full(root, ParentOf(rel)));
+        // The folder's adoption took what is in it, this one too.
+        if (root.IdAt(rel) is not null) return;
         if (FolderId(root, ParentOf(rel)) is not string parent) return;
         if (!dir && !Closed(full))
         {

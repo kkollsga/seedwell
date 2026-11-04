@@ -1704,6 +1704,34 @@ $checks.ondemandchanges = {
     'deep offline' | Set-Content -NoNewline "$bd\sub\deep.txt"
     $pb = Start-App $b -QaControl
     WaitFor { (& $tree $docs) -match 'offline\.txt=made offline' -and (& $tree $docs) -match 'sub/deep\.txt=deep offline' } 30000 'the files made offline on A' | Out-Null
+
+    # The folder kept above: A deleted it, so the sweep at each start leaves it here (one issue), and it never returns on A.
+    $issues = { @(((& $Cli --socket $sb sync list --json 2>&1) -join '' | ConvertFrom-Json).folders | Where-Object { $_.name -eq 'Docs' } | ForEach-Object { $_.issues } | Where-Object { $_.path -eq 'kf' }) }
+    $stayed = { foreach ($i in 1..5) { if (Test-Path "$docs\kf") { Fail 'the kept folder came back on A' }; Start-Sleep 3 } }
+    WaitFor { Log $b | Where-Object { $_ -like '*on-demand: kf not synced (kept: *' } } 15000 'the sweep to leave the kept folder' | Out-Null
+    & $stayed
+    if (@(& $issues).Count -ne 1) { Fail "the kept folder's issues: $((& $issues | ForEach-Object { $_.reason }) -join ' || ')" }
+    Stop-App $b $pb
+    $pb = Start-App $b -QaControl
+    WaitForSync $b
+    & $stayed
+    if (@(& $issues).Count -ne 1) { Fail "the kept folder's issues after another start: $((& $issues | ForEach-Object { $_.reason }) -join ' || ')" }
+    # A synced file in it takes it up again; the file not synced stays here only.
+    'n' | Set-Content -NoNewline "$bd\kf\new.txt"
+    WaitFor { (Get-Content -Raw "$docs\kf\new.txt" -ErrorAction SilentlyContinue) -eq 'n' } 15000 'the file in the kept folder on A' | Out-Null
+    if (Test-Path "$docs\kf\~keep.tmp") { Fail 'the file not synced reached A' }
+    WaitFor { (Qa $b @('ondemand', 'placeholder', "$bd\kf")) -match 'placeholder True' -and (Qa $b @('ondemand', 'placeholder', "$bd\kf\new.txt")) -match 'placeholder True' } 10000 'kf and new.txt as placeholders' | Out-Null
+    if ((Qa $b @('ondemand', 'placeholder', "$bd\kf\~keep.tmp")) -notmatch 'placeholder False') { Fail '~keep.tmp became a placeholder' }
+    WaitFor { @(& $issues).Count -eq 0 } 10000 'the kept folder''s issue to go' | Out-Null
+    $copies = @(Get-ChildItem -Recurse "$docs\kf", "$bd\kf" | Where-Object { $_.Name -notin 'new.txt', '~keep.tmp' })
+    if ($copies) { Fail "more in the folder taken up: $($copies.FullName -join ', ')" }
+    $errors = @(Log $b | Where-Object { $_ -match 'on-demand \S+: .*convert' })
+    if ($errors) { Fail "a file adopted twice: $($errors -join ' || ')" }
+    # A new folder nobody deleted, holding only a file not synced, is a folder like any other.
+    New-Item -ItemType Directory "$bd\fresh" | Out-Null
+    'x' | Set-Content -NoNewline "$bd\fresh\~x.tmp"
+    WaitFor { Test-Path "$docs\fresh" } 15000 'the new folder on A' | Out-Null
+    if (Test-Path "$docs\fresh\~x.tmp") { Fail '~x.tmp reached A' }
     if ($pb.HasExited) { Fail "B ended (exit code $($pb.ExitCode))" }
   } finally {
     if ($pb) { Stop-App $b $pb }
