@@ -179,10 +179,10 @@ import AppKit
 /// window server applies as it composites the window; an in-process drawing (`cacheDisplay`) skips it and gets the
 /// raw colours (black). Here the view is drawn with its vibrant layers hidden, then each of them over it in drawing
 /// order the way Core Animation composites them: the matrix works on what is under the layer (its backdrop), and the
-/// layer's own drawing gives only where and how much (its coverage), never a colour. `SidebarDrawingTests` checks it
-/// against Core Animation's own renderer. Secondary text "+0.3" is 0.3 lighter than whatever it is on, so a word on a
-/// grey pill in a grey selected row stays readable; put through the matrix on its own (black + 0.3, one fixed grey)
-/// it took the grey of the pill, and the sidebar's "agents" pill came out empty in the shots.
+/// layer's own drawing gives only where and how much (its coverage), never a colour (`SidebarDrawingTests` checks
+/// that it draws every vibrant layer, from what is under it). Secondary text "+0.3" is 0.3 lighter than whatever it
+/// is on, so a word on a grey pill in a grey selected row stays readable; put through the matrix on its own (black +
+/// 0.3, one fixed grey) it took the grey of the pill, and the sidebar's "agents" pill came out empty in the shots.
 ///
 /// The opacity of the layers a vibrant layer is in (SwiftUI's `.compositingGroup().opacity()`) scales its coverage as
 /// its own does. Each macOS builds these layers its own way (macOS 27 gives the sidebar "+0.3" at full alpha, macOS 26

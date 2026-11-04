@@ -69,6 +69,11 @@ release procedure.
 GitHub.** Locally we run targeted tests and do everything cheap that finds bugs early. A bug the PC or CI finds costs
 a round trip of an hour or more; most can be caught in the first minutes on the Mac.
 
+- **A test targets a specific way the code can fail** (the user's rule). It names that failure in its doc comment
+  (a deadlock, a delete reaching a peer before the save, a mark drawn in its row's own colour) and fails when it
+  happens. Tests are not there to restrict change: a test that only pins today's output (exact pixels, exact
+  wording, exact timings, values copied from one machine) blocks harmless changes and machine differences without
+  catching a break. Change it to target the failure, or delete it.
 - **Every core call a host uses gets a test that acts like the host,** in the same change. It calls it the way
   Finder, Explorer or the app will (repeated calls, the `wait_ms` they pass, the threads they call from) and asserts
   the promise the host relies on: "answers within `wait_ms`", "`done` rises while data comes", "gives up within N s".
