@@ -131,13 +131,13 @@ import Testing
         func walk(_ l: CALayer, _ around: Float) {
             guard !l.isHidden else { return }
             let frame = root.convert(l.bounds, from: l)
-            let matrix = ([l.compositingFilter].compactMap { $0 } + (l.filters ?? [])).compactMap { f -> String? in
-                guard let f = f as? NSObject, !(f is NSString), let m = matrix(of: f) else { return nil }
+            let matrices = ([l.compositingFilter].compactMap { $0 } + (l.filters ?? [])).compactMap { f -> String? in
+                guard let f = f as? NSObject, !(f is NSString), let m = Self.matrix(of: f) else { return nil }
                 return "\(f) \(m)"
             }
-            if frame.intersects(band), l.contents != nil || l.backgroundColor != nil || !matrix.isEmpty {
+            if frame.intersects(band), l.contents != nil || l.backgroundColor != nil || !matrices.isEmpty {
                 let bg = l.backgroundColor.map { " background \($0.components ?? [])" } ?? ""
-                out.append("\(type(of: l)) at \(frame) opacity \(l.opacity) in \(around)\(bg) \(matrix.joined(separator: ", "))")
+                out.append("\(type(of: l)) at \(frame) opacity \(l.opacity) in \(around)\(bg) \(matrices.joined(separator: ", "))")
             }
             for s in l.sublayers ?? [] { walk(s, around * l.opacity) }
         }
