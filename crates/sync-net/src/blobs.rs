@@ -117,6 +117,7 @@ impl Blobs {
         std::fs::create_dir_all(&self.dir)?;
         let tmp = self.dir.join(format!(".{}.tmp", hex(hash)));
         std::fs::write(&tmp, self.seal.seal(bytes))?;
+        crate::shared::slow_disk();
         std::fs::rename(&tmp, self.path(hash))?;
         lock(&self.state).failed.remove(hash);
         Ok(())

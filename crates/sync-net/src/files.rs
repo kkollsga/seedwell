@@ -189,6 +189,9 @@ struct Download {
     rate: u64,
     window: (Instant, u64),
     saved: Instant,
+    /// A cancel or the end of a run is deleting or putting in place its partial file, with the state let go: nobody
+    /// else starts, cancels or ends it meanwhile (a new run to the same place has the same partial file).
+    busy: bool,
 }
 
 impl Download {
@@ -239,6 +242,23 @@ struct State {
     table: Option<([u8; 32], Arc<Vec<u8>>)>,
     /// The room is gone: nothing starts any more.
     closed: bool,
+    /// Saves made of it so far ([`Files::snapshot`]): the turn of the next one.
+    saves: u64,
+}
+
+/// A save of a room's files: their state as it was when it was made (sealed), and its turn.
+struct Snapshot {
+    turn: u64,
+    bytes: Vec<u8>,
+}
+
+/// The writes of a room's files' state.
+#[derive(Default)]
+struct Saving {
+    /// The turn of the newest state on disk.
+    written: u64,
+    /// The room is gone: nothing is written any more (its folder is deleted).
+    closed: bool,
 }
 
 /// A file attachment as this device has it.
@@ -266,10 +286,20 @@ pub enum DownloadTo {
 }
 
 /// A room's files on this device.
+///
+/// What the app's calls read ([`Files::view`], [`Files::preparing_list`]) is never locked across a disk write: a
+/// save copies the state under its lock ([`Files::snapshot`]) and writes it after it let go, under a lock of its own
+/// ([`Files::write`]), where an older copy never replaces a newer one. A disk may take long to save (Windows' Defender
+/// reads each new file before the write is done).
 pub(crate) struct Files {
     dir: PathBuf,
     seal: Sealer,
     state: Mutex<State>,
+    /// Taken for a save's whole write, never by a read.
+    saving: Mutex<Saving>,
+    /// **Tests:** what [`Files::test_gap`] runs.
+    #[cfg(test)]
+    gap: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl Files {
@@ -292,21 +322,50 @@ impl Files {
             let Some(h) = hash_from_hex(&rec.hash) else { continue };
             let have = bitmap_from_hex(&rec.have, piece_count(rec.size));
             let done = (0..piece_count(rec.size)).filter(|i| have.get((i / 8) as usize).is_some_and(|b| b & (1 << (i % 8)) != 0)).map(|i| piece_span(rec.size, i).1).sum();
-            st.downloads.insert(h, Download { rec, have, done, running: None, rate: 0, window: (now, 0), saved: now });
+            st.downloads.insert(h, Download { rec, have, done, running: None, rate: 0, window: (now, 0), saved: now, busy: false });
         }
-        Files { dir, seal, state: Mutex::new(st) }
+        Files {
+            dir,
+            seal,
+            state: Mutex::new(st),
+            saving: Mutex::new(Saving::default()),
+            #[cfg(test)]
+            gap: Mutex::new(None),
+        }
     }
 
-    fn save(&self, st: &State) -> io::Result<()> {
+    /// The state as it is now, to save: a copy made under its lock, written after it is let go ([`Self::write`]).
+    fn snapshot(&self, st: &mut State) -> io::Result<Snapshot> {
         let saved = Saved {
             shares: st.shares.values().cloned().collect(),
             downloads: st.downloads.values().map(|d| DlRecord { have: hex(&d.have), ..d.rec.clone() }).collect(),
         };
         let plain = serde_json::to_vec(&saved).map_err(io::Error::other)?;
+        st.saves += 1;
+        Ok(Snapshot { turn: st.saves, bytes: self.seal.seal(&plain) })
+    }
+
+    /// Writes a copy of the state atomically, unless a newer one is on disk already (the file never goes back to an
+    /// older state) or the room is gone. The writes take turns.
+    fn write(&self, s: Snapshot) -> io::Result<()> {
+        let mut saving = lock(&self.saving);
+        if saving.closed || s.turn <= saving.written {
+            return Ok(());
+        }
         std::fs::create_dir_all(&self.dir)?;
         let tmp = self.dir.join(".state.tmp");
-        std::fs::write(&tmp, self.seal.seal(&plain))?;
-        std::fs::rename(&tmp, self.dir.join("state"))
+        std::fs::write(&tmp, &s.bytes)?;
+        crate::shared::slow_disk();
+        std::fs::rename(&tmp, self.dir.join("state"))?;
+        saving.written = s.turn;
+        Ok(())
+    }
+
+    /// Saves the state: copied under its lock (`st`, let go here), then written.
+    fn save(&self, mut st: std::sync::MutexGuard<'_, State>) -> io::Result<()> {
+        let snapshot = self.snapshot(&mut st);
+        drop(st);
+        self.write(snapshot?)
     }
 
     /// Keeps a file's piece table, sealed.
@@ -314,8 +373,22 @@ impl Files {
         std::fs::create_dir_all(&self.dir)?;
         let tmp = self.dir.join(format!(".{}.tmp", hex(hash)));
         std::fs::write(&tmp, self.seal.seal(table))?;
+        crate::shared::slow_disk();
         std::fs::rename(&tmp, self.dir.join(hex(hash)))
     }
+
+    /// **Tests:** called once where a cancel or the end of a run has let the state go before it touches the partial
+    /// file (to interleave another call there).
+    #[cfg(test)]
+    fn test_gap(&self) {
+        let f = lock(&self.gap).take();
+        if let Some(f) = f {
+            f();
+        }
+    }
+
+    #[cfg(not(test))]
+    fn test_gap(&self) {}
 
     /// A piece table kept here, checked against its hash.
     fn table(&self, hash: &[u8; 32]) -> Option<Arc<Vec<u8>>> {
@@ -339,7 +412,7 @@ impl Files {
         let mut st = lock(&self.state);
         let s = Share { hash: hex(&p.hash), table: hex(&p.table_hash), path: path.to_path_buf(), size: p.size, mtime_s: p.mtime.0, mtime_ns: p.mtime.1, own, gone: None };
         st.shares.insert(p.hash, s);
-        self.save(&st)
+        self.save(st)
     }
 
     /// Stops serving a file sent from here. False when it was not shared.
@@ -347,22 +420,23 @@ impl Files {
         let mut st = lock(&self.state);
         let Some(s) = st.shares.get_mut(hash).filter(|s| s.own) else { return Ok(false) };
         s.gone = Some("you stopped sharing it".into());
-        self.save(&st)?;
+        self.save(st)?;
         Ok(true)
     }
 
-    /// How a file stands here; `mine`: its message was sent from this device.
+    /// How a file stands here; `mine`: its message was sent from this device. The app calls it on its UI thread
+    /// (each file card shown): it looks at the file with the state let go, and never saves.
     pub(crate) fn view(&self, hash: &[u8; 32], mine: bool) -> FileView {
-        let mut st = lock(&self.state);
         let h = *hash;
-        if let Some(s) = st.shares.get(&h).filter(|s| s.own).cloned() {
+        let own = lock(&self.state).shares.get(&h).filter(|s| s.own).cloned();
+        if let Some(s) = own {
             if s.gone.is_none() && !s.matches() {
-                // Checked when shown, so the sender sees it at once (serving finds it too).
+                // Checked when shown, so the sender sees it at once (serving finds it too, and saves it). Kept in
+                // memory only: a view finds it again from the file after a restart.
                 let why = if s.path.exists() { "the file changed since it was sent" } else { "the file was moved or deleted" };
-                if let Some(x) = st.shares.get_mut(&h) {
-                    x.gone = Some(why.into());
+                if let Some(x) = lock(&self.state).shares.get_mut(&h) {
+                    x.gone.get_or_insert_with(|| why.into());
                 }
-                let _ = self.save(&st);
                 return FileView { state: "unshared", path: Some(s.path), problem: Some(why.into()), ..FileView::default() };
             }
             return match s.gone {
@@ -370,16 +444,21 @@ impl Files {
                 None => FileView { state: "shared", path: Some(s.path), ..FileView::default() },
             };
         }
-        if let Some(d) = st.downloads.get(&h) {
+        let dl = lock(&self.state).downloads.get(&h).map(|d| {
             let view = |state| FileView { state, done: d.done, rate: if state == "downloading" { d.rate } else { 0 }, path: None, problem: d.rec.problem.clone() };
-            return match d.rec.state {
-                DlState::Done if d.rec.to.is_file() => FileView { state: "downloaded", done: d.rec.size, path: Some(d.rec.to.clone()), ..FileView::default() },
-                DlState::Done => FileView { state: "available", ..FileView::default() },
-                DlState::Active if d.running.is_some() => view("downloading"),
-                DlState::Active | DlState::Paused => view("paused"),
-                DlState::Gone => view("gone"),
-                DlState::Failed => view("failed"),
-            };
+            match d.rec.state {
+                DlState::Done => Err((d.rec.to.clone(), d.rec.size)),
+                DlState::Active if d.running.is_some() => Ok(view("downloading")),
+                DlState::Active | DlState::Paused => Ok(view("paused")),
+                DlState::Gone => Ok(view("gone")),
+                DlState::Failed => Ok(view("failed")),
+            }
+        });
+        match dl {
+            Some(Ok(v)) => return v,
+            Some(Err((to, size))) if to.is_file() => return FileView { state: "downloaded", done: size, path: Some(to), ..FileView::default() },
+            Some(Err(_)) => return FileView { state: "available", ..FileView::default() },
+            None => {}
         }
         if mine {
             return FileView { state: "unshared", problem: Some("it is no longer shared from this device".into()), ..FileView::default() };
@@ -388,36 +467,47 @@ impl Files {
     }
 
     /// Stops a download and deletes its partial file: the file is *available* again. False when there was none.
+    /// The partial file is deleted with the state let go, the download held [`Download::busy`] meanwhile, so a new
+    /// run to the same place starts only after it is gone (and its own partial file is never deleted). False also
+    /// while the download is being finished.
     pub(crate) fn cancel(&self, hash: &[u8; 32]) -> io::Result<bool> {
-        let mut st = lock(&self.state);
-        let Some(d) = st.downloads.get(hash) else { return Ok(false) };
-        if d.rec.state == DlState::Done {
-            return Ok(false);
-        }
-        if let Some(stop) = &d.running {
-            stop.store(true, Ordering::SeqCst);
-        }
-        let part = d.rec.part.clone();
-        st.downloads.remove(hash);
-        self.save(&st)?;
-        drop(st);
+        let part = {
+            let mut st = lock(&self.state);
+            let Some(d) = st.downloads.get_mut(hash) else { return Ok(false) };
+            if d.rec.state == DlState::Done || d.busy {
+                return Ok(false);
+            }
+            if let Some(stop) = &d.running {
+                stop.store(true, Ordering::SeqCst);
+            }
+            d.busy = true;
+            d.rec.part.clone()
+        };
+        self.test_gap();
         let _ = std::fs::remove_file(part);
+        let mut st = lock(&self.state);
+        st.downloads.remove(hash);
+        self.save(st)?;
         Ok(true)
     }
 
     /// The room is gone: every download stops and its partial file goes (the folder itself is the caller's).
     pub(crate) fn close(&self) {
-        let mut st = lock(&self.state);
-        st.closed = true;
-        for d in st.downloads.values() {
-            if let Some(stop) = &d.running {
-                stop.store(true, Ordering::SeqCst);
+        let parts: Vec<PathBuf> = {
+            let mut st = lock(&self.state);
+            st.closed = true;
+            for d in st.downloads.values() {
+                if let Some(stop) = &d.running {
+                    stop.store(true, Ordering::SeqCst);
+                }
             }
-            if d.rec.state != DlState::Done {
-                let _ = std::fs::remove_file(&d.rec.part);
-            }
+            st.downloads.drain().filter(|(_, d)| d.rec.state != DlState::Done).map(|(_, d)| d.rec.part).collect()
+        };
+        // A save under way ends first, and none comes after: the folder is deleted next.
+        lock(&self.saving).closed = true;
+        for p in parts {
+            let _ = std::fs::remove_file(p);
         }
-        st.downloads.clear();
     }
 
     /// The service stops: every download stops where it is (and resumes when it starts again).
@@ -475,7 +565,8 @@ impl Files {
         (0..piece_count(d.rec.size)).filter(|i| !d.has(*i)).take(n).collect()
     }
 
-    /// A piece was written and checked: recorded (saved every [`SAVE_EVERY`], after the partial file is flushed).
+    /// A piece was written and checked: recorded (saved every [`SAVE_EVERY`], after the partial file is flushed: what
+    /// is saved names only pieces written before the copy was made).
     fn got(&self, hash: &[u8; 32], i: u64, len: u64, file: &File) {
         let mut st = lock(&self.state);
         let Some(d) = st.downloads.get_mut(hash) else { return };
@@ -492,10 +583,15 @@ impl Files {
             d.rate = (d.window.1 as f64 / since.as_secs_f64()) as u64;
             d.window = (Instant::now(), 0);
         }
-        if d.saved.elapsed() >= SAVE_EVERY {
-            d.saved = Instant::now();
-            let _ = file.sync_data();
-            let _ = self.save(&st);
+        if d.saved.elapsed() < SAVE_EVERY {
+            return;
+        }
+        d.saved = Instant::now();
+        let snapshot = self.snapshot(&mut st);
+        drop(st);
+        let _ = file.sync_data();
+        if let Ok(s) = snapshot {
+            let _ = self.write(s);
         }
     }
 }
@@ -586,7 +682,7 @@ pub(crate) fn serve(ctx: &Ctx, room: &dyn Room, w: &BlobWant) -> BlobData {
             }
             None => {}
         }
-        let _ = files.save(&st);
+        let _ = files.save(st);
     };
     let (n, table_asked) = match file_of_table(ctx, room, &w.hash) {
         Some(n) => (n, true),
@@ -659,13 +755,14 @@ pub(crate) fn download(ctx: &Arc<Ctx>, room: &Arc<dyn Room>, n: &Named, to: Down
             return Err(concat!("this file was sent from this ", trs_platform::computer!()).into());
         }
         match st.downloads.get_mut(&h) {
+            // Being cancelled or finished: what it ends as shows on its card.
+            Some(d) if d.busy => return Ok(()),
             Some(d) if d.rec.state == DlState::Done && d.rec.to.is_file() => return Ok(()),
             Some(d) if d.rec.state != DlState::Done => {
                 // Paused, gone or failed: tried again from where it was.
                 d.rec.state = DlState::Active;
                 d.rec.problem = None;
-                let _ = files.save(&st);
-                drop(st);
+                let _ = files.save(st);
                 resume(ctx, room);
                 return Ok(());
             }
@@ -701,8 +798,8 @@ pub(crate) fn download(ctx: &Arc<Ctx>, room: &Arc<dyn Room>, n: &Named, to: Down
     {
         let mut st = lock(&files.state);
         let have = vec![0u8; piece_count(n.r.size).div_ceil(8) as usize];
-        st.downloads.insert(h, Download { rec, have, done: 0, running: None, rate: 0, window: (now, 0), saved: now });
-        files.save(&st).map_err(|e| e.to_string())?;
+        st.downloads.insert(h, Download { rec, have, done: 0, running: None, rate: 0, window: (now, 0), saved: now, busy: false });
+        files.save(st).map_err(|e| e.to_string())?;
     }
     resume(ctx, room);
     Ok(())
@@ -735,7 +832,7 @@ pub(crate) fn resume(ctx: &Arc<Ctx>, room: &Arc<dyn Room>) {
         let (ctx, room) = (ctx.clone(), room.clone());
         tokio::spawn(async move {
             let end = pull(&ctx, &room, h, &stop).await;
-            finish(&room, h, &stop, end);
+            finish(room.files(), h, &stop, end);
         });
     }
 }
@@ -889,47 +986,68 @@ async fn pieces(p: &PeerHandle, room: &dyn Room, n: &Named, table: &[u8], file: 
     }
 }
 
-/// Records how a run ended; a finished download gets its name, the system's mark, and is served from here.
-fn finish(room: &Arc<dyn Room>, h: [u8; 32], stop: &Arc<AtomicBool>, end: End) {
-    let files = room.files();
+/// Records how a run ended; a finished download gets its name, the system's mark, and is served from here. The disk
+/// work (the file put in place, a partial file deleted) is done before the state is locked to record it: the app's
+/// calls read it.
+fn finish(files: &Files, h: [u8; 32], stop: &Arc<AtomicBool>, end: End) {
+    let ours = |st: &State| st.downloads.get(&h).filter(|d| !d.busy && d.running.as_ref().is_some_and(|r| Arc::ptr_eq(r, stop))).map(|d| d.rec.clone());
+    // Held busy while its partial file is put in place or deleted: no cancel, and so no new run to the same place
+    // (whose partial file has the same path), comes in between.
+    let rec = {
+        let mut st = lock(&files.state);
+        let Some(rec) = ours(&st) else { return };
+        let touches = matches!(end, End::Done | End::Gone);
+        if let Some(d) = st.downloads.get_mut(&h) {
+            d.busy = touches;
+        }
+        rec
+    };
+    files.test_gap();
+    let placed = match &end {
+        End::Done => Some(place(&rec).map(|to| {
+            let stamped = stamp(&to);
+            (to, stamped)
+        })),
+        End::Gone => {
+            let _ = std::fs::remove_file(&rec.part);
+            None
+        }
+        _ => None,
+    };
     let mut st = lock(&files.state);
-    let Some(d) = st.downloads.get_mut(&h) else { return };
-    if !d.running.as_ref().is_some_and(|r| Arc::ptr_eq(r, stop)) {
-        return;
-    }
+    // The room closed meanwhile (its downloads are gone).
+    let Some(d) = st.downloads.get_mut(&h).filter(|d| d.running.as_ref().is_some_and(|r| Arc::ptr_eq(r, stop))) else { return };
+    d.busy = false;
     d.running = None;
     d.rate = 0;
-    match end {
-        End::Stopped => {}
-        End::Paused => d.rec.state = DlState::Paused,
-        End::Gone => {
+    match (end, placed) {
+        (End::Stopped, _) | (End::Done, None) => {}
+        (End::Paused, _) => d.rec.state = DlState::Paused,
+        (End::Gone, _) => {
             d.rec.state = DlState::Gone;
             d.rec.problem = None;
-            let _ = std::fs::remove_file(&d.rec.part);
             d.have.iter_mut().for_each(|b| *b = 0);
             d.done = 0;
         }
-        End::Failed(why) => {
+        (End::Failed(why), _) => {
             d.rec.state = DlState::Failed;
             d.rec.problem = Some(why);
         }
-        End::Done => match place(&d.rec) {
-            Ok(to) => {
-                d.rec.to = to.clone();
-                d.rec.state = DlState::Done;
-                d.done = d.rec.size;
-                let table = d.rec.table.clone();
-                if let Ok((size, mtime)) = stamp(&to) {
-                    st.shares.insert(h, Share { hash: hex(&h), table, path: to, size, mtime_s: mtime.0, mtime_ns: mtime.1, own: false, gone: None });
-                }
+        (End::Done, Some(Ok((to, stamped)))) => {
+            d.rec.to = to.clone();
+            d.rec.state = DlState::Done;
+            d.done = d.rec.size;
+            let table = d.rec.table.clone();
+            if let Ok((size, mtime)) = stamped {
+                st.shares.insert(h, Share { hash: hex(&h), table, path: to, size, mtime_s: mtime.0, mtime_ns: mtime.1, own: false, gone: None });
             }
-            Err(e) => {
-                d.rec.state = DlState::Failed;
-                d.rec.problem = Some(format!("the finished file could not be put in place: {e}"));
-            }
-        },
+        }
+        (End::Done, Some(Err(e))) => {
+            d.rec.state = DlState::Failed;
+            d.rec.problem = Some(format!("the finished file could not be put in place: {e}"));
+        }
     }
-    let _ = files.save(&st);
+    let _ = files.save(st);
 }
 
 /// Puts a finished partial file in place: marked as downloaded, under its name (a free one like it when another file
@@ -960,6 +1078,93 @@ fn place(rec: &DlRecord) -> io::Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn files_in(dir: &Path) -> Arc<Files> {
+        Arc::new(Files::open(dir.join("x.files"), Sealer::new([3; 32], AAD)))
+    }
+
+    /// A download of `h` to `to` (Save As), run by the flag returned, its partial file holding `what`.
+    fn running(files: &Files, h: [u8; 32], to: &Path, what: &[u8]) -> Arc<AtomicBool> {
+        let stop = Arc::new(AtomicBool::new(false));
+        let part = part_of(to);
+        std::fs::write(&part, what).unwrap();
+        let rec = DlRecord {
+            hash: hex(&h),
+            table: hex(&[0; 32]),
+            name: "report.pdf".into(),
+            size: what.len() as u64,
+            to: to.to_path_buf(),
+            replace: true,
+            part,
+            have: String::new(),
+            state: DlState::Active,
+            problem: None,
+        };
+        let now = Instant::now();
+        lock(&files.state).downloads.insert(h, Download { rec, have: vec![0], done: 0, running: Some(stop.clone()), rate: 0, window: (now, 0), saved: now, busy: false });
+        stop
+    }
+
+    /// The user asks for the file again, to the same place: a new run with a new partial file, when `download` would
+    /// start one (no download of it is there; one that is there is tried again, or left alone while it is busy).
+    fn ask_again(files: &Files, h: [u8; 32], to: &Path) -> bool {
+        if lock(&files.state).downloads.contains_key(&h) {
+            return false;
+        }
+        running(files, h, to, b"new run");
+        true
+    }
+
+    /// The failure: a run ends (the file is done, or its sender said it is gone) and, before its partial file is put
+    /// in place or deleted, the user cancels and asks for the file again to the same place (the same partial file):
+    /// the old run's end deletes the new run's partial file, or puts it in place as the finished file.
+    #[test]
+    fn the_end_of_a_run_never_touches_the_partial_file_of_a_new_run_to_the_same_place() {
+        for end in [End::Gone, End::Done] {
+            let dir = tempfile::tempdir().unwrap();
+            let files = files_in(dir.path());
+            let (h, to) = ([5; 32], dir.path().join("report.pdf"));
+            let stop = running(&files, h, &to, b"old run");
+            let again = Arc::new(AtomicBool::new(false));
+            let (f, t, a) = (files.clone(), to.clone(), again.clone());
+            *lock(&files.gap) = Some(Box::new(move || {
+                if f.cancel(&h).unwrap() && ask_again(&f, h, &t) {
+                    a.store(true, Ordering::SeqCst);
+                }
+            }));
+            let gone = end == End::Gone;
+            finish(&files, h, &stop, end);
+            if again.load(Ordering::SeqCst) {
+                assert_eq!(std::fs::read(part_of(&to)).ok().as_deref(), Some(&b"new run"[..]), "the new run's partial file is kept");
+            } else if gone {
+                assert!(!part_of(&to).exists(), "the old run's partial file is deleted");
+            } else {
+                assert_eq!(std::fs::read(&to).unwrap(), b"old run", "the old run's file is put in place");
+            }
+        }
+    }
+
+    /// The failure: the user cancels a download (its partial file already deleted by hand) and asks for it again to
+    /// the same place before the cancel deleted the partial file: the cancel deletes the new run's.
+    #[test]
+    fn a_cancel_never_deletes_the_partial_file_of_a_new_run_to_the_same_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = files_in(dir.path());
+        let (h, to) = ([6; 32], dir.path().join("report.pdf"));
+        running(&files, h, &to, b"old run");
+        std::fs::remove_file(part_of(&to)).unwrap();
+        let (f, t) = (files.clone(), to.clone());
+        *lock(&files.gap) = Some(Box::new(move || {
+            ask_again(&f, h, &t);
+        }));
+        assert!(files.cancel(&h).unwrap());
+        if lock(&files.state).downloads.contains_key(&h) {
+            assert_eq!(std::fs::read(part_of(&to)).ok().as_deref(), Some(&b"new run"[..]), "the new run's partial file is kept");
+        }
+        // Once the cancel is done, the file can be asked for again.
+        assert!(ask_again(&files, h, &to) || lock(&files.state).downloads.contains_key(&h));
+        assert_eq!(std::fs::read(part_of(&to)).unwrap(), b"new run");
+    }
 
     #[test]
     fn a_file_is_named_by_its_hash_and_piece_table() {

@@ -11,7 +11,8 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::calls::testing::{first_poll, wait};
-use crate::chat_images::ChatImageInput;
+use crate::chat_images::{ChatImageInput, SAMPLE_SVG};
+use crate::chat_page::{ChatPageInput, chat_page_model};
 use crate::settings::SettingsStore;
 use crate::tracker_page::TrackerInfoCommand;
 use crate::*;
@@ -215,9 +216,17 @@ impl Calls {
         }
         if let Some(p) = place {
             let p = p.to_string();
+            let channel = self.time("chat_channels", |c| c.chat_channels()).into_iter().find(|c| c.id == p);
             self.time("chat_topics", |c| c.chat_topics(p.clone()));
+            self.time("chat_messages", |c| c.chat_messages(p.clone(), None, None, 50));
             self.time("chat_pending_sends", |c| c.chat_pending_sends(p.clone()));
-            self.time("chat_page_read", |c| c.chat_page_read(LibraryPlace::Chat { channel_id: p.clone(), topic_id: None }));
+            // The page on screen: what it shows is read (an unread channel is marked read).
+            let place = LibraryPlace::Chat { channel_id: p.clone(), topic_id: None };
+            let read = self.time("chat_page_read", |c| c.chat_page_read(place.clone()));
+            let input = ChatPageInput { place, title: String::new(), channel, topic: None, direct: None, read, members: Vec::new(), now_unix_s: 1_792_938_725 };
+            let at = Instant::now();
+            chat_page_model(input, Arc::new(Clock), Vec::new());
+            self.note("chat_page_model", at.elapsed());
         }
     }
 
@@ -398,6 +407,142 @@ fn the_apps_calls_never_wait_for_a_folder_move_or_a_big_file_being_sent() {
     calls.rounds_while(Duration::from_secs(30), None, Some(&channel), move |c| c.chat_pending_sends(ch.clone()).is_empty());
     calls.assert_quick("while a big file is prepared for a chat message");
     core.shutdown(5);
+}
+
+/// How long each save takes in the chat tests (`SEEDWELL_QA_SLOW_SAVES` does the same in a QA run): five times
+/// [`BOUND`], so a read that waited for one save shows.
+const CHAT_SAVE: Duration = Duration::from_millis(500);
+
+/// The failure these target: **a read the app makes on its UI thread waits for a disk write** of chat (a channel's
+/// messages file, a room's files and images, the configuration with a read mark). On Windows CI the UI thread hung
+/// 2 s in `qa chatpage send`: Defender slows each new file, and the reads waited for a lock held across the write.
+/// `act` (the `n`th time) runs `times` times on a thread of its own, every save made [`CHAT_SAVE`] slow, while every
+/// read of the app's main thread is timed (the chat page's included, as on screen: it marks what it shows read).
+/// Returns the core, the channel's id and the temporary folders.
+fn chat_reads_while(what: &str, times: u32, act: impl Fn(&Core, &str, &Path, u32) + Send + 'static) -> (Arc<Core>, String, [tempfile::TempDir; 2]) {
+    let (core, work, tmp) = real_core();
+    let (h, rt) = core.backend.sync().service().unwrap();
+    let channel = rt.block_on(h.chat_new("Saves", false)).unwrap().id;
+    // Primed as the app is.
+    Calls::new(&core).round(None, Some(&channel));
+    trs_sync_net::shared::test_slow_saves(CHAT_SAVE);
+    let worker = {
+        let (core, channel) = (core.clone(), channel.clone());
+        std::thread::spawn(move || {
+            for n in 0..times {
+                act(&core, &channel, &work, n);
+            }
+        })
+    };
+    let mut calls = Calls::new(&core);
+    let end = Instant::now() + Duration::from_secs(90);
+    while !worker.is_finished() && Instant::now() < end {
+        calls.round(None, Some(&channel));
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    trs_sync_net::shared::test_slow_saves(Duration::ZERO);
+    assert!(worker.is_finished(), "{what}: not done in 90 s");
+    worker.join().unwrap();
+    calls.assert_quick(what);
+    (core, channel, tmp)
+}
+
+/// Waits until the channel holds `n` messages and its send is done (no longer pending: the message is kept before
+/// the send's last save); a send that failed fails the test.
+fn until_messages(core: &Core, channel: &str, n: usize) {
+    let end = Instant::now() + Duration::from_secs(30);
+    loop {
+        let pending = core.chat_pending_sends(channel.into());
+        let failed: Vec<_> = pending.iter().filter(|p| p.failed).map(|p| p.problem.clone()).collect();
+        assert!(failed.is_empty(), "the send failed: {failed:?}");
+        if pending.is_empty() && core.chat_messages(channel.into(), None, None, 200).len() >= n {
+            return;
+        }
+        assert!(Instant::now() < end, "message {n} was not posted in 30 s");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn the_chat_reads_never_wait_for_a_text_message_being_saved() {
+    let (core, channel, _tmp) = chat_reads_while("while text messages are saved", 3, |core, ch, _, n| {
+        core.chat_send(ch.into(), None, format!("text {n}"), None).unwrap();
+    });
+    assert_eq!(core.chat_messages(channel, None, None, 200).len(), 3);
+    core.shutdown(5);
+}
+
+#[test]
+fn the_chat_reads_never_wait_for_a_message_with_a_picture_being_saved() {
+    let (core, channel, _tmp) = chat_reads_while("while messages with a picture are saved", 3, |core, ch, _, n| {
+        let picture = ChatImageInput { name: "Fjord.svg".into(), path: None, bytes: Some(SAMPLE_SVG.as_bytes().to_vec()) };
+        core.chat_send_attachments(ch.into(), None, format!("picture {n}"), None, vec![picture]).unwrap();
+        until_messages(core, ch, n as usize + 1);
+    });
+    let last = core.chat_messages(channel, None, None, 200).pop().unwrap();
+    assert_eq!(last.images.len(), 1, "{last:?}");
+    core.shutdown(5);
+}
+
+#[test]
+fn the_chat_reads_never_wait_for_a_message_with_a_file_being_saved() {
+    let (core, channel, _tmp) = chat_reads_while("while messages with a file are saved", 2, |core, ch, work, n| {
+        let file = work.join(format!("report {n}.bin"));
+        std::fs::write(&file, vec![n as u8; 300 << 10]).unwrap();
+        let input = ChatImageInput { name: format!("report {n}.bin"), path: Some(file.display().to_string()), bytes: None };
+        core.chat_send_attachments(ch.into(), None, format!("file {n}"), None, vec![input]).unwrap();
+        until_messages(core, ch, n as usize + 1);
+    });
+    assert_eq!(core.chat_messages(channel.clone(), None, None, 200).len(), 2);
+    let pending = core.chat_pending_sends(channel);
+    assert!(pending.is_empty(), "{pending:?}");
+    core.shutdown(5);
+}
+
+/// Messages from another device keep coming; the page on screen marks each read (`chat_page_read`), and the mark is
+/// still saved (by the core's threads, not the caller's).
+#[test]
+fn the_chat_page_never_waits_for_its_read_mark_being_saved() {
+    let (core, channel, tmp) = chat_reads_while("while the page marks new messages read", 4, |core, ch, _, n| {
+        let (h, _) = core.backend.sync().service().unwrap();
+        assert!(h.test_keep_from(&ch.parse().unwrap(), [7; 32], u64::from(n) + 1, "news").unwrap());
+        // Shown (and so read) before the next one comes.
+        let end = Instant::now() + Duration::from_secs(10);
+        while core.chat_channels().iter().any(|c| c.id == ch && c.unread > 0) {
+            assert!(Instant::now() < end, "the page did not mark message {n} read");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    });
+    // The mark is in the configuration's file.
+    let saved = || {
+        find_file(tmp[1].path(), "sync.toml")
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .unwrap_or_default()
+            .lines()
+            .any(|l| l.strip_prefix("read_at = ").is_some_and(|v| v.trim() != "0"))
+    };
+    let end = Instant::now() + Duration::from_secs(10);
+    while !saved() {
+        assert!(Instant::now() < end, "the read mark was not saved");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(core.chat_channels().iter().find(|c| c.id == channel).unwrap().unread, 0);
+    core.shutdown(5);
+}
+
+/// The first file called `name` below `dir`.
+fn find_file(dir: &Path, name: &str) -> Option<PathBuf> {
+    for e in std::fs::read_dir(dir).ok()?.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            if let Some(f) = find_file(&p, name) {
+                return Some(f);
+            }
+        } else if p.file_name().is_some_and(|f| f == name) {
+            return Some(p);
+        }
+    }
+    None
 }
 
 /// A `.torrent` file of one 40 kB file named `name`, nobody serving it.

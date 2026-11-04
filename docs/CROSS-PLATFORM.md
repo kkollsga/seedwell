@@ -27,8 +27,10 @@ it returns at once and runs on the core's own threads, the user's commands to th
 host starts the user's commands in the order given (the Mac: `CoreCalls.inOrder`) and refreshes when they are done.
 The synchronous calls left are cheap or bounded (a few milliseconds, then the last value), which `ui_wait_tests`
 proves with the engine stalled. A lock those calls take is never held across a disk write or a secret store's: a save
-locks what it saves only to copy it, and writes under a lock of its own (folder sync's `save_config`, `roles::keep`;
-`ui_wait_tests` saves to a slow disk while it times them). The host keeps blocking system calls (file system looks at user paths, system
+locks what it saves only to copy it, and writes under a lock of its own (folder sync's `save_config`, `roles::keep`; a
+chat's messages file through its `journal`, in the store's order; a room's files' state, `Files::write`). A cheap call
+that changes saved state (a page marks what it shows read) saves it on the core's threads (`save_config_soon`).
+`ui_wait_tests` saves to a slow disk while it times them; `SEEDWELL_QA_SLOW_SAVES=<ms>` does the same in a QA run. The host keeps blocking system calls (file system looks at user paths, system
 services) off its UI thread too, quits on a thread of its own with a deadline, and runs the core's hang watchdog
 (`ui_watchdog`, `Core::ui_stall`: a stall over a second is logged, a test run that hangs two seconds fails).
 

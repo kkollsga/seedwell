@@ -217,21 +217,24 @@ import Testing
         host.stop()
     }
 
-    /// The core gave up waiting (the system was slow to hand over): the removal it refused does not happen late, and
-    /// the domain stays as it was.
+    /// Fails if a removal that was refused goes ahead late: the core gives up (the test says when) while the system
+    /// is still handing over, and the domain must stay, never removed after the core said no.
     @MainActor @Test func aRemovalTheCoreGaveUpOnLeavesTheDomain() async throws {
         let (core, fake) = try Self.host()
         let host = FileProviderHost(core: core, domains: fake)
         await fake.set([FileProviderDomainState(id: "F", name: "Team", enabled: true)])
-        await fake.setSlowHandOver(500_000_000)
-        let listener = FileProviderListener(host, wait: 0.1)
-        let r = await Task.detached { listener.removeDomain(folderId: "F") }.value
-        #expect(r.error == syncHostText(t: .noAnswer))
-        // Until the late hand-over has finished (it started: the system was asked, and the note of the removal is
-        // gone again), however busy the main actor is: a fixed 0.9 s wait failed while other suites drew on it.
+        await fake.hold(.handOver)
+        let cutoff = DispatchSemaphore(value: 0)
+        let listener = FileProviderListener(host, waitForHost: { _ in cutoff.wait(); return .timedOut })
+        let call = Task.detached { listener.removeDomain(folderId: "F") }
+        await fake.started(.handOver)
+        cutoff.signal()
+        #expect(await call.value.error == syncHostText(t: .noAnswer))
+        await fake.finish(.handOver)
+        // The late hand-over finishes (the note of the removal goes with it), however busy the main actor is.
         var finished = false
-        for _ in 0..<200 {
-            if await fake.waited == ["F"], core.syncHostUnfinishedReleases().isEmpty { finished = true; break }
+        for _ in 0..<1200 {
+            if core.syncHostUnfinishedReleases().isEmpty { finished = true; break }
             try await Task.sleep(nanoseconds: 50_000_000)
         }
         #expect(finished, "the note of the removal went with it")
@@ -240,26 +243,46 @@ import Testing
         host.stop()
     }
 
-    /// The core gave up while the domain was going (the system's removal slow, its hand-over finished regardless of
-    /// the cutoff): the domain comes back.
+    /// Fails if a domain stays gone after the core gave up during its removal (the system's removal slow, its
+    /// hand-over finished regardless of the cutoff): the core refused, the folder stays on demand, so the domain must
+    /// come back. The give-up happens while the removal runs by construction: the fake holds the removal, and the test
+    /// ends the core's wait only once it started.
     @MainActor @Test func aDomainRemovedAfterTheCoreGaveUpComesBack() async throws {
         let (core, fake) = try Self.host()
         let host = FileProviderHost(core: core, domains: fake)
         await fake.set([FileProviderDomainState(id: "F", name: "Team", enabled: true)])
-        // The removal starts well inside the core's wait and outlasts it, with room for a busy machine: the test is
-        // about a give-up during the removal (one before it starts removes nothing, as it should). CI's Mac, 58 s into
-        // the suites, did not start it within a 1 s wait: the wait is 4 s, the removal 8 s, and the look 20 s.
-        await fake.setSlowRemoval(8_000_000_000)
-        let listener = FileProviderListener(host, wait: 4.0)
-        let r = await Task.detached { listener.removeDomain(folderId: "F") }.value
-        #expect(r.error == syncHostText(t: .noAnswer))
-        for _ in 0..<400 {
-            let (back, gone) = (await fake.domains.contains(where: { $0.id == "F" }), await fake.removals)
-            if back && gone == 1 { break }
+        await fake.hold(.removal)
+        let cutoff = DispatchSemaphore(value: 0)
+        let listener = FileProviderListener(host, waitForHost: { _ in cutoff.wait(); return .timedOut })
+        let call = Task.detached { listener.removeDomain(folderId: "F") }
+        await fake.started(.removal)
+        cutoff.signal()
+        #expect(await call.value.error == syncHostText(t: .noAnswer))
+        await fake.finish(.removal)
+        // The host adds it back once the removal returns (a liveness bound, not an ordering: the order is fixed above).
+        for _ in 0..<1200 {
+            if await fake.adds == 1 { break }
             try await Task.sleep(nanoseconds: 50_000_000)
         }
         #expect(await fake.removals == 1, "it did go")
         #expect(await fake.domains.map(\.id) == ["F"], "and came back")
+        host.stop()
+    }
+
+    /// Fails if the core is told "no answer" for a domain that is already gone: the core's wait ends just as the host
+    /// finished (after its last look at the give-up, before its signal reached the core). The core must take the
+    /// removal, not refuse it and leave an on-demand folder without its domain.
+    @MainActor @Test func aGiveUpRacingTheFinishedRemovalTakesIt() async throws {
+        let (core, fake) = try Self.host()
+        let host = FileProviderHost(core: core, domains: fake)
+        await fake.set([FileProviderDomainState(id: "F", name: "Team", enabled: true)])
+        // The host signals first; the core's wait reports a timeout all the same (the two crossed).
+        let listener = FileProviderListener(host, waitForHost: { done in done.wait(); return .timedOut })
+        let r = await Task.detached { listener.removeDomain(folderId: "F") }.value
+        #expect(r.error == nil, "the domain went: the core removes or switches the folder")
+        #expect(await fake.removals == 1)
+        #expect(await fake.domains.isEmpty)
+        #expect(await fake.adds == 0, "not added back")
         host.stop()
     }
 
@@ -400,17 +423,43 @@ actor FakeDomains: FileProviderDomains {
     private(set) var waited: [String] = []
     private var preserved: URL?
     func setPreserved(_ u: URL?) { preserved = u }
-    private var handOver: UInt64 = 0
-    func setSlowHandOver(_ ns: UInt64) { handOver = ns }
     func waitForChanges(id: String) async throws {
         waited.append(id)
-        if handOver > 0 { try await Task.sleep(nanoseconds: handOver) }
+        await pass(.handOver)
+    }
+
+    /// The system's steps a test holds: a held step waits for `finish`, and `started` waits for it to begin. All in
+    /// the actor, so the step and the test meet in a fixed order whatever the scheduling.
+    enum Step { case handOver, removal }
+    private struct Gate {
+        var held = false
+        var started = false
+        var waiting: CheckedContinuation<Void, Never>?
+        var watchers: [CheckedContinuation<Void, Never>] = []
+    }
+    private var gates: [Step: Gate] = [:]
+    func hold(_ step: Step) { gates[step, default: Gate()].held = true }
+    func started(_ step: Step) async {
+        if gates[step]?.started == true { return }
+        await withCheckedContinuation { gates[step, default: Gate()].watchers.append($0) }
+    }
+    func finish(_ step: Step) {
+        gates[step, default: Gate()].held = false
+        gates[step]?.waiting?.resume()
+        gates[step]?.waiting = nil
+    }
+    private func pass(_ step: Step) async {
+        var g = gates[step, default: Gate()]
+        g.started = true
+        for w in g.watchers { w.resume() }
+        g.watchers = []
+        gates[step] = g
+        guard g.held else { return }
+        await withCheckedContinuation { gates[step]?.waiting = $0 }
     }
 
     private var failing = 0
     func failAdds(_ n: Int) { failing = n }
-    private var removalTakes: UInt64 = 0
-    func setSlowRemoval(_ ns: UInt64) { removalTakes = ns }
     private(set) var removals = 0
 
     func add(id: String, name: String) async throws {
@@ -425,11 +474,8 @@ actor FakeDomains: FileProviderDomains {
 
     func remove(id: String) async throws -> URL? {
         removals += 1
-        if removalTakes > 0 {
-            // Not cancellable, as the system's own removal.
-            let t = removalTakes
-            await Task.detached { try? await Task.sleep(nanoseconds: t) }.value
-        }
+        // Not cancellable, as the system's own removal.
+        await pass(.removal)
         domains.removeAll { $0.id == id }
         defer { preserved = nil }
         return preserved

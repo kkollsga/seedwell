@@ -331,6 +331,10 @@ pub(crate) struct Inner {
     pub(crate) cfg: Mutex<SyncConfig>,
     /// Taken by a save of `cfg` for its whole write ([`SyncHandle::save_config`]), never by a read.
     pub(crate) cfg_saving: Mutex<()>,
+    /// A save of `cfg` is queued off the caller's thread ([`SyncHandle::save_config_soon`]) and has not started.
+    pub(crate) cfg_save_queued: AtomicBool,
+    /// **Tests:** how long a queued save waits once taken ([`SyncHandle::test_queued_save_wait`]).
+    pub(crate) queued_save_wait_ms: AtomicU64,
     pub(crate) secrets: Arc<dyn SecretStore>,
     pub(crate) port: u16,
     /// The address the sync port is bound to ([`Options::bind`]).
@@ -357,6 +361,8 @@ pub(crate) struct Inner {
     pub(crate) reopen_wait: Mutex<Duration>,
     /// **Tests:** how many more direct dials this device makes (`None`: no limit).
     pub(crate) dials_left: Mutex<Option<u32>>,
+    /// **Tests:** direct dials made so far.
+    pub(crate) dials_made: AtomicU64,
     /// How long a member that is not connected stays away before it counts as gone ([`crate::absence::GONE_AFTER_S`];
     /// shorter in tests).
     pub(crate) gone_after_s: AtomicU64,
@@ -481,6 +487,14 @@ impl SyncHandle {
         } else if std::env::var_os(crate::limit::QA_LIMIT_LAN).is_some() {
             eprintln!("seedwell sync: {} ignored: only an isolated run (a state folder in a temporary folder) limits the LAN", crate::limit::QA_LIMIT_LAN);
         }
+        match crate::shared::qa_slow_saves(std::env::var_os(crate::shared::QA_SLOW_SAVES).as_deref(), &dir) {
+            Ok(Some(wait)) => {
+                crate::shared::test_slow_saves(wait);
+                eprintln!("seedwell sync: QA: every save takes {} ms longer ({})", wait.as_millis(), crate::shared::QA_SLOW_SAVES);
+            }
+            Ok(None) => {}
+            Err(why) => eprintln!("seedwell sync: {} ignored: {why}", crate::shared::QA_SLOW_SAVES),
+        }
         let ctx = Arc::new(Ctx {
             me: key.device_id(),
             key,
@@ -506,6 +520,7 @@ impl SyncHandle {
             sessions: std::sync::atomic::AtomicU64::new(0),
             ours: Mutex::new(cfg.folders.iter().filter_map(|f| f.id.parse().ok()).collect()),
             setup_wait: Mutex::new(Duration::ZERO),
+            setups_waiting: std::sync::atomic::AtomicUsize::new(0),
             yes_to_holds: AtomicBool::new(false),
             pairing: Mutex::new(Vec::new()),
             devices_wake: Notify::new(),
@@ -526,6 +541,8 @@ impl SyncHandle {
             cfg_path,
             cfg: Mutex::new(cfg),
             cfg_saving: Mutex::new(()),
+            cfg_save_queued: AtomicBool::new(false),
+            queued_save_wait_ms: AtomicU64::new(0),
             secrets: opts.secrets,
             port,
             bind: opts.bind,
@@ -543,6 +560,7 @@ impl SyncHandle {
             stop_wait: Mutex::new(STOP_WAIT),
             reopen_wait: Mutex::new(Duration::ZERO),
             dials_left: Mutex::new(opts.dials),
+            dials_made: AtomicU64::new(0),
             gone_after_s: AtomicU64::new(crate::absence::GONE_AFTER_S),
             held: Mutex::new(BTreeMap::new()),
             held_retrying: tokio::sync::Mutex::new(()),
@@ -670,6 +688,8 @@ impl SyncHandle {
     /// process. The handle shows no folders or channels afterwards.
     pub async fn shutdown(&self) {
         self.inner.stopping.store(true, Ordering::SeqCst);
+        // A read mark's save still queued is made now, one under way is waited for, and none comes after.
+        self.save_queued_config(true);
         self.halt_rooms();
         let runners: Vec<Runner> = lock(&self.inner.runners).drain().map(|(_, r)| r).collect();
         for r in &runners {
@@ -678,9 +698,7 @@ impl SyncHandle {
         for r in runners {
             let _ = tokio::time::timeout(Duration::from_secs(5), r.task).await;
         }
-        for p in self.inner.ctx.registry.peers() {
-            p.close();
-        }
+        self.inner.ctx.registry.stop_peers();
         for t in lock(&self.inner.tasks).drain(..) {
             t.abort();
         }
@@ -711,9 +729,60 @@ impl SyncHandle {
         // The configuration is locked only while its text is made, never for the write: the app's calls read it, and
         // a disk may take long to save (a virus scanner reads each new file first). The saves take turns, and each
         // writes the configuration as it is at its turn, so the file never goes back to an older one.
-        let _turn = lock(&self.inner.cfg_saving);
+        let turn = lock(&self.inner.cfg_saving);
+        self.write_config(&turn)
+    }
+
+    /// Writes the configuration as it is now; `_turn` is the save's turn (`cfg_saving`), held by the caller.
+    fn write_config(&self, _turn: &std::sync::MutexGuard<'_, ()>) -> io::Result<()> {
         let text = lock(&self.inner.cfg).text()?;
         SyncConfig::write_text(&self.inner.cfg_path, &text)
+    }
+
+    /// Saves the configuration on the service's threads, for a change made by a call the app makes on its UI thread
+    /// (a read mark): that call never waits for the disk. Changes made while a save is queued go with it; the service
+    /// saves one still queued when it stops ([`Self::shutdown`]).
+    pub(crate) fn save_config_soon(&self) {
+        if self.inner.cfg_save_queued.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let h = self.clone();
+        drop(self.inner.rt.spawn_blocking(move || h.save_queued_config(false)));
+    }
+
+    /// The save [`Self::save_config_soon`] queued, if it has not been made; `at_stop`: the service stops
+    /// ([`Self::shutdown`]), else the queued task. The turn is taken first, so a stop waits for a save that took the
+    /// queue, and once the service stopped the task writes nothing (the stop saved it): no save of this service lands
+    /// after its shutdown returned (over a new service's on the same state).
+    fn save_queued_config(&self, at_stop: bool) {
+        let turn = lock(&self.inner.cfg_saving);
+        if !at_stop && self.inner.stopping.load(Ordering::SeqCst) {
+            return;
+        }
+        // Down under the turn: a change made after this goes with the next save, one made before it with this one.
+        if !self.inner.cfg_save_queued.swap(false, Ordering::SeqCst) {
+            return;
+        }
+        let wait = self.inner.queued_save_wait_ms.load(Ordering::SeqCst);
+        if wait > 0 && !at_stop {
+            std::thread::sleep(Duration::from_millis(wait));
+        }
+        if let Err(e) = self.write_config(&turn) {
+            eprintln!("seedwell sync: the configuration could not be saved: {e}");
+        }
+    }
+
+    /// **Tests only:** a queued save of the configuration ([`Self::save_config_soon`]), once taken, waits this long
+    /// before it writes (as a slow disk holds it).
+    #[doc(hidden)]
+    pub fn test_queued_save_wait(&self, wait: Duration) {
+        self.inner.queued_save_wait_ms.store(wait.as_millis() as u64, Ordering::SeqCst);
+    }
+
+    /// **Tests only:** a save of the configuration is queued and not taken yet.
+    #[doc(hidden)]
+    pub fn test_save_queued(&self) -> bool {
+        self.inner.cfg_save_queued.load(Ordering::SeqCst)
     }
 
     fn index_path(&self, id: &FolderId) -> PathBuf {
@@ -2816,10 +2885,15 @@ impl SyncHandle {
     /// Runs a session that finished its handshake (dialed, accepted, punched or relayed). A direct one with
     /// a device the test switch refuses is dropped.
     pub(crate) async fn run_session(&self, conn: session::Connected, candidates: Vec<FolderId>) {
+        self.run_session_then(conn, candidates, || {}).await;
+    }
+
+    /// [`Self::run_session`], `on_up` run once the session is up (not for one turned down in its setup).
+    async fn run_session_then(&self, conn: session::Connected, candidates: Vec<FolderId>, on_up: impl FnOnce() + Send) {
         if self.is_stopping() || (conn.via != Via::Relay && self.is_blocked(conn.device())) {
             return;
         }
-        let _ = crate::peer::run(self.inner.ctx.clone(), conn, candidates).await;
+        let _ = crate::peer::run(self.inner.ctx.clone(), conn, candidates, on_up).await;
     }
 
     /// Direct sessions with `device` are refused (the test switch).
@@ -3024,6 +3098,12 @@ impl SyncHandle {
         self.inner.ctx.sessions.load(Ordering::SeqCst)
     }
 
+    /// **Tests only:** how many direct dials this device made so far.
+    #[doc(hidden)]
+    pub fn test_dials_made(&self) -> u64 {
+        self.inner.dials_made.load(Ordering::SeqCst)
+    }
+
     /// **Tests only:** this device makes at most `n` more direct dials (`None`: as many as it wants).
     #[doc(hidden)]
     pub fn test_dials_left(&self, n: Option<u32>) {
@@ -3035,6 +3115,12 @@ impl SyncHandle {
     #[doc(hidden)]
     pub fn test_setup_wait(&self, wait: Duration) {
         *lock(&self.inner.ctx.setup_wait) = wait;
+    }
+
+    /// **Tests only:** how many answering sessions wait in [`Self::test_setup_wait`]'s wait now.
+    #[doc(hidden)]
+    pub fn test_setups_waiting(&self) -> usize {
+        self.inner.ctx.setups_waiting.load(Ordering::SeqCst)
     }
 
     /// **Tests only:** how long stopping a folder waits for it to let go.
@@ -3197,6 +3283,7 @@ impl SyncHandle {
             let fails = book.tried.get(&addr).map_or(0, |t| t.1);
             book.tried.insert(addr, (now, fails + 1));
         }
+        self.inner.dials_made.fetch_add(1, Ordering::SeqCst);
         let h = self.clone();
         tokio::spawn(async move {
             // A failed dial is retried with backoff by the dial loop.
@@ -3221,11 +3308,22 @@ impl SyncHandle {
                     if h.is_blocked(conn.device()) {
                         return;
                     }
-                    lock(&h.inner.book).tried.remove(&addr);
                     let dev = conn.device();
                     h.learn_address(Some(dev), None, addr);
                     h.remember_device(dev, None, None, Some(addr));
-                    h.run_session(conn, candidates).await;
+                    // The backoff goes once the session is up: one that ends after that is dialed again at once. A
+                    // session turned down in its setup (nothing in common, a refused link, the device stopping) waits
+                    // as a dial that did not connect does; it was dialed again at once, forever (hundreds of times a
+                    // second, each successful dial waking the dial loop), and a device starting a session sent dozens.
+                    let h2 = h.clone();
+                    h.run_session_then(conn, candidates, move || {
+                        lock(&h2.inner.book).tried.remove(&addr);
+                    })
+                    .await;
+                    // Turned down as a second session with a device that is connected: no backoff for it either.
+                    if h.inner.ctx.registry.peer(&dev).is_some() {
+                        lock(&h.inner.book).tried.remove(&addr);
+                    }
                 }
                 Err(e) => h.note_dial_failed(addr, device, &joining, &e),
             }

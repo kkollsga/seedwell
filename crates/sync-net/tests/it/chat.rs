@@ -486,3 +486,28 @@ async fn leaving_the_last_shared_channel_forgets_the_other_device() {
     a.shutdown().await;
     b.shutdown().await;
 }
+
+/// The failure: the page marks a channel read (its save queued on the service's threads), and the service stops while
+/// that save has been taken but not written. The mark must be in `sync.toml` when `shutdown` returns, and nothing may
+/// write after it (a late save would lose the mark on quit, or overwrite a new service's configuration on the same
+/// state in this process).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_read_mark_being_saved_is_on_disk_when_shutdown_returns_and_nothing_writes_after() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("a");
+    let h = start_at(&state, "Anna", |_| {}).await;
+    let id: FolderId = h.chat_new("Plans", false).await.unwrap().id.parse().unwrap();
+    assert!(h.test_keep_from(&id, [7; 32], 1, "news").unwrap());
+    assert_eq!(h.channel_status(&id).unwrap().unread, 1);
+    // The queued save is taken, then held up before it writes.
+    h.test_queued_save_wait(Duration::from_millis(600));
+    h.chat_mark_read(&id, None).unwrap();
+    until(10, "the queued save is taken", || !h.test_save_queued()).await;
+    h.shutdown().await;
+    let cfg = state.join("sync.toml");
+    let marked = std::fs::read_to_string(&cfg).unwrap().lines().any(|l| l.strip_prefix("read_at = ").is_some_and(|v| v.trim() != "0"));
+    assert!(marked, "the mark is saved when shutdown returns");
+    let written = std::fs::metadata(&cfg).unwrap().modified().unwrap();
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+    assert_eq!(std::fs::metadata(&cfg).unwrap().modified().unwrap(), written, "nothing writes after shutdown");
+}

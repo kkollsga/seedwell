@@ -47,8 +47,9 @@ fn bad(why: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, why.into())
 }
 
-/// Runs a session to its end. `candidates` are the folders a dialer believes the peer shares.
-pub async fn run(ctx: Arc<Ctx>, conn: Connected, candidates: Vec<FolderId>) -> io::Result<()> {
+/// Runs a session to its end. `candidates` are the folders a dialer believes the peer shares. `on_up` runs once the
+/// session is up (registered), not for one turned down in its setup.
+pub async fn run(ctx: Arc<Ctx>, conn: Connected, candidates: Vec<FolderId>, on_up: impl FnOnce() + Send) -> io::Result<()> {
     let device = conn.device();
     if device == ctx.me {
         return Err(bad("connected to ourselves"));
@@ -187,7 +188,11 @@ pub async fn run(ctx: Arc<Ctx>, conn: Connected, candidates: Vec<FolderId>) -> i
             let join = own_join(&ctx, &ids, &est.exporter, &est.peer_pk, lan).await;
             // (Tests: the answer is made, the session not up yet.)
             let wait = *lock(&ctx.setup_wait);
-            tokio::time::sleep(wait).await;
+            if !wait.is_zero() {
+                ctx.setups_waiting.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(wait).await;
+                ctx.setups_waiting.fetch_sub(1, Ordering::SeqCst);
+            }
             sent.extend(join.folders.iter().map(|f| f.folder_id));
             writer.send(&Message::Join(join)).await?;
             if chat {
@@ -246,9 +251,11 @@ pub async fn run(ctx: Arc<Ctx>, conn: Connected, candidates: Vec<FolderId>) -> i
         lock(&peer.stale).extend(checked.closed);
     }
     if !ctx.registry.add_peer(&ctx.me, peer.clone()) {
-        let _ = writer.send(&Message::Close(Close { reason: "already connected".into() })).await;
+        let reason = if ctx.registry.is_stopped() { "the device is stopping" } else { "already connected" };
+        let _ = writer.send(&Message::Close(Close { reason: reason.into() })).await;
         return Ok(());
     }
+    on_up();
     let _ = ctx.hub.send(HubMsg::PeerUp(device));
     // Its folders link and its index comes next: a fetch waits for that.
     ctx.settle();

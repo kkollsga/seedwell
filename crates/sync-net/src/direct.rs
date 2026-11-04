@@ -22,7 +22,7 @@
 //! and the keys it knew in `sync/direct.keys`: they are split into conversations when read, and deleted.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::io::{self, Write as _};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -38,6 +38,7 @@ use crate::at_rest::{DIRECT_KEY, Sealer};
 use crate::blobs::Blobs;
 use crate::chat::{AgentAccess, ChatEvent, FUTURE_SLACK_MS, Key, MAX_BYTES, MAX_MESSAGES, MessageInfo};
 use crate::files::Files;
+use crate::journal::Journal;
 use crate::room::{Index, Place, Room};
 use crate::config::{ConversationEntry, SyncConfig};
 use crate::secrets::SecretStore;
@@ -88,6 +89,8 @@ struct Store {
     seqs: HashMap<[u8; 32], BTreeSet<u64>>,
     bytes: usize,
     seal: Sealer,
+    /// Its file's writes, made after the conversations' lock is let go ([`Direct::keep`]).
+    journal: Arc<Journal>,
     /// The attachments the kept messages name.
     pub(crate) index: Index,
 }
@@ -118,7 +121,8 @@ fn record(s: &Stored, seal: &Sealer) -> Vec<u8> {
 
 impl Store {
     fn open(path: PathBuf, me: &[u8; 32], secret: &[u8; 32], seal: Sealer) -> io::Result<Store> {
-        let mut s = Store { path, msgs: BTreeMap::new(), ids: HashMap::new(), seqs: HashMap::new(), bytes: 0, seal, index: Index::default() };
+        let journal = Arc::new(Journal::new(path.clone()));
+        let mut s = Store { path, msgs: BTreeMap::new(), ids: HashMap::new(), seqs: HashMap::new(), bytes: 0, seal, journal, index: Index::default() };
         let bytes = match std::fs::read(&s.path) {
             Ok(b) => b,
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
@@ -206,33 +210,39 @@ impl Store {
         true
     }
 
-    fn rewrite(&self, me: &[u8; 32]) -> io::Result<()> {
+    /// The whole file, as it is written anew.
+    fn whole(&self, me: &[u8; 32]) -> Vec<u8> {
         let mut out = MSGS_MAGIC.to_vec();
         put_varint(&mut out, MSGS_FORMAT);
         for s in self.msgs.values() {
             out.extend_from_slice(&record(&own_copy(s, me), &self.seal));
         }
-        let tmp = self.path.with_extension("chat.tmp");
-        std::fs::write(&tmp, out)?;
-        std::fs::rename(&tmp, &self.path)
+        out
     }
 
-    fn insert(&mut self, s: Stored, me: &[u8; 32]) -> io::Result<bool> {
+    /// Writes the file anew now (while it is opened: nothing else uses the store yet).
+    fn rewrite(&self, me: &[u8; 32]) -> io::Result<()> {
+        crate::journal::write_whole(&self.path, &self.whole(me))
+    }
+
+    /// Keeps a message and queues its write ([`Self::journal`]; the caller writes it once it let the conversations
+    /// go). False when it is known already.
+    fn insert(&mut self, s: Stored, me: &[u8; 32]) -> bool {
         let rec = record(&own_copy(&s, me), &self.seal);
         let attached = attachments_of(&s).is_some();
         if !self.put(s) {
-            return Ok(false);
+            return false;
         }
         if self.prune() {
             self.index_attachments();
-            self.rewrite(me)?;
+            self.journal.rewrite(self.whole(me));
         } else {
             if attached {
                 self.index_attachments();
             }
-            std::fs::OpenOptions::new().append(true).open(&self.path)?.write_all(&rec)?;
+            self.journal.append(rec);
         }
-        Ok(true)
+        true
     }
 
     /// What this device holds of the messages to it.
@@ -427,7 +437,8 @@ impl Direct {
                     v.insert(self.open_one(other, entry)?)
                 }
             };
-            c.store.insert(s, &self.me)?;
+            c.store.insert(s, &self.me);
+            c.store.journal.flush(c.store.journal.queued())?;
         }
         cfg.conversations = all.values().map(|c| c.entry.clone()).collect();
         cfg.direct.read.clear();
@@ -503,6 +514,29 @@ impl Direct {
         Ok(true)
     }
 
+    /// Keeps a message in the conversation with `pk` and writes it to its file after the conversations' lock is let
+    /// go: the app's calls read them, and a disk may be slow to save. `None`: no such conversation; false: known
+    /// already.
+    /// `Some(Err)`: kept here but not saved (a write failed, and so did writing the whole file anew).
+    fn keep(&self, pk: &[u8; 32], s: Stored) -> Option<io::Result<bool>> {
+        let (kept, journal, upto) = {
+            let mut all = lock(&self.conversations);
+            let c = all.get_mut(pk)?;
+            let kept = c.store.insert(s, &self.me);
+            (kept, c.store.journal.clone(), c.store.journal.queued())
+        };
+        if journal.flush(upto).is_ok() {
+            return Some(Ok(kept));
+        }
+        // One of them did not land (here or in another caller's flush): the whole file anew, so nothing is lost.
+        let whole = {
+            let all = lock(&self.conversations);
+            let c = all.get(pk)?;
+            c.store.journal.rewrite(c.store.whole(&self.me))
+        };
+        Some(journal.flush(whole).map(|()| kept))
+    }
+
     /// Deletes a conversation: its entry, its messages and their key. False when there was none.
     fn delete(&self, device: &DeviceId) -> io::Result<bool> {
         let gone = {
@@ -512,6 +546,7 @@ impl Direct {
         };
         let Some(c) = gone else { return Ok(false) };
         c.room.files.close();
+        c.store.journal.close();
         drop(c);
         let base = base_of(device);
         let _ = std::fs::remove_file(conversation_path(&self.dir, device));
@@ -642,7 +677,7 @@ pub(crate) async fn on_messages(ctx: &Arc<Ctx>, peer: &PeerHandle, msgs: Vec<Dir
         }
         let attached = !body.extra.is_empty();
         let stored = Stored { msg: m.clone(), received_ms: now_ms(), body: Some(body) };
-        let res = lock(&d.conversations).get_mut(&m.author).map(|c| c.store.insert(stored, &d.me));
+        let res = d.keep(&m.author, stored);
         match res {
             Some(Ok(true)) => {
                 if attached && let Some(room) = room_of(ctx, &m.author) {
@@ -859,7 +894,7 @@ impl SyncHandle {
             msg
         };
         let stored = Stored { msg: msg.clone(), received_ms: now_ms(), body: Some(plain) };
-        let kept = lock(&d.conversations).get_mut(&peer.device_pk).map(|c| c.store.insert(stored, &d.me)).transpose()?;
+        let kept = d.keep(&peer.device_pk, stored).transpose()?;
         if kept != Some(true) {
             return Err(invalid("the message could not be kept"));
         }
@@ -875,7 +910,8 @@ impl SyncHandle {
         out.ok_or(SyncError::NotFound)
     }
 
-    /// Marks every private message from `device` read.
+    /// Marks every private message from `device` read. Cheap: the app calls it on its UI thread (a page on screen is
+    /// read), so the mark is saved on the service's threads ([`Self::save_config_soon`]).
     pub fn chat_mark_direct_read(&self, device: &DeviceId) -> Result<(), SyncError> {
         let d = &self.inner.ctx.direct;
         let moved = {
@@ -890,7 +926,9 @@ impl SyncHandle {
             }
         };
         if moved {
-            self.save_conversations()?;
+            let entries = d.entries();
+            lock(&self.inner.cfg).conversations = entries;
+            self.save_config_soon();
         }
         Ok(())
     }

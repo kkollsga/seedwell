@@ -40,6 +40,9 @@ sealed class ChatPage
     readonly TextBox draft = new() { AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, FontSize = Theme.Body, MaxHeight = 8 * Theme.BodyLine + 12, VerticalAlignment = VerticalAlignment.Center };
     readonly Border field = new() { CornerRadius = new CornerRadius(Theme.ComposerRadius), BorderThickness = new Thickness(1) };
     readonly Button send = new();
+    readonly StackPanel inside = new();
+    readonly Grid row = new() { ColumnSpacing = 2, Padding = new Thickness(4, 0, 6, 0) };
+    Button? attach;
     readonly Flyout membersFlyout = new();
     readonly List<(ChatImageInput Input, ChatImageDraft Draft)> attached = [];
     // Each message drawn, by id: to jump to it (a reply quote), switch its gallery (an image reference) and show its controls (QA).
@@ -48,6 +51,9 @@ sealed class ChatPage
     readonly Dictionary<string, int> galleries = [];
     SyncMember[] members = [];
     ChatPageModel? model;
+    SyncChannel? readChannel;
+    List<TaskCompletionSource> readsAsked = [];
+    bool reading;
     string drawn = "";
     string? lastId;
     string? replyTo;
@@ -78,12 +84,21 @@ sealed class ChatPage
         root.Children.Add(composer);
         Plain(draft);
         RoundSend();
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        row.ColumnDefinitions.Add(new ColumnDefinition());
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        Grid.SetColumn(draft, 1);
+        row.Children.Add(draft);
+        Grid.SetColumn(send, 2);
+        row.Children.Add(send);
+        inside.Children.Add(row);
+        field.Child = inside;
         draft.TextChanged += (_, _) => send.IsEnabled = CanSend();
         draft.PreviewKeyDown += DraftKey;
         draft.Paste += Paste;
         draft.GotFocus += (_, _) => field.BorderBrush = Theme.Brush(Theme.Accent);
         draft.LostFocus += (_, _) => field.BorderBrush = Theme.Faint(0.10);
-        send.Click += (_, _) => _ = Send();
+        send.Click += (_, _) => _ = SendClicked();
         // A wider or narrower window fits the images again.
         scroll.SizeChanged += (_, _) =>
         {
@@ -144,60 +159,94 @@ sealed class ChatPage
 
     static TextBlock Faint(string text, double size = Theme.Secondary) => new() { Text = text, FontSize = size, Foreground = Res("TextFillColorSecondaryBrush"), TextWrapping = TextWrapping.Wrap };
 
-    SyncChannel? Channel => place is LibraryPlace.Chat c ? app.Core.ChatChannels().FirstOrDefault(x => x.Id == c.ChannelId) : null;
+    /// <summary>The channel as last read with the page.</summary>
+    SyncChannel? Channel => readChannel;
 
     string? DeviceId => (place as LibraryPlace.Direct)?.DeviceId;
 
     /// <summary>The model last drawn (QA).</summary>
     internal ChatPageModel? Model => model;
 
-    /// <summary>Reads the page and asks for its model; redraws when its signature changed (on every library refresh).</summary>
-    public void Update()
+    /// <summary>Reads the page and redraws it when its signature changed (on every library refresh), off the UI thread.</summary>
+    public void Update() => _ = Read();
+
+    /// <summary>
+    /// What <see cref="Update"/> does, to wait for: done once a read that began after this call is drawn. One read at a
+    /// time; all those asked for meanwhile are served by the one that follows it, however often the library refreshes.
+    /// </summary>
+    internal Task Read()
     {
-        ChatPageModel? m;
-        try
-        {
-            var read = app.Core.ChatPageRead(place);
-            SyncChannel? channel = null;
-            SyncTopic? topic = null;
-            SyncDirect? direct = null;
-            if (place is LibraryPlace.Chat c)
-            {
-                channel = app.Core.ChatChannels().FirstOrDefault(x => x.Id == c.ChannelId);
-                topic = c.TopicId is string t ? app.Core.ChatTopics(c.ChannelId).FirstOrDefault(x => x.Id == t) : null;
-            }
-            else if (place is LibraryPlace.Direct d)
-            {
-                direct = app.Core.ChatDirects().FirstOrDefault(x => x.DeviceId == d.DeviceId);
-            }
-            var title = app.LibraryWindowIfCreated?.Pane.Model?.Title ?? "";
-            // To the minute: the cards' times change only with the day (the Mac's).
-            var now = (ulong)(DateTimeOffset.UtcNow.ToUnixTimeSeconds() / 60 * 60);
-            m = TrsFfiMethods.ChatPageModel(new ChatPageInput(place, title, channel, topic, direct, read, members, now), new Clock(), App.HostWindows);
-        }
-        catch (Exception e)
-        {
-            AppLog.Write($"chat page failed: {e.Message}");
-            return;
-        }
-        model = m;
-        if (m is null)
-        {
-            // Not a conversation, or its channel is gone: the library says why.
-            return;
-        }
-        if (m.Signature == drawn)
-        {
-            return;
-        }
-        drawn = m.Signature;
-        Draw(m);
+        var done = new TaskCompletionSource();
+        readsAsked.Add(done);
+        if (!reading) _ = ReadAndDraw();
+        return done.Task;
     }
 
-    void Redraw()
+    async Task ReadAndDraw()
+    {
+        reading = true;
+        while (readsAsked.Count > 0)
+        {
+            var served = readsAsked;
+            readsAsked = [];
+            try
+            {
+                var title = app.LibraryWindowIfCreated?.Pane.Model?.Title ?? "";
+                var known = members;
+                var (m, channel) = await Task.Run(() => ReadPage(title, known));
+                readChannel = channel;
+                model = m;
+                // No model: not a conversation, or its channel is gone; the library says why.
+                if (m is not null && m.Signature != drawn)
+                {
+                    drawn = m.Signature;
+                    HangWatch.Doing = "drawing the conversation";
+                    Draw(m);
+                    HangWatch.Doing = "";
+                }
+            }
+            catch (Exception e)
+            {
+                HangWatch.Doing = "";
+                AppLog.Write($"chat page failed: {e.Message}");
+            }
+            foreach (var done in served) done.SetResult();
+        }
+        reading = false;
+    }
+
+    /// <summary>
+    /// The page's reads and its model, on a thread of the pool: they can wait for the disk (what the page shows counts as
+    /// read, and that is saved) or for a lock a save holds, and the UI thread never waits for the core.
+    /// </summary>
+    (ChatPageModel? Model, SyncChannel? Channel) ReadPage(string title, SyncMember[] known)
+    {
+        if (QaSlowReadMs > 0) Thread.Sleep(QaSlowReadMs);
+        var read = app.Core.ChatPageRead(place);
+        SyncChannel? channel = null;
+        SyncTopic? topic = null;
+        SyncDirect? direct = null;
+        if (place is LibraryPlace.Chat c)
+        {
+            channel = app.Core.ChatChannels().FirstOrDefault(x => x.Id == c.ChannelId);
+            topic = c.TopicId is string t ? app.Core.ChatTopics(c.ChannelId).FirstOrDefault(x => x.Id == t) : null;
+        }
+        else if (place is LibraryPlace.Direct d)
+        {
+            direct = app.Core.ChatDirects().FirstOrDefault(x => x.DeviceId == d.DeviceId);
+        }
+        // To the minute: the cards' times change only with the day (the Mac's).
+        var now = (ulong)(DateTimeOffset.UtcNow.ToUnixTimeSeconds() / 60 * 60);
+        return (TrsFfiMethods.ChatPageModel(new ChatPageInput(place, title, channel, topic, direct, read, known, now), new Clock(), App.HostWindows), channel);
+    }
+
+    void Redraw() => _ = Redrawn();
+
+    /// <summary>Redraws whatever the signature says (the composer's own state changed); done once it is drawn.</summary>
+    Task Redrawn()
     {
         drawn = "";
-        Update();
+        return Read();
     }
 
     // ------------------------------------------------------------------------------------------------ drawing
@@ -698,23 +747,25 @@ sealed class ChatPage
     /// </summary>
     void DrawComposer(ChatComposer c)
     {
-        (draft.Parent as Panel)?.Children.Remove(draft);
-        (send.Parent as Panel)?.Children.Remove(send);
-        composer.Children.Clear();
         if (!c.CanPost)
         {
+            composer.Children.Clear();
             var cannot = Faint(c.CannotPost ?? "");
             cannot.HorizontalAlignment = HorizontalAlignment.Center;
             cannot.Margin = new Thickness(0, 6, 0, 4);
             composer.Children.Add(cannot);
             return;
         }
+        // The field itself stays in the page, only what is around it is made anew: out of the page, the text field would
+        // lose the focus (and what an input method is composing) with every redraw.
+        AllBut(composer, field);
+        if (composer.Children.Count == 0) composer.Children.Add(field);
         var place = model?.Place ?? "";
-        if (c.Pending.Length > 0) composer.Children.Add(attachments.Pending(place, c.Pending, Redraw));
-        var inside = new StackPanel();
+        if (c.Pending.Length > 0) composer.Children.Insert(0, attachments.Pending(place, c.Pending, Redraw));
+        AllBut(inside, row);
         if (replyTo is string id && model?.Messages.FirstOrDefault(m => m.Id == id) is ChatMessageCard replying)
         {
-            inside.Children.Add(ReplyBar(replying.Replying, c.ReplyCancelHelp));
+            inside.Children.Insert(inside.Children.Count - 1, ReplyBar(replying.Replying, c.ReplyCancelHelp));
         }
         if (attached.Count > 0)
         {
@@ -724,15 +775,11 @@ sealed class ChatPage
                 var at = n;
                 chips.Children.Add(attachments.Draft(attached[n].Draft, () => RemoveAttached(at)));
             }
-            inside.Children.Add(new ScrollViewer { Content = chips, Padding = new Thickness(10, 8, 10, 0), HorizontalScrollBarVisibility = ScrollBarVisibility.Auto, VerticalScrollBarVisibility = ScrollBarVisibility.Disabled, HorizontalScrollMode = ScrollMode.Auto });
+            inside.Children.Insert(inside.Children.Count - 1, new ScrollViewer { Content = chips, Padding = new Thickness(10, 8, 10, 0), HorizontalScrollBarVisibility = ScrollBarVisibility.Auto, VerticalScrollBarVisibility = ScrollBarVisibility.Disabled, HorizontalScrollMode = ScrollMode.Auto });
         }
-        var row = new Grid { ColumnSpacing = 2, Padding = new Thickness(4, 0, 6, 0) };
-        row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        row.ColumnDefinitions.Add(new ColumnDefinition());
-        row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        if (c.Attach)
+        if (c.Attach && attach is null)
         {
-            var attach = Glyph("", 15, new Thickness(8, 7, 6, 7));
+            attach = Glyph("", 15, new Thickness(8, 7, 6, 7));
             attach.VerticalAlignment = VerticalAlignment.Bottom;
             attach.Margin = new Thickness(0, 0, 0, 2);
             Help(attach, attachments.Texts.AttachHelp);
@@ -740,20 +787,22 @@ sealed class ChatPage
             attach.Click += (_, _) => PickAttachments();
             row.Children.Add(attach);
         }
+        if (attach is not null) attach.Visibility = c.Attach ? Visibility.Visible : Visibility.Collapsed;
         draft.PlaceholderText = c.Placeholder;
-        draft.IsEnabled = !sending;
-        Grid.SetColumn(draft, 1);
-        row.Children.Add(draft);
         send.IsEnabled = CanSend();
         Help(send, c.SendHelp);
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(send, c.SendTitle);
-        Grid.SetColumn(send, 2);
-        row.Children.Add(send);
-        inside.Children.Add(row);
-        field.Child = inside;
         field.Background = Theme.Faint(0.045);
         field.BorderBrush = draft.FocusState != FocusState.Unfocused ? Theme.Brush(Theme.Accent) : Theme.Faint(0.10);
-        composer.Children.Add(field);
+    }
+
+    /// <summary>Takes everything out of <paramref name="panel"/> but <paramref name="kept"/>.</summary>
+    static void AllBut(Panel panel, UIElement kept)
+    {
+        for (int i = panel.Children.Count - 1; i >= 0; i--)
+        {
+            if (panel.Children[i] != kept) panel.Children.RemoveAt(i);
+        }
     }
 
     /// <summary>The reply being written, docked on top of the field: the accent bar, "Replying to Kari", one line of it, and ×.</summary>
@@ -951,7 +1000,7 @@ sealed class ChatPage
                 Call(() => app.Core.SyncSetFollow(channel.Id, follow.On), e => new SyncAlert(e, ""));
                 break;
             case ChatPageCommand.SetDirectAgents access:
-                app.Core.ChatSetDirectAgents(access.Access);
+                Call(() => Task.Run(() => app.Core.ChatSetDirectAgents(access.Access)), e => new SyncAlert(e, ""));
                 break;
             case ChatPageCommand.SetRole sr when channel is not null:
                 var who = members.FirstOrDefault(m => m.DeviceId == sr.DeviceId)?.Name ?? "";
@@ -968,8 +1017,7 @@ sealed class ChatPage
                 return;
             case ChatPageCommand.Reply r:
                 replyTo = r.MessageId;
-                Redraw();
-                draft.Focus(FocusState.Programmatic);
+                FocusAfter(Redrawn());
                 return;
             case ChatPageCommand.SetTags tags:
                 _ = SendText(TrsFfiMethods.ChatTagNote(tags.MessageId, tags.Tags), null);
@@ -980,6 +1028,13 @@ sealed class ChatPage
                 break;
         }
         Redraw();
+    }
+
+    /// <summary>The field gets the focus once the page is drawn (a redraw takes the field out and puts it back).</summary>
+    async void FocusAfter(Task drawing)
+    {
+        await drawing;
+        draft.Focus(FocusState.Programmatic);
     }
 
     void Call(Func<Task> work, Func<string, SyncAlert> failed, Action? done = null)
@@ -1000,10 +1055,10 @@ sealed class ChatPage
     void LoadMembers(bool open)
     {
         if (Channel is not SyncChannel channel) return;
-        _ = Task.Run(() => app.Core.SyncMembers(channel.Id)).ContinueWith(t => app.Dispatch(() =>
+        _ = Task.Run(() => app.Core.SyncMembers(channel.Id)).ContinueWith(t => app.Dispatch(async () =>
         {
             if (t.IsCompletedSuccessfully) members = t.Result;
-            Redraw();
+            await Redrawn();
             if (model?.Members is ChatMembersPanel panel)
             {
                 membersFlyout.Content = Members(panel);
@@ -1184,6 +1239,13 @@ sealed class ChatPage
         Redraw();
     }
 
+    /// <summary>A click on Send: one goes on typing in the field (the Mac's buttons never take the keyboard focus).</summary>
+    Task<bool> SendClicked()
+    {
+        draft.Focus(FocusState.Programmatic);
+        return Send();
+    }
+
     /// <summary>Send: the field and the attachments, to the conversation (as a reply when one is being written).</summary>
     internal async Task<bool> Send()
     {
@@ -1191,6 +1253,8 @@ sealed class ChatPage
         var body = TrsFfiMethods.ChatComposerBody(draft.Text);
         var inputs = attached.Select(a => a.Input).ToList();
         bool ok;
+        // Nothing is typed into what is on its way (read only keeps the focus; disabled would lose it).
+        draft.IsReadOnly = true;
         if (inputs.Count > 0)
         {
             sending = true;
@@ -1204,8 +1268,10 @@ sealed class ChatPage
         }
         else
         {
+            draft.IsReadOnly = false;
             return false;
         }
+        draft.IsReadOnly = false;
         if (ok)
         {
             draft.Text = "";
@@ -1249,7 +1315,30 @@ sealed class ChatPage
 
     // --------------------------------------------------------------------------------------------------- QA
 
+    /// <summary>QA: every read of the page takes this much longer, as on a slow disk: the UI thread must not notice.</summary>
+    internal static int QaSlowReadMs { get; set; }
+
     internal void QaType(string text) => draft.Text = text;
+
+    /// <summary>QA: the field takes the focus with its caret at <paramref name="caret"/>, as someone typing there has it.</summary>
+    internal void QaFocus(int caret)
+    {
+        draft.Focus(FocusState.Programmatic);
+        draft.SelectionStart = caret;
+    }
+
+    /// <summary>QA: a click on Send: the button takes the focus as a click gives it, then its click's call.</summary>
+    internal Task<bool> QaClickSend()
+    {
+        send.Focus(FocusState.Pointer);
+        return SendClicked();
+    }
+
+    /// <summary>QA: a redraw of the whole page, as a change of its signature makes.</summary>
+    internal Task QaRedraw() => Redrawn();
+
+    /// <summary>QA: the field as someone typing there has it.</summary>
+    internal string QaField => $"field \"{draft.Text}\" focus {draft.FocusState != FocusState.Unfocused} caret {draft.SelectionStart}";
 
     /// <summary>QA: a file dropped on the field's text at <paramref name="at"/> (what a drop there does).</summary>
     internal Task QaDropAt(string path, uint at) => AttachDropped([new ChatImageInput(Path.GetFileName(path), path, null)], at);

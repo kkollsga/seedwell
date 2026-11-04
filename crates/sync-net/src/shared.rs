@@ -78,6 +78,24 @@ pub fn test_slow_saves(wait: std::time::Duration) {
     SAVE_WAIT_MS.store(wait.as_millis() as u64, Ordering::SeqCst);
 }
 
+/// **QA only:** `SEEDWELL_QA_SLOW_SAVES=<ms>` makes every save of folder sync's and chat's state (the configuration, a
+/// membership, a channel's or conversation's messages, a room's files and images) take that many milliseconds longer,
+/// as on a disk whose virus scanner reads each new file first ([`test_slow_saves`]), so a QA check sees a call that
+/// waits for a save as a long wait. Honoured only in an isolated run: a state folder inside a temporary folder (as
+/// [`crate::limit::QA_LIMIT_LAN`] is), never in the user's own Seedwell. The log says which.
+pub const QA_SLOW_SAVES: &str = "SEEDWELL_QA_SLOW_SAVES";
+
+/// How much longer each save takes in this run: [`QA_SLOW_SAVES`]'s milliseconds (`value`), when the service's state
+/// folder (`state`) is inside a temporary folder. `Err`: set but not honoured, and why (for the log).
+pub fn qa_slow_saves(value: Option<&std::ffi::OsStr>, state: &std::path::Path) -> Result<Option<std::time::Duration>, &'static str> {
+    let Some(v) = value else { return Ok(None) };
+    let Some(ms) = v.to_str().and_then(|t| t.trim().parse::<u64>().ok()) else { return Err("not a number of milliseconds") };
+    if !trs_platform::dirs::in_temp_folder(state) {
+        return Err("only an isolated run (a state folder in a temporary folder) slows its saves");
+    }
+    Ok(Some(std::time::Duration::from_millis(ms.min(60_000))))
+}
+
 /// A save to disk is under way (the test hook [`test_slow_saves`] makes it slow). What the app's calls read is never
 /// locked across one: they would wait for the disk.
 pub(crate) fn slow_disk() {
@@ -824,6 +842,8 @@ pub struct Registry {
     /// their key, only to tell one of its own devices that was away where the group went.
     ancestors: RwLock<Vec<Arc<Space>>>,
     peers: RwLock<BTreeMap<DeviceId, Arc<PeerHandle>>>,
+    /// The service stopped: no session comes up any more (one still being set up when it stopped is refused).
+    stopped: AtomicBool,
     /// Test switch: devices with which direct (not relayed) sessions are refused.
     refused: RwLock<BTreeSet<DeviceId>>,
 }
@@ -940,6 +960,10 @@ impl Registry {
             return false;
         }
         let mut peers = self.peers.write().unwrap_or_else(|e| e.into_inner());
+        // (Read under the lock `stop_peers` sets it under: a session is either closed by it or refused here.)
+        if self.stopped.load(Ordering::SeqCst) {
+            return false;
+        }
         if let Some(old) = peers.get(&p.device).filter(|o| !o.is_closed()) {
             let dialer_of = |h: &PeerHandle| if h.dialed { *me } else { h.device };
             if dialer_of(old) <= dialer_of(&p) {
@@ -949,6 +973,24 @@ impl Registry {
         }
         peers.insert(p.device, p);
         true
+    }
+
+    /// The service stops: every session is closed, and none comes up from now on, also one whose setup is still
+    /// running (its answer may have been made before the stop: it is refused when it would come up).
+    pub fn stop_peers(&self) {
+        let peers: Vec<Arc<PeerHandle>> = {
+            let peers = self.peers.write().unwrap_or_else(|e| e.into_inner());
+            self.stopped.store(true, Ordering::SeqCst);
+            peers.values().cloned().collect()
+        };
+        for p in peers {
+            p.close();
+        }
+    }
+
+    /// The service stopped ([`Self::stop_peers`]).
+    pub fn is_stopped(&self) -> bool {
+        self.stopped.load(Ordering::SeqCst)
     }
 
     /// Unregisters a session (only if it is still the registered one).
@@ -1034,6 +1076,8 @@ pub struct Ctx {
     pub sessions: std::sync::atomic::AtomicU64,
     /// **Tests:** how long an answering session waits between making its Join and going on.
     pub setup_wait: Mutex<std::time::Duration>,
+    /// **Tests:** answering sessions waiting there now.
+    pub setups_waiting: std::sync::atomic::AtomicUsize,
     /// **Tests:** hold queries are answered yes, whatever is held (a member that lies).
     pub yes_to_holds: std::sync::atomic::AtomicBool,
     /// Devices that asked to join this device's devices group with a pairing link it made, waiting for the user to
@@ -1114,6 +1158,19 @@ impl Drop for Freeing {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The QA switch never slows the user's own Seedwell (a state folder outside any temporary folder), and a value
+    /// it cannot read is said, not taken as some other wait.
+    #[test]
+    fn slow_saves_only_in_an_isolated_run() {
+        let temp = std::env::temp_dir().join("seedwell-qa").join("state");
+        let ms = |v: &str| Some(std::ffi::OsString::from(v));
+        assert_eq!(qa_slow_saves(ms("500").as_deref(), &temp), Ok(Some(std::time::Duration::from_millis(500))));
+        assert_eq!(qa_slow_saves(None, &temp), Ok(None));
+        assert!(qa_slow_saves(ms("soon").as_deref(), &temp).is_err());
+        let home = std::path::PathBuf::from(if cfg!(windows) { r"C:\Users\someone\AppData\Roaming\Seedwell" } else { "/home/someone/.seedwell" });
+        assert!(qa_slow_saves(ms("500").as_deref(), &home).is_err(), "the user's own Seedwell ignores it");
+    }
 
     /// A kept folder's issue is shown once and goes alone: a pull's issue at the same path stays.
     #[test]

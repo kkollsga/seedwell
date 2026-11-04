@@ -1449,13 +1449,15 @@ public partial class App : Application
                 // The conversation shown: describe | type <text> | send | reply <card> | attach <path> | menu <title> | menu-text |
                 // members | file <card> <file> <action> | image <card> <image> open|fetch | tag <card> <tag> | open-answer yes|no |
                 // hover <card> on|off (its time, Tag and Reply as the pointer shows them) | quote <card> (a click on its reply quote) |
-                // show-image <card> <image> (an image reference's click) | escape (Escape in the field).
+                // show-image <card> <image> (an image reference's click) | escape (Escape in the field) | slow-read <ms> (each read of the
+                // page takes that much longer) | focus <caret> (the field has the focus, as someone typing) | redraw (the whole page) |
+                // click-send (Send takes the focus as a click gives it, then its click's call).
                 // Cards count from 0; a file action is the core's kind (Download, SaveAs, Retry, Cancel, Open, ShowInFolder,
                 // StopSharing).
                 case "chatpage":
                     pane.Refresh();
                     if (pane.ChatPageShown is not ChatPage cp) { result = "no conversation"; break; }
-                    cp.Update();
+                    await cp.Read();
                     var cards = cp.Model?.Messages ?? [];
                     ChatMessageCard? CardAt(string n) => int.TryParse(n, out var i) && i >= 0 && i < cards.Length ? cards[i] : null;
                     switch (Arg(1))
@@ -1496,8 +1498,12 @@ public partial class App : Application
                             cp.Run(tagItem.Command);
                             await Task.Delay(800);
                             break;
+                        case "slow-read": ChatPage.QaSlowReadMs = int.TryParse(Arg(2), out var slowMs) ? slowMs : 0; break;
+                        case "focus": cp.QaFocus(int.TryParse(Arg(2), out var caretAt) ? caretAt : 0); break;
+                        case "redraw": await cp.QaRedraw(); break;
+                        case "click-send": result = await cp.QaClickSend() ? "sent; " : "not sent; "; await Task.Delay(300); break;
                     }
-                    cp.Update();
+                    await cp.Read();
                     var cm = cp.Model;
                     if (cm is null) { result += "no model"; break; }
                     var lastCard = cm.Messages.LastOrDefault();
@@ -1509,7 +1515,7 @@ public partial class App : Application
                         ChatMessageBody.Unsupported un => "unsupported " + un.Text,
                         _ => "",
                     };
-                    result += $"cards {cm.Messages.Length}, empty \"{cm.Empty ?? ""}\", last \"{(lastCard is null ? "" : BodyText(lastCard))}\", last images {lastCard?.Images.Length ?? 0} [{string.Join(",", lastCard?.Images.Select(i => i.State) ?? [])}], last files {lastCard?.Files.Length ?? 0} [{string.Join(",", lastCard?.Files.Select(f => $"{f.State}:{string.Join("+", f.Actions.Select(a => a.Kind))}") ?? [])}], last tags \"{string.Join("; ", lastCard?.Tags.Select(t => t.Text) ?? [])}\", tags total {cm.Messages.Sum(m => m.Tags.Length)}, reply quote \"{(lastCard?.ReplyQuote is ChatQuote quoted ? $"{quoted.Title}: {quoted.Text}" : "")}\", bubbles {cm.Bubbles}, last who {lastCard?.Who.ToString() ?? "none"}, last meta \"{(lastCard?.Meta is ChatMessageMeta lm ? $"{lm.Name} · {lm.Detail}" : "")}\", runs {cm.Messages.Count(m => m.StartsRun)}, metas {cm.Messages.Count(m => m.Meta is not null)}, toolbar [{(cm.Toolbar.Tag is null ? "" : "tag ")}{(cm.Toolbar.Members is null ? "" : "members ")}{(cm.Toolbar.Share is null ? "" : "share ")}menu], can post {cm.Composer.CanPost} \"{cm.Composer.CannotPost ?? ""}\", attach {cm.Composer.Attach}, attached {cp.Attached}, send enabled {cp.SendEnabled}, pending {cm.Composer.Pending.Length}, replying {cp.ReplyingTo ?? "none"}, members panel {(cm.Members is null ? "none" : $"{cm.Members.Rows.Length} rows")}, open {cp.MembersOpen}";
+                    result += $"cards {cm.Messages.Length}, empty \"{cm.Empty ?? ""}\", last \"{(lastCard is null ? "" : BodyText(lastCard))}\", last images {lastCard?.Images.Length ?? 0} [{string.Join(",", lastCard?.Images.Select(i => i.State) ?? [])}], last files {lastCard?.Files.Length ?? 0} [{string.Join(",", lastCard?.Files.Select(f => $"{f.State}:{string.Join("+", f.Actions.Select(a => a.Kind))}") ?? [])}], last tags \"{string.Join("; ", lastCard?.Tags.Select(t => t.Text) ?? [])}\", tags total {cm.Messages.Sum(m => m.Tags.Length)}, reply quote \"{(lastCard?.ReplyQuote is ChatQuote quoted ? $"{quoted.Title}: {quoted.Text}" : "")}\", bubbles {cm.Bubbles}, last who {lastCard?.Who.ToString() ?? "none"}, last meta \"{(lastCard?.Meta is ChatMessageMeta lm ? $"{lm.Name} · {lm.Detail}" : "")}\", runs {cm.Messages.Count(m => m.StartsRun)}, metas {cm.Messages.Count(m => m.Meta is not null)}, toolbar [{(cm.Toolbar.Tag is null ? "" : "tag ")}{(cm.Toolbar.Members is null ? "" : "members ")}{(cm.Toolbar.Share is null ? "" : "share ")}menu], can post {cm.Composer.CanPost} \"{cm.Composer.CannotPost ?? ""}\", attach {cm.Composer.Attach}, attached {cp.Attached}, send enabled {cp.SendEnabled}, pending {cm.Composer.Pending.Length}, replying {cp.ReplyingTo ?? "none"}, members panel {(cm.Members is null ? "none" : $"{cm.Members.Rows.Length} rows")}, open {cp.MembersOpen}, {cp.QaField}";
                     break;
                 // The Folder Sync page: describe | press <title> [<folder>] (a button, or a list row's menu item; its question
                 // counts as confirmed) | trash on|off | remove (the Stop Syncing question's Remove) | choose <folder>. A folder is named by its name or id.

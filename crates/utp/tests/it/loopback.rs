@@ -90,6 +90,9 @@ async fn echo_and_close_semantics() {
     assert_eq!(c.peer_addr(), _b.local_addr());
 }
 
+/// Fails if a stream stalls when 200 of them share one socket each way: the kernel drops datagrams, the streams probe
+/// the path's MTU up to 4000 B while queuing delay is high, and every stream must still deliver all of its bytes (a
+/// window left below one packet with nothing in flight once stalled one for good: 120 s on CI's Mac).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn one_socket_serves_many_concurrent_streams() {
     const N: usize = 200;
@@ -136,10 +139,14 @@ async fn one_socket_serves_many_concurrent_streams() {
             b.unwrap();
         }));
     }
-    for t in tasks {
-        tokio::time::timeout(Duration::from_secs(120), t).await.expect("timeout").unwrap();
-    }
-    srv.await.unwrap();
+    // About 2 s here, 7 s with ten copies at once at utility priority: 120 s for all of them is a stall.
+    let all = async {
+        for t in tasks {
+            t.await.unwrap();
+        }
+        srv.await.unwrap();
+    };
+    tokio::time::timeout(Duration::from_secs(120), all).await.expect("a stream stalled");
     let secs = start.elapsed().as_secs_f64();
     let (sa, sb) = (server.stats(), client.stats());
     let lost = (sa.datagrams_out + sb.datagrams_out).saturating_sub(sa.datagrams_in + sb.datagrams_in);

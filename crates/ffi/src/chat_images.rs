@@ -304,7 +304,7 @@ pub struct ChatImageSamples {
 }
 
 /// The made-up picture: a fjord at dusk, 1200 × 800.
-const SAMPLE_SVG: &str = concat!(
+pub(crate) const SAMPLE_SVG: &str = concat!(
     r##"<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="800" viewBox="0 0 1200 800">"##,
     r##"<defs><linearGradient id="sky" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#1d2b64"/><stop offset="0.6" stop-color="#f8a170"/><stop offset="1" stop-color="#fcd9a8"/></linearGradient>"##,
     r##"<linearGradient id="sea" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#3b6e8f"/><stop offset="1" stop-color="#14324a"/></linearGradient></defs>"##,

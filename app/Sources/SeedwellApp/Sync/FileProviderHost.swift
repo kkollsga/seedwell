@@ -197,7 +197,7 @@ struct SystemDomains: FileProviderDomains {
             }
             let preserved = try await domains.remove(id: id)
             await keep(preserved, id: id, name: d.name)
-            if attempt.gaveUpAfterCommit {
+            if !attempt.finish() {
                 // The core refused meanwhile: the folder stays on demand, so its domain comes back (tried again until
                 // it does), its held files shown downloaded again.
                 await addDomain(id, name: d.name)
@@ -332,13 +332,18 @@ struct SystemDomains: FileProviderDomains {
 final class FileProviderListener: SyncHostListener, @unchecked Sendable {
     private weak var host: FileProviderHost?
     private let peers: PeerVerifier
-    /// How long the core's thread waits for a domain to go (plumbing; the core then refuses the removal or switch).
-    private let wait: TimeInterval
+    /// Waits on the core's thread for the host to signal that the domain went; `.timedOut` is the core giving up (it
+    /// then refuses the removal or switch). Plumbing: the app waits `wait` seconds, a test says when the time is up.
+    private let waitForHost: @Sendable (DispatchSemaphore) -> DispatchTimeoutResult
 
-    init(_ host: FileProviderHost, peers: PeerVerifier = PeerVerifier(), wait: TimeInterval = 120) {
+    convenience init(_ host: FileProviderHost, peers: PeerVerifier = PeerVerifier(), wait: TimeInterval = 120) {
+        self.init(host, peers: peers, waitForHost: { $0.wait(timeout: .now() + wait) })
+    }
+
+    init(_ host: FileProviderHost, peers: PeerVerifier = PeerVerifier(), waitForHost: @escaping @Sendable (DispatchSemaphore) -> DispatchTimeoutResult) {
         self.host = host
         self.peers = peers
-        self.wait = wait
+        self.waitForHost = waitForHost
     }
 
     /// Only this app's extension is served (asked on the server's thread, before a request is read).
@@ -363,8 +368,10 @@ final class FileProviderListener: SyncHostListener, @unchecked Sendable {
             result.value = await host?.releaseDomain(folderId, attempt: attempt) ?? SyncHostRemoval(error: nil)
             done.signal()
         }
-        guard done.wait(timeout: .now() + wait) == .success else {
-            attempt.giveUp()
+        guard waitForHost(done) == .success else {
+            // The host may have finished just now, between its last look and the signal: the domain is gone, and the
+            // core is told so (not a refusal that leaves the folder on demand without its domain).
+            if attempt.giveUp() { return SyncHostRemoval(error: nil) }
             return SyncHostRemoval(error: syncHostText(t: .noAnswer))
         }
         return result.value
@@ -380,15 +387,24 @@ final class RemovalBox: @unchecked Sendable {
     var value = SyncHostRemoval(error: nil)
 }
 
-/// Whether the core still waits for a domain's removal: the removal goes ahead (`commit`) only while it does, and
-/// the host learns if the core gave up after that.
+/// Whether the core still waits for a domain's removal, decided once under one lock: the removal goes ahead
+/// (`commit`) only while the core waits, and when it is done (`finish`) either the core still waits (and takes it) or
+/// it gave up (and the host adds the domain back). A give-up and a finish never both win.
 final class ReleaseAttempt: @unchecked Sendable {
     private let lock = NSLock()
     private var gaveUp = false
     private var committed = false
+    private var finished = false
 
-    /// The core stopped waiting.
-    func giveUp() { lock.withLock { gaveUp = true } }
+    /// The core stopped waiting. `true` when the host had finished the removal already (the domain is gone: the core
+    /// takes that); `false` otherwise, and from now on `commit` and `finish` say no.
+    func giveUp() -> Bool {
+        lock.withLock {
+            if finished { return true }
+            gaveUp = true
+            return false
+        }
+    }
 
     /// The domain may go now (the core still waits); `false` once it gave up.
     func commit() -> Bool {
@@ -399,8 +415,16 @@ final class ReleaseAttempt: @unchecked Sendable {
         }
     }
 
-    /// The core gave up after the removal went ahead.
-    var gaveUpAfterCommit: Bool { lock.withLock { committed && gaveUp } }
+    /// The committed removal is done: `true` while the core still waits (it is told the domain went); `false` when it
+    /// gave up meanwhile (the folder stays on demand, so the domain must come back).
+    func finish() -> Bool {
+        lock.withLock {
+            precondition(committed, "finish follows commit")
+            if gaveUp { return false }
+            finished = true
+            return true
+        }
+    }
 }
 
 /// System Settings at the File Providers list (Login Items & Extensions; `com.apple.ExtensionsPreferences` is that

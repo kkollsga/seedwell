@@ -663,7 +663,6 @@ impl Connection {
         if d > n {
             return;
         }
-        let mss = self.pay() as u32;
         let flight_before = self.cur_window;
         let mut acked: u32 = 0;
         let mut rtt_sample: Option<u64> = None;
@@ -721,6 +720,11 @@ impl Connection {
             }
         }
 
+        // The packet size after this ack: a path-MTU probe confirmed above made it bigger, and the
+        // window's floor (two packets) must be two of those. With the size from before the ack, a
+        // delay-driven decrease could leave the window below one packet with nothing in flight: no
+        // packet could go, no timeout would fire, and the connection stalled for good.
+        let mss = self.pay() as u32;
         if let Some(s) = rtt_sample {
             let s = s.clamp(1, u32::MAX as u64) as u32;
             self.rtt.sample(s, micros(cfg.min_rto) as u32, micros(cfg.max_rto) as u32);
@@ -1358,6 +1362,59 @@ mod tests {
         assert!(t <= now + 1_000_000);
         c.handle_timeout(&cfg, t);
         assert_eq!(c.heap_bytes(), 0, "idle connection must hold no buffers");
+    }
+
+    /// Fails if a connection with nothing in flight can never send again: one ack confirms a
+    /// path-MTU probe (the packet grows from 1178 to 3946 B payload) and reports a long queuing
+    /// delay, and the window shrinks to the floor of the old packet size, below one new packet.
+    /// Nothing is in flight, so no timeout fires either (CI: a 120 s stall in
+    /// `one_socket_serves_many_concurrent_streams`, a stream stuck with 253 KB unsent).
+    #[test]
+    fn a_confirmed_probe_with_a_delay_never_leaves_the_window_below_a_packet() {
+        let cfg = Config::default();
+        let mut c = Connection::connect(&cfg, 1_000_000, 10);
+        c.set_path_ceiling(&cfg, 4000); // a peer on this host
+        let mut buf = vec![0u8; cfg.max_datagram()];
+        assert!(c.poll_transmit(&cfg, 1_000_000, &mut buf).is_some()); // SYN
+        // The peer's packets carry the delay sample: 1 ms base, then 2 s of queuing.
+        let state = |ack_nr: u16, delay: u32| Header {
+            ty: PacketType::State,
+            conn_id: 10,
+            timestamp: 1,
+            timestamp_diff: 1_000 + delay,
+            wnd_size: 1 << 20,
+            seq_nr: 50,
+            ack_nr,
+        };
+        let ack = |c: &mut Connection, now: u64, h: Header| {
+            c.handle_packet(&cfg, now, 20, &Packet { header: h, sack: None, payload: &[] });
+        };
+        let mut sent = |c: &mut Connection, now: u64| {
+            let mut sizes = Vec::new();
+            while let Some(n) = c.poll_transmit(&cfg, now, &mut buf) {
+                let p = Packet::parse(&buf[..n]).unwrap();
+                if p.header.ty == PacketType::Data {
+                    sizes.push(p.payload.len());
+                }
+            }
+            sizes
+        };
+        ack(&mut c, 1_010_000, state(1, 0));
+        assert_eq!(c.state(), State::Connected);
+        assert_eq!(c.write(&cfg, &[7u8; 256 * 1024]), WriteOutcome::Wrote(256 * 1024));
+        // The first window: three packets of the starting size (seq 2..=4), acked without delay.
+        assert_eq!(sent(&mut c, 1_010_000), [1178; 3]);
+        ack(&mut c, 1_020_000, state(4, 0));
+        // Room for a probe now: a 4000 B datagram, then one more of the starting size (seq 5, 6).
+        let next = sent(&mut c, 1_020_000);
+        assert!(next.len() == 2 && next[0] > 3900 && next[1] == 1178, "{next:?}");
+        // Both acked in one ack that reports 2 s of queuing delay (two duplicates before it said so too).
+        ack(&mut c, 1_030_000, state(4, 2_000_000));
+        ack(&mut c, 1_030_000, state(4, 2_000_000));
+        ack(&mut c, 1_030_000, state(6, 2_000_000));
+        let st = c.stats();
+        assert_eq!((st.path_mtu, st.in_flight), (4000, 0), "the probe was confirmed, nothing in flight");
+        assert!(!sent(&mut c, 1_030_000).is_empty(), "nothing in flight: the next packet must go ({st:?})");
     }
 
     #[test]

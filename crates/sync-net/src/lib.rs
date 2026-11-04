@@ -35,6 +35,7 @@ pub mod describe;
 pub mod direct;
 pub mod framed;
 mod joining;
+mod journal;
 pub mod lan;
 pub mod limit;
 pub mod netchange;

@@ -3189,7 +3189,8 @@ impl Core {
         self.backend.sync().chat_messages(&id, topic.as_deref(), before.as_deref(), limit)
     }
 
-    /// Every message of the channel's `topic` (`None`: General) is read.
+    /// Every message of the channel's `topic` (`None`: General) is read. Cheap (the mark is saved on the core's
+    /// threads): the hosts call it on their UI thread.
     pub fn chat_mark_read(&self, id: String, topic: Option<String>) {
         self.backend.sync().chat_mark_read(&id, topic.as_deref())
     }
@@ -3209,7 +3210,8 @@ impl Core {
         self.backend.sync().chat_direct_messages(&device_id, before.as_deref(), limit)
     }
 
-    /// Every private message from the device is read.
+    /// Every private message from the device is read. Cheap (the mark is saved on the core's threads): the hosts
+    /// call it on their UI thread.
     pub fn chat_mark_direct_read(&self, device_id: String) {
         self.backend.sync().chat_mark_direct_read(&device_id)
     }

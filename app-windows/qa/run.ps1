@@ -12,7 +12,7 @@
   the network either (no DHT, PEX, LSD, UPnP or NAT-PMP).
 
   Checks: render, handoff, separate, gate, selection, keys, removal, info, alert, trash, choice, move, add, chat,
-  dialogs, newchannel, links, tray, scheme, rendezvous, follow, folders, chatpage, platform, slowstart, damaged, notices, settingspage, requests, files, chooser, play, favorites, rules, cloudfiles, ondemand, ondemandfetch, ondemandpin, ondemandchanges, notray, settings, quit (all of them: all, the default).
+  dialogs, newchannel, links, tray, scheme, rendezvous, follow, folders, chatpage, chatslowdisk, platform, slowstart, damaged, notices, settingspage, requests, files, chooser, play, favorites, rules, cloudfiles, ondemand, ondemandfetch, ondemandpin, ondemandchanges, notray, settings, quit (all of them: all, the default).
   -Build builds the app first (build.ps1; -CoreProfile Debug builds its core from the debug test build, as CI does).
   -Out keeps the pictures in <dir> (default: a temp folder, printed).
   Flyouts (menus, the members panel and its role menus) are drawn by the render run (SnapshotRenderer.cs, check
@@ -34,7 +34,7 @@ $Repo = Split-Path $App -Parent
 $Exe = Join-Path $App 'bin\x64\Release\net10.0-windows10.0.19041.0\win-x64\Seedwell.exe'
 $Cli = Join-Path $Repo 'target\debug\seedwell.exe'
 $Fixtures = Join-Path $Repo 'crates\metainfo\tests\fixtures'
-$All = @('render', 'handoff', 'separate', 'gate', 'selection', 'keys', 'removal', 'info', 'alert', 'trash', 'choice', 'move', 'add', 'chat', 'dialogs', 'newchannel', 'links', 'tray', 'scheme', 'rendezvous', 'follow', 'folders', 'chatpage', 'platform', 'slowstart', 'damaged', 'notices', 'settingspage', 'requests', 'files', 'chooser', 'play', 'favorites', 'rules', 'cloudfiles', 'ondemand', 'ondemandfetch', 'ondemandpin', 'ondemandchanges', 'notray', 'settings', 'quit')
+$All = @('render', 'handoff', 'separate', 'gate', 'selection', 'keys', 'removal', 'info', 'alert', 'trash', 'choice', 'move', 'add', 'chat', 'dialogs', 'newchannel', 'links', 'tray', 'scheme', 'rendezvous', 'follow', 'folders', 'chatpage', 'chatslowdisk', 'platform', 'slowstart', 'damaged', 'notices', 'settingspage', 'requests', 'files', 'chooser', 'play', 'favorites', 'rules', 'cloudfiles', 'ondemand', 'ondemandfetch', 'ondemandpin', 'ondemandchanges', 'notray', 'settings', 'quit')
 
 if ($Build) {
   & powershell -NoProfile -File (Join-Path $App 'build.ps1') -CoreProfile $CoreProfile | Out-Host
@@ -179,7 +179,11 @@ function Stop-App([string]$dir, $p) {
   }
   # The app never hangs: a stall of the core's fail_ms in the run fails it (HangWatch's line in app.log).
   $hang = Log $dir | Where-Object { $_ -like '*ui stall:*this run fails*' } | Select-Object -First 1
-  if ($hang) { Fail "the UI thread stalled: $hang" }
+  if ($hang) {
+    # A debug core (CI's) says which of folder sync's locks anything waited for.
+    $waits = @(CoreLog $dir | Where-Object { $_ -like '*waited * ms for a lock at*' } | Select-Object -Last 8) -join ' | '
+    Fail "the UI thread stalled: $hang$(if ($waits) { " || the core: $waits" })"
+  }
   # The temp config must be taken whole: a value the core replaced would undo the offline settings above.
   $problem = Log $dir | Where-Object { $_ -like '*settings problem:*' } | Select-Object -First 1
   if ($problem) { Fail "the temp config has a problem: $problem" }
@@ -888,8 +892,40 @@ $checks.chatpage = {
     Shot 'chat-new-topic' -Dialog
     Qa $dir @('dialog', 'cancel') | Out-Null
 
+    # Someone typing keeps the field, the text and the caret whatever happens on the page: a message arrives, the page
+    # redraws, a tag's note is sent. A message they send themselves empties the field and leaves them in it.
+    Qa $dir @('chatpage', 'type', 'Half a thought') | Out-Null
+    function Typing([string]$when, [string]$said) {
+      if ($said -notmatch 'field "Half a thought" focus True caret 4;') { Fail "$when, the field lost the focus, its text or its caret: $said" }
+    }
+    Typing 'with the focus just given' (Qa $dir @('chatpage', 'focus', '4'))
+    $before = [int]([regex]::Match((Qa $dir @('chatpage')), 'cards (\d+)').Groups[1].Value)
+    'Someone else writes' | & $Cli --socket "$dir\state\control.sock" chat send 'QA-Chat' --as QA-Agent - | Out-Null
+    Typing 'after a message arrived' (WaitFor { $s = Qa $dir @('chatpage'); if ($s -match "cards $($before + 1),") { $s } } 10000 'the message to arrive')
+    Typing 'after a redraw' (Qa $dir @('chatpage', 'redraw'))
+    $noted = Qa $dir @('chatpage', 'tag', '1', 'Seen')
+    if ($noted -match 'no such tag') { Fail "no Seen in the second card's tag menu: $noted" }
+    Typing 'after a tag was sent' $noted
+    Qa $dir @('chatpage', 'type', 'Sent from the field') | Out-Null
+    $own = Qa $dir @('chatpage', 'send')
+    if ($own -notmatch 'field "" focus True caret 0;') { Fail "the field lost the focus when its message was sent: $own" }
+    # A click on Send goes on in the field (as on the Mac, where a button never takes the keyboard focus).
+    Qa $dir @('chatpage', 'type', 'Sent with a click') | Out-Null
+    $clicked = Qa $dir @('chatpage', 'click-send')
+    if ($clicked -notmatch 'sent; .*last "Sent with a click"') { Fail "the click did not send: $clicked" }
+    if ($clicked -notmatch 'field "" focus True caret 0;') { Fail "the focus did not come back to the field after a click on Send: $clicked" }
+    Qa $dir @('chatpage', 'focus', '0') | Out-Null
+
     $members = Qa $dir @('chatpage', 'members')
     if ($members -notmatch 'members panel [1-9] rows, open True') { Fail "the members panel has no rows: $members" }
+
+    # The page's reads never hold the UI thread (CI saw a 2 s stall after a send): each read here takes longer than
+    # the watchdog's fail_ms, so a read back on the UI thread fails this run every time (Stop-App reads the watchdog).
+    Qa $dir @('chatpage', 'slow-read', '2500') 60000 | Out-Null
+    Qa $dir @('chatpage', 'type', 'Sent while reads are slow') 60000 | Out-Null
+    $slow = Qa $dir @('chatpage', 'send') 60000
+    if ($slow -notmatch 'sent; .*last "Sent while reads are slow"') { Fail "the message was not sent and drawn while reads were slow: $slow" }
+    Qa $dir @('chatpage', 'slow-read', '0') 60000 | Out-Null
 
     # Build 52: a picture dropped onto the field's text leaves its reference where it lands (the core's spacing).
     Qa $dir @('chatpage', 'type', 'Hello world') | Out-Null
@@ -899,6 +935,58 @@ $checks.chatpage = {
     if ($dropped -notmatch 'draft "Hello !\[Image \d+\]\(att:\d+\) ?world"') { Fail "the dropped picture's reference is not where it landed: $dropped" }
   } finally { Stop-App $dir $p; Remove-Item -Recurse -Force $dir }
   $pictures.ToArray()
+}
+
+# The failure: the UI thread waits for a save of chat's state, on the UI thread or for a lock held across it (CI saw
+# 2 s after a send on 7152a8a). Every save here takes longer than the watchdog's fail_ms (SEEDWELL_QA_SLOW_SAVES, temp
+# states only), so one such wait fails this run every time (Stop-App reads the watchdog): sending text, a picture and a
+# file, and the read mark of a message that arrives. A core that ignored the switch would pass without having slowed
+# anything, so its line in core.log comes first.
+$checks.chatslowdisk = {
+  $dir = New-State 'control'
+  $env:SEEDWELL_QA_SLOW_SAVES = '3000'
+  try { $p = Start-App $dir -QaControl }
+  finally { Remove-Item env:SEEDWELL_QA_SLOW_SAVES -ErrorAction SilentlyContinue }
+  try {
+    WaitFor { CoreLog $dir | Where-Object { $_ -like '*QA: every save takes 3000 ms longer*' } } 60000 'the core to slow its saves (core.log)' | Out-Null
+    WaitFor { & $Cli --socket "$dir\state\control.sock" sync settings 2>&1 | Out-Null; $LASTEXITCODE -eq 0 } 60000 'folder sync to start' | Out-Null
+    & $Cli --socket "$dir\state\control.sock" chat new 'QA-Slow' | Out-Null
+    if ($LASTEXITCODE -ne 0) { Fail "the CLI could not make a channel (exit $LASTEXITCODE)" }
+    Qa $dir @('window') 60000 | Out-Null
+    Qa $dir @('place', 'chat', 'QA-Slow') 60000 | Out-Null
+
+    Qa $dir @('chatpage', 'type', 'Text on a slow disk') 60000 | Out-Null
+    $text = Qa $dir @('chatpage', 'send') 120000
+    if ($text -notmatch 'sent; .*last "Text on a slow disk"') { Fail "the text was not sent and drawn: $text" }
+
+    Add-Type -AssemblyName System.Drawing
+    $bmp = New-Object System.Drawing.Bitmap 64, 64
+    $bmp.Save("$dir\picture.png", [System.Drawing.Imaging.ImageFormat]::Png); $bmp.Dispose()
+    Qa $dir @('chatpage', 'attach', "$dir\picture.png") 60000 | Out-Null
+    Qa $dir @('chatpage', 'send') 120000 | Out-Null
+    WaitFor { (Qa $dir @('chatpage') 60000) -match 'last images 1 \[Available\]' } 120000 'the picture in the conversation' | Out-Null
+
+    'Notes on a slow disk' | Set-Content "$dir\notes.txt"
+    Qa $dir @('chatpage', 'attach', "$dir\notes.txt") 60000 | Out-Null
+    Qa $dir @('chatpage', 'send') 120000 | Out-Null
+    WaitFor { (Qa $dir @('chatpage') 60000) -match 'last files 1 \[Shared:' } 120000 'the shared file card' | Out-Null
+
+    # A message from another device arrives while the page is on screen: it counts as read, and that is saved. (Only
+    # another device's: this device's own agents write under its key, and those are never unread.)
+    $other = New-State 'full'
+    $po = $null
+    try {
+      $po = Start-App $other -QaControl
+      WaitForSync $other
+      $link = ((& $Cli --socket "$dir\state\control.sock" chat share 'QA-Slow' --role read_write --json 2>&1) -join '' | ConvertFrom-Json).link
+      $link | & $Cli --socket "$other\state\control.sock" chat join - 2>&1 | Out-Null
+      WaitFor { 'Read on a slow disk' | & $Cli --socket "$other\state\control.sock" chat send 'QA-Slow' --as QA-Agent - 2>&1 | Out-Null; $LASTEXITCODE -eq 0 } 120000 'the other device to be admitted' | Out-Null
+      $read = WaitFor { $s = Qa $dir @('chatpage') 60000; if ($s -match 'last "Read on a slow disk"') { $s } } 120000 'the message from the other device'
+      if ($read -notmatch 'last who TheirAgent') { Fail "the message is not another device's, so nothing was unread: $read" }
+      WaitFor { @((& $Cli --socket "$dir\state\control.sock" chat list --json 2>&1 | Out-String | ConvertFrom-Json).channels | Where-Object { $_.name -eq 'QA-Slow' -and $_.unread -eq 0 }).Count -eq 1 } 120000 'the read mark' | Out-Null
+    } finally { Stop-App $other $po; Remove-Item -Recurse -Force $other }
+  } finally { Stop-App $dir $p; Remove-Item -Recurse -Force $dir }
+  @()
 }
 
 # Build 42's platform parts on Windows: a channel's key goes into the DPAPI vault (<state>\sync\vault\*.sealed, no

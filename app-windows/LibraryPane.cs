@@ -369,6 +369,7 @@ sealed class LibraryPane
         LibraryViewModel m;
         try
         {
+            HangWatch.Doing = "the library's model";
             m = library.Model(App.Now());
         }
         catch (Exception e)
@@ -378,7 +379,13 @@ sealed class LibraryPane
             timer.Start();
             return;
         }
+        finally
+        {
+            HangWatch.Doing = "";
+        }
+        HangWatch.Doing = "drawing the library";
         Draw(m);
+        HangWatch.Doing = "";
         // The open file lists the core says are due are read again (the Mac's tick on the window's refresh).
         if (m.Page == LibraryPage.List) app.Files.Tick();
         if (m.RefreshMs is uint ms)

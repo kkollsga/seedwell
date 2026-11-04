@@ -78,6 +78,51 @@ async fn a_file_syncs_both_ways_over_tls() {
     b.h.shutdown().await;
 }
 
+/// Fails if a session outlives the service that stopped while it was being set up: A stops while B's session is
+/// still in its setup at A (A's answer made, the session not up), the setup goes on after A closed its sessions, and
+/// both register it. B then counts A as connected for as long as B runs (CI: "B and C connected, A gone" timed out
+/// in `ondemand::a_folder_kept_in_place_stores_each_file_once_in_its_placeholder`, A stopping amid reconnections).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_session_set_up_while_its_device_stops_never_comes_up() {
+    let (a, b) = (device("Alpha").await, device("Beta").await);
+    let (fa, fb) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let id: FolderId = a.h.add_folder(fa.path().to_path_buf()).await.unwrap().id.parse().unwrap();
+    let key = a.h.create_invite(&id, Role::ReadWrite, 1, 1).unwrap().link;
+    a.h.test_setup_wait(Duration::from_secs(3));
+    b.h.join_folder(&key, fb.path().join("Shared")).await.unwrap();
+    b.h.add_address(&id, addr(&a)).unwrap();
+    until(30, "B's session waits in its setup at A", || a.h.test_setups_waiting() > 0).await;
+    a.h.shutdown().await;
+    until(30, "the setup went on", || a.h.test_setups_waiting() == 0).await;
+    // What follows the wait is a message each way: either both register the session, or A refuses it.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(a.h.snapshot().devices.is_empty(), "A stopped: it has no session");
+    assert!(b.h.snapshot().devices.is_empty(), "B has no session with a stopped device");
+    b.h.shutdown().await;
+}
+
+/// Fails if a device that turns every session down in its setup is dialed again at once, forever: B holds a link to
+/// a folder A removed, each dial connects and A answers "no folders in common". B must wait between dials as after a
+/// dial that did not connect (it dialed hundreds of times a second, and dozens of its sessions were in setup at once
+/// at a device, which then crossed and refused each other).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_device_that_turns_every_session_down_is_dialed_with_a_backoff() {
+    let (a, b) = (device("Alpha").await, device("Beta").await);
+    let (fa, fb) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let id: FolderId = a.h.add_folder(fa.path().to_path_buf()).await.unwrap().id.parse().unwrap();
+    let key = a.h.create_invite(&id, Role::ReadWrite, 1, 1).unwrap().link;
+    a.h.remove_folder(&id).await.unwrap();
+    b.h.join_folder(&key, fb.path().join("Shared")).await.unwrap();
+    b.h.add_address(&id, addr(&a)).unwrap();
+    until(30, "B dialed A", || b.h.test_dials_made() > 0).await;
+    // The waits are 1 s, then 2 s, then 5 s: three or four dials in the next 4 s, however slow the machine.
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    let n = b.h.test_dials_made();
+    assert!(n <= 6, "{n} dials in about 4 s");
+    a.h.shutdown().await;
+    b.h.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_wrong_key_gets_nothing() {
     let (a, b) = (device("Alpha").await, device("Mallory").await);

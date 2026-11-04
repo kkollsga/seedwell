@@ -21,6 +21,11 @@ sealed class HangWatch
     /// <summary>What the user (or a QA command) did last, for the stall's line.</summary>
     internal static string LastAction { get; set; } = "";
 
+    /// <summary>The long step the UI thread is in, if any: a stall's line names it.</summary>
+    internal static string Doing { get; set; } = "";
+
+    static string Action => Doing.Length == 0 ? LastAction : $"{LastAction}, in {Doing}";
+
     /// <summary>A QA or render run had a stall of fail_ms or more (the run fails).</summary>
     internal static bool Failed { get; private set; }
 
@@ -50,7 +55,7 @@ sealed class HangWatch
                 if (testRun && late >= policy.FailMs && !Failed)
                 {
                     Failed = true;
-                    var line = TrsFfiMethods.UiStallLine((ulong)late, LastAction, true);
+                    var line = TrsFfiMethods.UiStallLine((ulong)late, Action, true);
                     FailedLine = line;
                     Console.Error.WriteLine(line);
                     AppLog.Write($"ui stall: {line}");

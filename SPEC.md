@@ -1191,6 +1191,10 @@ baseline every later version must still sync with:
   *QA only:* `SEEDWELL_QA_LIMIT_LAN=1` applies those limits to LAN sessions too (so a check over loopback sees a transfer
   take its time), honoured only when the state folder is inside a temporary folder (an isolated run, the guard of
   `SEEDWELL_QA_TRASH_DIR`); the user's Seedwell ignores it, and the log says which.
+  *QA only:* `SEEDWELL_QA_SLOW_SAVES=<ms>` makes every save of folder sync's and chat's state (the configuration, a
+  membership, a channel's or private conversation's messages, a room's files and images) that many milliseconds slower,
+  as on a disk whose virus scanner reads each new file first, so a check sees a call that waits for a save as a long
+  wait; honoured the same way (an isolated run only, the log says which; a value that is not a number is ignored).
 
 ### 7G.4 Budgets
 

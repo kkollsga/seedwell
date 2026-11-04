@@ -41,6 +41,7 @@ pub use trs_sync_proto::chat::MessageKind;
 use crate::at_rest::{Sealer, channel_key_name};
 use crate::blobs::Blobs;
 use crate::files::Files;
+use crate::journal::Journal;
 use crate::room::{Index, Room};
 use crate::config::ChannelEntry;
 use crate::service::{SyncError, SyncHandle, invalid, public_key_from_hex, random_id};
@@ -348,6 +349,13 @@ impl std::ops::Deref for ChannelShared {
 }
 
 impl ChannelShared {
+    /// Keeps a message (checked by the caller) and writes it to the channel's file after the store's lock is let go:
+    /// the app's calls read the store, and a disk may be slow to save. False when it is known already, or older than
+    /// what is kept.
+    pub(crate) fn keep(&self, msg: ChatMessage, received_ms: u64) -> io::Result<bool> {
+        keep_in(&self.store, msg, received_ms)
+    }
+
     /// `author` may post now (Owner, Admin or Read & write, while the sharing lasts).
     pub fn may_post(&self, author: &[u8; 32]) -> bool {
         self.role_of(author).is_some_and(|r| r >= Role::ReadWrite)
@@ -405,6 +413,8 @@ pub(crate) struct Store {
     last_received_ms: u64,
     cap: (usize, usize),
     seal: Sealer,
+    /// Its file's writes, made after the store's lock is let go ([`ChannelShared::keep`]).
+    pub(crate) journal: Arc<Journal>,
     /// Every attachment the kept messages name; the newest images within [`crate::blobs::CHANNEL_BUDGET`] are
     /// fetched by themselves.
     pub(crate) index: Index,
@@ -415,6 +425,7 @@ impl Store {
     /// dropped, and so are records that do not open (sealed with a key that is gone).
     pub(crate) fn open(path: PathBuf, cap: (usize, usize), seal: Sealer) -> io::Result<Store> {
         let mut s = Store {
+            journal: Arc::new(Journal::new(path.clone())),
             path,
             msgs: BTreeMap::new(),
             ids: HashMap::new(),
@@ -522,40 +533,44 @@ impl Store {
         out
     }
 
-    fn rewrite(&self) -> io::Result<()> {
+    /// The whole file, as it is written anew.
+    fn whole(&self) -> Vec<u8> {
         let mut out = MAGIC.to_vec();
         put_varint(&mut out, FORMAT);
         for s in self.msgs.values() {
             out.extend_from_slice(&self.record(&s.msg, s.received_ms));
         }
-        let tmp = self.path.with_extension("chat.tmp");
-        std::fs::write(&tmp, out)?;
-        std::fs::rename(&tmp, &self.path)
+        out
     }
 
-    /// Keeps a message (checked by the caller). False when it is known already, or older than what is kept.
-    pub(crate) fn insert(&mut self, msg: ChatMessage, received_ms: u64) -> io::Result<bool> {
+    /// Writes the file anew now (while it is opened: nothing else uses the store yet).
+    fn rewrite(&self) -> io::Result<()> {
+        crate::journal::write_whole(&self.path, &self.whole())
+    }
+
+    /// Keeps a message (checked by the caller) and queues its write ([`Self::journal`]; the caller writes it once it
+    /// let the store go). False when it is known already, or older than what is kept.
+    pub(crate) fn insert(&mut self, msg: ChatMessage, received_ms: u64) -> bool {
         if self.floor_at_ms != 0 && msg.at_ms < self.floor_at_ms {
-            return Ok(false);
+            return false;
         }
         // Each arrival after the last one, even within one millisecond.
         let received_ms = received_ms.max(self.last_received_ms + 1);
         let rec = self.record(&msg, received_ms);
         let images = !msg.extra.is_empty();
         if !self.put(msg, received_ms) {
-            return Ok(false);
+            return false;
         }
         if self.prune() {
             self.index_images();
-            self.rewrite()?;
+            self.journal.rewrite(self.whole());
         } else {
             if images {
                 self.index_images();
             }
-            let mut f = std::fs::OpenOptions::new().append(true).open(&self.path)?;
-            f.write_all(&rec)?;
+            self.journal.append(rec);
         }
-        Ok(true)
+        true
     }
 
     /// What this device holds, for a peer.
@@ -607,6 +622,31 @@ impl Store {
         }
         (n, last)
     }
+}
+
+/// Keeps a message in `store` and writes it once the store is let go ([`ChannelShared::keep`]).
+/// `Err`: it is kept here but could not be saved (the sender is told).
+fn keep_in(store: &Mutex<Store>, msg: ChatMessage, received_ms: u64) -> io::Result<bool> {
+    let (kept, journal, upto) = {
+        let mut s = lock(store);
+        let kept = s.insert(msg, received_ms);
+        (kept, s.journal.clone(), s.journal.queued())
+    };
+    write_through(store, &journal, upto)?;
+    Ok(kept)
+}
+
+/// Writes `store`'s queued writes up to `upto`; when one of them did not land (a write failed, here or in another
+/// caller's flush), the whole file is written anew at once, so nothing kept is lost on a restart.
+fn write_through(store: &Mutex<Store>, journal: &Journal, upto: u64) -> io::Result<()> {
+    if journal.flush(upto).is_ok() {
+        return Ok(());
+    }
+    let whole = {
+        let s = lock(store);
+        s.journal.rewrite(s.whole())
+    };
+    journal.flush(whole)
 }
 
 /// The images a text message names, when it names any this version reads.
@@ -850,6 +890,8 @@ impl SyncHandle {
         let gone = self.inner.ctx.registry.remove_channel(id);
         if let Some(c) = &gone {
             c.files.close();
+            let journal = lock(&c.store).journal.clone();
+            journal.close();
         }
         if gone.is_none() && !known {
             return Err(SyncError::NotFound);
@@ -1112,7 +1154,7 @@ impl SyncHandle {
             msg
         };
         let received = now_ms();
-        let stored = lock(&c.store).insert(msg.clone(), received)?;
+        let stored = c.keep(msg.clone(), received)?;
         if !stored {
             return Err(invalid("the message could not be kept"));
         }
@@ -1126,7 +1168,8 @@ impl SyncHandle {
         Ok(out)
     }
 
-    /// Marks every message of a channel's topic (`None`: General) read.
+    /// Marks every message of a channel's topic (`None`: General) read. Cheap: the app calls it on its UI thread (a
+    /// page on screen is read), so the mark is saved on the service's threads ([`Self::save_config_soon`]).
     pub fn chat_mark_read(&self, id: &FolderId, topic: Option<&str>) -> Result<(), SyncError> {
         let c = self.channel(id)?;
         let (topic, last) = {
@@ -1154,7 +1197,7 @@ impl SyncHandle {
             e.topic_read = s.topic_read.iter().map(|(t, k)| format!("{}:{}:{}:{}", hex(t), k.0, k.1, hex(&k.2))).collect();
             e.topic_read.sort();
         }
-        self.save_config()?;
+        self.save_config_soon();
         Ok(())
     }
 
@@ -1242,6 +1285,17 @@ impl SyncHandle {
         let msgs = messages.iter().filter_map(|b| ChatMessage::from_bytes(b).ok()).collect();
         on_messages(&self.inner.ctx, from, &c, msgs).await;
         Ok(())
+    }
+
+    /// **Tests only:** a text message from another device (its key made from `seed`), kept in a channel as one that
+    /// came from a member is (written to the channel's file the same way), so this device has unread messages.
+    #[doc(hidden)]
+    pub fn test_keep_from(&self, id: &FolderId, seed: [u8; 32], seq: u64, body: &str) -> Result<bool, SyncError> {
+        let c = self.channel(id)?;
+        let key = trs_sync_proto::device::DeviceKey::from_seed(&seed);
+        let draft = Draft { id: random_id(), seq, at_ms: now_ms(), reply_to: None, topic: None, agent: None, kind: MessageKind::Text, body: body.as_bytes().to_vec() };
+        let msg = ChatMessage::sign(&key, id, draft).map_err(|e| invalid(e.to_string()))?;
+        Ok(c.keep(msg, now_ms())?)
     }
 }
 
@@ -1540,16 +1594,19 @@ pub(crate) async fn on_have(ctx: &Arc<Ctx>, peer: &Arc<PeerHandle>, c: &Arc<Chan
 pub(crate) async fn on_messages(ctx: &Arc<Ctx>, from: DeviceId, c: &Arc<ChannelShared>, msgs: Vec<ChatMessage>) {
     let received = now_ms();
     let mut new: Vec<ChatMessage> = Vec::new();
+    let journal = lock(&c.store).journal.clone();
     for m in msgs {
         if !m.verify(&c.id) || !c.may_post(&m.author) {
             continue;
         }
-        let kept = lock(&c.store).insert(m.clone(), received);
-        match kept {
-            Ok(true) => new.push(m),
-            Ok(false) => {}
-            Err(e) => c.problem(format!("the channel's messages could not be saved: {e}")),
+        if lock(&c.store).insert(m.clone(), received) {
+            new.push(m);
         }
+    }
+    // A batch is written at once, after the store is let go (as `ChannelShared::keep` writes one).
+    let upto = journal.queued();
+    if let Err(e) = write_through(&c.store, &journal, upto) {
+        c.problem(format!("the channel's messages could not be saved: {e}"));
     }
     if new.iter().any(|m| !m.extra.is_empty()) {
         let room: Arc<dyn Room> = c.clone();
@@ -1590,11 +1647,11 @@ mod tests {
         let (a, b) = (DeviceKey::from_seed(&[1; 32]), DeviceKey::from_seed(&[2; 32]));
         let ch = FolderId([9; 32]);
         let mut s = Store::open(p.clone(), (10, MAX_BYTES), seal()).unwrap();
-        assert!(s.insert(msg(&a, &ch, 1, 100, "one"), 100).unwrap());
-        assert!(s.insert(msg(&b, &ch, 1, 90, "two"), 100).unwrap());
-        assert!(!s.insert(msg(&b, &ch, 1, 90, "two"), 100).unwrap(), "known");
+        assert!(keep(&mut s, msg(&a, &ch, 1, 100, "one"), 100));
+        assert!(keep(&mut s, msg(&b, &ch, 1, 90, "two"), 100));
+        assert!(!keep(&mut s, msg(&b, &ch, 1, 90, "two"), 100), "known");
         // Far in the future: shown when it arrived.
-        assert!(s.insert(msg(&a, &ch, 2, 10_000_000, "later"), 110).unwrap());
+        assert!(keep(&mut s, msg(&a, &ch, 2, 10_000_000, "later"), 110));
         let order: Vec<&str> = s.msgs.values().map(|m| m.msg.text().unwrap()).collect();
         assert_eq!(order, ["two", "one", "later"]);
         let have = s.have(ch);
@@ -1608,10 +1665,10 @@ mod tests {
         let missing: Vec<String> = s.missing_for(&theirs).iter().map(|m| m.text().unwrap().to_string()).collect();
         assert_eq!(missing, ["two", "later"]);
         for i in 3..20 {
-            s.insert(msg(&a, &ch, i, 200 + i, "x"), 300).unwrap();
+            keep(&mut s, msg(&a, &ch, i, 200 + i, "x"), 300);
         }
         assert!(s.msgs.len() <= 10 && s.floor_at_ms > 0);
-        assert!(!s.insert(msg(&b, &ch, 2, 1, "too old"), 300).unwrap(), "older than what is kept");
+        assert!(!keep(&mut s, msg(&b, &ch, 2, 1, "too old"), 300), "older than what is kept");
         let n = s.msgs.len();
         drop(s);
         // A cut-off tail is dropped, the rest kept.
@@ -1623,8 +1680,95 @@ mod tests {
         assert!(Store::open(p.clone(), (10, MAX_BYTES), seal()).err().is_some_and(|e| e.to_string().contains("newer Seedwell")));
     }
 
+    /// Keeps a message and writes it, as [`ChannelShared::keep`] does.
+    fn keep(s: &mut Store, m: ChatMessage, received_ms: u64) -> bool {
+        let kept = s.insert(m, received_ms);
+        s.journal.flush(s.journal.queued()).unwrap();
+        kept
+    }
+
     fn seal() -> Sealer {
         Sealer::new([7; 32], MAGIC)
+    }
+
+    /// The failure: a write of the messages file fails (Windows: a virus scanner holds the file, and the rename of a
+    /// prune's rewrite is refused; a full disk cuts an append off halfway) and the messages it carried are only in
+    /// memory, lost on a restart, while their send said it was saved. Every message the store holds must be in its file
+    /// after the next write that succeeds, and a send whose message could not be saved is told.
+    #[test]
+    fn a_failed_write_loses_no_message_and_a_send_not_saved_is_told() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("x.chat");
+        let ch = FolderId([9; 32]);
+        let a = DeviceKey::from_seed(&[1; 32]);
+        let store = Mutex::new(Store::open(p.clone(), (10, MAX_BYTES), seal()).unwrap());
+        let journal = lock(&store).journal.clone();
+        let send = |seq: u64| keep_in(&store, msg(&a, &ch, seq, 1_000 + seq, "m"), 5_000);
+        for seq in 1..=4 {
+            assert!(send(seq).unwrap());
+        }
+        // An append cut off halfway: the file is written anew at once, and the send is saved.
+        journal.test_fail.store(1, SeqCst);
+        assert!(send(5).unwrap());
+        // The write and the whole file anew both refused: the sender is told. The next send saves both.
+        journal.test_fail.store(2, SeqCst);
+        assert!(send(6).is_err(), "a message that could not be saved is not said to be");
+        assert!(send(7).unwrap());
+        // Over the cap: the prune's rewrite (its rename) refused, then written anew.
+        for seq in 8..=10 {
+            assert!(send(seq).unwrap());
+        }
+        journal.test_fail.store(1, SeqCst);
+        assert!(send(11).unwrap());
+        assert!(lock(&store).floor_at_ms > 0, "it pruned");
+        assert!(send(12).unwrap());
+        let held: Vec<Key> = lock(&store).msgs.keys().copied().collect();
+        drop(store);
+        let again = Store::open(p, (10, MAX_BYTES), seal()).unwrap();
+        assert_eq!(again.msgs.keys().copied().collect::<Vec<_>>(), held, "the file holds every message held");
+    }
+
+    /// The failure: with the file written after the store's lock is let go, writes of messages kept at once on several
+    /// threads land out of turn: an append lost under a whole rewrite made before it, an older rewrite renamed over a
+    /// newer one, or a record written twice. Every message the store holds must be in its file after a restart, and
+    /// nothing else. (A cap of 40 makes it drop its oldest, and write the whole file anew, again and again.)
+    #[test]
+    fn messages_kept_at_once_on_several_threads_are_all_in_the_file_in_the_stores_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("x.chat");
+        let ch = FolderId([9; 32]);
+        let store = Arc::new(Mutex::new(Store::open(p.clone(), (40, MAX_BYTES), seal()).unwrap()));
+        let threads: Vec<_> = (0..6u8)
+            .map(|t| {
+                let store = store.clone();
+                std::thread::spawn(move || {
+                    let key = DeviceKey::from_seed(&[t + 1; 32]);
+                    for seq in 1..=60u64 {
+                        // (One older than what the store keeps by now is refused: not kept, not written.)
+                        keep_in(&store, msg(&key, &ch, seq, 1_000 + seq * 10 + u64::from(t), "m"), 5_000).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        let held: Vec<Key> = lock(&store).msgs.keys().copied().collect();
+        drop(store);
+        let again = Store::open(p.clone(), (40, MAX_BYTES), seal()).unwrap();
+        let on_disk: Vec<Key> = again.msgs.keys().copied().collect();
+        assert_eq!(on_disk, held, "the file holds what the store held");
+        // Opened without dropping or mending anything: no record twice (which would have made it prune or count).
+        let bytes = std::fs::read(&p).unwrap();
+        let mut r = Reader::new(bytes.strip_prefix(MAGIC).unwrap());
+        r.varint("format").unwrap();
+        let mut records = 0;
+        while r.remaining() > 0 {
+            r.bytes(usize::MAX >> 1, "record").unwrap();
+            records += 1;
+        }
+        assert_eq!(records, held.len(), "each message once");
     }
 
     #[test]
@@ -1649,7 +1793,7 @@ mod tests {
         let mut s = Store::open(p.clone(), (10, MAX_BYTES), seal()).unwrap();
         assert_eq!(s.msgs.len(), 2, "kept");
         assert!(!found(b"secret words"), "sealed once opened");
-        s.insert(msg(&a, &ch, 3, 103, "third secret words"), 103).unwrap();
+        keep(&mut s, msg(&a, &ch, 3, 103, "third secret words"), 103);
         assert!(!found(b"secret words"), "a new message is appended sealed");
         drop(s);
 

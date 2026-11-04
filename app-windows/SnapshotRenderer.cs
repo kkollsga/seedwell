@@ -137,6 +137,7 @@ sealed class SnapshotRenderer(App app, FlyoutWindow flyout, string dir, string t
         {
             app.Library.SelectPlace(place);
             pane.Refresh();
+            if (pane.ChatPageShown is ChatPage conversation) await conversation.Read();
             await Settle();
             await Save(window.Content, name);
         }
@@ -295,9 +296,11 @@ sealed class SnapshotRenderer(App app, FlyoutWindow flyout, string dir, string t
                 page.QaHover(inRun, false);
                 page.QaHover(runEnd, false);
                 page.QaReply(notesModel.Messages.ToList().FindIndex(m => m.Who == ChatAuthorKind.Theirs));
+                await page.Read();
                 await Settle();
                 await Save(window.Content, "library-chat-reply");
                 page.Escape();
+                await page.Read();
                 // Send as it can send (the accent; grey above, with nothing to send).
                 page.QaType("Shipping it tonight");
                 // The button's state changes with a short animation.
