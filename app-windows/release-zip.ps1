@@ -113,7 +113,7 @@ try {
     # The app starts from the unzipped folder with what the zip holds, and draws (quiet: no window is activated).
     $p = Start-Process "$check\app\Seedwell.exe" -ArgumentList '--render-snapshots', "$check\render", '--theme', 'dark' -PassThru
     if (-not $p.WaitForExit(120000)) { $p.Kill(); throw 'the unzipped app did not finish a render within 120 s' }
-    if ($p.ExitCode -ne 0) { throw "the unzipped app's render ended with $($p.ExitCode)" }
+    if ($p.ExitCode -ne 0) { throw "the unzipped app's render ended with $($p.ExitCode): $(Get-Content "$check\render\error-dark.txt" -TotalCount 1 -ErrorAction SilentlyContinue)" }
     if (-not (Test-Path "$check\render\library-downloads-dark.png")) { throw 'the unzipped app drew nothing' }
     $errors = $null
     [Management.Automation.Language.Parser]::ParseFile((Join-Path $Out 'install.ps1'), [ref]$null, [ref]$errors) | Out-Null

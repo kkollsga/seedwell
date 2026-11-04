@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use trs_sync::folder::{FolderCore, HostError, RENAME_NEEDS_HOLDER, Requested};
+use trs_sync::fs::Fs;
 use trs_sync::index::IndexStore;
 use trs_sync::ondemand::{ChangePage, Deleted, Evicted, Item, Page};
 use trs_sync_proto::ids::{FolderId, ShortId};
@@ -637,7 +638,8 @@ impl SyncHandle {
     ///
     /// `base` is the item's `content_version` the user's edit started from, `None` for a new file. When the item moved on since (another device's version came first), or a new file's path is taken now,
     /// the content becomes a conflict copy named as a full folder names one, and the version there stays. Returns the
-    /// path written.
+    /// path written. Kept in place, a new file that is the item's own placeholder there, filled with its content and
+    /// unchanged since (the host adopting it a second time), is that item: nothing is written, and its path returned.
     pub async fn od_write(&self, id: &FolderId, path: &str, from: &Path, base: Option<&str>) -> Result<String, SyncError> {
         check(path)?;
         if path.is_empty() {
@@ -647,24 +649,36 @@ impl SyncHandle {
         let (root, p, from, base) = (f.root.clone(), path.to_string(), from.to_path_buf(), base.map(str::to_string));
         let device = lock(&self.inner.ctx.device_name).clone();
         let placed = f.placed.clone();
-        self.with_core(&f, move |c| {
-            // Checked first: a refused write leaves the cache as it was.
-            let to = c.host_target(&p, base.as_deref(), &device)?;
-            make_parents(c, &root, &to)?;
-            let target = abs(&root, &to);
-            let tmp = abs(&root, &trs_sync::pull::temp_path(&to));
-            // `std::fs::copy` clones on APFS: the host's copy and the cache share their blocks.
-            std::fs::copy(&from, &tmp)?;
-            // Kept in place: the new content is the cache's until the host fills the placeholder with it
-            // (`od_hydrated`), whose note stays as a record of what it held.
-            if let Some(pl) = &placed {
-                pl.let_go(&to)?;
-            }
-            std::fs::rename(&tmp, &target)?;
-            if to == p { c.host_written(&to) } else { c.host_written_copy(&to, &p) }?;
-            Ok(to)
-        })
-        .await
+        let written = self
+            .with_core(&f, move |c| {
+                // The host adopting a new file a second time (Windows: it took the folder above first, and this file
+                // with it): its own placeholder, filled with the item's content and unchanged since, is that item.
+                if base.is_none()
+                    && let Some(pl) = &placed
+                    && adopted_already(pl, c.store(), &p, &from)?
+                {
+                    return Ok(p);
+                }
+                // Checked first: a refused write leaves the cache as it was.
+                let to = c.host_target(&p, base.as_deref(), &device)?;
+                make_parents(c, &root, &to)?;
+                let target = abs(&root, &to);
+                let tmp = abs(&root, &trs_sync::pull::temp_path(&to));
+                // `std::fs::copy` clones on APFS: the host's copy and the cache share their blocks.
+                std::fs::copy(&from, &tmp)?;
+                // Kept in place: the new content is the cache's until the host fills the placeholder with it
+                // (`od_hydrated`), whose note stays as a record of what it held.
+                if let Some(pl) = &placed {
+                    pl.let_go(&to)?;
+                }
+                std::fs::rename(&tmp, &target)?;
+                if to == p { c.host_written(&to) } else { c.host_written_copy(&to, &p) }?;
+                Ok(to)
+            })
+            .await?;
+        // A kept folder above it is taken up with it (`make_parents`).
+        taken_up(&f, &written);
+        Ok(written)
     }
 
     /// Why `path` (a directory with `dir`) is a name on-demand folder `id` does not sync, if it is: the line that decides
@@ -682,6 +696,13 @@ impl SyncHandle {
     }
 
     /// The user's new folder at `path` (with any missing folders above it).
+    ///
+    /// Kept in place, a folder another device deleted that the host kept (it holds only names this folder does not
+    /// sync, as a full folder keeps it; SPEC §7G.11, *Kept folders*) is refused with [`OnDemandError::Ignored`]: nothing
+    /// is recorded or sent, the delete stays the record, and the folder shows the full folder's issue ("kept: …"), once.
+    /// The host leaves it as its own plain folder. A synced file in it later takes it up again: this call then records
+    /// it, and so does [`Self::od_write`] of a file below it. A folder made after the delete (by its creation time) is
+    /// new, and recorded even empty. The issue ends as [`check_kept`] says.
     pub async fn od_mkdir(&self, id: &FolderId, path: &str) -> Result<(), SyncError> {
         check(path)?;
         if path.is_empty() {
@@ -689,20 +710,41 @@ impl SyncHandle {
         }
         let f = self.on_demand_folder(id)?;
         let (root, p) = (f.root.clone(), path.to_string());
-        self.with_core(&f, move |c| {
-            c.host_check_write(&p, true)?;
-            // A folder that is there already is nothing new (and what is in it is not the host's to record).
-            if c.item_at(&p)?.is_some() {
-                return Ok(());
+        // The host's tree, where its folder is (in place only: elsewhere the host's folder is the system's, not seen).
+        let place = f.placed.as_ref().map(|pl| (trs_sync::fs::StdFs::new(pl.place()), pl.place()));
+        let kept = self
+            .with_core(&f, move |c| {
+                c.host_check_write(&p, true)?;
+                // A folder that is there already is nothing new (and what is in it is not the host's to record).
+                if c.item_at(&p)?.is_some() {
+                    return Ok(None);
+                }
+                if let Some((place, at)) = &place
+                    && let Some(kept) = c.host_kept_dir(&p, place, &|q: &str| born(&abs(at, q)))?
+                {
+                    return Ok(Some(kept));
+                }
+                make_parents(c, &root, &p)?;
+                match std::fs::create_dir(abs(&root, &p)) {
+                    Err(e) if e.kind() != io::ErrorKind::AlreadyExists => return Err(e.into()),
+                    _ => {}
+                }
+                c.host_made_dir(&p)?;
+                Ok(None)
+            })
+            .await?;
+        let Some(kept) = kept else {
+            taken_up(&f, path);
+            return Ok(());
+        };
+        {
+            let mut live = lock(&f.live);
+            match &kept.by {
+                Some(by) => live.set_kept(path, by),
+                None => live.drop_kept(path),
             }
-            make_parents(c, &root, &p)?;
-            match std::fs::create_dir(abs(&root, &p)) {
-                Err(e) if e.kind() != io::ErrorKind::AlreadyExists => return Err(e.into()),
-                _ => {}
-            }
-            c.host_made_dir(&p)
-        })
-        .await
+        }
+        Err(super::on_demand(OnDemandError::Ignored, kept.words))
     }
 
     /// The user deleted `path` (and everything below it). On a read-only member it frees the content instead
@@ -1031,6 +1073,77 @@ impl SyncHandle {
     pub async fn join_folder_on_demand(&self, key_or_link: &str, place: PathBuf) -> Result<FolderStatus, SyncError> {
         self.join_with(key_or_link, place, true).await
     }
+}
+
+/// The kept-folder issues ([`SyncHandle::od_mkdir`]) of `path` and the folders above it go: they are in the folder again.
+fn taken_up(f: &FolderShared, path: &str) {
+    let mut live = lock(&f.live);
+    let over: Vec<String> = live.kept.keys().filter(|q| *q == path || path.strip_prefix(q.as_str()).is_some_and(|r| r.starts_with('/'))).cloned().collect();
+    for q in over {
+        live.drop_kept(&q);
+    }
+}
+
+/// When the directory at `at` was made (Unix ns), where the system says.
+fn born(at: &Path) -> Option<i64> {
+    let t = std::fs::symlink_metadata(at).ok()?.created().ok()?;
+    Some(match t.duration_since(std::time::UNIX_EPOCH) {
+        Ok(d) => i64::try_from(d.as_nanos()).unwrap_or(i64::MAX),
+        Err(e) => -i64::try_from(e.duration().as_nanos()).unwrap_or(i64::MAX),
+    })
+}
+
+/// The kept folders of `f` (SPEC §7G.11, *Kept folders*) that are over lose their issue: in the folder again (another
+/// device made it anew), gone from the host's disk, or no longer kept by the file that kept it (deleted, or its line now
+/// `(?d)` or gone). A few stats of the host's disk and index reads, no walk: off the caller's thread only (settling,
+/// and a snapshot's background check). A disk that cannot be read now changes nothing.
+pub(crate) fn check_kept(f: &FolderShared) {
+    let kept: Vec<(String, String)> = lock(&f.live).kept.iter().map(|(d, b)| (d.clone(), b.clone())).collect();
+    if kept.is_empty() {
+        return;
+    }
+    let Some(pl) = &f.placed else { return };
+    let place = trs_sync::fs::StdFs::new(pl.place());
+    let ignore = f.ignore.get();
+    let view = f.index.view();
+    let mut over = Vec::new();
+    for (dir, by) in kept {
+        let back = view.local(&dir).ok().flatten().is_some_and(|r| trs_sync::ondemand::live(&r));
+        let (Ok(d), Ok(b)) = (place.lstat(&dir), place.lstat(&by)) else { continue };
+        let dir_there = d.is_some_and(|m| m.kind == trs_sync_proto::model::FileKind::Dir);
+        let keeps = b.is_some_and(|m| {
+            ignore.matches(&by, m.kind == trs_sync_proto::model::FileKind::Dir).is_some_and(|x| x.ignored && !x.deletable)
+        });
+        if back || !dir_there || !keeps {
+            over.push((dir, by));
+        }
+    }
+    let mut live = lock(&f.live);
+    for (d, by) in over {
+        // (Unless the host offered it again meanwhile, and something else keeps it now.)
+        if live.kept.get(&d) == Some(&by) {
+            live.drop_kept(&d);
+        }
+    }
+}
+
+/// Whether `from`, the host's new file at `p`, is `p`'s own placeholder, which holds the content of the item there
+/// (the host filled it and said so) and is unchanged since: an item the host adopted already.
+fn adopted_already(pl: &crate::placed::Placed, store: &dyn IndexStore, p: &str, from: &Path) -> io::Result<bool> {
+    let Some(n) = pl.held(p).filter(|n| n.at == p) else { return Ok(false) };
+    let Some(rec) = store.local(p)?.filter(|r| trs_sync::ondemand::live(r) && r.file.info.kind == trs_sync_proto::model::FileKind::File) else {
+        return Ok(false);
+    };
+    if n.content != trs_sync::ondemand::content_version_of(&rec.file.info) {
+        return Ok(false);
+    }
+    let at = abs(&pl.place(), p);
+    match (std::fs::canonicalize(&at), std::fs::canonicalize(from)) {
+        (Ok(a), Ok(b)) if a == b => {}
+        _ => return Ok(false),
+    }
+    let Some(m) = trs_sync::fs::StdFs::new(pl.place()).lstat(p)? else { return Ok(false) };
+    Ok(n.real.is_some_and(|r| r.same(&crate::placed::Mark::of(&m))))
 }
 
 /// Makes the folders above `path` that are missing in the cache, each recorded as the host's new folder.

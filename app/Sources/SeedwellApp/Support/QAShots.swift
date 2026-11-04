@@ -183,11 +183,19 @@ import AppKit
 /// against Core Animation's own renderer. Secondary text "+0.3" is 0.3 lighter than whatever it is on, so a word on a
 /// grey pill in a grey selected row stays readable; put through the matrix on its own (black + 0.3, one fixed grey)
 /// it took the grey of the pill, and the sidebar's "agents" pill came out empty in the shots.
+///
+/// The opacity of the layers a vibrant layer is in (SwiftUI's `.compositingGroup().opacity()`) scales its coverage as
+/// its own does. Each macOS builds these layers its own way (macOS 27 gives the sidebar "+0.3" at full alpha, macOS 26
+/// "white at 0.28/0.6/0.95 alpha"), so the pass follows the layers and their matrices, not one macOS.
 @MainActor enum VibrancyPass {
     private struct Vibrant {
         let layer: CALayer
         /// CAColorMatrix: rows for red, green, blue and alpha, each 4 factors (r, g, b, a) and a bias.
         let matrix: [Float]
+        /// The opacity of the layers it is in, below the root (its own is in its drawing).
+        let group: Float
+        /// The matrix is the layer's compositing filter (icons, the selection), not one of its filters (text).
+        let compositing: Bool
         /// Where it is drawn, in the root layer's points, and the part of it its clipping ancestors leave.
         let frame: CGRect
         let visible: CGRect
@@ -198,7 +206,7 @@ import AppKit
     static func image(of view: NSView) -> NSBitmapImageRep? {
         guard let root = view.layer else { return SnapshotWindow.image(of: view) }
         var found: [Vibrant] = []
-        collect(root, root: root, clip: root.bounds, into: &found)
+        collect(root, root: root, clip: root.bounds, group: 1, into: &found)
         guard !found.isEmpty else { return SnapshotWindow.image(of: view) }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
@@ -217,6 +225,8 @@ import AppKit
               let mask = coverage.data?.bindMemory(to: UInt8.self, capacity: width * height * 4) else { return base }
         coverage.scaleBy(x: scale, y: scale)
         for v in found {
+            // A compositing filter other than a plain one inside a layer with an opacity: Core Animation draws nothing.
+            if v.compositing, v.group < 1, !plain(v.matrix) { continue }
             let area = v.visible.intersection(v.frame)
             guard !area.isEmpty, let image = render(v) else { continue }
             coverage.saveGState()
@@ -234,7 +244,7 @@ import AppKit
                     guard a > 0 else { continue }
                     let i = row * base.bytesPerRow + x * 4
                     var px = (data[i], data[i + 1], data[i + 2], data[i + 3])
-                    blend(&px, coverage: Float(a) / 255, matrix: v.matrix)
+                    blend(&px, coverage: Float(a) / 255 * v.group, matrix: v.matrix, held: v.compositing && v.group < 1)
                     (data[i], data[i + 1], data[i + 2], data[i + 3]) = px
                 }
             }
@@ -244,22 +254,34 @@ import AppKit
 
     /// A pixel of the picture (premultiplied RGBA) under a vibrant layer that covers `coverage` of it: the pixel moved
     /// towards the layer's matrix applied to it, by the alpha the matrix gives times the coverage. As Core Animation
-    /// does it, the matrix's colour is not clamped before the mix (only the result is), so half a pixel of "-0.3" over
-    /// a dark grey is black, not half way to it. (At a soft edge over a light colour Core Animation clamps the plain
-    /// "+bias" matrices first; the pass is then within a tenth of it.)
-    static func blend(_ px: inout (UInt8, UInt8, UInt8, UInt8), coverage: Float, matrix m: [Float]) {
+    /// does it, a plain matrix (each colour itself plus a bias) has its colour held at 1 before the mix, so "white at
+    /// 0.6" over a mid grey is 0.6 of the way to white, not grey + 0.6, and "+0.3" at a light letter's soft edge is
+    /// not white; it is not held at 0, so half a pixel of "-0.3" over a dark grey is black, not half way to it. Other
+    /// matrices mix their colour as it comes. `held`: a compositing filter inside a layer with an opacity, whose
+    /// colour Core Animation holds between 0 and 1 (half of "-0.3" over a dark grey is then half way to black). Only
+    /// the result is clamped.
+    static func blend(_ px: inout (UInt8, UInt8, UInt8, UInt8), coverage: Float, matrix m: [Float], held: Bool = false) {
         let da = Float(px.3) / 255
         let unpremultiply: Float = da > 0 ? 1 / (da * 255) : 0
         let d = (Float(px.0) * unpremultiply, Float(px.1) * unpremultiply, Float(px.2) * unpremultiply)
         func row(_ k: Int) -> Float { m[k] * d.0 + m[k + 1] * d.1 + m[k + 2] * d.2 + m[k + 3] * da + m[k + 4] }
         let k = min(1, max(0, row(15))) * coverage
         guard k > 0 else { return }
+        let low: Float = held ? 0 : -.infinity, high: Float = held || plain(m) ? 1 : .infinity
         // Source over, premultiplied: the matrix's colour with alpha k over the pixel.
-        func over(_ c: Float, _ under: UInt8) -> UInt8 { UInt8(min(255, max(0, c * k * 255 + Float(under) * (1 - k))).rounded()) }
+        func over(_ c: Float, _ under: UInt8) -> UInt8 {
+            UInt8(min(255, max(0, min(high, max(low, c)) * k * 255 + Float(under) * (1 - k))).rounded())
+        }
         px = (over(row(0), px.0), over(row(5), px.1), over(row(10), px.2), UInt8(min(255, (k + da * (1 - k)) * 255).rounded()))
     }
 
-    private static func collect(_ layer: CALayer, root: CALayer, clip: CGRect, into found: inout [Vibrant]) {
+    /// Each colour is itself plus a bias (and the alpha any factor).
+    private static func plain(_ m: [Float]) -> Bool {
+        m[0] == 1 && m[6] == 1 && m[12] == 1 && [1, 2, 3, 5, 7, 8, 10, 11, 13].allSatisfy { m[$0] == 0 }
+    }
+
+    /// `group`: the opacity of the layers `layer` is in, below the root (the view's drawing leaves out the root's own).
+    private static func collect(_ layer: CALayer, root: CALayer, clip: CGRect, group: Float, into found: inout [Vibrant]) {
         guard !layer.isHidden, layer.opacity > 0 else { return }
         let frame = root.convert(layer.bounds, from: layer)
         var clip = clip
@@ -273,10 +295,12 @@ import AppKit
             m.withUnsafeMutableBytes { value.getValue($0.baseAddress!, size: 80) }
             let a = root.convert(CGPoint(x: layer.bounds.minX, y: layer.bounds.minY), from: layer)
             let b = root.convert(CGPoint(x: layer.bounds.minX, y: layer.bounds.minY + 1), from: layer)
-            found.append(Vibrant(layer: layer, matrix: m, frame: frame, visible: clip, flipped: b.y < a.y))
+            found.append(Vibrant(layer: layer, matrix: m, group: group, compositing: filter === layer.compositingFilter as? NSObject,
+                                 frame: frame, visible: clip, flipped: b.y < a.y))
             return
         }
-        for s in layer.sublayers ?? [] { collect(s, root: root, clip: clip, into: &found) }
+        let inner = layer === root ? 1 : group * layer.opacity
+        for s in layer.sublayers ?? [] { collect(s, root: root, clip: clip, group: inner, into: &found) }
     }
 
     /// The layer alone at 2x: its coverage (its colours are not used).

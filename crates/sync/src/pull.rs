@@ -186,6 +186,12 @@ enum Leftover {
 /// Steps whose records may wait before they are committed in one batch.
 const COMMIT_EVERY: usize = 64;
 
+/// The issue of a folder another device deleted that stays here because `q`, below it, is ignored on this device and not
+/// deletable (SPEC §7G.2, *Deletable*). On-demand folders say the same of a folder their host keeps (§7G.11).
+pub fn kept_words(q: &str) -> String {
+    format!("kept: \"{q}\" is ignored on this device; a (?d) in front of its line in .seedwellignore lets it go with the folder")
+}
+
 /// A step that did not run, and why.
 enum Skip {
     Rescan,
@@ -884,9 +890,7 @@ impl Puller<'_> {
                             return Err(match found {
                                 // Only ignored files keep it: that stays so until someone removes them or marks their
                                 // line `(?d)`. Said once (an issue), not tried again until something there changes.
-                                Leftover::Ignored(q) => Skip::Unsupported(format!(
-                                    "kept: \"{q}\" is ignored on this device; a (?d) in front of its line in .seedwellignore lets it go with the folder"
-                                )),
+                                Leftover::Ignored(q) => Skip::Unsupported(kept_words(&q)),
                                 _ => Skip::Failed("the directory holds files that are not synced".into()),
                             });
                         }

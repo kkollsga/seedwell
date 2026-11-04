@@ -50,6 +50,49 @@ sealed class CloudHost : SyncHostListener
         /// <summary>Paths the system was allowed to free (NOTIFY_DEHYDRATE), and when: the mark it leaves is not the user's choice.</summary>
         public Dictionary<string, DateTime> SystemAsked { get; } = new(StringComparer.OrdinalIgnoreCase);
 
+        /// <summary>The root's path without its drive, in its full form: what a callback's path starts with.</summary>
+        public string Normal { get; set; } = "";
+
+        // Paths the user deleted or renamed away a moment ago: a new file there is a save by replace, looked at soon.
+        readonly Dictionary<string, long> left = new(StringComparer.OrdinalIgnoreCase);
+
+        public void NoteLeft(string path)
+        {
+            lock (left) left[path] = Environment.TickCount64;
+        }
+
+        public bool JustLeft(string path)
+        {
+            lock (left) return left.TryGetValue(path, out var at) && Environment.TickCount64 - at < 5000;
+        }
+
+        /// <summary>A folder or file the user moved: it and what is below it are placed at the new path from now on.</summary>
+        public void Moved(string from, string to)
+        {
+            lock (Placed)
+            {
+                foreach (var (id, path) in Placed.ToArray())
+                {
+                    if (!path.Equals(from, StringComparison.OrdinalIgnoreCase) && !path.StartsWith(from + "/", StringComparison.OrdinalIgnoreCase)) continue;
+                    At.Remove(path);
+                    var moved = to + path[from.Length..];
+                    Placed[id] = moved;
+                    At[moved] = id;
+                }
+            }
+        }
+
+        /// <summary>An item and what is placed below it are no longer placed (gone from the folder).</summary>
+        public void UnmarkTree(string id)
+        {
+            lock (Placed)
+            {
+                if (!Placed.TryGetValue(id, out var path)) return;
+                foreach (var below in IdsBelow(path)) Unmark(below, out _);
+                Unmark(id, out _);
+            }
+        }
+
         // Written on the feed's queue only; the system's callbacks read through PathOf (under the same lock).
         public void Mark(string id, string path)
         {
@@ -257,6 +300,7 @@ sealed class CloudHost : SyncHostListener
     {
         app.Core.SyncSetInPlace(root.Id, true);
         Directory.CreateDirectory(root.Path);
+        root.Normal = CloudFiles.WithoutVolume(root.Path);
         var identity = Encoding.UTF8.GetBytes(root.Id);
         var h = GCHandle.Alloc(identity, GCHandleType.Pinned);
         try
@@ -554,11 +598,84 @@ sealed class CloudHost : SyncHostListener
     {
         if (!root.Unmark(id, out var path)) return;
         var full = Full(root, path);
+        // Only the placeholder of this item: a plain file there is the user's new one, not adopted yet.
+        if (!(File.Exists(full) || Directory.Exists(full)) || CloudFiles.IdentityOf(full) != id) return;
         // The host's own delete (the item and what was placed below it): their NOTIFY_DELETEs are not the user's.
         using (root.Own([id, .. root.IdsBelow(path)]))
         {
-            if (Directory.Exists(full)) Directory.Delete(full, true);
-            else if (File.Exists(full)) File.Delete(full);
+            if (Directory.Exists(full)) RemoveFolder(root, full, path);
+            else File.Delete(full);
+        }
+    }
+
+    /// <summary>
+    /// A folder the feed deleted: its placeholders go. A plain file stays unless the core says its ignore line lets it go
+    /// (a full folder keeps a folder that holds what is not synced, as it does here), and the folder stays with it, plain.
+    /// True when the folder went.
+    /// </summary>
+    bool RemoveFolder(Root root, string full, string rel)
+    {
+        var empty = true;
+        foreach (var entry in Directory.EnumerateFileSystemEntries(full))
+        {
+            var below = $"{rel}/{Path.GetFileName(entry)}";
+            if (Directory.Exists(entry))
+            {
+                if (!RemoveFolder(root, entry, below)) empty = false;
+            }
+            else if (CloudFiles.IsPlaceholder(entry) || app.Core.SyncIgnored(root.Id, below, false) is { Deletable: true })
+            {
+                File.Delete(entry);
+            }
+            else
+            {
+                empty = false;
+            }
+        }
+        if (empty)
+        {
+            Directory.Delete(full);
+        }
+        else if (CloudFiles.IsPlaceholder(full))
+        {
+            using var h = CloudFiles.Open(full);
+            CloudFiles.CfRevertPlaceholder(h, 0, IntPtr.Zero);
+        }
+        return empty;
+    }
+
+    /// <summary>Whether a callback's path is where the item is placed: a file renamed aside carries the identity of an item that is elsewhere now.</summary>
+    static bool PlacedAt(Root root, in CloudFiles.CallbackInfo info, string item) =>
+        string.Equals(Marshal.PtrToStringUni(info.NormalizedPath), $"{root.Normal}\\{root.PathOf(item).Replace('/', '\\')}", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>A notice the core has for a failure of this kind, if the user is to be told (once per file and problem in ten minutes).</summary>
+    void Tell(Root root, SyncErrorKind kind, string path)
+    {
+        try
+        {
+            if (notices.SyncOndemandNotice(root.Id, kind, path) is Notice n) app.Dispatch(() => app.Notifier?.Post(n));
+        }
+        catch { }
+    }
+
+    /// <summary>
+    /// A file or folder renamed onto a name not synced: it left the folder, and what is at the new name (once the rename
+    /// has happened) goes back to plain files. Word deletes it in a moment; then there is nothing to do.
+    /// </summary>
+    void LetGo(Root root, string full, int tries = 0)
+    {
+        if (!File.Exists(full) && !Directory.Exists(full))
+        {
+            if (tries < 40) _ = Task.Delay(50).ContinueWith(_ => Queue(root, () => LetGo(root, full, tries + 1)));
+            return;
+        }
+        // The deepest first.
+        var all = Directory.Exists(full) ? Directory.EnumerateFileSystemEntries(full, "*", SearchOption.AllDirectories).Reverse().Append(full) : [full];
+        foreach (var entry in all)
+        {
+            if (!CloudFiles.IsPlaceholder(entry)) continue;
+            using var h = CloudFiles.Open(entry);
+            CloudFiles.CfRevertPlaceholder(h, 0, IntPtr.Zero);
         }
     }
 
@@ -636,13 +753,7 @@ sealed class CloudHost : SyncHostListener
             AppLog.Write($"on-demand fetch of {item} failed ({kind?.ToString() ?? e.GetType().Name}): {Words(e)}{(answer < 0 ? $"; the system refused the failure ({answer:X8})" : "")}");
             if (kind is SyncErrorKind k)
             {
-                // The core decides whether the user is told (once per file and problem in ten minutes), by its path.
-                var path = root.PathOf(item);
-                try
-                {
-                    if (notices.SyncOndemandNotice(root.Id, k, path) is Notice n) app.Dispatch(() => app.Notifier?.Post(n));
-                }
-                catch { }
+                Tell(root, k, root.PathOf(item));
             }
         }
     }
@@ -715,14 +826,16 @@ sealed class CloudHost : SyncHostListener
     /// <summary>
     /// The user renames or moves an item, before it happens: the core records it (sync_modify_item: the new parent and
     /// name) and the answer lets it happen, or refuses it with the status for the core's reason. Moved out of the folder,
-    /// it leaves the folder on every device, as a delete does. The host's own moves pass.
+    /// it leaves the folder on every device, as a delete does. Onto a name not synced (Word's save renames the document
+    /// aside), the core takes the item out and the rename must happen; with its content not here the core refuses and
+    /// says so. The host's own moves pass, and so does a file that only carries the identity of an item now elsewhere.
     /// </summary>
     void OnRename(IntPtr infoPtr, IntPtr parameters)
     {
         var info = Marshal.PtrToStructure<CloudFiles.CallbackInfo>(infoPtr);
         var item = Encoding.UTF8.GetString(Bytes(info.FileIdentity, (int)info.FileIdentityLength));
         var status = CloudFiles.StatusSuccess;
-        if (RootOf(info) is Root root && !root.IsOwn(item))
+        if (RootOf(info) is Root root && !root.IsOwn(item) && PlacedAt(root, info, item))
         {
             var from = root.PathOf(item);
             try
@@ -730,7 +843,7 @@ sealed class CloudHost : SyncHostListener
                 var inScope = (CloudFiles.NotifyFlags(parameters) & CloudFiles.RenameTargetInScope) != 0;
                 if ((inScope ? RelativeTo(root, CloudFiles.RenameTarget(info, parameters)) : null) is not string to)
                 {
-                    status = Deleted(root, from, app.Core.SyncDeleteItem(root.Id, item));
+                    status = Deleted(root, item, from, app.Core.SyncDeleteItem(root.Id, item));
                 }
                 else
                 {
@@ -741,14 +854,30 @@ sealed class CloudHost : SyncHostListener
                         if (FolderId(root, ParentOf(to)) is null) root.Work.Wait(TimeSpan.FromSeconds(5));
                         parent = FolderId(root, ParentOf(to)) ?? throw new InvalidOperationException($"{ParentOf(to)} is not in the folder yet");
                     }
-                    var moved = app.Core.SyncModifyItem(root.Id, item, parent, NameOf(to) == NameOf(from) ? null : NameOf(to), null, null);
-                    AppLog.Write($"on-demand: {from} moved here to {moved.Path}");
+                    try
+                    {
+                        var moved = app.Core.SyncModifyItem(root.Id, item, parent, NameOf(to) == NameOf(from) ? null : NameOf(to), null, null);
+                        // Placed there from now on, what is below it too: a callback for one of them comes with the new path.
+                        root.Moved(from, moved.Path);
+                        AppLog.Write($"on-demand: {from} moved here to {moved.Path}");
+                    }
+                    catch (CoreException.OnDemand e) when (e.kind == SyncErrorKind.Ignored)
+                    {
+                        // The core took the item out: at once no longer placed, so no feed step touches the old path, where
+                        // the saved file is about to appear.
+                        root.UnmarkTree(item);
+                        root.NoteLeft(from);
+                        AppLog.Write($"on-demand: {from} left the folder as {to} ({Words(e)})");
+                        Queue(root, () => LetGo(root, Full(root, to)));
+                    }
                 }
             }
             catch (Exception e)
             {
-                status = Status((e as CoreException.OnDemand)?.kind);
+                var kind = (e as CoreException.OnDemand)?.kind;
+                status = Status(kind);
                 AppLog.Write($"on-demand: {from} not moved ({Words(e)})");
+                if (kind == SyncErrorKind.IgnoredNotHere) Tell(root, kind.Value, from);
             }
         }
         CloudFiles.Ack(info, CloudFiles.OperationType.AckRename, status);
@@ -757,19 +886,20 @@ sealed class CloudHost : SyncHostListener
     /// <summary>
     /// The user deletes an item, before it happens: deleted on every device (sync_delete_item). On a read-only member
     /// nothing is deleted and the content is freed instead: the delete is refused and the feed dehydrates it. Something
-    /// that could not go (open elsewhere) refuses it too. The host's own deletes pass.
+    /// that could not go (open elsewhere) refuses it too. The host's own deletes pass, and so does a file that only carries
+    /// the identity of an item now elsewhere (Word's renamed-aside document).
     /// </summary>
     void OnDelete(IntPtr infoPtr, IntPtr parameters)
     {
         var info = Marshal.PtrToStructure<CloudFiles.CallbackInfo>(infoPtr);
         var item = Encoding.UTF8.GetString(Bytes(info.FileIdentity, (int)info.FileIdentityLength));
         var status = CloudFiles.StatusSuccess;
-        if (RootOf(info) is Root root && !root.IsOwn(item) && (CloudFiles.NotifyFlags(parameters) & CloudFiles.DeleteIsUndelete) == 0)
+        if (RootOf(info) is Root root && !root.IsOwn(item) && (CloudFiles.NotifyFlags(parameters) & CloudFiles.DeleteIsUndelete) == 0 && PlacedAt(root, info, item))
         {
             var path = root.PathOf(item);
             try
             {
-                status = Deleted(root, path, app.Core.SyncDeleteItem(root.Id, item));
+                status = Deleted(root, item, path, app.Core.SyncDeleteItem(root.Id, item));
             }
             catch (CoreException.OnDemand e) when (e.kind is SyncErrorKind.NoItem or SyncErrorKind.Gone)
             {
@@ -784,8 +914,11 @@ sealed class CloudHost : SyncHostListener
         CloudFiles.Ack(info, CloudFiles.OperationType.AckDelete, status);
     }
 
-    /// <summary>What a delete answers: done, or refused (a read-only member freed it instead; something stayed).</summary>
-    static int Deleted(Root root, string path, SyncDeleted gone)
+    /// <summary>
+    /// What a delete answers: done, or refused (a read-only member freed it instead; something stayed). Done, the item is at
+    /// once no longer placed: the feed tells of it seconds later, and a new file at that path (a save) is not this placeholder.
+    /// </summary>
+    static int Deleted(Root root, string item, string path, SyncDeleted gone)
     {
         if (gone.Freed is not null)
         {
@@ -797,6 +930,8 @@ sealed class CloudHost : SyncHostListener
             AppLog.Write($"on-demand: {path} not deleted" + string.Concat(gone.Failed.Select(f => $"; {f.Path}: {f.Error}")));
             return CloudFiles.StatusCloudFileInUse;
         }
+        root.UnmarkTree(item);
+        root.NoteLeft(path);
         AppLog.Write($"on-demand: {path} deleted here ({gone.Deleted} items)");
         return CloudFiles.StatusSuccess;
     }
@@ -808,6 +943,7 @@ sealed class CloudHost : SyncHostListener
         var info = Marshal.PtrToStructure<CloudFiles.CallbackInfo>(infoPtr);
         if (RootOf(info) is not Root root) return;
         var item = Encoding.UTF8.GetString(Bytes(info.FileIdentity, (int)info.FileIdentityLength));
+        if (!PlacedAt(root, info, item)) return;
         Queue(root, () =>
         {
             var path = root.PathOf(item);
@@ -839,8 +975,9 @@ sealed class CloudHost : SyncHostListener
     /// <summary>
     /// Something not a placeholder appeared in the folder (made here, copied or moved in): the core takes it
     /// (sync_create_item: a file with its content copied; a folder, then what is in it) and it becomes a placeholder in
-    /// sync. A file still being written is looked at again a moment later. Where the core names it otherwise (a conflict
-    /// copy: something else is at that name now), it is renamed so.
+    /// sync. A name the folder does not sync stays a plain file of this PC. A file still being written is looked at again
+    /// a moment later (sooner where a file just left: a save by replace, and the core waits only so long for it). Where the
+    /// core names it otherwise (a conflict copy: something else is at that name now), it is renamed so.
     /// </summary>
     void Adopt(Root root, string full, int tries = 0)
     {
@@ -849,14 +986,29 @@ sealed class CloudHost : SyncHostListener
         if (!dir && !File.Exists(full)) return;
         // A placeholder renamed or moved: its NOTIFY_RENAME told the core already.
         if (CloudFiles.IsPlaceholder(full)) return;
+        // Asked first: Word holds its owner file open for as long as the document is, so it would never count as closed.
+        if (app.Core.SyncIgnored(root.Id, rel, dir) is SyncIgnored ignored)
+        {
+            AppLog.Write($"on-demand: {rel} not synced ({ignored.Reason})");
+            return;
+        }
         if (FolderId(root, ParentOf(rel)) is null) Adopt(root, Full(root, ParentOf(rel)));
         if (FolderId(root, ParentOf(rel)) is not string parent) return;
         if (!dir && !Closed(full))
         {
-            if (tries < 120) _ = Task.Delay(500).ContinueWith(_ => Queue(root, () => Adopt(root, full, tries + 1)));
+            if (tries < 120) _ = Task.Delay(root.JustLeft(rel) ? 50 : 500).ContinueWith(_ => Queue(root, () => Adopt(root, full, tries + 1)));
             return;
         }
-        var item = app.Core.SyncCreateItem(root.Id, parent, NameOf(rel), dir, dir ? null : full);
+        SyncItem item;
+        try
+        {
+            item = app.Core.SyncCreateItem(root.Id, parent, NameOf(rel), dir, dir ? null : full);
+        }
+        catch (CoreException.OnDemand e) when (e.kind == SyncErrorKind.Ignored)
+        {
+            AppLog.Write($"on-demand: {rel} not synced ({Words(e)})");
+            return;
+        }
         if (item.Path != rel)
         {
             var named = Full(root, item.Path);

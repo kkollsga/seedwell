@@ -962,6 +962,16 @@ impl std::fmt::Display for HostError {
     }
 }
 
+/// A directory another device deleted that the host keeps ([`FolderCore::host_kept_dir`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KeptDir {
+    /// The first file in it that keeps it: ignored on this device and not deletable (`None`: nothing in it is synced,
+    /// and nothing keeps it either).
+    pub by: Option<String>,
+    /// Why, for the host's log; with `by`, the issue a full folder shows on such a directory.
+    pub words: String,
+}
+
 /// What a fetch request found.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Requested {
@@ -1662,6 +1672,67 @@ impl FolderCore {
     pub fn host_made_dir(&mut self, path: &str) -> Result<(), HostError> {
         self.host_check(path)?;
         self.record_dir(path)
+    }
+
+    /// Whether the directory the host adds at `path` is one another device deleted that the host kept (SPEC §7G.11,
+    /// *Kept folders*): the record there is that device's delete of a directory, and the host's directory (in `place`,
+    /// the host's tree, only read) holds no file this folder syncs at any depth, only names it does not sync (or
+    /// nothing; a directory below counts as the same kept directory when its record is such a delete too). Then it is
+    /// left as it is, as a full folder keeps such a directory: not recorded, and the delete stays the record. `None`
+    /// takes it up: no such delete there (a new directory, or this device's own delete), or a synced file is in it.
+    ///
+    /// A kept directory is the one that was there when the delete was made: `born` gives a directory's creation time
+    /// (Unix ns) in `place`, and one made after the second of the delete (its deleting device's counter, a time) is
+    /// new, so it is recorded, also empty (the user's "New folder" at a name deleted long ago). Without a creation
+    /// time it is taken for new as well: the user's intent wins over an empty leftover.
+    pub fn host_kept_dir(&mut self, path: &str, place: &dyn Fs, born: &dyn Fn(&str) -> Option<i64>) -> Result<Option<KeptDir>, HostError> {
+        let me = self.me;
+        let peers_delete = move |store: &dyn IndexStore, p: &str| -> io::Result<bool> {
+            let Some(r) = store.local(p)? else { return Ok(false) };
+            let i = &r.file.info;
+            if !(i.deleted && i.kind == FileKind::Dir && i.modified_by != me) {
+                return Ok(false);
+            }
+            // The delete's second, by the clock of the device that made it (a version counter is a time).
+            let at = i.version.get(i.modified_by);
+            let before = i64::try_from(at.saturating_add(1)).unwrap_or(i64::MAX / 1_000_000_000).saturating_mul(1_000_000_000);
+            Ok(born(p).is_some_and(|b| b < before))
+        };
+        if path.is_empty() || !peers_delete(&*self.store, path)? {
+            return Ok(None);
+        }
+        if !place.lstat(path)?.is_some_and(|m| m.kind == FileKind::Dir && !m.other) {
+            return Ok(None);
+        }
+        self.refresh_ignore()?;
+        let ignore = self.ignore.get();
+        let mut by = None;
+        let mut dirs = vec![path.to_string()];
+        while let Some(d) = dirs.pop() {
+            for e in place.read_dir(&d)?.entries {
+                let q = format!("{d}/{}", crate::path::wire_name(&e.name));
+                let Some(m) = place.lstat(&q)? else { continue };
+                if m.other {
+                    continue;
+                }
+                let dir = m.kind == FileKind::Dir;
+                match ignore.matches(&q, dir) {
+                    Some(crate::ignore::Match { ignored: true, deletable }) => {
+                        if !deletable {
+                            by.get_or_insert(q);
+                        }
+                    }
+                    _ if dir && peers_delete(&*self.store, &q)? => dirs.push(q),
+                    // A synced file, or a directory new here: the directory is taken up with it.
+                    _ => return Ok(None),
+                }
+            }
+        }
+        let words = match &by {
+            Some(q) => crate::pull::kept_words(q),
+            None => format!("\"{path}\" was deleted on another device and holds nothing that is synced; it stays on this device only"),
+        };
+        Ok(Some(KeptDir { by, words }))
     }
 
     /// Records the directory at `path` (it is on disk) as this device's version, itself only.

@@ -412,6 +412,8 @@ public partial class App : Application
     {
         var state = Path.Combine(Path.GetTempPath(), $"seedwell-render-{Environment.ProcessId}");
         Core = new Core(new CoreOptions(state, true, false, null));
+        // Beside the pictures (the state folder goes at the end): every stall is noted there, also those short of failing.
+        AppLog.Open(dir);
         // A render that hangs fails (the core's fail_ms), as a QA run does.
         _ = new HangWatch(ui, () => Core, testRun: true);
         CreateLibrary(state);
@@ -436,7 +438,7 @@ public partial class App : Application
             try { Directory.Delete(state, true); } catch { }
             if (HangWatch.Failed && code == 0)
             {
-                File.WriteAllText(Path.Combine(dir, $"error-{(light ? "light" : "dark")}.txt"), "the UI thread stalled (see stderr)");
+                File.WriteAllText(Path.Combine(dir, $"error-{(light ? "light" : "dark")}.txt"), HangWatch.FailedLine ?? "the UI thread stalled");
                 code = 3;
             }
             Environment.Exit(code);
@@ -1385,7 +1387,7 @@ public partial class App : Application
                 // Notifications (a QA run posts none: it keeps them): notices (the last ones posted) | notice-click <click>
                 // (what a click on a notice with that route string opens).
                 case "notices":
-                    result = Notifier is null ? "no notifier" : string.Join(" || ", Notifier.Posted.TakeLast(5).Select(n => $"{n.Kind}: {n.Title} | {n.Body} [{n.Key ?? "-"}] {{{n.Click}}}"));
+                    result = Notifier is null ? "no notifier" : string.Join(" || ", Notifier.Posted.TakeLast(5).Select(n => $"{n.Kind}: {n.Title} | {n.Body} [{n.Key ?? "-"}] {{{Notifier.ClickArg(n.Click)}}}"));
                     if (result.Length == 0) result = "none";
                     break;
                 case "notice-click":
@@ -1395,7 +1397,7 @@ public partial class App : Application
                 // A click on a notice's button: notice-action <action id> (the last notice that has buttons).
                 case "notice-action":
                     if (Notifier?.Posted.LastOrDefault(n => n.Actions.Length > 0) is not Notice withButtons) { result = "no notice with buttons; "; break; }
-                    Notifier.Clicked(withButtons.Click, Arg(1));
+                    Notifier.Clicked(Notifier.ClickArg(withButtons.Click), Arg(1));
                     await Task.Delay(500);
                     await CoreCalls.Idle();
                     result = $"clicked {Arg(1)} on \"{withButtons.Title}\" [{string.Join(", ", withButtons.Actions.Select(a => a.Id))}]";

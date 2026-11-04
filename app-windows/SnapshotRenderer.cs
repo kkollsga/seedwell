@@ -432,7 +432,9 @@ sealed class SnapshotRenderer(App app, FlyoutWindow flyout, string dir, string t
     {
         var window = app.LibraryWindow;
         var scale = window.Content.XamlRoot?.RasterizationScale ?? 1;
-        var samples = TrsFfiMethods.ChatImageLayoutSamples((uint)Math.Ceiling(760 * scale));
+        // Off the UI thread: the core makes the sample pictures here, seconds on a slow machine or a debug core.
+        var side = (uint)Math.Ceiling(760 * scale);
+        var samples = await Task.Run(() => TrsFfiMethods.ChatImageLayoutSamples(side));
         var attachments = new ChatAttachments(app);
         Task<ChatImageView?> From(ChatImage image, uint side) => Task.FromResult(samples.FirstOrDefault(x => x.Image.Hash == image.Hash)?.View);
         StackPanel Labelled(ChatImageSample sample, double width)
@@ -551,7 +553,13 @@ sealed class SnapshotRenderer(App app, FlyoutWindow flyout, string dir, string t
         }
     }
 
-    Task Save(UIElement element, string name) => SaveImage(element, Path.Combine(dir, $"{name}-{theme}.png"), theme == "light");
+    async Task Save(UIElement element, string name)
+    {
+        // What a stall names: the picture being drawn, or the one before the step that stalled.
+        HangWatch.LastAction = $"render: drawing {name}";
+        await SaveImage(element, Path.Combine(dir, $"{name}-{theme}.png"), theme == "light");
+        HangWatch.LastAction = $"render: after {name}";
+    }
 
     /// <summary>An element drawn to a PNG, laid on the theme's base colour (the QA commands' shot uses it too).</summary>
     internal static async Task SaveImage(UIElement element, string path, bool light)

@@ -447,6 +447,33 @@ pub struct Live {
     /// The folder has its own `.seedwellignore` (looked at off the caller's thread, at start and on settling: the
     /// folder may be on a slow or missing disk).
     pub ignore_file: bool,
+    /// On demand, kept in place: the folders another device deleted that the host kept (SPEC §7G.11, *Kept folders*),
+    /// each with the file that keeps it; each has its issue in `issues`.
+    pub kept: BTreeMap<String, String>,
+    /// When the kept folders were last looked at on disk (at most every [`KEPT_CHECK_EVERY`] from a snapshot).
+    pub kept_checked: Option<std::time::Instant>,
+}
+
+/// How often a snapshot has the kept folders looked at on disk (off the caller's thread) while there are any.
+pub const KEPT_CHECK_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
+
+impl Live {
+    /// Shows the issue of the folder the host kept at `dir`, because of `by` (SPEC §7G.11, *Kept folders*): once, and
+    /// beside any other issue there.
+    pub fn set_kept(&mut self, dir: &str, by: &str) {
+        self.drop_kept(dir);
+        self.kept.insert(dir.to_string(), by.to_string());
+        self.issues.push((dir.to_string(), trs_sync::pull::kept_words(by)));
+    }
+
+    /// The kept folder at `dir` is over (in the folder again, gone, or nothing keeps it now): its issue goes, and only
+    /// that one.
+    pub fn drop_kept(&mut self, dir: &str) {
+        if let Some(by) = self.kept.remove(dir) {
+            let words = trs_sync::pull::kept_words(&by);
+            self.issues.retain(|(p, w)| !(p == dir && *w == words));
+        }
+    }
 }
 
 impl Default for Live {
@@ -464,6 +491,8 @@ impl Default for Live {
             local: (0, 0),
             fetched: 0,
             ignore_file: false,
+            kept: BTreeMap::new(),
+            kept_checked: None,
         }
     }
 }
@@ -1079,5 +1108,24 @@ impl Drop for Freeing {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A kept folder's issue is shown once and goes alone: a pull's issue at the same path stays.
+    #[test]
+    fn a_kept_folders_issue_is_one_and_goes_alone() {
+        let mut live = Live::default();
+        live.issues.push(("docs/old".into(), "could not be read: busy".into()));
+        live.set_kept("docs/old", "docs/old/~keep.tmp");
+        live.set_kept("docs/old", "docs/old/~keep.tmp");
+        let kept = trs_sync::pull::kept_words("docs/old/~keep.tmp");
+        assert_eq!(live.issues.iter().filter(|(_, w)| *w == kept).count(), 1);
+        live.drop_kept("docs/old");
+        assert_eq!(live.issues, [("docs/old".to_string(), "could not be read: busy".to_string())]);
+        assert!(live.kept.is_empty());
     }
 }

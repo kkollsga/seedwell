@@ -1003,6 +1003,13 @@ impl Core {
     /// `SyncErrorKind::Ignored`: nothing is taken, and the host leaves it as an ordinary file. At the name of an item the
     /// host deleted a moment ago (within `REPLACE_WINDOW`, 5 s: a save by replace) the new file is that item, changed:
     /// its identifier is returned, and other devices see an edit (SPEC §7G.11).
+    ///
+    /// A folder kept in place (Windows) that another device deleted and the host kept, because it holds names the folder
+    /// does not sync and may not delete (`~keep.tmp`), fails with `Ignored` as well whenever it is offered again (the
+    /// host's sweep at each start): it holds no synced file at any depth, so it stays the host's plain folder, nothing is
+    /// recorded or sent, and the folder shows the full folder's issue ("kept: …") once (*Kept folders*). Once a synced
+    /// file is in it, the same call takes it up (then the file, adopted as usual). A file the host adopts a second time
+    /// (its own placeholder, filled and unchanged since) returns its item as it is, never a conflict copy.
     pub fn sync_create_item(&self, id: String, parent: String, name: String, is_dir: bool, contents: Option<String>) -> Result<SyncItem, CoreError> {
         self.backend.sync().od_create(&id, &parent, &name, is_dir, contents.as_deref()).map_err(CoreError::from)
     }

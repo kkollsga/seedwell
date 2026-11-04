@@ -475,6 +475,8 @@ async fn settle(f: &Arc<FolderShared>) {
         let fs = f2.fs();
         let gone: Vec<String> = copies.into_iter().filter(|c| matches!(fs.lstat(c), Ok(None))).collect();
         let ignore_file = has_ignore_file(&f2);
+        // Folders the host kept that a pull made live again, or that are over on the host's disk: their issue goes.
+        crate::service::check_kept(&f2);
         let core = lock(&f2.core);
         // Worked out before the needs: what no device can give is not needed (counted apart).
         let unavailable = core.unavailable().map_or(0, |u| u.len() as u64);

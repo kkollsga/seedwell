@@ -24,6 +24,9 @@ sealed class HangWatch
     /// <summary>A QA or render run had a stall of fail_ms or more (the run fails).</summary>
     internal static bool Failed { get; private set; }
 
+    /// <summary>That stall's line: how long, and what was done last.</summary>
+    internal static string? FailedLine { get; private set; }
+
     public HangWatch(DispatcherQueue ui, Func<Core?> core, bool testRun)
     {
         this.ui = ui;
@@ -48,6 +51,7 @@ sealed class HangWatch
                 {
                     Failed = true;
                     var line = TrsFfiMethods.UiStallLine((ulong)late, LastAction, true);
+                    FailedLine = line;
                     Console.Error.WriteLine(line);
                     AppLog.Write($"ui stall: {line}");
                 }

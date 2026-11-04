@@ -54,6 +54,8 @@ $OutFile = "$Log.stdout"
 $env:TRS_FORBID_REAL_HOME = '1'
 $env:CARGO_INCREMENTAL = '0'
 $env:CARGO_TERM_COLOR = 'never'
+# GitHub's Windows runner sets no HOME, but Git Bash does: a run started from it would hide what fails there.
+Remove-Item Env:HOME -ErrorAction SilentlyContinue
 
 $cargoArgs = @('nextest', 'run', '--workspace', '--locked', '--profile', 'ci') + $Extra
 $quoted = $cargoArgs | ForEach-Object { if ($_ -match '[\s"]') { '"' + ($_ -replace '"', '\"') + '"' } else { $_ } }

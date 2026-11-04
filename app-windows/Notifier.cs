@@ -88,10 +88,16 @@ sealed class Notifier
         }));
     }
 
+    /// <summary>
+    /// A notice's click on one line: the core's click can hold a line break (a transfer's id on the line after its kind),
+    /// which neither a log line nor a toast's arguments carry. <see cref="Clicked"/> takes it back.
+    /// </summary>
+    internal static string ClickArg(string click) => click.Replace("%", "%25").Replace("\n", "%0A");
+
     /// <summary>Posts a notice the core made (also one a host asked for, such as an on-demand file that is not here yet).</summary>
     internal void Post(Notice n)
     {
-        AppLog.Write($"notice: {n.Kind}: {n.Title} | {n.Body} [{n.Key ?? "-"}] {{{n.Click}}}");
+        AppLog.Write($"notice: {n.Kind}: {n.Title} | {n.Body} [{n.Key ?? "-"}] {{{ClickArg(n.Click)}}}");
         Posted.Add(n);
         if (Posted.Count > 50) Posted.RemoveAt(0);
         if (Quiet.On)
@@ -106,7 +112,7 @@ sealed class Notifier
         try
         {
             var builder = new AppNotificationBuilder()
-                .AddArgument("click", n.Click)
+                .AddArgument("click", ClickArg(n.Click))
                 .AddText(n.Title)
                 .AddText(n.Body);
             // An agent's request stays on screen until it is answered or dismissed (a reminder; it has its two buttons).
@@ -115,7 +121,7 @@ sealed class Notifier
             // The notice's buttons (an agent's request: Approve, Deny), each with its action for notice_decision.
             foreach (var a in n.Actions)
             {
-                var button = new AppNotificationButton(a.Title).AddArgument("click", n.Click).AddArgument("action", a.Id);
+                var button = new AppNotificationButton(a.Title).AddArgument("click", ClickArg(n.Click)).AddArgument("action", a.Id);
                 if (a.Destructive) button.SetButtonStyle(AppNotificationButtonStyle.Critical);
                 builder.AddButton(button);
             }
@@ -140,6 +146,7 @@ sealed class Notifier
     /// </summary>
     internal void Clicked(string click, string? action = null)
     {
+        click = Uri.UnescapeDataString(click);
         AppLog.Write($"notice clicked{(action is null ? "" : $": {action}")}");
         if (action is not null && TrsFfiMethods.NoticeDecision(click, action) is NoticeDecision d)
         {

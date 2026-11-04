@@ -203,7 +203,8 @@ $checks.render = {
     $p = Start-Process $Exe -ArgumentList '--render-snapshots', $dir, '--theme', $theme -PassThru
     $front = 0
     while (-not $p.HasExited) { if ([QaForeground]::Pid() -eq $p.Id) { $front++ }; Start-Sleep -Milliseconds 50 }
-    if ($p.ExitCode -ne 0) { Fail "the $theme render ended with $($p.ExitCode): $(Get-Content "$dir\error-$theme.txt" -TotalCount 1)" }
+    # With every stall of the run (its log, beside the pictures), so a failure on CI names the step.
+    if ($p.ExitCode -ne 0) { Fail "the $theme render ended with $($p.ExitCode): $(Get-Content "$dir\error-$theme.txt" -TotalCount 1) || $((Get-Content "$dir\logs\app.log" -ErrorAction SilentlyContinue | Where-Object { $_ -like '*ui stall*' }) -join ' || ')" }
     if ($front -gt 0) { Fail "the $theme render held the foreground ($front samples)" }
   }
   $pictures = @(Get-ChildItem $dir -Filter *.png | ForEach-Object FullName)
@@ -677,11 +678,15 @@ $checks.rendezvous = {
     Qa $dir @('window') | Out-Null
     $off = Qa $dir @('rendezvous', 'status')
     if ($off -notmatch 'rendezvous Off') { Fail "not off at first: $off" }
-    Qa $dir @('shot', 'rendezvous-off', 'rendezvous') | Out-Null
+    # The section is on this tab: on another it is not drawn, and a picture of it fails.
+    Qa $dir @('settings', 'tab', 'FolderSync') | Out-Null
+    $shot = Qa $dir @('shot', 'rendezvous-off', 'rendezvous')
+    if (-not (Test-Path "$dir/state/qa/rendezvous-off.png")) { Fail "no picture: $shot" }
     Copy-Item "$dir\state\qa\rendezvous-off.png" "$Out\rendezvous-off.png"
     Qa $dir @('rendezvous', 'use', 'http://127.0.0.1:9') | Out-Null
     $done = WaitFor { $l = Qa $dir @('rendezvous', 'status'); if ($l -match 'problem True' -or $l -match 'refused "[^"]+"') { $l } } 60000 'the result'
-    Qa $dir @('shot', 'rendezvous-result', 'rendezvous') | Out-Null
+    $shot = Qa $dir @('shot', 'rendezvous-result', 'rendezvous')
+    if (-not (Test-Path "$dir/state/qa/rendezvous-result.png")) { Fail "no picture: $shot" }
     Copy-Item "$dir\state\qa\rendezvous-result.png" "$Out\rendezvous-result.png"
     if ($done -notmatch 'rendezvous Off') { Fail "an address that does not answer was taken: $done" }
   } finally { Stop-App $dir $p; Remove-Item -Recurse -Force $dir }
@@ -1611,6 +1616,78 @@ $checks.ondemandchanges = {
     $echo = @(& $mine | Select-Object -Skip $before)
     if ($echo) { Fail "A's changes were taken for B's user's: $($echo -join ' || ')" }
 
+    # Names not synced (the core's rules): each stays a plain file on B, never reaches A, and the log says why.
+    '*.bak' | Set-Content -NoNewline "$docs\.seedwellignore"
+    WaitFor { (Test-Path "$bd\.seedwellignore") -and (Get-Content -Raw "$bd\.seedwellignore") -eq '*.bak' } 20000 'the ignore file on B' | Out-Null
+    $junk = '~$edit.txt', '~WRD0001.tmp', 'Thumbs.db', 'desktop.ini', 'x.bak'
+    foreach ($n in $junk) { 'junk' | Set-Content -NoNewline -LiteralPath "$bd\$n" }
+    foreach ($n in $junk) {
+      WaitFor { Log $b | Where-Object { $_.Contains("on-demand: $n not synced (") } } 10000 "$n to be left alone" | Out-Null
+      if ((Qa $b @('ondemand', 'placeholder', "$bd\$n")) -notmatch 'placeholder False') { Fail "$n became a placeholder" }
+      if (Test-Path -LiteralPath "$docs\$n") { Fail "$n reached A" }
+    }
+
+    # Save by replace. $id: an item's id in the core; $watch: A's file polled every few ms, stopped with $seen (True: it went missing).
+    $id = { param($name) ((& $Cli --socket $sb sync items Docs --json 2>&1) -join '' | ConvertFrom-Json).items | Where-Object { $_.name -eq $name } | ForEach-Object { $_.id } }
+    $watch = { param($path) $ps = [powershell]::Create().AddScript('param($p) while ([IO.File]::Exists($p)) { Start-Sleep -Milliseconds 5 }').AddArgument($path); @{ Ps = $ps; Run = $ps.BeginInvoke() } }
+    $seen = { param($w) $gone = $w.Run.IsCompleted; $w.Ps.Stop(); $w.Ps.Dispose(); $gone }
+    $word = { param($text)
+      Rename-Item "$bd\edit.txt" '~WRL0001.tmp'
+      $text | Set-Content -NoNewline "$bd\~WRD0000.tmp"
+      Rename-Item "$bd\~WRD0000.tmp" 'edit.txt'
+      Remove-Item "$bd\~WRL0001.tmp"
+    }
+    # Word's way: the document renamed aside, a temp file renamed to its name, the old one deleted. One edit, the same item.
+    if ((Get-Content -Raw "$bd\edit.txt") -ne 'edited on B') { Fail 'edit.txt did not read on B before the save' }
+    $before = & $id 'edit.txt'
+    $w = & $watch "$docs\edit.txt"
+    & $word 'saved by replace'
+    WaitFor { (Get-Content -Raw "$docs\edit.txt" -ErrorAction SilentlyContinue) -eq 'saved by replace' } 15000 'the save on A' | Out-Null
+    if (& $seen $w) { Fail 'edit.txt went missing on A during the save' }
+    WaitFor { (Qa $b @('ondemand', 'placeholder', "$bd\edit.txt")) -match 'placeholder True' } 10000 'edit.txt a placeholder again' | Out-Null
+    if ((& $id 'edit.txt') -ne $before) { Fail "the save made a new item: $before, then $(& $id 'edit.txt')" }
+    foreach ($n in '~WRL0001.tmp', '~WRD0000.tmp') { if ((Test-Path "$bd\$n") -or (Test-Path "$docs\$n")) { Fail "$n is left over" } }
+    # With nothing changed: nothing is deleted, also after the window.
+    $w = & $watch "$docs\edit.txt"
+    & $word 'saved by replace'
+    Start-Sleep 8
+    if (& $seen $w) { Fail 'edit.txt went missing on A in a save with nothing changed' }
+    if ((Get-Content -Raw "$docs\edit.txt") -ne 'saved by replace' -or (& $id 'edit.txt') -ne $before) { Fail 'a save with nothing changed changed something' }
+    # Delete, then a new file at once: the same item too.
+    $before = & $id 'new.txt'
+    $w = & $watch "$docs\new.txt"
+    Remove-Item "$bd\new.txt"
+    'recreated' | Set-Content -NoNewline "$bd\new.txt"
+    WaitFor { (Get-Content -Raw "$docs\new.txt" -ErrorAction SilentlyContinue) -eq 'recreated' } 15000 'the recreated file on A' | Out-Null
+    if (& $seen $w) { Fail 'new.txt went missing on A' }
+    if ((& $id 'new.txt') -ne $before) { Fail 'delete and create at once made a new item' }
+    # Not a save: later, it is a new item, and A deleted the old one in between.
+    $before = & $id 'renamed.txt'
+    Remove-Item "$bd\renamed.txt"
+    WaitFor { -not (Test-Path "$docs\renamed.txt") } 15000 'the delete on A' | Out-Null
+    Start-Sleep 1
+    'again' | Set-Content -NoNewline "$bd\renamed.txt"
+    WaitFor { (Get-Content -Raw "$docs\renamed.txt" -ErrorAction SilentlyContinue) -eq 'again' } 15000 'the new file on A' | Out-Null
+    if ((& $id 'renamed.txt') -eq $before) { Fail 'a file made after the window kept the old item' }
+    # An online-only file renamed to a name not synced: refused, nothing changes, and the core's notice says why.
+    if ((Qa $b @('ondemand')) -notmatch 'farther\.txt:p') { Fail 'farther.txt is not online only' }
+    $refused = $false
+    try { Rename-Item "$bd\farther.txt" '~farther.tmp' -ErrorAction Stop } catch { $refused = $true }
+    if (-not $refused -or -not (Test-Path "$bd\farther.txt") -or -not (Test-Path "$docs\farther.txt")) { Fail 'the rename of an online-only file to a name not synced was not refused' }
+    WaitFor { Log $b | Where-Object { $_ -match 'notice: .*farther\.txt. wasn.t renamed' } } 5000 'the notice for the refused rename' | Out-Null
+
+    # A folder the feed deletes: its placeholders and what may go go; a file that may not stays, and the folder with it, plain.
+    New-Item -ItemType Directory "$docs\kf" | Out-Null
+    'k' | Set-Content -NoNewline "$docs\kf\k.txt"
+    WaitFor { Test-Path "$bd\kf\k.txt" } 20000 'kf on B' | Out-Null
+    foreach ($n in '~keep.tmp', 'Thumbs.db') { 'junk' | Set-Content -NoNewline "$bd\kf\$n" }
+    WaitFor { Log $b | Where-Object { $_.Contains('on-demand: kf/~keep.tmp not synced (') } } 10000 '~keep.tmp to be left alone' | Out-Null
+    Remove-Item -Recurse "$docs\kf"
+    WaitFor { -not (Test-Path "$bd\kf\k.txt") } 20000 'kf/k.txt gone from B' | Out-Null
+    WaitFor { -not (Test-Path "$bd\kf\Thumbs.db") } 5000 'kf/Thumbs.db gone from B' | Out-Null
+    if ((Get-Content -Raw "$bd\kf\~keep.tmp") -ne 'junk') { Fail 'a file not synced was deleted with its folder' }
+    if ((Qa $b @('ondemand', 'placeholder', "$bd\kf")) -notmatch 'placeholder False') { Fail 'the folder kept for it is still a placeholder' }
+
     # A read-only folder: a delete is refused, the file is freed instead and stays listed; A keeps it.
     if ((Get-Content -Raw "$bro\ro.txt") -ne 'ro text') { Fail 'ro.txt did not read on B' }
     $refused = $false
@@ -1703,6 +1780,9 @@ foreach ($n in $names) {
   $clock = [Diagnostics.Stopwatch]::StartNew()
   try {
     $pictures = @(& $checks[$n])
+    # A picture a check reports that is not there: its shot failed (Copy-Item only says so and goes on).
+    $missing = @($pictures | Where-Object { $_ -and -not (Test-Path $_) })
+    if ($missing) { Fail "pictures missing: $($missing -join ', ')" }
     $results += [pscustomobject]@{ Check = $n; Result = 'PASS'; Seconds = [math]::Round($clock.Elapsed.TotalSeconds, 1); Note = "$($pictures.Count) pictures" }
   } catch {
     $results += [pscustomobject]@{ Check = $n; Result = 'FAIL'; Seconds = [math]::Round($clock.Elapsed.TotalSeconds, 1); Note = "$_" }

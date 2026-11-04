@@ -313,6 +313,32 @@ static class CloudFiles
         return (CfGetPlaceholderStateFromAttributeTag(BitConverter.ToUInt32(info, 0), BitConverter.ToUInt32(info, 4)) & 0x1) != 0;
     }
 
+    /// <summary>The identity a placeholder carries (CF_PLACEHOLDER_BASIC_INFO: FileIdentityLength at 24, FileIdentity at 28), or null for a plain file.</summary>
+    internal static string? IdentityOf(string path)
+    {
+        if (!IsPlaceholder(path)) return null;
+        using var h = Open(path);
+        var info = new byte[28 + 4096];
+        Check(CfGetPlaceholderInfo(h, 0, info, (uint)info.Length, out _), "placeholder info");
+        return System.Text.Encoding.UTF8.GetString(info, 28, BitConverter.ToInt32(info, 24));
+    }
+
+    /// <summary>A path without its volume, in its full form: what a callback's NormalizedPath is.</summary>
+    internal static string WithoutVolume(string path)
+    {
+        using var h = Open(path);
+        var name = new System.Text.StringBuilder(32768);
+        var n = GetFinalPathNameByHandleW(h, name, (uint)name.Capacity, 0x4 /* VOLUME_NAME_NONE */);
+        if (n == 0) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error(), path);
+        return name.ToString();
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern uint GetFinalPathNameByHandleW(Microsoft.Win32.SafeHandles.SafeFileHandle file, System.Text.StringBuilder path, uint length, uint flags);
+
+    [DllImport("cldapi.dll", ExactSpelling = true)]
+    static extern int CfGetPlaceholderInfo(Microsoft.Win32.SafeHandles.SafeFileHandle file, int infoClass, byte[] info, uint length, out uint returned);
+
     [DllImport("kernel32.dll", SetLastError = true)]
     static extern bool GetFileInformationByHandleEx(Microsoft.Win32.SafeHandles.SafeFileHandle file, int infoClass, byte[] info, uint size);
 

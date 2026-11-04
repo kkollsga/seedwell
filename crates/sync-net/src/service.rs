@@ -230,6 +230,7 @@ mod ondemand;
 #[path = "service_placed.rs"]
 mod placed_api;
 pub use placed_api::LocalChange;
+pub(crate) use ondemand::check_kept;
 pub use ondemand::{FETCH_GRACE, FETCH_STALL, FetchProgress, FetchWait, Fetched};
 
 pub(crate) fn invalid(why: impl Into<String>) -> SyncError {
@@ -2397,12 +2398,35 @@ impl SyncHandle {
         Some(self.status_of(&f))
     }
 
-    fn status_of(&self, f: &FolderShared) -> FolderStatus {
+    fn status_of(&self, f: &Arc<FolderShared>) -> FolderStatus {
         let channel_id = {
             let cfg = lock(&self.inner.cfg);
             cfg.folder(&f.id.to_string()).map(|e| e.channel.clone()).filter(|c| !c.is_empty() && cfg.channels.iter().any(|ch| ch.id == *c))
         };
-        let mut live = lock(&f.live).clone();
+        let mut live = {
+            let mut l = lock(&f.live);
+            if !l.kept.is_empty() {
+                // Folders the host kept (SPEC §7G.11, *Kept folders*) that are in the folder again (another device made
+                // them anew) are over: read from the index's read-only handle, which never waits.
+                let view = f.index.view();
+                let back: Vec<String> = l
+                    .kept
+                    .keys()
+                    .filter(|p| trs_sync::index::IndexStore::local(&view, p).ok().flatten().is_some_and(|r| trs_sync::ondemand::live(&r)))
+                    .cloned()
+                    .collect();
+                for p in back {
+                    l.drop_kept(&p);
+                }
+                // Whether the others still are is a look at the disk: off this thread, the next snapshot shows it.
+                if !l.kept.is_empty() && l.kept_checked.is_none_or(|t| t.elapsed() >= crate::shared::KEPT_CHECK_EVERY) {
+                    l.kept_checked = Some(std::time::Instant::now());
+                    let f = f.clone();
+                    self.inner.rt.spawn_blocking(move || ondemand::check_kept(&f));
+                }
+            }
+            l.clone()
+        };
         live.issues.extend(f.note_issues());
         if !f.on_demand && lock(&self.inner.cfg).folder(&f.id.to_string()).is_some_and(|e| e.full_here) {
             live.issues.push((String::new(), FULL_HERE.into()));

@@ -81,8 +81,9 @@ import Testing
 
     static let rows = ["tag", "unread", "flag", "star"]
 
-    /// A sidebar in a window off the screens, in `state`, drawn as a QA shot draws it.
-    static func picture(dark: Bool, state: RowState, marks: Bool) async throws -> (NSBitmapImageRep, [CGRect]) {
+    /// A sidebar in a window off the screens, in `state`, drawn as a QA shot draws it; its rows, and for each the
+    /// layers drawn in it (what a failure on another Mac reports, as each macOS builds them its own way).
+    static func picture(dark: Bool, state: RowState, marks: Bool) async throws -> (NSBitmapImageRep, [CGRect], [String]) {
         let selection = Selection()
         let w = Window(contentRect: NSRect(x: 0, y: 0, width: 640, height: 360),
                        styleMask: [.titled, .closable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
@@ -119,7 +120,37 @@ import Testing
         })
         // The rows, in the picture's points (y up).
         let bands = (0..<table.numberOfRows).map { frame.convert(table.rect(ofRow: $0), from: table) }
-        return (rep, bands)
+        let root = try #require(frame.layer)
+        return (rep, bands, bands.map { layers(in: $0, of: root) })
+    }
+
+    /// The layers that draw something in `band` (the root's points), with their opacity, the opacity of the layers
+    /// they are in, and their colour matrix.
+    static func layers(in band: CGRect, of root: CALayer) -> String {
+        var out: [String] = []
+        func walk(_ l: CALayer, _ around: Float) {
+            guard !l.isHidden else { return }
+            let frame = root.convert(l.bounds, from: l)
+            let matrix = ([l.compositingFilter].compactMap { $0 } + (l.filters ?? [])).compactMap { f -> String? in
+                guard let f = f as? NSObject, !(f is NSString), let m = matrix(of: f) else { return nil }
+                return "\(f) \(m)"
+            }
+            if frame.intersects(band), l.contents != nil || l.backgroundColor != nil || !matrix.isEmpty {
+                let bg = l.backgroundColor.map { " background \($0.components ?? [])" } ?? ""
+                out.append("\(type(of: l)) at \(frame) opacity \(l.opacity) in \(around)\(bg) \(matrix.joined(separator: ", "))")
+            }
+            for s in l.sublayers ?? [] { walk(s, around * l.opacity) }
+        }
+        walk(root, 1)
+        return out.joined(separator: "\n")
+    }
+
+    /// A colour matrix filter's matrix (CAColorMatrix: rows for red, green, blue and alpha, 4 factors and a bias each).
+    static func matrix(of filter: NSObject) -> [Float]? {
+        guard "\(filter)".contains("ColorMatrix"), let value = filter.value(forKey: "inputColorMatrix") as? NSValue else { return nil }
+        var m = [Float](repeating: 0, count: 20)
+        m.withUnsafeMutableBytes { value.getValue($0.baseAddress!, size: 80) }
+        return m
     }
 
     static func all(_ v: NSView) -> [NSView] { [v] + v.subviews.flatMap { all($0) } }
@@ -168,8 +199,8 @@ import Testing
         var report: [String] = []
         for dark in [true, false] {
             for state in RowState.allCases {
-                let (on, bands) = try await Self.picture(dark: dark, state: state, marks: true)
-                let (off, _) = try await Self.picture(dark: dark, state: state, marks: false)
+                let (on, bands, layers) = try await Self.picture(dark: dark, state: state, marks: true)
+                let (off, _, _) = try await Self.picture(dark: dark, state: state, marks: false)
                 let name = "\(state.rawValue)-\(dark ? "dark" : "light")"
                 if let out {
                     try on.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: "\(out)/sidebar-\(name).png"))
@@ -177,9 +208,12 @@ import Testing
                 let a = Pixels(rep: on), b = Pixels(rep: off)
                 // The table's rows: Chats, tag, unread, Places, flag, star.
                 try #require(bands.count == 6, "\(name): \(bands.count) rows")
-                for (row, band) in zip(Self.rows, [bands[1], bands[2], bands[4], bands[5]]) {
+                for (row, i) in zip(Self.rows, [1, 2, 4, 5]) {
+                    let band = bands[i]
+                    // What a failure says besides its numbers: the row's layers as this macOS built them.
+                    let drawn = "the row's layers:\n\(layers[i])"
                     guard let box = Self.differing(a, b, in: band) else {
-                        Issue.record("\(name): the \(row) mark cannot be seen at all")
+                        Issue.record("\(name): the \(row) mark cannot be seen at all\n\(drawn)")
                         report.append("\(name) \(row): not seen")
                         continue
                     }
@@ -201,12 +235,13 @@ import Testing
                     switch row {
                     case "tag":
                         // The word against its quiet capsule (the capsule itself is meant to be faint).
-                        #expect(text >= 60, "\(name): the \"agents\" tag's word does not read on its capsule (\(Int(text)))")
+                        #expect(text >= 60, "\(name): the \"agents\" tag's word does not read on its capsule (\(Int(text)))\n\(drawn)")
                     case "unread":
-                        #expect(text >= 60, "\(name): the unread number does not read on its capsule (\(Int(text)))")
-                        #expect(Self.distance(fill, row0) >= 60, "\(name): the unread capsule melts into its row (\(Int(Self.distance(fill, row0))))")
+                        #expect(text >= 60, "\(name): the unread number does not read on its capsule (\(Int(text)))\n\(drawn)")
+                        #expect(Self.distance(fill, row0) >= 60,
+                                "\(name): the unread capsule melts into its row (\(Int(Self.distance(fill, row0))))\n\(drawn)")
                     default:
-                        #expect(mark >= 60, "\(name): the \(row) mark melts into its row (\(Int(mark)))")
+                        #expect(mark >= 60, "\(name): the \(row) mark melts into its row (\(Int(mark)))\n\(drawn)")
                     }
                 }
             }
@@ -214,15 +249,12 @@ import Testing
         if let out { try report.joined(separator: "\n").write(toFile: "\(out)/sidebar-contrast.txt", atomically: true, encoding: .utf8) }
     }
 
-    /// The vibrant layers' filters as the sidebar has them (in every state), composited by VibrancyPass and by Core
-    /// Animation's own renderer over the same backdrops: the same colours. (The window server composites with
-    /// Core Animation; an in-process drawing has no vibrancy at all.)
-    @Test func vibrancyPassCompositesAsCoreAnimationDoes() async throws {
-        _ = NSApplication.shared
-        guard let device = MTLCreateSystemDefaultDevice(), let queue = device.makeCommandQueue() else { return }
-        let restore = Self.reduceTransparency()
-        defer { restore() }
-        var filters: [String: (filter: NSObject, content: Bool, matrix: [Float])] = [:]
+    typealias Filter = (filter: NSObject, content: Bool, matrix: [Float])
+
+    /// The colour matrix filters of the sidebar's vibrant layers as this macOS makes them, in every row state, dark and
+    /// light: as a layer's compositing filter (icons, the selection) or among its filters (`content`: text).
+    static func sidebarFilters() throws -> [String: Filter] {
+        var filters: [String: Filter] = [:]
         for dark in [true, false] {
             for state in [RowState.unselected, .accent, .grey] {
                 let selection = Selection()
@@ -234,27 +266,37 @@ import Testing
                 w.contentViewController = NSHostingController(rootView: Sidebar(selection: selection, marks: true))
                 w.setFrameOrigin(NSPoint(x: -30_000, y: -30_000))
                 w.orderFront(nil)
+                defer { w.contentViewController = nil; w.close() }
                 for _ in 0..<6 { spinRunLoop(0.02); w.contentView?.superview?.layoutSubtreeIfNeeded() }
-                let views = Self.all(try #require(w.contentView?.superview))
-                if state != .unselected { selection.rows = Set(Self.rows) }
+                let views = all(try #require(w.contentView?.superview))
+                if state != .unselected { selection.rows = Set(rows) }
                 w.makeFirstResponder(state == .grey ? views.first { ($0 as? NSTextField)?.isEditable == true } : views.first { $0 is NSTableView })
                 for _ in 0..<6 { spinRunLoop(0.02); w.contentView?.superview?.layoutSubtreeIfNeeded() }
                 func walk(_ l: CALayer) {
                     let all: [(Any, Bool)] = [l.compositingFilter].compactMap { $0 }.map { ($0, false) } + (l.filters ?? []).map { ($0, true) }
                     for (f, content) in all {
-                        guard let f = f as? NSObject, !(f is NSString), "\(f)".contains("ColorMatrix"),
-                              let value = f.value(forKey: "inputColorMatrix") as? NSValue else { continue }
-                        var m = [Float](repeating: 0, count: 20)
-                        m.withUnsafeMutableBytes { value.getValue($0.baseAddress!, size: 80) }
+                        guard let f = f as? NSObject, !(f is NSString), let m = matrix(of: f) else { continue }
                         filters["\(f) \(content) \(m)"] = (f, content, m)
                     }
                     for s in l.sublayers ?? [] { walk(s) }
                 }
                 if let root = w.contentView?.superview?.layer { walk(root) }
-                w.contentViewController = nil
-                w.close()
             }
         }
+        return filters
+    }
+
+    /// The vibrant layers' filters as the sidebar has them (in every state), composited by VibrancyPass and by Core
+    /// Animation's own renderer over the same backdrops: the same colours. (The window server composites with
+    /// Core Animation; an in-process drawing has no vibrancy at all.) Each macOS has its own filters, so this checks
+    /// those of the Mac it runs on; `vibrancyPassCompositesAsCoreAnimationDidOnMacOS26` checks macOS 26's anywhere.
+    @Test func vibrancyPassCompositesAsCoreAnimationDoes() async throws {
+        _ = NSApplication.shared
+        let device = try #require(MTLCreateSystemDefaultDevice(), "no Metal device: Core Animation's renderer needs one")
+        let queue = try #require(device.makeCommandQueue())
+        let restore = Self.reduceTransparency()
+        defer { restore() }
+        let filters = try Self.sidebarFilters()
         #expect(filters.count >= 3, "the sidebar's vibrant filters were not found (\(filters.count))")
         let backdrops: [SIMD3<Float>] = [[0, 0, 0], [28, 28, 28], [48, 48, 48], [127, 127, 127], [236, 236, 236], [255, 255, 255], [0, 122, 255]]
         for (name, f) in filters {
@@ -265,13 +307,111 @@ import Testing
                     var px = (UInt8(backdrop.x), UInt8(backdrop.y), UInt8(backdrop.z), UInt8(255))
                     VibrancyPass.blend(&px, coverage: coverage, matrix: f.matrix)
                     let ours = SIMD3(Float(px.0), Float(px.1), Float(px.2))
-                    // Where a layer covers a pixel fully (a letter's body, a selected row) the same colour; at a
-                    // letter's soft edge Core Animation clamps the plain "+bias" matrices before it mixes and the
-                    // others after, which the pass does not copy: within a tenth.
-                    let tolerance: Float = coverage == 1 ? 6 : 26
-                    #expect(Self.distance(ours, core) <= tolerance, "\(name) over \(backdrop) at \(coverage): VibrancyPass \(ours), Core Animation \(core)")
+                    // Where a layer covers a pixel fully (a letter's body, a selected row) and at its soft edge.
+                    #expect(Self.distance(ours, core) <= 6, "\(name) over \(backdrop) at \(coverage): VibrancyPass \(ours), Core Animation \(core)")
                 }
             }
+        }
+    }
+
+    /// What Core Animation's renderer made of macOS 26's sidebar filters (white at 0.28, 0.6 and 0.95 alpha, "+1" on
+    /// every colour) on GitHub's macOS 26.6 runner (the 0.1.18 release's CI run, where the pass drew them as
+    /// "backdrop + alpha" and was up to 60 too light): the pass gives the same on any Mac. AppKit on macOS 27 makes
+    /// other filters, so a Mac with 27 never sees these from its own sidebar.
+    @Test func vibrancyPassCompositesAsCoreAnimationDidOnMacOS26() {
+        // (alpha of the matrix, backdrop grey or the blue accent, coverage, Core Animation's colour)
+        let blue: SIMD3<Float> = [0, 122, 255]
+        let seen: [(Float, SIMD3<Float>, Float, SIMD3<Float>)] = [
+            (0.28, [28, 28, 28], 1, [92, 92, 92]), (0.28, [48, 48, 48], 1, [106, 106, 106]),
+            (0.28, [127, 127, 127], 1, [163, 163, 163]), (0.28, [127, 127, 127], 0.5, [145, 145, 145]),
+            (0.28, [236, 236, 236], 1, [241, 241, 241]), (0.28, [236, 236, 236], 0.5, [239, 239, 239]),
+            (0.28, blue, 1, [71, 159, 255]),
+            (0.95, [28, 28, 28], 1, [244, 244, 244]), (0.95, [48, 48, 48], 1, [245, 245, 245]),
+            (0.95, [48, 48, 48], 0.5, [146, 146, 146]), (0.95, [127, 127, 127], 1, [249, 249, 249]),
+            (0.95, [127, 127, 127], 0.5, [188, 188, 188]), (0.95, blue, 1, [242, 248, 255]), (0.95, blue, 0.5, [121, 185, 255]),
+            (0.6, [28, 28, 28], 1, [164, 164, 164]), (0.6, [48, 48, 48], 1, [172, 172, 172]),
+            (0.6, [127, 127, 127], 1, [204, 204, 204]), (0.6, [127, 127, 127], 0.5, [165, 165, 165]),
+            (0.6, [236, 236, 236], 1, [247, 247, 247]), (0.6, blue, 1, [153, 202, 255]), (0.6, blue, 0.5, [77, 162, 255]),
+        ]
+        for (alpha, backdrop, coverage, core) in seen {
+            let matrix: [Float] = [1, 0, 0, 0, 1, 0, 1, 0, 0, 1, 0, 0, 1, 0, 1, 0, 0, 0, alpha, 0]
+            var px = (UInt8(backdrop.x), UInt8(backdrop.y), UInt8(backdrop.z), UInt8(255))
+            VibrancyPass.blend(&px, coverage: coverage, matrix: matrix)
+            let ours = SIMD3(Float(px.0), Float(px.1), Float(px.2))
+            #expect(Self.distance(ours, core) <= 2, "white at \(alpha) over \(backdrop) at \(coverage): VibrancyPass \(ours), Core Animation \(core)")
+        }
+    }
+
+    /// A vibrant layer with an opacity of its own, inside a layer with one (SwiftUI's `.compositingGroup().opacity()`),
+    /// and inside two: VibrancyPass draws each as Core Animation's renderer does. On GitHub's macOS 26 runner the
+    /// "agents" pill's 16 % fill came out at full strength, its word lost in it, as a vibrant fill whose opacity sits
+    /// on a layer around it did in the pass before it counted that opacity. The layer structure is what differs between
+    /// macOS versions, so it is built here by hand, the same on every Mac.
+    @Test func vibrantLayersInsideAnOpacityAreDrawnAsCoreAnimationDoes() async throws {
+        _ = NSApplication.shared
+        let device = try #require(MTLCreateSystemDefaultDevice(), "no Metal device: Core Animation's renderer needs one")
+        let queue = try #require(device.makeCommandQueue())
+        let restore = Self.reduceTransparency()
+        defer { restore() }
+        // Every matrix this Mac's sidebar has that draws something (Core Animation here composites those as its window
+        // server does; macOS 26's are checked by the test above).
+        let kinds = try Self.sidebarFilters().filter { $0.value.matrix[18] > 0 }
+        #expect(kinds.count >= 2, "the sidebar's vibrant filters were not found (\(kinds.count))")
+        // (the opacity of the layers around it, from the outside in; its own)
+        let structures: [([Float], Float)] = [([], 0.16), ([0.16], 1), ([0.5, 0.5], 0.5)]
+        let w = Window(contentRect: NSRect(x: 0, y: 0, width: 8, height: 8), styleMask: [.borderless], backing: .buffered, defer: false)
+        w.isReleasedWhenClosed = false
+        w.setFrameOrigin(NSPoint(x: -30_000, y: -30_000))
+        w.orderFront(nil)
+        defer { w.close() }
+        for (name, f) in kinds {
+            for backdrop: SIMD3<Float> in [[28, 28, 28], [127, 127, 127], [236, 236, 236]] {
+                for (around, own) in structures {
+                    func build(_ space: CGColorSpace) -> CALayer {
+                        let square = CALayer()
+                        square.frame = CGRect(x: 0, y: 0, width: 8, height: 8)
+                        square.backgroundColor = CGColor(colorSpace: space, components: [0, 0, 0, 1])
+                        square.opacity = own
+                        if f.content { square.filters = [f.filter] } else { square.compositingFilter = f.filter }
+                        var top = square
+                        for o in around.reversed() {
+                            let group = CALayer()
+                            group.frame = square.frame
+                            group.opacity = o
+                            group.addSublayer(top)
+                            top = group
+                        }
+                        return top
+                    }
+                    let core = try #require(Self.coreAnimation(device: device, queue: queue, backdrop: backdrop, build))
+                    let view = Backdrop(frame: NSRect(x: 0, y: 0, width: 8, height: 8), color: backdrop)
+                    w.contentView = view
+                    let space = try #require(CGColorSpace(name: CGColorSpace.sRGB))
+                    CATransaction.begin()
+                    CATransaction.setDisableActions(true)
+                    view.layer?.addSublayer(build(space))
+                    CATransaction.commit()
+                    let rep = try #require(VibrancyPass.image(of: view))
+                    let ours = Pixels(rep: rep).rgb(rep.pixelsWide / 2, rep.pixelsHigh / 2)
+                    #expect(Self.distance(ours, core) <= 6,
+                            "\(name) inside \(around) at \(own) over \(backdrop): VibrancyPass \(ours), Core Animation \(core)")
+                }
+            }
+        }
+    }
+
+    /// A view that is one colour, with room for layers over it.
+    final class Backdrop: NSView {
+        let color: SIMD3<Float>
+        init(frame: NSRect, color: SIMD3<Float>) {
+            self.color = color
+            super.init(frame: frame)
+            wantsLayer = true
+        }
+        required init?(coder: NSCoder) { nil }
+        override func draw(_ dirtyRect: NSRect) {
+            NSColor(srgbRed: CGFloat(color.x / 255), green: CGFloat(color.y / 255), blue: CGFloat(color.z / 255), alpha: 1).setFill()
+            bounds.fill()
         }
     }
 
@@ -279,6 +419,18 @@ import Testing
     /// and over it a square of black with `coverage` alpha carrying `filter`. The square's colour.
     static func coreAnimation(device: any MTLDevice, queue: any MTLCommandQueue, backdrop: SIMD3<Float>, coverage: Float,
                               filter: NSObject, content: Bool) -> SIMD3<Float>? {
+        coreAnimation(device: device, queue: queue, backdrop: backdrop) { space in
+            let square = CALayer()
+            square.frame = CGRect(x: 0, y: 0, width: 8, height: 8)
+            square.backgroundColor = CGColor(colorSpace: space, components: [0, 0, 0, CGFloat(coverage)])
+            if content { square.filters = [filter] } else { square.compositingFilter = filter }
+            return square
+        }
+    }
+
+    /// Core Animation's renderer: a backdrop of 8 by 8 and over it the layers `build` makes. The colour in the middle.
+    static func coreAnimation(device: any MTLDevice, queue: any MTLCommandQueue, backdrop: SIMD3<Float>,
+                              _ build: (CGColorSpace) -> CALayer) -> SIMD3<Float>? {
         let size = 8
         let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: size, height: size, mipmapped: false)
         d.usage = [.renderTarget, .shaderRead, .shaderWrite]
@@ -291,11 +443,7 @@ import Testing
         let root = CALayer()
         root.frame = CGRect(x: 0, y: 0, width: size, height: size)
         root.backgroundColor = CGColor(colorSpace: space, components: [CGFloat(backdrop.x / 255), CGFloat(backdrop.y / 255), CGFloat(backdrop.z / 255), 1])
-        let square = CALayer()
-        square.frame = root.bounds
-        square.backgroundColor = CGColor(colorSpace: space, components: [0, 0, 0, CGFloat(coverage)])
-        if content { square.filters = [filter] } else { square.compositingFilter = filter }
-        root.addSublayer(square)
+        root.addSublayer(build(space))
         renderer.layer = root
         renderer.bounds = root.bounds
         CATransaction.commit()

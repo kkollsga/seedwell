@@ -2321,3 +2321,155 @@ async fn a_big_document_saved_by_replace_reaches_the_other_device_as_one_edit() 
     a.h.shutdown().await;
     b.h.shutdown().await;
 }
+
+/// The issues the folder shows at `path`.
+fn issues_at(h: &SyncHandle, path: &str) -> Vec<String> {
+    h.snapshot().folders.iter().flat_map(|f| f.issues.iter()).filter(|(p, _)| p == path).map(|(_, w)| w.clone()).collect()
+}
+
+/// A folder another device deleted that still holds a file this device does not sync and may not delete
+/// (`~keep.tmp`, under the built-in `~*.tmp`): the Windows host keeps it as a plain folder, as a full folder keeps it,
+/// and its sweep at the next start offers it again (`sync_create_item`: it adopts what is not a placeholder). The core
+/// leaves it: `Ignored`, nothing recorded or sent, the full folder's issue shown once, however often it is offered. A
+/// synced file put in it later takes it up again: the host adopts the folder first, then the file (twice, as its
+/// `Adopt` does: the folder's adoption took the file already), and both reach the full device as one file. A folder at
+/// a name nobody deleted, or one this device deleted itself, holding only such files, is a new empty folder, as a
+/// full folder's scan records it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_folder_deleted_elsewhere_that_the_host_kept_stays_out_until_a_synced_file_comes() {
+    let (a, b, fa, fb, id) = pair().await;
+    let place = fb.path().join("Shared");
+    std::fs::create_dir_all(&place).unwrap();
+    b.h.od_set_in_place(&id, true).await.unwrap();
+    until(30, "B runs again", || b.h.od_item_at(&id, "docs/a.txt").is_ok()).await;
+    std::fs::create_dir_all(fa.path().join("docs/old/sub")).unwrap();
+    std::fs::write(fa.path().join("docs/old/sub/d.txt"), b"delta").unwrap();
+    a.h.rescan(&id).unwrap();
+    until(30, "B lists A's new file", || b.h.od_item_at(&id, "docs/old/sub/d.txt").ok().flatten().is_some()).await;
+    // B's placeholders: docs/old/c.txt and docs/old/sub/d.txt filled; the user's Word temp file beside d.txt.
+    fill_placeholder(&b.h, &id, &place, "docs/old/c.txt").await;
+    fill_placeholder(&b.h, &id, &place, "docs/old/sub/d.txt").await;
+    std::fs::write(place.join("docs/old/sub/~keep.tmp"), b"word's").unwrap();
+    assert!(b.h.od_ignored(&id, "docs/old/sub/~keep.tmp", false).unwrap().is_some_and(|w| !w.deletable));
+
+    // A deletes the folder. The host's steps: the placeholders go, the plain file and the folders above it stay.
+    std::fs::remove_dir_all(fa.path().join("docs/old")).unwrap();
+    a.h.rescan(&id).unwrap();
+    until(30, "B took the delete", || b.h.od_item_at(&id, "docs/old").ok().flatten().is_none()).await;
+    std::fs::remove_file(place.join("docs/old/c.txt")).unwrap();
+    std::fs::remove_file(place.join("docs/old/sub/d.txt")).unwrap();
+
+    // The next start: the host's sweep offers the plain folder, twice here (and again at every start).
+    b.h.shutdown().await;
+    let hb = device_at("Beta", b._state.path()).await;
+    hb.add_address(&id, addr(&a)).unwrap();
+    until(30, "B runs again", || hb.od_item_at(&id, "docs/a.txt").ok().flatten().is_some()).await;
+    let kept = trs_sync::pull::kept_words("docs/old/sub/~keep.tmp");
+    for _ in 0..2 {
+        let e = hb.od_mkdir(&id, "docs/old").await.unwrap_err();
+        assert!(matches!(&e, trs_sync_net::SyncError::OnDemand(trs_sync_net::OnDemandError::Ignored, w) if w == &kept), "{e}");
+    }
+    assert!(hb.od_item_at(&id, "docs/old").unwrap().is_none(), "not recorded");
+    assert_eq!(issues_at(&hb, "docs/old"), std::slice::from_ref(&kept), "the full folder's issue, once");
+    // Something B announces after it reaches A; the kept folder never does.
+    std::fs::create_dir_all(place.join("later")).unwrap();
+    hb.od_mkdir(&id, "later").await.unwrap();
+    until(30, "A has B's later folder", || fa.path().join("later").is_dir()).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(!fa.path().join("docs/old").exists(), "the kept folder did not come back on A");
+
+    // A synced file in it: the host adopts the folder (it holds a synced file now), then the file, then the file again.
+    let new = place.join("docs/old/new.txt");
+    std::fs::write(&new, b"new in the kept folder").unwrap();
+    hb.od_mkdir(&id, "docs/old").await.unwrap();
+    // What is in it: the folder below still holds only the temp file, so it stays kept, with the issue now.
+    let e = hb.od_mkdir(&id, "docs/old/sub").await.unwrap_err();
+    assert!(matches!(&e, trs_sync_net::SyncError::OnDemand(trs_sync_net::OnDemandError::Ignored, w) if w == &kept), "{e}");
+    assert_eq!(issues_at(&hb, "docs/old/sub"), std::slice::from_ref(&kept));
+    assert_eq!(hb.od_write(&id, "docs/old/new.txt", &new, None).await.unwrap(), "docs/old/new.txt");
+    let item = hb.od_item_at(&id, "docs/old/new.txt").unwrap().unwrap();
+    hb.od_hydrated(&id, "docs/old/new.txt", &item.content_version).await.unwrap();
+    assert_eq!(hb.od_write(&id, "docs/old/new.txt", &new, None).await.unwrap(), "docs/old/new.txt", "adopted already: no conflict copy");
+    assert_eq!(hb.od_item_at(&id, "docs/old/new.txt").unwrap().unwrap().id, item.id);
+    assert!(issues_at(&hb, "docs/old").is_empty(), "taken up: the issue went");
+    until(30, "A has the folder and its new file", || read(&fa.path().join("docs/old/new.txt")).as_deref() == Some(&b"new in the kept folder"[..])).await;
+    let names: Vec<String> = std::fs::read_dir(fa.path().join("docs/old")).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+    assert_eq!(names, ["new.txt"], "no conflict copy, no temp file");
+
+    // Nobody deleted this one: a new folder, empty, as a full folder's scan records it.
+    std::fs::create_dir_all(place.join("fresh")).unwrap();
+    std::fs::write(place.join("fresh/~x.tmp"), b"x").unwrap();
+    hb.od_mkdir(&id, "fresh").await.unwrap();
+    // This device deleted this one itself: a folder made there again is new as well.
+    hb.od_delete(&id, "later").await.unwrap();
+    std::fs::write(place.join("later/~y.tmp"), b"y").unwrap();
+    hb.od_mkdir(&id, "later").await.unwrap();
+    assert!(hb.od_item_at(&id, "later").unwrap().is_some());
+    until(30, "A has the new folder, empty", || fa.path().join("fresh").is_dir()).await;
+    assert!(!fa.path().join("fresh/~x.tmp").exists());
+
+    // Another device makes the kept folder below anew: it is in the folder again, and its issue is over.
+    std::fs::create_dir_all(fa.path().join("docs/old/sub")).unwrap();
+    std::fs::write(fa.path().join("docs/old/sub/e.txt"), b"echo").unwrap();
+    a.h.rescan(&id).unwrap();
+    until(30, "B lists A's folder made anew", || hb.od_item_at(&id, "docs/old/sub/e.txt").ok().flatten().is_some()).await;
+    assert!(issues_at(&hb, "docs/old/sub").is_empty());
+    // Deleted for real then (the host removes all of it but the temp file): the old issue does not come back.
+    std::fs::remove_dir_all(fa.path().join("docs/old/sub")).unwrap();
+    a.h.rescan(&id).unwrap();
+    until(30, "B took A's delete", || hb.od_item_at(&id, "docs/old/sub").ok().flatten().is_none()).await;
+    assert!(issues_at(&hb, "docs/old/sub").is_empty(), "no stale issue");
+    a.h.shutdown().await;
+    hb.shutdown().await;
+}
+
+/// The kept folders' ends. A kept folder's issue goes once nothing keeps it (Word closed its temp file), without the
+/// host offering it again; the folder stays out even empty, since it is the one that was there when the delete came.
+/// A folder the user makes later at a name another device deleted (Explorer's empty "New folder") is new: recorded,
+/// it reaches the full device.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_kept_folder_stays_out_empty_and_a_new_one_at_a_deleted_name_is_synced() {
+    let (a, b, fa, fb, id) = pair().await;
+    for d in ["left", "made"] {
+        std::fs::create_dir_all(fa.path().join(d)).unwrap();
+        std::fs::write(fa.path().join(format!("{d}/f.txt")), b"f").unwrap();
+    }
+    a.h.rescan(&id).unwrap();
+    until(30, "B lists A's folders", || b.h.od_item_at(&id, "made/f.txt").ok().flatten().is_some() && b.h.od_item_at(&id, "left/f.txt").ok().flatten().is_some()).await;
+    let place = fb.path().join("Shared");
+    std::fs::create_dir_all(&place).unwrap();
+    b.h.od_set_in_place(&id, true).await.unwrap();
+    until(30, "B runs again", || b.h.od_item_at(&id, "left/f.txt").ok().flatten().is_some()).await;
+    // The host's folder placeholders (their files online only), and Word's temp file in one.
+    std::fs::create_dir_all(place.join("left")).unwrap();
+    std::fs::create_dir_all(place.join("made")).unwrap();
+    std::fs::write(place.join("left/~keep.tmp"), b"word's").unwrap();
+
+    // A deletes both. The host: `made` goes (nothing kept it), `left` stays with the temp file.
+    std::fs::remove_dir_all(fa.path().join("left")).unwrap();
+    std::fs::remove_dir_all(fa.path().join("made")).unwrap();
+    a.h.rescan(&id).unwrap();
+    until(30, "B took the deletes", || b.h.od_item_at(&id, "left").ok().flatten().is_none() && b.h.od_item_at(&id, "made").ok().flatten().is_none()).await;
+    std::fs::remove_dir(place.join("made")).unwrap();
+    let kept = trs_sync::pull::kept_words("left/~keep.tmp");
+    assert!(b.h.od_mkdir(&id, "left").await.is_err());
+    assert_eq!(issues_at(&b.h, "left"), std::slice::from_ref(&kept));
+
+    // Word closes the document: its temp file goes. The issue goes with it (looked at off the snapshot's thread).
+    std::fs::remove_file(place.join("left/~keep.tmp")).unwrap();
+    until(10, "the issue is over", || issues_at(&b.h, "left").is_empty()).await;
+    // Offered again, empty: still the folder that was there when the delete came, so it stays out, with no issue.
+    let e = b.h.od_mkdir(&id, "left").await.unwrap_err();
+    assert!(matches!(&e, trs_sync_net::SyncError::OnDemand(trs_sync_net::OnDemandError::Ignored, _)), "{e}");
+    assert!(issues_at(&b.h, "left").is_empty());
+
+    // Later the user makes an empty "made" again: new, so recorded, and it reaches A.
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    std::fs::create_dir(place.join("made")).unwrap();
+    b.h.od_mkdir(&id, "made").await.unwrap();
+    until(30, "A has the new empty folder", || fa.path().join("made").is_dir()).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(!fa.path().join("left").exists(), "the kept folder stays out");
+    a.h.shutdown().await;
+    b.h.shutdown().await;
+}

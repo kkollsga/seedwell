@@ -118,7 +118,8 @@ them are (`notify_tests.rs`, `ChatControlsTests`).
 buttons in colour) from the first shot on, every 50 ms until two drawings match. Materials draw as with Reduce
 transparency (the window server composites them from what is behind a window on screen) and vibrant layers (the
 sidebar) as Core Animation composites them: their colour matrix applied to what is under them, the layer giving only
-the shape (`VibrancyPass`, checked against Core Animation's own renderer in `SidebarDrawingTests`). Menus and
+the shape and the opacity of the layers it is in (`VibrancyPass`, checked against Core Animation's own renderer in
+`SidebarDrawingTests`, with the filters and layer shapes of macOS 26 as well as those of the Mac it runs on). Menus and
 popovers cannot be drawn off screen: a quiet run opens and refreshes the menu bar menu without showing it and keeps
 context menus "open" for drawing; `shot … menu` draws their real item views and
 stand-ins of what NSMenu draws itself (MenuPanel); the "Starting in …" popover's content lives in a window off screen

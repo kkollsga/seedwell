@@ -2153,6 +2153,30 @@ an app group shared by the app and its extension), a Cloud Files sync root on Wi
     version that follows the delete it left by, is the host letting go of it, answered done, nothing deleted (taken
     once, kept ten minutes). That holds when the saved file has the same content too (a save that changed nothing, an
     editor that renames the file to `name~` and writes it anew): the delete is never taken for one of the saved file.
+  - **Kept folders.** A folder another device deleted that holds files this device does not sync and may not delete
+    (ignored, not deletable: §7G.2, *Deletable*) is kept, as in a full folder. Windows (kept in place) deletes the
+    placeholders in it, keeps those files and the folder, a plain folder again, and offers it as new whenever it sees
+    it (its sweep at each start). The core answers that it is *ignored* (`SyncErrorKind::Ignored`, so the host leaves it
+    plain) while its record is that other device's delete, the folder is the one that was there when the delete was
+    made (made before the second of the delete, by the deleting device's clock: its version counter), and it holds no
+    synced file at any depth (a folder below counts as kept too when the same holds for it; empty counts as holding
+    nothing): nothing is recorded or sent, the delete stays the record, and the folder shows the full folder's issue
+    once (`kept: "…" is ignored on this device; a (?d) in front of its line in .seedwellignore lets it go with the
+    folder`), however often it is offered. A synced file in it takes it up again: the host offers the folder first and
+    it is recorded (so is a folder above a new file the host writes). The issue goes when the folder is taken up, when
+    a pull makes it live again (another device made it anew), when the folder is gone from the host's disk, and when
+    the file named in it no longer keeps it (deleted, or its line now `(?d)` or gone); the last two are looked at off
+    the caller's thread, on settling and at most every 2 s while a snapshot shows the issue, so a folder status never
+    waits for the disk. A folder made after the delete (Explorer's empty "New folder" at a name deleted long ago) is
+    new: recorded, also empty, its version following the delete; so is one whose creation time the system does not
+    give (the user's intent wins over an empty leftover). A folder at a name nobody deleted, or
+    one this device deleted itself, is a new folder, recorded empty, as a full folder's scan records one; so is one in
+    a folder kept in the cache (the Mac), whose host's folder is the system's and not seen by the core: if the system
+    makes such a folder again, it comes back empty on the other devices (answering `excludedFromSync` would hide from
+    Seedwell the synced files put in it later). Unlike a full folder, the kept folder does not go once the ignored files
+    are gone: it stays this device's plain folder (empty), never sent. A file the host adopts a second time (its own
+    placeholder, filled with the item's content and unchanged since: Windows adopts a kept folder's new file with the
+    folder, then again) is that item, returned as it is.
   - The host's changes are checked (mode, role, names, what is there) before the cache is touched, so a refused one
     leaves nothing behind. A delete that cannot remove a file (open elsewhere) keeps it and the folders above it, and
     reports it; the rest go. Files in a deleted folder the host never saw (ignored, unknown, temps) are never deleted
