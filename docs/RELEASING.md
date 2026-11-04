@@ -143,9 +143,10 @@ more in Windows follow-ups asked one at a time and work added halfway. So:
    otherwise when asked.
 2. **Windows work for a release goes to the PC as one checklist:** everything at once (compile, follow-ups, platform
    checks), in one message with the bundle (`.claude/skills/windows-bridge`), not one item at a time.
-3. **No full test run locally, on the Mac or the PC** (the user's decision, 2026-11-03). Changes are tested with
-   targeted tests as they are made (`tools/check.sh --quick`, AGENTS.md *Catching bugs early*); GitHub CI (Mac and
-   Windows) is the thorough run and the gate.
+3. **Shortest tests first, a full local check before code is handed back or pushed** (the user's rule, 2026-11-04,
+   replacing 2026-11-03's "no full local runs"): the Mac's workers hand back after `tools/check.sh --base master`, the
+   PC sends after `run.ps1 all -Build -CoreProfile Debug`, and the public commit goes after `tools/check.sh --base
+   public`. GitHub CI (Mac and Windows) is the gate, and the last check rather than where bugs are found.
 4. **No bug should reach GitHub, even so.** A CI failure is a bug that escaped: fix it, then add the cheapest guard
    that would have caught it locally (a host-like test, the timing list, the portability scan, `check.sh --quick`).
 

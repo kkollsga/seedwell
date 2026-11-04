@@ -54,10 +54,10 @@ A bug the PC finds costs a round trip; the Mac catches what it can first (AGENTS
 
 - each new or changed core call a host uses has a test that acts like the host and asserts the promise it relies
   on (timing, progress, giving up), with what each system does with it written in the doc comment;
-- the worker's `tools/check.sh --quick` passed, which includes the Windows compile check;
+- the worker's `tools/check.sh --base master` passed (the full local check; it includes the Windows compile check);
 - a reviewer agent that builds nothing has read the diff against those promises and the platform differences.
 
-No full test run goes with a bundle, on either machine: GitHub CI is the thorough run (AGENTS.md).
+GitHub CI is the last check, not where bugs are found (AGENTS.md, the user's rule of 2026-11-04).
 A bundle's note says which host-like tests it added, so the PC knows what is already covered and what only its QA
 can show.
 
@@ -78,25 +78,25 @@ attachments, and the README as the message text:
 
 HOW TO QA
 compiled: <dotnet build result>
-ran: <the QA checks run here, PASS/FAIL, what they showed>
-CI only: <the checks that will first run on CI>
+ran: <the targeted checks while working, and the full run.ps1 all -Build -CoreProfile Debug before sending: n of N PASS>
+not run: <anything that could not run here, and why>
 
 OPEN
 <questions for the Mac, Rust the PC needs, NEED: placeholders left>
 ```
 
 On the Mac: check each sha256, read the patches, `git am -3` them (the author stays; replace a session trailer with
-this session's attribution), run `tools/check.sh --quick` when the patches touch Rust, and answer in the chat with
-what was merged.
+this session's attribution), run `tools/check.sh --quick` when the patches touch Rust (the PC ran its full check
+before sending), and answer in the chat with what was merged.
 
 ## What the PC tests
 
-- **Targeted, never everything** (the user's decision, 2026-11-03): no local `run.ps1 all` or `rust-tests.ps1`, no
-  local release build of the core. GitHub CI's Windows job runs both on every push to `main`.
-- The PC compiles the C# (`dotnet build`) and, when it has a core to run against, runs the QA checks its change
-  touches: `app-windows\qa\run.ps1 <check>...` (from bash:
-  `powershell.exe -NoProfile -ExecutionPolicy Bypass -File app-windows/qa/run.ps1 <check>...`).
-- Each batch's HOW TO QA says which checks ran and which only CI will run.
+- **Shortest first, then fully before sending** (the user's rule, 2026-11-04). While working: `dotnet build` and the
+  QA checks the change touches, `app-windows\qa\run.ps1 <check>...` (from bash:
+  `powershell.exe -NoProfile -ExecutionPolicy Bypass -File app-windows/qa/run.ps1 <check>...`). Before every batch:
+  the full `run.ps1 all -Build -CoreProfile Debug` on that code (about 18 minutes); a failure is fixed before sending.
+- Local Rust builds: debug, `CARGO_BUILD_JOBS=4`, one at a time. Never a local release core (memory).
+- Each batch's HOW TO QA says what ran.
 - A CI failure in Windows is sent to the PC with its log at once: a Rust test is the Mac's to fix, an
   `app-windows` one the PC's. Either way, add the guard that would have caught it before CI.
 

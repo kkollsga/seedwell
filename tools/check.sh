@@ -117,6 +117,8 @@ if [ -z "$(find "$stamp" -mtime -1 2>/dev/null)" ]; then
   if command -v cargo-sweep >/dev/null; then
     cargo sweep --time 3 . >/dev/null
     find target/*/incremental -mindepth 1 -maxdepth 1 -mtime +3 -exec rm -rf {} + 2>/dev/null || true
+    # The tests' own temp root (CARGO_TARGET_TMPDIR): what a killed or panicked run left there (AGENTS.md, temp folders).
+    find target/tmp -mindepth 1 -maxdepth 1 -mtime +0 -exec rm -rf {} + 2>/dev/null || true
     mkdir -p target && touch "$stamp"
   else
     echo "check: install cargo-sweep (cargo install cargo-sweep) so old build artifacts are removed as you go"

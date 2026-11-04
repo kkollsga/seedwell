@@ -491,7 +491,7 @@ sealed class CloudHost : SyncHostListener
         w.Changed += (_, e) =>
         {
             Queue(root, () => Attributes(root, e.FullPath));
-            Queue(root, () => Overwritten(root, e.FullPath));
+            Queue(root, () => Written(root, e.FullPath));
         };
         // Something new (made, copied or moved in): the core takes it unless it is a placeholder.
         w.Created += (_, e) => Queue(root, () => Adopt(root, e.FullPath));
@@ -604,8 +604,12 @@ sealed class CloudHost : SyncHostListener
                     dehydrate = true;
                     break;
             }
+            qaDuringUpdate?.Invoke(full);
+            // A filled file's size is its own: the update would set it to the item's and cut off what a program has just
+            // written. Only a placeholder with no content, or one let go of here, takes the item's metadata.
+            if (!dehydrate) return false;
         }
-        var meta = CloudFiles.Metadata((long)item.Size, item.MtimeNs, dir);
+        var meta =CloudFiles.Metadata((long)item.Size, item.MtimeNs, dir);
         var ptr = Marshal.AllocHGlobal(Marshal.SizeOf<CloudFiles.FsMetadata>());
         try
         {
@@ -1044,6 +1048,25 @@ sealed class CloudHost : SyncHostListener
         }
     }
 
+    /// <summary>
+    /// The watcher saw a write to a file the host knows. Not only a close notification tells of a change: none comes for a
+    /// plain file, and a save must not hang on one signal. The core says first whether it changed (this event may be only
+    /// an attribute, and looking whether a file is closed takes it for a moment, in the way of the host's own calls on it);
+    /// a change is reported once no one has it open, so a file still being written is not copied again and again.
+    /// </summary>
+    void Written(Root root, string full)
+    {
+        if (RelativeTo(root, full) is not string rel || rel.Length == 0 || root.IdAt(rel) is not string id || !File.Exists(full)) return;
+        if (!CloudFiles.IsPlaceholder(full))
+        {
+            Overwritten(root, full);
+            return;
+        }
+        if (((uint)File.GetAttributes(full) & RecallOnDataAccess) != 0 || app.Core.SyncLocalChange(root.Id, id) is not SyncLocalChange.Modified) return;
+        if (Closed(full)) LookAt(root, id);
+        else Later(root, full, 500, () => Written(root, full));
+    }
+
     /// <summary>Looks at a file again a moment later, off the queue while it waits; one wait per file.</summary>
     void Later(Root root, string full, int ms, Action look)
     {
@@ -1141,6 +1164,34 @@ sealed class CloudHost : SyncHostListener
     /// QA: a file of the first root read as an app reads it (a placeholder is filled first, within 90 s): a short text
     /// file's text, another file's size and SHA-256, or why not.
     /// </summary>
+    /// <summary>QA: runs after the core said what a filled file holds and before its placeholder is updated.</summary>
+    Action<string>? qaDuringUpdate;
+
+    /// <summary>
+    /// QA: a program's write at the worst moment of an update from the feed: the feed's item, of the size the file had
+    /// before, is placed while the write lands (in place, so the file stays a placeholder). Answers what the file holds then.
+    /// </summary>
+    internal string QaWriteDuringUpdate(string relative, string text)
+    {
+        Root? r;
+        lock (gate) r = roots.Values.FirstOrDefault();
+        if (r is null || r.IdAt(relative) is not string id || app.Core.SyncItem(r.Id, id) is not SyncItem item) return "write: no such item";
+        var bytes = Encoding.ASCII.GetBytes(text);
+        qaDuringUpdate = full =>
+        {
+            using var f = new FileStream(full, FileMode.Open, FileAccess.Write, FileShare.Read);
+            f.Write(bytes);
+        };
+        var done = new TaskCompletionSource();
+        Queue(r, () =>
+        {
+            try { Place(r, item); }
+            finally { qaDuringUpdate = null; done.SetResult(); }
+        });
+        done.Task.Wait(30_000);
+        return $"holds \"{File.ReadAllText(Full(r, relative))}\"";
+    }
+
     internal string QaRead(string relative)
     {
         Root? r;

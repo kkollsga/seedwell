@@ -52,10 +52,11 @@ release procedure.
 - **The Mac and the PC work together as the `windows-bridge` skill says** (`.claude/skills/windows-bridge/SKILL.md`):
   git bundles from the Mac, patches from the PC, both as attachments in "Seedwell Development"; the Mac owns Rust and
   merges, the PC owns `app-windows/` and never commits.
-- **The PC tests what it changed, not everything** (the user's decision, 2026-11-03: no full local runs; GitHub CI
-  runs `run.ps1 all` and the Rust tests on Windows). It compiles the C# and, when it has a core to run against, runs
-  the QA checks its change touches (`app-windows\qa\run.ps1 <check>...`). Every batch says which checks ran and
-  which only CI will run.
+- **The PC tests the shortest way first, then fully before a hand-back** (the user's rule, 2026-11-04: the goal is faster development overall and as little waiting for CI as possible). While working it runs
+  the checks its change touches (`app-windows\qa\run.ps1 <check>...`); before every batch it sends, the full
+  `app-windows\qa\run.ps1 all -Build -CoreProfile Debug` on that code, and a failure is fixed before it goes. Local
+  Rust builds on the PC are debug, `CARGO_BUILD_JOBS=4`, one at a time; never a local release core (it ran the PC out
+  of memory). Every batch says what ran.
 
 ## Bugs
 
@@ -65,9 +66,10 @@ release procedure.
 
 ## Catching bugs early
 
-**We don't run full test suites locally; GitHub CI is the thorough run. The goal is still that no bug reaches
-GitHub.** Locally we run targeted tests and do everything cheap that finds bugs early. A bug the PC or CI finds costs
-a round trip of an hour or more; most can be caught in the first minutes on the Mac.
+**Shortest tests first, a full local check before code is handed back or pushed, and GitHub CI as the last check,
+not where bugs are found** (the user's rule, 2026-11-04: the goal is faster development overall and as little waiting for CI as possible). A local check of 15–20 minutes is faster than a CI round trip of
+about an hour; the shortest test that can catch a failure is faster still. A bug the PC or CI finds costs a round
+trip; most can be caught in the first minutes on the Mac.
 
 - **A test targets a specific way the code can fail** (the user's rule). It names that failure in its doc comment
   (a deadlock, a delete reaching a peer before the save, a mark drawn in its row's own colour) and fails when it
@@ -85,7 +87,8 @@ a round trip of an hour or more; most can be caught in the first minutes on the 
 - **A review that builds nothing:** before a worker's branch goes into a bundle, the coordinator has its diff read by
   a reviewer agent (the `code-review` skill, medium) against the call's promise and the platform differences above.
   It takes a few minutes and can run while something else builds.
-- **Test what you changed** with `tools/check.sh --quick` (see *Heavy work*); never a full suite locally.
+- **While working, test what you changed** with `tools/check.sh --quick` (see *Heavy work*); before handing back,
+  the full local check.
 - **Every CI failure is a bug that escaped.** Fix it, then find why the targeted tests missed it and add the
   cheapest guard that catches that kind locally next time: a host-like test, a line in `tools/timing-tests.txt`, a
   rule in `tools/test-portability.py` or `tools/ffi-names.py`, a step in `tools/check.sh --quick`. Say in the fix's
@@ -102,12 +105,25 @@ a round trip of an hour or more; most can be caught in the first minutes on the 
     are late as on CI's Mac runner, and it scans the affected crates' tests for Mac assumptions
     (`tools/test-portability.py`). docs/ENGINEERING.md §5 says how a test joins the one and passes the other.
   - While iterating, narrow it further: `tools/check.sh --quick -p trs-tracker -- -E 'test(/host_recovery/)'`.
-  - **A worker hands back once `tools/check.sh --quick` passes.** It runs the tests of the crates that changed
-    only (not of the crates that depend on them), clippy over those and their dependents (which compiles them, no
-    tests), the app and Swift tests only when `app/` or `trs-ffi` itself changed, and the Windows compile check.
-  - **No broad runs locally:** not the plain `tools/check.sh` over many crates, not `--base public`, not `--full`.
-    GitHub CI runs the whole workspace on the Mac and Windows on every push to `main`. Run a broad check only when the
-    user asks.
+  - **While working: `tools/check.sh --quick`.** It runs the tests of the crates that changed only (not of the
+    crates that depend on them), clippy over those and their dependents (which compiles them, no tests), the app and
+    Swift tests only when `app/` or `trs-ffi` itself changed, and the Windows compile check.
+  - **A worker hands back once `tools/check.sh --base master` passes:** every crate the branch changed and every
+    crate that depends on them, the app and Swift tests when they are affected, the timing pass at utility priority,
+    the portability and FFI-name scans. That is what CI would run for that change: crates it cannot reach cannot
+    break. About 15–20 minutes on this Mac, one heavy job at a time. Its result goes in the hand-back.
+  - **Before a push to GitHub** (a release's public commit), the coordinator runs `tools/check.sh --base public` on
+    master, unless every commit since the last push was already checked that way and nothing was merged by hand.
+  - `tools/check.sh --full` (the whole workspace) only when the user asks, or after a toolchain or dependency
+    change (which `check.sh` turns into a full run by itself).
+- **Clean up temp folders as you go** (the user's rule, 2026-11-04). Whatever a run, a test, a QA check or a worker
+  makes outside the repo's tracked files goes when it is done with: QA state folders, render output, a worker's own
+  `CARGO_TARGET_DIR` or scratch copies, downloaded CI logs and artifacts. A worker's worktree is removed once its
+  branch is merged (its build folder alone is 10–35 GB; 33 of them filled 496 GB on 2026-11-04), and the coordinator
+  removes them after each merge. `tools/check.sh` sweeps `target/tmp` (the tests' own temp root) of anything older
+  than a day; the PC's `run.ps1` sweeps `seedwell-qa-*` and `seedwell-render-*` older than an hour at its start. Never
+  sweep a folder other programs share (the system temp folder, `~/Library`, the Seedwell Sync folder): delete only
+  what you made.
 - **Clear the build cache as you go.** `tools/check.sh` removes, once a day, the build artifacts no build has
   used for 3 days (`cargo sweep --time 3`, plus the `target/*/incremental` folders of that age, which cargo sweep
   leaves; it says so if cargo-sweep is missing). After a toolchain or dependency change, or when `target/` grows

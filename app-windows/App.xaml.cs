@@ -1431,6 +1431,8 @@ public partial class App : Application
                     if (Arg(1) == "read") { var rel = string.Join(' ', w.Skip(2)); result = await Task.Run(() => Cloud.QaRead(rel)) + "; "; }
                     // placeholder <full path>: whether a file or folder is still a Cloud Files placeholder (after a switch to full, none is).
                     if (Arg(1) == "placeholder") { var at = string.Join(' ', w.Skip(2)); result = $"placeholder {await Task.Run(() => CloudFiles.IsPlaceholder(at))}; "; }
+                    // write-during-update <relative path> <text>: a program's write lands while the feed's item is placed.
+                    if (Arg(1) == "write-during-update") { var wrel = Arg(2); var wtext = string.Join(' ', w.Skip(3)); result = await Task.Run(() => Cloud.QaWriteDuringUpdate(wrel, wtext)) + "; "; }
                     result += Cloud.QaStatus();
                     break;
                 // The Cloud Files plumbing's own check (item 6): a sync root in this run's temp state, no core involved.

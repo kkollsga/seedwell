@@ -42,6 +42,10 @@ if ($Build) {
 }
 if (-not (Test-Path $Exe)) { throw "No app at ${Exe}: run with -Build" }
 if (-not (Test-Path $Cli)) { Push-Location $Repo; cargo build -q --bin seedwell; Pop-Location }
+# What earlier runs left in the temp folder: their default picture folders, and states of runs that were stopped or crashed.
+Get-ChildItem ([IO.Path]::GetTempPath()) -Directory -Filter 'seedwell-*' -ErrorAction SilentlyContinue |
+  Where-Object { $_.Name -match '^seedwell-(qa|render)-' -and $_.LastWriteTime -lt (Get-Date).AddHours(-1) } |
+  ForEach-Object { Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }
 if (-not $Out) { $Out = Join-Path ([IO.Path]::GetTempPath()) "seedwell-qa-$([DateTime]::Now.ToString('yyyyMMdd-HHmmss'))" }
 New-Item -ItemType Directory -Force $Out | Out-Null
 $names = if ($Names -contains 'all') { $All } else { $Names }
@@ -275,7 +279,8 @@ $checks.separate = {
     Launch $test @('--quit') | Out-Null
     if (-not $pt.WaitForExit(30000)) { Fail 'the test instance did not quit' }
     if ($pr.HasExited) { Fail 'the stand-in for the user''s app quit' }
-    $reached = @(Log $real | Select-Object -Skip $before)
+    # The test's commands in the stand-in's log, not its own lines (it goes on starting: "on-demand folders: 0 ()").
+    $reached = @(Log $real | Select-Object -Skip $before | Where-Object { $_ -match 'qa window|quit:' })
     if ($reached.Count) { Fail "the stand-in heard the test: $($reached -join ' | ')" }
     if (List $real | Where-Object { $_ -match 'Debian' }) { Fail 'the torrent went to the stand-in' }
     # The stand-in's folder with a trailing \: a hand-off to it, not a second instance on the same state.
@@ -1937,6 +1942,15 @@ $checks.ondemandwrites = {
       catch { Fail "the save made while the app was not running was lost: $($was.f) on B has '$([IO.File]::ReadAllText("$bd\$($was.f)"))', on A '$(Get-Content -Raw "$docs\$($was.f)")'" }
     }
     WaitFor { (Qa $b @('ondemand', 'placeholder', $one)) -match 'placeholder True' } 20000 'one.txt a placeholder again after the restart' | Out-Null
+
+    # A save cut short (CI on 61c0913: 'edited 5' became 'edited', the 6 bytes of 'text 5'): updating a placeholder from
+    # the feed's item set the file's size to the item's, so a write that came just before was truncated, and the damage
+    # then synced. A longer text written at that moment stays whole here and arrives whole.
+    $whole = 'written at the worst moment of an update'
+    $during = Qa $b @('ondemand', 'write-during-update', 'one.txt', $whole) 40000
+    if ($during -notmatch "holds `"$whole`"") { Fail "a write during an update was damaged: $during" }
+    try { WaitFor { (Get-Content -Raw "$docs\one.txt" -ErrorAction SilentlyContinue) -eq $whole } 20000 'the write during an update on A' | Out-Null }
+    catch { Fail "a write during an update did not arrive whole: B has '$([IO.File]::ReadAllText($one))', A has '$(Get-Content -Raw "$docs\one.txt")'" }
 
     # A read that fills the placeholder, and writes straight after it, on through the moment the feed says the file is
     # here and the host updates the placeholder (the save that was refused on CI).

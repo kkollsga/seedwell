@@ -13,9 +13,9 @@ Read `AGENTS.md` and `docs/RELEASING.md` first. Their rules win over anything he
 - Never touch the installed `/Applications/Seedwell.app` or its data. Do not run `tools/install-local.sh` unless the
   user asks.
 
-The gate for the tag is CI (Mac and Windows) and the release workflow. **No full test run happens locally**, on the
-Mac or the PC (the user's decision, 2026-11-03): the work was tested with targeted tests as it was made (AGENTS.md,
-*Catching bugs early*), and GitHub CI is the thorough run. No manual acceptance run is waited for. A CI failure is a
+The gate for the tag is CI (Mac and Windows) and the release workflow. Every hand-back was checked fully on its machine
+(AGENTS.md, *Catching bugs early*: the user's rule of 2026-11-04), and the public commit is checked locally before it
+goes, so CI is the last check, not where bugs are found. No manual acceptance run is waited for. A CI failure is a
 bug that escaped: fix it and add the guard that would have caught it locally (AGENTS.md). The rules behind this are docs/RELEASING.md's "Release discipline":
 
 - **Scope is fixed once the release has started.** Anything the user asks for after that goes to the next release,
@@ -94,9 +94,9 @@ gh pr list --state open --json number,title,author,headRefName,statusCheckRollup
 1. **Bump** `Cargo.toml` (`Cargo.lock` follows on the next cargo command) and commit on master: `Seedwell X.Y.Z`,
    with the session's attribution trailer.
 2. **Clean tree:** `git status --short` must be empty.
-3. **No local full check.** Every change was tested when it was made (`tools/check.sh --quick`); GitHub CI runs
-   everything on the pushed commit. Only when master has commits nobody tested (a hand edit, a merge with
-   conflicts), run `tools/check.sh --quick` over them.
+3. **Check locally:** `tools/check.sh --base public` (everything since the last release, its dependents, the app,
+   the timing pass, the scans; 15–20 minutes). Skip it only when every commit since the last push was checked that
+   way and nothing was merged by hand.
 4. **Tell the PC** in the agent channel that the release is going and from which commit, so it can stand by for a CI
    log. Don't wait for it.
 5. **Build the public commit.** Its message becomes the release notes, so write what changed for users: a title
