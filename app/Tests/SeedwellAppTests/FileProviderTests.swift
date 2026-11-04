@@ -247,12 +247,13 @@ import Testing
         let host = FileProviderHost(core: core, domains: fake)
         await fake.set([FileProviderDomainState(id: "F", name: "Team", enabled: true)])
         // The removal starts well inside the core's wait and outlasts it, with room for a busy machine: the test is
-        // about a give-up during the removal (one before it starts removes nothing, as it should).
-        await fake.setSlowRemoval(3_000_000_000)
-        let listener = FileProviderListener(host, wait: 1.0)
+        // about a give-up during the removal (one before it starts removes nothing, as it should). CI's Mac, 58 s into
+        // the suites, did not start it within a 1 s wait: the wait is 4 s, the removal 8 s, and the look 20 s.
+        await fake.setSlowRemoval(8_000_000_000)
+        let listener = FileProviderListener(host, wait: 4.0)
         let r = await Task.detached { listener.removeDomain(folderId: "F") }.value
         #expect(r.error == syncHostText(t: .noAnswer))
-        for _ in 0..<160 {
+        for _ in 0..<400 {
             let (back, gone) = (await fake.domains.contains(where: { $0.id == "F" }), await fake.removals)
             if back && gone == 1 { break }
             try await Task.sleep(nanoseconds: 50_000_000)

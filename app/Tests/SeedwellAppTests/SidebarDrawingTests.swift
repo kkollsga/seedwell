@@ -11,7 +11,8 @@ import Testing
 /// is not key; dark and light. Drawn as QA's shots draw (Reduce transparency, VibrancyPass), and VibrancyPass itself
 /// checked against Core Animation's own renderer, which composites as the window server does.
 ///
-/// `SIDEBAR_DRAWING_OUT=<folder>` keeps the pictures.
+/// `SIDEBAR_DRAWING_OUT=<folder>` keeps the pictures (as drawn for QA, with and without the marks, and drawn
+/// in-process without the pass), the windows' layer trees and the contrast report; CI keeps them of a failed run.
 @MainActor @Suite(.serialized) struct SidebarDrawingTests {
     final class Selection: ObservableObject {
         @Published var rows: Set<String> = []
@@ -82,8 +83,10 @@ import Testing
     static let rows = ["tag", "unread", "flag", "star"]
 
     /// A sidebar in a window off the screens, in `state`, drawn as a QA shot draws it; its rows, and for each the
-    /// layers drawn in it (what a failure on another Mac reports, as each macOS builds them its own way).
-    static func picture(dark: Bool, state: RowState, marks: Bool) async throws -> (NSBitmapImageRep, [CGRect], [String]) {
+    /// layers drawn in it (what a failure on another Mac reports, as each macOS builds them its own way). With `keep`
+    /// (a path without its extension) it also writes the window drawn in-process without the pass (`-raw.png`) and its
+    /// whole layer tree (`-layers.txt`): what CI keeps of a failure, to see what another macOS drew.
+    static func picture(dark: Bool, state: RowState, marks: Bool, keep: String? = nil) async throws -> (NSBitmapImageRep, [CGRect], [String]) {
         let selection = Selection()
         let w = Window(contentRect: NSRect(x: 0, y: 0, width: 640, height: 360),
                        styleMask: [.titled, .closable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
@@ -121,7 +124,58 @@ import Testing
         // The rows, in the picture's points (y up).
         let bands = (0..<table.numberOfRows).map { frame.convert(table.rect(ofRow: $0), from: table) }
         let root = try #require(frame.layer)
+        if let keep {
+            try SnapshotWindow.image(of: frame)?.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: "\(keep)-raw.png"))
+            try tree(root).write(toFile: "\(keep)-layers.txt", atomically: true, encoding: .utf8)
+        }
         return (rep, bands, bands.map { layers(in: $0, of: root) })
+    }
+
+    /// Every layer under `root`, one a line and indented by depth: its kind, place (the root's points), opacity,
+    /// whether hidden, clipping, mask, background, contents and filters (compositing filter first).
+    static func tree(_ root: CALayer) -> String {
+        var out: [String] = []
+        func walk(_ l: CALayer, _ depth: Int) {
+            let filters = ([l.compositingFilter].compactMap { $0 }.map { ("compositing", $0) } + (l.filters ?? []).map { ("filter", $0) })
+                .map { kind, f -> String in
+                    guard let f = f as? NSObject, !(f is NSString), let m = Self.matrix(of: f) else { return "\(kind) \(f)" }
+                    return "\(kind) \(f) \(m)"
+                }
+            var line = "\(String(repeating: "  ", count: depth))\(type(of: l)) at \(root.convert(l.bounds, from: l)) opacity \(l.opacity)"
+            if l.isHidden { line += " hidden" }
+            if l.masksToBounds { line += " clips (radius \(l.cornerRadius))" }
+            if let mask = l.mask { line += " mask \(type(of: mask))" }
+            if let bg = l.backgroundColor { line += " background \(bg.components ?? [])" }
+            if let c = l.contents { line += " contents \(type(of: c))" }
+            if !filters.isEmpty { line += " " + filters.joined(separator: ", ") }
+            if let b = l.backgroundFilters, !b.isEmpty { line += " background filters \(b)" }
+            // What the layer's own drawing (`render(in:)`, which VibrancyPass takes its coverage from) gives.
+            if !filters.isEmpty || l.contents != nil { line += " own drawing covers \(coverage(of: l))" }
+            out.append(line)
+            for s in l.sublayers ?? [] { walk(s, depth + 1) }
+        }
+        walk(root, 0)
+        return out.joined(separator: "\n")
+    }
+
+    /// The mean alpha of `layer` drawn alone at 2x, and its brightest pixel's (premultiplied) colour.
+    static func coverage(of layer: CALayer) -> String {
+        let b = layer.bounds
+        let w = Int((b.width * 2).rounded(.up)), h = Int((b.height * 2).rounded(.up))
+        guard w > 0, h > 0, w * h < 4_000_000, let space = CGColorSpace(name: CGColorSpace.sRGB),
+              let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4, space: space,
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue),
+              let data = ctx.data?.bindMemory(to: UInt8.self, capacity: w * h * 4) else { return "-" }
+        ctx.scaleBy(x: 2, y: 2)
+        ctx.translateBy(x: -b.minX, y: -b.minY)
+        layer.render(in: ctx)
+        var sum = 0, top = (0, 0, 0, 0)
+        for i in 0..<(w * h) {
+            let a = Int(data[i * 4 + 3])
+            sum += a
+            if a > top.3 { top = (Int(data[i * 4]), Int(data[i * 4 + 1]), Int(data[i * 4 + 2]), a) }
+        }
+        return "\(sum * 100 / (255 * w * h)) % (most \(top))"
     }
 
     /// The layers that draw something in `band` (the root's points), with their opacity, the opacity of the layers
@@ -137,7 +191,8 @@ import Testing
             }
             if frame.intersects(band), l.contents != nil || l.backgroundColor != nil || !matrices.isEmpty {
                 let bg = l.backgroundColor.map { " background \($0.components ?? [])" } ?? ""
-                out.append("\(type(of: l)) at \(frame) opacity \(l.opacity) in \(around)\(bg) \(matrices.joined(separator: ", "))")
+                let drawn = matrices.isEmpty || frame.width * frame.height > 20_000 ? "" : " own drawing covers \(coverage(of: l))"
+                out.append("\(type(of: l)) at \(frame) opacity \(l.opacity) in \(around)\(bg) \(matrices.joined(separator: ", "))\(drawn)")
             }
             for s in l.sublayers ?? [] { walk(s, around * l.opacity) }
         }
@@ -199,11 +254,12 @@ import Testing
         var report: [String] = []
         for dark in [true, false] {
             for state in RowState.allCases {
-                let (on, bands, layers) = try await Self.picture(dark: dark, state: state, marks: true)
-                let (off, _, _) = try await Self.picture(dark: dark, state: state, marks: false)
                 let name = "\(state.rawValue)-\(dark ? "dark" : "light")"
+                let (on, bands, layers) = try await Self.picture(dark: dark, state: state, marks: true, keep: out.map { "\($0)/sidebar-\(name)" })
+                let (off, _, _) = try await Self.picture(dark: dark, state: state, marks: false, keep: out.map { "\($0)/sidebar-\(name)-no-marks" })
                 if let out {
                     try on.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: "\(out)/sidebar-\(name).png"))
+                    try off.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: "\(out)/sidebar-\(name)-no-marks.png"))
                 }
                 let a = Pixels(rep: on), b = Pixels(rep: off)
                 // The table's rows: Chats, tag, unread, Places, flag, star.

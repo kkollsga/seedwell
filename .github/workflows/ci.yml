@@ -56,7 +56,17 @@ jobs:
         env:
           SEEDWELL_PROFILE: dev
       - name: Swift tests (reuse the app build)
-        run: swift test --package-path app
+        run: mkdir -p "$SIDEBAR_DRAWING_OUT" && swift test --package-path app
+        env:
+          # SidebarDrawingTests' pictures and layer trees: what this macOS drew, kept when the run fails.
+          SIDEBAR_DRAWING_OUT: ${{ runner.temp }}/sidebar-drawing
+      - name: Keep the sidebar drawings of a failed run
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: sidebar-drawing
+          path: ${{ runner.temp }}/sidebar-drawing
+          if-no-files-found: ignore
       - name: Shell scripts
         run: |
           for f in install.sh app/build.sh app/release-zip.sh app/qa/update_e2e.sh; do bash -n "$f"; done
