@@ -678,15 +678,19 @@ async fn send_index(f: &Arc<FolderShared>, peer: &Arc<PeerHandle>, their: JoinFo
 /// Waits, before announcing, while a delete the host made a moment ago may still turn out to be a save by replace (SPEC
 /// §7G.11): a new file at its path then replaces the delete in the index, and the peer is sent one edit instead of a
 /// delete and a new file. Asked before every batch, and at most one window each time, so a run of deletes never holds
-/// the folder's announcements up for longer than that; nothing waits in a folder without such deletes.
+/// the folder's announcements up for longer than that; nothing waits in a folder without such deletes. While the new
+/// file is still being written (a big file read in and hashed for longer than the window: `Hold::writing`) it waits on
+/// past the window until that write ends, and never longer than `WRITE_HOLD_MAX` each time.
 async fn replace_hold(f: &FolderShared) {
-    let end = std::time::Instant::now() + f.replacing.window();
-    while let Some(left) = f.replacing.hold() {
+    let start = std::time::Instant::now();
+    let (end, firm_end) = (start + f.replacing.window(), start + f.replacing.write_max());
+    while let Some(hold) = f.replacing.hold() {
         let now = std::time::Instant::now();
-        if now >= end || *f.stopped.borrow() {
+        let until = if hold.writing { firm_end } else { end };
+        if now >= until || *f.stopped.borrow() {
             return;
         }
-        tokio::time::sleep(left.min(end - now).min(std::time::Duration::from_millis(50))).await;
+        tokio::time::sleep(hold.left.min(until - now).min(std::time::Duration::from_millis(50))).await;
     }
 }
 

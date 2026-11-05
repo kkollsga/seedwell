@@ -96,6 +96,9 @@ before sending), and answer in the chat with what was merged.
   `powershell.exe -NoProfile -ExecutionPolicy Bypass -File app-windows/qa/run.ps1 <check>...`). Before every batch:
   the full `run.ps1 all -Build -CoreProfile Debug` on that code (about 18 minutes); a failure is fixed before sending.
 - Local Rust builds: debug, `CARGO_BUILD_JOBS=4`, one at a time. Never a local release core (memory).
+- On every bundle from the Mac, and always on the final candidate before a push: `app-windows\qa\rust-tests.ps1`
+  (the Rust tests as CI's Windows job runs them, about 2 minutes). It is the only place Windows-only Rust failures
+  show before CI.
 - Each batch's HOW TO QA says what ran.
 - A CI failure in Windows is sent to the PC with its log at once: a Rust test is the Mac's to fix, an
   `app-windows` one the PC's. Either way, add the guard that would have caught it before CI.

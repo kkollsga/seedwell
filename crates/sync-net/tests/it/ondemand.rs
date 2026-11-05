@@ -2808,6 +2808,44 @@ async fn a_big_document_saved_by_replace_reaches_the_other_device_as_one_edit() 
     b.h.shutdown().await;
 }
 
+/// A save by replace whose new file takes longer to read in than the window (CI's debug Windows build hashing 48 MB in
+/// over 4.4 s; a large video saved by replace on any device): the delete's wait used to end at the window while the
+/// file was still being hashed, so the delete went out and the full device lost its file for seconds, then got it back
+/// as a new item. The write is held mid-way here, past a shortened window: the delete waits while it goes on, the item
+/// keeps its identifier, and the full device never sees the file missing. A delete with nothing written after it still
+/// goes out after one window.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_save_by_replace_slower_than_the_window_still_reaches_the_other_device_as_one_edit() {
+    let (a, b, fa, fb, id) = pair().await;
+    let window = Duration::from_millis(1000);
+    b.h.test_replace_window(&id, window, trs_sync::ondemand::WRITE_HOLD_MAX);
+    let doc = b.h.od_item_at(&id, "docs/a.txt").unwrap().unwrap();
+    let watch = Watch::new(fa.path().join("docs/a.txt"));
+    b.h.od_delete(&id, "docs/a.txt").await.unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let src = fb.path().join("saved.txt");
+    std::fs::write(&src, b"alpha, saved slowly").unwrap();
+    // Read in for three windows, the core held all that time (as hashing a big file holds it).
+    b.h.test_write_wait(&id, window * 3);
+    let t = Instant::now();
+    assert_eq!(b.h.od_write(&id, "docs/a.txt", &src, None).await.unwrap(), "docs/a.txt");
+    assert!(t.elapsed() >= window * 3, "the write was held past the window");
+    b.h.test_write_wait(&id, Duration::ZERO);
+    assert_eq!(b.h.od_item_at(&id, "docs/a.txt").unwrap().unwrap().id, doc.id, "the same item");
+    assert!(b.h.od_replace_hold(&id).is_none(), "the new record took the name");
+    until(30, "A has the saved version", || read(&fa.path().join("docs/a.txt")).as_deref() == Some(&b"alpha, saved slowly"[..])).await;
+    assert!(!watch.missed(), "A's file was never deleted meanwhile");
+    drop(watch);
+
+    // A delete with nothing written after it: announced once the window is over, not held for a write.
+    let t0 = Instant::now();
+    b.h.od_delete(&id, "big.bin").await.unwrap();
+    until(30, "A deleted big.bin", || !fa.path().join("big.bin").exists()).await;
+    assert!(t0.elapsed() >= window, "{:?}", t0.elapsed());
+    a.h.shutdown().await;
+    b.h.shutdown().await;
+}
+
 /// The issues the folder shows at `path`.
 fn issues_at(h: &SyncHandle, path: &str) -> Vec<String> {
     h.snapshot().folders.iter().flat_map(|f| f.issues.iter()).filter(|(p, _)| p == path).map(|(_, w)| w.clone()).collect()

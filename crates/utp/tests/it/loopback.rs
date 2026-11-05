@@ -330,7 +330,8 @@ async fn readiness_api_behaves_like_a_tcp_stream() {
         }
         assert!(queued < 64 << 20, "the send buffer must be bounded");
     }
-    assert_eq!(c2.try_write(&chunk).unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+    // (No second `try_write` here expecting `WouldBlock` again: the driver keeps sending what is queued into the
+    // peer's window meanwhile, so room can open at any moment, as with a TCP socket. Windows CI saw `Ok(3534)`.)
     let mut sink = vec![0u8; 256 * 1024];
     let mut got = 0;
     while got < queued {

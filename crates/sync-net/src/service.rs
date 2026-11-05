@@ -1016,6 +1016,7 @@ impl SyncHandle {
             served: crate::limit::Meter::default(),
             fetches: Mutex::new(Default::default()),
             announce_pause: Mutex::new(Duration::ZERO),
+            write_wait: Mutex::new(Duration::ZERO),
             streams: Mutex::new(HashMap::new()),
             streamer: Mutex::new(Default::default()),
             fetcher: Mutex::new(Default::default()),
@@ -3276,6 +3277,25 @@ impl SyncHandle {
     pub fn test_announce_pause(&self, id: &FolderId, pause: Duration) {
         if let Some(f) = self.inner.ctx.registry.folder(id) {
             *lock(&f.announce_pause) = pause;
+        }
+    }
+
+    /// **Tests only:** each host's write to folder `id` (`od_write`) holds the folder's core this much longer once the
+    /// content is in place, before it is read in: a big file whose hashing takes longer than the save-by-replace window.
+    #[doc(hidden)]
+    pub fn test_write_wait(&self, id: &FolderId, wait: Duration) {
+        if let Some(f) = self.inner.ctx.registry.folder(id) {
+            *lock(&f.write_wait) = wait;
+        }
+    }
+
+    /// **Tests only:** folder `id`'s save-by-replace window ([`trs_sync::ondemand::REPLACE_WINDOW`]) and the longest a
+    /// write keeps a delete waiting ([`trs_sync::ondemand::WRITE_HOLD_MAX`]).
+    #[doc(hidden)]
+    pub fn test_replace_window(&self, id: &FolderId, window: Duration, write_max: Duration) {
+        if let Some(f) = self.inner.ctx.registry.folder(id) {
+            f.replacing.set_window(window);
+            f.replacing.set_write_max(write_max);
         }
     }
 

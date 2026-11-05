@@ -620,9 +620,9 @@ impl RealSync {
         Ok(h.od_ignored(&folder_id(id)?, path, dir).map_err(od_err)?.map(|w| SyncIgnored { reason: w.words(), deletable: w.deletable }))
     }
 
-    pub(super) fn od_replace_hold(&self, id: &str) -> bool {
-        let (Ok(h), Ok(fid)) = (self.handle(), folder_id(id)) else { return false };
-        h.od_replace_hold(&fid).is_some()
+    pub(super) fn od_replace_hold(&self, id: &str) -> Option<trs_sync::ondemand::Hold> {
+        let (Ok(h), Ok(fid)) = (self.handle(), folder_id(id)) else { return None };
+        h.od_replace_hold(&fid)
     }
 
     pub(super) fn od_delete(&self, id: &str, item: &str, seen: Option<trs_sync_net::DeleteSeen>) -> Result<SyncDeleted, OdError> {

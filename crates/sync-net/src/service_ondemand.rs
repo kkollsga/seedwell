@@ -658,8 +658,13 @@ impl SyncHandle {
         let (root, p, from, base) = (f.root.clone(), path.to_string(), from.to_path_buf(), base.map(str::to_string));
         let device = lock(&self.inner.ctx.device_name).clone();
         let placed = f.placed.clone();
+        // A delete at this name a moment ago (a save by replace) waits for this write however long the file takes to
+        // read in (SPEC §7G.11): marked from here, the wait for the core included, until the closure is done or dropped.
+        let writing = f.replacing.writing(path);
+        let wait = *lock(&f.write_wait);
         let written = self
             .with_core(&f, move |c| {
+                let _writing = writing;
                 // The host adopting a new file a second time (Windows: it took the folder above first, and this file
                 // with it): its own placeholder, filled with the item's content and unchanged since, is that item.
                 if base.is_none()
@@ -732,6 +737,9 @@ impl SyncHandle {
                     pl.let_go(&to)?;
                 }
                 std::fs::rename(&tmp, &target)?;
+                if !wait.is_zero() {
+                    std::thread::sleep(wait);
+                }
                 if to == p { c.host_written(&to) } else { c.host_written_copy(&to, &p) }?;
                 Ok(to)
             })
@@ -749,9 +757,10 @@ impl SyncHandle {
         Ok(f.ignore.get().why(path, dir))
     }
 
-    /// How long announcing folder `id`'s changes still waits for a save by replace (a delete the host made a moment
-    /// ago, SPEC §7G.11): `None` when nothing waits.
-    pub fn od_replace_hold(&self, id: &FolderId) -> Option<Duration> {
+    /// What announcing folder `id`'s changes waits for (a delete the host made a moment ago may be a save by replace,
+    /// SPEC §7G.11): how long still, and whether a new file is being written at a deleted name, which holds it past the
+    /// window until that write ends. `None` when nothing waits.
+    pub fn od_replace_hold(&self, id: &FolderId) -> Option<trs_sync::ondemand::Hold> {
         self.inner.ctx.registry.folder(id)?.replacing.hold()
     }
 

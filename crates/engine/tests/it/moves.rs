@@ -320,7 +320,21 @@ async fn crash_case(force_copy: bool, stop_at: u32) -> Option<bool> {
     s.h.flush().await.unwrap();
     s.shutdown(Duration::from_secs(3)).await;
     drop(ev);
+    let store = Arc::downgrade(&s.store);
     drop(s);
+    // A crashed process is gone before the next start: wait until the stopped engine's tasks that were still ending (the
+    // move runs as a task of its own, which `shutdown` does not wait for, and on a slow disk its interrupted step can
+    // outlast the 200 ms above) let go of its state store, and so of the database's lock. Opened again before that, the
+    // next start failed with "Database already open" (Windows CI, once).
+    let t0 = Instant::now();
+    wait_for("the stopped engine let go of its state store", 30, || {
+        let gone = store.upgrade().is_none();
+        async move { gone.then_some(()) }
+    })
+    .await;
+    if t0.elapsed() > Duration::from_millis(10) {
+        eprintln!("DIAG the stopped engine let go of its state store after {:?}", t0.elapsed());
+    }
     // The next start resolves it, before the torrent may serve again.
     let s2 = snode(&l.state, &l.dl, None, plain(&l)).await;
     wait_for("the journal is resolved", 30, || async {

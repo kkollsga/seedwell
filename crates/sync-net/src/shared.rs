@@ -367,6 +367,9 @@ pub struct FolderShared {
     pub fetches: Mutex<Fetches>,
     /// Tests only: each batch an index session announces starts with this pause.
     pub announce_pause: Mutex<std::time::Duration>,
+    /// Tests only: each host's write (`od_write`) pauses this long with the content in place and the core held, before
+    /// reading it in (as a big file's hashing takes).
+    pub write_wait: Mutex<std::time::Duration>,
     /// The reads of this device's unhashed files for the devices fetching them, by path and device (SPEC §7G.11: each
     /// read once, hashed as it goes).
     pub streams: Mutex<HashMap<(String, trs_sync_proto::ids::ShortId), StreamSlot>>,

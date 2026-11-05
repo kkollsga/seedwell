@@ -2334,7 +2334,14 @@ an app group shared by the app and its extension), a Cloud Files sync root on Wi
     batching). Until it is over or the new file came, the folder's announcements wait (to the other devices' sessions,
     asked before every batch, and to the host's change feed; at most one window each time, so a run of deletes never
     keeps either from hearing of changes), so the other devices and the host see one edit, not a
-    delete and a new file; a delete with nothing after it reaches them that much later. A new file at that name within
+    delete and a new file; a delete with nothing after it reaches them that much later. A new file the host began to
+    write at that name within the window (`sync_create_item`/`sync_modify_item`: copied into the cache, then read in
+    and hashed on the folder's core, which for a large file takes longer than the window) keeps the delete waiting
+    while that write goes on, past the window and past the one-window caps, and it still takes the deleted item's
+    place: the write marks its path as being written from its start (its wait for the core included) until it ends or
+    fails. A safety net bounds it: a write still going `WRITE_HOLD_MAX` (10 minutes) after it began lets its delete go
+    (logged), and no wait lasts longer than that each time. A delete with nothing written after it still waits one
+    window. A new file at that name within
     the window that is not a save is taken as an edit too, which costs nothing (versions go by path). A rename of
     another item over that name keeps the renamed item's identifier (a host cannot change one in a rename) and its
     version follows the delete, so the history there goes on and no conflict copy is made. The file that left under a

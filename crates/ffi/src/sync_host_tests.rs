@@ -41,6 +41,8 @@ struct Fake {
     no_anchor: AtomicBool,
     /// A delete was made a moment ago: the feed waits (a save by replace may follow).
     hold: AtomicBool,
+    /// ... and the new file is being written at its name.
+    writing: AtomicBool,
 }
 
 fn item(id: &str, parent: &str, name: &str, kind: SyncItemKind, state: SyncItemState) -> SyncItem {
@@ -212,8 +214,9 @@ impl HostCore for Fake {
     fn ignored(&self, _: &str, path: &str, _: bool) -> Result<Option<crate::sync::ondemand::SyncIgnored>, OdError> {
         Ok(path.ends_with(".tmp").then(|| crate::sync::ondemand::SyncIgnored { reason: "it matches “*.tmp”".into(), deletable: false }))
     }
-    fn replace_hold(&self, _: &str) -> bool {
-        self.hold.load(Ordering::Relaxed)
+    fn replace_hold(&self, _: &str) -> Option<trs_sync::ondemand::Hold> {
+        let writing = self.writing.load(Ordering::Relaxed);
+        self.hold.load(Ordering::Relaxed).then_some(trs_sync::ondemand::Hold { left: Duration::from_secs(1), writing })
     }
 }
 
@@ -562,6 +565,44 @@ fn a_run_of_deletes_never_keeps_the_feed_from_the_system() {
     std::thread::sleep(Duration::from_millis(350));
     h.watch_once(&told, &mut anchors, &mut shown);
     assert_eq!(told.moved.lock().unwrap().len(), 3);
+}
+
+/// A save by replace whose new file takes longer to read in than the window (a large video hashed on a slow disk): the
+/// system must not hear of the feed's move (the delete as the record) while that file is still being written, or it
+/// takes the item for deleted. Past one window the signal still waits while the write goes on; once it ended, or
+/// after `write_cap` at most, the system hears of it.
+#[test]
+fn the_feed_waits_for_a_new_file_still_being_written_past_the_window() {
+    let d = tempfile::tempdir().unwrap();
+    let fake = Fake::new(&d.path().join("cache"));
+    let mut h = host(&fake, d.path());
+    h.replace_cap = Duration::from_millis(300);
+    h.write_cap = Duration::from_millis(1500);
+    let told = Told::default();
+    let (mut anchors, mut shown) = (HashMap::new(), None);
+    h.watch_once(&told, &mut anchors, &mut shown);
+    assert_eq!(told.moved.lock().unwrap().len(), 1);
+    fake.hold.store(true, Ordering::Relaxed);
+    fake.writing.store(true, Ordering::Relaxed);
+    fake.anchor.store(9, Ordering::Relaxed);
+    h.watch_once(&told, &mut anchors, &mut shown);
+    std::thread::sleep(Duration::from_millis(350));
+    h.watch_once(&told, &mut anchors, &mut shown);
+    assert_eq!(told.moved.lock().unwrap().len(), 1, "still being written after a window: held");
+    // The write ended (the new record took the name): the system hears of it.
+    fake.hold.store(false, Ordering::Relaxed);
+    fake.writing.store(false, Ordering::Relaxed);
+    h.watch_once(&told, &mut anchors, &mut shown);
+    assert_eq!(told.moved.lock().unwrap().len(), 2);
+    // A write that never ends holds the signal `write_cap` at most.
+    fake.hold.store(true, Ordering::Relaxed);
+    fake.writing.store(true, Ordering::Relaxed);
+    fake.anchor.store(10, Ordering::Relaxed);
+    h.watch_once(&told, &mut anchors, &mut shown);
+    assert_eq!(told.moved.lock().unwrap().len(), 2, "held");
+    std::thread::sleep(Duration::from_millis(1600));
+    h.watch_once(&told, &mut anchors, &mut shown);
+    assert_eq!(told.moved.lock().unwrap().len(), 3, "signalled after write_cap all the same");
 }
 
 /// A folder renamed onto a name the folder does not sync, on the Mac: answered `excluded` (the system then deletes it

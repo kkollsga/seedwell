@@ -54,7 +54,10 @@ release procedure.
   merges, the PC owns `app-windows/` and never commits.
 - **The PC tests the shortest way first, then fully before a hand-back** (the user's rule, 2026-11-04: the goal is faster development overall and as little waiting for CI as possible). While working it runs
   the checks its change touches (`app-windows\qa\run.ps1 <check>...`); before every batch it sends, the full
-  `app-windows\qa\run.ps1 all -Build -CoreProfile Debug` on that code, and a failure is fixed before it goes. Local
+  `app-windows\qa\run.ps1 all -Build -CoreProfile Debug` on that code, and a failure is fixed before it goes. On every
+  bundle from the Mac, and always on the final candidate before the coordinator pushes, it also runs
+  `app-windows\qa\rust-tests.ps1` (the Rust tests as CI's Windows job runs them, about 2 minutes): Windows-only Rust
+  failures are found there, not on CI (a save-by-replace gap reached CI on 2026-11-05 because this run was skipped). Local
   Rust builds on the PC are debug, `CARGO_BUILD_JOBS=4`, one at a time; never a local release core (it ran the PC out
   of memory). Every batch says what ran.
 

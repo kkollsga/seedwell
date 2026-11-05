@@ -87,9 +87,17 @@ pub struct Item {
 /// (Windows' watcher and its check every half second that the new file is closed, the File Provider's own batching), so
 /// a few seconds cover them with room. Until then the delete waits to be announced, to the other devices and to the
 /// host's change feed, so they see one edit; a delete with nothing after it reaches them that much later. A new file
+/// the host began to write there within the window holds the delete until it is in, however long it takes to read in
+/// ([`Replacing::writing`], bounded by [`WRITE_HOLD_MAX`]). A new file
 /// at the name within the window that is not a save at all is taken as an edit too, which costs nothing: versions go
 /// by path, and the item keeps its history.
 pub const REPLACE_WINDOW: Duration = Duration::from_secs(5);
+
+/// How long a file being written at the name of a delete through the host keeps that delete waiting, at most
+/// ([`Replacing::writing`]). A safety net only: a write ends (or fails) long before, but one that never reports its end
+/// must not keep the folder's announcements back for good. Far above any file's reading in (a large video hashed on a
+/// slow disk takes minutes); hitting it is logged.
+pub const WRITE_HOLD_MAX: Duration = Duration::from_secs(600);
 
 /// How long the version a file had when it was renamed onto a name the folder does not sync is remembered: the host
 /// may report that file's delete only after the file left (the Mac's File Provider deletes an excluded item once it
@@ -114,9 +122,83 @@ pub(crate) struct Recent {
 struct ReplacingState {
     /// [`REPLACE_WINDOW`] unless a test sets another.
     window: Option<Duration>,
+    /// [`WRITE_HOLD_MAX`] unless a test sets another.
+    write_max: Option<Duration>,
     recent: HashMap<String, Recent>,
+    /// The paths files are being written at now ([`Replacing::writing`]): how many writes, and since when.
+    writing: HashMap<String, (usize, Instant)>,
     /// Files renamed onto a name the folder does not sync: file id → what they were when they left.
     left: HashMap<[u8; 16], Left>,
+}
+
+impl ReplacingState {
+    fn window(&self) -> Duration {
+        self.window.unwrap_or(REPLACE_WINDOW)
+    }
+
+    fn write_max(&self) -> Duration {
+        self.write_max.unwrap_or(WRITE_HOLD_MAX)
+    }
+
+    /// How much longer the write at `path` keeps the delete `r` there waiting: a write that began within the delete's
+    /// window, while it goes on, up to [`WRITE_HOLD_MAX`] from its start. `None`: no such write.
+    fn write_left(&self, path: &str, r: &Recent) -> Option<Duration> {
+        let &(_, since) = self.writing.get(path)?;
+        if since.saturating_duration_since(r.at) >= self.window() {
+            return None;
+        }
+        Some(self.write_max().saturating_sub(since.elapsed())).filter(|d| !d.is_zero())
+    }
+
+    /// Whether the delete `r` at `path` still waits: within its window, or a file is being written there (above).
+    fn holds(&self, path: &str, r: &Recent) -> bool {
+        r.at.elapsed() < self.window() || self.write_left(path, r).is_some()
+    }
+
+    /// Lets go of the deletes that no longer wait. One a write kept waiting until [`WRITE_HOLD_MAX`] is logged: a write
+    /// that never ended.
+    fn prune(&mut self) {
+        let gone: Vec<String> = self.recent.iter().filter(|(p, r)| !self.holds(p, r)).map(|(p, _)| p.clone()).collect();
+        for p in gone {
+            if let Some(r) = self.recent.remove(&p)
+                && let Some(&(_, since)) = self.writing.get(&p)
+                && since.saturating_duration_since(r.at) < self.window()
+            {
+                eprintln!(
+                    "seedwell sync: the new file at “{p}” was still being written after {} s; its delete is announced now",
+                    self.write_max().as_secs()
+                );
+            }
+        }
+    }
+}
+
+/// What announcing waits for ([`Replacing::hold`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Hold {
+    /// How long until the last delete that waits stops waiting (when nothing takes its name first).
+    pub left: Duration,
+    /// A file is being written at the name of a delete that waits ([`Replacing::writing`]): the wait lasts until that
+    /// write ends, past one window, so whoever caps the wait at one window waits on (up to [`WRITE_HOLD_MAX`]).
+    pub writing: bool,
+}
+
+/// A file being written at a path ([`Replacing::writing`]); dropped when the write ends or fails.
+pub struct Writing {
+    replacing: Replacing,
+    path: String,
+}
+
+impl Drop for Writing {
+    fn drop(&mut self) {
+        let mut s = self.replacing.state();
+        if let Some((n, _)) = s.writing.get_mut(&self.path) {
+            *n -= 1;
+            if *n == 0 {
+                s.writing.remove(&self.path);
+            }
+        }
+    }
 }
 
 /// A file that left the folder under a name it does not sync ([`Replacing::note_left`]).
@@ -141,7 +223,7 @@ impl Replacing {
 
     /// The window (a test may shorten it, or set zero: nothing is taken for a replacement then).
     pub fn window(&self) -> Duration {
-        self.state().window.unwrap_or(REPLACE_WINDOW)
+        self.state().window()
     }
 
     /// Sets the window (tests).
@@ -149,25 +231,34 @@ impl Replacing {
         self.state().window = Some(window);
     }
 
+    /// The longest a write keeps a delete waiting ([`WRITE_HOLD_MAX`] unless a test set another).
+    pub fn write_max(&self) -> Duration {
+        self.state().write_max()
+    }
+
+    /// Sets [`Self::write_max`] (tests).
+    pub fn set_write_max(&self, max: Duration) {
+        self.state().write_max = Some(max);
+    }
+
     /// Notes the deletes of a host's change, by path: in one go, so a tree of many thousand files costs one pass.
     pub(crate) fn note_all(&self, deletes: Vec<(String, Recent)>) {
         let mut s = self.state();
-        let window = s.window.unwrap_or(REPLACE_WINDOW);
-        s.recent.retain(|_, r| r.at.elapsed() < window);
-        if window.is_zero() {
+        s.prune();
+        if s.window().is_zero() {
             return;
         }
         let room = RECENT_MAX.saturating_sub(s.recent.len());
         s.recent.extend(deletes.into_iter().take(room));
     }
 
-    /// The delete of `path`, if one was made within the window (a new item there is the deleted one). It stays noted,
-    /// and so holds announcing, until [`Self::forget`]: the caller forgets it once the record that takes the name is
-    /// stored, so no announcement in between finds the delete as the record there and sends it.
+    /// The delete of `path`, if it still waits: made within the window, or a file being written there began within it
+    /// ([`Self::writing`]; a new item there is the deleted one). It stays noted, and so holds announcing, until
+    /// [`Self::forget`]: the caller forgets it once the record that takes the name is stored, so no announcement in
+    /// between finds the delete as the record there and sends it.
     pub(crate) fn get(&self, path: &str) -> Option<Recent> {
         let s = self.state();
-        let window = s.window.unwrap_or(REPLACE_WINDOW);
-        s.recent.get(path).filter(|r| r.at.elapsed() < window).cloned()
+        s.recent.get(path).filter(|r| s.holds(path, r)).cloned()
     }
 
     /// Forgets the delete of `path` (something took the name: call it once that record is stored).
@@ -175,12 +266,32 @@ impl Replacing {
         self.state().recent.remove(path);
     }
 
-    /// How long until the last recent delete leaves the window (`None`: there is none): announcing waits that long.
-    pub fn hold(&self) -> Option<Duration> {
+    /// Marks a file being written at `path` (a host's new file there being copied in and read, which for a big file
+    /// takes longer than the window) until the returned mark is dropped, when the write ends or fails. A delete at
+    /// `path` made within the window before the write began keeps waiting while it goes on, past the window and the
+    /// callers' one-window caps ([`Hold::writing`]), up to [`WRITE_HOLD_MAX`] from the write's start: so the new
+    /// record takes the delete's place, and the other devices and the host see one edit however long the file takes
+    /// (SPEC §7G.11, *Save by replace*). A delete with nothing written after it waits one window, as before.
+    pub fn writing(&self, path: &str) -> Writing {
         let mut s = self.state();
-        let window = s.window.unwrap_or(REPLACE_WINDOW);
-        s.recent.retain(|_, r| r.at.elapsed() < window);
-        s.recent.values().map(|r| window.saturating_sub(r.at.elapsed())).max().filter(|d| !d.is_zero())
+        s.writing.entry(path.to_string()).or_insert((0, Instant::now())).0 += 1;
+        Writing { replacing: self.clone(), path: path.to_string() }
+    }
+
+    /// What announcing waits for (`None`: nothing): the deletes still in their window, and those a file being written
+    /// at their name keeps waiting ([`Self::writing`]).
+    pub fn hold(&self) -> Option<Hold> {
+        let mut s = self.state();
+        s.prune();
+        let window = s.window();
+        let mut hold = Hold { left: Duration::ZERO, writing: false };
+        for (p, r) in &s.recent {
+            hold.left = hold.left.max(window.saturating_sub(r.at.elapsed()));
+            if let Some(w) = s.write_left(p, r) {
+                hold = Hold { left: hold.left.max(w), writing: true };
+            }
+        }
+        (!hold.left.is_zero()).then_some(hold)
     }
 
     /// Notes that files left under a name the folder does not sync: each file id, the delete it left by, and its

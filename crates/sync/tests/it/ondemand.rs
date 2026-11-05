@@ -2076,6 +2076,56 @@ fn a_new_file_elsewhere_or_later_is_a_new_item() {
     assert!(!conflicts.iter().any(|c| format!("{c:?}").contains("top")), "{conflicts:?}");
 }
 
+/// A save by replace whose new file takes longer to read in than the window (a big file hashed): the delete keeps
+/// waiting while the file is being written at its name, past the window, so the new file still takes the deleted
+/// item's place (one edit) and nothing announces the delete meanwhile. Only such a write: one that began after the
+/// window brings no delete back, a delete with nothing written after it stops waiting at the window, and a write that
+/// never ends holds its delete `write_max` at most, so nothing waits for good.
+#[test]
+fn a_delete_waits_for_a_file_still_being_written_at_its_name() {
+    use std::time::Duration;
+    let mut a = full_with_files();
+    a.core.scan("").unwrap();
+    let mut b = dev("B", 2, &rw(), true);
+    sync(&mut a, &mut b);
+    let r = b.core.replacing();
+    let window = Duration::from_millis(500);
+    let past = window + Duration::from_millis(200);
+    r.set_window(window);
+    let doc = item(&mut b, "docs/b.txt").id;
+    host_delete(&mut b, "docs/b.txt", &[]);
+    let writing = r.writing("docs/b.txt");
+    std::thread::sleep(past);
+    assert!(r.hold().is_some_and(|h| h.writing), "past the window, the file still being written: waits");
+    host_create(&mut b, "docs/b.txt", b"bravo, saved slowly").unwrap();
+    drop(writing);
+    assert_eq!(item(&mut b, "docs/b.txt").id, doc, "the same item, changed");
+    assert!(r.hold().is_none(), "the new record took the name");
+
+    // A write that began after the window: the delete stopped waiting, and stays so.
+    host_delete(&mut b, "docs/a.txt", &[]);
+    std::thread::sleep(past);
+    let late = r.writing("docs/a.txt");
+    assert!(r.hold().is_none(), "too late to wait for");
+    drop(late);
+
+    // A delete with nothing written after it: waits the window, no more.
+    host_delete(&mut b, "top.txt", &[]);
+    assert!(r.hold().is_some_and(|h| !h.writing));
+    std::thread::sleep(past);
+    assert!(r.hold().is_none());
+
+    // A write that never ends: its delete waits `write_max` at most.
+    r.set_write_max(Duration::from_millis(1500));
+    host_delete(&mut b, "docs/b.txt", &[]);
+    let stuck = r.writing("docs/b.txt");
+    std::thread::sleep(past);
+    assert!(r.hold().is_some_and(|h| h.writing), "still being written");
+    std::thread::sleep(Duration::from_millis(1500));
+    assert!(r.hold().is_none(), "past write_max: announced all the same");
+    drop(stuck);
+}
+
 /// Word's save as the host reports it: the document renamed aside to a temp name the folder does not sync (it leaves
 /// the folder, its content the host's), the new document made at its name (the same item, changed), and the host's
 /// delete of the file that left, as it saw it then (letting go of it: the item stays). A rename onto such a name of

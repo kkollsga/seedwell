@@ -121,9 +121,11 @@ pub fn path_of(url: &str) -> String {
     rest[rest.find('/').unwrap()..].to_string()
 }
 
+/// This process's resident memory in KiB (the working set on Windows). Panics when the system would not say: a memory
+/// check that read 0 could never fail.
 pub fn rss_kb() -> u64 {
-    let out = std::process::Command::new("ps").args(["-o", "rss=", "-p", &std::process::id().to_string()]).output().unwrap();
-    String::from_utf8_lossy(&out.stdout).trim().parse().unwrap_or(0)
+    let bytes = trs_platform::proc::resident_bytes().filter(|&b| b > 0);
+    bytes.expect("this process's resident memory could not be read") / 1024
 }
 
 /// Poll `f` until true or `secs` pass.

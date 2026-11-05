@@ -731,9 +731,9 @@ pub trait SyncBackend: Send + Sync {
     fn od_ignored(&self, _id: &str, _path: &str, _dir: bool) -> Result<Option<ondemand::SyncIgnored>, ondemand::OdError> {
         Err(ondemand::not_on_demand())
     }
-    /// Whether a folder's announcements wait for a save by replace now (a delete the host made a moment ago).
-    fn od_replace_hold(&self, _id: &str) -> bool {
-        false
+    /// What a folder's announcements wait for now (a delete the host made a moment ago may be a save by replace).
+    fn od_replace_hold(&self, _id: &str) -> Option<trs_sync::ondemand::Hold> {
+        None
     }
     /// Adds a folder of this computer on demand, whole or not at all (the mock: added, then switched).
     fn add_folder_on_demand(&self, path: &str) -> Result<SyncFolder, CoreError> {
@@ -1266,7 +1266,7 @@ impl SyncBackend for RealSync {
     fn od_ignored(&self, id: &str, path: &str, dir: bool) -> Result<Option<ondemand::SyncIgnored>, ondemand::OdError> {
         RealSync::od_ignored(self, id, path, dir)
     }
-    fn od_replace_hold(&self, id: &str) -> bool {
+    fn od_replace_hold(&self, id: &str) -> Option<trs_sync::ondemand::Hold> {
         RealSync::od_replace_hold(self, id)
     }
 

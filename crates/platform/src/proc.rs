@@ -336,10 +336,51 @@ pub struct SelfStats {
     pub open_files: Option<u32>,
 }
 
+/// This process's resident memory in bytes (the working set on Windows), asked of the system directly: no other
+/// program runs, so it is cheap and works where there is no `ps` (Windows). `None` when the system would not say.
+pub fn resident_bytes() -> Option<u64> {
+    #[cfg(target_os = "macos")]
+    {
+        // SAFETY: `proc_taskinfo` is plain old data, so zeroed is a valid value; proc_pidinfo writes at most `size`
+        // bytes into it and returns how many it wrote.
+        unsafe {
+            let mut info: libc::proc_taskinfo = std::mem::zeroed();
+            let size = size_of::<libc::proc_taskinfo>() as libc::c_int;
+            let pid = libc::pid_t::try_from(std::process::id()).ok()?;
+            let n = libc::proc_pidinfo(pid, libc::PROC_PIDTASKINFO, 0, (&raw mut info).cast(), size);
+            (n == size).then_some(info.pti_resident_size)
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // `/proc/self/statm` counts pages; its second figure is the resident set.
+        let statm = std::fs::read_to_string("/proc/self/statm").ok()?;
+        let pages: u64 = statm.split_whitespace().nth(1)?.parse().ok()?;
+        // SAFETY: sysconf takes no pointers.
+        let page = u64::try_from(unsafe { libc::sysconf(libc::_SC_PAGESIZE) }).ok().filter(|&p| p > 0)?;
+        Some(pages * page)
+    }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
+        use windows_sys::Win32::System::Threading::GetCurrentProcess;
+        // SAFETY: the pseudo handle of this process needs no closing; the counters are a local of the size given.
+        unsafe {
+            let mut mem: PROCESS_MEMORY_COUNTERS = std::mem::zeroed();
+            mem.cb = size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
+            (K32GetProcessMemoryInfo(GetCurrentProcess(), &mut mem, mem.cb) != 0).then_some(mem.WorkingSetSize as u64)
+        }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+    {
+        None
+    }
+}
+
 /// Measure this process. On Unix it runs `ps` once or twice (run it on a blocking thread); on
 /// Windows it asks the system directly.
 pub fn self_stats() -> SelfStats {
-    let mut out = SelfStats::default();
+    let mut out = SelfStats { rss_bytes: resident_bytes(), ..SelfStats::default() };
     #[cfg(unix)]
     {
         let pid = std::process::id();
@@ -348,10 +389,8 @@ pub fn self_stats() -> SelfStats {
             let o = std::process::Command::new("ps").env("LC_ALL", "C").args(args).arg("-p").arg(pid.to_string()).output().ok()?;
             o.status.success().then(|| String::from_utf8_lossy(&o.stdout).into_owned())
         };
-        if let Some(t) = ps(&["-o", "rss=", "-o", "%cpu="]) {
-            let mut it = t.split_whitespace();
-            out.rss_bytes = it.next().and_then(|v| v.parse::<u64>().ok()).map(|kb| kb * 1024);
-            out.cpu_percent = it.next().and_then(decimal);
+        if let Some(t) = ps(&["-o", "%cpu="]) {
+            out.cpu_percent = t.split_whitespace().next().and_then(decimal);
         }
         out.threads = if cfg!(target_os = "macos") {
             // One line per thread plus a header.
@@ -367,18 +406,12 @@ pub fn self_stats() -> SelfStats {
     {
         use windows_sys::Win32::Foundation::{CloseHandle, FILETIME, INVALID_HANDLE_VALUE};
         use windows_sys::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next};
-        use windows_sys::Win32::System::ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
         use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetProcessHandleCount, GetProcessTimes};
         let ticks = |t: FILETIME| (u64::from(t.dwHighDateTime) << 32) | u64::from(t.dwLowDateTime);
         // SAFETY: the pseudo handle of this process needs no closing; every out-pointer is a local of
         // the right type and size; the snapshot handle is closed once.
         unsafe {
             let me = GetCurrentProcess();
-            let mut mem: PROCESS_MEMORY_COUNTERS = std::mem::zeroed();
-            mem.cb = size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
-            if K32GetProcessMemoryInfo(me, &mut mem, mem.cb) != 0 {
-                out.rss_bytes = Some(mem.WorkingSetSize as u64);
-            }
             let (mut created, mut exited, mut kernel, mut user) = std::mem::zeroed::<(FILETIME, FILETIME, FILETIME, FILETIME)>();
             if GetProcessTimes(me, &mut created, &mut exited, &mut kernel, &mut user) != 0 {
                 // FILETIME counts 100 ns since 1601; now in the same units from the system clock.
@@ -581,6 +614,27 @@ mod tests {
         eprintln!("{s:?}");
         assert!(s.cpu_percent.is_some() && s.rss_bytes.is_some_and(|b| b > 0), "{s:?}");
         assert!(s.threads.is_some_and(|n| n >= 1) && s.open_files.is_some_and(|n| n >= 1), "{s:?}");
+    }
+
+    /// The failure: this process's resident memory is not read (no `ps` on Windows), read as 0, read in the wrong unit
+    /// (KiB for bytes) or read of another process, so a test that bounds memory growth by it can never fail.
+    #[test]
+    fn resident_memory_is_read_and_grows_with_memory_written() {
+        let before = resident_bytes().expect("this process's resident memory could not be read");
+        assert!(before > 1 << 20, "{before} bytes resident");
+        // 64 MiB, every page written (with bytes that do not compress, so the Mac's compressor leaves them as they are).
+        let mut x = 0x9E37_79B9_7F4A_7C15u64;
+        let held: Vec<u64> = (0..8 << 20)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                x
+            })
+            .collect();
+        let after = resident_bytes().expect("this process's resident memory could not be read");
+        assert!(after >= before + (48 << 20), "64 MiB written, resident {before} -> {after} bytes");
+        std::hint::black_box(&held);
     }
 
     #[test]

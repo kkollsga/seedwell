@@ -18,14 +18,18 @@ use crate::tracker_page::TrackerInfoCommand;
 use crate::*;
 
 /// What one call may take, measured around the call alone. A call waits at most `UI_WAIT` (40 ms) for a fresh read
-/// and then shows the last one; the rest is room for the system to wake the waiting thread (its waits are made of short
-/// slices, so a runner that coalesces timers adds little: `calls::wait_until`). The work a call must not wait for lasts
-/// seconds here, so a call that waited for it shows as that.
-const BOUND: Duration = Duration::from_millis(100);
+/// and then shows the last one. The work a call must not wait for lasts [`SLOW_SAVE`] (a save) or longer (a held
+/// core, a busy engine, a scan, a move or a message with its saves), and the calls come every few milliseconds while
+/// it runs, so a call that waits for it takes about that long: twice this bound or more. The rest is room for a loaded machine: a runner busy
+/// with the rest of the suite runs a call that waits for nothing up to about 200 ms late (Windows, 2026-11-05: 202 ms
+/// with no wait for a lock), which a bound of 100 ms failed on.
+const BOUND: Duration = Duration::from_millis(250);
 
-/// How long a save of folder sync's state takes on the slow disk of the first scan: longer than [`BOUND`], so a call
-/// that waited for one shows.
-const SLOW_SAVE: Duration = Duration::from_millis(150);
+/// How long each save of folder sync's and chat's state takes in these tests (`SEEDWELL_QA_SLOW_SAVES` does the same
+/// in a QA run), as on a disk whose virus scanner reads each new file first: twice [`BOUND`], so a read that waited
+/// for one save shows.
+const SLOW_SAVE: Duration = Duration::from_millis(500);
+const _: () = assert!(SLOW_SAVE.as_millis() >= 2 * BOUND.as_millis(), "a call that waited for a save must show");
 
 /// How late this process's timers fire: the latest of a few plain 40 ms waits that nothing ends early. Said when a
 /// call was slow, so that a runner that delays timers shows as one.
@@ -380,15 +384,23 @@ fn the_apps_calls_never_wait_for_a_folder_move_or_a_big_file_being_sent() {
     let f = core.sync_add_folder(place.display().to_string()).unwrap();
     let id = f.id.clone();
 
+    // Saves are slow (as on a disk whose virus scanner reads each new file first), so that the move and the message
+    // below last long enough for a call that waited for them to show: on a fast disk each takes less than `BOUND`.
+    trs_sync_net::shared::test_slow_saves(SLOW_SAVE);
+
     // A move while the first scan runs (it stops the folder, moves the files, opens it again), from another thread as
     // the app's Edit Folder does.
     let to = work.join("Moved");
     let (c2, id2, to2) = (core.clone(), id.clone(), to.display().to_string());
-    let mover = std::thread::spawn(move || c2.sync_move(id2, to2));
+    let mover = std::thread::spawn(move || {
+        let at = Instant::now();
+        (c2.sync_move(id2, to2), at.elapsed())
+    });
     let mut calls = Calls::new(&core);
     calls.rounds_while(Duration::from_secs(30), Some(&id), None, |_| mover.is_finished());
-    let moved = mover.join().unwrap();
+    let (moved, took) = mover.join().unwrap();
     calls.assert_quick("during a move");
+    assert!(took >= 2 * BOUND, "the move took {took:?}: too short for a call that waited for it to show");
     // (The first scan, still running, ends at its next step: the folder is free to move at once.)
     assert!(moved.is_ok(), "{moved:?}");
     assert!(to.join("big0.bin").exists() && !place.exists());
@@ -404,19 +416,19 @@ fn the_apps_calls_never_wait_for_a_folder_move_or_a_big_file_being_sent() {
     let mut calls = Calls::new(&core);
     core.chat_send_attachments(channel.clone(), None, "the film".into(), None, vec![input]).unwrap();
     let ch = channel.clone();
+    let at = Instant::now();
     calls.rounds_while(Duration::from_secs(30), None, Some(&channel), move |c| c.chat_pending_sends(ch.clone()).is_empty());
+    let took = at.elapsed();
+    trs_sync_net::shared::test_slow_saves(Duration::ZERO);
     calls.assert_quick("while a big file is prepared for a chat message");
+    assert!(took >= 2 * BOUND, "the message was prepared in {took:?}: too short for a call that waited for it to show");
     core.shutdown(5);
 }
-
-/// How long each save takes in the chat tests (`SEEDWELL_QA_SLOW_SAVES` does the same in a QA run): five times
-/// [`BOUND`], so a read that waited for one save shows.
-const CHAT_SAVE: Duration = Duration::from_millis(500);
 
 /// The failure these target: **a read the app makes on its UI thread waits for a disk write** of chat (a channel's
 /// messages file, a room's files and images, the configuration with a read mark). On Windows CI the UI thread hung
 /// 2 s in `qa chatpage send`: Defender slows each new file, and the reads waited for a lock held across the write.
-/// `act` (the `n`th time) runs `times` times on a thread of its own, every save made [`CHAT_SAVE`] slow, while every
+/// `act` (the `n`th time) runs `times` times on a thread of its own, every save made [`SLOW_SAVE`] slow, while every
 /// read of the app's main thread is timed (the chat page's included, as on screen: it marks what it shows read).
 /// Returns the core, the channel's id and the temporary folders.
 fn chat_reads_while(what: &str, times: u32, act: impl Fn(&Core, &str, &Path, u32) + Send + 'static) -> (Arc<Core>, String, [tempfile::TempDir; 2]) {
@@ -425,7 +437,7 @@ fn chat_reads_while(what: &str, times: u32, act: impl Fn(&Core, &str, &Path, u32
     let channel = rt.block_on(h.chat_new("Saves", false)).unwrap().id;
     // Primed as the app is.
     Calls::new(&core).round(None, Some(&channel));
-    trs_sync_net::shared::test_slow_saves(CHAT_SAVE);
+    trs_sync_net::shared::test_slow_saves(SLOW_SAVE);
     let worker = {
         let (core, channel) = (core.clone(), channel.clone());
         std::thread::spawn(move || {

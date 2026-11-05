@@ -388,9 +388,10 @@ pub(crate) trait HostCore: Send + Sync {
     fn ignored(&self, _f: &str, _path: &str, _dir: bool) -> Result<Option<crate::sync::ondemand::SyncIgnored>, OdError> {
         Ok(None)
     }
-    /// Whether the folder's changes wait to be reported (a delete a moment ago may be a save by replace).
-    fn replace_hold(&self, _f: &str) -> bool {
-        false
+    /// What the folder's changes wait for before they are reported (a delete a moment ago may be a save by replace;
+    /// `writing`: the new file is being written at its name). `None`: nothing.
+    fn replace_hold(&self, _f: &str) -> Option<trs_sync::ondemand::Hold> {
+        None
     }
 
 }
@@ -514,7 +515,7 @@ impl HostCore for BackendCore {
     fn ignored(&self, f: &str, path: &str, dir: bool) -> Result<Option<crate::sync::ondemand::SyncIgnored>, OdError> {
         self.0.od_ignored(f, path, dir)
     }
-    fn replace_hold(&self, f: &str) -> bool {
+    fn replace_hold(&self, f: &str) -> Option<trs_sync::ondemand::Hold> {
         self.0.od_replace_hold(f)
     }
     fn delete(&self, f: &str, id: &str, seen: Option<trs_sync_net::DeleteSeen>) -> Result<SyncDeleted, OdError> {
@@ -734,6 +735,8 @@ pub(crate) struct Host {
     pub(crate) keepalive: Duration,
     /// The host hears of a folder's changes after a delete at most this long later (a save by replace may follow).
     pub(crate) replace_cap: Duration,
+    /// ... and at most this long while the new file is still being written at the delete's name.
+    pub(crate) write_cap: Duration,
     /// Since when each folder's feed signal has waited for a save by replace.
     held_since: Mutex<HashMap<String, Instant>>,
     /// [`REQUEST_WAIT`], [`SEND_WAIT`], [`MAX_CONNECTIONS`] (shorter in tests).
@@ -806,6 +809,7 @@ impl Host {
             held_since: Mutex::new(HashMap::new()),
             keepalive: KEEPALIVE,
             replace_cap: trs_sync::ondemand::REPLACE_WINDOW,
+            write_cap: trs_sync::ondemand::WRITE_HOLD_MAX,
             request_wait: REQUEST_WAIT,
             send_wait: SEND_WAIT,
             max_connections: MAX_CONNECTIONS,
@@ -1431,11 +1435,13 @@ impl Host {
         for f in &folders {
             // A delete a moment ago may turn out to be a save by replace: the system hears of it once that is settled
             // (one edit), as the other devices do.
-            // At most one window, though: a run of deletes never keeps the system from hearing of changes.
-            if self.core.replace_hold(&f.id) {
+            // At most one window, though: a run of deletes never keeps the system from hearing of changes. Longer only
+            // while the new file is still being written at the name (a big file read in): until that write ends, and
+            // never past `write_cap`.
+            if let Some(hold) = self.core.replace_hold(&f.id) {
                 let mut held = lock(&self.held_since);
                 let since = *held.entry(f.id.clone()).or_insert_with(Instant::now);
-                if since.elapsed() < self.replace_cap {
+                if since.elapsed() < if hold.writing { self.write_cap } else { self.replace_cap } {
                     continue;
                 }
                 held.insert(f.id.clone(), Instant::now());
