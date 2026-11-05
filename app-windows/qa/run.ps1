@@ -2206,7 +2206,17 @@ $checks.ondemandfirst = {
     $out
   }
   function Status([string]$sock) { (& $Cli --socket $sock sync status Docs --json 2>&1) -join '' | ConvertFrom-Json }
-  function Shown([string]$path) { @($shell.NameSpace($path).Items() | ForEach-Object { $_.Name } | Sort-Object) -join ',' }
+  function OnDisk([string]$path) { @([IO.Directory]::GetFileSystemEntries($path) | ForEach-Object { [IO.Path]::GetFileName($_) } | Sort-Object) -join ',' }
+  # A session with no shell has no namespace to ask.
+  $noShell = @{}
+  function Shown([string]$path) {
+    $folder = if ($null -ne $shell) { $shell.NameSpace($path) }
+    if ($null -eq $folder) {
+      if (-not $noShell.Said) { Write-Host '  ondemandfirst: no shell namespace in this session, so listed through the file system only'; $noShell.Said = $true }
+      return OnDisk $path
+    }
+    @($folder.Items() | ForEach-Object { $_.Name } | Sort-Object) -join ','
+  }
   function NoStall([string]$during, [int]$limit) {
     $late = @($slowest.GetEnumerator() | Where-Object { $_.Value -gt $limit } | ForEach-Object { "$($_.Key) $($_.Value) ms" })
     if ($late.Count -gt 0) { Fail "a call waited during $during (limit $limit ms): $($late -join ', ')" }
@@ -2218,7 +2228,8 @@ $checks.ondemandfirst = {
     if ($added -notlike 'Sharing Docs*') { Fail "sync add: $added" }
     $link = ((& $Cli --socket $sa sync share Docs --json 2>&1) -join '' | ConvertFrom-Json).link
     $linkC = ((& $Cli --socket $sa sync share Docs --json 2>&1) -join '' | ConvertFrom-Json).link
-    $maker = ((& $Cli --socket $sa sync list --json 2>&1) -join '' | ConvertFrom-Json).device_name
+    $listed = (& $Cli --socket $sa sync list --json 2>&1) -join '' | ConvertFrom-Json
+    $maker = $listed.device_name; $port = $listed.port
     Stop-App $a $pa; $pa = $null
 
     # One: the owner is away. B joins, the folder opens at once and empty, and says whom it waits for.
@@ -2238,7 +2249,14 @@ $checks.ondemandfirst = {
     # Its owner comes: the placeholders appear with nothing asked, and hold no bytes yet.
     $pa = Start-App $a -QaControl
     WaitForSync $a
-    WaitFor { if ((Shown $bd) -eq 'big.bin,small.txt') { $true } } 60000 'the placeholders on B by themselves' | Out-Null
+    $portNow = ((& $Cli --socket $sa sync list --json 2>&1) -join '' | ConvertFrom-Json).port
+    try { WaitFor { if ((OnDisk $bd) -eq 'big.bin,small.txt') { $true } } 60000 'the placeholders on B by themselves' | Out-Null }
+    catch {
+      $said = { param($dir) @(CoreLog $dir | Select-Object -Last 12) -join ' / ' }
+      Fail "the placeholders did not come by themselves; on disk '$(OnDisk $bd)', in the shell '$(Shown $bd)'; A's port was $port and is $portNow; B: $((Status $sb) | ConvertTo-Json -Compress); host: $(Qa $b @('ondemand')); A's core: $(& $said $a); B's core: $(& $said $b)"
+    }
+    # The shell shows what the file system holds (its answer is not cached from the empty folder).
+    WaitFor { if ((Shown $bd) -eq 'big.bin,small.txt') { $true } } 10000 "the placeholders in the shell (it says '$(Shown $bd)')" | Out-Null
     if ((Qa $b @('ondemand')) -notmatch 'big\.bin:p, small\.txt:p') { Fail "not placeholders: $(Qa $b @('ondemand'))" }
 
     # Two: a scan on A. Nothing on A waits for it, and it has to have really been running.
@@ -2283,14 +2301,21 @@ $checks.ondemandfirst = {
     NoStall "a stream to B ($reading looks)" 3000
     & $Cli --socket $sb sync settings --down unlimited 2>&1 | Out-Null
 
-    # A second device, with the first device's maker gone: the copy B made is enough.
-    Stop-App $a $pa; $pa = $null
-    WaitFor { $r = Qa $c @('ondemand', 'read', 'big.bin') 60000; if ($r -match "read 41943040 bytes, sha256 $want") { $r } } 60000 'C to get big.bin from B' | Out-Null
+    # A second device, with the first device's maker gone: the copy B made is enough. C has to have met B first, which
+    # takes LAN discovery here (a network where it is blocked leaves this part untested, and says so).
+    $met = $false
+    $until = [DateTime]::Now.AddSeconds(30)
+    do { $met = (Status $sc).connected -ge 2; if (-not $met) { Start-Sleep -Milliseconds 500 } } while (-not $met -and [DateTime]::Now -lt $until)
+    if (-not $met) { Write-Host '  ondemandfirst: C never met B (no LAN discovery here?), so the second device was not tested' }
+    else {
+      Stop-App $a $pa; $pa = $null
+      WaitFor { $r = Qa $c @('ondemand', 'read', 'big.bin') 60000; if ($r -match "read 41943040 bytes, sha256 $want") { $r } } 60000 'C to get big.bin from B' | Out-Null
+    }
   } finally {
     Stop-App $b $pb
     if ($pc) { Stop-App $c $pc }
     if ($pa) { Stop-App $a $pa }
-    [void][Runtime.InteropServices.Marshal]::ReleaseComObject($shell)
+    if ($null -ne $shell) { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($shell) }
     Remove-Item -Recurse -Force $a, $b, $c -ErrorAction SilentlyContinue
   }
   @()

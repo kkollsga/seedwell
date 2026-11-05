@@ -1323,6 +1323,8 @@ public partial class App : Application
                     if (menuItems.FirstOrDefault(i => i.Command.GetType().Name.Equals(Arg(2), StringComparison.OrdinalIgnoreCase)) is SidebarMenuEntry.Item entry)
                     {
                         pane.RunSidebarCommand(entry.Command, chatPlace);
+                        // Mute and the like are queued: what they did shows once they returned.
+                        await CoreCalls.Idle();
                     }
                     else { result = $"no such entry (the menu has {string.Join(", ", menuItems.Select(i => i.Command.GetType().Name))})"; break; }
                     var now = Core.ChatChannels().FirstOrDefault(c => c.Id == channel.Id);
