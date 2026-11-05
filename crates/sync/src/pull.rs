@@ -70,8 +70,59 @@ pub enum FetchError {
     Failed(String),
 }
 
+/// One piece of an unhashed file, asked of a device that holds it (its maker): SPEC §7G.11, *hashed when first fetched*.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StreamAsk {
+    /// The path (wire form).
+    pub path: String,
+    /// The unhashed version.
+    pub version: Version,
+    /// Where the piece starts: 0, or where the last one ended.
+    pub offset: u64,
+    /// Its length (the last piece: what is left).
+    pub len: u32,
+    /// The version's maker: the one device that can stream it (it signs the hashed form). Another holder of the
+    /// unhashed form is never asked.
+    pub maker: ShortId,
+}
+
+/// A piece that came ([`ChunkSource::stream`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StreamGot {
+    /// The bytes.
+    pub data: Vec<u8>,
+    /// The chunks that ended inside the bytes sent so far, not sent before.
+    pub chunks: Vec<ChunkRef>,
+    /// With the last piece: the maker's signature of the version with the chunks that came in all the pieces.
+    pub sig: Option<[u8; 64]>,
+}
+
+/// Why a piece of a stream did not come ([`ChunkSource::stream`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StreamFail {
+    /// The maker is not connected, or its answer did not come in time: the same piece is asked again later (what
+    /// came so far is kept, [`crate::lazy::Resume`]).
+    Unavailable,
+    /// The maker has no read of the file where this one was (it started again, or let the read go): start again
+    /// from the first byte.
+    Restart,
+    /// The file changed on its maker since it was listed or while it was read: nothing of it is kept.
+    Changed,
+    /// It failed otherwise.
+    Failed(String),
+}
+
+/// Bytes asked for in one piece of a stream.
+pub const STREAM_PIECE: u32 = trs_sync_proto::msg::STREAM_PIECE;
+
 /// Fetches chunks from peers. Blocking; an implementation fetches the requests of one call in parallel.
 pub trait ChunkSource: Sync {
+    /// The next piece of an unhashed file, from its maker (`ask.maker`: it hashes the file as it reads it to us).
+    fn stream(&self, ask: &StreamAsk) -> Result<StreamGot, StreamFail> {
+        let _ = ask;
+        Err(StreamFail::Unavailable)
+    }
+
     /// One result per request, in order.
     fn fetch(&self, reqs: &[ChunkRequest]) -> Vec<Result<Vec<u8>, FetchError>>;
 
@@ -131,6 +182,9 @@ pub struct Puller<'a> {
     pub signer: Option<&'a dyn Signer>,
     /// Peers.
     pub source: &'a dyn ChunkSource,
+    /// Checks a signed version (its writer's signature): the hashed form of an unhashed version that came with its
+    /// last piece is taken only so.
+    pub verify: &'a dyn Fn(&SignedFile) -> bool,
     /// Time.
     pub clock: &'a dyn Clock,
     /// Names devices for conflict copies (`None` = the first group of the device id is used).
@@ -156,6 +210,13 @@ pub struct Puller<'a> {
     pub on_demand: Option<&'a dyn Fn(&str) -> bool>,
     /// On demand: the online-only files by content, kept from round to round (start with `Default::default()`).
     pub online_only: Option<&'a RefCell<OnlineOnly>>,
+    /// The streams of unhashed files, kept from round to round ([`crate::lazy::Streams`]): a round notes what it
+    /// wants streamed and places what came, and never streams itself. `None`: an unhashed file waits.
+    pub streams: Option<&'a std::sync::Mutex<crate::lazy::Streams>>,
+    /// Peers' chunks of a hashed file are fetched with the core let go too ([`crate::lazy::ChunkJob`]): a round reuses
+    /// what is here, notes what must come from peers as a job and goes on; the next round after the job places the
+    /// file. Off: a round fetches them itself (needs `streams` on).
+    pub fetch_apart: bool,
     /// Devices that are no members any more: no source (a need only they hold is reported holderless).
     pub not_members: &'a std::collections::BTreeSet<ShortId>,
     /// What this device ignores: a directory another device deleted goes here too when all that is left in it is
@@ -221,6 +282,23 @@ fn parent(p: &str) -> &str {
 
 fn name(p: &str) -> &str {
     p.rfind('/').map_or(p, |i| &p[i + 1..])
+}
+
+/// The temp file a stream of an unhashed version builds (SPEC §7G.11), beside `p`: its own, apart from
+/// [`temp_path`], since it is written with the folder's core let go while a round may build `p` another way.
+pub fn stream_temp_path(p: &str) -> String {
+    let n = name(p);
+    let tmp = if n.len() + 21 <= 255 {
+        format!(".seedwell.{n}.stream.tmp")
+    } else {
+        let h = Sha256::digest(n.as_bytes());
+        let hex: String = h[..16].iter().map(|b| format!("{b:02x}")).collect();
+        format!(".seedwell.{hex}.stream.tmp")
+    };
+    match parent(p) {
+        "" => tmp,
+        dir => format!("{dir}/{tmp}"),
+    }
 }
 
 /// `.seedwell.<name>.tmp` beside `p`; a hash stands in for names too long to fit.
@@ -1054,9 +1132,15 @@ impl Puller<'_> {
         if meta.is_none() && self.under_own_change(store, p)? {
             return self.skip_under_own_change(store, n);
         }
+        // A transfer of it runs with the core let go (it writes the temp file): left alone until it ends.
+        if self.streams.is_some_and(|s| crate::lazy::lock(s).running.contains_key(p)) {
+            return Err(Skip::Waiting);
+        }
         self.ensure_parents(p)?;
-        let tmp = temp_path(p);
+        let tmp = if want.kind == FileKind::File && want.is_unhashed() { stream_temp_path(p) } else { temp_path(p) };
 
+        // An unhashed version comes as a stream from its maker, hashed as it is read: what is recorded is its hashed form.
+        let mut hashed: Option<SignedFile> = None;
         let tier = match want.kind {
             FileKind::Symlink => {
                 if self.fs.lstat(&tmp)?.is_some() {
@@ -1064,6 +1148,11 @@ impl Puller<'_> {
                 }
                 self.fs.symlink(&want.symlink_target, &tmp)?;
                 None
+            }
+            FileKind::File if want.is_unhashed() => {
+                let (tier, file) = self.take_streamed(p, &tmp, local.as_ref(), &n)?;
+                hashed = Some(file);
+                Some(tier)
             }
             FileKind::File => Some(self.build(store, p, &tmp, local.as_ref(), &n, report)?),
             FileKind::Dir => return Err(Skip::Failed("a directory is not fetched".into())),
@@ -1094,8 +1183,58 @@ impl Puller<'_> {
             }
         }
         let placed = self.fs.lstat(&tmp)?;
+        if let Some(h) = &hashed {
+            // What is placed, noted first: a stop between the rename and the commit is then recognised by its bytes.
+            crate::lazy::note_hashed(self.fs, h)?;
+        }
         self.fs.rename(&tmp, p)?;
-        self.record_placed(store, n.file, tier, placed.as_ref())
+        let streamed = hashed.is_some();
+        self.record_placed(store, hashed.unwrap_or(n.file), tier, placed.as_ref())?;
+        if streamed {
+            // Its record at once, not with the round's batch.
+            self.commit(store)?;
+            crate::lazy::forget_noted(self.fs, p);
+        }
+        Ok(())
+    }
+
+    /// The stream of an unhashed version (SPEC §7G.11) that came to its end ([`crate::lazy::Streams`]), to place:
+    /// its temp file as the stream left it, and its version (put together from what was asked for and the chunks
+    /// that came) signed by the maker the version names, for exactly these chunks. None yet: the stream is noted as
+    /// wanted, for whoever drives the folder to run with the core let go, and the step waits. A stream that failed
+    /// says why, once.
+    fn take_streamed(&self, p: &str, tmp: &str, local: Option<&LocalRecord>, n: &NeedRecord) -> Result<(TierMemo, SignedFile), Skip> {
+        let want = &n.file.info;
+        let Some(streams) = self.streams else { return Err(Skip::Waiting) };
+        let mut s = crate::lazy::lock(streams);
+        if let Some((v, why)) = s.failed.remove(p)
+            && v == want.version
+        {
+            return Err(Skip::Failed(why));
+        }
+        let Some(pr) = s.prepared.remove(p).filter(|pr| pr.file.info.version == want.version && pr.file.info.path == want.path && pr.file.info.same_content(want))
+        else {
+            s.jobs.insert(p.to_string(), crate::lazy::Wanted::Stream(n.file.clone()));
+            return Err(Skip::Waiting);
+        };
+        drop(s);
+        let left = self.fs.lstat(tmp)?;
+        if !left.is_some_and(|m| m.kind == FileKind::File && m.size == want.size && (m.inode, m.mtime_ns) == pr.tmp) {
+            // Not the file the stream left (changed or gone since): streamed again.
+            crate::lazy::lock(streams).jobs.insert(p.to_string(), crate::lazy::Wanted::Stream(n.file.clone()));
+            return Err(Skip::Waiting);
+        }
+        if pr.file.info.is_unhashed() || !(self.verify)(&pr.file) {
+            let _ = self.fs.remove_file(tmp);
+            return Err(Skip::Failed("the device that has it signed something other than what it sent".into()));
+        }
+        self.fs.set_mtime(tmp, want.mtime_ns)?;
+        if self.exec_bits {
+            self.fs.set_exec(tmp, want.exec)?;
+        }
+        let prev = local.and_then(|l| l.tier).map(|t| (chunk::Tier { avg: t.avg }, t.chosen_at));
+        let (tier, chosen_at) = chunk::choose_tier(want.size, prev);
+        Ok((TierMemo { avg: tier.avg, chosen_at }, pr.file))
     }
 
     /// Is everything under the directory `p` on its way out in this round (a delete is needed for
@@ -1241,6 +1380,48 @@ impl Puller<'_> {
         report: &mut PullReport,
     ) -> Result<TierMemo, Skip> {
         let want = &n.file.info;
+        // Apart: everything that reads the disk in proportion to the file or waits for the network (the clone of our old
+        // version, local chunks, the check of a temp file left over, the peers' chunks) is a job's, run with the core
+        // let go (SPEC §7G.2); a round only notes it, and places the file once a job has built it.
+        if let Some(streams) = self.streams.filter(|_| self.fetch_apart) {
+            let mut s = crate::lazy::lock(streams);
+            if let Some((v, why)) = s.failed.remove(p)
+                && v == want.version
+            {
+                s.chunks.remove(p);
+                return Err(Skip::Failed(why));
+            }
+            let ours = local.map(|l| (l.file.info.version.clone(), l.stamp));
+            let mut known = None;
+            if let Some(st) = s.chunks.remove(p) {
+                let now = self.fs.lstat(tmp)?;
+                // Built for this version from our record as it still is, the temp file as the job left it.
+                let as_left = st.version == want.version && st.local == ours && now.is_some_and(|m| m.kind == FileKind::File && (m.inode, m.size, m.mtime_ns) == st.tmp);
+                if as_left && st.remaining.is_empty() {
+                    drop(s);
+                    let fh = self.fs.open_rw(tmp)?;
+                    return self.finish_build(fh, tmp, local, want);
+                }
+                if as_left {
+                    known = Some((st.tmp, st.remaining));
+                }
+            }
+            let old = local
+                .filter(|l| !l.invalid && !l.dataless && !l.file.info.deleted && l.file.info.kind == FileKind::File)
+                .and_then(|l| l.stamp.map(|st| (st, l.file.info.chunks.clone())));
+            let job = crate::lazy::ChunkJob {
+                path: p.to_string(),
+                tmp: tmp.to_string(),
+                version: want.version.clone(),
+                chunks: want.chunks.clone(),
+                old,
+                known,
+                holders: n.holders.clone(),
+                local: ours,
+            };
+            s.jobs.insert(p.to_string(), crate::lazy::Wanted::Chunks(job));
+            return Err(Skip::Waiting);
+        }
         // What is in the temp file to start with: a resumed temp file is trusted only chunk by chunk
         // (each is hashed before it is kept); a fresh clone of our old version holds its chunks.
         let mut in_place: BTreeMap<u64, [u8; 32]> = BTreeMap::new();
@@ -1276,7 +1457,6 @@ impl Puller<'_> {
             }
             missing.push((off, *c));
         }
-
         // Peers, in windows of at most `window` bytes.
         let mut i = 0;
         let mut waiting = false;
@@ -1326,6 +1506,11 @@ impl Puller<'_> {
             fh.sync_barrier()?;
             return Err(Skip::Waiting);
         }
+        self.finish_build(fh, tmp, local, want)
+    }
+
+    /// The temp file holds every chunk of `want`: its length, a barrier, its time and bits, and its tier.
+    fn finish_build(&self, fh: Box<dyn FileHandle>, tmp: &str, local: Option<&LocalRecord>, want: &FileInfo) -> Result<TierMemo, Skip> {
         fh.set_len(want.size)?;
         // Ordered before the rename; durable at the batch's full flush, before its record is committed.
         fh.sync_barrier()?;
@@ -1408,7 +1593,7 @@ impl Puller<'_> {
     }
 }
 
-fn hash(data: &[u8]) -> [u8; 32] {
+pub(crate) fn hash(data: &[u8]) -> [u8; 32] {
     Sha256::digest(data).into()
 }
 

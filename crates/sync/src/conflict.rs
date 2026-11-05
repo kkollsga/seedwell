@@ -8,7 +8,7 @@
 
 /// The last component's stem and extension: `a/b/Report.docx` → (`a/b/Report`, `.docx`). A leading dot
 /// is part of the name (`.profile` has no extension), and so is a trailing one.
-fn split_ext(path: &str) -> (&str, &str) {
+pub(crate) fn split_ext(path: &str) -> (&str, &str) {
     let name_start = path.rfind('/').map_or(0, |i| i + 1);
     let name = &path[name_start..];
     match name.rfind('.') {
@@ -53,6 +53,22 @@ pub fn conflict_path(path: &str, device: &str, stamp: &str, n: u32) -> String {
     let num = if n > 1 { format!(" {n}") } else { String::new() };
     let suffix = format!(" (conflict, {}, {stamp}{num})", clean_device(device));
     fit(stem, &suffix, ext)
+}
+
+/// The longest suffix [`conflict_path`] puts before the extension: ` (conflict, `, a device name of 40 characters of
+/// up to 4 bytes each, `, `, a UTC stamp, a copy number (` 4294967295`), `)`.
+const MAX_SUFFIX: usize = 12 + 40 * 4 + 2 + 17 + 11 + 1;
+
+/// What every conflict copy of `path` begins with, whatever device names it and however its name is cut to fit
+/// ([`conflict_path`]): its folder and as much of its stem as is kept with the longest suffix (maybe none).
+pub fn copy_prefix(path: &str) -> &str {
+    let (stem, ext) = split_ext(path);
+    let name_start = stem.rfind('/').map_or(0, |i| i + 1);
+    let mut end = stem.len().min(name_start + MAX_NAME.saturating_sub(MAX_SUFFIX + ext.len()));
+    while !stem.is_char_boundary(end) {
+        end -= 1;
+    }
+    &stem[..end]
 }
 
 /// Is this the name of a conflict copy? (Used only for display; the index records `conflict_of`.)
@@ -138,6 +154,28 @@ mod tests {
     /// No character any system refuses in a name.
     fn portable(p: &str) -> bool {
         !p.chars().any(|c| matches!(c, '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|'))
+    }
+
+    /// Fails when a copy's name, cut to fit for a long device name, no longer begins with `copy_prefix` (a host's
+    /// same edit would then not find its copy, and make another).
+    #[test]
+    fn every_copy_begins_with_its_files_copy_prefix() {
+        let devices = ["B", "A rather long device name, forty chars", &"日".repeat(40), &"😀".repeat(40)];
+        let names = [
+            "a.txt".to_string(),
+            format!("docs/{}.docx", "r".repeat(200)),
+            format!("{}.txt", "l".repeat(250)),
+            format!("x/{}.{}", "é".repeat(100), "e".repeat(40)),
+        ];
+        for d in devices {
+            for p in &names {
+                for n in [1, 2, 4_294_967_295] {
+                    let c = conflict_path(p, d, "2026-10-25 14.32z", n);
+                    assert!(c.starts_with(copy_prefix(p)), "{c} for {p}");
+                }
+            }
+        }
+        assert_eq!(copy_prefix("docs/a.txt"), "docs/a");
     }
 
     #[test]

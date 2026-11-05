@@ -37,6 +37,7 @@ pub mod fs;
 pub mod global;
 pub mod ignore;
 pub mod index;
+pub mod lazy;
 pub mod ondemand;
 pub mod path;
 pub mod plan;

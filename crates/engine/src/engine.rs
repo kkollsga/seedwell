@@ -1132,6 +1132,12 @@ impl EngineHandle {
         closed
     }
 
+    /// Where every torrent's files are or are about to be ([`TorrentPlaces`]): its file or folder, its staging folder,
+    /// and the destinations of its moves. One message to the session, no disk access: as cheap as [`Self::snapshot`].
+    pub async fn torrent_places(&self) -> Result<Vec<TorrentPlaces>, EngineError> {
+        self.call(Cmd::Places).await
+    }
+
     /// Aggregates over all torrents without building a row per torrent (see [`Totals`]).
     pub async fn totals(&self) -> Result<Totals, EngineError> {
         self.call(Cmd::Totals).await

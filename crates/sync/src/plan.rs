@@ -37,7 +37,8 @@ fn depth(p: &str) -> usize {
 
 /// Same content and kind, so a rename can stand in for a fetch.
 fn same_file(a: &FileInfo, b: &FileInfo) -> bool {
-    a.kind == FileKind::File && b.kind == FileKind::File && a.exec == b.exec && a.size == b.size && a.chunks == b.chunks
+    // An unhashed file is like no other: its content is not known.
+    a.kind == FileKind::File && b.kind == FileKind::File && !a.is_unhashed() && !b.is_unhashed() && a.exec == b.exec && a.size == b.size && a.chunks == b.chunks
 }
 
 /// Orders `needs` into steps. `local` looks up our current record of a path.

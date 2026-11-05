@@ -365,6 +365,21 @@ When a finished location changes (app default, category override, a favorite tra
 - **Scheduling:** at most one cross-volume copy per destination volume at a time; the copy is unbuffered (`F_NOCACHE`), so seeding and the Mac stay responsive without a speed limit (`advanced.move_limit_mib`, default 0 = unlimited; settings before version 6 that still hold the old default 100 become 0). Measured, 1 GiB verified copy within one SSD: about 1.4 GB/s. Re-pointing a category with hundreds of torrents queues them; same-volume moves finish almost at once.
 - **Safety:** never overwrite (collisions get a suffix, §7A.3); refuse when the destination lacks free space for the largest pending torrent plus 1 GB; a failed or cancelled move leaves the torrent seeding from its original location.
 - **UI:** the row shows "Moving… 42%" in its grey status line; the menu bar icon shows the green move bar (§8.1).
+- **Torrents inside a synced folder** (§7G): folder sync never moves files from under a torrent. Turning *Files on
+  demand* on for a folder whose files are here leaves them where they are (§7G.11, *Modes*); freeing a folder's local
+  copies (its files moved into Seedwell's cache), moving a full folder (`sync move`) and adding a folder with its copies
+  freed are refused while a torrent's files are at or below the folder (or its folder holds it), naming the torrents
+  ("a torrent uses files in this folder", "3 torrents use..."). What counts is every place a torrent has files: where
+  they are, its staging folder while it downloads, and where a move puts them (a move queued to a place not planned yet
+  counts everywhere until it is planned). Paths are compared as the disk names them (links resolved: a folder added as
+  `~/Movies`, a link to `/Volumes/Media/Movies`, is the folder a torrent saves to) and without regard to case on a
+  volume that finds names in any case (APFS and HFS+ by default, NTFS). The check runs before anything starts and again
+  once the folder has stopped, right before the move (stopping can take a minute; a torrent added meanwhile counts).
+  After any move of a folder's files (a switch back to full, a move, a removal that puts an on-demand folder's files at
+  its place, also one a start finishes from its journal) every torrent folder is looked at once, as after a disk is
+  mounted, so a torrent that went missing-data because its files were moved away finds them again at once, from its
+  record (no recheck). *Verify* (`recheck`) on a
+  torrent in missing-data looks for its files again too, at once, checks them and seeds.
 
 ### 7A.6 Smart add: choose what to download (concept 10)
 Detection exists to remove decisions, so the app asks only when there is a real choice. A single movie, episode, album or book with a confident match starts silently with a notification. The chooser appears **before anything is downloaded or announced** when any of these holds:
@@ -786,8 +801,10 @@ Sync (now Resilio Sync) did, with Syncthing's proven sync rules. Holding a folde
 design notes, with the research behind them, are in `dev-docs/` (local).
 
 **The wire protocol** is specified in `crates/sync-proto/PROTOCOL.md`: framing, every message, statement,
-invitation and proof, the stored formats, and how they may change. 0.1.6, the first release with sync, is the
-baseline every later version must still sync with:
+invitation and proof, the stored formats, and how they may change. 0.1.6, the first release with sync, was the
+baseline until 0.1.19, which speaks protocol 3 only (unhashed versions, §7G.11): the user's decision (2026-11-04,
+"no devices are older… we can update all"), so a device of 0.1.18 or before refuses a 0.1.19 one and says which
+needs an update, rather than receiving entries it would mishandle. The rules below hold from there on:
 - devices agree on a protocol version and feature bits in their Hellos, and two that share none refuse each
   other and say which needs an update;
 - fields are only appended, records carry their length, and types, kinds and values a device does not know are
@@ -952,9 +969,10 @@ baseline every later version must still sync with:
     Both devices need 0.1.13. A device in a group with other devices leaves it before it joins another; one alone in
     its own group simply joins.
   - **On all my devices.** A folder or channel the user puts on all devices (a *Follow* statement in the group, signed
-    by the device that says it; the latest per folder or channel counts) comes to each other device by itself: a
+    by the device that says it; the latest per folder or channel counts, *Whose statement counts* below) comes to each other device by itself: a
     folder at the default location for joined folders under its name (with a number when taken: never into a folder
-    that is there), on demand when it is on demand on the device that put it there (since 0.1.14: its place there, its
+    that is there), on demand when it is on demand on the device that put it there, or marked on demand there for the
+    devices without its files (§7G.11, *Modes*; since 0.1.14: its place there, its
     files in this device's cache, nothing downloaded until asked for), else synced in full; a channel. A device that
     keeps no folders on demand yet (Windows, Linux) joins such a folder in full, and its page says so. The mode is only
     the default at joining: each device switches its own afterwards, and a switch on one device changes no other (one
@@ -967,11 +985,52 @@ baseline every later version must still sync with:
     stops it coming to new devices and deletes nothing. A folder or channel taken off one device (removed or left
     there) does not come back to it by itself (the skip list). Nothing follows on its own: an agent's channel or
     folder never does. A channel closed to agents follows and stays closed on every device.
+  - **Whose statement counts** (0.1.19): for a folder or channel a device has, only the latest Follow of a device
+    that is owner or admin of it there counts (on or off, removed, on demand, Read only); one of a device that is
+    only a member there (a sibling made Read only, a device on another build) turns nothing off, removes nothing and
+    lifts nothing. Only while a device waits to be admitted, or does not have it yet, the latest of any of the
+    user's devices counts; so that those go by the right one too, an owner or admin says its statement again when a
+    member's says otherwise (only with a higher serial). A Follow's serial counts only up to 2³² (a higher one, which
+    no device reaches by counting, counts for nothing), and a device numbers its next one above those of the owners
+    and admins, so no statement can freeze a folder's. A group that moves to a new key carries each statement as it
+    counts, at its own time.
+  - **Read only** (0.1.19, a folder's): the statement can also say the user's other devices only read the folder
+    (`FOLLOW_READ_ONLY`, signed the same way, said again in every later statement for it, the off one included). For
+    a folder kept on one computer and opened on the others: they open and download its files but never change, add
+    or delete anything, here or on each other (Read only members, below and §7G.11), and nothing is downloaded to the
+    device that hosts it.
+    - *Who turned it on* is the earliest Follow with the flag since the last one without: a sibling saying it again
+      later (after a mode switch) does not take its place. That device keeps its role; owners are never lowered.
+    - While it is on, an owner admits the user's devices at Read only instead of Admin (an admin with a one-use
+      invitation at Read only), and raises nobody. An owner makes Read only, signed with the folder key, each sibling
+      at Admin or Read & write whose role was decided no later than the second it came on, and one at Read & write
+      by an admin's invitation (an admin that did not know yet). It confirms what such an admin admitted first, so
+      lowering it drops nobody it let in (its links that are not used yet stop working, as for any admin who is
+      lowered). A role an owner gives one of them afterwards stays. What an owner decides under Read only is dated
+      a second after it came on at least.
+    - **No owner online:** until an owner is, roles do not change. A sibling that becomes Read only then holds back
+      by itself: it writes nothing to the folder (its edits stay its own, as a Read only member's), so the host gets
+      none of its changes. A device on an older Seedwell does not hold back; the line of the switch on an admin says
+      so ("Until an owner of this folder is online, a device on an older Seedwell can still send changes.").
+    - Turned off (by a later statement without the flag), an owner gives every sibling at Read only since it came on
+      Admin back; those Read only before it came on stay so. Turned on and off while the owner was away, it gives
+      Admin back to those made Read only in between. Each once.
+    - It stays on until an owner or admin turns it off: when the statement that turned it on stops counting (its
+      device left the user's devices, or is no longer owner or admin), the owner says it again, numbered above the
+      one that turned it on. It notes in the folder's entry (`devices_read_only`) who turned it on, when, and the last
+      off it carried out. Until the owner's statement arrives, each device goes on reading it on from the statement
+      that turned it on, which it read before (never off for a moment, so nothing is admitted at Admin, written or
+      said off meanwhile); and an owner or admin that says its statement again (above) says it with the flag.
+    - Only the user's own devices follow it: members admitted by link keep the role their link gave. Only an owner
+      or admin can switch it. "On all my devices" turned off keeps it as it is. An owner on an older Seedwell admits
+      as before (it keeps the flag and passes it on).
   - **Removed by its owner** (0.1.14). The device that owns a folder on all devices (its owner, normally the device
     that added it) removing it in the app removes it from Seedwell on every device: it says so in the group (its
     Follow turns off, marked removed), and each other device stops syncing it, its files kept where they are (an
     on-demand folder's become an ordinary folder at its place; nothing is deleted or moved to the Trash). A device
-    that is away does it when it is back. The Remove question on the owner says so ("It is also removed from Seedwell
+    that is away does it when it is back. Only a statement of a device that is owner of the folder there removes it
+    (0.1.19): a sibling's that is not removes nothing, its key included, and a device where the folder is not running
+    keeps it. The Remove question on the owner says so ("It is also removed from Seedwell
     on your other devices; their files stay where they are."). Removed on any other device, or through the agent
     interface (agents never change what is on the user's other devices), it goes from that device only and does not
     come back there. Done once per removal: a device that joins the folder again afterwards keeps it. Channels are
@@ -987,7 +1046,12 @@ baseline every later version must still sync with:
     at once or when it next meets one of the devices (over any session), which admits it by its device key; it then
     receives the new key. The old key is worth nothing: a device signed in with it afterwards finds no one. Two
     removals made apart settle on the lowest new group id, and the devices removed in either are taken out of it.
-    Leaving changes the key the same way (the others do it). Admissions in folders and channels are by device key,
+    Leaving changes the key the same way (the others do it): each other device that learns of it makes a new key at
+    once, so two or more may do so at the same moment (0.1.19). They settle the same way, on the lowest new group id
+    of the moves said in the old group, which each one learns: what reaches the old group while a device switches to
+    its own new group (another's Moved, said at the same moment) stays in what that device keeps of the old group, and
+    the device moves on to the winner once it reads it there. No device waits for another to make the key: one that is
+    away must not keep the departed device's key valid. Admissions in folders and channels are by device key,
     so they stay and nothing syncs again. A device that has not moved yet still trusts the old group; a thief who
     removed the honest devices first still leaves only *Start Over*.
   - **Leave and Start Over.** *Leave Your Devices…* signs this device out of the group (the others change the key) and
@@ -1101,10 +1165,16 @@ baseline every later version must still sync with:
   ctime) is never hashed again.
 - **Scanning in steps:** a scan holds the folder's index for about 0.1 s at a time (at most a thousand changes), commits
   what it found and lets go; files of 4 MiB and more are read and hashed with the index let go, and recorded by the
-  next step only if they did not change meanwhile (otherwise they are scanned again). Each step's records are announced
-  at once, so the other devices see a big folder's first scan grow and fetch its files while the rest is still hashed.
+  next step only if they did not change meanwhile (otherwise they are scanned again). **Names first** (0.1.19): those
+  big files are hashed once the whole tree has been walked, so directories, links and small files are recorded and
+  announced in the first seconds of a big folder's first scan, and the hashing that follows knows its total. Each
+  step's records are announced at once, so the other devices see a big folder's first scan grow and fetch its files
+  while the rest is still hashed. While a folder scans, its status says the phase and how far it is, and the app shows
+  that instead of a bare spinner: *Listing · 1,234 files (56 GB)* while the tree is walked, then *Checking contents · 3
+  of 407 files · 4.1 GB of 914 GB* with the ring at that fraction (the words and the fraction are the core's,
+  `SyncFolder.scan`; the hosts draw them). An on-demand folder's scan only lists (§7G.11, *Listed first*).
   Peers are sent the index from a read-only view of it, and the app reads a folder's status from what the folder keeps
-  for it: neither waits for a scan or a pull. A pull, too, holds the index one round at a time. A device's index
+  for it: neither waits for a scan or a pull. A pull, too, holds the index one round at a time, and never across a wait for the network or disk work in proportion to a file: a round only notes what a file needs as a job and goes on; the folder's two lanes run the jobs with the index let go, one for the streams of unhashed files (§7G.11) and one for the hashed files, so a stream minutes long holds up no hashed file. A hashed file's job builds it in its temp file: a temp file an earlier job left as it was, or one left over checked chunk by chunk, or our old version cloned (trusted only if the file has its recorded stamp before and after the copy: a save during the copy would mix its bytes in), then each chunk still missing from another local file that has it, then the rest from peers, every chunk checked and written as it comes. A later round places the file and records it, only while the temp file is as the job left it and our record of the path is as the job started from it (else another job checks it again); a chunk that did not come is asked for again, alone. A job's failure fails only the version it was of. So a chunk a minute late, or a film's full copy on a disk that cannot clone, holds up no scan step and none of the hosts' calls. A device's index
   changes that arrive while a pull holds the index wait for it, a few frames at most; beyond that the session stops
   reading until one is applied, and since the answers to the pull's requests come behind them on the connection, the
   requests to that device are given up at once (asked of another device, or again next round) rather than waited for:
@@ -1123,6 +1193,9 @@ baseline every later version must still sync with:
   exchange between members, and addresses typed in by hand.
 - **Transports:** TCP, plus uTP on the Internet (LEDBAT gives way to other traffic). Up to two connections per peer
   on the LAN (index and data).
+- **The sync port** (TCP and its UDP twin) takes IPv4 and IPv6 on one socket each (`[::]` with `IPV6_V6ONLY` off, set
+  on every system: Windows' default is IPv6 only, and its sync port refused every IPv4 device up to 0.1.18). A system
+  with IPv6 turned off listens on IPv4 only and says so in the log.
 - **NAT:**
   1. NAT-PMP/UPnP map the sync port.
   2. Devices that both reach a third member punch a hole through it.
@@ -1164,7 +1237,10 @@ baseline every later version must still sync with:
   makes: "Waiting for Kristian's Mac mini (last seen 3 days ago: nothing answers at 192.168.68.57:55799)", "Waiting
   for Mac mini (never connected to this Mac)", or for several "Waiting for 2 devices: Mac mini (3 days ago), Makro (1
   hour ago)" (by name, three at most, then "and N more"). It is the folder's `waiting` in `sync.list`/`sync.status`
-  and the channel's in `chat.list`; the app shows it as the row's grey line and on the folder page (§7G.5).
+  and the channel's in `chat.list`; the app shows it as the row's grey line and on the folder page (§7G.5). A folder
+  whose members are connected but none of which has sent its list yet (its first index: a joining device just
+  admitted, an owner busy) says so too, "Waiting for Kristian's Mac mini to list Movies", until one has; meanwhile
+  its file manager shows it empty at once (§7G.11), never a spinner, and fills it when the list comes.
 - **Gone devices:** a member not connected and not seen for a day (or never seen here: a record from before 0.1.13
   has no time) is *gone*, as far as this device can tell. Nothing happens to it on its own; the user chooses:
   - **An owner** is offered to remove it: the folder's (or channel's) `gone` lists it, the CLI row names the
@@ -1250,7 +1326,8 @@ baseline every later version must still sync with:
     - The Share menu is read by asking which services the system offers for a folder. A switched-off extension is
       left out; it is the only way an app can read this.
   - Settings:
-    - the role, as a segmented control: Read & write, Read only, and Admin for an owner;
+    - the role, as a segmented control: Read & write, Read only, and Admin for an owner (Read only first chosen
+      while the folder is *Read only* on the user's devices, below);
     - *Single use* (on by default; off offers 5 or 10 times, or unlimited);
     - *Link expires* (on by default, 7 days; or 1 or 30 days): how long the link can be used to join.
     - optionally a channel (§7G.7): the same link then also invites to it, so the joining Mac gets the folder and
@@ -1269,6 +1346,8 @@ baseline every later version must still sync with:
       adds 1, 7 or 30 days to the current end, or **No End Date** lifts the end; the members count again.
     - Members' rows show "until 1 Nov", and the folder page shows "shared until 1 Nov".
     - An admin sees the countdown, without the menu.
+  - **Your devices** (0.1.19): a folder's *On all my devices* and its *Read only* (below), while this Mac is paired
+    and may share it, applied at once.
   - **Active links:** the links that still admit someone, with uses and dates, each with **Revoke**. Used, expired
     and revoked links are not listed.
 - **Edit** opens a modal, then **Cancel** and **Save**:
@@ -1311,10 +1390,22 @@ baseline every later version must still sync with:
   Device…* (the link with *Copy* and its countdown; when a device asks, the confirmation with its id, *Refuse* and
   *Pair*), *Pair with a Link…* (this Mac's id under the field, to compare), and *Leave Your Devices…* or, once removed,
   *Start Over…*. A note says why a second device as co-owner of a folder is a good backup.
-- **On all my devices** (0.1.13): a switch in the folder's Add (*From this Mac*; off by default) and Edit sheets, and
-  in the New Channel window (on by default while this Mac is paired); in the channel's ⋯ menu *On All My Devices*
-  with a checkmark. Under the switch: "Your other devices (MacBook, Studio PC) join it by themselves, as admins.", or
-  why it cannot be turned on. Shown only while this Mac is paired with other devices (or the item is on all of them).
+- **On all my devices** (0.1.13): a switch in the folder's Add (*From this Mac*; off by default) and Edit sheets and
+  its Share dialog, and in the New Channel window (on by default while this Mac is paired); in the channel's ⋯ menu
+  *On All My Devices* with a checkmark. Under the switch: "Your other devices (MacBook, Studio PC) join it by
+  themselves." (a channel's: "…, as admins."), or why it cannot be turned on. Shown only while this Mac is paired
+  with other devices (or the item is on all of them).
+  - **Read only** (0.1.19, §7G.1): a folder's second switch, under it (off by default), switchable by an owner or
+    admin while *On all my devices* is on (or chosen). Its tooltip: "Your other devices can open and download its
+    files but never change, add or delete anything, here or on each other; nothing is downloaded to this Mac". The
+    line under it says what it does and what applying it changes: "Your other devices that have it become Read only:
+    they can open and download its files, but never change, add or delete anything, here or on each other. Nothing
+    is downloaded to this Mac, which keeps its role."; turning it off, "Your other devices become admins again: they
+    can change, add and delete its files, here and on each other."; on a device that may not switch it, who can. In
+    the Add and Edit sheets it applies with Start or Save (on together with *On all my devices*: one statement); in
+    the Share dialog both switches apply at once, under the sharing period, and while Read only is on the dialog's
+    role starts at Read only (also when it opens), so a new link admits at Read only too; another role can still be
+    picked for one link.
 - **Finder:** a Finder Sync extension inside the app badges each synced folder and its items.
   - **The folder's badge:**
     - green tick: up to date, with a device online;
@@ -1345,6 +1436,10 @@ baseline every later version must still sync with:
     (`sync.set_role`, `sync.remove_device`), sharing a folder again (`sync.reshare`) and how long a folder is shared
     (`sync.set_share_until`) need Full permission; `sync.members` is read-only; revoking a link is
     Control.
+  - `sync.share` without a role makes a Read & write link, or a Read only one while the folder is *Read only* on the
+    user's devices, as the Share dialog does (`seedwell sync share <folder> --read-only` is `--role read_only`). No
+    method switches *On all my devices* or *Read only* (§9A.3: agents never change what is on the user's other
+    devices).
   - Links never reach the activity log.
   - *Remove and delete files* takes two steps.
 
@@ -1844,10 +1939,28 @@ browser in Seedwell's window: the Finder through a File Provider extension on th
 an app group shared by the app and its extension), a Cloud Files sync root on Windows. The rules are the core's
 (`trs_sync::ondemand`, `FolderCore`'s on-demand calls); the hosts only draw and report.
 
-- **Modes.** A folder is *full* (every file here, as before) or *on demand*, chosen when joining (`join --on-demand`)
-  and changeable later. Full → on demand moves the folder's files into this device's cache, so nothing is fetched
+- **Modes.** *Files on demand* never touches the files of a device that holds them (the user's decision, 2026-11-04,
+  after 0.1.18 moved a 914 GB folder from under the torrents seeding from it). On demand matters only for the devices
+  that do not hold the files: they get placeholders. On a folder whose files are here (adding one with *Files on
+  demand*, or turning it on in its Edit dialog, `sync mode <folder> on-demand`) nothing is read, moved, renamed or
+  changed: the folder stays *full* at the user's path (wherever that is; `~/Seedwell` is only the default the dialogs
+  propose for a joined folder), and it is marked on demand for the others (`on_demand_others` in `sync.toml`, shown in
+  the status; the *On all my devices* statement carries it as `FOLLOW_ON_DEMAND`, signed anew after every change of the
+  mark or of the folder's mode here, freeing its copies and a switch back to full included, so the user's devices that
+  join it later join it on demand). While the folder is on all the user's devices, the switch shows what the statement
+  says (the last of them to change it), not this device's mark alone. Only devices that join through *On all my
+  devices* follow it: with that off the mark changes nothing until it is on, and a device that joins with a link
+  chooses in its own dialog. Off again takes only that mark back (a switch back to full takes it back too). Added with
+  *Files on demand*, a folder is saved with its mark in one step, never without it; sharing a folder again (`reshare`)
+  keeps the mark. A device without the
+  files is *on demand* (joined with `join --on-demand`, or through *On all my devices* from a folder marked so): every
+  file listed, its content in this device's cache. **Freeing this device's local copies** is a separate, explicit
+  choice (`sync mode <folder> on-demand --free-space`, `Core::sync_set_on_demand`; never the dialogs' switch): full →
+  on demand moves the folder's files into this device's cache, so nothing is fetched
   again and everything starts downloaded; on demand → full moves the cache to the folder's place (which must be free),
-  and the folder runs full from there, fetching every file that was online only. Neither loses anything: a file is
+  and the folder runs full from there, fetching every file that was online only (`sync mode <folder> full [--to
+  <path>]` says so as it happened: "its files are back in place" when the cache held them all, and how many files are
+  on their way only when some were online only). Neither loses anything: a file is
   never deleted by a switch. To full, the versions taken without their content are forgotten (each is needed again and
   fetched like any), so the index holds only records Seedwell 0.1.11 can read. Nothing changes until the folder is stopped and moved: a switch refused (the folder still
   busy) or failed leaves the folder as it was (mode, place, pins). A switch and a removal are noted in a small journal
@@ -1945,7 +2058,9 @@ an app group shared by the app and its extension), a Cloud Files sync root on Wi
   working set. macOS adds a domain
   switched off: the app asks the user once, when the folder becomes on demand (a window with *Open Settings*, at
   System Settings › General › Login Items & Extensions › File Providers, that notices by itself when it is on), and
-  the folder page says so while it is off. Items carry the core's identifiers (`root` is the root container), the
+  the folder page says so while it is off. macOS keeps such a folder in `~/Library/CloudStorage`, not at the location
+  the user picked: the join dialog's note says so plainly ("the location chosen here is where its files go if you turn
+  Files on demand off"). A device that holds the files has no domain at all (*Modes*): its folder stays at its path. Items carry the core's identifiers (`root` is the root container), the
   role's capabilities (a read-only member reads and deletes; the folder itself is neither renamed nor deleted from the
   Finder), and a kept item downloads eagerly and is never evicted by the system; the Finder actions *Always Keep on
   This Mac* and *Stop Keeping on This Mac* pin and unpin. A fetch reports progress and hands the extension a copy (a
@@ -2000,6 +2115,76 @@ an app group shared by the app and its extension), a Cloud Files sync root on Wi
   totals and serves no chunks. An on-demand device marks what it announces *on demand* (bit 2): it may let go of its
   copy later (switching to on demand announces what is here again, so marked). Asking for a file sets `want` on its record: its
   need is then computed as if nothing were here, and the ordinary puller fetches it.
+- **Listed first, hashed when first fetched** (0.1.19, the user's design). A listing needs a file's path, kind, size,
+  time and permissions, never its content, and an on-demand folder's files are fetched one at a time when someone
+  opens them. So the scan of a folder that is on demand reads no file's content: on the device that holds the files
+  (a full folder marked on demand for the others, *Modes*: added with *Files on demand*, `sync add --on-demand`, or
+  marked later; the mark reaches a scan already under way at its next step, and what it has not read yet is listed
+  instead) and on one whose copies are in its cache (freed, joined on demand). What it finds new or changed (adding
+  the folder, a change found by the hourly scan) is recorded and announced as an **unhashed** version: signed as any
+  version, with no chunk list (a file entry with a size and no chunks; Seedwell 0.1.18 and before cannot read one, so
+  the protocol is 3: they refuse the session and say which device needs an update). Adding 914 GB with *Files on
+  demand* lists it everywhere in about a second instead of the 28 minutes 0.1.18 took to hash it first. Nothing is
+  hashed in the background. A host's own writes (`host_written`) are hashed as before: they are a user's saves, read
+  once anyway. A file whose size or time changes later is a new version and unhashed again until a device fetches
+  it; one whose size and time are its record's is that version (a move into the cache changes only its inode and
+  change time) and is never read, unless its hashes are known (a device announced them, or the maker noted what it
+  signed at the end of a stream, below): then it is read again, and chunks other than those are a new version (an
+  edit that kept the size and time, `touch -r`, `exiftool -P`), so one version is never signed with two chunk lists. Unmarked again, a full folder hashes what it finds changed from then on, as any full
+  folder; a file it listed unhashed whose size, time and bits are unchanged (a tag, an attribute, Spotlight) is
+  recorded in its hashed form (the one it signed for a stream, when it did), the same version, never a new version. A big file that
+  must still be read after a mark (a need there, hashes to confirm) is read apart, the folder's core let go.
+  - **The first download hashes it, in the same read.** A device that needs the content of an unhashed version
+    (an on-demand device that opens it, a full device) asks the version's maker for it in pieces of 8 MiB, in order
+    (`StreamRequest`, type 31). The maker reads each piece once from its folder (or cache), runs it through the chunker as it
+    goes and answers with the bytes and the chunks that ended inside them (`StreamData`, type 32); the last piece
+    carries the maker's signature of the version with its chunk list (a signature only: a whole chunk list would not
+    fit in a frame for a file of a terabyte). Only the maker is asked, never another device that announces the
+    unhashed form. The receiver checks every chunk's hash as its bytes arrive, writes them as they come (so a host's
+    progress moves), and at the end puts the hashed version together from the version it asked for and the chunks
+    that came, and takes it only if the maker's signature checks for exactly that (another device's signature, or
+    one over other chunks, never does); then it notes that hashed version in the folder's state directory, places the
+    file and commits its record at once (not with the round's batch), and announces it (a version is the same
+    version before and after its hashes are known: the same version vector). **A stream never holds the folder's
+    core:** a pull round that needs an unhashed file's content notes it and goes on; the folder's streamer runs the
+    streams one at a time with the core let go (a piece can take minutes), and the next round places a finished one
+    (its temp file as the stream left it, the signature checked then). So the hosts' calls on the core and the scan
+    steps never wait for a stream. A stop between placing and committing leaves a file with the version's size,
+    time and bits and no record: the next scan takes it for that version's hashed form when its bytes are exactly
+    that form's chunks (the receiver's note, or a device's announcement), never for a new version, which every
+    device would take for a conflict with the maker's; other bytes are what they always were (kept aside on an
+    on-demand device, this device's change on a full one). The maker notes what it signs at the end of a stream
+    (its file unchanged throughout) the same way, so its scans know the version's chunks even when the receiver
+    never announces them. So every later download, from the maker or from any
+    device that holds a copy, is the ordinary chunk by chunk transfer, every chunk checked against the signed
+    hashes; the maker serves the chunks of its unhashed record by reading each and checking it against the hash
+    asked for. The maker's own record stays as it is: its host's view of the file (a File Provider's or Cloud
+    Files' content version) never moves because another device downloaded it, so nothing there is fetched,
+    evicted or dehydrated again. Asked whether it holds the version (before a free, `HoldQuery`), a device holding
+    either form says yes to the other: a hashed copy knows its unhashed form's digest, and the maker made the only
+    content the version ever had. If no hashed copy is left anywhere (every one freed), the next download streams
+    and hashes again. Each requesting device has its own
+    read on the maker (two devices fetching the same file at once each read it once). A piece is waited for 60 s
+    plus its bytes at 16 KiB/s (the time covers the maker's upload limit too); one whose answer did not come in
+    time, or whose session closed, is asked for again in a later round, and the maker serves its last piece once
+    more (once), so the stream goes on from where it stopped (the receiver keeps what came and its check of it, for
+    10 minutes, while that version is wanted and its temp file is as it left it) while the maker keeps its read: 10
+    minutes after the last piece asked for, or a read that came to its end until that device starts another.
+    Asked elsewhere (its read dropped, the maker started again), the maker answers busy and the stream starts again
+    from the first piece; a temp file left from anything else is never trusted.
+  - **A file changed while it is read** is never recorded with a hash of mixed content: the maker compares the
+    file's stamp before the first piece with the stamp its record holds and again after the last byte (as
+    `trs_platform::fs::copy_shared` does), and when either differs it answers the piece *changed* (response code 5),
+    forgets the read and records nothing; the receiver drops what it got and tries again in its next round, by then
+    against the new version the scan found.
+  - **Which version is current.** The hashed and the unhashed form of one version are the same content (same
+    version vector, maker, file id, size and time): neither replaces the other as a change, no device takes one over
+    the other as a conflict, and the hashed form is current where both are announced, so its holders serve it.
+    Unhashed versions are equal to nothing else: two unhashed files of the same size are never taken for a rename
+    or a copy of each other.
+  - **Only the maker can hash a version**, since the hashed form is signed again: while it is offline, an unhashed
+    file it alone holds cannot be fetched (as before: the other devices hold no copy of it). An old device (0.1.18
+    or before) sees none of this: it cannot connect to a 0.1.19 device at all until it is updated.
 - **What an on-demand device fetches.** Only what is wanted: files asked for (opened, *Download Now*), files below a
   pinned folder or pinned themselves (*Always Keep on This Device*; inherited, new files there included), and files
   whose content is here already (a downloaded file stays current: a newer version elsewhere is fetched). Any other
@@ -2070,7 +2255,8 @@ an app group shared by the app and its extension), a Cloud Files sync root on Wi
     its path is unchanged). The cache is then only the staging area: a fetch lands there as always (partial
     downloads, chunk checks); the host transfers the whole file into the placeholder and says so (`sync_hydrated` with
     the content version it was handed); the core checks the placeholder holds exactly that content (every chunk's
-    hash, the file unchanged while it was read), notes it (`<sync state>/<id>.placed`, an append-only log beside the
+    hash, or for an unhashed version of this device's own every byte against the cache's copy; the file unchanged
+    while it was read), notes it (`<sync state>/<id>.placed`, an append-only log beside the
     index, deleted with the folder), and only then deletes its cache copy (a stop in between leaves both, and the
     cache's copy wins). From then on the folder's filesystem reads that file from its placeholder (serving chunks to
     other devices, which still checks every chunk's hash; answering whether it holds it; scans), shown with the
@@ -2189,7 +2375,31 @@ an app group shared by the app and its extension), a Cloud Files sync root on Wi
     rename in the same change; a rename, or a new version with the same content, is no conflict). When the content
     moved on since (another device's version arrived before the host reported the user's edit), the edit is written
     as a conflict copy, named as a full folder names one, and the other version stays. A write without a base is a
-    new file: where something is now, it becomes a conflict copy too.
+    new file: where something is now, it becomes a conflict copy too. So the version that reached this device first
+    stays at the name on every device, and the edit made from an earlier one is the conflict copy on every device.
+    One content makes one copy: a write from an earlier version whose content is the item's current content is no
+    conflict and no new version, and one whose content a conflict copy of the item already holds is that copy (nothing
+    is written; when the copy's content is not on this device, freed or another device's, the host's bytes, checked
+    against its hashes, are its content here again, and the feed names the item again), so a host that reports the
+    same edit again never makes a second copy. The copies are found by their records beside the item (named as conflict
+    copies, `conflict_of` the item, the same content), whatever device named them. After the copy the host's feed
+    names the item again; kept in place, `sync_local_change` then answers *stale* for the placeholder that holds the
+    copied edit while it is unchanged since it was read and the copy is here (recorded, so never *modified* again), and
+    the host lets go of it and shows the item's version. A later, different edit, or one made from the current version
+    (whatever it holds), is *modified*.
+  - **One edit, one version, whichever path sees it first** (0.1.19). Kept in place, a filled placeholder is where
+    the core reads its file from, so an edit there is seen twice: by the scan and by the host's report. The scan is
+    not held back for placeholders: it must see the change (the core serves that file to other devices, and never as
+    the version it recorded before), and it is the only path for an edit the host never saw (made while the app was
+    not running, a notification missed). Instead the later path takes the earlier one's record for the same edit. An
+    unhashed version, which has no hashes, is held by a file when the file this device has its bytes in (the cache's
+    copy, or the held placeholder) still has the size, time and file id it was recorded with, and holds the same bytes
+    (or is that placeholder itself). So the host's report of an edit the scan recorded first is the version at the
+    name (no copy, no new version), `sync_local_change` answers *unchanged* for it, and a conflict copy recorded
+    unhashed is found by its content as a hashed one is. While the core reads the version at the name from the
+    placeholder, a change to it starts from that version, whatever this device recorded of it since. **Never *stale*
+    for that placeholder**: it holds the only copy here of the version at the name, and a refill would have no source
+    (Windows, before: a conflict copy of the device's own edit, then the placeholder let go of and unreadable).
   - The renamed records keep the stamp of the checked file only while its size, time and inode are unchanged after
     the rename; otherwise the scanner reads it again. On a disk that folds case, the folders above the new name are
     recorded as the disk (or the index) names them.
@@ -2238,7 +2448,7 @@ an app group shared by the app and its extension), a Cloud Files sync root on Wi
 - **Agents and the CLI** (§9A): `sync.items`, `sync.changes` (read); `sync.fetch`, `sync.cancel_fetch`, `sync.pin`,
   `sync.unpin`, `sync.evict`, `sync.host_mkdir` (control); `sync.set_mode`, `sync.host_write`, `sync.host_delete`,
   `sync.host_rename` (full: they move or replace files on disk, `host_write` from any file the daemon can read, or
-  reach every device). `seedwell sync join --on-demand`, `mode`, `items`, `fetch`, `pin`, `unpin`, `evict`.
+  reach every device). `seedwell sync join --on-demand`, `mode` (`on-demand` marks a folder that is here; `--free-space` frees its copies), `items`, `fetch`, `pin`, `unpin`, `evict`.
 - **Read-only members** list and fetch. A delete on one acts as *Remove Download*: the content is freed, the file
   stays listed online only and can be fetched again, and nothing goes to the other devices (a deleted pinned file is
   unpinned, then freed; one kept through a pinned folder above it splits that pin, as Remove Download does; a deleted

@@ -12,7 +12,7 @@
   the network either (no DHT, PEX, LSD, UPnP or NAT-PMP).
 
   Checks: render, handoff, separate, gate, selection, keys, removal, info, alert, trash, choice, move, add, chat,
-  dialogs, newchannel, links, tray, scheme, rendezvous, follow, folders, chatpage, chatslowdisk, platform, slowstart, damaged, notices, settingspage, requests, files, chooser, play, favorites, rules, cloudfiles, ondemand, ondemandfetch, ondemandpin, ondemandchanges, ondemandwrites, notray, settings, quit (all of them: all, the default).
+  dialogs, newchannel, links, tray, scheme, rendezvous, follow, listen, readonly, folders, chatpage, chatslowdisk, platform, slowstart, damaged, notices, settingspage, requests, files, chooser, play, favorites, rules, cloudfiles, ondemand, ondemandfetch, ondemandpin, ondemandchanges, ondemandwrites, ondemandstale, ondemandfirst, notray, settings, quit (all of them: all, the default).
   -Build builds the app first (build.ps1; -CoreProfile Debug builds its core from the debug test build, as CI does).
   -Out keeps the pictures in <dir> (default: a temp folder, printed).
   Flyouts (menus, the members panel and its role menus) are drawn by the render run (SnapshotRenderer.cs, check
@@ -34,14 +34,18 @@ $Repo = Split-Path $App -Parent
 $Exe = Join-Path $App 'bin\x64\Release\net10.0-windows10.0.19041.0\win-x64\Seedwell.exe'
 $Cli = Join-Path $Repo 'target\debug\seedwell.exe'
 $Fixtures = Join-Path $Repo 'crates\metainfo\tests\fixtures'
-$All = @('render', 'handoff', 'separate', 'gate', 'selection', 'keys', 'removal', 'info', 'alert', 'trash', 'choice', 'move', 'add', 'chat', 'dialogs', 'newchannel', 'links', 'tray', 'scheme', 'rendezvous', 'follow', 'folders', 'chatpage', 'chatslowdisk', 'platform', 'slowstart', 'damaged', 'notices', 'settingspage', 'requests', 'files', 'chooser', 'play', 'favorites', 'rules', 'cloudfiles', 'ondemand', 'ondemandfetch', 'ondemandpin', 'ondemandchanges', 'ondemandwrites', 'notray', 'settings', 'quit')
+$All = @('render', 'handoff', 'separate', 'gate', 'selection', 'keys', 'removal', 'info', 'alert', 'trash', 'choice', 'move', 'add', 'chat', 'dialogs', 'newchannel', 'links', 'tray', 'scheme', 'rendezvous', 'follow', 'listen', 'readonly', 'folders', 'chatpage', 'chatslowdisk', 'platform', 'slowstart', 'damaged', 'notices', 'settingspage', 'requests', 'files', 'chooser', 'play', 'favorites', 'rules', 'cloudfiles', 'ondemand', 'ondemandfetch', 'ondemandpin', 'ondemandchanges', 'ondemandwrites', 'ondemandstale', 'ondemandfirst', 'notray', 'settings', 'quit')
 
 if ($Build) {
   & powershell -NoProfile -File (Join-Path $App 'build.ps1') -CoreProfile $CoreProfile | Out-Host
   if ($LASTEXITCODE -ne 0) { Write-Host 'The build failed (is the app running from bin\? Quit it with Seedwell.exe --quit).'; exit 1 }
 }
 if (-not (Test-Path $Exe)) { throw "No app at ${Exe}: run with -Build" }
-if (-not (Test-Path $Cli)) { Push-Location $Repo; cargo build -q --bin seedwell; Pop-Location }
+# With -Build the CLI too: one older than the core fails checks for options it has not got.
+if ($Build -or -not (Test-Path $Cli)) {
+  Push-Location $Repo; cargo build -q --bin seedwell; $built = $LASTEXITCODE; Pop-Location
+  if ($built -ne 0) { Write-Host 'The CLI build failed.'; exit 1 }
+}
 # What earlier runs left in the temp folder: their default picture folders, and states of runs that were stopped or crashed.
 Get-ChildItem ([IO.Path]::GetTempPath()) -Directory -Filter 'seedwell-*' -ErrorAction SilentlyContinue |
   Where-Object { $_.Name -match '^seedwell-(qa|render)-' -and $_.LastWriteTime -lt (Get-Date).AddHours(-1) } |
@@ -747,6 +751,117 @@ $checks.follow = {
     Copy-Item "$dir\state\qa\foldersync.png" "$Out\foldersync.png"
   } finally { Stop-App $dir $p; Remove-Item -Recurse -Force $dir }
   @("$Out\foldersync.png")
+}
+
+# The sync port answers on IPv4 as well as IPv6. The failure it names: a listener on [::] is IPv6 only on Windows unless
+# told otherwise (on a Mac it takes both), so no device can dial this PC at the IPv4 addresses a link gives or a router maps.
+$checks.listen = {
+  $dir = New-State 'control'
+  $p = Start-App $dir -QaControl
+  try {
+    WaitForSync $dir
+    $port = ((& $Cli --socket "$dir\state\control.sock" sync list --json 2>&1) -join '' | ConvertFrom-Json).port
+    $answers = foreach ($ip in '::1', '127.0.0.1') {
+      $t = [Net.Sockets.TcpClient]::new([Net.IPAddress]::Parse($ip).AddressFamily)
+      try { $t.Connect($ip, $port); "$ip yes" } catch { "$ip no" } finally { $t.Dispose() }
+    }
+    if ($answers -notcontains '::1 yes' -or $answers -notcontains '127.0.0.1 yes') { Fail "the sync port $port answers: $($answers -join ', ')" }
+  } finally { Stop-App $dir $p; Remove-Item -Recurse -Force $dir }
+  @()
+}
+
+# "Read only" on two paired temp devices, A and B. The failures it names: a dialog that does not draw the switch or does
+# not apply it (B keeps its role and can still send changes), a switch left on while "On all my devices" is off, the
+# Share dialog's next link not following it, and a role not given back when it goes off.
+$checks.readonly = {
+  $a = New-State 'control'; $b = New-State 'control'
+  $docs = "$a\Docs"
+  New-Item -ItemType Directory -Force $docs, "$a\New" | Out-Null
+  Set-Content -NoNewline -Encoding ascii "$docs\from-a.txt" 'from A'
+  $sa = "$a\state\control.sock"; $sb = "$b\state\control.sock"
+  $pa = Start-App $a -QaControl
+  $pb = $null
+  $pictures = @()
+  function Shot([string]$name) {
+    Qa $a @('shot', $name, 'dialog') | Out-Null
+    Copy-Item "$a\state\qa\$name.png" "$Out\$name.png"
+    "$Out\$name.png"
+  }
+  function RoleOfB {
+    $m = (& $Cli --socket $sa sync members Docs --json 2>&1) -join '' | ConvertFrom-Json
+    @($m.members | Where-Object { -not $_.me } | ForEach-Object { $_.role }) -join ','
+  }
+  try {
+    $pb = Start-App $b -QaControl
+    WaitForSync $a; WaitForSync $b
+    Qa $a @('window') | Out-Null
+    $link = [regex]::Match((Qa $a @('pair', 'link')), 'link (\S+) ;').Groups[1].Value
+    if (-not $link) { Fail 'A made no pairing link' }
+    Qa $b @('pair', 'join', $link) 30000 | Out-Null
+    try { WaitFor { $s = Qa $a @('pair', 'status'); if ($s -match 'requests 1') { $s } } 30000 'B asking to pair on A' | Out-Null }
+    catch { Fail "B did not reach A to pair; A: $(Qa $a @('pair', 'status')); B: $(Qa $b @('pair', 'status'))" }
+    Qa $a @('pair', 'confirm') 30000 | Out-Null
+    WaitFor { $s = Qa $b @('pair', 'status'); if ($s -match 'devices Paired') { $s } } 30000 'B to be paired' | Out-Null
+
+    # Add Folder: off and not switchable until "On all my devices" is chosen; the choice comes back from the core.
+    $added = (& $Cli --socket $sa sync add $docs 2>&1) -join ' '
+    if ($added -notlike 'Sharing Docs*') { Fail "sync add: $added" }
+    $open = Qa $a @('add-folder', 'open')
+    if ($open -notmatch 'read only False enabled False') { Fail "Add Folder's Read only should wait for On all my devices: $open" }
+    Qa $a @('add-folder', 'folder', "$a\New") | Out-Null
+    Qa $a @('add-folder', 'devices', 'on') | Out-Null
+    $chosen = Qa $a @('add-folder', 'readonly', 'on')
+    if ($chosen -notmatch 'all devices True enabled True, read only True enabled True line "[^"]+"') { Fail "Add Folder did not draw the choice: $chosen" }
+    if ($chosen -notmatch 'drawn \[[^\]]*On all my devices True, Read only True') { Fail "Add Folder has no Read only switch on screen: $chosen" }
+    $pictures += Shot 'readonly-add'
+    Qa $a @('add-folder', 'cancel') | Out-Null
+
+    # Edit Folder: both on and saved: B joins by itself, Read only, and what it makes does not reach A.
+    Qa $a @('edit-folder', 'open', 'Docs') | Out-Null
+    Qa $a @('edit-folder', 'devices', 'on') | Out-Null
+    $chosen = Qa $a @('edit-folder', 'readonly', 'on')
+    if ($chosen -notmatch 'read only True enabled True line "[^"]+"') { Fail "Edit Folder did not draw the choice: $chosen" }
+    if ($chosen -notmatch 'drawn \[[^\]]*On all my devices True, Read only True') { Fail "Edit Folder has no Read only switch on screen: $chosen" }
+    $pictures += Shot 'readonly-edit'
+    $saved = Qa $a @('edit-folder', 'save') 30000
+    if ($saved -notmatch 'saved' -or $saved -match 'not saved') { Fail "Edit Folder did not save: $saved" }
+    WaitFor { if ((RoleOfB) -eq 'read_only') { $true } } 60000 'B in the folder at Read only' | Out-Null
+    $inB = WaitFor {
+      # A temp state's default location is its own Sync folder, never the real home.
+      if (Test-Path "$b\state\Sync\Docs\from-a.txt") { "$b\state\Sync\Docs" }
+    } 60000 'the folder on B'
+    Set-Content -NoNewline -Encoding ascii "$inB\from-b.txt" 'from B'
+    $why = (& $Cli --socket $sb sync rescan Docs 2>&1) -join ' '
+    Start-Sleep -Seconds 8
+    if (Test-Path "$docs\from-b.txt") { Fail "a file made on a Read only device reached A (rescan: $why)" }
+
+    # Share: as the core has it, applied at once. Off: B is an admin again and the next link is not Read only any more.
+    $share = Qa $a @('share', 'open', 'Docs')
+    if ($share -notmatch 'role ReadOnly') { Fail "the Share dialog's next link should be Read only: $share" }
+    if ($share -notmatch 'all devices True enabled True, read only True enabled True') { Fail "Share's model has not the switches: $share" }
+    if ($share -notmatch 'drawn \[[^\]]*On all my devices True, Read only True') { Fail "Share has no Read only switch on screen: $share" }
+    Qa $a @('share', 'scroll-end') | Out-Null
+    $pictures += Shot 'readonly-share'
+    Qa $a @('share', 'readonly', 'off') | Out-Null
+    $off = WaitFor { $s = Qa $a @('share', 'status'); if ($s -match 'setting devices False' -and $s -match 'read only False') { $s } } 30000 'Read only to go off in Share'
+    if ($off -notmatch 'role ReadWrite') { Fail "the next link stayed Read only: $off" }
+    if ($off -match 'failure "[^"]') { Fail "Share's Read only failed: $off" }
+    WaitFor { if ((RoleOfB) -eq 'admin') { $true } } 30000 'B to be an admin again' | Out-Null
+    Qa $a @('share', 'readonly', 'on') | Out-Null
+    $on = WaitFor { $s = Qa $a @('share', 'status'); if ($s -match 'setting devices False' -and $s -match 'read only True') { $s } } 30000 'Read only to come on in Share'
+    if ($on -notmatch 'role ReadOnly') { Fail "the next link should follow Read only: $on" }
+    WaitFor { if ((RoleOfB) -eq 'read_only') { $true } } 30000 'B to be Read only again' | Out-Null
+    Qa $a @('share', 'devices', 'off') | Out-Null
+    $free = WaitFor { $s = Qa $a @('share', 'status'); if ($s -match 'setting devices False' -and $s -match 'all devices False') { $s } } 30000 'On all my devices to go off in Share'
+    if ($free -notmatch 'read only True enabled False') { Fail "Read only should stay as it is and not be switchable with On all my devices off: $free" }
+    Qa $a @('share', 'cancel') | Out-Null
+    if ((Log $a) -match 'seedwell://sync/') { Fail 'a folder link was printed' }
+  } finally {
+    Stop-App $a $pa
+    if ($pb) { Stop-App $b $pb }
+    Remove-Item -Recurse -Force $a, $b
+  }
+  $pictures
 }
 
 # The Folder Sync page and its dialogs (W3), on a temp state with no other device: the empty page; Add Folder from this
@@ -1496,7 +1611,8 @@ $checks.ondemand = {
     WaitForSync $dir
     $added = (& $Cli --socket $sock sync add $docs 2>&1) -join ' '
     if ($added -notlike 'Sharing Docs*') { throw "sync add: $added" }
-    $mode = (& $Cli --socket $sock sync mode Docs on-demand 2>&1) -join ' '
+    # Freeing this PC's copies is the explicit choice (`on-demand` alone keeps a folder's files where they are).
+    $mode = (& $Cli --socket $sock sync mode Docs on-demand --free-space 2>&1) -join ' '
     if ($mode -notlike 'Docs is on demand*') { throw "sync mode: $mode" }
     WaitFor { (Qa $dir @('ondemand')) -match 'roots 1 \[\S+ connected True placed 5 files \[a\.txt:p, b\.txt:p, d\.txt:p, sub/c\.txt:p\]\]' } 20000 'the placeholders' | Out-Null
     $read = Qa $dir @('ondemand', 'read', 'a.txt')
@@ -1948,7 +2064,7 @@ $checks.ondemandwrites = {
     # then synced. A longer text written at that moment stays whole here and arrives whole.
     $whole = 'written at the worst moment of an update'
     $during = Qa $b @('ondemand', 'write-during-update', 'one.txt', $whole) 40000
-    if ($during -notmatch "holds `"$whole`"") { Fail "a write during an update was damaged: $during" }
+    if ($during -notmatch "holds `"$whole`"") { Fail "a write during an update was damaged: $during. B: $((Log $b | Where-Object { $_ -like '*on-demand: one*' }) -join ' / ')" }
     try { WaitFor { (Get-Content -Raw "$docs\one.txt" -ErrorAction SilentlyContinue) -eq $whole } 20000 'the write during an update on A' | Out-Null }
     catch { Fail "a write during an update did not arrive whole: B has '$([IO.File]::ReadAllText($one))', A has '$(Get-Content -Raw "$docs\one.txt")'" }
 
@@ -1977,6 +2093,205 @@ $checks.ondemandwrites = {
     }  } finally {
     Stop-App $b $pb; Stop-App $a $pa
     Remove-Item -Recurse -Force $a, $b -ErrorAction SilentlyContinue
+  }
+  @()
+}
+
+# A save lost to a dehydrate: the core says a filled file is an earlier version (another device changed it), and a program
+# writes before the host lets the content go: the update is refused, as nothing may write since the core looked, and the
+# write survives as a conflict copy. Also conflict copies without end, below.
+$checks.ondemandstale = {
+  $a = New-State 'full'
+  $b = New-State 'full'
+  $docs = "$a\state\od\Docs"
+  New-Item -ItemType Directory -Force $docs | Out-Null
+  foreach ($name in 'one', 'two', 'three') { $name | Set-Content -NoNewline "$docs\$name.txt" }
+  $sa = "$a\state\control.sock"; $sb = "$b\state\control.sock"
+  $bd = "$b\state\od\Docs"
+  $pa = Start-App $a -QaControl
+  $pb = $null
+  try {
+    $pb = Start-App $b -QaControl
+    WaitForSync $a; WaitForSync $b
+    $added = (& $Cli --socket $sa sync add $docs 2>&1) -join ' '
+    if ($added -notlike 'Sharing Docs*') { throw "sync add: $added" }
+    $link = ((& $Cli --socket $sa sync share Docs --json 2>&1) -join '' | ConvertFrom-Json).link
+    $link | & $Cli --socket $sb sync join - --on-demand --to $bd 2>&1 | Out-Null
+    WaitFor { (Qa $b @('ondemand')) -match 'placed 3 files' } 60000 'the placeholders on B' | Out-Null
+    foreach ($name in 'one', 'two', 'three') { if ([IO.File]::ReadAllText("$bd\$name.txt") -ne $name) { Fail "$name.txt did not read on B" } }
+    Start-Sleep -Seconds 3
+
+    $write = 'the write that landed as the file was let go of'
+    Qa $b @('ondemand', 'write-when-stale', 'one.txt', $write) | Out-Null
+    'from A' | Set-Content -NoNewline "$docs\one.txt"
+    WaitFor { (Qa $b @('ondemand', 'wrote-when-stale')) -match 'wrote True' } 30000 'the write at the moment the file is let go of' | Out-Null
+
+    $holders = { foreach ($d in $bd, $docs) { Get-ChildItem -LiteralPath $d -File -ErrorAction SilentlyContinue | Where-Object { (Get-Content -Raw -LiteralPath $_.FullName -ErrorAction SilentlyContinue) -eq $write } | ForEach-Object { $_.FullName } } }
+    try { WaitFor { @(& $holders).Count -gt 0 } 20000 'the write in a file' | Out-Null }
+    catch {
+      $there = foreach ($d in $bd, $docs) { Get-ChildItem -LiteralPath $d -File -ErrorAction SilentlyContinue | ForEach-Object { "$($_.FullName): '$(Get-Content -Raw -LiteralPath $_.FullName -ErrorAction SilentlyContinue)'" } }
+      Fail "the write was lost: $($there -join ' || ')"
+    }
+    # Both devices end up holding it.
+    WaitFor { $h = @(& $holders); @($h | Where-Object { $_ -like "$bd\*" }).Count -gt 0 -and @($h | Where-Object { $_ -like "$docs\*" }).Count -gt 0 } 30000 'the write on both devices' | Out-Null
+
+    # Conflict copies without end (a new one every sweep, on every device): the file keeps differing from the item, so each
+    # look at it is a new conflict. One write is one copy, the devices agree on the file, and it stays that way past two sweeps.
+    Start-Sleep -Seconds 25
+    $settled = {
+      param($name, $theirs)
+      $copies = @(Get-ChildItem -LiteralPath $bd -File -Filter "$name (conflict*")
+      $bHas = Get-Content -Raw -LiteralPath "$bd\$name.txt"; $aHas = Get-Content -Raw -LiteralPath "$docs\$name.txt"
+      if ($copies.Count -ne 1 -or $bHas -ne $theirs -or $aHas -ne $theirs) {
+        $held = ($copies | ForEach-Object { Get-Content -Raw -LiteralPath $_.FullName }) -join ', '
+        $saidB = (Log $b | Where-Object { $_ -like "*on-demand: $name*" -and $_ -notlike '*filled (*' } | Select-Object -First 6) -join ' / '
+        $copied = @(Get-ChildItem -LiteralPath $bd, $docs -File -Filter "$name (conflict*" | ForEach-Object { "$($_.Directory.Parent.Parent.Parent.Name)\$($_.Name) at $($_.LastWriteTime.ToString('HH:mm:ss.fff')), made $($_.CreationTime.ToString('HH:mm:ss.fff'))" }) -join ' / '
+        "$name`: one write made $($copies.Count) conflict copies ($held); on B '$bHas', on A '$aHas'; B said: $saidB; copies: $copied"
+      }
+    }
+    $wrong = @(& $settled 'one' 'from A')
+
+    # The same with no hook: both devices edit while this one is not running, one save in place and one that overwrites
+    # (no placeholder left). Each is one copy, and the devices agree on the file.
+    Stop-App $b $pb
+    $inplace = [IO.File]::Open("$bd\two.txt", 'Open', 'Write', 'Read')
+    $bytes = [Text.Encoding]::ASCII.GetBytes('written here in place')
+    $inplace.Write($bytes, 0, $bytes.Length); $inplace.Dispose()
+    [IO.File]::WriteAllText("$bd\three.txt", 'overwritten here')
+    # The later edit wins by its time, and a file's time moves in ticks of about 15 ms: within one, the higher device id wins.
+    Start-Sleep -Milliseconds 1100
+    'two from A' | Set-Content -NoNewline "$docs\two.txt"
+    'three from A' | Set-Content -NoNewline "$docs\three.txt"
+    Start-Sleep -Seconds 2
+    $pb = Start-App $b -QaControl
+    foreach ($name in 'two', 'three') {
+      WaitFor { @(Get-ChildItem -LiteralPath $bd -File -Filter "$name (conflict*").Count -gt 0 } 40000 "$name's conflict copy" | Out-Null
+    }
+    Start-Sleep -Seconds 25
+    $wrong += @('two', 'three' | ForEach-Object { & $settled $_ "$_ from A" })
+    if ($wrong.Count -gt 0) { Fail ($wrong -join ' || ') }
+  } finally {
+    Stop-App $b $pb; Stop-App $a $pa
+    Remove-Item -Recurse -Force $a, $b -ErrorAction SilentlyContinue
+  }
+  @()
+}
+
+# A folder listed first and hashed when first fetched (build 68), as the file manager meets it. The failures it names: a
+# just-joined folder that makes Explorer wait for its owner, or never fills by itself; a call that waits for a scan or a
+# stream; a first download of an unhashed file with no progress (Cloud Files cancels one silent for 60 s) or wrong bytes;
+# a file only its first downloader still has that a second device cannot get. Listings go through the shell's namespace,
+# as Explorer's do, with no window.
+$checks.ondemandfirst = {
+  $a = New-State 'full'; $b = New-State 'full'; $c = New-State 'full'
+  $docs = "$a\state\od\Docs"; $bd = "$b\state\od\Docs"; $cd = "$c\state\od\Docs"
+  New-Item -ItemType Directory -Force $docs, "$a\state\bulk" | Out-Null
+  $bytes = New-Object byte[] (40MB)
+  (New-Object Random 11).NextBytes($bytes)
+  [IO.File]::WriteAllBytes("$docs\big.bin", $bytes)
+  $want = (Get-FileHash "$docs\big.bin" -Algorithm SHA256).Hash.ToLowerInvariant()
+  'small text' | Set-Content -NoNewline "$docs\small.txt"
+  $huge = [IO.File]::Create("$a\state\bulk\huge.bin"); $huge.SetLength(1GB); $huge.Dispose()
+  $sa = "$a\state\control.sock"; $sb = "$b\state\control.sock"; $sc = "$c\state\control.sock"
+  $shell = New-Object -ComObject Shell.Application
+  $pa = Start-App $a -QaControl
+  $pb = $null; $pc = $null
+  # How long a call took (ms); the slowest of each is kept.
+  $slowest = @{}
+  function Timed([string]$what, [scriptblock]$call) {
+    $t = [Diagnostics.Stopwatch]::StartNew()
+    $out = & $call
+    $ms = $t.ElapsedMilliseconds
+    if (-not $slowest.ContainsKey($what) -or $slowest[$what] -lt $ms) { $slowest[$what] = $ms }
+    $out
+  }
+  function Status([string]$sock) { (& $Cli --socket $sock sync status Docs --json 2>&1) -join '' | ConvertFrom-Json }
+  function Shown([string]$path) { @($shell.NameSpace($path).Items() | ForEach-Object { $_.Name } | Sort-Object) -join ',' }
+  function NoStall([string]$during, [int]$limit) {
+    $late = @($slowest.GetEnumerator() | Where-Object { $_.Value -gt $limit } | ForEach-Object { "$($_.Key) $($_.Value) ms" })
+    if ($late.Count -gt 0) { Fail "a call waited during $during (limit $limit ms): $($late -join ', ')" }
+    $slowest.Clear()
+  }
+  try {
+    WaitForSync $a
+    $added = (& $Cli --socket $sa sync add $docs --on-demand 2>&1) -join ' '
+    if ($added -notlike 'Sharing Docs*') { Fail "sync add: $added" }
+    $link = ((& $Cli --socket $sa sync share Docs --json 2>&1) -join '' | ConvertFrom-Json).link
+    $linkC = ((& $Cli --socket $sa sync share Docs --json 2>&1) -join '' | ConvertFrom-Json).link
+    $maker = ((& $Cli --socket $sa sync list --json 2>&1) -join '' | ConvertFrom-Json).device_name
+    Stop-App $a $pa; $pa = $null
+
+    # One: the owner is away. B joins, the folder opens at once and empty, and says whom it waits for.
+    $env:SEEDWELL_QA_LIMIT_LAN = '1'
+    try { $pb = Start-App $b -QaControl } finally { Remove-Item Env:SEEDWELL_QA_LIMIT_LAN }
+    WaitForSync $b
+    $joined = ($link | & $Cli --socket $sb sync join - --on-demand --to $bd 2>&1) -join ' '
+    if ($joined -notlike 'Joining Docs*') { Fail "sync join: $joined" }
+    WaitFor { (Qa $b @('ondemand')) -match 'roots 1 \[\S+ connected True' } 10000 'the empty root on B' | Out-Null
+    $empty = Timed 'the shell listing the just-joined folder' { Shown $bd }
+    if ($empty) { Fail "the folder should be empty before its owner lists it: $empty" }
+    $status = Status $sb
+    # Not admitted yet: its progress line says it; admitted, with the owner away: its waiting line.
+    if ("$($status.waiting) $($status.progress)" -notmatch [regex]::Escape($maker)) { Fail "the folder does not say it waits for $maker`: $($status | ConvertTo-Json -Compress)" }
+    NoStall 'a join with the owner away' 2000
+
+    # Its owner comes: the placeholders appear with nothing asked, and hold no bytes yet.
+    $pa = Start-App $a -QaControl
+    WaitForSync $a
+    WaitFor { if ((Shown $bd) -eq 'big.bin,small.txt') { $true } } 60000 'the placeholders on B by themselves' | Out-Null
+    if ((Qa $b @('ondemand')) -notmatch 'big\.bin:p, small\.txt:p') { Fail "not placeholders: $(Qa $b @('ondemand'))" }
+
+    # Two: a scan on A. Nothing on A waits for it, and it has to have really been running.
+    $pc = Start-App $c -QaControl
+    WaitForSync $c
+    ($linkC | & $Cli --socket $sc sync join - --on-demand --to $cd 2>&1) | Out-Null
+    WaitFor { (Qa $c @('ondemand')) -match 'big\.bin:p, small\.txt:p' } 60000 'the placeholders on C' | Out-Null
+    (& $Cli --socket $sa sync add "$a\state\bulk" 2>&1) | Out-Null
+    $scanning = 0
+    $until = [DateTime]::Now.AddSeconds(30)
+    do {
+      $folders = Timed 'sync list on A' { (& $Cli --socket $sa sync list --json 2>&1) -join '' | ConvertFrom-Json }
+      $bulk = @($folders.folders | Where-Object { $_.name -eq 'bulk' })
+      $busy = $bulk.Count -gt 0 -and $bulk[0].state -eq 'scanning'
+      if ($busy) { $scanning++ }
+      Timed 'the app on A' { Qa $a @('ondemand') } | Out-Null
+      Timed 'the shell listing the folder on A' { Shown $docs } | Out-Null
+    } while (($busy -or $scanning -eq 0) -and [DateTime]::Now -lt $until)
+    if ($scanning -eq 0) { Fail 'no scan was seen on A, so nothing was tested during one' }
+    NoStall "a scan on A (seen scanning $scanning times)" 3000
+
+    # Three: the first download of an unhashed file, slowed to 4 MB/s. Progress, A's bytes, and nothing waits for the stream.
+    & $Cli --socket $sb sync settings --down 4m 2>&1 | Out-Null
+    $before = (Log $b).Count
+    Launch $b @('--qa', 'ondemand', 'read', 'big.bin') | Out-Null
+    $reading = 0
+    $until = [DateTime]::Now.AddSeconds(90)
+    do {
+      $done = @(Log $b | Select-Object -Skip $before | Where-Object { $_ -like '*qa ondemand read big.bin:*' })
+      if ($done.Count -gt 0) { break }
+      $reading++
+      Timed 'sync status on B' { Status $sb } | Out-Null
+      Timed 'sync status on A' { Status $sa } | Out-Null
+      Timed 'the app on B' { Qa $b @('ondemand') } | Out-Null
+      Timed 'the shell listing the folder on B' { Shown $bd } | Out-Null
+    } while ([DateTime]::Now -lt $until)
+    if ($done.Count -eq 0) { Fail 'the first download did not end within 90 s' }
+    if ($reading -lt 2) { Fail "the download was over before anything was timed ($reading looks)" }
+    if ($done[-1] -notmatch "read 41943040 bytes, sha256 $want") { Fail "the first download on B: $($done[-1])" }
+    $filled = WaitFor { Log $b | Where-Object { $_ -like '*on-demand: big.bin filled (Downloaded;*' } | Select-Object -Last 1 } 5000 'the core to adopt big.bin'
+    if (-not ($filled -match 'progress shown (\d+) times') -or [int]$Matches[1] -lt 2) { Fail "progress was not shown while fetching: $filled" }
+    NoStall "a stream to B ($reading looks)" 3000
+    & $Cli --socket $sb sync settings --down unlimited 2>&1 | Out-Null
+
+    # A second device, with the first device's maker gone: the copy B made is enough.
+    Stop-App $a $pa; $pa = $null
+    WaitFor { $r = Qa $c @('ondemand', 'read', 'big.bin') 60000; if ($r -match "read 41943040 bytes, sha256 $want") { $r } } 60000 'C to get big.bin from B' | Out-Null
+  } finally {
+    Stop-App $b $pb
+    if ($pc) { Stop-App $c $pc }
+    if ($pa) { Stop-App $a $pa }
+    [void][Runtime.InteropServices.Marshal]::ReleaseComObject($shell)
+    Remove-Item -Recurse -Force $a, $b, $c -ErrorAction SilentlyContinue
   }
   @()
 }

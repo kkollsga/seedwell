@@ -759,6 +759,45 @@ async fn cancelling_a_copy_leaves_the_torrent_where_it_was() {
     let _ = leech_all(&s, &t).await;
 }
 
+/// Folder sync asks where torrents' files are before it moves a folder's files (SPEC §7G.11): a torrent being copied
+/// into a folder has files there already that its row does not show (the row names where it seeds from until the
+/// switch). Fails when [`EngineHandle::torrent_places`] leaves out a running move's destination: the sync would move
+/// the half-made copy away from under the move.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_places_of_a_torrent_being_moved_include_where_it_goes() {
+    let t = bundle("placesmove", 942, 6_000_000);
+    let l = lab();
+    let s = seeding_node(&l, &t, |c| {
+        c.force_copy_moves = true;
+        c.move_rate_limit = 1_000_000;
+    })
+    .await;
+    let mut ev = s.h.subscribe();
+    s.h.move_to(&[t.id], &l.other).await.unwrap();
+    wait_event(&mut ev, 10, |e| matches!(e, EngineEvent::MoveStarted { .. })).await;
+    let places = s.h.torrent_places().await.unwrap();
+    s.h.cancel_moves(&[t.id]);
+    let p = places.iter().find(|p| p.name == "placesmove").expect("the torrent has places");
+    assert!(p.paths.contains(&l.dl.join("placesmove")), "where it seeds from: {p:?}");
+    assert!(p.paths.contains(&l.other.join("placesmove")), "where the move puts it: {p:?}");
+    wait_move_end(&mut ev, t.id, 20).await;
+}
+
+/// An unfinished download writes into its staging folder (`<incomplete>/<info-hash>`), not where its row says it will
+/// be: fails when [`EngineHandle::torrent_places`] leaves the staging folder out (a folder sync that holds it would
+/// move the partial data away).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_places_of_an_unfinished_download_include_its_staging_folder() {
+    let t = bundle("placesstaged", 943, 0);
+    let l = lab();
+    let n = snode(&l.state, &l.dl, None, plain(&l)).await;
+    n.h.add_torrent_file(t.bytes.clone(), AddOptions::default()).await.unwrap();
+    let places = n.h.torrent_places().await.unwrap();
+    let p = places.iter().find(|p| p.name == "placesstaged").expect("the torrent has places");
+    assert!(p.paths.contains(&l.inc.join(trs_engine::util::hex(&t.id))), "its staging folder: {p:?}");
+    assert!(!p.moving_somewhere, "{p:?}");
+}
+
 /// Throughput of a verified copy (`cargo test --test moves copy_throughput -- --ignored --nocapture`):
 /// a 1 GiB torrent forced through the cross-volume path inside the temp dir. A report, not a gate.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

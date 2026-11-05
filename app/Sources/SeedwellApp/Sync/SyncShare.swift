@@ -71,6 +71,23 @@ import SwiftUI
         }
     }
 
+    /// "On all my devices" (`on`) and its "Read only" (`readOnly`) switched: applied at once, for the user's other
+    /// devices; the next link's role follows Read only (the core's choice).
+    func setDevices(on: Bool, readOnly: Bool) {
+        guard !busy else { return }
+        busy = true
+        error = nil
+        let (core, form) = (core, form)
+        Task {
+            let r: Result<SyncShareForm, Error> = await catching { try await core.syncShareSetDevices(form: form, on: on, readOnly: readOnly) }
+            busy = false
+            switch r {
+            case .success(let f): self.form.role = f.role
+            case .failure(let e): error = SyncText.message(e)
+            }
+        }
+    }
+
     /// Makes a link with the settings and copies it (a secret: shown nowhere, never logged).
     func copyLink(actions: SyncActions) {
         guard window().copyTitle != nil, !busy else { return }
@@ -151,6 +168,16 @@ struct SyncShareView: View {
                     .font(Theme.secondary).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     .padding(.top, 14)
                     .accessibilityIdentifier("sync-share-summary")
+                if let devices = w.devices {
+                    Divider().padding(.top, 16)
+                    FollowToggle(
+                        line: devices,
+                        isOn: Binding(get: { devices.on }, set: { model.setDevices(on: $0, readOnly: devices.readOnly?.on ?? false) }),
+                        readOnly: Binding(get: { devices.readOnly?.on ?? false }, set: { model.setDevices(on: devices.on, readOnly: $0) })
+                    )
+                    .disabled(model.busy)
+                    .padding(.top, 12)
+                }
                 if let s = w.sharing {
                     Divider().padding(.top, 16)
                     sharing(s).padding(.top, 12)

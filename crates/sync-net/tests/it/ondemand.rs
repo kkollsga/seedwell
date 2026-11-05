@@ -1347,8 +1347,9 @@ async fn a_holder_freeing_a_file_says_no_and_its_free_ends_with_the_work_not_the
     lo.h.test_silent_ondemand(true);
     hi.h.test_hold_wait(Duration::from_secs(3));
     let freeing = { let h = hi.h.clone(); tokio::spawn(async move { h.od_evict(&id, "x.txt").await }) };
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    assert_eq!(hi.h.test_freeing(&id), 1);
+    // (Its free under way: on a loaded machine it can take longer than a moment to get there, a pull round on the core
+    // before it; it then waits 3 s for the lower's answer.)
+    until(2, "the higher is freeing it", || hi.h.test_freeing(&id) == 1).await;
     lo.h.test_hold_wait(Duration::from_secs(1));
     let e = lo.h.od_evict(&id, "x.txt").await.unwrap();
     assert_eq!(e.files, 0, "the other is freeing it: no: {e:?}");
@@ -1924,6 +1925,491 @@ async fn a_folder_kept_in_place_stores_each_file_once_in_its_placeholder() {
     assert!(b.h.od_in_place(&id).is_err(), "not on demand any more");
     ha.shutdown().await;
     b.h.shutdown().await;
+}
+
+/// The Windows host's 10 s look again at a file (its retry, the watcher, the feed), replayed this much faster.
+const HOST_RETRY: Duration = Duration::from_millis(100);
+
+/// What the Windows host (app-windows/CloudHost.cs) does when it looks at a filled placeholder: `LookAt` (a close
+/// notification, the watcher, its retry) reports a change `sync_local_change` calls Modified (`Report`: the write, then
+/// `sync_hydrated` when it is the item's own version); `Update` (the feed named the item) does that too, and lets go of
+/// a stale placeholder (dehydrated, here deleted as in the tests above) and fills it again when the item is wanted
+/// here. Returns the conflict copies its reports made.
+async fn host_looks(h: &SyncHandle, id: &FolderId, place: &std::path::Path, path: &str, from_feed: bool) -> Vec<String> {
+    let mut copies = Vec::new();
+    match h.od_local_change(id, path).await.unwrap() {
+        trs_sync_net::LocalChange::Modified { base } => {
+            let at = h.od_write(id, path, &place.join(path), base.as_deref()).await.unwrap();
+            if at == path {
+                let cv = h.od_item_at(id, path).unwrap().unwrap().content_version;
+                h.od_hydrated(id, path, &cv).await.unwrap();
+            } else {
+                copies.push(at);
+            }
+        }
+        trs_sync_net::LocalChange::Stale if from_feed => {
+            std::fs::remove_file(place.join(path)).unwrap();
+            let state = h.od_item_at(id, path).unwrap().unwrap().state;
+            if matches!(state, ItemState::Downloaded | ItemState::ModifiedHere | ItemState::Downloading) {
+                fill_placeholder(h, id, place, path).await;
+            }
+        }
+        _ => {}
+    }
+    copies
+}
+
+/// The paths the host's feed names after `anchor` (it then asks from the anchor returned).
+fn feed_names(h: &SyncHandle, id: &FolderId, anchor: &mut u64) -> Vec<String> {
+    let page = h.od_changes(id, *anchor, 1000).unwrap();
+    *anchor = page.anchor;
+    page.items.into_iter().map(|i| i.path).collect()
+}
+
+/// Two devices and B on demand, kept in place, its file `docs/a.txt` filled; A's version ("from A") reaches B, the
+/// host's update asks the core (Stale), and a program's write (`write`) lands before the update, which Cloud Files
+/// refuses (not in sync): the placeholder holds the write, the item A's version.
+struct Met {
+    a: Device,
+    b: Device,
+    fa: tempfile::TempDir,
+    _fb: tempfile::TempDir,
+    id: FolderId,
+    place: std::path::PathBuf,
+    first: String,
+    /// The host's feed anchor: applied up to the update.
+    anchor: u64,
+}
+
+const P: &str = "docs/a.txt";
+
+async fn met_in_place(write: &[u8]) -> Met {
+    let (a, b, fa, fb, id) = pair().await;
+    let place = fb.path().join("Shared");
+    std::fs::create_dir_all(&place).unwrap();
+    b.h.od_set_in_place(&id, true).await.unwrap();
+    until(30, "B runs again", || b.h.od_item_at(&id, P).is_ok()).await;
+    let first = fill_placeholder(&b.h, &id, &place, P).await;
+    // A's version arrives; B, which has the file, fetches it into its cache.
+    std::fs::write(fa.path().join(P), b"from A").unwrap();
+    a.h.rescan(&id).unwrap();
+    until(30, "B has A's version, recorded", || {
+        b.h.od_cache_path(&id, P).is_ok_and(|c| read(&c).as_deref() == Some(&b"from A"[..]))
+            && b.h.od_item_at(&id, P).ok().flatten().is_some_and(|i| i.content_version != first)
+    })
+    .await;
+    // The host applies the feed up to here: its update of the item asks the core, which says the placeholder is stale ...
+    let anchor = b.h.od_anchor(&id).unwrap();
+    assert_eq!(b.h.od_local_change(&id, P).await.unwrap(), trs_sync_net::LocalChange::Stale);
+    // ... a program's write lands before the host's update, which Cloud Files refuses: the write stays.
+    std::thread::sleep(Duration::from_millis(20));
+    std::fs::write(place.join(P), write).unwrap();
+    Met { a, b, fa, _fb: fb, id, place, first, anchor }
+}
+
+/// What 30 rounds of the host's looks did (its 10 s retry, the watcher, the feed naming what changed, sped up).
+struct Looked {
+    /// The paths its reports returned that are not the item (a conflict copy each, or one made already).
+    copies: Vec<String>,
+    /// `sync_local_change`'s last answer.
+    last: Option<trs_sync_net::LocalChange>,
+    /// How often the feed named each path.
+    fed: std::collections::BTreeMap<String, usize>,
+}
+
+async fn host_rounds(m: &mut Met) -> Looked {
+    let (h, id, place) = (&m.b.h, &m.id, &m.place);
+    let mut l = Looked { copies: Vec::new(), last: None, fed: std::collections::BTreeMap::new() };
+    for _ in 0..30 {
+        let named = feed_names(h, id, &mut m.anchor);
+        if named.iter().any(|n| n == P) {
+            l.copies.extend(host_looks(h, id, place, P, true).await);
+        }
+        l.copies.extend(host_looks(h, id, place, P, false).await);
+        l.last = Some(h.od_local_change(id, P).await.unwrap());
+        for n in named {
+            *l.fed.entry(n).or_default() += 1;
+        }
+        tokio::time::sleep(HOST_RETRY).await;
+    }
+    l
+}
+
+/// The conflict copies of the item a device has.
+async fn copies_of(h: &SyncHandle, id: &FolderId) -> Vec<String> {
+    h.conflicts(id).await.unwrap().into_iter().filter(|(_, of)| of == P).map(|(c, _)| c).collect()
+}
+
+/// A program writes to a filled placeholder just as another device's version of it arrives: on Windows the write
+/// lands between `sync_local_change` answering Stale and the host's update, which Cloud Files then refuses (not in
+/// sync), so the placeholder holds the write and the item the other version. Fails when the core goes on answering
+/// Modified for the write once it is recorded as the conflict copy (0.1.18: a new conflict copy at every look of the
+/// host, four in the first second and one every 10 s after, without end), when a repeat of the same content makes a
+/// second copy, when the name holds different versions on the two devices (the host is never told to let go of the
+/// placeholder), or when anything goes on changing after.
+///
+/// The rule (SPEC §7G.11): the version that reached this device first (A's) stays at the name everywhere; the write
+/// made from an earlier one is the conflict copy, everywhere.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_write_meeting_another_devices_version_in_place_makes_one_conflict_copy_and_settles() {
+    let mut m = met_in_place(b"from B").await;
+    let (p, place, id, first) = (P, m.place.clone(), m.id, m.first.clone());
+
+    // The host's looks right after: Update's own look, the close notification, the watcher, an overwrite's second look.
+    let mut copies = Vec::new();
+    for _ in 0..4 {
+        copies.extend(host_looks(&m.b.h, &id, &place, p, false).await);
+    }
+    assert_eq!(copies.len(), 1, "one write, one conflict copy: {copies:?}");
+    let copy = copies[0].clone();
+    // A report of the same content again (a host that looked twice before it reported) is that copy, not another.
+    let base = Some(first.as_str());
+    assert_eq!(m.b.h.od_write(&id, p, &place.join(p), base).await.unwrap(), copy, "the same content reported again");
+
+    // Then 30 s of the host's looks, sped up.
+    let Looked { copies: more, last, fed } = host_rounds(&mut m).await;
+    copies.extend(more);
+    assert_eq!(copies, std::slice::from_ref(&copy), "no copy after the first");
+    assert_eq!(last, Some(trs_sync_net::LocalChange::Unchanged), "the name holds the recorded version again");
+    // The feed named the item once (let go of the placeholder), the copy at most twice (new, then held elsewhere).
+    assert_eq!(fed.get(p), Some(&1), "nothing repeats: {fed:?}");
+    assert!(fed.values().all(|&n| n <= 2), "nothing repeats: {fed:?}");
+    assert_eq!(read(&place.join(p)).as_deref(), Some(&b"from A"[..]), "B's name holds A's version");
+    assert!(m.b.h.od_held_in_place(&id, p));
+
+    // Both devices agree: A's version at the name, the write in the one conflict copy.
+    until(30, "A has the conflict copy", || read(&m.fa.path().join(&copy)).as_deref() == Some(&b"from B"[..])).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(read(&m.fa.path().join(p)).as_deref(), Some(&b"from A"[..]), "A's name holds A's version");
+    for d in [&m.a.h, &m.b.h] {
+        assert_eq!(copies_of(d, &id).await, std::slice::from_ref(&copy), "one conflict copy on each device");
+    }
+    let at = m.b.h.od_fetch(&id, &copy, Duration::from_secs(30)).await.unwrap().path;
+    assert_eq!(read(&at).as_deref(), Some(&b"from B"[..]));
+    m.a.h.shutdown().await;
+    m.b.h.shutdown().await;
+}
+
+/// The user edits the placeholder again after its first edit became a conflict copy, before the host let go of it:
+/// "from B", then "from C" of the same size. Fails when the later edit is taken for the copy made already (it is new
+/// content: reported, a second copy) and so lost when the host lets go of the placeholder.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_later_different_edit_after_the_copy_is_reported_and_copied_again() {
+    let mut m = met_in_place(b"from B").await;
+    let first = host_looks(&m.b.h, &m.id, &m.place, P, false).await;
+    assert_eq!(first.len(), 1);
+    std::thread::sleep(Duration::from_millis(20));
+    std::fs::write(m.place.join(P), b"from C").unwrap();
+    assert!(matches!(m.b.h.od_local_change(&m.id, P).await.unwrap(), trs_sync_net::LocalChange::Modified { .. }), "a new edit");
+    let second = host_looks(&m.b.h, &m.id, &m.place, P, false).await;
+    assert_eq!(second.len(), 1);
+    assert_ne!(first, second, "a copy of its own");
+    let l = host_rounds(&mut m).await;
+    assert_eq!(l.last, Some(trs_sync_net::LocalChange::Unchanged), "{:?}", l.copies);
+    let mut copies = copies_of(&m.b.h, &m.id).await;
+    copies.sort();
+    let mut want = vec![first[0].clone(), second[0].clone()];
+    want.sort();
+    assert_eq!(copies, want);
+    for (c, text) in [(&first[0], &b"from B"[..]), (&second[0], &b"from C"[..])] {
+        let at = m.b.h.od_fetch(&m.id, c, Duration::from_secs(30)).await.unwrap().path;
+        assert_eq!(read(&at).as_deref(), Some(text));
+    }
+    m.a.h.shutdown().await;
+    m.b.h.shutdown().await;
+}
+
+/// Once settled, the user puts the conflict copy's content back at the name (an edit from the current version).
+/// Fails when that edit is taken for the copy and let go of (answered Stale: the host would throw it away) instead of
+/// reported as the new version at the name.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_edit_from_the_current_version_that_equals_a_copy_is_the_new_version_at_the_name() {
+    let mut m = met_in_place(b"from B").await;
+    host_rounds(&mut m).await;
+    assert_eq!(read(&m.place.join(P)).as_deref(), Some(&b"from A"[..]), "settled");
+    let now = m.b.h.od_item_at(&m.id, P).unwrap().unwrap().content_version;
+    std::thread::sleep(Duration::from_millis(20));
+    std::fs::write(m.place.join(P), b"from B").unwrap();
+    assert_eq!(m.b.h.od_local_change(&m.id, P).await.unwrap(), trs_sync_net::LocalChange::Modified { base: Some(now) });
+    assert!(host_looks(&m.b.h, &m.id, &m.place, P, false).await.is_empty(), "written at the name");
+    until(30, "A has it at the name", || read(&m.fa.path().join(P)).as_deref() == Some(&b"from B"[..])).await;
+    assert_eq!(copies_of(&m.b.h, &m.id).await.len(), 1);
+    m.a.h.shutdown().await;
+    m.b.h.shutdown().await;
+}
+
+/// The conflict copy is not here any more when the host looks again (freed: another device holds it). Fails when the
+/// look answers Modified and the report returns the copy without taking the bytes the placeholder has for it, or
+/// without telling the host to let go of the placeholder: every look then reports it again, and it never settles.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_copy_this_device_let_go_of_is_taken_from_the_report_and_settles() {
+    let mut m = met_in_place(b"from B").await;
+    let copy = host_looks(&m.b.h, &m.id, &m.place, P, false).await.remove(0);
+    until(30, "A has the copy", || read(&m.fa.path().join(&copy)).as_deref() == Some(&b"from B"[..])).await;
+    until(60, "B frees the copy", || futures_now(m.b.h.od_evict(&m.id, &copy)).files == 1).await;
+    assert_eq!(m.b.h.od_item_at(&m.id, &copy).unwrap().unwrap().state, ItemState::OnlineOnly);
+    let l = host_rounds(&mut m).await;
+    assert_eq!(l.last, Some(trs_sync_net::LocalChange::Unchanged), "settled: {:?}", l.copies);
+    assert!(l.copies.iter().all(|c| *c == copy), "{:?}", l.copies);
+    assert!(l.copies.len() <= 1, "reported once: {:?}", l.copies);
+    assert_eq!(read(&m.place.join(P)).as_deref(), Some(&b"from A"[..]));
+    assert_eq!(copies_of(&m.b.h, &m.id).await, std::slice::from_ref(&copy));
+    assert_eq!(m.b.h.od_item_at(&m.id, &copy).unwrap().unwrap().state, ItemState::Downloaded, "held here again");
+    m.a.h.shutdown().await;
+    m.b.h.shutdown().await;
+}
+
+/// A program writes to the placeholder while the core reads it to find its content in the conflict copy. Fails when
+/// the look answers Stale for what it read (the file as noted before the write): the host would then throw the new
+/// write away.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_write_while_the_core_reads_the_placeholder_is_never_taken_for_the_copy() {
+    let m = met_in_place(b"from B").await;
+    host_looks(&m.b.h, &m.id, &m.place, P, false).await;
+    // Changed since it was noted (same content), so the next look reads it to find the copy.
+    std::thread::sleep(Duration::from_millis(20));
+    std::fs::write(m.place.join(P), b"from B").unwrap();
+    let at = m.place.join(P);
+    let w = at.clone();
+    trs_sync_net::placed::test_after_reading(
+        &at,
+        Some(Box::new(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            std::fs::write(&w, b"from D").unwrap();
+        })),
+    );
+    let answer = m.b.h.od_local_change(&m.id, P).await.unwrap();
+    trs_sync_net::placed::test_after_reading(&at, None);
+    assert!(matches!(answer, trs_sync_net::LocalChange::Modified { .. }), "{answer:?}");
+    assert!(matches!(m.b.h.od_local_change(&m.id, P).await.unwrap(), trs_sync_net::LocalChange::Modified { .. }), "a new edit");
+    m.a.h.shutdown().await;
+    m.b.h.shutdown().await;
+}
+
+/// A host that reports the same edit again and again from the base it started from (Windows 0.1.18 after an ordinary
+/// conflict: every look reported the placeholder anew, every 10 s, on every device), and one whose edit is the content
+/// the item has now. Fails when a repeat makes a second conflict copy, or an edit equal to the current version makes a
+/// copy or a new version: the core's own guard, so no host can loop.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_same_content_reported_again_makes_no_second_copy_and_the_current_content_no_copy() {
+    let (a, b, fa, fb, id) = pair().await;
+    let place = fb.path().join("Shared");
+    std::fs::create_dir_all(&place).unwrap();
+    b.h.od_set_in_place(&id, true).await.unwrap();
+    until(30, "B runs again", || b.h.od_item_at(&id, "docs/a.txt").is_ok()).await;
+    let p = "docs/a.txt";
+    let first = fill_placeholder(&b.h, &id, &place, p).await;
+    // Edited on both devices: A's version reaches B first.
+    std::fs::write(fa.path().join(p), b"from A").unwrap();
+    a.h.rescan(&id).unwrap();
+    until(30, "B has A's version, recorded", || b.h.od_item_at(&id, p).ok().flatten().is_some_and(|i| i.content_version != first)).await;
+    std::fs::write(place.join(p), b"from B").unwrap();
+
+    // The host reports it every look, always from the version it started from, for 30 s of its 10 s retry.
+    let mut made = std::collections::BTreeSet::new();
+    for _ in 0..30 {
+        made.insert(b.h.od_write(&id, p, &place.join(p), Some(&first)).await.unwrap());
+        tokio::time::sleep(HOST_RETRY).await;
+    }
+    assert_eq!(made.len(), 1, "one copy: {made:?}");
+    let copy = made.into_iter().next().unwrap();
+    assert_ne!(copy, p);
+    let copies: Vec<_> = b.h.conflicts(&id).await.unwrap().into_iter().filter(|(_, of)| of == p).collect();
+    assert_eq!(copies.len(), 1, "{copies:?}");
+
+    // An edit from an earlier version whose content is the current one: no conflict, no new version.
+    let now = b.h.od_item_at(&id, p).unwrap().unwrap();
+    let same = fb.path().join("same.txt");
+    std::fs::write(&same, b"from A").unwrap();
+    assert_eq!(b.h.od_write(&id, p, &same, Some(&first)).await.unwrap(), p);
+    assert_eq!(b.h.od_item_at(&id, p).unwrap().unwrap().metadata_version, now.metadata_version, "no new version");
+    let copies: Vec<_> = b.h.conflicts(&id).await.unwrap().into_iter().filter(|(_, of)| of == p).collect();
+    assert_eq!(copies.len(), 1, "{copies:?}");
+    a.h.shutdown().await;
+    b.h.shutdown().await;
+}
+
+/// B (on demand, kept in place) with `docs/a.txt` filled, stopped; `while_stopped` runs (a program overwriting the
+/// placeholder, another device's edit), then B starts again on its state and dials A. Returns B and the host's feed
+/// anchor from before the stop (it applied the feed up to there).
+struct Stopped {
+    a: Device,
+    b: Device,
+    fa: tempfile::TempDir,
+    _fb: tempfile::TempDir,
+    id: FolderId,
+    place: std::path::PathBuf,
+    first: String,
+    anchor: u64,
+}
+
+async fn stopped_in_place(while_stopped: impl FnOnce(&std::path::Path, &std::path::Path, &SyncHandle)) -> Stopped {
+    let (a, b, fa, fb, id) = pair().await;
+    let place = fb.path().join("Shared");
+    std::fs::create_dir_all(&place).unwrap();
+    b.h.od_set_in_place(&id, true).await.unwrap();
+    until(30, "B runs again", || b.h.od_item_at(&id, P).is_ok()).await;
+    let first = fill_placeholder(&b.h, &id, &place, P).await;
+    let anchor = b.h.od_anchor(&id).unwrap();
+    b.h.shutdown().await;
+    std::thread::sleep(Duration::from_millis(20));
+    while_stopped(&place, fa.path(), &a.h);
+    let state = b._state;
+    let h = device_at("Beta", state.path()).await;
+    h.add_address(&id, addr(&a)).unwrap();
+    Stopped { a, b: Device { h, _state: state }, fa, _fb: fb, id, place, first, anchor }
+}
+
+/// [`host_rounds`] for a device started again: the host's start (each filled file looked at, as it does for saves made
+/// while the app was not running, an overwritten one's second look after it is a placeholder again), then 30 rounds.
+async fn host_start_and_rounds(s: &mut Stopped) -> Looked {
+    let (h, id, place) = (&s.b.h, &s.id, &s.place);
+    let mut l = Looked { copies: Vec::new(), last: None, fed: std::collections::BTreeMap::new() };
+    for _ in 0..2 {
+        l.copies.extend(host_looks(h, id, place, P, false).await);
+    }
+    for _ in 0..30 {
+        let named = feed_names(h, id, &mut s.anchor);
+        if named.iter().any(|n| n == P) {
+            l.copies.extend(host_looks(h, id, place, P, true).await);
+        }
+        l.copies.extend(host_looks(h, id, place, P, false).await);
+        l.last = Some(h.od_local_change(id, P).await.unwrap());
+        for n in named {
+            *l.fed.entry(n).or_default() += 1;
+        }
+        tokio::time::sleep(HOST_RETRY).await;
+    }
+    l
+}
+
+/// The conflict copies of the item a full device has.
+fn full_copies(h: &SyncHandle, id: &FolderId) -> Vec<String> {
+    futures_now(h.conflicts(id)).into_iter().filter(|(_, of)| of == P).map(|(c, _)| c).collect()
+}
+
+/// The conflict copies of the item an on-demand device records, here or not (`conflicts` lists those here only).
+fn copy_items(h: &SyncHandle, id: &FolderId) -> Vec<String> {
+    let docs = h.od_item_at(id, "docs").unwrap().unwrap().id;
+    let page = h.od_children(id, &docs, None, 1000).unwrap().unwrap();
+    page.items.into_iter().map(|i| i.path).filter(|p| p.starts_with("docs/a (conflict")).collect()
+}
+
+/// What B's name reads as the host would read it: the placeholder's content when it holds any, else a fetch (Cloud
+/// Files' FETCH_DATA: the host's fill). `None` when neither works (Explorer's "The cloud operation was unsuccessful").
+async fn read_on_host(h: &SyncHandle, id: &FolderId, place: &std::path::Path, path: &str) -> Option<Vec<u8>> {
+    if let Some(b) = read(&place.join(path)) {
+        return Some(b);
+    }
+    let fetched = h.od_fetch(id, path, Duration::from_secs(10)).await.ok()?;
+    read(&fetched.path)
+}
+
+/// The Windows agent's `ondemandwrites` (master after build 69): B is stopped, a program overwrites its filled
+/// placeholder, B starts. Its core's scan finds the change before the host looks and records it, unhashed (an on-demand
+/// folder's scan reads no file), so A gets the edit; then the host reports the same edit from the version it started
+/// from. Fails when that report is taken for a conflict (an unhashed version holds no content by its hashes: a copy of
+/// B's own edit, "kept as … (conflict …)"), when the core then answers Stale and the host lets go of the only copy here
+/// of the version at the name (the refill fails, 0x80070185, and the name is unreadable on B), or when A lacks the edit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_edit_made_while_stopped_that_the_scan_records_first_is_no_conflict_and_stays_readable() {
+    let edit = &b"overwritten while Seedwell was not running"[..];
+    let mut s = stopped_in_place(|place, _, _| std::fs::write(place.join(P), edit).unwrap()).await;
+    // The core's own scan at start, before the host looks (the Windows order).
+    until(30, "B's scan recorded the edit", || s.b.h.od_item_at(&s.id, P).ok().flatten().is_some_and(|i| i.content_version != s.first)).await;
+    until(30, "A has the edit", || read(&s.fa.path().join(P)).as_deref() == Some(edit)).await;
+    // The host's report of it from the version it started from (it asked before the scan recorded it, or reports
+    // without asking): the version at the name, no copy and no new version.
+    let recorded = s.b.h.od_item_at(&s.id, P).unwrap().unwrap();
+    assert_eq!(s.b.h.od_write(&s.id, P, &s.place.join(P), Some(&s.first)).await.unwrap(), P, "B's own edit is no conflict");
+    s.b.h.od_hydrated(&s.id, P, &recorded.content_version).await.unwrap();
+    assert_eq!(s.b.h.od_item_at(&s.id, P).unwrap().unwrap().metadata_version, recorded.metadata_version, "no new version");
+
+    let l = host_start_and_rounds(&mut s).await;
+    assert!(l.copies.is_empty(), "B's own edit is no conflict: {:?}", l.copies);
+    assert_eq!(l.last, Some(trs_sync_net::LocalChange::Unchanged), "the placeholder holds the version at the name");
+    assert_eq!(read(&s.place.join(P)).as_deref(), Some(edit), "never let go of: it is the only copy here");
+    assert_eq!(read_on_host(&s.b.h, &s.id, &s.place, P).await.as_deref(), Some(edit), "readable on B");
+    let item = s.b.h.od_item_at(&s.id, P).unwrap().unwrap();
+    assert!(matches!(item.state, ItemState::Downloaded | ItemState::ModifiedHere), "{item:?}");
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(read(&s.fa.path().join(P)).as_deref(), Some(edit), "A's name holds B's edit");
+    for d in [&s.a.h, &s.b.h] {
+        assert!(copies_of(d, &s.id).await.is_empty(), "no conflict copy anywhere");
+    }
+    s.a.h.shutdown().await;
+    s.b.h.shutdown().await;
+}
+
+/// After a conflict settled (A's version at the name, B's edit in the one copy), the user edits B's placeholder; the
+/// core's scan records that edit (unhashed: the version at the name is now B's, read from this placeholder only); then
+/// the user puts the copy's content back at the name, an edit from that version. Fails when the core answers Stale for
+/// it (taken for the copy, from the version the placeholder was filled with): the host would let go of the
+/// placeholder, the only copy here of what the name holds, and refill it from nowhere; or when the edit does not reach A.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_edit_of_a_version_the_scan_recorded_from_the_placeholder_is_never_let_go_of() {
+    let mut m = met_in_place(b"from B").await;
+    host_rounds(&mut m).await;
+    assert_eq!(read(&m.place.join(P)).as_deref(), Some(&b"from A"[..]), "settled");
+    let settled = m.b.h.od_item_at(&m.id, P).unwrap().unwrap().content_version;
+    std::thread::sleep(Duration::from_millis(20));
+    std::fs::write(m.place.join(P), b"edited on B, found by the scan").unwrap();
+    m.b.h.rescan(&m.id).unwrap();
+    until(30, "B's scan recorded the edit", || m.b.h.od_item_at(&m.id, P).ok().flatten().is_some_and(|i| i.content_version != settled)).await;
+    std::thread::sleep(Duration::from_millis(20));
+    std::fs::write(m.place.join(P), b"from B").unwrap();
+
+    let l = host_rounds(&mut m).await;
+    assert_eq!(l.last, Some(trs_sync_net::LocalChange::Unchanged), "{:?}", l.copies);
+    assert!(l.copies.is_empty(), "an edit at the name: {:?}", l.copies);
+    assert_eq!(read(&m.place.join(P)).as_deref(), Some(&b"from B"[..]), "never let go of");
+    until(30, "A has it at the name", || read(&m.fa.path().join(P)).as_deref() == Some(&b"from B"[..])).await;
+    assert_eq!(copies_of(&m.b.h, &m.id).await.len(), 1);
+    m.a.h.shutdown().await;
+    m.b.h.shutdown().await;
+}
+
+/// The Windows agent's `ondemandstale` (master after build 69): while B is stopped the file is edited on B (its filled
+/// placeholder, in place) and on A; B starts. B's core finds its edit first (the scan, unhashed) and meets A's edit:
+/// the core's own conflict copy, before the host looks; then the host reports B's edit from the version it started
+/// from. Either edit may win (the later one): A's (B's edit becomes the copy, unhashed) or B's (the placeholder holds
+/// the version at the name). Fails when the report makes a second copy of the same content (an unhashed version holds
+/// no content by its hashes), when the devices end with different versions at the name, or when the name or the copy
+/// cannot be read on either device (let go of as stale while it was the only copy here).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_edit_on_both_devices_while_one_was_stopped_makes_one_copy_readable_everywhere() {
+    for b_wins in [false, true] {
+        let (on_b, on_a) = (&b"edited on B while it was stopped"[..], &b"edited on A meanwhile"[..]);
+        let mut s = stopped_in_place(|place, fa, ha| {
+            let (first, then) = if b_wins { (fa.join(P), place.join(P)) } else { (place.join(P), fa.join(P)) };
+            std::fs::write(first, if b_wins { on_a } else { on_b }).unwrap();
+            std::thread::sleep(Duration::from_millis(20));
+            std::fs::write(then, if b_wins { on_b } else { on_a }).unwrap();
+            let id: FolderId = ha.snapshot().folders[0].id.parse().unwrap();
+            ha.rescan(&id).unwrap();
+        })
+        .await;
+        // B's core on its own after start: its edit recorded and met with A's (a copy on both devices), before the host
+        // looks.
+        until(30, "the core's conflict copy on both devices", || !full_copies(&s.a.h, &s.id).is_empty() && !copy_items(&s.b.h, &s.id).is_empty()).await;
+
+        let l = host_start_and_rounds(&mut s).await;
+        assert_eq!(l.last, Some(trs_sync_net::LocalChange::Unchanged), "B wins: {b_wins}; settled: {:?}", l.copies);
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let copies = copy_items(&s.b.h, &s.id);
+        assert_eq!(copies.len(), 1, "B wins: {b_wins}; one edit, one copy: {copies:?} (the host's reports returned {:?})", l.copies);
+        let copy = copies[0].clone();
+        until(30, "A has the one copy", || full_copies(&s.a.h, &s.id) == copies).await;
+        // The same at the name on both devices, and each version readable on each.
+        let at_a = read(&s.fa.path().join(P)).expect("A's name reads");
+        let copy_a = read(&s.fa.path().join(&copy)).expect("A's copy reads");
+        assert_eq!(at_a, if b_wins { on_b } else { on_a }, "the later edit at the name");
+        assert_eq!(read_on_host(&s.b.h, &s.id, &s.place, P).await.as_deref(), Some(&at_a[..]), "B wins: {b_wins}; B's name reads as A's");
+        assert_eq!(read_on_host(&s.b.h, &s.id, &s.place, &copy).await.as_deref(), Some(&copy_a[..]), "B wins: {b_wins}; B's copy reads as A's");
+        assert_eq!(copy_a, if b_wins { on_a } else { on_b }, "the other edit in the copy");
+        s.a.h.shutdown().await;
+        s.b.h.shutdown().await;
+    }
 }
 
 /// The host's change-feed anchor is kept with the folder and goes with it.

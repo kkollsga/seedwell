@@ -98,6 +98,12 @@ pub struct FolderEntry {
     /// Provider, Cloud Files) shows the folder, not where its files are.
     #[serde(default)]
     pub on_demand: bool,
+    /// Files on demand for the devices that do not hold the files (SPEC §7G.11, *Modes*): this device keeps every file
+    /// where it is (a full folder at `path`, nothing moved or changed), and the user's other devices that join it get
+    /// placeholders (the *On all my devices* statement says so). Only on a full folder: `on_demand` is this device's
+    /// own choice to free its local copies.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub on_demand_others: bool,
     /// On demand: the paths kept on this device (`""` = all of it).
     #[serde(default)]
     pub pins: Vec<String>,
@@ -115,6 +121,32 @@ pub struct FolderEntry {
     /// keeps that way; the Mac's File Provider keeps none.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub in_place: bool,
+    /// *Read only* on all the user's devices (SPEC §7G.1, [`trs_sync_proto::members::FOLLOW_READ_ONLY`]) as this
+    /// device, an owner of the folder, carries it out (`None`: it never did).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub devices_read_only: Option<DevicesReadOnly>,
+}
+
+/// What an owner of a folder keeps of *Read only* for the user's other devices (SPEC §7G.1): while it is on, the
+/// Follow that turned it on, so the device that said it keeps its role even when another says it again later, and it
+/// stays on when that statement stops counting (its device left the group, or is no longer owner or admin) until an
+/// owner or admin turns it off; and the last Follow that turned it off that this device carried out, so it is done once.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DevicesReadOnly {
+    /// It is on, as this device carries it out.
+    pub on: bool,
+    /// The device that turned it on (its key, hex): it keeps its role.
+    pub setter: String,
+    /// The serial of the Follow that turned it on: one without the flag above it turns it off.
+    pub serial: u64,
+    /// That Follow's time: a device whose role was decided before it becomes Read only; one at Read only since then
+    /// gets Admin back when it is turned off.
+    pub at_s: u64,
+    /// The devices group (id) that serial is of: a group that moves to a new key numbers its statements anew.
+    pub group: String,
+    /// The serial of the last Follow without the flag that this device gave Admin back for.
+    pub off_serial: u64,
 }
 
 fn yes() -> bool {
@@ -141,10 +173,12 @@ impl FolderEntry {
             channel: String::new(),
             devices: Vec::new(),
             on_demand: false,
+            on_demand_others: false,
             pins: Vec::new(),
             mode_switched: false,
             full_here: false,
             in_place: false,
+            devices_read_only: None,
         }
     }
 }

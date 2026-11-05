@@ -40,6 +40,12 @@ fn precedes(a: &SignedFile, b: &SignedFile) -> Ordering {
         Causality::Lesser => return Ordering::Less,
         Causality::Equal | Causality::Concurrent => {}
     }
+    // One version unhashed and hashed (SPEC §7G.11): the hashed form is current, so its holders serve it chunk by chunk.
+    match (a.info.is_unhashed(), b.info.is_unhashed()) {
+        (false, true) if a.info.same_content(&b.info) => return Ordering::Greater,
+        (true, false) if a.info.same_content(&b.info) => return Ordering::Less,
+        _ => {}
+    }
     if a.info.wins_conflict(&b.info) {
         Ordering::Greater
     } else if b.info.wins_conflict(&a.info) {
@@ -149,6 +155,28 @@ mod tests {
 
     fn cand(device: u64, f: &SignedFile) -> Candidate<'_> {
         Candidate { device: ShortId(device), file: f, invalid: false }
+    }
+
+    /// The failure: a version's unhashed form and its hashed form (SPEC §7G.11) taken for a conflict (`Repair`: the
+    /// maker's own file moved aside as a conflict copy), or the unhashed form chosen as current so nobody serves the
+    /// hashed one chunk by chunk; or two different unhashed files of one size taken for the same content.
+    #[test]
+    fn a_versions_hashed_form_is_current_and_no_conflict_with_its_unhashed_form() {
+        let hashed = file(ver(&[(1, 3)]), 1, 10, 7, false);
+        let mut unhashed = hashed.clone();
+        unhashed.info.chunks.clear();
+        unhashed.sig = [9; 64];
+        assert!(unhashed.info.is_unhashed() && !hashed.info.is_unhashed());
+        for c in [[cand(1, &unhashed), cand(2, &hashed)], [cand(2, &hashed), cand(1, &unhashed)]] {
+            assert_eq!(current(&c), Some(&hashed));
+            assert_eq!(holders(&c, &hashed).len(), 2, "the maker holds it (and serves it chunk by chunk) before it records the hashes");
+        }
+        assert_eq!(need(Some(&unhashed.info), Some(&hashed.info)), Need::Nothing);
+        assert_eq!(need(Some(&hashed.info), Some(&unhashed.info)), Need::Nothing);
+        let mut other = unhashed.clone();
+        other.info.file_id = [1; 16];
+        assert!(!other.info.same_content(&unhashed.info), "another file of the same size");
+        assert_ne!(other.info.content_digest(), unhashed.info.content_digest());
     }
 
     #[test]

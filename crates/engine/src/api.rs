@@ -739,6 +739,19 @@ pub struct TorrentRow {
     pub idle: Option<IdleStatus>,
 }
 
+/// Where one torrent's (or direct download's) files are, or are about to be ([`crate::EngineHandle::torrent_places`]):
+/// what a folder sync must not move from under it (SPEC §7A.5, §7G.11).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TorrentPlaces {
+    /// Display name.
+    pub name: String,
+    /// Absolute paths, as the engine knows them (not resolved): the torrent's file or folder, its staging folder while
+    /// unfinished data is staged, and where a planned or running move puts them (save and staging).
+    pub paths: Vec<PathBuf>,
+    /// A move is queued or being planned and where it goes is not known yet: it may go anywhere.
+    pub moving_somewhere: bool,
+}
+
 /// The inactive stop condition of one torrent: what went out in the last window of seeding.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct IdleStatus {

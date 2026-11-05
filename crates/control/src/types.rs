@@ -1521,6 +1521,14 @@ pub struct SyncFolderDto {
     /// `path` is where the Finder shows it.
     #[serde(default)]
     pub on_demand: bool,
+    /// A full folder here (every file at `path`) that is on demand on the devices that do not hold its files: they get
+    /// placeholders (SPEC §7G.11, *Modes*).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub on_demand_others: bool,
+    /// Only in `sync.set_mode`'s answer for a switch to full: how many files are fetched from other devices (they were
+    /// online only here); the files this device held were moved back in place (nothing fetched for them).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fetching: Option<u64>,
     /// Files no device can give right now (not counted in `need_files`).
     #[serde(default)]
     pub unavailable: u64,

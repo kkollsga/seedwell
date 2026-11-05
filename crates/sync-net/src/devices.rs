@@ -24,6 +24,11 @@
 //!   It does so when the group or the Follow changes (push) and when a sibling proves itself (pull). An owner raises a
 //!   sibling it finds at Read & write to Admin, never lowers one. These are ordinary statements, which every member
 //!   (also on an older Seedwell) accepts. Matching user names never grant anything.
+//! - **Read only** ([`FOLLOW_READ_ONLY`], 0.1.19): a folder's Follow says the user's other devices only read it. Then
+//!   siblings are admitted at Read only (an owner's grant, an admin's one-use invitation at Read only), and an owner
+//!   makes the siblings that have it Read only (signed with the folder key), all but the device that said it; turned
+//!   off, it gives those back Admin, except the ones that were Read only before. Only the Follow of a device that is
+//!   owner or admin of the folder counts for it ([`trusted_follow`]), so a sibling made Read only cannot lift it.
 //! - **Removal**: final in the group; the dialog's places (where this device is owner) get the ordinary Remove too.
 //!   Leave deletes the group here; Start Over makes a new one.
 //!
@@ -40,11 +45,12 @@ use trs_sync_proto::device::DeviceKey;
 use trs_sync_proto::ids::{DeviceId, FolderId};
 use trs_sync_proto::keys::{Access, FolderKey, FolderSecret, Proof};
 use trs_sync_proto::members::{
-    Body, FOLLOW_ON_DEMAND, FOLLOW_REMOVED, Follow, FollowTarget, Invite, InviteLink, Membership, Role, Signer, Statement, hex, new_invite,
+    Body, FOLLOW_ON_DEMAND, FOLLOW_READ_ONLY, FOLLOW_REMOVED, Follow, FollowTarget, Invite, InviteLink, Member, Membership, Role, Signer, Statement, hex,
+    new_invite,
 };
 use trs_sync_proto::msg::{DevicesJoin, JoinChannel, Members, Message};
 
-use crate::config::{ChannelEntry, MyDevicesEntry};
+use crate::config::{ChannelEntry, DevicesReadOnly, MyDevicesEntry};
 use crate::roles::{Proved, now_s};
 use crate::service::{SyncError, SyncHandle, invalid, public_key_from_hex, random_id};
 use crate::shared::{Ctx, HubMsg, PeerHandle, Space, SpaceKind, lock};
@@ -180,6 +186,9 @@ pub struct FollowState {
     pub role: Option<Role>,
     /// The other devices' names, for the line under the toggle.
     pub others: Vec<String>,
+    /// A folder on the user's devices *Read only* ([`FOLLOW_READ_ONLY`]): they open and download its files but never
+    /// change anything. Switched with [`SyncHandle::set_follow_read_only`] (owner or admin here).
+    pub read_only: bool,
 }
 
 // ------------------------------------------------------------------------------------------------- the group
@@ -199,25 +208,62 @@ fn my_group(ctx: &Ctx) -> Option<Arc<Space>> {
     ctx.registry.devices().filter(|g| g.role_of(ctx.key.public_key()).is_some())
 }
 
-/// The latest Follow for a target's key, on or off.
-fn follow_of(g: &Space, target_pk: &[u8; 32]) -> Option<Follow> {
-    g.membership.read().unwrap_or_else(|e| e.into_inner()).follow(target_pk).cloned()
-}
-
 /// A folder's or channel's public key.
 fn pk_of(f: &Space) -> [u8; 32] {
     *f.public.public_key()
 }
 
-/// `f` is on all the user's devices (the latest Follow for it is on), as this device's group says.
+/// The owners and admins of `f`, as this device knows them.
+fn admitting(f: &Space) -> BTreeSet<[u8; 32]> {
+    f.membership.read().unwrap_or_else(|e| e.into_inner()).members().filter(|(_, m)| m.role.admits()).map(|(pk, _)| *pk).collect()
+}
+
+/// The Follows for `f` in group `g` of the devices that are owner or admin of `f` here, oldest first. The folder's
+/// devices are read first, then the group: never both locks at once.
+fn trusted_follows(g: &Space, f: &Space) -> Vec<Follow> {
+    let admits = admitting(f);
+    g.membership.read().unwrap_or_else(|e| e.into_inner()).follows_by(&pk_of(f), |pk| admits.contains(pk))
+}
+
+/// The Follow that counts for folder or channel `f` (SPEC §7G.1): the latest of a device that is owner or admin of it,
+/// so a sibling that is only a member there (one made Read only, say) can neither turn it off, nor remove it, nor
+/// change what it says. Only while this device knows none of its owners and admins yet (it waits to be admitted) the
+/// latest of any of the user's devices.
+pub(crate) fn effective_follow(ctx: &Ctx, f: &Space) -> Option<Follow> {
+    let g = my_group(ctx)?;
+    let admits = admitting(f);
+    let m = g.membership.read().unwrap_or_else(|e| e.into_inner());
+    if admits.is_empty() { m.follow(&pk_of(f)).cloned() } else { m.follow_by(&pk_of(f), |pk| admits.contains(pk)) }
+}
+
+/// The serial and time this device's next Follow for `f` gets: above every one of `f`'s owners and admins (and this
+/// device's own), so a higher serial another device said never holds it back, and above the Follow that turned
+/// *Read only* on ([`read_only_run`], also when its device no longer counts), so turning it off always ranks after
+/// it; at the highest serial ([`trs_sync_proto::members::MAX_FOLLOW_SERIAL`]) a second after the latest of these, so
+/// it still ranks above it.
+fn next_serial_for(g: &Space, f: &Space, me: &[u8; 32]) -> (u64, u64) {
+    let admits = admitting(f);
+    let trusted = |pk: &[u8; 32]| admits.contains(pk) || pk == me;
+    let run = read_only_run_in(g, f);
+    let latest = g.membership.read().unwrap_or_else(|e| e.into_inner()).follow_by(&pk_of(f), trusted);
+    let top = [latest, run].into_iter().flatten().max_by_key(|fl| (fl.serial, fl.at_s));
+    let serial = top.as_ref().map_or(0, |t| t.serial).saturating_add(1).min(trs_sync_proto::members::MAX_FOLLOW_SERIAL);
+    let at = match &top {
+        Some(t) if t.serial >= serial => now_s().max(t.at_s.saturating_add(1)),
+        _ => now_s(),
+    };
+    (serial, at)
+}
+
+/// `f` is on all the user's devices (the Follow that counts for it is on, [`effective_follow`]).
 pub(crate) fn followed(ctx: &Ctx, f: &Space) -> bool {
-    my_group(ctx).is_some_and(|g| follow_of(&g, &pk_of(f)).is_some_and(|fl| fl.on))
+    effective_follow(ctx, f).is_some_and(|fl| fl.on)
 }
 
 /// The name of the device that put `f` on all the user's devices (its profile in the group), if known.
 pub(crate) fn followed_by(ctx: &Ctx, f: &Space) -> Option<String> {
     let g = my_group(ctx)?;
-    let by = follow_of(&g, &pk_of(f))?.by;
+    let by = effective_follow(ctx, f)?.by;
     let m = g.membership.read().unwrap_or_else(|e| e.into_inner());
     m.profile(&by).map(|(name, _)| name.to_string())
 }
@@ -247,18 +293,98 @@ pub(crate) fn sibling_proof(ctx: &Ctx, f: &Space, peer_pk: &[u8; 32]) -> Option<
     Some(Proof::Sibling(g.id.0.to_vec()))
 }
 
+/// Folder `f` is on the user's devices *Read only* ([`FOLLOW_READ_ONLY`]): a run of it is on ([`read_only_run`]).
+pub(crate) fn read_only_for(ctx: &Ctx, f: &Space) -> bool {
+    read_only_run(ctx, f).is_some()
+}
+
+/// Of trusted Follows (oldest first), the one that began the run of Read only ending at `upto` (exclusive index): the
+/// earliest with the flag after the last one without. `None` when the one before `upto` has no flag.
+fn run_start(list: &[Follow], upto: usize) -> Option<&Follow> {
+    let run = list[..upto].iter().rev().take_while(|fl| fl.read_only()).count();
+    (run > 0).then(|| &list[upto - run])
+}
+
+/// The Follow that turned *Read only* on for folder `f`, while it is on ([`read_only_run`]).
+pub(crate) fn read_only_start(ctx: &Ctx, f: &Space) -> Option<Follow> {
+    read_only_run(ctx, f)
+}
+
+/// [`read_only_run_in`] of this device's group. `None` without one.
+pub(crate) fn read_only_run(ctx: &Ctx, f: &Space) -> Option<Follow> {
+    read_only_run_in(&*my_group(ctx)?, f)
+}
+
+/// The Follow that turned *Read only* on for folder `f` in group `g`, while it is on (SPEC §7G.1): the earliest Follow
+/// of an owner or admin with the flag since the last one without, so a later one (a sibling saying it again after a
+/// mode switch) does not make its signer the one that keeps its role. Only a later Follow of an owner or admin without
+/// the flag turns it off: when the statement that turned it on stops counting (its device left the group, or is no
+/// longer owner or admin of `f`), the run this device read last ([`Space::read_only_run`]) stays on, until the owner
+/// says it again; never off for a moment, where a device would admit at Admin, write, or say it off. `None` for a
+/// channel, or while it is off.
+pub(crate) fn read_only_run_in(g: &Space, f: &Space) -> Option<Follow> {
+    if f.kind != SpaceKind::Folder {
+        return None;
+    }
+    let list = trusted_follows(g, f);
+    let mut last = lock(&f.read_only_run);
+    let key = |fl: &Follow| (fl.serial, fl.at_s);
+    // The run read last, while no Follow without the flag of an owner or admin ranks after it.
+    let kept = last.take().filter(|(group, start)| *group == g.id && !list.iter().any(|x| !x.read_only() && key(x) > key(start))).map(|(_, start)| start);
+    // Of that and the run the statements that count show, the earlier began it.
+    let start = [run_start(&list, list.len()).cloned(), kept].into_iter().flatten().min_by_key(key);
+    *last = start.clone().map(|s| (g.id, s));
+    start
+}
+
+/// Member `m` is one *Read only* makes Read only and no owner has decided on since it came on (at `since_s`): Admin or
+/// Read & write by a statement not later than that, or Read & write by an admin's invitation (an admin that did not know
+/// yet). A role an owner gave since (a lowering, or the user's own choice) is left.
+fn due_read_only(m: &Member, since_s: u64) -> bool {
+    match m.role {
+        // Times are whole seconds: one decided in the second it came on counts as decided before. What an owner decides
+        // under Read only (a lowering, an admission) is dated a second later at least, so it never counts as before.
+        Role::Admin => m.since_s <= since_s,
+        Role::ReadWrite => m.since_s <= since_s || m.invite.is_some(),
+        _ => false,
+    }
+}
+
+/// This device holds back from writing to folder `f` (SPEC §7G.1 *Read only*): the folder is Read only on the
+/// user's devices, this device did not turn it on, and it is one of those that become Read only, but no owner has
+/// lowered it yet (no owner online). It then writes nothing there meanwhile, as if it were Read only already: its
+/// edits stay its own until an owner decides. ([`crate::roles::changed`] gives the folder's core this.)
+pub(crate) fn held_read_only(ctx: &Ctx, f: &Space) -> bool {
+    let Some(start) = read_only_start(ctx, f) else { return false };
+    let me = ctx.key.public_key();
+    if start.by == *me {
+        return false;
+    }
+    let m = f.membership.read().unwrap_or_else(|e| e.into_inner());
+    m.members().find(|(pk, _)| *pk == me).is_some_and(|(_, mm)| due_read_only(mm, start.at_s))
+}
+
 /// The statement that admits sibling `device` to `f`, signed by this device: an owner's `Grant{Admin}`, or an
-/// admin's `Grant{Read & write}` with a one-use invitation of its own (`serial`: an owner's next one). `None`: this
-/// device admits nobody there.
+/// admin's `Grant{Read & write}` with a one-use invitation of its own (`serial`: an owner's next one); both at Read
+/// only while `f` is on the user's devices *Read only* ([`read_only_for`]). `None`: this device admits nobody there.
 fn admission(ctx: &Ctx, f: &Space, device: [u8; 32], serial: u64) -> Option<Statement> {
-    let now = now_s();
+    let read_only = read_only_for(ctx, f);
+    // Under Read only, admitted after it came on (a later second): turned off, it gets Admin back.
+    let now = match read_only_start(ctx, f).filter(|_| read_only) {
+        Some(start) => now_s().max(start.at_s + 1),
+        None => now_s(),
+    };
     match f.role_of(ctx.key.public_key())? {
-        Role::Owner => crate::roles::by_owner(f, Body::Grant { device, role: Role::Admin, serial, at_s: now, invite: None }),
+        Role::Owner => {
+            let role = if read_only { Role::ReadOnly } else { Role::Admin };
+            crate::roles::by_owner(f, Body::Grant { device, role, serial, at_s: now, invite: None })
+        }
         Role::Admin => {
+            let role = if read_only { Role::ReadOnly } else { Role::ReadWrite };
             let key: &DeviceKey = &ctx.key;
             let issuer = Signer::Device(*key.public_key());
-            let invite = new_invite(pk_of(f), random_id(), seed(), Role::ReadWrite, 1, now + SIBLING_INVITE_S, now, issuer, &|m: &[u8]| key.sign(m));
-            Some(Statement::by_device(key, &f.id, Body::Grant { device, role: Role::ReadWrite, serial: 0, at_s: now, invite: Some(invite) }))
+            let invite = new_invite(pk_of(f), random_id(), seed(), role, 1, now + SIBLING_INVITE_S, now, issuer, &|m: &[u8]| key.sign(m));
+            Some(Statement::by_device(key, &f.id, Body::Grant { device, role, serial: 0, at_s: now, invite: Some(invite) }))
         }
         _ => None,
     }
@@ -274,7 +400,7 @@ fn seed() -> [u8; 32] {
 /// and the device is a member of this device's group now and was not removed from `f` by an owner.
 pub(crate) fn check_sibling(ctx: &Ctx, f: &Space, peer_pk: &[u8; 32], group: &[u8], changed: &mut bool) -> Proved {
     let Some(g) = my_group(ctx).filter(|g| g.id.0.as_slice() == group) else { return Proved::Nothing };
-    if g.role_of(peer_pk).is_none() || !follow_of(&g, &pk_of(f)).is_some_and(|fl| fl.on) {
+    if g.role_of(peer_pk).is_none() || !followed(ctx, f) {
         return Proved::Nothing;
     }
     let (removed, ended, serial) = {
@@ -486,13 +612,33 @@ impl SyncHandle {
             }
         }
         // The groups it moved on from (without their keys), and whether it is moving into this one: not a member yet,
-        // no pairing link, so its members admit it from the group it moved from.
+        // no pairing link, so its members admit it from the group it moved from. One already open here (the group it
+        // switches from, or an earlier one) is kept as it is, never read from its file again: a session may add to it
+        // while this device switches (another device's Moved, said at the same moment), and that is what this device
+        // must read of it afterwards.
+        let open: Vec<Arc<Space>> = self.inner.ctx.registry.devices().into_iter().chain(self.inner.ctx.registry.ancestors()).collect();
         let mut ancestors = Vec::new();
         for p in &e.previous {
             let (Ok(aid), Some(apk)) = (p.id.parse::<FolderId>(), public_key_from_hex(&p.group_pk)) else { continue };
+            if let Some(a) = open.iter().find(|a| a.id == aid && pk_of(a) == apk) {
+                *a.secret.write().unwrap_or_else(|e| e.into_inner()) = None;
+                lock(&a.invite).take();
+                lock(&a.links).clear();
+                a.following.store(false, Ordering::SeqCst);
+                ancestors.push(a.clone());
+                continue;
+            }
             let path = self.members_path(&aid);
             let Ok(m) = crate::roles::load_devices(&path, apk) else { continue };
             ancestors.push(Arc::new(Space::new(aid, SpaceKind::Devices, FolderKey::Member(apk), None, m, path, None, BTreeMap::new(), GROUP_NAME.into())));
+        }
+        // (Tests: a switch waits here, its groups ready and not in use yet.)
+        if self.inner.ctx.hold_switch.load(Ordering::SeqCst) {
+            self.inner.ctx.switches_waiting.fetch_add(1, Ordering::SeqCst);
+            while self.inner.ctx.hold_switch.load(Ordering::SeqCst) {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            self.inner.ctx.switches_waiting.fetch_sub(1, Ordering::SeqCst);
         }
         let moving = !ancestors.is_empty() && lock(&space.invite).is_none() && space.role_of(self.inner.ctx.key.public_key()).is_none();
         space.following.store(moving, Ordering::SeqCst);
@@ -832,23 +978,46 @@ impl SyncHandle {
     /// old key is deleted here. Each member moves by itself and is admitted by the new group's members, who know its
     /// key from the old group.
     async fn rotate(&self, g: &Arc<Space>) -> Result<(), SyncError> {
+        let secret = FolderSecret::generate(&mut ring::rand::SystemRandom::new()).map_err(io::Error::other)?;
+        self.rotate_to(g, secret).await
+    }
+
+    /// [`Self::rotate`], to the group of `secret`.
+    async fn rotate_to(&self, g: &Arc<Space>, secret: FolderSecret) -> Result<(), SyncError> {
         let ctx = self.inner.ctx.clone();
         let me = *ctx.key.public_key();
-        let secret = FolderSecret::generate(&mut ring::rand::SystemRandom::new()).map_err(io::Error::other)?;
         let (pk, id) = (*secret.public_key(), FolderId::of_public_key(secret.public_key()));
         let now = now_s();
         let (mut members, follows, removed) = {
             let m = g.membership.read().unwrap_or_else(|e| e.into_inner());
             let members: Vec<[u8; 32]> = m.members().map(|(pk, _)| *pk).filter(|pk| *pk != me).collect();
             // What follows, and the folders removed on all devices (a sibling that did not take one out yet still does).
-            (members, m.follows().filter(|f| f.on || f.removed()).cloned().collect::<Vec<_>>(), m.removed_devices())
+            (members, m.follows().cloned().collect::<Vec<_>>(), m.removed_devices())
         };
         members.insert(0, me);
         let mut m = Membership::new_devices(pk);
         let grants = members.iter().enumerate().map(|(i, d)| Statement::by_owner(&secret, Body::Grant { device: *d, role: Role::Owner, serial: 1 + i as u64, at_s: now, invite: None }));
         m.add(grants.collect::<Vec<_>>());
-        let carried = follows.iter().map(|f| {
-            Statement::by_device(&ctx.key, &id, Body::Follow { target: f.target, target_pk: f.target_pk, name: f.name.clone(), on: f.on, serial: 1, at_s: now, flags: f.flags })
+        // Each as it counts here (an owner's or admin's statement for a folder or channel here, never a member's alone,
+        // which this device would otherwise sign as its own), Read only kept while this device, an owner, carries it
+        // out, and at its own time (the time Read only came on stays what it was).
+        let carried = follows.iter().filter_map(|plain| {
+            let here = ctx.registry.user_space(&FolderId::of_public_key(&plain.target_pk));
+            let mut f = match &here {
+                Some(s) => effective_follow(&ctx, s)?,
+                None => plain.clone(),
+            };
+            if !(f.on || f.removed()) {
+                return None;
+            }
+            // (Also while the statement that turned it on no longer counts: its run is still on.)
+            let owner_on = here.as_ref().is_some_and(|s| s.kind == SpaceKind::Folder && s.role_of(&me) == Some(Role::Owner))
+                && lock(&self.inner.cfg).folder(&FolderId::of_public_key(&plain.target_pk).to_string()).and_then(|e| e.devices_read_only.as_ref().map(|r| r.on)) == Some(true);
+            if owner_on || here.as_ref().is_some_and(|s| read_only_run_in(g, s).is_some()) {
+                f.flags |= FOLLOW_READ_ONLY;
+            }
+            let body = Body::Follow { target: f.target, target_pk: f.target_pk, name: f.name.clone(), on: f.on, serial: 1, at_s: f.at_s, flags: f.flags };
+            Some(Statement::by_device(&ctx.key, &id, body))
         });
         m.add(carried.collect::<Vec<_>>());
         crate::roles::save(&self.members_path(&id), &m)?;
@@ -984,22 +1153,51 @@ impl SyncHandle {
         let f = ctx.registry.user_space(id).ok_or(SyncError::NotFound)?;
         let me = ctx.key.public_key();
         let role = f.role_of(me);
-        let Some(g) = my_group(ctx) else { return Ok(FollowState { on: false, may: false, paired: false, role, others: Vec::new() }) };
+        let Some(g) = my_group(ctx) else { return Ok(FollowState { on: false, may: false, paired: false, role, others: Vec::new(), read_only: false }) };
         let names = self.own_names(&g);
         let others: Vec<String> = {
             let m = g.membership.read().unwrap_or_else(|e| e.into_inner());
             group_members(&m, me).iter().map(|pk| names.get(&DeviceId::of_public_key(pk)).map(|n| n.0.clone()).unwrap_or_default()).filter(|n| !n.is_empty()).collect()
         };
         let paired = !others.is_empty();
-        let on = follow_of(&g, &pk_of(&f)).is_some_and(|fl| fl.on);
-        Ok(FollowState { on, may: paired && role.is_some_and(Role::admits), paired, role, others })
+        let on = followed(ctx, &f);
+        let read_only = read_only_for(ctx, &f);
+        Ok(FollowState { on, may: paired && role.is_some_and(Role::admits), paired, role, others, read_only })
     }
 
     /// Turns "On all my devices" on or off for folder or channel `id`: on puts it on every device of the group (only
     /// an owner or admin here, so siblings can be admitted), on demand where it can be when it is on demand here
     /// ([`FOLLOW_ON_DEMAND`]: only the default when a sibling joins it); off only stops it coming to new ones, and
-    /// deletes nothing anywhere.
+    /// deletes nothing anywhere. *Read only* stays as it is, on or off ([`Self::set_follow_read_only`] switches it).
     pub async fn set_follow(&self, id: &FolderId, on: bool) -> Result<(), SyncError> {
+        let read_only = self.follow_read_only(id);
+        self.say_follow(id, on, read_only).await
+    }
+
+    /// Turns *Read only* on or off for folder `id` on the user's other devices ([`FOLLOW_READ_ONLY`]); on also puts it
+    /// on all of them (in one statement). Only an owner or admin here. On: they join it at Read only, and an owner of
+    /// the folder makes the ones that have it Read only, all but this device, which keeps its role; their edits, new
+    /// files and deletes then never reach this device or each other, and nothing is downloaded here. Off: an owner
+    /// gives them Admin back (not the ones that were Read only before it came on); the folder stays on all devices.
+    pub async fn set_follow_read_only(&self, id: &FolderId, read_only: bool) -> Result<(), SyncError> {
+        let ctx = self.inner.ctx.clone();
+        let f = ctx.registry.user_space(id).ok_or(SyncError::NotFound)?;
+        if f.kind != SpaceKind::Folder {
+            return Err(invalid("only a folder can be read only on your other devices"));
+        }
+        if !f.role_of(ctx.key.public_key()).is_some_and(Role::admits) {
+            return Err(invalid("only an owner or admin of this folder can make it read only on your other devices"));
+        }
+        if !read_only && !followed(&ctx, &f) && !read_only_for(&ctx, &f) {
+            return Ok(());
+        }
+        let on = read_only || followed(&ctx, &f);
+        self.say_follow(id, on, read_only).await
+    }
+
+    /// Says "On all my devices" for `id` in the group as `on`, a folder *Read only* as `read_only`, when that is not
+    /// what the group says already.
+    async fn say_follow(&self, id: &FolderId, on: bool, read_only: bool) -> Result<(), SyncError> {
         let ctx = self.inner.ctx.clone();
         let g = my_group(&ctx).ok_or_else(|| invalid(concat!("pair this ", trs_platform::computer!(), " with your other devices first (Settings › Devices)")))?;
         let f = ctx.registry.user_space(id).ok_or(SyncError::NotFound)?;
@@ -1008,16 +1206,16 @@ impl SyncHandle {
         }
         let target = if f.kind == SpaceKind::Channel { FollowTarget::Channel } else { FollowTarget::Folder };
         let pk = pk_of(&f);
-        let (now_on, serial) = {
-            let m = g.membership.read().unwrap_or_else(|e| e.into_inner());
-            (m.follow(&pk).is_some_and(|fl| fl.on), m.next_follow_serial(&pk))
-        };
-        if now_on == on {
+        let (now_on, (serial, at_s)) = (followed(&ctx, &f), next_serial_for(&g, &f, ctx.key.public_key()));
+        let read_only = read_only && f.kind == SpaceKind::Folder;
+        if now_on == on && read_only_for(&ctx, &f) == read_only {
             return Ok(());
         }
         let name = lock(&f.name).clone();
-        let flags = if on && f.kind == SpaceKind::Folder && self.configured(id) == Some(true) { FOLLOW_ON_DEMAND } else { 0 };
-        let st = Statement::by_device(&ctx.key, &g.id, Body::Follow { target, target_pk: pk, name, on, serial, at_s: now_s(), flags });
+        let on_demand = if on && f.kind == SpaceKind::Folder && self.offers_on_demand(id) { FOLLOW_ON_DEMAND } else { 0 };
+        // Read only is said off too: turning "On all my devices" off changes no role.
+        let flags = on_demand | if read_only { FOLLOW_READ_ONLY } else { 0 };
+        let st = Statement::by_device(&ctx.key, &g.id, Body::Follow { target, target_pk: pk, name, on, serial, at_s, flags });
         if on && let Some(e) = lock(&self.inner.cfg).my_devices.as_mut() {
             e.skip.retain(|s| *s != id.to_string());
         }
@@ -1025,6 +1223,47 @@ impl SyncHandle {
             crate::roles::changed(&ctx, &g).await;
         }
         Ok(())
+    }
+
+    /// Files on demand changed for folder `id` here: while it is on all the user's devices, the statement says so anew
+    /// ([`FOLLOW_ON_DEMAND`]), so the devices that join it later get placeholders or every file. A device that has the
+    /// folder already keeps its own mode. Only an owner or admin here says it (as when it was turned on).
+    pub(crate) async fn follow_mode_changed(&self, id: &FolderId) {
+        let ctx = self.inner.ctx.clone();
+        let Some(g) = my_group(&ctx) else { return };
+        let Some(f) = ctx.registry.user_space(id).filter(|f| f.kind == SpaceKind::Folder) else { return };
+        if !f.role_of(ctx.key.public_key()).is_some_and(Role::admits) {
+            return;
+        }
+        let pk = pk_of(&f);
+        let want = if self.offers_on_demand(id) { FOLLOW_ON_DEMAND } else { 0 };
+        let Some(flags) = effective_follow(&ctx, &f).filter(|fl| fl.on).map(|fl| fl.flags) else { return };
+        let (serial, at_s) = next_serial_for(&g, &f, ctx.key.public_key());
+        if flags & FOLLOW_ON_DEMAND == want {
+            return;
+        }
+        let name = lock(&f.name).clone();
+        // Read only as an owner or admin said it last.
+        let read_only = if read_only_for(&ctx, &f) { FOLLOW_READ_ONLY } else { 0 };
+        let flags = (flags & !(FOLLOW_ON_DEMAND | FOLLOW_READ_ONLY)) | want | read_only;
+        let st = Statement::by_device(&ctx.key, &g.id, Body::Follow { target: FollowTarget::Folder, target_pk: pk, name, on: true, serial, at_s, flags });
+        if crate::roles::add(&g, [st]) {
+            crate::roles::changed(&ctx, &g).await;
+        }
+    }
+
+    /// What the *On all my devices* statement of folder `id` says of files on demand ([`FOLLOW_ON_DEMAND`]): `Some` while
+    /// the folder is on all the user's devices (whichever owner or admin of it said it last), `None` otherwise. What the hosts show
+    /// as the folder's *Files on demand* ([`crate::status::FolderStatus::on_demand_others`]).
+    pub fn follow_on_demand(&self, id: &FolderId) -> Option<bool> {
+        let ctx = &self.inner.ctx;
+        let f = ctx.registry.user_space(id).filter(|f| f.kind == SpaceKind::Folder)?;
+        effective_follow(ctx, &f).filter(|fl| fl.on).map(|fl| fl.flags & FOLLOW_ON_DEMAND != 0)
+    }
+
+    /// Folder `id` is on the user's devices *Read only* ([`FOLLOW_READ_ONLY`], as an owner or admin of it said last).
+    pub fn follow_read_only(&self, id: &FolderId) -> bool {
+        self.inner.ctx.registry.user_space(id).is_some_and(|f| read_only_for(&self.inner.ctx, &f))
     }
 
     /// Folder or channel `id` is on all the user's devices (the hosts ask before removing it).
@@ -1040,23 +1279,25 @@ impl SyncHandle {
     }
 
     /// What [`Self::removed_everywhere`] needs of folder `id`, taken before it is removed: `None` when removing it here
-    /// does not remove it on the other devices ([`Self::removes_everywhere`]).
-    pub(crate) fn everywhere_follow(&self, id: &FolderId) -> Option<([u8; 32], String)> {
+    /// does not remove it on the other devices ([`Self::removes_everywhere`]). With the serial its statement gets (above
+    /// every one of the folder's owners and admins: read while the folder's roles are still here).
+    pub(crate) fn everywhere_follow(&self, id: &FolderId) -> Option<([u8; 32], String, (u64, u64))> {
         if !self.removes_everywhere(id) {
             return None;
         }
-        let f = self.inner.ctx.registry.user_space(id)?;
+        let ctx = &self.inner.ctx;
+        let f = ctx.registry.user_space(id)?;
         let name = lock(&f.name).clone();
-        Some((pk_of(&f), name))
+        let serial = next_serial_for(&*my_group(ctx)?, &f, ctx.key.public_key());
+        Some((pk_of(&f), name, serial))
     }
 
     /// Folder `pk` was removed here by its owner: the group says so ([`FOLLOW_REMOVED`]), and every sibling removes it
     /// too, keeping its files.
-    pub(crate) async fn removed_everywhere(&self, pk: [u8; 32], name: String) {
+    pub(crate) async fn removed_everywhere(&self, pk: [u8; 32], name: String, (serial, at_s): (u64, u64)) {
         let ctx = self.inner.ctx.clone();
         let Some(g) = my_group(&ctx) else { return };
-        let serial = g.membership.read().unwrap_or_else(|e| e.into_inner()).next_follow_serial(&pk);
-        let body = Body::Follow { target: FollowTarget::Folder, target_pk: pk, name, on: false, serial, at_s: now_s(), flags: FOLLOW_REMOVED };
+        let body = Body::Follow { target: FollowTarget::Folder, target_pk: pk, name, on: false, serial, at_s, flags: FOLLOW_REMOVED };
         if crate::roles::add(&g, [Statement::by_device(&ctx.key, &g.id, body)]) {
             crate::roles::changed(&ctx, &g).await;
         }
@@ -1112,23 +1353,57 @@ impl SyncHandle {
         };
         let (skip, gone): (BTreeSet<String>, BTreeSet<String>) =
             self.group_entry().map(|e| (e.skip.into_iter().collect(), e.removed.into_iter().collect())).unwrap_or_default();
-        for fl in follows {
-            let id = FolderId::of_public_key(&fl.target_pk);
-            let kind = match fl.target {
+        for plain in follows {
+            let id = FolderId::of_public_key(&plain.target_pk);
+            let kind = match plain.target {
                 FollowTarget::Folder => SpaceKind::Folder,
                 FollowTarget::Channel => SpaceKind::Channel,
             };
+            let here = ctx.registry.user_space(&id).filter(|f| f.kind == kind);
+            // Read only first, before this round's admissions.
+            if kind == SpaceKind::Folder
+                && let Some(f) = &here
+            {
+                self.apply_read_only(f, &siblings).await;
+                self.hold_read_only(f).await;
+            }
+            // What counts for a folder or channel here is what its owners and admins said: a statement of a member that
+            // is neither (one made Read only, say) turns nothing off and removes nothing.
+            let fl = match &here {
+                Some(f) => match effective_follow(&ctx, f) {
+                    Some(fl) => {
+                        self.restate_follow(&g, f, &fl, &plain).await;
+                        fl
+                    }
+                    None => continue,
+                },
+                None => plain,
+            };
             if kind == SpaceKind::Folder {
                 if fl.removed() && !gone.contains(&id.to_string()) {
-                    self.remove_removed(&g, &fl, &id).await;
-                    continue;
+                    match &here {
+                        // Its owner removed it on all devices: it goes from Seedwell here too, its files kept.
+                        Some(f) if f.role_of(&fl.by) == Some(Role::Owner) => {
+                            self.remove_removed(&g, &fl, &id).await;
+                            continue;
+                        }
+                        // An admin's off statement marked removed: only an owner's removal reaches the other devices.
+                        Some(_) => {}
+                        // Here but not running: whose removal it is cannot be told, so nothing is removed.
+                        None if self.configured(&id).is_some() => continue,
+                        // Not here: nothing to remove; it is not joined again by itself.
+                        None => {
+                            self.note_removed(&id, true);
+                            continue;
+                        }
+                    }
                 }
                 if fl.on && gone.contains(&id.to_string()) {
                     // On all devices again: a later removal is carried out again.
                     self.note_removed(&id, false);
                 }
             }
-            match ctx.registry.user_space(&id).filter(|f| f.kind == kind) {
+            match here {
                 Some(f) => {
                     let was = f.following.load(Ordering::SeqCst);
                     let now = mark_following(&ctx, &f);
@@ -1157,7 +1432,8 @@ impl SyncHandle {
         }
     }
 
-    /// Folder `id`'s owner removed it on all devices: it goes from Seedwell here too (if it is here, running or not),
+    /// Folder `id`'s owner removed it on all devices (`devices_sync` checked that its signer is an owner of the folder
+    /// here, so a sibling that is not can never remove it, nor its key): it goes from Seedwell here too,
     /// its files kept where they are (an on-demand folder's become an ordinary folder at its place). Noted once done,
     /// so a folder joined again afterwards stays; a removal that fails (the folder busy) is tried again at the next
     /// change.
@@ -1239,7 +1515,7 @@ impl SyncHandle {
         let ctx = self.inner.ctx.clone();
         let Some(g) = ctx.registry.devices() else { return Ok(false) };
         let me = *ctx.key.public_key();
-        if g.role_of(&me).is_none() {
+        if g.role_of(&me).is_none() || ctx.hold_key_changes.load(Ordering::SeqCst) {
             return Ok(false);
         }
         g.following.store(false, Ordering::SeqCst);
@@ -1294,13 +1570,15 @@ impl SyncHandle {
     }
 
     /// Admits `siblings` to `f` where this device may: an owner's grant as Admin for those not in it (and not removed
-    /// from it by an owner), raising those at Read & write; an admin's one-use admission at Read & write.
+    /// from it by an owner), raising those at Read & write; an admin's one-use admission at Read & write. *Read only*
+    /// ([`read_only_for`]): both admit at Read only, and nobody is raised ([`Self::apply_read_only`] does the rest).
     async fn admit_siblings(&self, f: &Arc<Space>, siblings: &[[u8; 32]]) {
         let ctx = &self.inner.ctx;
         let mine = f.role_of(ctx.key.public_key());
         if !mine.is_some_and(Role::admits) {
             return;
         }
+        let read_only = read_only_for(ctx, f);
         let mut sts = Vec::new();
         let mut serial = f.membership.read().unwrap_or_else(|e| e.into_inner()).next_serial();
         let ended = f.membership.read().unwrap_or_else(|e| e.into_inner()).share_ended(now_s());
@@ -1311,7 +1589,9 @@ impl SyncHandle {
             };
             let st = match role {
                 None if !removed && !ended => admission(ctx, f, *d, serial),
-                Some(Role::ReadWrite) if mine == Some(Role::Owner) => crate::roles::by_owner(f, Body::Grant { device: *d, role: Role::Admin, serial, at_s: now_s(), invite: None }),
+                Some(Role::ReadWrite) if mine == Some(Role::Owner) && !read_only => {
+                    crate::roles::by_owner(f, Body::Grant { device: *d, role: Role::Admin, serial, at_s: now_s(), invite: None })
+                }
                 _ => None,
             };
             if let Some(st) = st {
@@ -1321,6 +1601,163 @@ impl SyncHandle {
         }
         if !sts.is_empty() && crate::roles::add(f, sts) {
             crate::roles::changed(ctx, f).await;
+        }
+    }
+
+    /// *Read only* on the user's devices ([`FOLLOW_READ_ONLY`]) carried out by an owner of folder `f`, signed with the
+    /// folder key, from the Follows of the folder's owners and admins (oldest first) and what this device noted
+    /// ([`crate::config::DevicesReadOnly`]):
+    /// - **On** (the latest has the flag): it notes the Follow that turned it on (the earliest of the run: a sibling
+    ///   saying it again later does not make itself the one that keeps its role), then makes Read only every sibling
+    ///   [`due_read_only`] since then, all but the one that turned it on. What admins admitted is confirmed first, so
+    ///   lowering an admin drops nobody it let in.
+    /// - **Off** (a later Follow without the flag): every sibling at Read only since it came on gets Admin back; those
+    ///   Read only before stay so. Once.
+    /// - **The statement that turned it on stops counting** (its device left the group, or is no longer owner or admin)
+    ///   while nobody turned it off: this device says it again, so it stays on everywhere.
+    /// - **Turned on and off while this device was away**: the siblings made Read only meanwhile get Admin back.
+    ///
+    /// Owners are never lowered, and members that are not the user's devices (by link) never touched.
+    async fn apply_read_only(&self, f: &Arc<Space>, siblings: &[[u8; 32]]) {
+        let ctx = &self.inner.ctx;
+        let me = *ctx.key.public_key();
+        if f.role_of(&me) != Some(Role::Owner) {
+            return;
+        }
+        let Some(g) = my_group(ctx) else { return };
+        let key = f.id.to_string();
+        let list = trusted_follows(&g, f);
+        let last = list.last().cloned();
+        let mut rec = lock(&self.inner.cfg).folder(&key).and_then(|e| e.devices_read_only.clone()).unwrap_or_default();
+        // The group moved (a new key) since it was noted: its serials start again there.
+        let moved = rec.on && rec.group != g.id.to_string();
+        let members = |f: &Space| -> Vec<([u8; 32], Member)> {
+            let m = f.membership.read().unwrap_or_else(|e| e.into_inner());
+            siblings.iter().filter_map(|d| m.members().find(|(pk, _)| *pk == d).map(|(pk, mm)| (*pk, *mm))).collect()
+        };
+        let mut grants: Vec<([u8; 32], Role)> = Vec::new();
+        let mut at = now_s();
+        match &last {
+            Some(l) if l.read_only() => {
+                let start = run_start(&list, list.len()).cloned().unwrap_or_else(|| l.clone());
+                // A run this device has not noted: the first, or one after a Follow without the flag since the noted one.
+                if moved {
+                    rec = DevicesReadOnly { serial: start.serial, group: g.id.to_string(), ..rec };
+                    self.note_read_only(f, Some(rec.clone()));
+                }
+                let fresh = !rec.on || list.iter().any(|x| !x.read_only() && x.serial > rec.serial);
+                if fresh {
+                    let group = g.id.to_string();
+                    rec = DevicesReadOnly { on: true, setter: hex(&start.by), serial: start.serial, at_s: start.at_s, group, off_serial: rec.off_serial };
+                    // Noted before any role changes: a crash in between still knows who turned it on, and when.
+                    self.note_read_only(f, Some(rec.clone()));
+                }
+                // Admins' admissions confirmed first: an admin lowered below takes nobody it admitted with it.
+                if crate::roles::confirm_admitted(ctx, f) {
+                    crate::roles::changed(ctx, f).await;
+                }
+                let lower = members(f).into_iter().filter(|(d, m)| hex(d) != rec.setter && due_read_only(m, rec.at_s));
+                grants.extend(lower.map(|(d, _)| (d, Role::ReadOnly)));
+                // Decided after it came on (a later second), also when this clock is behind the one of the device that
+                // turned it on.
+                at = at.max(rec.at_s + 1);
+            }
+            _ if rec.on => match &last {
+                Some(l) if !moved && l.serial > rec.serial => {
+                    let since = rec.at_s;
+                    let back = members(f).into_iter().filter(|(_, m)| m.role == Role::ReadOnly && m.since_s > since);
+                    grants.extend(back.map(|(d, _)| (d, Role::Admin)));
+                    rec = DevicesReadOnly { on: false, off_serial: l.serial, ..rec };
+                }
+                // Nobody turned it off: the statement that turned it on stopped counting (or the group moved, carried by a
+                // device that does not count here). Said again, by this owner.
+                _ => {
+                    if ctx.hold_read_only_again.load(Ordering::SeqCst) {
+                        return;
+                    }
+                    let on = last.as_ref().is_none_or(|l| l.on);
+                    let flags = last.as_ref().map_or(0, |l| l.flags & FOLLOW_ON_DEMAND) | FOLLOW_READ_ONLY;
+                    // Above the one that turned it on, so the owner's later off ranks after it (also when this device
+                    // did not read that run since it started, so it is not in `next_serial_for`).
+                    let (serial, at_s) = next_serial_for(&g, f, &me);
+                    let (serial, at_s) = if moved || serial > rec.serial {
+                        (serial, at_s)
+                    } else {
+                        (rec.serial.saturating_add(1).min(trs_sync_proto::members::MAX_FOLLOW_SERIAL), at_s.max(rec.at_s.saturating_add(1)))
+                    };
+                    let name = lock(&f.name).clone();
+                    let body = Body::Follow { target: FollowTarget::Folder, target_pk: pk_of(f), name, on, serial, at_s, flags };
+                    if crate::roles::add(&g, [Statement::by_device(&ctx.key, &g.id, body)]) {
+                        crate::roles::changed(ctx, &g).await;
+                    }
+                    return;
+                }
+            },
+            Some(l) if l.serial > rec.off_serial || rec.group != g.id.to_string() => {
+                // On and off again while this device was away: Admin back for those made Read only in between.
+                let Some(start) = run_start(&list, list.len() - 1).cloned() else { return };
+                let (from, to) = (start.at_s, l.at_s);
+                let back = members(f).into_iter().filter(|(_, m)| m.role == Role::ReadOnly && m.since_s > from && m.since_s < to);
+                grants.extend(back.map(|(d, _)| (d, Role::Admin)));
+                rec = DevicesReadOnly { on: false, off_serial: l.serial, group: g.id.to_string(), ..rec };
+            }
+            _ => return,
+        }
+        let first = f.membership.read().unwrap_or_else(|e| e.into_inner()).next_serial();
+        let sts: Vec<Statement> = (first..)
+            .zip(grants)
+            .filter_map(|(serial, (device, role))| crate::roles::by_owner(f, Body::Grant { device, role, serial, at_s: at, invite: None }))
+            .collect();
+        // The roles first, then that they are done: a crash in between does them again.
+        if !sts.is_empty() && crate::roles::add(f, sts) {
+            crate::roles::changed(ctx, f).await;
+        }
+        if Some(&rec) != lock(&self.inner.cfg).folder(&key).and_then(|e| e.devices_read_only.clone()).as_ref() {
+            self.note_read_only(f, Some(rec));
+        }
+    }
+
+    /// The latest Follow for `f` of any of the user's devices (`plain`, what a device that does not have `f` yet, or
+    /// runs an older Seedwell, goes by) is a member's that says something else than its owners and admins (`fl`): an
+    /// owner or admin here says `fl` again, so such a device too joins it, or not, as they said (a Read only sibling's
+    /// "off" would keep a new device from joining). Only with a serial above it: never one statement after another.
+    async fn restate_follow(&self, g: &Arc<Space>, f: &Space, fl: &Follow, plain: &Follow) {
+        let ctx = &self.inner.ctx;
+        let me = *ctx.key.public_key();
+        let admits = admitting(f);
+        // Read only as it is on (its run), not as the latest of an owner or admin says: when the statement that turned
+        // it on stopped counting, that one has no flag, and said again above every other it would turn it off.
+        let read_only = if read_only_run_in(g, f).is_some() { FOLLOW_READ_ONLY } else { 0 };
+        let flags = (fl.flags & !FOLLOW_READ_ONLY) | read_only;
+        let same = (plain.on, plain.flags) == (fl.on, flags);
+        if same || admits.contains(&plain.by) || !admits.contains(&me) {
+            return;
+        }
+        let serial = g.membership.read().unwrap_or_else(|e| e.into_inner()).next_follow_serial(&pk_of(f));
+        if serial <= plain.serial {
+            return;
+        }
+        let body = Body::Follow { target: fl.target, target_pk: fl.target_pk, name: fl.name.clone(), on: fl.on, serial, at_s: now_s(), flags };
+        if crate::roles::add(g, [Statement::by_device(&ctx.key, &g.id, body)]) {
+            crate::roles::changed(ctx, g).await;
+        }
+    }
+
+    /// Gives folder `f`'s core [`held_read_only`] anew when it changed (the group said something new).
+    async fn hold_read_only(&self, f: &Arc<Space>) {
+        let ctx = &self.inner.ctx;
+        if held_read_only(ctx, f) != f.held_read_only.load(Ordering::SeqCst) {
+            crate::roles::changed(ctx, f).await;
+        }
+    }
+
+    /// Keeps what [`Self::apply_read_only`] did for folder `f` in its entry.
+    fn note_read_only(&self, f: &Space, r: Option<DevicesReadOnly>) {
+        if let Some(e) = lock(&self.inner.cfg).folder_mut(&f.id.to_string()) {
+            e.devices_read_only = r;
+        }
+        if let Err(e) = self.save_config() {
+            f.problem(format!("the folder's settings could not be saved: {e}"));
         }
     }
 
@@ -1393,6 +1830,66 @@ impl SyncHandle {
         }
     }
 
+    /// **Tests:** this device says in its group, past every check (as a sibling on another build could), that folder
+    /// `id` follows (`on`) with `flags`, at `serial` (`None`: above every one it knows, as a build that counts every
+    /// member's would). True when the group took it.
+    pub async fn test_say_follow(&self, id: &FolderId, on: bool, flags: u64, serial: Option<u64>) -> bool {
+        let ctx = self.inner.ctx.clone();
+        let (Some(g), Some(f)) = (my_group(&ctx), ctx.registry.user_space(id)) else { return false };
+        let pk = pk_of(&f);
+        let serial = serial.unwrap_or_else(|| g.membership.read().unwrap_or_else(|e| e.into_inner()).next_follow_serial(&pk));
+        let name = lock(&f.name).clone();
+        let st = Statement::by_device(&ctx.key, &g.id, Body::Follow { target: FollowTarget::Folder, target_pk: pk, name, on, serial, at_s: now_s(), flags });
+        let took = crate::roles::add(&g, [st]);
+        if took {
+            crate::roles::changed(&ctx, &g).await;
+        }
+        took
+    }
+
+    /// **Tests:** this device's group holds a Follow for folder `id` said by `by` with `flags` (it has received it,
+    /// whether it counts or not).
+    pub fn test_has_follow(&self, id: &FolderId, by: &DeviceId, flags: u64) -> bool {
+        let ctx = &self.inner.ctx;
+        let (Some(g), Some(f)) = (my_group(ctx), ctx.registry.user_space(id)) else { return false };
+        let pk = pk_of(&f);
+        g.membership.read().unwrap_or_else(|e| e.into_inner()).follows_by(&pk, |_| true).iter().any(|fl| DeviceId::of_public_key(&fl.by) == *by && fl.flags == flags)
+    }
+
+    /// **Tests:** the statements of folder `id`'s membership here.
+    pub fn test_statements(&self, id: &FolderId) -> Vec<Statement> {
+        let Some(f) = self.inner.ctx.registry.user_space(id) else { return Vec::new() };
+        f.membership.read().unwrap_or_else(|e| e.into_inner()).statements().cloned().collect()
+    }
+
+    /// **Tests:** adds `statements` to folder `id`'s membership here and nothing else (as a session delivers them,
+    /// before this device acts on them). True when it changed.
+    pub fn test_add_statements(&self, id: &FolderId, statements: Vec<Statement>) -> bool {
+        self.inner.ctx.registry.user_space(id).is_some_and(|f| crate::roles::add(&f, statements))
+    }
+
+    /// **Tests:** the statements of this device's group.
+    pub fn test_group_statements(&self) -> Vec<Statement> {
+        let Some(g) = my_group(&self.inner.ctx) else { return Vec::new() };
+        g.membership.read().unwrap_or_else(|e| e.into_inner()).statements().cloned().collect()
+    }
+
+    /// **Tests:** takes `statements` into this device's group as a session delivers them (and acts on them).
+    pub async fn test_take_group_statements(&self, statements: Vec<Statement>) -> bool {
+        let ctx = self.inner.ctx.clone();
+        let Some(g) = my_group(&ctx) else { return false };
+        let took = crate::roles::add(&g, statements);
+        if took {
+            crate::roles::changed(&ctx, &g).await;
+        }
+        took
+    }
+
+    /// **Tests:** this device's folder `id` holds back from writing ([`held_read_only`]).
+    pub fn test_held_read_only(&self, id: &FolderId) -> bool {
+        self.inner.ctx.registry.user_space(id).is_some_and(|f| f.held_read_only.load(Ordering::SeqCst))
+    }
+
     /// **Tests:** the id of this device's devices group.
     pub fn test_group_id(&self) -> Option<FolderId> {
         self.inner.ctx.registry.devices().map(|g| g.id)
@@ -1416,6 +1913,49 @@ impl SyncHandle {
         let entry = MyDevicesEntry { id: g.id.to_string(), group_pk: hex(&pk_of(&g)), devices, mode: "full".into(), ..MyDevicesEntry::default() };
         lock(&other.inner.cfg).my_devices = Some(entry.clone());
         other.save_config().is_ok() && other.open_devices(&entry).await.is_ok()
+    }
+
+    /// **Tests:** while `on`, this device leaves its group's key as it is: it neither moves to another group nor makes
+    /// a new key, whatever it learns (off: it catches up at once).
+    pub fn test_hold_key_changes(&self, on: bool) {
+        self.inner.ctx.hold_key_changes.store(on, Ordering::SeqCst);
+        self.inner.ctx.devices_wake.notify_one();
+    }
+
+    /// **Tests:** while `on`, this device, an owner, does not say *Read only* again when the statement that turned it
+    /// on stops counting (as when a round of its devices began before it stopped); off: it does at once.
+    pub fn test_hold_read_only_again(&self, on: bool) {
+        self.inner.ctx.hold_read_only_again.store(on, Ordering::SeqCst);
+        self.inner.ctx.devices_wake.notify_one();
+    }
+
+    /// **Tests:** while `on`, a switch of this device to another group waits once that group and the ones it moved on
+    /// from are ready, before they are in use ([`Self::test_switches_waiting`]).
+    pub fn test_hold_switch(&self, on: bool) {
+        self.inner.ctx.hold_switch.store(on, Ordering::SeqCst);
+    }
+
+    /// **Tests:** switches waiting in [`Self::test_hold_switch`]'s wait now.
+    pub fn test_switches_waiting(&self) -> usize {
+        self.inner.ctx.switches_waiting.load(Ordering::SeqCst)
+    }
+
+    /// **Tests:** this device changes its group's key now, as after a removal, whatever it knows of moves (as a
+    /// device does that decided to before it learned of another's); with `below`, to a group whose id is lower than
+    /// that one. The new group's id.
+    pub async fn test_rotate(&self, below: Option<FolderId>) -> Result<FolderId, SyncError> {
+        let ctx = self.inner.ctx.clone();
+        let _one = ctx.devices_lock.lock().await;
+        let g = my_group(&ctx).ok_or(SyncError::NotFound)?;
+        let secret = loop {
+            let s = FolderSecret::generate(&mut ring::rand::SystemRandom::new()).map_err(io::Error::other)?;
+            if below.is_none_or(|b| FolderId::of_public_key(s.public_key()) < b) {
+                break s;
+            }
+        };
+        let id = FolderId::of_public_key(secret.public_key());
+        self.rotate_to(&g, secret).await?;
+        Ok(id)
     }
 
     /// **Tests:** this device holds the user key (in memory and in its secret store).

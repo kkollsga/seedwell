@@ -227,7 +227,27 @@ pub struct FileInfo {
 }
 
 impl FileInfo {
-    /// A digest of what [`Self::same_content`] compares: equal for the same content.
+    /// A file whose content is not hashed yet (SPEC §7G.11, *Listed first, hashed when first fetched*): a file with
+    /// bytes and no chunk list. Its content comes from its maker as a stream, hashed as it is read.
+    pub fn is_unhashed(&self) -> bool {
+        self.kind == FileKind::File && !self.deleted && self.size > 0 && self.chunks.is_empty()
+    }
+
+    /// The same version of the same file: version vector, maker, file id and time. An unhashed version and its hashed
+    /// form are this; two different files never are.
+    fn same_version_of_file(&self, other: &FileInfo) -> bool {
+        self.version == other.version && self.modified_by == other.modified_by && self.file_id == other.file_id && self.mtime_ns == other.mtime_ns
+    }
+
+    /// The [`Self::content_digest`] of this version's unhashed form (its chunks left out): what a device holding the
+    /// version unhashed says it holds.
+    pub fn unhashed_digest(&self) -> [u8; 32] {
+        FileInfo { chunks: Vec::new(), ..self.clone() }.content_digest()
+    }
+
+    /// A digest of what [`Self::same_content`] compares: equal for the same content, except that an unhashed version
+    /// and its hashed form differ (a device asked whether it holds one and holding the other says no: never a wrong
+    /// yes). An unhashed version's digest takes in which version it is, so two unhashed files of one size never match.
     pub fn content_digest(&self) -> [u8; 32] {
         let mut b = Vec::with_capacity(48 + 36 * self.chunks.len() + self.symlink_target.len());
         b.extend_from_slice(&[self.kind as u8, u8::from(self.deleted), u8::from(self.exec)]);
@@ -238,18 +258,31 @@ impl FileInfo {
             b.extend_from_slice(&c.len.to_le_bytes());
             b.extend_from_slice(&c.hash);
         }
+        if self.is_unhashed() {
+            b.extend_from_slice(b"unhashed");
+            b.extend_from_slice(&self.file_id);
+            b.extend_from_slice(&self.mtime_ns.to_le_bytes());
+            b.extend_from_slice(&self.modified_by.0.to_le_bytes());
+            for c in self.version.counters() {
+                b.extend_from_slice(&c.id.0.to_le_bytes());
+                b.extend_from_slice(&c.value.to_le_bytes());
+            }
+        }
         ring::digest::digest(&ring::digest::SHA256, &b).as_ref().try_into().expect("32 bytes")
     }
 
     /// The same content as `other` (kind, size, chunks, exec bit, link target, deleted): two devices
     /// that made the same change concurrently are not in conflict.
+    ///
+    /// An unhashed file's content is not known ([`Self::is_unhashed`]): it is the same only as the same version (its
+    /// other form, before or after its hashes were known), never as another file of the same size.
     pub fn same_content(&self, other: &FileInfo) -> bool {
         self.kind == other.kind
             && self.deleted == other.deleted
             && self.size == other.size
             && self.exec == other.exec
             && self.symlink_target == other.symlink_target
-            && self.chunks == other.chunks
+            && if self.is_unhashed() || other.is_unhashed() { self.same_version_of_file(other) } else { self.chunks == other.chunks }
     }
 
     /// Of two concurrent versions, does `self` win? In this order, so every device picks the same

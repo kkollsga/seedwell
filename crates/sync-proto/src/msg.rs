@@ -26,11 +26,17 @@ use crate::model::{
 use crate::members::Statement;
 use crate::sign::{flags_byte, kind_byte};
 
-/// The highest protocol version this build speaks (in [`Hello`]). 2 is 0.1.6's, the first release with sync.
-pub const PROTOCOL: u32 = 2;
+/// The highest protocol version this build speaks (in [`Hello`]). 2 is 0.1.6's, the first release with sync; 3 is
+/// 0.1.19's: an index entry may be an unhashed file (a size and no chunks, [`crate::model::FileInfo::is_unhashed`]),
+/// fetched with [`StreamRequest`] and [`StreamData`].
+pub const PROTOCOL: u32 = 3;
 /// The lowest protocol version this build still speaks. A breaking change raises [`PROTOCOL`] and keeps this one
-/// version behind for a while (N-1), so devices that are a release apart still sync.
-pub const MIN_PROTOCOL: u32 = 2;
+/// version behind for a while (N-1), so devices that are a release apart still sync. Protocol 3 raised it at once (the
+/// user's decision, 2026-11-04: no older device is left, and one of 0.1.18 would mishandle an unhashed entry), so a
+/// device of 0.1.18 or before refuses the session and says which one needs an update.
+pub const MIN_PROTOCOL: u32 = 3;
+/// Most bytes one [`StreamRequest`] asks for: the receiver asks for an unhashed file in pieces of this, in order.
+pub const STREAM_PIECE: u32 = 8 << 20;
 /// Feature bit 0: channels, their topics and private messages (in 0.1.6, the baseline, so every device has it; the
 /// bit documents the mechanism). Sessions that both have it carry types 17 to 22. Sessions that both have it carry [`ChatJoin`], [`ChatHave`] and
 /// [`ChatMessages`]; a device without it is never sent them.
@@ -375,6 +381,9 @@ pub enum ResponseCode {
     Invalid,
     /// 4: busy, ask someone else or later.
     Busy,
+    /// 5 (protocol 3, [`StreamData`] only): the file changed while it was read; nothing of it was recorded. Ask again
+    /// once its new version is announced.
+    Changed,
 }
 
 impl ResponseCode {
@@ -385,6 +394,7 @@ impl ResponseCode {
             ResponseCode::NoSuchFile => 2,
             ResponseCode::Invalid => 3,
             ResponseCode::Busy => 4,
+            ResponseCode::Changed => 5,
         }
     }
 
@@ -394,6 +404,7 @@ impl ResponseCode {
             2 => ResponseCode::NoSuchFile,
             3 => ResponseCode::Invalid,
             4 => ResponseCode::Busy,
+            5 => ResponseCode::Changed,
             // A newer peer's code still means the request failed.
             _ => ResponseCode::Generic,
         }
@@ -414,6 +425,50 @@ pub struct Response {
 impl std::fmt::Debug for Response {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Response {{ id: {}, code: {:?}, data: {} bytes }}", self.id, self.code, self.data.len())
+    }
+}
+
+/// Type 31 (protocol 3): a piece of an unhashed file (SPEC §7G.11, *hashed when first fetched*), asked of the version's
+/// maker in order from the first byte; it reads the piece once, hashing it as it goes. Answered with a [`StreamData`]
+/// of the same id.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StreamRequest {
+    /// Matches the [`StreamData`].
+    pub id: u32,
+    /// The folder.
+    pub folder_id: FolderId,
+    /// The file.
+    pub path: String,
+    /// The unhashed version asked for.
+    pub version: Version,
+    /// First byte: 0, or where the last piece ended.
+    pub offset: u64,
+    /// Bytes wanted (at most [`STREAM_PIECE`]; less only for the file's last piece).
+    pub len: u32,
+}
+
+/// Type 32 (protocol 3): the answer to a [`StreamRequest`].
+#[derive(Clone, PartialEq, Eq)]
+pub struct StreamData {
+    /// The request's id.
+    pub id: u32,
+    /// How it went ([`ResponseCode::Busy`]: a piece out of order, start again from 0; [`ResponseCode::Changed`]: the
+    /// file changed while it was read).
+    pub code: ResponseCode,
+    /// The bytes (empty unless `code` is `Ok`).
+    pub data: Vec<u8>,
+    /// The chunks that ended inside the bytes sent so far and were not sent before, in order.
+    pub chunks: Vec<ChunkRef>,
+    /// With the file's last piece: the maker's signature of the version asked for with its chunk list, the chunks
+    /// sent in all the pieces (the receiver puts the version together from what it asked for and what came, and
+    /// checks the signature against it). Only a signature: a whole chunk list would not fit in the last frame of a
+    /// file of a terabyte or so.
+    pub sig: Option<[u8; 64]>,
+}
+
+impl std::fmt::Debug for StreamData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "StreamData {{ id: {}, code: {:?}, data: {} bytes, chunks: {}, last: {} }}", self.id, self.code, self.data.len(), self.chunks.len(), self.sig.is_some())
     }
 }
 
@@ -707,6 +762,10 @@ pub enum Message {
     BlobWant(BlobWant),
     /// 30.
     BlobData(BlobData),
+    /// 31.
+    StreamRequest(StreamRequest),
+    /// 32.
+    StreamData(StreamData),
     /// A type this version does not know: skipped, not an error. Encodes as an empty frame of that type.
     Unknown(u8),
 }
@@ -745,6 +804,8 @@ impl Message {
             Message::DevicesJoin(_) => 28,
             Message::BlobWant(_) => 29,
             Message::BlobData(_) => 30,
+            Message::StreamRequest(_) => 31,
+            Message::StreamData(_) => 32,
             Message::Unknown(k) => *k,
         }
     }
@@ -922,6 +983,31 @@ impl Message {
                 put_varint(out, m.total);
                 put_bytes(out, &m.data);
             }
+            Message::StreamRequest(m) => {
+                put_varint(out, u64::from(m.id));
+                out.extend_from_slice(&m.folder_id.0);
+                put_str(out, &m.path);
+                put_version(out, &m.version);
+                put_varint(out, m.offset);
+                put_varint(out, u64::from(m.len));
+            }
+            Message::StreamData(m) => {
+                put_varint(out, u64::from(m.id));
+                out.push(m.code.byte());
+                put_bytes(out, &m.data);
+                put_len(out, m.chunks.len());
+                for c in &m.chunks {
+                    put_varint(out, u64::from(c.len));
+                    out.extend_from_slice(&c.hash);
+                }
+                match &m.sig {
+                    Some(sig) => {
+                        put_bool(out, true);
+                        out.extend_from_slice(sig);
+                    }
+                    None => put_bool(out, false),
+                }
+            }
         }
     }
 
@@ -1062,6 +1148,21 @@ impl Message {
                 },
                 total: r.varint("total")?,
                 data: r.bytes(MAX_BLOB_CHUNK, "data")?.to_vec(),
+            }),
+            31 => Message::StreamRequest(StreamRequest {
+                id: r.u32("request id")?,
+                folder_id: FolderId(r.array("folder id")?),
+                path: r.str(MAX_PATH, "path")?,
+                version: version(r)?,
+                offset: r.varint("offset")?,
+                len: r.u32("length")?,
+            }),
+            32 => Message::StreamData(StreamData {
+                id: r.u32("request id")?,
+                code: ResponseCode::from_byte(r.u8("code")?),
+                data: r.bytes(MAX_DATA, "data")?.to_vec(),
+                chunks: r.list(MAX_CHUNKS, 33, "chunks", chunk)?,
+                sig: if r.bool("has signature")? { Some(r.array("signature")?) } else { None },
             }),
             k => Message::Unknown(k),
         })
@@ -1316,6 +1417,36 @@ mod tests {
         let (frame, used) = Frame::split(&out).unwrap().unwrap();
         assert_eq!(used, out.len());
         Message::decode(frame).unwrap()
+    }
+
+    /// The failure: a piece of an unhashed file whose chunks or signature is lost or garbled on the way, so the
+    /// receiver cannot check what it was sent.
+    #[test]
+    fn stream_pieces_carry_their_chunks_and_the_signature_whole() {
+        let version = Version::from_counters(vec![Counter { id: ShortId(7), value: 3 }]).unwrap();
+        let q = Message::StreamRequest(StreamRequest { id: 9, folder_id: FolderId([1; 32]), path: "Film.mkv".into(), version, offset: 8 << 20, len: STREAM_PIECE });
+        assert_eq!(roundtrip(&q), q);
+        let chunks = vec![ChunkRef { len: 1, hash: [5; 32] }, ChunkRef { len: 2, hash: [6; 32] }];
+        let last = Message::StreamData(StreamData { id: 9, code: ResponseCode::Ok, data: vec![1, 2, 3], chunks: chunks.clone(), sig: Some([8; 64]) });
+        assert_eq!(roundtrip(&last), last);
+        let piece = Message::StreamData(StreamData { id: 9, code: ResponseCode::Ok, data: vec![1], chunks, sig: None });
+        assert_eq!(roundtrip(&piece), piece);
+        let changed = Message::StreamData(StreamData { id: 9, code: ResponseCode::Changed, data: vec![], chunks: vec![], sig: None });
+        assert_eq!(roundtrip(&changed), changed);
+    }
+
+    /// The failure: the last piece of a very big file (a terabyte: hundreds of thousands of chunks) does not fit in a
+    /// frame, so that file can never be fetched. The last piece carries a full piece of bytes, the chunks that ended
+    /// in it (as many as the smallest chunks allow) and a signature, never the whole file's list.
+    #[test]
+    fn the_last_piece_of_a_terabyte_file_fits_in_a_frame() {
+        // (2 KiB: smaller than any chunk the chunker cuts but a file's last.)
+        let chunks = vec![ChunkRef { len: 2048, hash: [5; 32] }; (STREAM_PIECE / 2048) as usize + 1];
+        let last = Message::StreamData(StreamData { id: u32::MAX, code: ResponseCode::Ok, data: vec![7; STREAM_PIECE as usize], chunks, sig: Some([8; 64]) });
+        let mut out = Vec::new();
+        last.encode_payload(&mut out);
+        assert!(out.len() + 2 <= crate::codec::MAX_FRAME as usize, "{} bytes", out.len());
+        assert_eq!(roundtrip(&last), last);
     }
 
     fn hello(protocol: u32, min_protocol: u32, features: u64) -> Hello {

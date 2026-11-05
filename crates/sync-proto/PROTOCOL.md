@@ -6,10 +6,16 @@ rules for changing any of them. The code is the reference: `src/codec.rs` (frami
 `src/members.rs` (statements, invitations, links), `src/sign.rs` (signed file versions), `src/keys.rs` (folder
 keys, proofs), `src/chat.rs` (channel messages and topics), `src/direct.rs` (private messages).
 
-**0.1.6 is the baseline.** It is the first release with folder sync, and every later version must still
-sync with it until a major version change drops it (see [Evolution](#evolution)). The bytes 0.1.6 writes are
-frozen in `tests/it/golden.rs`: each message type, statement kind, invitation link (a link for a folder and its
-channel too), proof, channel message and private message, decoded and encoded back byte for byte. That table only ever gets new entries.
+**0.1.6 was the baseline; 0.1.19 (protocol 3) is the new one.** 0.1.6 is the first release with folder sync,
+and every version up to 0.1.18 syncs with it. 0.1.19 speaks protocol 3 only (`PROTOCOL = MIN_PROTOCOL = 3`):
+an index entry may be an *unhashed* file (below), which a device of protocol 2 would take for a file with no
+content, so the two refuse each other at the Hello and say which needs an update. That was the user's decision
+(2026-11-04: every device is the user's own, and all are updated together), not the N-1 rule of
+[Evolution](#evolution), which holds again from protocol 3 on. The bytes 0.1.6 writes stay frozen in
+`tests/it/golden.rs` (each message type, statement kind, invitation link, proof, channel message and private
+message, decoded and encoded back byte for byte): protocol 3 changed no existing encoding, it only added two
+message types, a response code and the meaning of an entry with a size and no chunks. That table only ever gets
+new entries.
 
 ## Contents
 
@@ -101,7 +107,7 @@ channel too), proof, channel message and private message, decoded and encoded ba
 | 3 | Members | `folder_id` (32) ‖ records of statements (≤ 10 000). A statement this version cannot frame (a signer kind it does not know) is left out. |
 | 4 | Index | `folder_id` (32) ‖ `index_id` varint ‖ `full` bool ‖ records of index entries (≤ 1000, about 1 MiB) ‖ `done` bool (the last batch of a full send) |
 | 5 | Request | `id` varint (u32) ‖ `folder_id` (32) ‖ `path` str ‖ `offset` varint ‖ `len` varint (u32, one chunk) ‖ `hash` (32, what the bytes must hash to) ‖ `from_temp` bool (read from the sender's download in progress) |
-| 6 | Response | `id` varint ‖ `code` u8 (0 ok, 1 failed, 2 no such file, 3 invalid, 4 busy; any other code means failed) ‖ `data` bytes (≤ 16 MiB) |
+| 6 | Response | `id` varint ‖ `code` u8 (0 ok, 1 failed, 2 no such file, 3 invalid, 4 busy; 5 changed, in StreamData only; any other code means failed) ‖ `data` bytes (≤ 16 MiB) |
 | 7 | Progress | `folder_id` (32) ‖ records of updates (≤ 1000), each: `path` str ‖ version ‖ `have` (count ‖ chunk indexes, varint each; empty: forget this file) |
 | 8 | Addresses | records of address records (≤ 256), each: `device_pk` (32) ‖ `addrs` (count ‖ str, ≤ 32) ‖ `relay` str ‖ `issued_s` varint ‖ `sig` (64) |
 | 9 | Ping | (empty) |
@@ -126,6 +132,8 @@ channel too), proof, channel message and private message, decoded and encoded ba
 | 28 | DevicesJoin (devices bit, 0.1.13) | records of devices groups, each: `group_id` (32) ‖ proofs (as in Join): the sender's group, and, to a device of its current group, each group it moved on from (its grant there and the Moved statements, as grant proofs); sent once while a session starts, after DirectJoin (the dialer first, only to a device it believes is one of its own or, joining, to whoever it dialed for the group; the other side answers only for a group the dialer proved), and later for a group made, joined, confirmed or moved to meanwhile; a device moving to a new group proves nothing there (no proofs: its members know its key); empty when there is nothing to prove |
 | 29 | BlobWant (blobs bit, 0.1.15) | `id` varint (u32) ‖ `scope` u8 (0: ‖ `channel_id` (32), a channel's message names it; 1: a private message between the two devices of this session names it, asked only over a direct session) ‖ `hash` (32: an image's SHA-256, a file's piece table's SHA-256, or a file's SHA-256 for one of its pieces) ‖ `offset` varint ‖ `len` varint (u32, ≤ 1 MiB): a part of an image or piece table, or one piece of a file (`offset` a multiple of 1 MiB, `len` the piece's length) |
 | 30 | BlobData (blobs bit, 0.1.15) | `id` varint ‖ `code` u8 (0 ok, 1 not held, 2 refused, 3 gone: the sender's file changed, moved or is no longer shared, for good) ‖ `total` varint (the blob's or file's size) ‖ `data` bytes (≤ 1 MiB; empty unless ok) |
+| 31 | StreamRequest (protocol 3, 0.1.19) | `id` varint (u32) ‖ `folder_id` (32) ‖ `path` str ‖ version (the unhashed version asked for) ‖ `offset` varint ‖ `len` varint (u32, ≤ 8 MiB): the next piece of an unhashed file, asked of the version's maker, in order from 0 (see [Unhashed files](#unhashed-files)) |
+| 32 | StreamData (protocol 3, 0.1.19) | `id` varint ‖ `code` u8 (as Response: 0 ok; 4 busy: a piece out of order, or the read was dropped, start again from 0; 5 changed: the file changed since it was recorded or while it was read, nothing of it was signed) ‖ `data` bytes (≤ 16 MiB) ‖ chunks (count ‖ n × (len varint ‖ SHA-256 (32))): the chunks that ended inside the bytes sent so far and were not sent before ‖ `has_sig` bool [‖ `sig` (64): the maker's signature of the version asked for with the chunks of all the pieces]: with the file's last piece only (never the whole chunk list, which would not fit in a frame for a file of about a terabyte) |
 | other | (unknown) | skipped |
 
 - **Version** (in entries and progress): `count ‖ n × (short device id, 8 bytes BE ‖ counter varint)`, sorted by
@@ -158,6 +166,35 @@ own, so the wire form can change without invalidating signatures:
 
 `sequence` and the entry flags belong to the announcing device and are not signed. Stores keep entries in the
 bare form above (without the record length): see [Stored formats](#stored-formats).
+
+### Unhashed files
+
+From protocol 3 (0.1.19) a file entry may have a size above 0 and **no chunks**: an *unhashed* version (SPEC
+§7G.11, *Listed first, hashed when first fetched*). An on-demand folder's scan records what it finds so, without
+reading it; the entry is signed as any (its chunk digest is that of the empty list). Its content is fetched with
+StreamRequest / StreamData from its maker (`modified_by`) only: another device that announces the unhashed form
+as held is never asked for a stream.
+
+1. The receiver asks for `[0, min(size, 8 MiB))`, then each next piece where the last ended. The maker keeps one
+   read per (file, asking device): a piece at 0 starts it (the file's stamp must still be its record's, else
+   *changed*), a piece elsewhere must start where the read is (else *busy*: start again from 0), except that the
+   last piece served may be asked for once more with the same offset and length (its answer was lost: a timeout),
+   and is served again (read again, its stamp checked, the same chunks and end), once. A read nobody asks of for 10
+   minutes is dropped, and one that came to its end when the same device starts another; until then a receiver whose answer did not come (a slow link: it waits for a piece 60 s plus
+   its bytes at 16 KiB/s) or whose session closed asks again where it stopped.
+2. Each answer carries the piece's bytes and the chunks (FastCDC with the tier of the file's size, as a scan cuts
+   them) that ended in the bytes sent so far. The receiver hashes the bytes as they come and checks every chunk as
+   its end arrives; a chunk ending past the bytes sent, or that does not hash right, fails the transfer.
+3. The last piece carries the maker's signature of the version with its chunk list. After reading the last byte
+   the maker checks the file's stamp again: changed while it was read, it answers *changed* (code 5) and signs
+   nothing. The receiver puts the hashed version together from the version it asked for and the chunks that came
+   in all the pieces, and takes it only if the signature checks for it with the maker's key (a signature by any
+   other device, or over other chunks, does not); then it records and announces that hashed version.
+4. The hashed and unhashed forms of one version are the *same content*: neither is a change or a conflict of the
+   other, and where both are announced the hashed one is current. A Request (type 5) for a chunk of the hashed
+   form may go to a device holding the unhashed form: it reads the range and answers only if the bytes hash to the
+   chunk asked for. In a HoldQuery a device holding one form answers yes for the other (the digest of a hashed
+   copy's unhashed form is that of the version with its chunks left out, which includes the version's identity).
 
 ## Membership statements
 
@@ -561,6 +598,12 @@ What a later version may change, and how:
 5. **Breaking changes** raise `PROTOCOL`, the highest version spoken. The new build keeps `MIN_PROTOCOL` one
    behind for at least one release (N-1), so devices a release apart still sync at the older version, and
    raises it later. Two devices whose ranges do not overlap refuse each other and say which needs an update.
+   (Protocol 3, 0.1.19, raised both at once by the user's decision: see the top of this file.)
+
+   | protocol | since | what changed |
+   |---|---|---|
+   | 2 | 0.1.6 | the baseline |
+   | 3 | 0.1.19 | unhashed file entries; StreamRequest (31), StreamData (32); response code 5 (changed) |
 6. **Invitations and links** never grow: a new form is a new invitation version (the first byte of an
    invitation and of a link's payload).
 7. **Signed bytes** never change for an existing type: a new signed form needs a new domain string

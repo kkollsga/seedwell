@@ -166,7 +166,7 @@ change, every 30 minutes) and lookups of wanted devices from the dial loop (SPEC
 | `flate2` (Rust backend) | deflate for metadata messages; already used by the tracker crate |
 | `serde`, `toml` | `sync.toml`; already used by `trs-state` |
 | `serde_json` | the JSON a channel's wake-up command reads; already used by `trs-control` and `trs-engine` |
-| `socket2` (`all`) | SO_REUSEPORT on the LAN discovery socket before it binds (std and tokio cannot set it, and `unsafe` is forbidden); already built with `all` through tokio's `net` |
+| `socket2` (`all`) | SO_REUSEPORT on the LAN discovery socket before it binds (std and tokio cannot set it, and `unsafe` is forbidden), and the sync port's sockets read back in its tests (dual-stack, through `trs-platform`); already built with `all` through tokio's `net` |
 
 ## Tests
 

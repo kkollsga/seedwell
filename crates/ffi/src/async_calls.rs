@@ -253,6 +253,9 @@ core_async! {
     apart fn sync_add_folder_on_demand_async = sync_add_folder_on_demand "sync_add_folder_on_demand" (path: String) -> Result<SyncFolder, CoreError>;
     apart fn sync_join_on_demand_async = sync_join_on_demand "sync_join_on_demand" (link: String, place: String) -> Result<SyncFolder, CoreError>;
     apart fn sync_set_follow_async = sync_set_follow "sync_set_follow" (id: String, on: bool) -> Result<(), CoreError>;
+    apart fn sync_set_follow_read_only_async = sync_set_follow_read_only "sync_set_follow_read_only" (id: String, read_only: bool) -> Result<(), CoreError>;
+    /// The Share window's "On all my devices" and "Read only" (applied at once; the form's next role).
+    apart fn sync_share_set_devices_async = sync_share_set_devices "sync_share_set_devices" (form: SyncShareForm, on: bool, read_only: bool) -> Result<SyncShareForm, CoreError>;
 
     // ------------------------------------------------------------ devices
 

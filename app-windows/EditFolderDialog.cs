@@ -157,7 +157,7 @@ sealed class EditFolderDialog
         }
         if (model.Follow is FollowLine follow)
         {
-            content.Children.Add(AddFolderDialog.Follow(follow, form.AllDevices, !saving, on => Change(form with { AllDevices = on })));
+            content.Children.Add(AddFolderDialog.Follow(follow, form.AllDevices, !saving, on => Change(form with { AllDevices = on }), ro => Change(form with { ReadOnly = ro })));
         }
 
         content.Children.Add(new TextBlock { Text = model.ShareCaption, Margin = new Thickness(0, 6, 0, 0) });
@@ -274,6 +274,8 @@ sealed class EditFolderDialog
     internal void QaPaused(bool on) => Change(form with { Paused = on });
     internal void QaLanOnly(bool on) => Change(form with { LanOnly = on });
     internal void QaAllDevices(bool on) => Change(form with { AllDevices = on });
+    internal string Switches => AddFolderDialog.QaSwitches(content);
+    internal void QaReadOnly(bool on) => Change(form with { ReadOnly = on });
     internal void QaOnDemand(bool on) => Change(form with { OnDemand = on });
     internal void QaOptions(bool open) => Change(form with { OptionsOpen = open });
     internal void QaParent(string path) => Change(TrsFfiMethods.SyncEditChooseParent(form, path));

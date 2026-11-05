@@ -218,6 +218,9 @@ mod tests {
         b.join_folder(&a.create_invite(&id, Role::ReadWrite, 1, 7).unwrap().link, df.path().join("B")).await.unwrap();
         let bob = b.device_id();
         until(20, "connected", || a.inner.ctx.registry.peer(&bob).is_some() && b.inner.ctx.registry.peer(&a.device_id()).is_some()).await;
+        // Bo dialed: Anna knows where Bo listens only from the record Bo sends once the session is up (a busy machine
+        // had not read it yet, so Anna had nobody to dial and the test waited for a dial that could not come).
+        until(20, "Anna knows Bo's address", || lock(&a.inner.book).by_device.get(&bob).is_some_and(|s| !s.is_empty())).await;
         let first = a.inner.ctx.registry.peer(&bob).unwrap();
         // Bo's address is held back for minutes on both sides (as after failed dials), and Bo dials nobody: only a
         // dial by Anna past her backoff brings the session back soon.

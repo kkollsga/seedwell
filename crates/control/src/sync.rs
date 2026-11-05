@@ -211,6 +211,66 @@ async fn collect(dht: Option<trs_dht::DhtHandle>, topic: [u8; 20], announce: Opt
     out
 }
 
+/// The engine's torrents, for folder sync ([`trs_sync_net::LocalTorrents`]): a folder's files are never moved from under
+/// a torrent, and a torrent missing its files looks again after a folder's files moved (they may be back).
+struct EngineTorrents(EngineHandle);
+
+/// Longest the engine is asked which torrents use a folder, and their paths are resolved on the disk.
+const TORRENTS_WAIT: Duration = Duration::from_secs(10);
+
+impl trs_sync_net::LocalTorrents for EngineTorrents {
+    fn using(&self, path: &Path) -> BoxFuture<'static, Result<Vec<String>, String>> {
+        let (e, path) = (self.0.clone(), path.to_path_buf());
+        Box::pin(async move {
+            let late = || "the torrents did not answer in time".to_string();
+            let end = tokio::time::Instant::now() + TORRENTS_WAIT;
+            let places = tokio::time::timeout_at(end, e.torrent_places()).await.map_err(|_| late())?.map_err(|e| e.to_string())?;
+            // Resolving reads the disk (links, the case names have there): off the engine's actor and the caller's task.
+            tokio::time::timeout_at(end, tokio::task::spawn_blocking(move || torrents_using(&places, &path)))
+                .await
+                .map_err(|_| late())?
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    fn moved(&self) {
+        // Every folder torrents save to is looked at once, off the engine's actor; one found again recovers.
+        self.0.volumes_changed();
+    }
+}
+
+/// The names of the torrents with files at or below `path`, or whose folder holds it: where they are now, their staging
+/// folders, and where a move puts them ([`trs_engine::TorrentPlaces`]); a torrent on its way to a place not known yet
+/// counts too. Both sides are compared as the disk names them ([`trs_platform::dirs::real_path`]: a folder added
+/// through a link, `~/Movies` → `/Volumes/Media/Movies`, is the folder a torrent saves to), and without regard to case
+/// on a volume that finds names in any case ([`trs_platform::fs::folds_case`]). Reads the disk: off any actor.
+fn torrents_using(torrents: &[trs_engine::TorrentPlaces], path: &Path) -> Vec<String> {
+    let real = |p: &Path| trs_platform::dirs::real_path(p).unwrap_or_else(|| p.to_path_buf());
+    let folder = real(path);
+    let fold = trs_platform::fs::folds_case(&folder);
+    let names = |p: &Path| -> Vec<String> {
+        p.components()
+            .map(|c| {
+                let n = c.as_os_str().to_string_lossy();
+                if fold { n.to_lowercase() } else { n.into_owned() }
+            })
+            .collect()
+    };
+    let within = |a: &[String], b: &[String]| a.len() >= b.len() && a[..b.len()] == *b;
+    let f = names(&folder);
+    torrents
+        .iter()
+        .filter(|t| {
+            t.moving_somewhere
+                || t.paths.iter().filter(|p| !p.as_os_str().is_empty()).any(|p| {
+                    let at = names(&real(p));
+                    within(&at, &f) || within(&f, &at)
+                })
+        })
+        .map(|t| t.name.clone())
+        .collect()
+}
+
 /// The computer's name (`scutil --get ComputerName` on macOS, the host name elsewhere), for the device
 /// name when none is set.
 pub fn default_device_name() -> String {
@@ -248,6 +308,7 @@ pub async fn start_sync_with(
     opts.default_device_name = default_device_name();
     if let Some(e) = engine {
         opts.discovery = Some(Arc::new(DhtDiscovery::new(e.clone())));
+        opts.torrents = Some(Arc::new(EngineTorrents(e.clone())));
     }
     tweak(&mut opts);
     let h = SyncHandle::start(opts).await?;
@@ -394,6 +455,8 @@ pub fn folder_dto(f: &FolderStatus) -> SyncFolderDto {
         last_synced_at: f.last_synced_s,
         channel_id: f.channel_id.clone(),
         on_demand: f.on_demand,
+        on_demand_others: f.on_demand_others,
+        fetching: None,
         unavailable: f.unavailable,
         progress: f.progress.as_deref().map(|t| clip(t, 300)),
         problem: f.problem.as_deref().map(|t| clip(&scrub_keys(t), 300)),
@@ -804,6 +867,7 @@ mod tests {
             last_synced_s: None,
             channel_id: None,
             on_demand: false,
+            on_demand_others: false,
             unavailable: 0,
             progress: None,
             problem: None,
@@ -811,7 +875,54 @@ mod tests {
             waiting: None,
             gone: Vec::new(),
             reshare: false,
+            scan: None,
         }
+    }
+
+    fn places(t: &[(&str, &Path)]) -> Vec<trs_engine::TorrentPlaces> {
+        t.iter().map(|(n, p)| trs_engine::TorrentPlaces { name: (*n).into(), paths: vec![p.to_path_buf()], moving_somewhere: false }).collect()
+    }
+
+    /// A torrent counts as using a folder when its files are in it (below it, or the folder itself is the torrent's) or
+    /// its folder holds the synced folder; a torrent next to it (a name that only starts the same) does not.
+    #[test]
+    fn a_torrent_uses_a_folder_it_is_in_or_that_is_in_it_and_not_one_beside_it() {
+        let t = places(&[
+            ("in", Path::new("/d/Movies/V for Vendetta (2005)")),
+            ("holds", Path::new("/d")),
+            ("beside", Path::new("/d/Movies 2/x.mkv")),
+            ("no metadata", Path::new("")),
+        ]);
+        assert_eq!(torrents_using(&t, Path::new("/d/Movies")), ["in", "holds"]);
+        assert_eq!(torrents_using(&t, Path::new("/d/Movies/V for Vendetta (2005)")), ["in", "holds"]);
+        assert!(torrents_using(&t, Path::new("/e")).is_empty());
+    }
+
+    /// Review of 0.1.18's on-demand fix, #1: the folder added as a link (`~/Movies` → `/Volumes/Media/Movies`) and a
+    /// torrent saving to the real folder were two different texts, so freeing the folder's copies moved the torrent's
+    /// file away. Fails when the guard compares paths as given: through a link, in another case on a disk that finds
+    /// names in any case, or for a file the torrent has not written yet.
+    #[cfg(unix)]
+    #[test]
+    fn a_torrent_in_a_folder_added_through_a_link_or_in_another_case_uses_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let media = dir.path().join("Media").join("Movies");
+        std::fs::create_dir_all(media.join("V for Vendetta (2005)")).unwrap();
+        let link = dir.path().join("Movies");
+        std::os::unix::fs::symlink(&media, &link).unwrap();
+        // The torrent as the engine knows it (the real folder), and one that has not made its folder yet.
+        let t = places(&[("seeding", &media.join("V for Vendetta (2005)")), ("new", &media.join("Not There Yet"))]);
+        assert_eq!(torrents_using(&t, &link), ["seeding", "new"], "a folder added through a link");
+        // In another case (the folder the user typed differently): one folder on a disk that folds case.
+        let other_case = dir.path().join("media").join("movies");
+        if trs_platform::fs::folds_case(&media) {
+            assert_eq!(torrents_using(&t, &other_case), ["seeding", "new"], "another case on a disk that folds case");
+            let t = places(&[("typed", &dir.path().join("MEDIA/MOVIES/not there yet"))]);
+            assert_eq!(torrents_using(&t, &link), ["typed"], "a torrent's path in another case");
+        }
+        // A torrent on its way to a place not known yet may be going there.
+        let moving = [trs_engine::TorrentPlaces { name: "moving".into(), paths: vec![dir.path().join("elsewhere")], moving_somewhere: true }];
+        assert_eq!(torrents_using(&moving, &link), ["moving"]);
     }
 
     #[test]

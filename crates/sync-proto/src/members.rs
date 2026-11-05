@@ -379,7 +379,7 @@ pub enum Body {
     ///
     /// `flags` (0.1.14) are written after `at_s` only when not 0, so a Follow without flags is the 0.1.13 bytes, and
     /// 0.1.13 reads one with flags as the same Follow with those bytes kept after it (its signature checks, it is
-    /// passed on as it came): [`FOLLOW_ON_DEMAND`], [`FOLLOW_REMOVED`].
+    /// passed on as it came): [`FOLLOW_ON_DEMAND`], [`FOLLOW_REMOVED`], [`FOLLOW_READ_ONLY`] (0.1.19).
     Follow {
         /// A folder or a channel.
         target: FollowTarget,
@@ -393,7 +393,8 @@ pub enum Body {
         serial: u64,
         /// When it was made.
         at_s: u64,
-        /// [`FOLLOW_ON_DEMAND`], [`FOLLOW_REMOVED`]; bits this version does not know are kept (0: none, as 0.1.13).
+        /// [`FOLLOW_ON_DEMAND`], [`FOLLOW_REMOVED`], [`FOLLOW_READ_ONLY`]; bits this version does not know are kept (0:
+        /// none, as 0.1.13).
         flags: u64,
     },
     /// "This group moved" (0.1.13): in a devices group only, a member says the group now goes on under a new key
@@ -469,6 +470,17 @@ pub const FOLLOW_ON_DEMAND: u64 = 1;
 /// [`Body::Follow`]'s flag (0.1.14), with `on` false: the folder's owner removed it from Seedwell, so every sibling
 /// removes it too, keeping its files. Without it, off only stops the folder coming to more devices.
 pub const FOLLOW_REMOVED: u64 = 2;
+
+/// The highest serial a [`Body::Follow`] counts with (0.1.19): a Follow above it is kept and passed on but counts for
+/// nothing, so a device that says `u64::MAX` cannot freeze a target (every later statement would need a higher serial).
+/// A serial grows by one per change: no device reaches it by counting.
+pub const MAX_FOLLOW_SERIAL: u64 = 1 << 32;
+
+/// [`Body::Follow`]'s flag (0.1.19) of a folder put on all devices *Read only*: an owner of the folder admits the
+/// user's other devices at Read only instead of Admin, and makes those that have it Read only (all but the device that
+/// said it). Only a Follow signed by an owner or admin of the folder counts for it ([`Membership::follow_by`]); a
+/// device before 0.1.19 keeps the bit and passes it on, and admits as before.
+pub const FOLLOW_READ_ONLY: u64 = 4;
 
 /// A Follow's flags after its time (0.1.14): read only when they are there, not 0 and written as this version writes
 /// them, so the statement is written back byte for byte; anything else stays in the statement's `extra`.
@@ -861,7 +873,7 @@ pub struct Follow {
     pub serial: u64,
     /// When it was said.
     pub at_s: u64,
-    /// The statement's flags ([`FOLLOW_ON_DEMAND`], [`FOLLOW_REMOVED`]).
+    /// The statement's flags ([`FOLLOW_ON_DEMAND`], [`FOLLOW_REMOVED`], [`FOLLOW_READ_ONLY`]).
     pub flags: u64,
 }
 
@@ -874,6 +886,11 @@ impl Follow {
     /// Off because its owner removed it from Seedwell: every sibling removes it too, keeping its files.
     pub fn removed(&self) -> bool {
         !self.on && self.flags & FOLLOW_REMOVED != 0
+    }
+
+    /// Read only for the user's other devices ([`FOLLOW_READ_ONLY`]).
+    pub fn read_only(&self) -> bool {
+        self.flags & FOLLOW_READ_ONLY != 0
     }
 }
 
@@ -937,9 +954,45 @@ impl Membership {
         self.follows.get(target_pk)
     }
 
-    /// The serial the next Follow for `target_pk` gets (above every one known for it).
+    /// The latest Follow for one target (on or off) of a current member that `trusted` accepts, by the same order as
+    /// [`Self::follow`]. What *Read only* counts ([`FOLLOW_READ_ONLY`]): only a statement of a device that is owner or
+    /// admin of the folder, so a sibling made Read only cannot lift it with a statement of its own.
+    pub fn follow_by(&self, target_pk: &[u8; 32], trusted: impl Fn(&[u8; 32]) -> bool) -> Option<Follow> {
+        self.follows_by(target_pk, trusted).pop()
+    }
+
+    /// Every Follow for one target (on or off) of a current member that `trusted` accepts, oldest first (by serial,
+    /// then time, then signature); one with a serial above [`MAX_FOLLOW_SERIAL`] is none.
+    pub fn follows_by(&self, target_pk: &[u8; 32], trusted: impl Fn(&[u8; 32]) -> bool) -> Vec<Follow> {
+        if !self.devices {
+            return Vec::new();
+        }
+        let mut out: Vec<(FollowKey, Follow)> = self
+            .statements
+            .values()
+            .filter_map(|st| {
+                let (Body::Follow { target, target_pk: t, name, on, serial, at_s, flags }, Signer::Device(by)) = (&st.body, st.signer) else { return None };
+                if t != target_pk || *serial > MAX_FOLLOW_SERIAL || !self.members.contains_key(&by) || !trusted(&by) {
+                    return None;
+                }
+                let f = Follow { target: *target, target_pk: *t, name: name.clone(), on: *on, by, serial: *serial, at_s: *at_s, flags: *flags };
+                Some(((*serial, *at_s, st.sig), f))
+            })
+            .collect();
+        out.sort_by_key(|(k, _)| *k);
+        out.into_iter().map(|(_, f)| f).collect()
+    }
+
+    /// The serial the next Follow for `target_pk` gets (above every one known for it), at most [`MAX_FOLLOW_SERIAL`].
     pub fn next_follow_serial(&self, target_pk: &[u8; 32]) -> u64 {
-        self.follow_serial.get(target_pk).copied().unwrap_or(0) + 1
+        self.follow_serial.get(target_pk).copied().unwrap_or(0).saturating_add(1).min(MAX_FOLLOW_SERIAL)
+    }
+
+    /// The serial the next Follow for `target_pk` gets among the signers `trusted` accepts (above every one of
+    /// theirs), at most [`MAX_FOLLOW_SERIAL`]: a device that orders its statements only among those of a folder's
+    /// owners and admins is never held back by a higher serial another device said.
+    pub fn next_follow_serial_by(&self, target_pk: &[u8; 32], trusted: impl Fn(&[u8; 32]) -> bool) -> u64 {
+        self.follows_by(target_pk, trusted).last().map_or(0, |f| f.serial).saturating_add(1).min(MAX_FOLLOW_SERIAL)
     }
 
     /// Where a devices group moved: every member's (signer, target key) of a [`Body::Moved`] of a current member.
@@ -1059,6 +1112,9 @@ impl Membership {
         }
         // Admins' statements may make another device an admin only through an owner, so one pass is enough.
         let mut more = false;
+        // A new Follow counts as a change even when the latest per target stays another one: the latest of a folder's
+        // owners and admins (what the devices that have it go by, `follow_by`) may be this one.
+        let mut new_follow = false;
         for st in by_device.drain(..) {
             let Signer::Device(pk) = st.signer else { continue };
             if let Body::Profile { serial, .. } = st.body {
@@ -1080,7 +1136,10 @@ impl Membership {
             // meaning nothing).
             if matches!(st.body, Body::Follow { .. } | Body::Moved { .. } | Body::Rendezvous { .. }) && self.devices {
                 if self.statements.len() < MAX_STATEMENTS && self.role(&pk).is_some() {
-                    more |= self.statements.insert(st.hash(), st).is_none();
+                    let follow = matches!(st.body, Body::Follow { .. });
+                    let inserted = self.statements.insert(st.hash(), st).is_none();
+                    more |= inserted;
+                    new_follow |= inserted && follow;
                 }
                 continue;
             }
@@ -1092,7 +1151,9 @@ impl Membership {
         if more {
             self.resolve();
         }
-        (new || more) && before != (self.members.clone(), self.invites.clone(), self.share_until, self.profile_hashes(), self.agents, self.follows.clone(), self.moves(), self.rendezvous())
+        new_follow
+            || (new || more)
+                && before != (self.members.clone(), self.invites.clone(), self.share_until, self.profile_hashes(), self.agents, self.follows.clone(), self.moves(), self.rendezvous())
     }
 
     /// The latest profile statement of a device, and its hash.
@@ -1471,6 +1532,10 @@ impl Membership {
         if self.devices {
             for st in self.statements.values() {
                 let (Body::Follow { target, target_pk, name, on, serial, at_s, flags }, Signer::Device(by)) = (&st.body, st.signer) else { continue };
+                // A serial no device reaches by counting is none (it would hold every later statement back).
+                if *serial > MAX_FOLLOW_SERIAL {
+                    continue;
+                }
                 let top = follow_serial.entry(*target_pk).or_insert(0);
                 *top = (*top).max(*serial);
                 if !self.members.contains_key(&by) {
@@ -2446,6 +2511,56 @@ mod tests {
         assert!(f.on && f.on_demand() && !f.removed());
     }
 
+    /// Read only must not be lifted by a sibling it made Read only: a later Follow of a device the caller does not
+    /// trust (not owner or admin of the folder) is passed over for it, while the plain latest still is that one; a
+    /// device no longer in the group counts for neither.
+    #[test]
+    fn read_only_is_read_from_the_latest_follow_of_a_trusted_device() {
+        let s = owner();
+        let fid = FolderId::of_public_key(s.public_key());
+        let follow = |serial, flags| Body::Follow { target: FollowTarget::Folder, target_pk: [5; 32], name: "Films".into(), on: true, serial, at_s: NOW, flags };
+        let (me, sib, gone) = (dev(1), dev(2), dev(3));
+        let mut g = group(&s, &me, &[&sib, &gone]);
+        g.add([Statement::by_device(&me, &fid, follow(1, FOLLOW_READ_ONLY | FOLLOW_ON_DEMAND))]);
+        g.add([Statement::by_device(&sib, &fid, follow(2, FOLLOW_ON_DEMAND))]);
+        let trusted = |pk: &[u8; 32]| pk == me.public_key() || pk == gone.public_key();
+        assert!(!g.follow(&[5; 32]).unwrap().read_only(), "the plain latest is the sibling's");
+        let t = g.follow_by(&[5; 32], trusted).unwrap();
+        assert!(t.read_only() && t.on_demand() && t.by == *me.public_key(), "{t:?}");
+        // Bytes this version writes come back with the flag.
+        let st = Statement::by_device(&me, &fid, follow(3, FOLLOW_READ_ONLY));
+        assert_eq!(Statement::from_bytes(&st.to_bytes()).unwrap(), st);
+        // A trusted device's later statement counts, until it leaves the group.
+        g.add([Statement::by_device(&gone, &fid, follow(4, 0))]);
+        assert!(!g.follow_by(&[5; 32], trusted).unwrap().read_only());
+        g.add([Statement::by_owner(&s, Body::Remove { device: *gone.public_key(), serial: 20, at_s: NOW })]);
+        assert!(g.follow_by(&[5; 32], trusted).unwrap().read_only(), "a removed device's statement no longer counts");
+        assert_eq!(g.follow_by(&[6; 32], trusted), None);
+    }
+
+    /// A Follow at `u64::MAX` made the next serial overflow (a panic in a debug build, 0 in a release one) and ranked
+    /// above every later statement. Fails when such a serial counts, or the next serial is not above the others.
+    #[test]
+    fn a_follow_serial_no_device_reaches_by_counting_counts_for_nothing() {
+        let s = owner();
+        let fid = FolderId::of_public_key(s.public_key());
+        let follow = |serial, flags| Body::Follow { target: FollowTarget::Folder, target_pk: [5; 32], name: "Films".into(), on: true, serial, at_s: NOW, flags };
+        let (me, sib) = (dev(1), dev(2));
+        let mut g = group(&s, &me, &[&sib]);
+        g.add([Statement::by_device(&me, &fid, follow(3, FOLLOW_READ_ONLY))]);
+        g.add([Statement::by_device(&sib, &fid, follow(u64::MAX, 0)), Statement::by_device(&sib, &fid, follow(MAX_FOLLOW_SERIAL + 1, 0))]);
+        assert!(g.follow(&[5; 32]).unwrap().read_only(), "the huge serials count for nothing");
+        assert_eq!(g.next_follow_serial(&[5; 32]), 4);
+        g.add([Statement::by_device(&sib, &fid, follow(MAX_FOLLOW_SERIAL, 0))]);
+        assert_eq!(g.next_follow_serial(&[5; 32]), MAX_FOLLOW_SERIAL, "saturates");
+        // Among trusted signers, the sibling's serial holds nobody back.
+        assert_eq!(g.next_follow_serial_by(&[5; 32], |pk| pk == me.public_key()), 4);
+        assert!(g.follow_by(&[5; 32], |pk| pk == me.public_key()).unwrap().read_only());
+        // A trusted Follow under that higher one is still a change (it is saved and sent on), and counts among them.
+        assert!(g.add([Statement::by_device(&me, &fid, follow(4, 0))]), "a new Follow under a higher one changed nothing");
+        assert!(!g.follow_by(&[5; 32], |pk| pk == me.public_key()).unwrap().read_only());
+    }
+
     #[test]
     fn a_removal_in_a_devices_group_is_final_and_in_a_folder_it_is_not() {
         let s = owner();
@@ -2483,8 +2598,10 @@ mod tests {
         // B turns it off (a higher serial): off, whatever the times say.
         assert!(g.add([follow(&b, &gid, t, false, 2, NOW - 100)]));
         assert!(g.follow(&t).is_some_and(|f| !f.on));
-        // An older statement arriving late changes nothing; the same serial goes by time.
-        assert!(!g.add([follow(&a, &gid, t, true, 1, NOW + 50)]));
+        // An older statement arriving late changes nothing it says (it is kept, as every Follow, and passed on); the
+        // same serial goes by time.
+        g.add([follow(&a, &gid, t, true, 1, NOW + 50)]);
+        assert!(g.follow(&t).is_some_and(|f| !f.on));
         assert!(g.add([follow(&a, &gid, t, true, 2, NOW + 1)]) && g.follow(&t).is_some_and(|f| f.on));
         assert_eq!(g.next_follow_serial(&t), 3);
         // Every order gives the same.

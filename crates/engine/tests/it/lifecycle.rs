@@ -86,6 +86,39 @@ async fn missing_files_are_reported_not_rewritten() {
     .await;
 }
 
+/// The bug: a torrent in missing-data whose file was put back stayed missing-data after a recheck (the app's Verify);
+/// only Resume made it look again. A recheck of it now looks for the files at once, checks them and seeds again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn recheck_of_missing_data_finds_the_file_put_back_and_seeds() {
+    let t = standard_torrent(0, None, false, 62);
+    let mut a = seeded(&t, |_| {}).await;
+    wait_for("fingerprints stored", 10, || async {
+        a.h.flush().await.ok()?;
+        let r = a.store.resume(&t.id)?;
+        (r.complete && !r.fingerprints.is_empty()).then_some(())
+    })
+    .await;
+    a.shutdown(Duration::from_secs(3)).await;
+    let victim = t.file_path(a.dir.path(), 2);
+    let saved = std::fs::read(&victim).unwrap();
+    std::fs::remove_file(&victim).unwrap();
+    let store = a.store.clone();
+    // No retry is due for an hour: only the recheck can bring it back.
+    let b = node_in(a.dir, store, |c| c.retry_minute = Duration::from_secs(3600)).await;
+    // Cold torrents are validated when they wake; a peer address wakes it.
+    b.h.add_peers(t.id, vec!["127.0.0.1:9".parse().unwrap()]);
+    wait_for("missing data", 20, || async { (b.state(&t.id).await? == TorrentState::MissingData).then_some(()) }).await;
+    std::fs::write(&victim, &saved).unwrap();
+    let rechecks = b.h.diagnostics().rechecks;
+    b.h.recheck(&[t.id]);
+    wait_for("seeding again", 30, || async {
+        matches!(b.state(&t.id).await?, TorrentState::LowPower | TorrentState::Seeding).then_some(())
+    })
+    .await;
+    assert!(b.h.diagnostics().rechecks > rechecks, "the recheck checked the files");
+    assert!(b.row(&t.id).await.unwrap().error.is_none());
+}
+
 /// A peer that sends corrupt blocks is banned and the download still completes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn corrupt_peer_is_banned() {

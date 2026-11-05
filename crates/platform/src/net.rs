@@ -1,6 +1,7 @@
 //! Sockets.
 
 use std::io;
+use std::net::{IpAddr, SocketAddr};
 
 /// Let other processes on this machine bind the same UDP port (the app and a daemon, or tests, all
 /// listening for LAN discovery): `SO_REUSEADDR` and, on Unix, `SO_REUSEPORT`. On Windows
@@ -10,6 +11,53 @@ pub fn share_udp_port(s: &socket2::Socket) -> io::Result<()> {
     #[cfg(unix)]
     s.set_reuse_port(true)?;
     Ok(())
+}
+
+/// A TCP listener on `addr` as tokio's `TcpListener::bind` makes one (`SO_REUSEADDR` on Unix, so a restart listens
+/// again at once while old connections linger; not on Windows, where it would let another program take the port; a
+/// backlog of 1024), except that one on the IPv6 any-address `[::]` takes IPv4 connections too: `IPV6_V6ONLY` is
+/// turned off, on every system. Windows turns it on by default (macOS and Linux off), so a listener on `[::]` there
+/// refused every IPv4 connection (Seedwell 0.1.18 and earlier). Inside a tokio runtime.
+pub fn listen_tcp(addr: SocketAddr) -> io::Result<tokio::net::TcpListener> {
+    listen_tcp_on(socket2::Socket::new(socket2::Domain::for_address(addr), socket2::Type::STREAM, Some(socket2::Protocol::TCP))?, addr)
+}
+
+fn listen_tcp_on(s: socket2::Socket, addr: SocketAddr) -> io::Result<tokio::net::TcpListener> {
+    dual_stack(&s, addr)?;
+    #[cfg(unix)]
+    s.set_reuse_address(true)?;
+    s.set_nonblocking(true)?;
+    s.bind(&addr.into())?;
+    s.listen(1024)?;
+    tokio::net::TcpListener::from_std(s.into())
+}
+
+/// A UDP socket on `addr` as tokio's `UdpSocket::bind` makes one, except that one on `[::]` takes IPv4 datagrams
+/// too (`IPV6_V6ONLY` off, on every system: see [`listen_tcp`]). Inside a tokio runtime.
+pub fn bind_udp(addr: SocketAddr) -> io::Result<tokio::net::UdpSocket> {
+    bind_udp_on(socket2::Socket::new(socket2::Domain::for_address(addr), socket2::Type::DGRAM, Some(socket2::Protocol::UDP))?, addr)
+}
+
+fn bind_udp_on(s: socket2::Socket, addr: SocketAddr) -> io::Result<tokio::net::UdpSocket> {
+    dual_stack(&s, addr)?;
+    s.set_nonblocking(true)?;
+    s.bind(&addr.into())?;
+    tokio::net::UdpSocket::from_std(s.into())
+}
+
+/// A socket for `[::]` takes IPv4 too (the OS default is not relied on); other addresses keep the default.
+fn dual_stack(s: &socket2::Socket, addr: SocketAddr) -> io::Result<()> {
+    match addr.ip() {
+        IpAddr::V6(ip) if ip.is_unspecified() => s.set_only_v6(false),
+        _ => Ok(()),
+    }
+}
+
+/// Whether this system can make a socket on `[::]` that takes IPv4 as well: false when IPv6 is turned off (no IPv6
+/// socket can be made) or the system refuses to turn `IPV6_V6ONLY` off. A listener for every address then binds
+/// `0.0.0.0` instead.
+pub fn dual_stack_available() -> bool {
+    socket2::Socket::new(socket2::Domain::IPV6, socket2::Type::STREAM, Some(socket2::Protocol::TCP)).and_then(|s| s.set_only_v6(false)).is_ok()
 }
 
 /// Whether a failed multicast join means the socket is in the group already: `EADDRINUSE` on Unix,
@@ -159,6 +207,50 @@ mod tests {
         assert_eq!(e.kind(), io::ErrorKind::ConnectionRefused, "{e:?}");
         // Windows: ~1.0 s (2.0 s with its default SYN retries); elsewhere at once.
         assert!(took < std::time::Duration::from_millis(1500), "a refused dial took {took:?}");
+    }
+
+    /// A socket made the way Windows makes one: IPv6 only by default. On a Mac or Linux the system default is
+    /// dual-stack, so the listener must turn it off itself for the test to see what Windows would.
+    fn v6_only_socket(ty: socket2::Type, proto: socket2::Protocol) -> Option<socket2::Socket> {
+        if !dual_stack_available() {
+            eprintln!("no IPv6 here: nothing to check");
+            return None;
+        }
+        let s = socket2::Socket::new(socket2::Domain::IPV6, ty, Some(proto)).unwrap();
+        s.set_only_v6(true).unwrap();
+        Some(s)
+    }
+
+    /// A TCP listener on `[::]` that refuses IPv4 connections, as Seedwell's sync port did on Windows (where
+    /// `IPV6_V6ONLY` is on by default): fails when the listener keeps that default.
+    #[tokio::test]
+    async fn a_listener_on_any_ipv6_address_takes_ipv4_where_the_default_is_ipv6_only() {
+        let Some(s) = v6_only_socket(socket2::Type::STREAM, socket2::Protocol::TCP) else { return };
+        let l = listen_tcp_on(s, "[::]:0".parse().unwrap()).unwrap();
+        assert!(!socket2::SockRef::from(&l).only_v6().unwrap(), "IPV6_V6ONLY stays on");
+        let port = l.local_addr().unwrap().port();
+        for ip in ["127.0.0.1", "::1"] {
+            let to = SocketAddr::new(ip.parse().unwrap(), port);
+            let dial = tokio::time::timeout(std::time::Duration::from_secs(5), tokio::net::TcpStream::connect(to));
+            dial.await.expect("dial timed out").unwrap_or_else(|e| panic!("{to}: {e}"));
+            tokio::time::timeout(std::time::Duration::from_secs(5), l.accept()).await.expect("accept timed out").unwrap();
+        }
+    }
+
+    /// The same for UDP (the sync port's uTP twin): fails when a datagram to 127.0.0.1 does not arrive.
+    #[tokio::test]
+    async fn a_udp_socket_on_any_ipv6_address_takes_ipv4_where_the_default_is_ipv6_only() {
+        let Some(s) = v6_only_socket(socket2::Type::DGRAM, socket2::Protocol::UDP) else { return };
+        let u = bind_udp_on(s, "[::]:0".parse().unwrap()).unwrap();
+        assert!(!socket2::SockRef::from(&u).only_v6().unwrap(), "IPV6_V6ONLY stays on");
+        let port = u.local_addr().unwrap().port();
+        for (from, to) in [("127.0.0.1:0", "127.0.0.1"), ("[::1]:0", "::1")] {
+            let c = tokio::net::UdpSocket::bind(from).await.unwrap();
+            c.send_to(b"hello", (to.parse::<IpAddr>().unwrap(), port)).await.unwrap();
+            let mut buf = [0u8; 16];
+            let (n, _) = tokio::time::timeout(std::time::Duration::from_secs(5), u.recv_from(&mut buf)).await.expect("no datagram").unwrap();
+            assert_eq!(&buf[..n], b"hello");
+        }
     }
 
     #[test]

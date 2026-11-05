@@ -52,6 +52,29 @@ async fn a_newer_device_syncs_at_the_version_both_speak_and_one_too_new_is_told_
     }
 }
 
+/// The failure: a device of Seedwell 0.1.18 or before (protocol 2) syncs with this one and is sent unhashed entries
+/// (SPEC §7G.11), which it cannot fetch (it reads a file of that size with no chunks). Protocol 3 alone: it is refused,
+/// and told to update.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_device_of_0_1_18_is_refused_and_told_to_update() {
+    assert_eq!((MIN_PROTOCOL, PROTOCOL), (3, 3), "unhashed entries need protocol 3 on both sides");
+    let dirs: Vec<tempfile::TempDir> = (0..2).map(|_| tempfile::tempdir().unwrap()).collect();
+    let a = device_with("Owner", |_| {}).await;
+    std::fs::write(dirs[0].path().join("seed.txt"), b"from the owner").unwrap();
+    let id: FolderId = a.h.add_folder(dirs[0].path().to_path_buf()).await.unwrap().id.parse().unwrap();
+    let old = device_with("Old", |o| o.protocol = (2, 2)).await;
+    old.h.join_folder(&a.h.create_invite(&id, Role::ReadOnly, 1, 7).unwrap().link, dirs[1].path().join("F")).await.unwrap();
+    old.h.add_address(&id, addr(&a)).unwrap();
+    until(20, "the old device is told to update", || {
+        matches!(state(&old, &id), Some((FolderState::Error, Some(e))) if e.contains("Owner runs Seedwell test, a newer Seedwell that this one cannot sync with"))
+    })
+    .await;
+    assert!(read(&dirs[1].path().join("F/seed.txt")).is_none());
+    for d in [&a, &old] {
+        d.h.shutdown().await;
+    }
+}
+
 /// A service on a state folder that outlives it (to start it again, as another version).
 async fn start_at(state: &std::path::Path, name: &str, protocol: (u32, u32)) -> trs_sync_net::SyncHandle {
     let secrets = std::sync::Arc::new(trs_sync_net::secrets::FileSecrets::new(state.join("secrets")));

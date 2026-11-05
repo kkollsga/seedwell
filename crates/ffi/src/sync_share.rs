@@ -2,17 +2,20 @@
 //! (docs/CROSS-PLATFORM.md §1): the settings of the next link (role, uses, how long it works, a chat it joins too) and
 //! what they add up to, Copy Link, the sharing period (an owner starts, extends or lifts it; an admin sees it), the
 //! active links with Revoke, and what the dialog says when this computer may not share or the folder is gone. Opened
-//! on a folder not synced yet (the file manager's Share menu), Copy Link syncs it from this computer first.
+//! on a folder not synced yet (the file manager's Share menu), Copy Link syncs it from this computer first. A folder's
+//! dialog also has "On all my devices" and its "Read only" (SPEC 7G.1), applied at once; with Read only on, a new
+//! link admits at Read only too.
 //!
 //! The host keeps a [`SyncShareForm`], reads the links (`Core::sync_invites`, off the main thread), draws
 //! [`Core::sync_share_window`] and runs [`Core::sync_share_copy_link`], `Core::sync_revoke_invite` and
-//! `Core::sync_set_share_until` (with `sync_sharing_end` / `sync_sharing_extended`).
+//! `Core::sync_set_share_until` (with `sync_sharing_end` / `sync_sharing_extended`) and [`Core::sync_share_set_devices`].
 
 use std::path::Path;
 use std::sync::Arc;
 
 use trs_platform::computer;
 
+use crate::devices_text::FollowLine;
 use crate::library::{local_day, LocalClock};
 use crate::sync::{SyncChannel, SyncInvite, SyncRole};
 use crate::sync_text::{
@@ -138,6 +141,9 @@ pub struct SyncShareWindowModel {
     pub summary: String,
     /// The sharing period of a folder or channel this computer may share (not before the folder is synced).
     pub sharing: Option<SyncShareSharing>,
+    /// A folder's "On all my devices" and its "Read only" (while this computer is paired with others and may share
+    /// it), as they are: switching either applies at once (`Core::sync_share_set_devices`, off the main thread).
+    pub devices: Option<FollowLine>,
     /// "Active links", the links, "and 2 more", and each one's Revoke and its tooltip.
     pub links_caption: String,
     pub links: Vec<SyncShareLink>,
@@ -165,6 +171,7 @@ pub struct SyncShareCopied {
 }
 
 /// What is shared.
+#[derive(Clone)]
 struct Target {
     name: String,
     role: SyncRole,
@@ -205,7 +212,16 @@ fn setting(label: &str, help: &str, on: bool, choices: Vec<SyncChoice>, value: u
     SyncShareSetting { label: label.into(), help: help.into(), on, choices, value }
 }
 
-fn window(f: &SyncShareForm, t: Option<&Target>, channels: &[SyncChannel], invites: Vec<SyncInvite>, now_s: u64, clock: &dyn LocalClock) -> SyncShareWindowModel {
+#[allow(clippy::too_many_arguments)]
+fn window(
+    f: &SyncShareForm,
+    t: Option<&Target>,
+    channels: &[SyncChannel],
+    invites: Vec<SyncInvite>,
+    now_s: u64,
+    clock: &dyn LocalClock,
+    follow: Option<FollowLine>,
+) -> SyncShareWindowModel {
     let can_share = t.is_some_and(|t| sync_can_share(t.role));
     let limits = sync_link_limits(f.single_use, f.uses, f.link_expires, f.link_days);
     let owner = t.is_some_and(|t| t.role == SyncRole::Owner);
@@ -265,6 +281,9 @@ fn window(f: &SyncShareForm, t: Option<&Target>, channels: &[SyncChannel], invit
         }),
         summary: t.map(|t| sync_share_summary(f.role, limits.uses, limits.link_days, chat_name(f, t, channels))).unwrap_or_default(),
         sharing,
+        devices: follow
+            .filter(|l| l.shown && can_share && f.new_path.is_none() && t.is_some_and(|t| !t.is_channel))
+            .map(|l| crate::sync_dialogs::follow_drawn(&l, l.on, l.read_only.as_ref().is_some_and(|r| r.on))),
         links_caption: "Active links".into(),
         links: active
             .links
@@ -335,14 +354,39 @@ impl Core {
         let invite = self.sync_create_invite(form.id.clone(), form.role, limits.uses, limits.link_days, channel)?;
         Ok(SyncShareCopied { invite, form })
     }
+
+    /// The Share dialog's "On all my devices" (`on`) and "Read only" (`read_only`) switched: applied at once (Read only
+    /// on also puts the folder on all devices; "On all my devices" off keeps Read only as it is). Returns the form with
+    /// the next link's role: Read only once Read only comes on, Read & write again when it goes off. Slow: off the main
+    /// thread. On failure the host shows `core_error_message` and draws the dialog again (the switches as they are).
+    pub fn sync_share_set_devices(&self, form: SyncShareForm, on: bool, read_only: bool) -> Result<SyncShareForm, CoreError> {
+        let line = self.sync_follow_line(form.id.clone());
+        let was = line.read_only.as_ref().is_some_and(|r| r.on);
+        if read_only != was && (on || read_only) {
+            self.sync_set_follow_read_only(form.id.clone(), read_only)?;
+        } else if on != line.on {
+            self.sync_set_follow(form.id.clone(), on)?;
+        }
+        let now = self.sync_follow_line(form.id.clone()).read_only.is_some_and(|r| r.on);
+        let role = match (was, now) {
+            (false, true) => SyncRole::ReadOnly,
+            (true, false) if form.role == SyncRole::ReadOnly => SyncRole::ReadWrite,
+            _ => form.role,
+        };
+        Ok(SyncShareForm { role, ..form })
+    }
 }
 
 #[uniffi::export]
 impl Core {
-    /// The Share dialog's form for folder or channel `id` as it opens: Read & write, single use, 7 days; a folder's
-    /// link joins its chat too when it has one this computer may share.
+    /// The Share dialog's form for folder or channel `id` as it opens: Read & write (Read only while the folder is
+    /// Read only on the user's devices), single use, 7 days; a folder's link joins its chat too when it has one this
+    /// computer may share.
     pub fn sync_share_form(&self, id: String) -> SyncShareForm {
-        let mut f = form(id, None);
+        let mut f = form(id.clone(), None);
+        if self.sync_follow_line(id).read_only.is_some_and(|r| r.on) {
+            f.role = SyncRole::ReadOnly;
+        }
         if let Some(t) = self.share_target(&f)
             && let Some(c) = t.channel_id
             && chat_choices(&self.chat_channels()).iter().any(|x| x.id == c)
@@ -362,7 +406,8 @@ impl Core {
     /// The Share dialog drawn from `form`, with the links the host read (`Core::sync_invites`). Cheap: it reads the
     /// folders and channels, nothing slow.
     pub fn sync_share_window(&self, form: SyncShareForm, invites: Vec<SyncInvite>, now_unix_s: u64, clock: Arc<dyn LocalClock>) -> SyncShareWindowModel {
-        window(&form, self.share_target(&form).as_ref(), &self.chat_channels(), invites, now_unix_s, clock.as_ref())
+        let follow = (form.new_path.is_none() && !form.id.is_empty()).then(|| self.sync_follow_line(form.id.clone()));
+        window(&form, self.share_target(&form).as_ref(), &self.chat_channels(), invites, now_unix_s, clock.as_ref(), follow)
     }
 
 }
@@ -424,6 +469,24 @@ mod tests {
         assert_eq!((s.extend_title.as_deref(), s.start), (Some("Extend"), None));
         assert_eq!(s.line, sync_sharing_line(Some(format!("D{}", NOW_S + 86_400 + 60)), true));
         assert_eq!(w.refresh_ms, Some(COUNTDOWN_MS));
+    }
+
+    /// The Share dialog's "On all my devices" and "Read only": shown for a folder this computer may share, while it is
+    /// paired, as the core has them (they apply at once, so the dialog must never show a choice that is not applied);
+    /// never for a channel, a folder this computer may not share, or one not synced yet.
+    #[test]
+    fn the_share_dialog_shows_the_devices_switches_as_they_are() {
+        let line = FollowLine { on: true, ..crate::devices_text::follow_line_new(&["MacBook".into()], false) };
+        let line = FollowLine { read_only: line.read_only.map(|r| crate::devices_text::FollowReadOnly { on: true, ..r }), ..line };
+        let folder = Target { name: "Films".into(), role: SyncRole::Owner, share_until_s: None, is_channel: false, channel_id: None };
+        let w = |f: &SyncShareForm, t: &Target| window(f, Some(t), &[], Vec::new(), NOW_S, &Clock, Some(line.clone())).devices;
+        let f = form("x".into(), None);
+        let d = w(&f, &folder).expect("a folder's dialog has them");
+        let r = d.read_only.unwrap();
+        assert!(d.on && r.on && r.enabled && r.line.contains("never change, add or delete"), "{r:?}");
+        assert_eq!(w(&f, &Target { is_channel: true, ..folder.clone() }), None, "not for a channel");
+        assert_eq!(w(&f, &Target { role: SyncRole::ReadOnly, ..folder.clone() }), None, "not where this computer may not share");
+        assert_eq!(w(&form(String::new(), Some("/tmp/x".into())), &folder), None, "not before the folder is synced");
     }
 
     #[test]

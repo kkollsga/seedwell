@@ -13,7 +13,12 @@ import ImageIO
 // `make_icon --windows <dir>`: the sizes a Windows .ico holds instead (icon_<px>.png, each drawn from scratch), for
 // the Windows app, which cannot run this script.
 let windows = CommandLine.arguments.count > 2 && CommandLine.arguments[1] == "--windows"
-let out = windows ? CommandLine.arguments[2] : CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : "AppIcon.iconset"
+// `make_icon --symbol <dir>.xcassets`: an asset catalog with the monochrome symbol `seedwell` (the same two arrows as
+// a custom SF Symbol), which the File Provider extension names in its Info.plist (CFBundleIcons ›
+// CFBundlePrimaryIcon › CFBundleSymbolName) so that the Finder sidebar shows it for an on-demand folder's domain
+// instead of a plain folder. build.sh compiles it with `actool` into the extension's Assets.car.
+let symbol = CommandLine.arguments.count > 2 && CommandLine.arguments[1] == "--symbol"
+let out = windows || symbol ? CommandLine.arguments[2] : CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : "AppIcon.iconset"
 try? FileManager.default.createDirectory(atPath: out, withIntermediateDirectories: true)
 
 let space = CGColorSpace(name: CGColorSpace.sRGB)!
@@ -127,6 +132,101 @@ func render(_ px: Int) -> Data? {
     }
     guard let image = ctx.makeImage() else { return nil }
     return NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:])
+}
+
+/// The symbol's outline in its own units (a 100 pt glyph: baseline at y 0, cap height 70.459, y up): the app icon's
+/// two arrows (down on the left, up on the right; shaft, wing and spacing in the icon's proportions) stroked at about
+/// SF Symbols' Regular weight and merged into one filled shape, since a custom symbol is filled, not stroked.
+/// Returns the outline and the advance width (side bearings included).
+func symbolGlyph() -> (CGPath, CGFloat) {
+    let stroke: CGFloat = 9, bearing: CGFloat = 3
+    let reach: CGFloat = 36                                  // half the shaft: 72 units, centred on the cap height
+    let wing = reach * 2 * (0.135 / 0.47)                    // make_icon's wing : shaft
+    let spacing = reach * 2 * (0.316 / 0.47)                 // make_icon's arrow spacing : shaft
+    let cy: CGFloat = 70.459 / 2
+    let left = bearing + stroke / 2 + wing
+    var glyph = CGMutablePath() as CGPath
+    for (x, up) in [(left, false), (left + spacing, true)] {
+        let tip = up ? cy + reach : cy - reach, tail = up ? cy - reach : cy + reach, back = up ? -wing : wing
+        let p = CGMutablePath()
+        p.move(to: CGPoint(x: x, y: tail))
+        p.addLine(to: CGPoint(x: x, y: tip))
+        p.move(to: CGPoint(x: x - wing, y: tip + back))
+        p.addLine(to: CGPoint(x: x, y: tip))
+        p.addLine(to: CGPoint(x: x + wing, y: tip + back))
+        glyph = glyph.union(p.copy(strokingWithWidth: stroke, lineCap: .round, lineJoin: .round, miterLimit: 1), using: .winding)
+    }
+    return (glyph, left + spacing + wing + stroke / 2 + bearing)
+}
+
+/// SVG path data for `path`, y flipped (SVG's y runs down; a symbol's glyph sits on its baseline at y 0).
+func svgPath(_ path: CGPath) -> String {
+    var d: [String] = []
+    func f(_ v: CGFloat) -> String { String(format: "%.3f", v) }
+    func pt(_ p: CGPoint) -> String { "\(f(p.x)) \(f(-p.y))" }
+    path.applyWithBlock { e in
+        let el = e.pointee, ps = el.points
+        switch el.type {
+        case .moveToPoint: d.append("M\(pt(ps[0]))")
+        case .addLineToPoint: d.append("L\(pt(ps[0]))")
+        case .addQuadCurveToPoint: d.append("Q\(pt(ps[0])) \(pt(ps[1]))")
+        case .addCurveToPoint: d.append("C\(pt(ps[0])) \(pt(ps[1])) \(pt(ps[2]))")
+        case .closeSubpath: d.append("Z")
+        @unknown default: break
+        }
+    }
+    return d.joined(separator: " ")
+}
+
+if symbol {
+    // Apple's custom-symbol template (SF Symbols' export, version 3.0) with one design, Regular at Medium scale; the
+    // system derives the other weights and scales from it.
+    let (glyph, advance) = symbolGlyph()
+    let x0: CGFloat = 1500
+    func line(_ id: String, _ x1: CGFloat, _ y1: CGFloat, _ x2: CGFloat, _ y2: CGFloat) -> String {
+        "  <line id=\"\(id)\" style=\"fill:none;stroke:#27AAE1;opacity:1;stroke-width:0.5;\" x1=\"\(x1)\" x2=\"\(x2)\" y1=\"\(y1)\" y2=\"\(y2)\"/>"
+    }
+    var guides: [String] = []
+    for (scale, base) in [("S", 696.0), ("M", 1126.0), ("L", 1556.0)] {
+        guides.append(line("Baseline-\(scale)", 263, base, 3036, base))
+        guides.append(line("Capline-\(scale)", 263, base - 70.459, 3036, base - 70.459))
+    }
+    guides.append(line("left-margin-Regular-M", x0, 1030, x0, 1150))
+    guides.append(line("right-margin-Regular-M", x0 + advance, 1030, x0 + advance, 1150))
+    let svg = """
+    <?xml version="1.0" encoding="UTF-8"?>
+    <!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+    <!-- Drawn by app/Resources/make_icon.swift (its symbol mode); not edited by hand. -->
+    <svg version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="3300" height="2200">
+     <g id="Notes">
+      <rect height="2200" id="artboard" style="fill:white;opacity:1" width="3300" x="0" y="0"/>
+      <text style="stroke:none;fill:black;font-family:sans-serif;font-size:13;" transform="matrix(1 0 0 1 263 1933)">Seedwell</text>
+      <text id="template-version" style="stroke:none;fill:black;font-family:sans-serif;font-size:13;text-anchor:end;" transform="matrix(1 0 0 1 3036 1933)">Template v.3.0</text>
+     </g>
+     <g id="Guides">
+    \(guides.joined(separator: "\n"))
+     </g>
+     <g id="Symbols">
+      <g id="Regular-M" transform="matrix(1 0 0 1 \(x0) 1126)">
+       <path d="\(svgPath(glyph))"/>
+      </g>
+     </g>
+    </svg>
+
+    """
+    let set = "\(out)/seedwell.symbolset"
+    try? FileManager.default.createDirectory(atPath: set, withIntermediateDirectories: true)
+    let info = #"{ "info" : { "author" : "xcode", "version" : 1 } }"#
+    let contents = #"{ "info" : { "author" : "xcode", "version" : 1 }, "symbols" : [ { "filename" : "seedwell.svg", "idiom" : "universal" } ] }"#
+    do {
+        try info.write(toFile: "\(out)/Contents.json", atomically: true, encoding: .utf8)
+        try contents.write(toFile: "\(set)/Contents.json", atomically: true, encoding: .utf8)
+        try svg.write(toFile: "\(set)/seedwell.svg", atomically: true, encoding: .utf8)
+    } catch {
+        FileHandle.standardError.write("make_icon --symbol: \(error)\n".data(using: .utf8)!)
+        exit(1)
+    }
+    exit(0)
 }
 
 if windows {

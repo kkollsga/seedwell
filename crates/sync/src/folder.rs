@@ -184,6 +184,13 @@ pub struct FolderCore {
     retry_due: bool,
     /// Joining with write access, not admitted yet (see [`FolderCore::set_awaiting_write`]).
     awaiting_write: bool,
+    /// A full folder on demand for the devices that do not hold its files ([`FolderCore::set_list_first`]).
+    list_first: bool,
+    /// What the pull rounds want fetched with the core let go, and how far it came ([`crate::lazy::Streams`]): shared
+    /// with whoever runs the jobs, who hands their ends back without the core ([`Self::streams`]).
+    streams: Arc<std::sync::Mutex<crate::lazy::Streams>>,
+    /// Peers' chunks are fetched with the core let go ([`Self::set_fetch_apart`]).
+    fetch_apart: bool,
     /// On demand: the folders (and files) kept on this device, `""` for all of it.
     pins: BTreeSet<String>,
     /// On demand: item identifiers, read from the records when first asked for.
@@ -241,6 +248,9 @@ impl FolderCore {
             retrying: BTreeMap::new(),
             retry_due: false,
             awaiting_write: false,
+            list_first: false,
+            streams: Default::default(),
+            fetch_apart: false,
             pins: BTreeSet::new(),
             items: None,
             online_only: Default::default(),
@@ -517,6 +527,7 @@ impl FolderCore {
             new_file_id: &new_id,
             batch_size: 1000,
             on_demand: self.cfg.on_demand.then_some(&pinned as &dyn Fn(&str) -> bool),
+            list_first: self.list_first || self.cfg.on_demand,
             host_write,
         };
         f(&scanner, &mut *self.store)
@@ -527,11 +538,14 @@ impl FolderCore {
         let pins = &self.pins;
         let wanted = |p: &str| ondemand::pinned(pins, p);
         let ignore = self.ignore.get();
+        let writers = &self.writers;
+        let verify = |f: &SignedFile| writers.verify(f);
         let puller = Puller {
             fs: &*self.fs,
             me: self.me,
             signer: self.signer.as_ref().map(|s| s as &dyn Signer),
             source,
+            verify: &verify,
             clock: &*self.clock,
             device_name,
             case_insensitive: self.cfg.case_insensitive,
@@ -542,6 +556,8 @@ impl FolderCore {
             awaiting_write: self.awaiting_write && self.signer.is_none(),
             on_demand: self.cfg.on_demand.then_some(&wanted as &dyn Fn(&str) -> bool),
             online_only: Some(&self.online_only),
+            streams: Some(&*self.streams),
+            fetch_apart: self.fetch_apart,
             not_members: &self.not_members,
             ignore: &ignore,
             round: Default::default(),
@@ -640,6 +656,75 @@ impl FolderCore {
     /// invitation is pending.
     pub fn set_awaiting_write(&mut self, on: bool) {
         self.awaiting_write = on;
+    }
+
+    /// A full folder whose files are on demand for the devices that do not hold them (SPEC §7G.11, *Modes*, *Listed
+    /// first, hashed when first fetched*): its scans list what they find and read nothing, as an on-demand folder's do,
+    /// and the first device that fetches a file hashes it as it streams. The host's own writes are still hashed. Off: a
+    /// change found from then on is hashed again before it is announced (what is recorded unhashed stays so until it
+    /// changes or is fetched). The driver sets it from the folder's configuration before each scan step.
+    pub fn set_list_first(&mut self, on: bool) {
+        self.list_first = on;
+    }
+
+    /// What the last pull rounds want done with the core let go ([`crate::lazy::Streams`]): streams of unhashed files
+    /// (SPEC §7G.11), each with where an earlier one of the same version stopped, and, with
+    /// [`Self::set_fetch_apart`], peers' chunks of hashed files. Run each ([`crate::lazy::run_job`]) and hand its end
+    /// back ([`Self::job_ended`]); until then a round leaves its path alone. What was cut off longer than
+    /// [`crate::lazy::STREAM_IDLE`] ago (the maker has let its read go) is forgotten.
+    pub fn take_jobs(&mut self) -> Vec<crate::lazy::Job> {
+        let now = self.clock.now_ns();
+        let idle = i64::try_from(crate::lazy::STREAM_IDLE.as_nanos()).unwrap_or(i64::MAX);
+        let mut s = crate::lazy::lock(&self.streams);
+        s.resume.retain(|_, (_, at)| now.saturating_sub(*at) < idle);
+        // What was done or failed for paths that need nothing any more (the fetch was cancelled, another version came).
+        let store = &self.store;
+        s.prepared.retain(|p, _| store.need(p).ok().flatten().is_some());
+        s.failed.retain(|p, (v, _)| store.need(p).ok().flatten().is_some_and(|n| n.file.info.version == *v));
+        s.chunks.retain(|p, _| store.need(p).ok().flatten().is_some());
+        let jobs = std::mem::take(&mut s.jobs);
+        let mut out = Vec::with_capacity(jobs.len());
+        for (path, wanted) in jobs {
+            match wanted {
+                crate::lazy::Wanted::Stream(want) => {
+                    s.taken(&path, &want.info.version);
+                    let resume = s.resume.remove(&path).map(|(r, _)| r).filter(|r| r.version == want.info.version);
+                    out.push(crate::lazy::Job::Stream(Box::new(crate::lazy::StreamJob { path, want, resume })));
+                }
+                crate::lazy::Wanted::Chunks(job) => {
+                    s.taken(&path, &job.version);
+                    out.push(crate::lazy::Job::Chunks(Box::new(job)));
+                }
+            }
+        }
+        out
+    }
+
+    /// How a job for `path` ended ([`Self::take_jobs`]). A stream: done, it is placed and recorded by the next pull
+    /// round (if that version is still wanted there); cut off, the next one goes on from there; failed, the next round
+    /// says why. A fetch of chunks: the next round asks for what is still missing, or places the file; failed, it says
+    /// why.
+    pub fn job_ended(&mut self, path: &str, end: crate::lazy::JobEnd) {
+        crate::lazy::lock(&self.streams).job_ended(path, end, self.clock.now_ns());
+    }
+
+    /// The jobs' state, for whoever runs them to hand each end back without the core
+    /// ([`crate::lazy::Streams::job_ended`], with the time now): a job's end never waits for a round.
+    pub fn streams(&self) -> Arc<std::sync::Mutex<crate::lazy::Streams>> {
+        self.streams.clone()
+    }
+
+    /// Peers' chunks of hashed files are fetched with the core let go ([`Self::take_jobs`]): a pull round reuses what
+    /// is here, notes what must come from peers and goes on, and a later round places the file. The driver that runs
+    /// the jobs turns it on (the hosts' calls and the scan never wait for a network); off (the default), a round fetches
+    /// them itself.
+    pub fn set_fetch_apart(&mut self, on: bool) {
+        self.fetch_apart = on;
+    }
+
+    /// Its scans list and do not read ([`Self::set_list_first`], or an on-demand folder).
+    pub fn lists_first(&self) -> bool {
+        self.list_first || self.cfg.on_demand
     }
 
     /// This device signs its versions (it may write and is admitted).
@@ -1424,6 +1509,8 @@ impl FolderCore {
 
     /// The devices that announce `f` held (valid, with its content, this version or a later one): the ones to ask.
     pub fn holders_of(&self, f: &HeldFile) -> io::Result<Vec<ShortId>> {
+        // Ours hashed, theirs the same version unhashed (its maker's, SPEC §7G.11): its digest is our unhashed form's.
+        let ours_unhashed = self.store.local(&f.path)?.filter(|l| l.file.info.content_digest() == f.content).map(|l| l.file.info.unhashed_digest());
         Ok(self
             .store
             .remote(&f.path)?
@@ -1435,7 +1522,9 @@ impl FolderCore {
                     && !e.dataless
                     && !i.deleted
                     && match i.version.compare(&f.version) {
-                        trs_sync_proto::model::Causality::Equal => i.content_digest() == f.content,
+                        trs_sync_proto::model::Causality::Equal => {
+                            ondemand::same_form(i, &f.content, None) || (i.is_unhashed() && ours_unhashed == Some(i.content_digest()))
+                        }
                         trs_sync_proto::model::Causality::Greater => true,
                         _ => false,
                     }
@@ -1884,8 +1973,19 @@ impl FolderCore {
         unreachable!("a free conflict copy name")
     }
 
+    /// The host's feed names `path` again, without a new version: what the host shows of it is to be looked at anew
+    /// (its file there holds content that is recorded elsewhere now, SPEC §7G.11).
+    pub fn host_show(&mut self, path: &str) -> io::Result<()> {
+        let mut batch = Batch::new(&*self.store, self.me)?;
+        batch.shown(path);
+        let ops = batch.finish()?;
+        self.store.apply(ops)
+    }
+
     /// The host's content for `path` was written at `copy` (a conflict copy, [`Self::host_target`]): recorded as
-    /// this device's new file, a conflict copy of `path`.
+    /// this device's new file, a conflict copy of `path`. The host's feed names `path` again too: the host's file
+    /// there holds the content now at `copy`, so the host lets go of it (it is stale, SPEC §7G.11) and shows the
+    /// version at `path`.
     pub fn host_written_copy(&mut self, copy: &str, path: &str) -> Result<(), HostError> {
         self.host_written(copy)?;
         let Some(r) = self.store.local(copy)?.filter(|r| ondemand::live(r) && r.file.info.conflict_of.is_none()) else { return Ok(()) };
@@ -1893,6 +1993,9 @@ impl FolderCore {
         let info = FileInfo { conflict_of: Some(path.to_string()), ..r.file.info.clone() };
         let mut batch = Batch::new(&*self.store, self.me)?;
         batch.put_local(LocalRecord { file: signer.sign(info), ..r });
+        if self.cfg.on_demand {
+            batch.shown(path);
+        }
         let ops = batch.finish()?;
         self.store.apply(ops)?;
         Ok(())

@@ -145,7 +145,7 @@ struct SyncAddView: View {
             .padding(.top, 18)
             if let label = w.onDemandLabel { onDemand(w, label: label).padding(.top, 14) }
             if let follow = w.follow {
-                FollowToggle(line: follow, isOn: $model.form.allDevices).padding(.top, 10).padding(.leading, 92)
+                FollowToggle(line: follow, isOn: $model.form.allDevices, readOnly: $model.form.readOnly).padding(.top, 10).padding(.leading, 92)
             }
             if let e = model.error { ModalError(text: e).padding(.top, 14) }
             ModalButtons(primary: w.confirmTitle, enabled: w.canStart, busy: model.busy, primaryHelp: w.confirmHelp,
@@ -259,6 +259,7 @@ struct SyncAddView: View {
     var lanOnly: Bool { get { form.lanOnly } set { form.lanOnly = newValue } }
     var onDemand: Bool { get { form.onDemand } set { form.onDemand = newValue } }
     var allDevices: Bool { get { form.allDevices } set { form.allDevices = newValue } }
+    var readOnly: Bool { get { form.readOnly } set { form.readOnly = newValue } }
     var optionsOpen: Bool { get { form.optionsOpen } set { form.optionsOpen = newValue } }
 
     /// The dialog as the core draws it for what the Mac has (the Share dialog, on-demand folders).
@@ -369,7 +370,7 @@ struct SyncEditView: View {
             }
             if let follow = w.follow {
                 Divider().padding(.vertical, 2)
-                FollowToggle(line: follow, isOn: $model.allDevices)
+                FollowToggle(line: follow, isOn: $model.allDevices, readOnly: $model.readOnly)
             }
             Divider().padding(.vertical, 2)
             VStack(alignment: .leading, spacing: 8) {
@@ -405,10 +406,12 @@ struct SyncEditView: View {
     }
 }
 
-/// "On all my devices" (SPEC §7G.1 "Your devices"): the core's title, its line under it, and whether it may be switched.
+/// "On all my devices" (SPEC §7G.1 "Your devices"): the core's title, its line under it, and whether it may be switched;
+/// under it a folder's "Read only" (`line.readOnly`) when the dialog binds one.
 struct FollowToggle: View {
     let line: FollowLine
     @Binding var isOn: Bool
+    var readOnly: Binding<Bool>? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
@@ -419,6 +422,19 @@ struct FollowToggle: View {
                 .accessibilityIdentifier("sync-all-devices")
             if !line.line.isEmpty {
                 Text(line.line).font(Theme.secondary).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+            if let ro = line.readOnly, let readOnly {
+                VStack(alignment: .leading, spacing: 5) {
+                    Toggle(ro.title, isOn: readOnly)
+                        .toggleStyle(.switch).controlSize(.small)
+                        .disabled(!ro.enabled)
+                        .help(ro.help)
+                        .accessibilityIdentifier("sync-read-only")
+                    if !ro.line.isEmpty {
+                        Text(ro.line).font(Theme.secondary).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .padding(.top, 4).padding(.leading, 16)
             }
         }
         .font(Theme.body)

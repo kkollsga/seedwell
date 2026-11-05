@@ -2,6 +2,7 @@
 
 mod flow;
 mod ignored;
+mod lazy;
 mod ondemand;
 mod sim;
 mod redb_store;

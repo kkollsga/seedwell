@@ -9,15 +9,31 @@ use std::time::Duration;
 use tokio::runtime::Handle;
 use tokio::task::JoinSet;
 use tokio::time::Instant;
-use trs_sync::pull::{ChunkRequest, ChunkSource, FetchError};
+use trs_sync::pull::{ChunkRequest, ChunkSource, FetchError, StreamAsk, StreamFail, StreamGot};
 use trs_sync_proto::ids::FolderId;
-use trs_sync_proto::msg::{Request, ResponseCode};
+use trs_sync_proto::msg::{Request, ResponseCode, StreamRequest};
 
 use crate::shared::{Ctx, PeerHandle};
 
 /// Requests not answered in this time (from when each was asked) are given up (and asked of another device, or again
 /// next round).
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// The slowest link a piece of a stream is waited for at: below it, a piece times out (and is asked again).
+const STREAM_FLOOR_RATE: u64 = 16 << 10;
+
+/// How long a piece of `len` bytes of a stream is waited for: [`REQUEST_TIMEOUT`] plus its bytes at
+/// [`STREAM_FLOOR_RATE`]. The time includes the maker's wait for its upload limit and its serving budget, so a piece of
+/// 8 MiB has about 9 minutes; a session that dies ends the wait at once anyway.
+pub(crate) fn stream_timeout(len: u32) -> Duration {
+    REQUEST_TIMEOUT + Duration::from_secs(u64::from(len).div_ceil(STREAM_FLOOR_RATE))
+}
+
+/// The connected device to stream an unhashed version from: its maker, the one device that can (it signs the hashed
+/// form); never another that announces the unhashed form as held, however close.
+pub(crate) fn stream_peer(peers: Vec<Arc<PeerHandle>>, maker: trs_sync_proto::ids::ShortId) -> Option<Arc<PeerHandle>> {
+    peers.into_iter().find(|p| p.device.short() == maker)
+}
 
 /// Fetches chunks of one folder from connected peers. Used on a blocking thread.
 pub struct NetSource {
@@ -48,6 +64,53 @@ impl NetSource {
 }
 
 impl ChunkSource for NetSource {
+    /// Asks the version's maker for the next piece ([`stream_peer`]) and waits for it at most [`stream_timeout`]. A
+    /// piece whose answer did not come in time is [`StreamFail::Unavailable`]: asked again, the maker serves it once
+    /// more. The maker answering busy (it has no read there any more) is [`StreamFail::Restart`].
+    fn stream(&self, ask: &StreamAsk) -> Result<StreamGot, StreamFail> {
+        self.rt.block_on(async {
+            let peers: Vec<Arc<PeerHandle>> = self.ctx.registry.peers().into_iter().filter(|p| p.access(&self.folder).is_some()).collect();
+            let Some(peer) = stream_peer(peers, ask.maker) else { return Err(StreamFail::Unavailable) };
+            // A folder that stops (a pause, a move, a removal) is not kept waiting for a piece minutes long.
+            let Some(mut stopped) = self.ctx.registry.folder(&self.folder).map(|f| f.stopped.subscribe()) else { return Err(StreamFail::Unavailable) };
+            if self.ctx.limited(peer.lan) {
+                self.ctx.limits.down.take(u64::from(ask.len)).await;
+            }
+            let req = StreamRequest { id: 0, folder_id: self.folder, path: ask.path.clone(), version: ask.version.clone(), offset: ask.offset, len: ask.len };
+            peer.inflight.fetch_add(u64::from(ask.len), Ordering::Relaxed);
+            let asked = peer.stream(req).await;
+            let got = match asked {
+                None => None,
+                Some((id, rx)) => {
+                    let r = tokio::select! {
+                        r = tokio::time::timeout(stream_timeout(ask.len), rx) => Some(r),
+                        _ = stopped.wait_for(|s| *s) => None,
+                    };
+                    if !matches!(r, Some(Ok(_))) {
+                        peer.forget_stream(id);
+                    }
+                    r
+                }
+            };
+            peer.inflight.fetch_sub(u64::from(ask.len), Ordering::Relaxed);
+            match got {
+                // Not reading now, timed out, or the session closed: the same piece again later.
+                None | Some(Err(_)) | Some(Ok(Err(_))) => Err(StreamFail::Unavailable),
+                Some(Ok(Ok(d))) => match d.code {
+                    ResponseCode::Ok => {
+                        if let Some(f) = self.ctx.registry.folder(&self.folder) {
+                            f.fetched.add(d.data.len() as u64);
+                        }
+                        Ok(StreamGot { data: d.data, chunks: d.chunks, sig: d.sig })
+                    }
+                    ResponseCode::Busy => Err(StreamFail::Restart),
+                    ResponseCode::Changed => Err(StreamFail::Changed),
+                    code => Err(StreamFail::Failed(format!("{} answered {code:?}", peer.name))),
+                },
+            }
+        })
+    }
+
     fn fetch(&self, reqs: &[ChunkRequest]) -> Vec<Result<Vec<u8>, FetchError>> {
         let mut out: Vec<Option<Result<Vec<u8>, FetchError>>> = vec![None; reqs.len()];
         self.fetch_each(reqs, &mut |i, r| out[i] = Some(r));
@@ -181,4 +244,39 @@ async fn collect(
             code => Err(FetchError::Failed(format!("{} answered {code:?}", peer.name))),
         },
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn peer(seed: u8, ip: &str) -> Arc<PeerHandle> {
+        let addr: std::net::SocketAddr = format!("{ip}:1").parse().unwrap();
+        let pk = *trs_sync_proto::device::DeviceKey::from_seed(&[seed; 32]).public_key();
+        let agreed = trs_sync_proto::msg::Agreed { protocol: trs_sync_proto::msg::PROTOCOL, features: 0 };
+        PeerHandle::new(pk, format!("device {seed}"), "Seedwell".into(), agreed, addr, addr, [0; 32], true, crate::session::Via::Tcp).0
+    }
+
+    /// The failure: a device that announces the maker's unhashed version as held (a copy it took without its hashes)
+    /// is on the LAN and ranked first, so every stream goes to it, which cannot serve one, and the download never
+    /// happens. The maker is asked, wherever it is.
+    #[test]
+    fn a_stream_goes_to_the_maker_never_to_another_holder() {
+        let (near, maker) = (peer(1, "192.168.1.5"), peer(2, "203.0.113.9"));
+        let id = maker.device.short();
+        let chosen = stream_peer(vec![near.clone(), maker.clone()], id).expect("the maker");
+        assert!(Arc::ptr_eq(&chosen, &maker));
+        assert!(stream_peer(vec![near], id).is_none(), "the maker not connected: nobody");
+    }
+
+    /// The failure: a piece of 8 MiB over a slow link (or behind the maker's upload limit) times out every time, so a
+    /// big file never arrives. A piece is waited for as long as it takes at 16 KiB/s.
+    #[test]
+    fn a_piece_is_waited_for_as_long_as_a_slow_link_takes() {
+        let slow = Duration::from_secs(u64::from(STREAM_PIECE_BYTES) / (16 << 10));
+        assert!(stream_timeout(STREAM_PIECE_BYTES) >= slow, "{:?}", stream_timeout(STREAM_PIECE_BYTES));
+        assert!(stream_timeout(1) >= REQUEST_TIMEOUT);
+    }
+
+    const STREAM_PIECE_BYTES: u32 = trs_sync_proto::msg::STREAM_PIECE;
 }

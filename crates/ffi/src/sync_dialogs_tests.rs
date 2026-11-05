@@ -202,3 +202,35 @@ fn files_on_demand_is_offered_only_by_a_host_that_has_on_demand_folders() {
         assert!(!mentions_on_demand(&w), "{w:?}");
     }
 }
+
+/// "Read only" under "On all my devices" in Add Folder and Edit: it must be switchable only with "On all my devices"
+/// chosen (Save could not apply it otherwise), Save must count it as a change only then, and a channel's toggle (or an
+/// unpaired computer's) has none.
+#[test]
+fn read_only_rides_on_all_my_devices_in_the_add_and_edit_dialogs() {
+    let (core, _d) = mock();
+    let paired = crate::devices_text::follow_line_new(&["MacBook".into()], false);
+    let form = SyncAddForm { follow: paired.clone(), ..core.sync_add_form(None) };
+    let ro = |form: &SyncAddForm| core.sync_add_window(form.clone(), host_features_all()).follow.unwrap().read_only.unwrap();
+    assert!(!ro(&form).enabled, "not switchable before On all my devices is chosen");
+    let r = ro(&SyncAddForm { all_devices: true, read_only: true, ..form.clone() });
+    assert!(r.on && r.enabled && r.line.starts_with("Your other devices join it Read only"), "{r:?}");
+    assert_eq!(crate::devices_text::follow_line_new(&["MacBook".into()], true).read_only, None, "a channel has none");
+    assert_eq!(crate::devices_text::follow_line_new(&[], false).read_only, None, "not paired: none");
+
+    // Edit: a folder on all devices, Read only off as the core has it.
+    let f = core.sync_add_folder("/tmp/seedwell-mock/Films".into()).unwrap();
+    let on = FollowLine { on: true, ..paired.clone() };
+    let base = SyncEditForm { follow: on.clone(), all_devices: true, read_only: false, ..core.sync_edit_form(f.id.clone()) };
+    assert!(!sync_edit_window(base.clone(), host_windows_all(), host_features_all()).changed);
+    let w = sync_edit_window(SyncEditForm { read_only: true, ..base.clone() }, host_windows_all(), host_features_all());
+    let r = w.follow.unwrap().read_only.unwrap();
+    assert!(w.changed && r.on && r.line.contains("that have it become Read only"), "{r:?}");
+    // With On all my devices turned off, Read only cannot change: only the switch counts.
+    let off = SyncEditForm { all_devices: false, read_only: true, ..base.clone() };
+    let r = sync_edit_window(off, host_windows_all(), host_features_all()).follow.unwrap().read_only.unwrap();
+    assert!(!r.on && !r.enabled, "{r:?}");
+    assert_eq!(follow_change(&on, false, true), Some((false, false)));
+    assert_eq!(follow_change(&on, true, true), Some((true, true)));
+    assert_eq!(follow_change(&on, true, false), None);
+}

@@ -11,7 +11,7 @@ use std::path::Path;
 
 use trs_platform::{computer, dirs};
 
-use crate::devices_text::FollowLine;
+use crate::devices_text::{follow_read_only_drawn, FollowLine};
 use crate::host::{has, HostFeature, HostWindow};
 use crate::sync::{SyncFolder, SyncState};
 use crate::sync_text::{
@@ -26,6 +26,19 @@ const CAPTION: &str = "Folder Sync";
 const CANCEL: &str = "Cancel";
 const CANCEL_HELP: &str = "Close without changing anything";
 const LABEL_LOCATION: &str = "Location";
+
+/// "On all my devices" as a dialog draws it: `line` as the core has it, `on` and `read_only` the form's choices.
+pub(crate) fn follow_drawn(line: &FollowLine, on: bool, read_only: bool) -> FollowLine {
+    FollowLine { on, read_only: line.read_only.as_ref().map(|r| follow_read_only_drawn(r, read_only, line.on, on)), ..line.clone() }
+}
+
+/// What Save or Start does with "On all my devices" and its "Read only", from `line` (as the core has it) and the
+/// choices: `None` nothing; `Some((on, read_only))`. Read only changes only with "On all my devices" chosen.
+fn follow_change(line: &FollowLine, on: bool, read_only: bool) -> Option<(bool, bool)> {
+    let was_read_only = line.read_only.as_ref().is_some_and(|r| r.on);
+    let read_only = if on && line.read_only.is_some() { read_only } else { was_read_only };
+    (on != line.on || read_only != was_read_only).then_some((on, read_only))
+}
 
 /// A path as the host shows one ("~/Seedwell/Photos").
 fn shown(path: &str) -> String {
@@ -102,7 +115,8 @@ pub struct SyncAddWindowModel {
     pub on_demand_label: Option<String>,
     pub on_demand_help: Option<String>,
     pub on_demand_note: Option<String>,
-    /// "On all my devices" (a folder of this computer, while this computer is paired); `on` is the form's choice.
+    /// "On all my devices" (a folder of this computer, while this computer is paired) and its "Read only"; `on` and
+    /// `read_only.on` are the form's choices.
     pub follow: Option<FollowLine>,
     pub cancel_title: String,
     pub cancel_help: String,
@@ -178,7 +192,7 @@ fn add_window(form: &SyncAddForm, local_on_demand_note: String, on_demand: bool)
         on_demand_help: on_demand.then(sync_on_demand_help),
         on_demand_note: (on_demand && form.on_demand)
             .then(|| if local { local_on_demand_note } else { sync_on_demand_note(SyncOnDemandChange::Join, String::new()) }),
-        follow: (local && form.follow.shown).then(|| FollowLine { on: form.all_devices, ..form.follow.clone() }),
+        follow: (local && form.follow.shown).then(|| follow_drawn(&form.follow, form.all_devices, form.read_only)),
         cancel_title: CANCEL.into(),
         cancel_help: CANCEL_HELP.into(),
         confirm_title: "Start".into(),
@@ -191,7 +205,7 @@ fn add_window(form: &SyncAddForm, local_on_demand_note: String, on_demand: bool)
 // MARK: Edit
 
 /// The Edit dialog's choices for one folder (SPEC 7G.5). The host keeps it as a value, edits `name`, `paused`,
-/// `lan_only`, `on_demand`, `all_devices` and `options_open` itself, and the place with [`sync_edit_choose_parent`].
+/// `lan_only`, `on_demand`, `all_devices`, `read_only` and `options_open` itself, and the place with [`sync_edit_choose_parent`].
 /// Everything applies on Save.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct SyncEditForm {
@@ -207,6 +221,8 @@ pub struct SyncEditForm {
     /// "On all my devices" as the core has it (hidden while this computer is not paired), and the choice.
     pub follow: FollowLine,
     pub all_devices: bool,
+    /// Its "Read only" for the other devices (a folder's; applied with `all_devices` only).
+    pub read_only: bool,
     /// The Options disclosure is open.
     pub options_open: bool,
 }
@@ -238,7 +254,7 @@ pub struct SyncEditWindowModel {
     pub on_demand_help: Option<String>,
     /// What Files on demand means as it is set now (`None` for a full folder that stays full, and without the switch).
     pub on_demand_note: Option<String>,
-    /// "On all my devices" while it is shown; `on` is the form's choice.
+    /// "On all my devices" while it is shown, and its "Read only"; `on` and `read_only.on` are the form's choices.
     pub follow: Option<FollowLine>,
     /// The Share section: its caption, what this computer's role lets it do, and Share… (its Share dialog) when it
     /// may share.
@@ -287,8 +303,8 @@ fn changed(form: &SyncEditForm) -> bool {
         moves(form, f)
             || form.paused != (f.state == SyncState::Paused)
             || form.lan_only != f.lan_only
-            || form.on_demand != f.on_demand
-            || form.all_devices != form.follow.on
+            || form.on_demand != (f.on_demand || f.on_demand_others)
+            || follow_change(&form.follow, form.all_devices, form.read_only).is_some()
     })
 }
 
@@ -338,7 +354,7 @@ pub fn sync_edit_window(form: SyncEditForm, host: Vec<HostWindow>, features: Vec
         on_demand_label: on_demand.then(sync_on_demand_label),
         on_demand_help: on_demand.then(sync_on_demand_help),
         on_demand_note,
-        follow: form.follow.shown.then(|| FollowLine { on: form.all_devices, ..form.follow.clone() }),
+        follow: form.follow.shown.then(|| follow_drawn(&form.follow, form.all_devices, form.read_only)),
         share_caption: "Share".into(),
         share_note: f.map(|f| sync_edit_share_note(f.role)).unwrap_or_default(),
         share_title: f.filter(|f| share && sync_can_share(f.role)).map(|_| "Share…".into()),
@@ -379,15 +395,20 @@ impl Core {
         let key = form.key.trim().to_owned();
         let f = match (form.mode, form.on_demand) {
             (SyncAddMode::Local, false) => self.sync_add_folder(form.folder.clone())?,
-            // Its files go into this computer's storage before it ever opens: added whole or not at all.
-            (SyncAddMode::Local, true) => self.sync_add_folder_on_demand(form.folder.clone())?,
+            // Its files stay where they are (nothing is read or moved): the devices without them get placeholders, listed
+            // within seconds (marked before its first scan, which then reads nothing).
+            (SyncAddMode::Local, true) => self.backend.sync().add_folder_offering(&form.folder)?,
             (SyncAddMode::Shared, false) => self.sync_join(key, form.location.clone())?,
             (SyncAddMode::Shared, true) => self.sync_join_on_demand(key, form.location.clone())?,
         };
-        // On all my devices: the others join it by themselves (this computer is its owner). Added either way: the Edit
-        // dialog shows the toggle as it is.
+        // On all my devices: the others join it by themselves (this computer is its owner), Read only when chosen (in
+        // one statement). Added either way: the Edit dialog shows the toggles as they are.
         if form.mode == SyncAddMode::Local && form.follow.shown && form.all_devices {
-            let _ = self.sync_set_follow(f.id.clone(), true);
+            let _ = if form.read_only && form.follow.read_only.is_some() {
+                self.sync_set_follow_read_only(f.id.clone(), true)
+            } else {
+                self.sync_set_follow(f.id.clone(), true)
+            };
         }
         Ok(f)
     }
@@ -409,7 +430,7 @@ impl Core {
         let id = form.folder_id.clone();
         let target = target(&form);
         if !form.on_demand && f.on_demand {
-            self.sync_set_on_demand(id.clone(), false, None)?;
+            self.sync_set_files_on_demand(id.clone(), false, None)?;
         }
         if moves(&form, &f) {
             if form.new_parent.is_some() {
@@ -424,11 +445,17 @@ impl Core {
         if form.lan_only != f.lan_only {
             self.sync_set_lan_only(id.clone(), form.lan_only)?;
         }
-        if form.on_demand && !f.on_demand {
-            self.sync_set_on_demand(id.clone(), true, None)?;
+        // On or off for the devices without the files: nothing on this computer moves.
+        if !f.on_demand && form.on_demand != f.on_demand_others {
+            self.sync_set_files_on_demand(id.clone(), form.on_demand, None)?;
         }
-        if form.all_devices != form.follow.on {
-            self.sync_set_follow(id.clone(), form.all_devices)?;
+        match follow_change(&form.follow, form.all_devices, form.read_only) {
+            // Read only changes with it on (turning it on puts the folder on all devices too, in one statement).
+            Some((true, read_only)) if read_only != form.follow.read_only.as_ref().is_some_and(|r| r.on) => {
+                self.sync_set_follow_read_only(id.clone(), read_only)?
+            }
+            Some((on, _)) => self.sync_set_follow(id.clone(), on)?,
+            None => {}
         }
         Ok(self.sync_snapshot().folders.into_iter().find(|x| x.id == id).unwrap_or(f))
     }
@@ -483,8 +510,9 @@ impl Core {
             new_parent: None,
             paused: folder.as_ref().is_some_and(|f| f.state == SyncState::Paused),
             lan_only: folder.as_ref().is_some_and(|f| f.lan_only),
-            on_demand: folder.as_ref().is_some_and(|f| f.on_demand),
+            on_demand: folder.as_ref().is_some_and(|f| f.on_demand || f.on_demand_others),
             all_devices: follow.on,
+            read_only: follow.read_only.as_ref().is_some_and(|r| r.on),
             follow,
             options_open: false,
             folder,

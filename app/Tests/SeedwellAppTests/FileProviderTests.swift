@@ -339,7 +339,7 @@ import Testing
         form.onDemand = true
         #expect(syncOnDemandLabel() == "Files on demand")
         #expect(syncOnDemandNote(change: .join, placeShown: "").contains("until you open it"))
-        #expect(syncOnDemandNote(change: .add, placeShown: "").contains("asks you once"))
+        #expect(syncOnDemandNote(change: .add, placeShown: "").contains("nothing is moved"))
     }
 
     @MainActor @Test func theEditModalSaysWhatASwitchDoes() async throws {
@@ -353,7 +353,7 @@ import Testing
         let m = SyncEditModel(core: core, id: f.id)
         #expect(!m.onDemand && m.onDemandNote == nil && !m.changed)
         m.onDemand = true
-        #expect(m.changed && m.onDemandNote?.contains("Remove Download") == true)
+        #expect(m.changed && m.onDemandNote?.contains("nothing is moved") == true)
         // An on-demand folder switched back: everything is downloaded, into its place.
         _ = try await core.syncSetOnDemand(id: f.id, onDemand: true, path: nil)
         let back = SyncEditModel(core: core, id: f.id)

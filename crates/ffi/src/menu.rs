@@ -1155,6 +1155,7 @@ mod tests {
             last_synced_s: None,
             channel_id: None,
             on_demand: false,
+            on_demand_others: false,
             unavailable: 0,
             progress: None,
             problem: None,
@@ -1162,6 +1163,7 @@ mod tests {
             gone: Vec::new(),
             can_reshare: false,
             removes_everywhere: false,
+            scan: None,
         }
     }
 

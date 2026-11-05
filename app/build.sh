@@ -267,6 +267,27 @@ echo "==> File Provider extension"
 FPX="$APP/Contents/PlugIns/SeedwellFileProvider.appex"
 mkdir -p "$FPX/Contents/MacOS"
 cp "$BIN_DIR/SeedwellFileProvider" "$FPX/Contents/MacOS/SeedwellFileProvider"
+# Its icons. The Finder sidebar (Locations) draws a domain with the symbol the extension's Info.plist names in
+# CFBundleIcons › CFBundlePrimaryIcon › CFBundleSymbolName (Apple: "Setting the Finder Sidebar Icon"); without it, a
+# plain folder. `seedwell` is make_icon's custom symbol of the two arrows, compiled into the extension's Assets.car by
+# Xcode's actool. CFBundleIconFile is the full-colour app icon, for where the system shows the extension's own icon.
+mkdir -p "$FPX/Contents/Resources"
+cp "$APP/Contents/Resources/AppIcon.icns" "$FPX/Contents/Resources/AppIcon.icns"
+ACTOOL="$(xcrun --find actool 2>/dev/null || true)"
+if [ -z "$ACTOOL" ] && [ -x /Applications/Xcode.app/Contents/Developer/usr/bin/actool ]; then
+    ACTOOL=/Applications/Xcode.app/Contents/Developer/usr/bin/actool
+fi
+FPX_SYMBOL=""
+if [ -n "$ACTOOL" ]; then
+    rm -rf "$BUILD/FileProvider.xcassets" && "$BUILD/make_icon" --symbol "$BUILD/FileProvider.xcassets"
+    "$ACTOOL" --compile "$FPX/Contents/Resources" --platform macosx --minimum-deployment-target 15.0 \
+        --output-format human-readable-text --output-partial-info-plist "$BUILD/FileProvider-assets.plist" \
+        "$BUILD/FileProvider.xcassets" >/dev/null
+    [ -f "$FPX/Contents/Resources/Assets.car" ] || { echo "actool made no Assets.car for the File Provider extension" >&2; exit 1; }
+    FPX_SYMBOL="<key>CFBundleSymbolName</key><string>seedwell</string>"
+else
+    echo "    no actool (Xcode): the on-demand folders' Finder sidebar icon is a plain folder in this build" >&2
+fi
 cat > "$FPX/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -276,6 +297,15 @@ cat > "$FPX/Contents/Info.plist" <<PLIST
     <key>CFBundleName</key><string>SeedwellFileProvider</string>
     <key>CFBundleDisplayName</key><string>Seedwell</string>
     <key>CFBundleExecutable</key><string>SeedwellFileProvider</string>
+    <key>CFBundleIconFile</key><string>AppIcon</string>
+    <key>CFBundleIcons</key>
+    <dict>
+        <key>CFBundlePrimaryIcon</key>
+        <dict>
+            <key>CFBundleIconFile</key><string>AppIcon</string>
+            $FPX_SYMBOL
+        </dict>
+    </dict>
     <key>CFBundlePackageType</key><string>XPC!</string>
     <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
     <key>CFBundleShortVersionString</key><string>$VERSION</string>

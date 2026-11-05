@@ -118,6 +118,10 @@ pub struct SyncFolder {
     /// On demand (SPEC 7G.11): every file is listed, only some are here (`files` and `bytes` count those); `path` is
     /// where the Finder shows it.
     pub on_demand: bool,
+    /// A full folder here, every file at `path`, that is on demand on the devices that do not hold its files (they get
+    /// placeholders; SPEC 7G.11, *Modes*): the Edit dialog's *Files on demand* is on for it.
+    #[uniffi(default = false)]
+    pub on_demand_others: bool,
     /// Files no device can give right now (SPEC 7G.11): not counted in `need_files`; "N files unavailable: no device
     /// has them".
     pub unavailable: u64,
@@ -137,6 +141,49 @@ pub struct SyncFolder {
     /// Removing it here also removes it from Seedwell on the user's other devices, their files kept: it is on all of
     /// them and this computer owns it (`sync_remove_folder_question` says so).
     pub removes_everywhere: bool,
+    /// While it scans: the phase and how far it is, which the row's grey line and ring say (`sync_folder_subtitle`,
+    /// `sync_folder_badge`): never a bare spinner (SPEC §7G.2).
+    #[uniffi(default = None)]
+    pub scan: Option<SyncScan>,
+}
+
+/// What a scan does now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum SyncScanPhase {
+    /// Walking the folder's tree.
+    Listing,
+    /// Reading the files found changed.
+    CheckingContents,
+}
+
+/// How far a folder's scan is (SPEC §7G.2).
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct SyncScan {
+    pub phase: SyncScanPhase,
+    /// Files seen so far, and their bytes.
+    pub files: u64,
+    pub bytes: u64,
+    /// Files found changed whose content is read, and their bytes (final once the listing is over).
+    pub check_files: u64,
+    pub check_bytes: u64,
+    /// Of those, read already.
+    pub checked_files: u64,
+    pub checked_bytes: u64,
+}
+
+fn scan_of(p: &trs_sync::scan::ScanProgress) -> SyncScan {
+    SyncScan {
+        phase: match p.phase {
+            trs_sync::scan::ScanPhase::Listing => SyncScanPhase::Listing,
+            trs_sync::scan::ScanPhase::CheckingContents => SyncScanPhase::CheckingContents,
+        },
+        files: p.files,
+        bytes: p.bytes,
+        check_files: p.check_files,
+        check_bytes: p.check_bytes,
+        checked_files: p.checked_files,
+        checked_bytes: p.checked_bytes,
+    }
 }
 
 /// A member of a folder or channel not connected for a day or more (or never here).
@@ -520,6 +567,17 @@ pub trait SyncBackend: Send + Sync {
     }
     fn snapshot(&self) -> SyncSnapshot;
     fn add_folder(&self, path: &str) -> Result<SyncFolder, CoreError>;
+    /// Adds a folder of this computer on demand for the devices without its files, its files kept where they are (the
+    /// Add dialog's *Files on demand*): marked before it opens, so its first scan lists its files and reads none (SPEC
+    /// §7G.11, *Listed first, hashed when first fetched*). Whole or not at all: never added without the mark (Start
+    /// again would find it synced already). The default (the mock): added, then marked, and taken back when the mark
+    /// fails.
+    fn add_folder_offering(&self, path: &str) -> Result<SyncFolder, CoreError> {
+        let f = self.add_folder(path)?;
+        self.set_files_on_demand(&f.id, true, None).inspect_err(|_| {
+            let _ = self.remove(&f.id);
+        })
+    }
     fn join(&self, key_or_link: &str, path: &str) -> Result<SyncFolder, CoreError>;
     /// Where a joined folder goes by default (`~/Seedwell/<name>`, numbered when taken).
     fn join_path(&self, key_or_link: &str) -> Option<String>;
@@ -594,8 +652,14 @@ pub trait SyncBackend: Send + Sync {
     fn rendezvous_start(&self, _task: crate::sync_rendezvous::Task) -> Result<(), CoreError> {
         Err(failed("Folder sync is not running."))
     }
-    /// On demand (SPEC 7G.11, [`ondemand`]): a folder full or on demand.
+    /// On demand (SPEC 7G.11, [`ondemand`]): this computer's local copies freed (`on`: its files move into Seedwell's
+    /// storage; the user's explicit choice only) or the folder full again.
     fn set_on_demand(&self, _id: &str, _on: bool, _path: Option<&str>) -> Result<SyncFolder, CoreError> {
+        Err(ondemand::not_on_demand().error)
+    }
+    /// *Files on demand* as the dialogs switch it: on a full folder it moves nothing (devices without the files get
+    /// placeholders); off on an on-demand folder it is full again ([`trs_sync_net::SyncHandle::set_files_on_demand`]).
+    fn set_files_on_demand(&self, _id: &str, _on: bool, _path: Option<&str>) -> Result<SyncFolder, CoreError> {
         Err(ondemand::not_on_demand().error)
     }
     fn join_on_demand(&self, _link: &str, _place: &str) -> Result<SyncFolder, CoreError> {
@@ -839,6 +903,7 @@ fn folder_of(f: &FolderStatus) -> SyncFolder {
         last_synced_s: f.last_synced_s,
         channel_id: f.channel_id.clone(),
         on_demand: f.on_demand,
+        on_demand_others: f.on_demand_others,
         unavailable: f.unavailable,
         progress: f.progress.clone(),
         problem: f.problem.as_deref().map(|e| readable(&trs_control::redact::scrub_keys(e))),
@@ -846,6 +911,7 @@ fn folder_of(f: &FolderStatus) -> SyncFolder {
         gone: f.gone.iter().map(gone_of).collect(),
         can_reshare: f.reshare,
         removes_everywhere: false,
+        scan: f.scan.as_ref().map(scan_of),
     }
 }
 
@@ -1127,6 +1193,9 @@ impl SyncBackend for RealSync {
     fn set_on_demand(&self, id: &str, on: bool, path: Option<&str>) -> Result<SyncFolder, CoreError> {
         self.od_set_mode(id, on, path)
     }
+    fn set_files_on_demand(&self, id: &str, on: bool, path: Option<&str>) -> Result<SyncFolder, CoreError> {
+        self.od_set_files_on_demand(id, on, path)
+    }
     fn join_on_demand(&self, link: &str, place: &str) -> Result<SyncFolder, CoreError> {
         self.od_join(link, place)
     }
@@ -1370,6 +1439,13 @@ impl SyncBackend for RealSync {
         let h = self.handle()?;
         let p = folder_path(path, "the folder").map_err(api_err)?;
         let f = self.rt.block_on(h.add_folder(p)).map_err(sync_err)?;
+        Ok(folder_of(&f))
+    }
+
+    fn add_folder_offering(&self, path: &str) -> Result<SyncFolder, CoreError> {
+        let h = self.handle()?;
+        let p = folder_path(path, "the folder").map_err(api_err)?;
+        let f = self.rt.block_on(h.add_folder_with(p, true)).map_err(sync_err)?;
         Ok(folder_of(&f))
     }
 
@@ -1946,6 +2022,7 @@ impl MockSync {
             last_synced_s: Some(now_s().saturating_sub(120)),
             channel_id: None,
             on_demand: false,
+            on_demand_others: false,
             unavailable: 0,
             progress: None,
             problem: None,
@@ -1953,6 +2030,7 @@ impl MockSync {
             gone: Vec::new(),
             can_reshare: false,
             removes_everywhere: false,
+            scan: None,
         };
         let mut photos = mk(1, "Photos", SyncAccess::ReadWrite, SyncState::UpToDate, 4, 3);
         photos.role = SyncRole::Owner;
@@ -2255,6 +2333,7 @@ impl MockSync {
             last_synced_s: None,
             channel_id: None,
             on_demand: false,
+            on_demand_others: false,
             unavailable: 0,
             progress: None,
             problem: None,
@@ -2262,6 +2341,7 @@ impl MockSync {
             gone: Vec::new(),
             can_reshare: false,
             removes_everywhere: false,
+            scan: None,
         };
         let members = mock_members(if joining { SyncRole::ReadOnly } else { role }, &[], None);
         s.folders.push(MockFolder { n, f: f.clone(), members, invites: Vec::new(), chat: None });
@@ -2280,6 +2360,9 @@ fn parent_of(path: &str) -> String {
 impl SyncBackend for MockSync {
     fn set_on_demand(&self, id: &str, on: bool, _path: Option<&str>) -> Result<SyncFolder, CoreError> {
         self.od_set_mode(id, on)
+    }
+    fn set_files_on_demand(&self, id: &str, on: bool, _path: Option<&str>) -> Result<SyncFolder, CoreError> {
+        self.od_set_files_on_demand(id, on)
     }
     fn join_on_demand(&self, link: &str, place: &str) -> Result<SyncFolder, CoreError> {
         ondemand::mock_join(self, link, place)

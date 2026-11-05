@@ -8,7 +8,7 @@
 
 use std::collections::BTreeSet;
 use std::io;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
@@ -858,6 +858,10 @@ async fn read_loop(
                 tokio::spawn(async move {
                     let id = req.id;
                     let f2 = f.clone();
+                    let wait = *lock(&ctx2.serve_wait);
+                    if !wait.is_zero() {
+                        tokio::time::sleep(wait).await;
+                    }
                     let resp = tokio::task::spawn_blocking(move || serve_chunk(&f2, &req))
                         .await
                         .unwrap_or(Response { id, code: ResponseCode::Generic, data: vec![] });
@@ -874,6 +878,37 @@ async fn read_loop(
                 peer.rx_bytes.fetch_add(r.data.len() as u64, Ordering::Relaxed);
                 peer.answer(r);
             }
+            Message::StreamRequest(req) => {
+                // A piece of an unhashed file of ours (SPEC §7G.11): read and hashed on a blocking thread, within the
+                // serving budget and the upload limit, as a chunk is.
+                let Some(f) = shared_folder(ctx, peer, &req.folder_id) else {
+                    let refused = trs_sync_proto::msg::StreamData { id: req.id, code: ResponseCode::Invalid, data: vec![], chunks: vec![], sig: None };
+                    let _ = peer.data.send(Message::StreamData(refused)).await;
+                    continue;
+                };
+                let kib = (req.len as usize).div_ceil(1024).clamp(1, SERVE_BUDGET_KIB) as u32;
+                let permit = serve.clone().acquire_many_owned(kib).await.map_err(io::Error::other)?;
+                let (peer2, ctx2) = (peer.clone(), ctx.clone());
+                tokio::spawn(async move {
+                    let id = req.id;
+                    let (f2, ctx3, from) = (f.clone(), ctx2.clone(), peer2.device.short());
+                    let d = tokio::task::spawn_blocking(move || serve_stream(&f2, &ctx3, from, &req)).await.unwrap_or(trs_sync_proto::msg::StreamData {
+                        id,
+                        code: ResponseCode::Generic,
+                        data: vec![],
+                        chunks: vec![],
+                        sig: None,
+                    });
+                    let n = d.data.len() as u64;
+                    if ctx2.limited(peer2.lan) {
+                        ctx2.limits.up.take(n).await;
+                    }
+                    f.served.add(n);
+                    let _ = peer2.data.send(Message::StreamData(d)).await;
+                    drop(permit);
+                });
+            }
+            Message::StreamData(d) => peer.answer_stream(d),
             // (A build without the feature does not know the type: it skips it.)
             Message::HoldQuery(_) if ctx.silent_ondemand.load(Ordering::SeqCst) || ctx.features & trs_sync_proto::msg::FEATURE_HOLDS == 0 => {}
             Message::HoldQuery(q) => {
@@ -1243,8 +1278,10 @@ fn serve_chunk(f: &FolderShared, req: &Request) -> Response {
     if rec.invalid || rec.dataless || info.deleted || info.kind != FileKind::File || f.ignore.get().is_ignored(&req.path, false) {
         return fail(ResponseCode::NoSuchFile);
     }
-    let listed = trs_sync::index::offsets(&info.chunks).any(|(off, c)| off == req.offset && c.len == req.len && c.hash == req.hash);
-    if !listed {
+    // An unhashed version of ours (SPEC §7G.11) has no list to look the chunk up in: a device asks for the chunks of its
+    // hashed form, which we signed, and what is read below must hash to the chunk's hash all the same.
+    let listed = info.is_unhashed() || trs_sync::index::offsets(&info.chunks).any(|(off, c)| off == req.offset && c.len == req.len && c.hash == req.hash);
+    if !listed || req.len > trs_sync_proto::model::MAX_CHUNK || req.offset.saturating_add(u64::from(req.len)) > info.size {
         return fail(ResponseCode::Invalid);
     }
     let fs = f.fs();
@@ -1261,4 +1298,92 @@ fn serve_chunk(f: &FolderShared, req: &Request) -> Response {
         return fail(ResponseCode::NoSuchFile);
     }
     Response { id: req.id, code: ResponseCode::Ok, data: buf }
+}
+
+/// Reads one piece of an unhashed file of ours for `from` (SPEC §7G.11, *hashed when first fetched*): only a file our
+/// index holds as our own unhashed version, valid and at the version asked for; the piece at offset 0 starts a read,
+/// each later one must follow the one before (else busy: start again). Every byte is read once and run through the
+/// chunker; with the last piece, the file unchanged since its record and throughout, the version goes back signed
+/// with its chunk list. A file that changed is answered *changed* and its read dropped: nothing of it is signed.
+pub(crate) fn serve_stream(f: &FolderShared, ctx: &Ctx, from: trs_sync_proto::ids::ShortId, req: &trs_sync_proto::msg::StreamRequest) -> trs_sync_proto::msg::StreamData {
+    use trs_sync::lazy::{Stream, StreamError};
+    let fail = |code| trs_sync_proto::msg::StreamData { id: req.id, code, data: vec![], chunks: vec![], sig: None };
+    let Some(rec) = f.index.local(&req.path).ok().flatten() else { return fail(ResponseCode::NoSuchFile) };
+    let info = &rec.file.info;
+    let ours = info.modified_by == ctx.me.short() && info.version == req.version && info.is_unhashed();
+    if !ours || rec.invalid || rec.dataless || f.ignore.get().is_ignored(&req.path, false) {
+        return fail(ResponseCode::NoSuchFile);
+    }
+    if req.len == 0 || req.len > trs_sync_proto::msg::STREAM_PIECE {
+        return fail(ResponseCode::Invalid);
+    }
+    let wait = *lock(&ctx.stream_wait);
+    if !wait.is_zero() {
+        std::thread::sleep(wait);
+    }
+    let key = (req.path.clone(), from);
+    let fs = f.fs();
+    let slot = {
+        let mut all = lock(&f.streams);
+        all.retain(|_, s| s.used.elapsed() < crate::shared::STREAM_IDLE);
+        if req.offset == 0 {
+            // This device's reads that came to their end (kept so a last answer lost on the way can be asked for
+            // again): a device streams one file at a time, so starting another means those ended well.
+            all.retain(|(p, d), s| !(*d == from && *p != req.path && s.stream.try_lock().is_ok_and(|x| x.ended())));
+            match Stream::start(&*fs, &rec) {
+                Ok(s) => {
+                    let stream = Arc::new(Mutex::new(s));
+                    all.insert(key.clone(), crate::shared::StreamSlot { stream: stream.clone(), used: std::time::Instant::now() });
+                    stream
+                }
+                Err(StreamError::Changed) => return fail(ResponseCode::Changed),
+                Err(StreamError::Gone) => return fail(ResponseCode::NoSuchFile),
+                Err(_) => return fail(ResponseCode::Generic),
+            }
+        } else {
+            match all.get_mut(&key) {
+                Some(s) => {
+                    s.used = std::time::Instant::now();
+                    s.stream.clone()
+                }
+                None => return fail(ResponseCode::Busy),
+            }
+        }
+    };
+    let mut s = lock(&slot);
+    if *s.version() != req.version {
+        return fail(ResponseCode::Busy);
+    }
+    let drop_read = || {
+        let mut all = lock(&f.streams);
+        if all.get(&key).is_some_and(|x| Arc::ptr_eq(&x.stream, &slot)) {
+            all.remove(&key);
+        }
+    };
+    match s.piece(&*fs, req.offset, req.len) {
+        // (The read stays after the last piece, until this device starts another or it idles out: an answer lost on
+        // the way is asked for again, once.)
+        Ok(p) => {
+            let sig = p.done.map(|h| {
+                let signed = trs_sync::scan::Signer::sign(&trs_sync::folder::DeviceSigner::new(ctx.key.clone(), f.id), h.info);
+                // What was signed, noted (the file unchanged throughout): this device's scans know the version's chunks
+                // even if the receiver never announces them.
+                if let Err(e) = trs_sync::lazy::note_hashed(&*fs, &signed) {
+                    eprintln!("seedwell sync: {}: its hashes could not be noted ({e})", req.path);
+                }
+                signed.sig
+            });
+            trs_sync_proto::msg::StreamData { id: req.id, code: ResponseCode::Ok, data: p.data, chunks: p.chunks, sig }
+        }
+        Err(StreamError::OutOfOrder) => fail(ResponseCode::Busy),
+        Err(StreamError::Changed) => {
+            drop_read();
+            fail(ResponseCode::Changed)
+        }
+        Err(StreamError::Gone) => fail(ResponseCode::NoSuchFile),
+        Err(StreamError::Io(_)) => {
+            drop_read();
+            fail(ResponseCode::Generic)
+        }
+    }
 }

@@ -217,12 +217,20 @@ async fn scan(ctx: &Arc<Ctx>, f: &Arc<FolderShared>, scope: &str) -> bool {
         // Stopping (a move, a removal, a switch) or paused: the core is let go at once; what was recorded stays, and
         // the next scan goes on from there (unchanged files are not read again).
         if *f.stopped.borrow() || f.paused.load(Ordering::Relaxed) {
+            lock(&f.live).scan = None;
             return false;
         }
         let f2 = f.clone();
+        let hold = *lock(&ctx.scan_hold);
         let step = tokio::task::spawn_blocking(move || {
             let mut core = lock(&f2.core);
+            // Marked on demand for the other devices (or not) since the last step: listed, or read (SPEC §7G.11).
+            core.set_list_first(f2.list_first.load(Ordering::SeqCst));
+            if !hold.is_zero() {
+                std::thread::sleep(hold);
+            }
             let r = core.scan_step(&mut job);
+            lock(&f2.live).scan = Some(job.progress());
             // New ignore patterns: what they no longer ignore was never scanned (a whole scan follows).
             if core.take_ignore_changed() {
                 f2.rescan.notify_one();
@@ -241,11 +249,16 @@ async fn scan(ctx: &Arc<Ctx>, f: &Arc<FolderShared>, scope: &str) -> bool {
             // Big files are read with the core free; the next step records them.
             if matches!(r, Ok(false)) {
                 let mut hashed = Vec::new();
+                // How far, file by file (a share can be a gigabyte: seconds of reading).
+                let mut p = job.progress();
                 for t in job.take_to_hash() {
                     if *f2.stopped.borrow() {
                         break;
                     }
                     hashed.push(t.run(&*fs));
+                    p.checked_files += 1;
+                    p.checked_bytes += t.size();
+                    lock(&f2.live).scan = Some(p);
                 }
                 job.hashed(hashed);
             }
@@ -255,6 +268,7 @@ async fn scan(ctx: &Arc<Ctx>, f: &Arc<FolderShared>, scope: &str) -> bool {
         let (r, seq, back) = match step {
             Ok(x) => x,
             Err(e) => {
+                lock(&f.live).scan = None;
                 set_error(f, format!("scan: {e}"));
                 return false;
             }
@@ -274,6 +288,7 @@ async fn scan(ctx: &Arc<Ctx>, f: &Arc<FolderShared>, scope: &str) -> bool {
             tokio::time::sleep(wait).await;
         }
     };
+    lock(&f.live).scan = None;
     match res {
         Ok(report) => {
             record_issues(f, &report);
@@ -303,7 +318,7 @@ async fn pull(ctx: &Arc<Ctx>, f: &Arc<FolderShared>, retry: &mut Option<(Instant
         let (ctx2, f2) = (ctx.clone(), f.clone());
         let rt = tokio::runtime::Handle::current();
         let res = tokio::task::spawn_blocking(move || {
-            let source = NetSource::new(ctx2.clone(), f2.id, rt);
+            let source = NetSource::new(ctx2.clone(), f2.id, rt.clone());
             // The losing device's own signed name in this folder first, so every member names a conflict copy the same.
             let profiles = ctx2.registry.space(&f2.id).map(|s| s.profile_names()).unwrap_or_default();
             let names = |id: ShortId| {
@@ -341,7 +356,12 @@ async fn pull(ctx: &Arc<Ctx>, f: &Arc<FolderShared>, retry: &mut Option<(Instant
                     break;
                 }
             }
-            let core = lock(&f2.core);
+            let mut core = lock(&f2.core);
+            // The streams and the peers' chunks the rounds want, fetched with the core let go (below).
+            let jobs = core.take_jobs();
+            if !jobs.is_empty() {
+                enqueue_jobs(&ctx2, &f2, jobs, &rt);
+            }
             let seq = core.index_state().map(|(_, s)| s).unwrap_or(0);
             // Issues of earlier pulls whose paths need nothing any more: they are settled.
             let earlier: Vec<String> = lock(&f2.live).pull_issues.keys().cloned().collect();
@@ -391,6 +411,95 @@ async fn pull(ctx: &Arc<Ctx>, f: &Arc<FolderShared>, retry: &mut Option<(Instant
         }
     }
     settle(f).await;
+}
+
+/// Queues the jobs the pull rounds want done with the folder's core let go ([`trs_sync::lazy::Job`]: streams of
+/// unhashed files, SPEC §7G.11, and the builds of hashed files, §7G.2) in the folder's two lanes, each running its jobs
+/// one at a time: a piece or a chunk can take minutes on a slow link, and nothing (the hosts' calls, a scan step, a
+/// peer's index) may wait for it. A later job for a path replaces a queued one. Returns at once.
+fn enqueue_jobs(ctx: &Arc<Ctx>, f: &Arc<FolderShared>, jobs: Vec<trs_sync::lazy::Job>, rt: &tokio::runtime::Handle) {
+    for job in jobs {
+        let stream = matches!(job, trs_sync::lazy::Job::Stream(_));
+        let start = {
+            let mut s = lock(lane(f, stream));
+            if let Some(replaced) = s.push(job) {
+                trs_sync::lazy::lock(&f.jobs).cancelled(replaced.path());
+            }
+            !std::mem::replace(&mut s.running, true)
+        };
+        if start {
+            let (ctx, f) = (ctx.clone(), Arc::downgrade(f));
+            // (Started from a blocking thread: on the runtime the source runs on.)
+            rt.spawn(run_lane(ctx, f, stream));
+        }
+    }
+}
+
+/// A folder's lane of jobs: streams of unhashed files, or the builds of hashed ones (each its own, so a stream that
+/// takes minutes holds up no hashed file).
+fn lane(f: &FolderShared, stream: bool) -> &std::sync::Mutex<crate::shared::Streamer> {
+    if stream { &f.streamer } else { &f.fetcher }
+}
+
+/// One lane of the folder's jobs: each queued job in turn, on a blocking thread, holding nothing of the folder but
+/// its files and a read-only view of its index (only a weak handle between jobs, so a folder that stops is let go
+/// of); each end handed to the core's job state (never the core), and a pull asked for when one came to its end (it
+/// places the file) or failed (it says why).
+async fn run_lane(ctx: Arc<Ctx>, f: std::sync::Weak<FolderShared>, stream: bool) {
+    loop {
+        let Some(sh) = f.upgrade() else { return };
+        let job = {
+            let mut s = lock(lane(&sh, stream));
+            match s.queue.pop_front() {
+                Some(j) => {
+                    s.current = Some(j.path().to_string());
+                    j
+                }
+                None => {
+                    s.running = false;
+                    s.current = None;
+                    return;
+                }
+            }
+        };
+        let path = job.path().to_string();
+        let (fs, id, stop, index) = (sh.fs(), sh.id, sh.stopped.subscribe(), sh.index.view());
+        let paused = sh.space.clone();
+        drop(sh);
+        let (ctx2, rt) = (ctx.clone(), tokio::runtime::Handle::current());
+        let ran = tokio::task::spawn_blocking(move || {
+            let source = NetSource::new(ctx2, id, rt);
+            let stop = || *stop.borrow() || paused.paused.load(Ordering::Relaxed);
+            let mut fetched = 0;
+            let end = trs_sync::lazy::run_job(&*fs, &source, &index, job, &stop, PULL_WINDOW, &mut fetched);
+            (end, fetched)
+        })
+        .await;
+        let Some(sh) = f.upgrade() else { return };
+        use trs_sync::lazy::{ChunksEnd, JobEnd, StreamEnd};
+        let failed = |why: String| if stream { JobEnd::Stream(StreamEnd::Failed(why)) } else { JobEnd::Chunks(ChunksEnd::Failed(why)) };
+        let end = match ran {
+            Ok((end, n)) => {
+                lock(&sh.live).fetched += n;
+                end.unwrap_or_else(|e| failed(format!("the download could not be written: {e}")))
+            }
+            Err(e) => failed(format!("the download stopped: {e}")),
+        };
+        let settled = match &end {
+            JobEnd::Stream(e) => !matches!(e, StreamEnd::Waiting(_)),
+            JobEnd::Chunks(ChunksEnd::Fetched(c)) => c.remaining.is_empty(),
+            JobEnd::Chunks(_) => true,
+        };
+        // No longer this lane's current job before the core hears of its end: a job for the path taken right after is
+        // queued, never taken for this one.
+        lock(lane(&sh, stream)).current = None;
+        // (Without the core: a round holding it never holds up a job's end.)
+        trs_sync::lazy::lock(&sh.jobs).job_ended(&path, end, trs_sync::clock::Clock::now_ns(&SystemClock));
+        // Done or failed: a pull places it, or says why. Cut off: the pull's own retry comes back to it.
+        if settled {
+            sh.remote_changed.notify_one();
+        }
+    }
 }
 
 /// This device's status in each pass folder (SPEC §7G.10), `.status-<this device>`: `receiving` while something
@@ -484,6 +593,8 @@ async fn settle(f: &Arc<FolderShared>) {
     })
     .await;
     let Ok((need, local, gone, pending, unavailable, ignore_file)) = totals else { return };
+    // A stream on its way (with the core let go, after the rounds): syncing, not waiting.
+    let streaming = lock(&f.streamer).running || lock(&f.fetcher).running;
     let mut live = lock(&f.live);
     live.ignore_file = ignore_file;
     live.need = need;
@@ -500,6 +611,8 @@ async fn settle(f: &Arc<FolderShared>) {
     if need.0 == 0 {
         live.state = FolderState::UpToDate;
         live.last_synced_s = Some(now_s());
+    } else if streaming {
+        live.state = FolderState::Syncing;
     } else {
         live.state = FolderState::WaitingForDevices;
     }

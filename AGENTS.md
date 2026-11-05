@@ -124,6 +124,9 @@ trip; most can be caught in the first minutes on the Mac.
   than a day; the PC's `run.ps1` sweeps `seedwell-qa-*` and `seedwell-render-*` older than an hour at its start. Never
   sweep a folder other programs share (the system temp folder, `~/Library`, the Seedwell Sync folder): delete only
   what you made.
+- **A worker's logs and scratch files go under a name of its own** (its worktree or branch name, for example
+  `<scratchpad>/<branch>/check.log`), never a shared name like `check.log`: workers share the coordinator's scratchpad,
+  and one run's log overwrote another's on 2026-11-05.
 - **Clear the build cache as you go.** `tools/check.sh` removes, once a day, the build artifacts no build has
   used for 3 days (`cargo sweep --time 3`, plus the `target/*/incremental` folders of that age, which cargo sweep
   leaves; it says so if cargo-sweep is missing). After a toolchain or dependency change, or when `target/` grows

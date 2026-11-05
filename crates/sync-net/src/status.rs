@@ -73,6 +73,9 @@ pub struct FolderStatus {
     pub channel_id: Option<String>,
     /// On demand (SPEC §7G.11): `files` and `bytes` count what is on this device, `path` is where the host shows it.
     pub on_demand: bool,
+    /// A full folder here whose files are on demand on the devices that do not hold them (SPEC §7G.11, *Modes*):
+    /// this device keeps its files at `path`.
+    pub on_demand_others: bool,
     /// Files no device can give right now (SPEC §7G.11): not counted as needed; "N files unavailable: no device has
     /// them". Removed only by the user deleting such an item (on a device where the folder is on demand).
     pub unavailable: u64,
@@ -85,7 +88,8 @@ pub struct FolderStatus {
     pub join_attempts: Vec<JoinAttemptStatus>,
     /// Admitted, with members of which none is connected: whom it waits for, since when, and why it cannot reach
     /// one ("Waiting for Kristian's Mac mini (last seen 3 days ago: nothing answers at 192.168.68.57:55799)",
-    /// "Waiting for 2 devices: Mac mini (3 days ago), Makro (1 hour ago)"). `None` otherwise.
+    /// "Waiting for 2 devices: Mac mini (3 days ago), Makro (1 hour ago)"); or connected to members none of which has
+    /// sent its list of the folder yet ("Waiting for Mac mini to list Movies"). `None` otherwise.
     pub waiting: Option<String>,
     /// As an owner: the members not connected and not seen for a day or more (or never here), which this device may
     /// remove (SPEC §7G.5). Nothing is removed unless the user says so.
@@ -93,6 +97,8 @@ pub struct FolderStatus {
     /// As a read-write or read-only member of a full folder whose every owner and admin is gone (nobody can admit
     /// devices or change roles any more): it may be shared again from this device ([`crate::SyncHandle::reshare`]).
     pub reshare: bool,
+    /// While it scans (`state` is `Scanning`): the phase and how far it is, for the app's words and ring (SPEC §7G.2).
+    pub scan: Option<trs_sync::scan::ScanProgress>,
 }
 
 /// A member of a folder or channel that has not been connected for a day or more (or never here).

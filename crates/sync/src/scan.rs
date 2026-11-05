@@ -100,6 +100,10 @@ pub struct ScanReport {
     pub deleted: u64,
     /// Bytes read for hashing.
     pub hashed_bytes: u64,
+    /// Files read for hashing (each counted once, also when it changed while it was read).
+    pub hashed_files: u64,
+    /// Files recorded unhashed (an on-demand folder's: nothing of them was read, SPEC §7G.11).
+    pub unhashed: u64,
     /// Files that changed while being hashed: scan them again later.
     pub busy: Vec<String>,
     /// Paths that are not synced, and why.
@@ -150,6 +154,11 @@ pub struct Scanner<'a> {
     /// ([`crate::folder::FolderCore::host_delete`]). It says which paths are kept on this device (pinned): one of
     /// those missing from the cache is fetched again.
     pub on_demand: Option<&'a dyn Fn(&str) -> bool>,
+    /// What the walk finds is listed and not read (SPEC §7G.11, *Listed first, hashed when first fetched*): an
+    /// on-demand folder, or a full one on demand for the devices without its files. A file is recorded unhashed (its
+    /// size, time and bits, no chunks) and hashed as it first streams to a device. The host's writes (`host_write`)
+    /// and content the puller may have written are read as before.
+    pub list_first: bool,
     /// On demand: the content found is the host's change (`host_written`), so it becomes this device's version even
     /// where the record is online only. Otherwise content found at an online-only path that is not the record's goes
     /// to the archive and never becomes a version (in an on-demand folder edits come from the host only).
@@ -189,11 +198,13 @@ fn is_ours(name: &str) -> bool {
 /// needs something)? A wanted temp is kept for that; any other is left over.
 fn temp_is_wanted(store: &dyn IndexStore, dir: &str, name: &str) -> io::Result<bool> {
     let tmp = join(dir, name);
-    let wanted = |p: &str, n: &NeedRecord| n.need != Need::Nothing && crate::pull::temp_path(p) == tmp;
-    // The usual name: `.seedwell.<name>.tmp` next to the path. (`.seedwell.tmp` itself has no name inside.)
+    let wanted = |p: &str, n: &NeedRecord| n.need != Need::Nothing && (crate::pull::temp_path(p) == tmp || crate::pull::stream_temp_path(p) == tmp);
+    // The usual name: `.seedwell.<name>.tmp` next to the path, or a stream's `.seedwell.<name>.stream.tmp` (written
+    // with the core let go, while a scan may run). (`.seedwell.tmp` itself has no name inside.)
     let Some(inner) = name.get(".seedwell.".len()..name.len().saturating_sub(".tmp".len())).filter(|n| !n.is_empty()) else {
         return Ok(false);
     };
+    let inner = inner.strip_suffix(".stream").filter(|i| !i.is_empty() && name.ends_with(".stream.tmp")).unwrap_or(inner);
     let path = join(dir, inner);
     if store.need(&path)?.is_some_and(|n| wanted(&path, &n)) {
         return Ok(true);
@@ -234,6 +245,42 @@ fn same_for_sync(a: &FileInfo, b: &FileInfo) -> bool {
     a.same_content(b)
 }
 
+/// The file `found` (just read) has the size, time and bits of the version `v`.
+fn same_listing(v: &FileInfo, found: &FileInfo, exec_bits: bool) -> bool {
+    v.kind == FileKind::File && found.kind == FileKind::File && v.size == found.size && v.mtime_ns == found.mtime_ns && (!exec_bits || v.exec == found.exec)
+}
+
+/// The hashed form of the unhashed version `v` (SPEC §7G.11): one a device announces (what a stream of it hashed), or
+/// the one noted here ([`crate::lazy::note_hashed`]: what this device signed as its maker at the end of a stream, or
+/// is about to place as a receiver). The same version of the same file, with its chunks.
+fn hashed_form<S: IndexStore + ?Sized>(fs: &dyn Fs, batch: &Batch<'_, S>, v: &FileInfo) -> io::Result<Option<SignedFile>> {
+    if !v.is_unhashed() {
+        return Ok(None);
+    }
+    let announced = batch
+        .remote_at(&v.path)?
+        .into_iter()
+        .map(|(_, e)| e)
+        .find(|e| !e.invalid && !e.file.info.is_unhashed() && e.file.info.path == v.path && e.file.info.same_content(v))
+        .map(|e| e.file);
+    Ok(announced.or_else(|| crate::lazy::noted_hashed(fs, v)))
+}
+
+/// What the file `found` at a path is when it is the content of the unhashed version `v` that a pull streamed, placed
+/// and did not record yet (a stop between the rename and the commit, SPEC §7G.11): `v`'s hashed form (announced, or
+/// noted by the puller before the rename), when the file has `v`'s size, time and bits and exactly that form's chunks.
+/// `None` otherwise: not that file, or nothing says what its bytes should be.
+fn streamed_as<S: IndexStore + ?Sized>(fs: &dyn Fs, batch: &Batch<'_, S>, v: &SignedFile, found: &FileInfo, exec_bits: bool) -> io::Result<Option<SignedFile>> {
+    if !v.info.is_unhashed() || !same_listing(&v.info, found, exec_bits) {
+        return Ok(None);
+    }
+    let noted = crate::lazy::noted_hashed(fs, &v.info).filter(|h| h.info.chunks == found.chunks);
+    Ok(match hashed_form(fs, batch, &v.info)? {
+        Some(h) if h.info.chunks == found.chunks => Some(h),
+        _ => noted,
+    })
+}
+
 /// A scan in steps (SPEC §7G.2, *Scanning in steps*): each [`Scanner::step`] commits what it found and returns, so
 /// whoever drives it can let go of the folder between steps (the app, a peer asking for the index and the file provider
 /// never wait for a whole first scan of a big folder). A step ends after a batch of changes, after [`ScanJob::stepped`]'s time budget,
@@ -254,8 +301,42 @@ pub struct ScanJob {
     budget: Option<Duration>,
     /// Files of at least this many bytes are hashed apart (`None`: in the step).
     hash_apart_from: Option<u64>,
+    /// Big files the walk found changed, hashed once the walk is over (names first: SPEC §7G.2, *Scanning in steps*).
+    deferred: std::collections::VecDeque<HashTask>,
     to_hash: Vec<HashTask>,
     hashed: Vec<Hashed>,
+    /// Regular files the walk saw, and their bytes.
+    listed: (u64, u64),
+    /// Big files found changed and not recorded yet (deferred, being hashed, or hashed), and their bytes.
+    pending: (u64, u64),
+}
+
+/// What a scan is doing (SPEC §7G.2: the folder's status says it, never a bare spinner).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScanPhase {
+    /// Walking the tree: every path's stat, small files read as they come.
+    Listing,
+    /// The tree is walked; the big files found changed are read and hashed.
+    CheckingContents,
+}
+
+/// How far a scan is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScanProgress {
+    /// What it does now.
+    pub phase: ScanPhase,
+    /// Regular files seen so far (all of them once the walk is over), and their bytes.
+    pub files: u64,
+    /// Their bytes.
+    pub bytes: u64,
+    /// Files found changed whose content is read (the total so far: final once the walk is over).
+    pub check_files: u64,
+    /// Their bytes.
+    pub check_bytes: u64,
+    /// Of those, read already.
+    pub checked_files: u64,
+    /// Their bytes.
+    pub checked_bytes: u64,
 }
 
 /// Files hashed apart in one go at most: this many, or this many bytes (a step ends when either is reached).
@@ -274,8 +355,25 @@ impl ScanJob {
             done: false,
             budget: None,
             hash_apart_from: None,
+            deferred: Default::default(),
             to_hash: Vec::new(),
             hashed: Vec::new(),
+            listed: (0, 0),
+            pending: (0, 0),
+        }
+    }
+
+    /// How far it is: the phase, the files seen, and of the content read, how much is done.
+    pub fn progress(&self) -> ScanProgress {
+        let (r, (pf, pb)) = (&self.report, self.pending);
+        ScanProgress {
+            phase: if self.walking && !self.stack.is_empty() { ScanPhase::Listing } else { ScanPhase::CheckingContents },
+            files: self.listed.0,
+            bytes: self.listed.1,
+            check_files: r.hashed_files + pf,
+            check_bytes: r.hashed_bytes + pb,
+            checked_files: r.hashed_files,
+            checked_bytes: r.hashed_bytes,
         }
     }
 
@@ -331,6 +429,7 @@ pub struct HashTask {
 pub struct Hashed {
     rel: String,
     stamp: Stamp,
+    size: u64,
     tier: Tier,
     chosen_at: u64,
     /// The chunks; `Ok(None)` when the file changed while it was read; or why it could not be read.
@@ -351,7 +450,7 @@ impl HashTask {
             Ok(c) => Ok(matches!(fs.lstat(&self.rel), Ok(Some(after)) if stamp_of(&after) == self.stamp).then_some(c)),
             Err(e) => Err(e.to_string()),
         };
-        Hashed { rel: self.rel.clone(), stamp: self.stamp, tier: self.tier, chosen_at: self.chosen_at, chunks }
+        Hashed { rel: self.rel.clone(), stamp: self.stamp, size: self.size, tier: self.tier, chosen_at: self.chosen_at, chunks }
     }
 }
 
@@ -381,7 +480,7 @@ impl Scanner<'_> {
         let out_of_time = || budget.is_some_and(|b| started.elapsed() >= b);
         if job.walking {
             self.walk(store, job, &out_of_time)?;
-            if job.stack.is_empty() && job.to_hash.is_empty() && job.hashed.is_empty() {
+            if job.stack.is_empty() && job.to_hash.is_empty() && job.hashed.is_empty() && job.deferred.is_empty() {
                 job.walking = false;
             }
             return Ok(false);
@@ -440,6 +539,7 @@ impl Scanner<'_> {
         // Files hashed apart since the last step first, each as it is now.
         for h in std::mem::take(&mut job.hashed) {
             let rel = h.rel.clone();
+            job.pending = (job.pending.0.saturating_sub(1), job.pending.1.saturating_sub(h.size));
             match self.fs.lstat(&rel) {
                 // Gone meanwhile: pass 2 says so.
                 Ok(None) => {}
@@ -449,7 +549,33 @@ impl Scanner<'_> {
                 Err(e) => report.issues.push(Issue { path: rel, kind: IssueKind::Io(e.to_string()) }),
             }
         }
-        let mut apart: u64 = 0;
+        // The walk is over (in an earlier step): the big files it found changed are read now, a share at a time, the next
+        // share handed out at the start of a step, so a mark that came between two steps counts. The folder lists first
+        // now (marked on demand for the other devices while this scan walked): they are listed, not read.
+        if job.stack.is_empty() && job.to_hash.is_empty() && self.list_first {
+            while let Some(task) = job.deferred.pop_front() {
+                job.pending = (job.pending.0.saturating_sub(1), job.pending.1.saturating_sub(task.size));
+                match self.fs.lstat(&task.rel) {
+                    // (One that is still read, a need there or hashes to confirm, is read apart, the core let go.)
+                    Ok(Some(meta)) => {
+                        if let Some(t) = self.visit(&mut batch, &task.rel, &meta, report, job.hash_apart_from, None)? {
+                            job.pending = (job.pending.0 + 1, job.pending.1 + t.size);
+                            job.to_hash.push(t);
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => report.issues.push(Issue { path: task.rel.clone(), kind: IssueKind::Io(e.to_string()) }),
+                }
+            }
+        }
+        if job.stack.is_empty() && job.to_hash.is_empty() {
+            let mut apart: u64 = 0;
+            while job.to_hash.len() < APART_FILES && apart < APART_BYTES {
+                let Some(task) = job.deferred.pop_front() else { break };
+                apart += task.size;
+                job.to_hash.push(task);
+            }
+        }
         let scope = job.scope.as_str();
         // A scope that is not on disk is handled by pass 2 (it was deleted).
         while let Some(rel) = job.stack.pop() {
@@ -472,9 +598,13 @@ impl Scanner<'_> {
                 if rel == scope && self.case_insensitive && !self.listed(&rel, &mut None) {
                     continue;
                 }
+                if meta.kind == FileKind::File && !meta.other {
+                    job.listed = (job.listed.0 + 1, job.listed.1 + meta.size);
+                }
+                // Hashed once the whole tree is walked: names first.
                 if let Some(task) = self.visit(&mut batch, &rel, &meta, report, job.hash_apart_from, None)? {
-                    apart += task.size;
-                    job.to_hash.push(task);
+                    job.pending = (job.pending.0 + 1, job.pending.1 + task.size);
+                    job.deferred.push_back(task);
                 }
             }
             if meta.kind == FileKind::Dir && !meta.other {
@@ -508,7 +638,7 @@ impl Scanner<'_> {
                     job.stack.push(join(&rel, &path::wire_name(&name)));
                 }
             }
-            if batch.len() >= self.batch_size || job.to_hash.len() >= APART_FILES || apart >= APART_BYTES || out_of_time() {
+            if batch.len() >= self.batch_size || out_of_time() {
                 break;
             }
         }
@@ -575,10 +705,61 @@ impl Scanner<'_> {
             if unchanged {
                 return Ok(None);
             }
+            // On demand, listed and not read: a file whose size and time are still its record's is that version (moving
+            // the files into the cache, switching to on demand, changes only their inode and change time). Restamped, never
+            // read, and no new version that every device would take for a change. A hashed record of a full folder (files
+            // in place, never moved) is checked by its content as before: its hashes must stay the file's.
+            let held = !o.dataless && !o.invalid && !o.file.info.deleted && o.file.info.kind == FileKind::File;
+            // An unhashed version a device has fetched has hashes now (its hashed form): the file is read to confirm it
+            // still has them, below; a version signed with two chunk lists would be a conflict of itself.
+            let streamed = held && hashed_form(self.fs, batch, &o.file.info)?.is_some();
+            if self.list_first
+                && (self.on_demand.is_some() || o.file.info.is_unhashed())
+                && !streamed
+                && !self.host_write
+                && meta.kind == FileKind::File
+                && held
+                && o.file.info.size == meta.size
+                && o.file.info.mtime_ns == meta.mtime_ns
+                && (!self.exec_bits || o.file.info.exec == meta.exec)
+                && batch.need(rel)?.is_none_or(|n| n.need == Need::Nothing)
+            {
+                batch.restamp_local(LocalRecord { stamp: Some(stamp), ..o.clone() });
+                return Ok(None);
+            }
         }
 
         let tier_memo = old.as_ref().and_then(|o| o.tier);
+        // On demand, what the scan finds is listed and not read (SPEC §7G.11, *Listed first, hashed when first fetched*):
+        // the first download hashes it. Read as before: the host's own writes, content found at an online-only path (it
+        // is the record's, fetched, or a stray to keep aside) and a file the puller may have written but not recorded
+        // (a need stands there): those are told apart by their content. So is a hashed file whose size and time are still
+        // its record's (only its change time or file id moved: a tag, an attribute): most likely the same content, which
+        // its hashes confirm, so it stays that version and no device takes it for a change.
+        let same_as_hashed = match &old {
+            Some(o)
+                if !o.dataless
+                    && !o.invalid
+                    && !o.file.info.deleted
+                    && o.file.info.kind == FileKind::File
+                    && o.file.info.size == meta.size
+                    && o.file.info.mtime_ns == meta.mtime_ns =>
+            {
+                !o.file.info.is_unhashed() || hashed_form(self.fs, batch, &o.file.info)?.is_some()
+            }
+            _ => false,
+        };
+        let lazy = meta.kind == FileKind::File
+            && self.list_first
+            && !self.host_write
+            && !same_as_hashed
+            && !old.as_ref().is_some_and(|o| o.dataless)
+            && batch.need(rel)?.is_none_or(|n| n.need == Need::Nothing);
         let (chunks, size, tier, target) = match meta.kind {
+            FileKind::File if lazy => {
+                report.unhashed += 1;
+                (Vec::new(), meta.size, tier_memo, String::new())
+            }
             FileKind::File => {
                 let (tier, chosen_at) =
                     chunk::choose_tier(meta.size, tier_memo.map(|t| (Tier { avg: t.avg }, t.chosen_at)));
@@ -592,6 +773,7 @@ impl Scanner<'_> {
                         }
                         _ => {
                             report.hashed_bytes += meta.size;
+                            report.hashed_files += 1;
                             report.busy.push(rel.to_string());
                             return Ok(None);
                         }
@@ -619,6 +801,7 @@ impl Scanner<'_> {
                             Some(after) if stamp_of(&after) == stamp => {}
                             _ => {
                                 report.hashed_bytes += meta.size;
+                                report.hashed_files += 1;
                                 report.busy.push(rel.to_string());
                                 return Ok(None);
                             }
@@ -627,6 +810,7 @@ impl Scanner<'_> {
                     }
                 };
                 report.hashed_bytes += meta.size;
+                report.hashed_files += 1;
                 (chunks, meta.size, Some(TierMemo { avg: tier.avg, chosen_at }), String::new())
             }
             FileKind::Symlink => match self.fs.read_link(rel) {
@@ -655,6 +839,64 @@ impl Scanner<'_> {
             conflict_of: base.and_then(|b| b.conflict_of.clone()),
             chunks,
         };
+
+        // An unhashed version held here whose size, time and bits the file still has (SPEC §7G.11), read now (its stamp
+        // moved: a tag, an attribute, a copy back; or the folder no longer lists first): it is that version when its
+        // chunks are the ones a device recorded for it, or no device did. The maker records the version's hashed form
+        // (the same version, signed again with its chunks: no change for anyone) unless the folder lists first;
+        // another holder takes the hashed form a device announced. Other chunks than recorded: changed, below.
+        if let Some(o) = &old
+            && meta.kind == FileKind::File
+            && !o.dataless
+            && !o.invalid
+            && !o.file.info.deleted
+            && o.file.info.is_unhashed()
+            && !info.chunks.is_empty()
+            && same_listing(&o.file.info, &info, self.exec_bits)
+        {
+            let known = hashed_form(self.fs, batch, &o.file.info)?;
+            if known.as_ref().is_none_or(|h| h.info.chunks == info.chunks) {
+                let file = match (known, self.signer) {
+                    _ if self.list_first => None,
+                    (Some(h), _) => Some(h),
+                    (None, Some(signer)) if o.file.info.modified_by == self.me => {
+                        Some(signer.sign(FileInfo { chunks: info.chunks.clone(), ..o.file.info.clone() }))
+                    }
+                    _ => None,
+                };
+                match file {
+                    Some(file) => {
+                        batch.put_local(LocalRecord { file, stamp: Some(stamp), tier, ..o.clone() });
+                        report.changed += 1;
+                    }
+                    None => batch.restamp_local(LocalRecord { stamp: Some(stamp), tier, ..o.clone() }),
+                }
+                return Ok(None);
+            }
+        }
+
+        // The content of an unhashed version a pull placed and did not record (a stop in between, SPEC §7G.11): that
+        // version, never a new one (which every device would take for a conflict with its maker's).
+        if let Some(o) = &old
+            && o.dataless
+            && !o.file.info.deleted
+            && let Some(file) = streamed_as(self.fs, batch, &o.file, &info, self.exec_bits)?
+        {
+            batch.put_local(LocalRecord { file, invalid: false, stamp: Some(stamp), tier, dataless: false, want: false, ..o.clone() });
+            report.changed += 1;
+            return Ok(None);
+        }
+        if let Some(n) = batch.need(rel)?
+            && !n.file.info.deleted
+            && !old.as_ref().is_some_and(|o| o.dataless)
+            && let Some(file) = streamed_as(self.fs, batch, &n.file, &info, self.exec_bits)?
+        {
+            let others: Vec<Version> = batch.remote_versions(rel)?;
+            let file = adopt(self.signer, self.me, old.as_ref(), file, &others);
+            batch.put_local(LocalRecord { file, sequence: 0, invalid: false, stamp: Some(stamp), tier, dataless: false, want: false });
+            report.changed += 1;
+            return Ok(None);
+        }
 
         // The same content as what we already have: only the stamp moved (a touch, a copy back).
         if let Some(o) = &old

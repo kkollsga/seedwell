@@ -1195,6 +1195,10 @@ public partial class App : Application
         }, TaskContinuationOptions.OnlyOnFaulted);
     }
 
+    /// <summary>"On all my devices" and its "Read only" as a dialog's model draws them (QA).</summary>
+    static string QaFollow(FollowLine? f) => f is null ? "all devices none, read only none"
+        : $"all devices {f.On} enabled {f.Enabled}, read only {(f.ReadOnly is FollowReadOnly r ? $"{r.On} enabled {r.Enabled} line \"{r.Line}\"" : "none")}";
+
     async Task QaRun(string[] w)
     {
         string verb = w.Length > 0 ? w[0] : "";
@@ -1433,6 +1437,9 @@ public partial class App : Application
                     if (Arg(1) == "placeholder") { var at = string.Join(' ', w.Skip(2)); result = $"placeholder {await Task.Run(() => CloudFiles.IsPlaceholder(at))}; "; }
                     // write-during-update <relative path> <text>: a program's write lands while the feed's item is placed.
                     if (Arg(1) == "write-during-update") { var wrel = Arg(2); var wtext = string.Join(' ', w.Skip(3)); result = await Task.Run(() => Cloud.QaWriteDuringUpdate(wrel, wtext)) + "; "; }
+                    // write-when-stale <relative path> <text>: armed; the write lands when another device's change reaches the file, before it is let go of.
+                    if (Arg(1) == "write-when-stale") { var srel = Arg(2); var stext = string.Join(' ', w.Skip(3)); result = Cloud.QaWriteWhenStale(srel, stext) + "; "; }
+                    if (Arg(1) == "wrote-when-stale") result = $"wrote {Cloud.QaWroteWhenStale}; ";
                     result += Cloud.QaStatus();
                     break;
                 // The Cloud Files plumbing's own check (item 6): a sync root in this run's temp state, no core involved.
@@ -1536,7 +1543,7 @@ public partial class App : Application
                     result += page.QaDescribe();
                     break;
                 // Add Folder: open [link] | mode local|shared | folder <path> | link <text> | location <path> | parent <path> |
-                // devices on|off | ondemand on|off | start | cancel | status.
+                // devices on|off | readonly on|off | ondemand on|off | start | cancel | status.
                 case "add-folder":
                     if (Arg(1) == "open") { AddFolderDialog.Show(this, w.Length > 2 ? w[2] : null); await Quiet.Settle(LibraryWindow.Content); }
                     else if (AddFolderDialog.Open is not AddFolderDialog af) { result = "not open"; break; }
@@ -1548,6 +1555,7 @@ public partial class App : Application
                         case "location": af.QaLocation(string.Join(' ', w.Skip(2))); break;
                         case "parent": af.QaParent(string.Join(' ', w.Skip(2))); break;
                         case "devices": af.QaAllDevices(Arg(2) == "on"); break;
+                        case "readonly": af.QaReadOnly(Arg(2) == "on"); break;
                         case "ondemand": af.QaOnDemand(Arg(2) == "on"); break;
                         case "start": result = await af.QaStart() ? "started" : "not started"; await Quiet.Settle(LibraryWindow.Content); break;
                         case "cancel": af.QaCancel(); break;
@@ -1555,11 +1563,11 @@ public partial class App : Application
                     if (AddFolderDialog.Open is AddFolderDialog afOpen)
                     {
                         var am = afOpen.Model;
-                        result += $"; add folder {afOpen.Form.Mode}, can start {am.CanStart}, folder \"{am.FolderText}\", link line \"{am.LinkLine}\", location \"{am.Location}\", on demand \"{am.OnDemandLabel ?? "none"}\" {afOpen.Form.OnDemand} note \"{am.OnDemandNote ?? ""}\", failure \"{afOpen.Failure}\"";
+                        result += $"; add folder {afOpen.Form.Mode}, can start {am.CanStart}, folder \"{am.FolderText}\", link line \"{am.LinkLine}\", location \"{am.Location}\", on demand \"{am.OnDemandLabel ?? "none"}\" {afOpen.Form.OnDemand} note \"{am.OnDemandNote ?? ""}\", {QaFollow(am.Follow)}, drawn [{afOpen.Switches}], failure \"{afOpen.Failure}\"";
                     }
                     if (ShareDialog.Open is not null) result += "; share open";
                     break;
-                // A folder's Edit dialog: open <folder> | name <text> | pause on|off | lan on|off | devices on|off | ondemand on|off |
+                // A folder's Edit dialog: open <folder> | name <text> | pause on|off | lan on|off | devices on|off | readonly on|off | ondemand on|off |
                 // options on|off | parent <path> | share | save | cancel | status.
                 case "edit-folder":
                     if (Arg(1) == "open") { EditFolderDialog.Show(this, FolderId(Arg(2))); await Quiet.Settle(LibraryWindow.Content); }
@@ -1570,6 +1578,7 @@ public partial class App : Application
                         case "pause": ef.QaPaused(Arg(2) == "on"); break;
                         case "lan": ef.QaLanOnly(Arg(2) == "on"); break;
                         case "devices": ef.QaAllDevices(Arg(2) == "on"); break;
+                        case "readonly": ef.QaReadOnly(Arg(2) == "on"); break;
                         case "ondemand": ef.QaOnDemand(Arg(2) == "on"); break;
                         case "options": ef.QaOptions(Arg(2) == "on"); break;
                         case "parent": ef.QaParent(string.Join(' ', w.Skip(2))); break;
@@ -1580,13 +1589,13 @@ public partial class App : Application
                     if (EditFolderDialog.Open is EditFolderDialog efOpen)
                     {
                         var em = efOpen.Model;
-                        result += $"; edit {em.Title}, changed {em.Changed}, can save {em.CanSave}, location \"{em.Location}\", share {(em.ShareTitle ?? "none")}, follow {(em.Follow is null ? "none" : em.Follow.On.ToString())}, on demand \"{em.OnDemandLabel ?? "none"}\" {efOpen.Form.OnDemand} note \"{em.OnDemandNote ?? ""}\", failure \"{efOpen.Failure}\"";
+                        result += $"; edit {em.Title}, changed {em.Changed}, can save {em.CanSave}, location \"{em.Location}\", share {(em.ShareTitle ?? "none")}, follow {(em.Follow is null ? "none" : em.Follow.On.ToString())}, on demand \"{em.OnDemandLabel ?? "none"}\" {efOpen.Form.OnDemand} note \"{em.OnDemandNote ?? ""}\", {QaFollow(em.Follow)}, drawn [{efOpen.Switches}], failure \"{efOpen.Failure}\"";
                     }
                     if (ShareDialog.Open is not null) result += "; share open";
                     break;
                 // The Share dialog: open <folder or channel> | role read_only|read_write|admin | single on|off | expires on|off
-                // [days] | chat on|off [channel id] | copy | revoke (the first link) | for <days> | noend | cancel | status. The
-                // link copied is never printed.
+                // [days] | chat on|off [channel id] | devices on|off | readonly on|off | scroll-end | copy | revoke (the first link) | for <days> |
+                // noend | cancel | status. The link copied is never printed.
                 case "share":
                     if (Arg(1) == "open") { ShareDialog.Show(this, FolderId(Arg(2))); await Quiet.Settle(LibraryWindow.Content); }
                     else if (ShareDialog.Open is not ShareDialog sd) { result = "not open"; break; }
@@ -1596,6 +1605,9 @@ public partial class App : Application
                         case "single": sd.QaSingleUse(Arg(2) == "on"); break;
                         case "expires": sd.QaExpires(Arg(2) == "on", uint.TryParse(Arg(3), out var days) ? days : 0); break;
                         case "chat": sd.QaChat(Arg(2) == "on", Arg(3)); break;
+                        case "devices": sd.QaDevices(Arg(2) == "on"); break;
+                        case "readonly": sd.QaReadOnly(Arg(2) == "on"); break;
+                        case "scroll-end": sd.QaScrollEnd(); await Quiet.Settle(LibraryWindow.Content); break;
                         case "copy": result = await sd.Copy() ? "copied" : "not copied"; break;
                         case "revoke": sd.QaRevokeFirst(); await Task.Delay(500); break;
                         case "for": sd.QaShareFor(uint.TryParse(Arg(2), out var forDays) ? forDays : 7); await Task.Delay(500); break;
@@ -1605,7 +1617,7 @@ public partial class App : Application
                     if (ShareDialog.Open is ShareDialog sdOpen)
                     {
                         var sm = sdOpen.Model;
-                        result += $"; share {sm.Title}, role {sm.Role}, summary \"{sm.Summary}\", links {sm.Links.Length}, sharing \"{sm.Sharing?.Countdown ?? sm.Sharing?.Line ?? "none"}\", copy {(sm.CopyTitle ?? "none")}, refusal \"{sm.Gone ?? sm.Refusal ?? ""}\", failure \"{sdOpen.Failure}\"";
+                        result += $"; share {sm.Title}, role {sm.Role}, summary \"{sm.Summary}\", links {sm.Links.Length}, sharing \"{sm.Sharing?.Countdown ?? sm.Sharing?.Line ?? "none"}\", copy {(sm.CopyTitle ?? "none")}, {QaFollow(sm.Devices)}, drawn [{sdOpen.Switches}], setting devices {sdOpen.SettingDevices}, refusal \"{sm.Gone ?? sm.Refusal ?? ""}\", failure \"{sdOpen.Failure}\"";
                     }
                     break;
                 // The tray's right-click menu as drawn (its entries' titles, [x] when checked, (off) when disabled), or one
@@ -1652,6 +1664,21 @@ public partial class App : Application
                     if (!await fe.QaSave()) { result = $"not saved: {fe.Failure}; "; fe.QaCancel(); }
                     var fl = Core.SyncFollowLine(folderId);
                     result = $"follow shown {fl.Shown}, on {fl.On}, enabled {fl.Enabled}";
+                    break;
+                // Settings › Devices' calls, between two temp states: link (a temp state's, so it may be printed) | join <link> |
+                // confirm (the first asking) | status.
+                case "pair":
+                    switch (Arg(1))
+                    {
+                        case "link": result = $"link {(Core.DevicesCurrentLink() ?? await Core.DevicesPairLink()).Link} ;"; break;
+                        case "join": await Core.DevicesJoin(Arg(2)); break;
+                        case "confirm":
+                            if (Core.DevicesView().Requests.FirstOrDefault() is PairRequestRow asking) await Core.DevicesConfirm(asking.Id);
+                            else result = "nobody asking; ";
+                            break;
+                    }
+                    var pairing = Core.DevicesView();
+                    result += $"devices {pairing.Kind}, rows {pairing.Rows.Length}, requests {pairing.Requests.Length}, joining \"{pairing.JoiningLine}\", problem \"{pairing.JoiningProblem}\"";
                     break;
                 case "search": Library.SetSearch(string.Join(' ', w.Skip(1))); break;
                 case "taskbar-created": TaskbarCreated(); result = $"tray {(tray is null ? "none" : "created")}"; break;

@@ -1058,6 +1058,146 @@ fn an_edit_of_a_version_that_moved_on_is_a_conflict_copy() {
     assert_eq!(read_all(&a.fs, &to).unwrap(), b"bravo, the user's edit of v1");
 }
 
+/// The conflict copy a host's edit was written as is found again by its content (`copy_holding`), so the same content
+/// reported again makes no second copy. Fails when a long name, whose copy's name is cut to fit (by how much depends
+/// on the device's name: 40 characters of Japanese are 120 bytes), hides its copy; or when another copy of the same
+/// size, a file beside it that only looks like one (no `conflict_of`), or another file's copy, is taken for it.
+#[test]
+fn the_copy_a_hosts_edit_was_written_as_is_found_by_its_content() {
+    let mut a = full_with_files();
+    let long = format!("docs/{}.txt", "l".repeat(240));
+    let docx = format!("docs/{}.docx", "r".repeat(200));
+    for p in [&long, &docx] {
+        write_all(&a.fs, p, b"long v1").unwrap();
+    }
+    a.core.scan("").unwrap();
+    let mut b = dev("B", 2, &rw(), true);
+    sync(&mut a, &mut b);
+    b.core.request("docs").unwrap();
+    pull(&mut b, &[&a]);
+    let edit = b"the user's edit of v1";
+    let japanese = "日".repeat(40);
+    for (path, device) in [(long.as_str(), "A rather long device name, forty chars"), (docx.as_str(), japanese.as_str()), ("docs/b.txt", "Beta")] {
+        let v1 = item(&mut b, path).content_version;
+        write_all(&a.fs, path, b"v2 from A").unwrap();
+        a.core.scan("").unwrap();
+        send(&a, &mut b);
+        pull(&mut b, &[&a]);
+        let found = |b: &Dev| {
+            let holds = &mut |i: &FileInfo| Ok(read_all(&b.fs, &i.path).ok().as_deref() == Some(&edit[..]));
+            trs_sync::ondemand::copy_holding(b.core.store(), path, holds).unwrap().map(|r| r.file.info.path)
+        };
+        assert!(found(&b).is_none(), "no copy yet");
+        let to = b.core.host_target(path, Some(&v1), device).unwrap();
+        assert_ne!(to, path);
+        write_all(&b.fs, &to, edit).unwrap();
+        b.core.host_written_copy(&to, path).unwrap();
+        // Another edit of the same size, its own copy (named before the first one).
+        let other = b.core.host_target(path, Some(&v1), device).unwrap();
+        write_all(&b.fs, &other, b"THE USER'S EDIT OF V1").unwrap();
+        b.core.host_written_copy(&other, path).unwrap();
+        assert!(other < to, "{other} is listed first");
+        assert_eq!(found(&b).as_deref(), Some(to.as_str()), "{path}");
+    }
+    // A file named like a copy of a.txt that is none, and b.txt's copy, are no copy of a.txt.
+    write_all(&b.fs, "docs/a (conflict, Beta, 2026-01-01 10.00z).txt", edit).unwrap();
+    b.core.scan("").unwrap();
+    let holds = &mut |i: &FileInfo| Ok(read_all(&b.fs, &i.path).ok().as_deref() == Some(&edit[..]));
+    assert!(trs_sync::ondemand::copy_holding(b.core.store(), "docs/a.txt", holds).unwrap().is_none());
+}
+
+/// An index store that counts the records read.
+struct Counting(MemStore, std::sync::atomic::AtomicUsize);
+
+impl trs_sync::index::IndexStore for Counting {
+    fn meta(&self) -> std::io::Result<trs_sync::index::Meta> {
+        self.0.meta()
+    }
+    fn local(&self, path: &str) -> std::io::Result<Option<trs_sync::index::LocalRecord>> {
+        self.1.fetch_add(1, Ordering::SeqCst);
+        self.0.local(path)
+    }
+    fn local_since(&self, after: u64, limit: usize) -> std::io::Result<Vec<trs_sync::index::LocalRecord>> {
+        self.0.local_since(after, limit)
+    }
+    fn local_paths(&self, prefix: &str, after: Option<&str>, limit: usize) -> std::io::Result<Vec<String>> {
+        self.0.local_paths(prefix, after, limit)
+    }
+    fn remote(&self, path: &str) -> std::io::Result<Vec<(ShortId, trs_sync_proto::model::IndexEntry)>> {
+        self.0.remote(path)
+    }
+    fn remote_paths(&self, device: ShortId, after: Option<&str>, limit: usize) -> std::io::Result<Vec<String>> {
+        self.0.remote_paths(device, after, limit)
+    }
+    fn peer(&self, device: ShortId) -> std::io::Result<Option<trs_sync::index::PeerState>> {
+        self.0.peer(device)
+    }
+    fn peer_ids(&self) -> std::io::Result<Vec<ShortId>> {
+        self.0.peer_ids()
+    }
+    fn writers(&self) -> std::io::Result<Vec<(ShortId, trs_sync_proto::sign::Writer)>> {
+        self.0.writers()
+    }
+    fn need(&self, path: &str) -> std::io::Result<Option<trs_sync::index::NeedRecord>> {
+        self.0.need(path)
+    }
+    fn needs(&self, after: Option<&str>, limit: usize) -> std::io::Result<Vec<(String, trs_sync::index::NeedRecord)>> {
+        self.0.needs(after, limit)
+    }
+    fn need_totals(&self) -> std::io::Result<(u64, u64)> {
+        self.0.need_totals()
+    }
+    fn local_totals(&self) -> std::io::Result<(u64, u64)> {
+        self.0.local_totals()
+    }
+    fn shown_since(&self, after: u64, limit: usize) -> std::io::Result<Vec<(u64, String)>> {
+        self.0.shown_since(after, limit)
+    }
+    fn shown_at(&self, path: &str) -> std::io::Result<Option<u64>> {
+        self.0.shown_at(path)
+    }
+    fn retired(&self, after: u64, upto: u64) -> std::io::Result<Vec<(u64, String, [u8; 16])>> {
+        self.0.retired(after, upto)
+    }
+    fn unavailable(&self) -> std::io::Result<Vec<(String, u64)>> {
+        self.0.unavailable()
+    }
+    fn unavailable_at(&self, path: &str) -> std::io::Result<Option<u64>> {
+        self.0.unavailable_at(path)
+    }
+    fn feed_floor(&self) -> std::io::Result<u64> {
+        self.0.feed_floor()
+    }
+    fn chunk_sources(&self, hash: &[u8; 32], limit: usize) -> std::io::Result<Vec<(String, u64)>> {
+        self.0.chunk_sources(hash, limit)
+    }
+    fn apply(&mut self, _ops: Vec<trs_sync::index::Op>) -> std::io::Result<()> {
+        unreachable!("read only")
+    }
+}
+
+/// Looking for a file's conflict copies reads the records beside it, never what is below a folder beside it whose name
+/// begins the same (`Photos/` beside `Photos.zip`). Fails when that whole folder is read, a record at a time, on the
+/// folder's core.
+#[test]
+fn looking_for_a_copy_never_reads_a_folder_beside_the_file() {
+    let a = full_with_files();
+    a.fs.create_dir("docs/b").unwrap();
+    for n in 0..200 {
+        write_all(&a.fs, &format!("docs/b/photo {n}.jpg"), b"x").unwrap();
+    }
+    let mut a = a;
+    a.core.scan("").unwrap();
+    use trs_sync::index::IndexStore;
+    let mut copy = MemStore::new(1);
+    let all = a.core.store().local_paths("", None, 10_000).unwrap();
+    copy.apply(all.iter().map(|p| trs_sync::index::Op::PutLocal(a.core.store().local(p).unwrap().unwrap())).collect()).unwrap();
+    let counting = Counting(copy, std::sync::atomic::AtomicUsize::new(0));
+    assert!(trs_sync::ondemand::copy_holding(&counting, "docs/b.txt", &mut |_| Ok(true)).unwrap().is_none());
+    let read = counting.1.load(Ordering::SeqCst);
+    assert!(read < 5, "{read} records read");
+}
+
 #[test]
 fn deleting_a_folder_keeps_what_the_host_never_saw_in_the_archive() {
     let mut a = full_with_files();

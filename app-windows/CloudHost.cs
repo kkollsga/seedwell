@@ -411,7 +411,7 @@ sealed class CloudHost : SyncHostListener
     }
 
     /// <summary>One item: its placeholder created, moved or updated; its in-sync state and pin as the item says.</summary>
-    void Place(Root root, SyncItem item)
+    void Place(Root root, SyncItem item, int refusals = 0)
     {
         if (item.Id == "root") return;
         var full = Full(root, item.Path);
@@ -433,7 +433,16 @@ sealed class CloudHost : SyncHostListener
         }
         else
         {
-            refill = Update(root, full, item, dir);
+            refill = Update(root, full, item, dir, out var refused);
+            if (refused)
+            {
+                // Its in-sync state stays: the file may hold what the core has not seen. A new write is reported now, and
+                // the item as it is then placed again.
+                root.Mark(item.Id, item.Path);
+                LookAt(root, item.Id);
+                if (refusals < 30) Later(root, full, 1000, () => { if (app.Core.SyncItem(root.Id, item.Id) is SyncItem now) Place(root, now, refusals + 1); });
+                return;
+            }
         }
         root.Mark(item.Id, item.Path);
         // Overwritten and still being written: nothing to set on a plain file; it becomes a placeholder when it closes.
@@ -581,11 +590,14 @@ sealed class CloudHost : SyncHostListener
     /// <summary>
     /// A placeholder's metadata as the item has it now. A filled file asks the core what it holds first
     /// (sync_local_change): the user's change not reported yet is reported (the next feed brings the item as changed);
-    /// an earlier version, or content this PC let go of, is dehydrated. True when a dehydrated file is wanted here again
-    /// (downloaded, only here, on its way), so the caller fills it.
+    /// an earlier version, or content this PC let go of, is dehydrated, only if nothing wrote to it since the core looked
+    /// (the core has its content then, as a conflict copy perhaps).
+    /// True when a dehydrated file is wanted here again (downloaded, only here, on its way), so the caller fills it.
+    /// <paramref name="refused"/>: the system refused, so the file may hold what the core has not seen.
     /// </summary>
-    bool Update(Root root, string full, SyncItem item, bool dir)
+    bool Update(Root root, string full, SyncItem item, bool dir, out bool refused)
     {
+        refused = false;
         // Overwritten: its change first, and it is a placeholder again (or will be, when it closes).
         if (!dir && !CloudFiles.IsPlaceholder(full))
         {
@@ -595,6 +607,7 @@ sealed class CloudHost : SyncHostListener
         var dehydrate = false;
         if (!dir && ((uint)File.GetAttributes(full) & RecallOnDataAccess) == 0)
         {
+            var saved = Stamp(full);
             switch (app.Core.SyncLocalChange(root.Id, item.Id))
             {
                 case SyncLocalChange.Modified:
@@ -604,21 +617,50 @@ sealed class CloudHost : SyncHostListener
                     dehydrate = true;
                     break;
             }
-            qaDuringUpdate?.Invoke(full);
+            qaDuringUpdate?.Invoke(full, dehydrate);
             // A filled file's size is its own: the update would set it to the item's and cut off what a program has just
             // written. Only a placeholder with no content, or one let go of here, takes the item's metadata.
             if (!dehydrate) return false;
+            // Windows dehydrates only a file in sync, and a write clears the mark, so one after this is refused. One before it:
+            // still being written, or a save since the core looked. (The USN can't tell: it moves at each close of a handle.)
+            SetInSync(full, true, item.Path);
+            if (!Closed(full) || Stamp(full) != saved)
+            {
+                SetInSync(full, false, item.Path);
+                refused = true;
+                return false;
+            }
         }
-        var meta =CloudFiles.Metadata((long)item.Size, item.MtimeNs, dir);
+        var meta = CloudFiles.Metadata((long)item.Size, item.MtimeNs, dir);
         var ptr = Marshal.AllocHGlobal(Marshal.SizeOf<CloudFiles.FsMetadata>());
         try
         {
             Marshal.StructureToPtr(meta, ptr, false);
             using var h = CloudFiles.Open(full);
-            Refused(CloudFiles.CfUpdatePlaceholder(h, ptr, IntPtr.Zero, 0, IntPtr.Zero, 0, dehydrate ? CloudFiles.UpdateDehydrate : 0, IntPtr.Zero, IntPtr.Zero), "update", item.Path);
+            var hr = CloudFiles.CfUpdatePlaceholder(h, ptr, IntPtr.Zero, 0, IntPtr.Zero, 0, dehydrate ? CloudFiles.UpdateDehydrate : 0, IntPtr.Zero, IntPtr.Zero);
+            Refused(hr, "update", item.Path);
+            refused = hr < 0;
+            // Marked in sync for this: refused, the file still holds bytes other than the item's.
+            if (dehydrate && refused)
+            {
+                SetInSync(full, false, item.Path);
+            }
         }
         finally { Marshal.FreeHGlobal(ptr); }
-        return dehydrate && item.State is SyncItemState.Downloaded or SyncItemState.ModifiedHere or SyncItemState.Downloading;
+        return !refused && dehydrate && item.State is SyncItemState.Downloaded or SyncItemState.ModifiedHere or SyncItemState.Downloading;
+    }
+
+    /// <summary>What a file's last save looks like, for telling whether another came after it.</summary>
+    static (DateTime, long) Stamp(string full)
+    {
+        var f = new FileInfo(full);
+        return (f.LastWriteTimeUtc, f.Length);
+    }
+
+    static void SetInSync(string full, bool inSync, string path)
+    {
+        using var h = CloudFiles.Open(full);
+        Refused(CloudFiles.CfSetInSyncState(h, inSync ? 1u : 0u, 0, IntPtr.Zero), "in-sync state", path);
     }
 
     void Remove(Root root, string id)
@@ -1004,7 +1046,8 @@ sealed class CloudHost : SyncHostListener
     /// <summary>
     /// The user's change of a file's content: the core takes it (copied, from the version it started from) and the
     /// placeholder, which holds exactly that, is adopted. When another device's version came first the change becomes a
-    /// conflict copy, which the feed places; this placeholder is then let go of as the feed says.
+    /// conflict copy, which the feed places; the feed names this item again too, the core then says it is stale, and Update
+    /// lets this placeholder go. However often it is reported, one content is one copy.
     /// </summary>
     void Report(Root root, string item, string path, string? @base)
     {
@@ -1165,7 +1208,8 @@ sealed class CloudHost : SyncHostListener
     /// file's text, another file's size and SHA-256, or why not.
     /// </summary>
     /// <summary>QA: runs after the core said what a filled file holds and before its placeholder is updated.</summary>
-    Action<string>? qaDuringUpdate;
+    Action<string, bool>? qaDuringUpdate;
+    volatile bool qaWroteWhenStale;
 
     /// <summary>
     /// QA: a program's write at the worst moment of an update from the feed: the feed's item, of the size the file had
@@ -1177,7 +1221,7 @@ sealed class CloudHost : SyncHostListener
         lock (gate) r = roots.Values.FirstOrDefault();
         if (r is null || r.IdAt(relative) is not string id || app.Core.SyncItem(r.Id, id) is not SyncItem item) return "write: no such item";
         var bytes = Encoding.ASCII.GetBytes(text);
-        qaDuringUpdate = full =>
+        qaDuringUpdate = (full, _) =>
         {
             using var f = new FileStream(full, FileMode.Open, FileAccess.Write, FileShare.Read);
             f.Write(bytes);
@@ -1191,6 +1235,30 @@ sealed class CloudHost : SyncHostListener
         done.Task.Wait(30_000);
         return $"holds \"{File.ReadAllText(Full(r, relative))}\"";
     }
+
+    /// <summary>
+    /// QA: a program's write at the moment the core has said a filled file is an earlier version, before it is let go of:
+    /// armed now, it lands when another device's change reaches the file. A dehydrate from here on would throw it away.
+    /// </summary>
+    internal string QaWriteWhenStale(string relative, string text)
+    {
+        Root? r;
+        lock (gate) r = roots.Values.FirstOrDefault();
+        if (r is null) return "write: no root";
+        var target = Full(r, relative);
+        var bytes = Encoding.ASCII.GetBytes(text);
+        qaWroteWhenStale = false;
+        qaDuringUpdate = (full, stale) =>
+        {
+            if (!stale || !string.Equals(full, target, StringComparison.OrdinalIgnoreCase)) return;
+            qaDuringUpdate = null;
+            using (var f = new FileStream(full, FileMode.Open, FileAccess.Write, FileShare.Read)) f.Write(bytes);
+            qaWroteWhenStale = true;
+        };
+        return "armed";
+    }
+
+    internal bool QaWroteWhenStale => qaWroteWhenStale;
 
     internal string QaRead(string relative)
     {

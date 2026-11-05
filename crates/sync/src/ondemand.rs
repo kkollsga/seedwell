@@ -430,12 +430,57 @@ impl Ids {
     }
 }
 
+/// A live conflict copy of the file `path` (a file whose record names it `conflict_of` `path`) whose recorded content
+/// `holds` finds in the host's file: the copy a host's edit of `path` was written as already, so the same content
+/// reported again is that copy, never a second one (SPEC §7G.11). Lists only the names beside `path` that begin as all
+/// its copies do ([`crate::conflict::copy_prefix`]), never what is below a folder among them, and reads the records of
+/// those named as conflict copies only, so it costs little beside a large folder (it runs on the folder's core).
+pub fn copy_holding(store: &dyn IndexStore, path: &str, holds: &mut dyn FnMut(&FileInfo) -> io::Result<bool>) -> io::Result<Option<LocalRecord>> {
+    let dir = path.rsplit_once('/').map_or("", |(d, _)| d);
+    let prefix = if dir.is_empty() { String::new() } else { format!("{dir}/") };
+    let start = crate::conflict::copy_prefix(path);
+    // Listed from just before `start`: a name that begins with it sorts after anything shorter.
+    let mut after = start.char_indices().last().map(|(i, _)| start[..i].to_string());
+    'pages: loop {
+        let page = store.local_paths(dir, after.as_deref(), 1000)?;
+        if page.is_empty() {
+            return Ok(None);
+        }
+        for p in page {
+            if !p.starts_with(start) {
+                if p.as_str() > start {
+                    return Ok(None);
+                }
+                after = Some(p);
+                continue;
+            }
+            if let Some(slash) = p[prefix.len()..].find('/') {
+                // Below a folder beside it: everything below that folder is skipped at once.
+                after = Some(format!("{}/\u{10FFFF}", &p[..prefix.len() + slash]));
+                continue 'pages;
+            }
+            if p != path
+                && crate::conflict::parse_conflict(&p).is_some()
+                && let Some(r) = store.local(&p)?
+                && live(&r)
+                && r.file.info.kind == FileKind::File
+                && r.file.info.conflict_of.as_deref() == Some(path)
+                && holds(&r.file.info)?
+            {
+                return Ok(Some(r));
+            }
+            after = Some(p);
+        }
+    }
+}
+
 /// An item's content version (as [`Item::content_version`]), for a host's check of what it saw.
 pub fn content_version_of(i: &FileInfo) -> String {
     content_version(i)
 }
 
-/// Changes exactly when the content does.
+/// Changes exactly when the content does. An unhashed version's content is not known (SPEC §7G.11): its content version
+/// is that of the version itself (its digest names it), so another one at the same path and of the same size is a change.
 pub(crate) fn content_version(i: &FileInfo) -> String {
     let mut h = Sha256::new();
     h.update([i.kind as u8, u8::from(i.exec), u8::from(i.deleted)]);
@@ -443,6 +488,9 @@ pub(crate) fn content_version(i: &FileInfo) -> String {
     h.update(i.symlink_target.as_bytes());
     for c in &i.chunks {
         h.update(c.hash);
+    }
+    if i.is_unhashed() {
+        h.update(i.content_digest());
     }
     hex(&h.finalize()[..16])
 }
@@ -562,7 +610,7 @@ impl Holder<'_> {
                             && crate::pull::holds(&r)
                             && !r.invalid
                             && match i.version.compare(&h.version) {
-                                Causality::Equal => i.content_digest() == h.content,
+                                Causality::Equal => same_form(i, &h.content, Some(self.me)),
                                 Causality::Greater => true,
                                 _ => false,
                             }
@@ -618,6 +666,10 @@ pub(crate) fn same_bytes(a: &FileInfo, b: &FileInfo) -> bool {
 
 /// This device holds `i`'s bytes in some file (the puller copies them from there).
 pub(crate) fn bytes_here(store: &dyn IndexStore, i: &FileInfo) -> io::Result<bool> {
+    // (Unhashed: no chunk to find it by; held only at its own path, by its maker.)
+    if i.is_unhashed() {
+        return Ok(false);
+    }
     let Some(first) = i.chunks.first() else { return Ok(true) };
     for (p, _) in store.chunk_sources(&first.hash, 64)? {
         if store.local(&p)?.is_some_and(|r| !r.dataless && !r.invalid && !r.file.info.deleted && same_bytes(&r.file.info, i)) {
@@ -625,6 +677,14 @@ pub(crate) fn bytes_here(store: &dyn IndexStore, i: &FileInfo) -> io::Result<boo
         }
     }
     Ok(false)
+}
+
+/// Our version `i` is the content another device describes by `content` (its [`FileInfo::content_digest`]) at the same
+/// version: the same digest, or one form of a version unhashed on one side and hashed on the other (SPEC §7G.11). A
+/// hashed copy knows its unhashed form's digest; an unhashed version of this device's own (`me` made it) is the only
+/// content that version ever had, whichever form the other device holds.
+pub fn same_form(i: &FileInfo, content: &[u8; 32], me: Option<ShortId>) -> bool {
+    i.content_digest() == *content || (i.kind == FileKind::File && i.size > 0 && i.unhashed_digest() == *content) || (i.is_unhashed() && Some(i.modified_by) == me)
 }
 
 /// `held` (another device's version) stands for `ours`: the same version and content, or a later version.

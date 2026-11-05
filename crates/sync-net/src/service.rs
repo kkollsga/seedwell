@@ -103,6 +103,22 @@ pub struct Options {
     /// a folder that is on demand on the device that put it on all the user's devices is joined here in full, and its
     /// page says why.
     pub on_demand: bool,
+    /// Seedwell's own torrents, when the engine runs beside the service (the app, the daemon): a folder's files are
+    /// never moved from under one ([`LocalTorrents`]).
+    pub torrents: Option<Arc<dyn LocalTorrents>>,
+}
+
+/// Seedwell's own torrents, which may seed from inside a synced folder (SPEC §7G.11, *Modes*). Lent by whoever runs the
+/// engine beside the service (`trs_control::sync::start_sync_with`). Freeing a folder's local copies (its files moved
+/// into this device's cache) is refused while a torrent uses files in it, and after any move of a folder's files a
+/// torrent that missed its files looks again (they may be back).
+pub trait LocalTorrents: Send + Sync {
+    /// The names of the torrents whose files are at or below `path` (absolute), or that hold it; an error with the
+    /// reason when that cannot be told now (the engine did not answer in time). Answers within seconds.
+    fn using(&self, path: &Path) -> BoxFuture<'static, Result<Vec<String>, String>>;
+    /// A folder's files moved on this device (a switch, a move, a removal): torrents missing their files look again.
+    /// Returns at once.
+    fn moved(&self);
 }
 
 /// The host that shows on-demand folders in the file manager (the Mac's File Provider domain, SPEC 7G.11). Before a
@@ -154,6 +170,7 @@ impl Options {
             chat_agents: None,
             on_demand_host: Arc::new(Mutex::new(None)),
             on_demand: trs_platform::ON_DEMAND_FOLDERS,
+            torrents: None,
         }
     }
 }
@@ -386,6 +403,8 @@ pub(crate) struct Inner {
     pub(crate) on_demand_host: OnDemandHostCell,
     /// This device keeps folders on demand ([`Options::on_demand`]).
     pub(crate) on_demand: bool,
+    /// Seedwell's own torrents ([`Options::torrents`]).
+    pub(crate) torrents: Option<Arc<dyn LocalTorrents>>,
     /// Network changes ([`crate::netchange`]).
     pub(crate) netwatch: crate::netchange::NetWatch,
     /// The rendezvous ([`crate::rendezvous`]).
@@ -474,7 +493,7 @@ impl SyncHandle {
         let key = Arc::new(key);
         let tls = Tls::new(&key).map_err(io::Error::other)?;
 
-        let (listener, utp, foreign_rx) = bind_port(opts.bind, cfg.settings.port, opts.utp).await?;
+        let (bind, listener, utp, foreign_rx) = bind_port(opts.bind, cfg.settings.port, opts.utp).await?;
         let port = listener.local_addr()?.port();
         if cfg.settings.port != port {
             cfg.settings.port = port;
@@ -521,6 +540,9 @@ impl SyncHandle {
             hold_wait: Mutex::new(Duration::from_secs(10)),
             scan_step_wait: Mutex::new(Duration::ZERO),
             fetch_wait: Mutex::new(Duration::ZERO),
+            stream_wait: Mutex::new(Duration::ZERO),
+            serve_wait: Mutex::new(Duration::ZERO),
+            scan_hold: Mutex::new(Duration::ZERO),
             silent_ondemand: AtomicBool::new(false),
             folder_gen: std::sync::atomic::AtomicU64::new(0),
             file_hooks: crate::files::Hooks::default(),
@@ -532,6 +554,10 @@ impl SyncHandle {
             pairing: Mutex::new(Vec::new()),
             devices_wake: Notify::new(),
             devices_lock: tokio::sync::Mutex::new(()),
+            hold_key_changes: AtomicBool::new(false),
+            hold_switch: AtomicBool::new(false),
+            hold_read_only_again: AtomicBool::new(false),
+            switches_waiting: std::sync::atomic::AtomicUsize::new(0),
             settling: Mutex::new(std::time::Instant::now() + FETCH_GRACE),
             fetch_grace: Mutex::new(FETCH_GRACE),
             fetch_stall: Mutex::new(FETCH_STALL),
@@ -541,7 +567,7 @@ impl SyncHandle {
             lock(&ctx.direct.settings).agents = a;
         }
         let lan_runs = opts.lan_discovery && cfg.settings.lan_discovery;
-        let lan = crate::lan::Lan::new(ctx.clone(), opts.bind, opts.lan_port, opts.lan_targets);
+        let lan = crate::lan::Lan::new(ctx.clone(), bind, opts.lan_port, opts.lan_targets);
         let inner = Arc::new(Inner {
             ctx,
             dir,
@@ -552,7 +578,7 @@ impl SyncHandle {
             queued_save_wait_ms: AtomicU64::new(0),
             secrets: opts.secrets,
             port,
-            bind: opts.bind,
+            bind,
             lan_runs,
             discovery: opts.discovery,
             runners: Mutex::new(HashMap::new()),
@@ -575,6 +601,7 @@ impl SyncHandle {
             forbidden_root: opts.forbidden_root,
             on_demand_host: opts.on_demand_host,
             on_demand: opts.on_demand,
+            torrents: opts.torrents,
             netwatch: crate::netchange::NetWatch::default(),
             rendezvous: crate::rendezvous::State::default(),
         });
@@ -607,7 +634,7 @@ impl SyncHandle {
             }
             eprintln!(concat!("seedwell sync: channel {} was made by a test build; it is no longer on this ", trs_platform::computer!()), e.name);
         }
-        let stopped = h.recover_journals().await;
+        let (stopped, switched) = h.recover_journals().await;
         *lock(&h.inner.held) = stopped.clone();
         let entries = lock(&h.inner.cfg).folders.clone();
         for e in entries {
@@ -633,6 +660,9 @@ impl SyncHandle {
             && let Err(err) = h.open_devices(&e).await
         {
             eprintln!("seedwell sync: your devices: {err}");
+        }
+        for id in &switched {
+            h.follow_mode_changed(id).await;
         }
 
         let mut tasks = vec![
@@ -933,6 +963,9 @@ impl SyncHandle {
                 core.set_members(&members)?;
             }
             core.set_pins(entry.pins.iter().cloned());
+            core.set_list_first(entry.on_demand_others);
+            // Peers' chunks come with the core let go (the folder's streamer runs the fetches).
+            core.set_fetch_apart(true);
             if entry.mode_switched {
                 // Switched: to full, what is still online only is fetched now; to on demand, what is here is
                 // announced again as an on-demand device's.
@@ -958,11 +991,13 @@ impl SyncHandle {
         crate::devices::mark_following(&self.inner.ctx, &space);
         let mut items = trs_sync::ondemand::Items::default();
         items.set_not_members(core.not_members());
+        let jobs = core.streams();
         let shared = Arc::new(FolderShared {
             space: Arc::new(space),
             root: if e.on_demand { self.cache_path(&id) } else { e.path.clone() },
             place: Mutex::new(e.path.clone()),
             on_demand: e.on_demand,
+            list_first: AtomicBool::new(e.on_demand_others),
             pins: Mutex::new(e.pins.iter().cloned().collect()),
             items: Mutex::new(items),
             freeing: Mutex::new(BTreeMap::new()),
@@ -981,6 +1016,10 @@ impl SyncHandle {
             served: crate::limit::Meter::default(),
             fetches: Mutex::new(Default::default()),
             announce_pause: Mutex::new(Duration::ZERO),
+            streams: Mutex::new(HashMap::new()),
+            streamer: Mutex::new(Default::default()),
+            fetcher: Mutex::new(Default::default()),
+            jobs,
             closed: crate::shared::Closed::default(),
         });
         // Devices met in this folder before are members to dial, at the addresses they had.
@@ -1081,6 +1120,14 @@ impl SyncHandle {
 
     /// Starts sharing a folder on this Mac: makes its secret, and this device its owner.
     pub async fn add_folder(&self, path: PathBuf) -> Result<FolderStatus, SyncError> {
+        self.add_folder_with(path, false).await
+    }
+
+    /// [`Self::add_folder`], on demand for the devices without its files (`on_demand_others`, as
+    /// [`Self::set_files_on_demand`] marks it) from the start: its files stay where they are, and its first scan lists
+    /// them and reads none (SPEC §7G.11, *Listed first, hashed when first fetched*), so the other devices list it within
+    /// seconds whatever its size. What the app's Add dialog does with *Files on demand* on.
+    pub async fn add_folder_with(&self, path: PathBuf, on_demand_others: bool) -> Result<FolderStatus, SyncError> {
         let path = absolute(&path)?;
         let meta = std::fs::metadata(&path).map_err(|_| invalid(format!("{} does not exist", path.display())))?;
         if !meta.is_dir() {
@@ -1097,10 +1144,12 @@ impl SyncHandle {
         m.add([grant]);
         crate::roles::save(&self.members_path(&id), &m)?;
         self.inner.secrets.put(&crate::roles::secret_name(&id), secret.as_bytes())?;
-        self.install(*secret.public_key(), path, None, false).await
+        self.install_with(*secret.public_key(), path, None, false, on_demand_others).await
     }
 
-    /// Adds a folder of this device on demand (SPEC §7G.11): its files go into this device's cache before the folder
+    /// Adds a folder of this device with its local copies freed at once (SPEC §7G.11; the user's explicit choice: the
+    /// app's *Files on demand* adds a full folder that offers it, [`Self::set_files_on_demand`]). Refused while a
+    /// torrent uses files in it. Its files go into this device's cache before the folder
     /// ever opens, so no scan holds it busy, and the add ends on demand or adds nothing. The configuration and the
     /// journal of the move come first: a move cut off is finished (or undone) at the next start, as a switch's is; a
     /// move that cannot be finished now keeps the folder, held back, and says so; any other failure forgets it again,
@@ -1114,6 +1163,7 @@ impl SyncHandle {
         refuse_cloud_root(&path)?;
         self.refuse_forbidden(&path)?;
         self.refuse_overlap(&path)?;
+        self.refuse_in_use(&path).await?;
         let secret = FolderSecret::generate(&mut ring::rand::SystemRandom::new()).map_err(io::Error::other)?;
         let id = FolderId::of_public_key(secret.public_key());
         let me = *self.inner.ctx.key.public_key();
@@ -1249,6 +1299,10 @@ impl SyncHandle {
     }
 
     async fn install(&self, folder_pk: [u8; 32], path: PathBuf, channel: Option<FolderId>, on_demand: bool) -> Result<FolderStatus, SyncError> {
+        self.install_with(folder_pk, path, channel, on_demand, false).await
+    }
+
+    async fn install_with(&self, folder_pk: [u8; 32], path: PathBuf, channel: Option<FolderId>, on_demand: bool, others: bool) -> Result<FolderStatus, SyncError> {
         let id = FolderId::of_public_key(&folder_pk);
         if on_demand {
             std::fs::create_dir_all(self.cache_path(&id).join(STATE_DIR))?;
@@ -1258,6 +1312,7 @@ impl SyncHandle {
         let mut entry = FolderEntry::new(id.to_string(), path);
         entry.folder_pk = hex(&folder_pk);
         entry.on_demand = on_demand;
+        entry.on_demand_others = others && !on_demand;
         entry.channel = channel.map(|c| c.to_string()).unwrap_or_default();
         {
             let mut cfg = lock(&self.inner.cfg);
@@ -1289,6 +1344,92 @@ impl SyncHandle {
     /// never here). From the configuration only, so a folder that could not open, or is stopped for a move, counts.
     pub fn configured(&self, id: &FolderId) -> Option<bool> {
         lock(&self.inner.cfg).folder(&id.to_string()).map(|e| e.on_demand)
+    }
+
+    /// Whether folder `id` is on demand for the devices that join it: on demand here, or a full folder here that
+    /// offers it ([`FolderEntry::on_demand_others`]).
+    pub fn offers_on_demand(&self, id: &FolderId) -> bool {
+        lock(&self.inner.cfg).folder(&id.to_string()).is_some_and(|e| e.on_demand || e.on_demand_others)
+    }
+
+    /// *Files on demand* as the user turns it on and off (SPEC §7G.11, *Modes*). On a full folder, whose files are on
+    /// this device, it changes nothing on disk: nothing is read, moved, renamed or changed; the folder stays full at
+    /// its path, and the devices that do not hold the files (the user's other devices that join it) get placeholders.
+    /// Off on such a folder only takes that back. Off on a folder that is on demand here (joined on demand, or its
+    /// local copies freed) switches it to full ([`Self::set_on_demand`]: the files the cache holds move to `place`, or
+    /// the folder's place, the rest is fetched). Freeing this device's copies is never a side effect of this: that is
+    /// [`Self::free_local_copies`]. While the folder is on all the user's devices, the statement says it anew whenever
+    /// it differs from the switch (another device of the user may have changed it since).
+    pub async fn set_files_on_demand(&self, id: &FolderId, on: bool, place: Option<PathBuf>) -> Result<FolderStatus, SyncError> {
+        self.refuse_held(id)?;
+        let entry = lock(&self.inner.cfg).folder(&id.to_string()).cloned().ok_or(SyncError::NotFound)?;
+        if entry.on_demand && !on {
+            // Full again, and so for the devices that join it (the statement says it there).
+            return self.set_on_demand(id, false, place).await;
+        }
+        if !entry.on_demand && entry.on_demand_others != on {
+            if let Some(e) = lock(&self.inner.cfg).folder_mut(&id.to_string()) {
+                e.on_demand_others = on;
+            }
+            if let Err(e) = self.save_config() {
+                if let Some(e) = lock(&self.inner.cfg).folder_mut(&id.to_string()) {
+                    e.on_demand_others = entry.on_demand_others;
+                }
+                return Err(SyncError::Io(e));
+            }
+            // Its scans list and do not read from the next step on (SPEC §7G.11, *Listed first*).
+            if let Some(f) = self.inner.ctx.registry.folder(id) {
+                f.list_first.store(on, Ordering::SeqCst);
+            }
+        }
+        self.follow_mode_changed(id).await;
+        self.folder_status(id).ok_or(SyncError::NotFound)
+    }
+
+    /// How many files of an on-demand folder are online only here (their content on other devices): what a switch to
+    /// full fetches; the rest is moved from the cache. 0 for a full folder. Walks the index's read-only handle (never
+    /// waits for the folder's core): ask once, before a switch.
+    pub fn online_only(&self, id: &FolderId) -> Result<u64, SyncError> {
+        let Some(f) = self.inner.ctx.registry.folder(id).filter(|f| f.on_demand) else { return Ok(0) };
+        let view = f.index.view();
+        let store: &dyn trs_sync::index::IndexStore = &view;
+        let (mut n, mut after) = (0u64, None::<String>);
+        loop {
+            let page = store.local_paths("", after.as_deref(), 1000)?;
+            let Some(last) = page.last().cloned() else { return Ok(n) };
+            for p in &page {
+                if let Some(r) = store.local(p)?
+                    && r.dataless
+                    && !r.file.info.deleted
+                    && r.file.info.kind == trs_sync_proto::model::FileKind::File
+                {
+                    n += 1;
+                }
+            }
+            after = Some(last);
+        }
+    }
+
+    /// Frees this device's local copies of a full folder: its files move into this device's cache (a rename on one
+    /// volume) and it is on demand here from then on ([`Self::set_on_demand`]). The user's explicit choice only, never
+    /// a side effect of *Files on demand*. Refused while a torrent of this device uses files in the folder (they would
+    /// go from under it), naming them.
+    pub async fn free_local_copies(&self, id: &FolderId, place: Option<PathBuf>) -> Result<FolderStatus, SyncError> {
+        let entry = lock(&self.inner.cfg).folder(&id.to_string()).cloned().ok_or(SyncError::NotFound)?;
+        if !entry.on_demand {
+            self.refuse_in_use(&entry.path).await?;
+        }
+        self.set_on_demand(id, true, place).await
+    }
+
+    /// Refuses a move of the files at `path` while a torrent of this device uses files there ([`LocalTorrents`]).
+    pub(crate) async fn refuse_in_use(&self, path: &Path) -> Result<(), SyncError> {
+        let Some(t) = self.inner.torrents.clone() else { return Ok(()) };
+        let names = t.using(path).await.map_err(|why| invalid(format!("the torrents using files in {} could not be told ({why}); nothing changed", path.display())))?;
+        if names.is_empty() {
+            return Ok(());
+        }
+        Err(invalid(in_use_text(&names)))
     }
 
     /// The file manager's host of on-demand folders, or none ([`Options::on_demand_host`]).
@@ -1370,9 +1511,9 @@ impl SyncHandle {
         }
         let removed = self.remove_here(id, for_trash).await;
         if removed.is_ok()
-            && let Some((pk, name)) = everywhere
+            && let Some((pk, name, serial)) = everywhere
         {
-            self.removed_everywhere(pk, name).await;
+            self.removed_everywhere(pk, name, serial).await;
         }
         removed
     }
@@ -1491,7 +1632,7 @@ impl SyncHandle {
     pub(crate) async fn noted_move(&self, id: &FolderId, j: Journal) -> io::Result<Option<PathBuf>> {
         let path = self.journal_path(id);
         let (from, to) = j.paths();
-        tokio::task::spawn_blocking(move || {
+        let moved = tokio::task::spawn_blocking(move || {
             let manifest = path.with_extension("manifest");
             let leftover = move_tree_kept(&from, &to, |by_rename| write_journal_at(&path, &j.copied(by_rename)), false, Some(&manifest))?;
             if let Err(e) = write_journal_at(&path, &j.finished()) {
@@ -1500,7 +1641,19 @@ impl SyncHandle {
             Ok(leftover)
         })
         .await
-        .unwrap_or_else(|e| Err(io::Error::other(e)))
+        .unwrap_or_else(|e| Err(io::Error::other(e)));
+        // A torrent whose files were here (or are now, back from an earlier move) looks again.
+        if moved.is_ok() {
+            self.files_moved();
+        }
+        moved
+    }
+
+    /// A folder's files moved on this device: the torrents missing theirs look again ([`LocalTorrents::moved`]).
+    fn files_moved(&self) {
+        if let Some(t) = &self.inner.torrents {
+            t.moved();
+        }
     }
 
     /// Removes a folder held back by an unfinished move: it is forgotten, its retry ends and its journal goes, and
@@ -1562,27 +1715,34 @@ impl SyncHandle {
     /// At start, before any folder opens: a removal or switch that was cut off (a crash, the power) is finished, or
     /// undone when its files never moved. Never deletes a file.
     /// Returns the folders whose change could not be finished: they stay stopped (with the reason) until a start that
-    /// can.
-    async fn recover_journals(&self) -> BTreeMap<FolderId, Held> {
-        let mut stopped = BTreeMap::new();
-        let Ok(dir) = std::fs::read_dir(&self.inner.dir) else { return stopped };
+    /// can; and those whose switch between full and on demand was finished (the *On all my devices* statement says
+    /// their new mode once the user's devices are open).
+    async fn recover_journals(&self) -> (BTreeMap<FolderId, Held>, Vec<FolderId>) {
+        let (mut stopped, mut switched) = (BTreeMap::new(), Vec::new());
+        let Ok(dir) = std::fs::read_dir(&self.inner.dir) else { return (stopped, switched) };
         for e in dir.flatten() {
             let name = e.file_name().to_string_lossy().into_owned();
             let Some(id) = name.strip_suffix(".journal").and_then(|i| i.parse::<FolderId>().ok()) else { continue };
             let j: Option<Journal> = std::fs::read(e.path()).ok().and_then(|b| serde_json::from_slice(&b).ok());
-            if let Err(err) = self.recover(&id, j).await {
-                eprintln!("seedwell sync: folder {id}: an interrupted change could not be finished ({err}); it stays stopped, and it is tried again when a disk is mounted");
-                stopped.insert(id, self.held_of(&id, &err));
-                continue;
+            match self.recover(&id, j).await {
+                Err(err) => {
+                    eprintln!("seedwell sync: folder {id}: an interrupted change could not be finished ({err}); it stays stopped, and it is tried again when a disk is mounted");
+                    stopped.insert(id, self.held_of(&id, &err));
+                    continue;
+                }
+                Ok(true) => switched.push(id),
+                Ok(false) => {}
             }
             self.drop_journal(&id);
         }
-        stopped
+        (stopped, switched)
     }
 
-    async fn recover(&self, id: &FolderId, j: Option<Journal>) -> Result<(), SyncError> {
+    /// Finishes or undoes the change `j` of folder `id`; `true` when that switched the folder between full and on
+    /// demand.
+    async fn recover(&self, id: &FolderId, j: Option<Journal>) -> Result<bool, SyncError> {
         match j {
-            None => Ok(()),
+            None => Ok(false),
             Some(Journal::Remove { from, to, place, copied, renamed, made_to, done }) => {
                 // The move is finished (or a partial copy undone), then the files go to the place if they are not
                 // there (a removal on its way to the Trash), then the folder is forgotten, as the removal would have.
@@ -1602,7 +1762,7 @@ impl SyncHandle {
                     prune_state(&dest);
                 }
                 let _ = std::fs::remove_dir(self.inner.dir.join(format!("{id}.removed")));
-                self.forget_folder(id)
+                self.forget_folder(id).map(|()| false)
             }
             Some(Journal::Move { from, to, copied, renamed, made_to, done }) => {
                 // Finished when its copy was whole (or it was a rename), undone otherwise; over, only saved.
@@ -1614,13 +1774,14 @@ impl SyncHandle {
                         e.path = to;
                     }
                     self.save_config()?;
+                    self.files_moved();
                 }
-                Ok(())
+                Ok(false)
             }
             Some(Journal::Switch { on, from, to, place, copied, renamed, made_to, done: over }) => {
                 let done = lock(&self.inner.cfg).folder(&id.to_string()).is_none_or(|e| e.on_demand == on);
                 if done {
-                    return Ok(());
+                    return Ok(false);
                 }
                 // Finished when its copy was whole (or it was a rename), undone otherwise: never a half-deleted place.
                 // Over, only saved.
@@ -1630,13 +1791,18 @@ impl SyncHandle {
                     }
                     if let Some(e) = lock(&self.inner.cfg).folder_mut(&id.to_string()) {
                         e.on_demand = on;
+                        e.on_demand_others &= on;
                         e.pins = Vec::new();
                         e.mode_switched = true;
                         e.path = place;
                     }
                     self.save_config()?;
+                    // Back in place (a switch to full): a torrent missing them finds them now, not at its next retry
+                    // (the daemon has no disk observer to tell it).
+                    self.files_moved();
+                    return Ok(true);
                 }
-                Ok(())
+                Ok(false)
             }
         }
     }
@@ -1688,6 +1854,8 @@ impl SyncHandle {
         if new_path.starts_with(&entry.path) {
             return Err(invalid("a folder cannot move into itself"));
         }
+        // A torrent seeding from it would lose its files.
+        self.refuse_in_use(&entry.path).await?;
         // The journal first: a move to another volume cut off is finished (its copy whole) or undone at the next start.
         let j = Journal::Move { from: entry.path.clone(), to: new_path.clone(), copied: false, renamed: false, made_to: !new_path.exists(), done: false };
         write_journal_at(&self.journal_path(id), &j).map_err(|e| invalid(format!("the move could not be noted ({e}); nothing changed")))?;
@@ -1704,6 +1872,13 @@ impl SyncHandle {
             self.drop_journal(id);
             self.reopen_when_closed(closed, entry);
             return Err(invalid("the folder is still busy (a scan or a transfer); it stays where it is, try again in a moment"));
+        }
+        // Stopping took a while (up to a minute): a torrent added meanwhile, or moved into the folder, is asked about
+        // again right before the move. Refused, nothing moved: the folder syncs on where it is.
+        if let Err(e) = self.refuse_in_use(&entry.path).await {
+            self.drop_journal(id);
+            self.open_folder(&entry).await?;
+            return Err(e);
         }
         let moved = self.noted_move(id, j).await;
         if let Err(e) = &moved
@@ -2309,6 +2484,7 @@ impl SyncHandle {
         e.folder_pk = hex(secret.public_key());
         e.paused = old.paused;
         e.lan_only = old.lan_only;
+        e.on_demand_others = old.on_demand_others;
         e.archive = old.archive;
         e.archive_days = old.archive_days;
         e.ignore = old.ignore.clone();
@@ -2493,10 +2669,43 @@ impl SyncHandle {
         Some(self.status_of(&f))
     }
 
+    /// Devices of the folder are connected, none has sent its list of the folder yet (its first index), and this device
+    /// lists nothing of its own: whom it waits for, in words ("Waiting for Mac mini to list Movies"), so a folder that shows nothing yet says why
+    /// (SPEC §7G.5). Read from the index's read-only handle: never waits.
+    fn unlisted(&self, f: &FolderShared) -> Option<String> {
+        let view = f.index.view();
+        // A device with files of its own listed (an owner) waits for nobody's list.
+        if trs_sync::index::IndexStore::local_paths(&view, "", None, 1).is_ok_and(|p| !p.is_empty()) {
+            return None;
+        }
+        let mut names: Vec<String> = Vec::new();
+        for p in self.inner.ctx.registry.peers().iter().filter(|p| p.access(&f.id).is_some()) {
+            if trs_sync::index::IndexStore::peer(&view, p.device.short()).ok().flatten().is_some_and(|s| s.index_id != 0) {
+                return None;
+            }
+            if !names.contains(&p.name) {
+                names.push(p.name.clone());
+            }
+        }
+        let who = match names.as_slice() {
+            [] => return None,
+            [one] => one.clone(),
+            [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+        };
+        Some(format!("Waiting for {who} to list {}", lock(&f.name)))
+    }
+
     fn status_of(&self, f: &Arc<FolderShared>) -> FolderStatus {
-        let channel_id = {
+        // On all the user's devices, the statement says it (the last of the user's devices to change it), else this
+        // device's own mark.
+        let shared = self.follow_on_demand(&f.id);
+        let (channel_id, on_demand_others) = {
             let cfg = lock(&self.inner.cfg);
-            cfg.folder(&f.id.to_string()).map(|e| e.channel.clone()).filter(|c| !c.is_empty() && cfg.channels.iter().any(|ch| ch.id == *c))
+            let e = cfg.folder(&f.id.to_string());
+            (
+                e.map(|e| e.channel.clone()).filter(|c| !c.is_empty() && cfg.channels.iter().any(|ch| ch.id == *c)),
+                e.is_some_and(|e| !e.on_demand && shared.unwrap_or(e.on_demand_others)),
+            )
         };
         let mut live = {
             let mut l = lock(&f.live);
@@ -2544,6 +2753,7 @@ impl SyncHandle {
             live.error = Some(if ended { "this folder is no longer shared" } else { concat!("this ", trs_platform::computer!(), " was removed from the folder") }.into());
             FolderState::Error
         };
+        let scanning = state == FolderState::Scanning;
         let share_until = f.membership.read().unwrap_or_else(|e| e.into_inner()).share_until();
         let (need_files, need_bytes) = live.need;
         let connected = self.inner.ctx.registry.peers().iter().filter(|p| p.access(&f.id).is_some()).count() as u32;
@@ -2552,6 +2762,8 @@ impl SyncHandle {
         let away = self.away(f);
         let shows = role.is_some() && !matches!(state, FolderState::Paused | FolderState::Missing | FolderState::Error);
         let reshare = shows && !f.on_demand && away.stuck(role);
+        // (Before the status below: its name field holds the name's lock to the end of it.)
+        let waiting = away.waiting().filter(|_| shows).or_else(|| shows.then(|| self.unlisted(f)).flatten());
         FolderStatus {
             id: f.id.to_string(),
             name: lock(&f.name).clone(),
@@ -2575,13 +2787,15 @@ impl SyncHandle {
             last_synced_s: live.last_synced_s,
             channel_id,
             on_demand: f.on_demand,
+            on_demand_others,
             unavailable: live.unavailable,
             progress,
             problem,
             join_attempts,
-            waiting: away.waiting().filter(|_| shows),
+            waiting,
             gone: away.removable(),
             reshare,
+            scan: live.scan.filter(|_| scanning),
         }
     }
 
@@ -2622,7 +2836,7 @@ impl SyncHandle {
             }
             let j: Option<Journal> = std::fs::read(self.journal_path(&id)).ok().and_then(|b| serde_json::from_slice(&b).ok());
             match self.recover(&id, j).await {
-                Ok(()) => {
+                Ok(switched) => {
                     self.drop_journal(&id);
                     lock(&self.inner.held).remove(&id);
                     // Finished or undone: the folder starts where its entry says (a removal forgot it).
@@ -2631,6 +2845,9 @@ impl SyncHandle {
                         && let Err(err) = self.open_folder(&e).await
                     {
                         eprintln!("seedwell sync: folder {id}: {err}");
+                    }
+                    if switched {
+                        self.follow_mode_changed(&id).await;
                     }
                 }
                 Err(err) => {
@@ -2677,6 +2894,7 @@ impl SyncHandle {
             last_synced_s: None,
             channel_id: None,
             on_demand: e.on_demand,
+            on_demand_others: e.on_demand_others && !e.on_demand,
             unavailable: 0,
             progress: None,
             problem: None,
@@ -2684,6 +2902,7 @@ impl SyncHandle {
             waiting: None,
             gone: Vec::new(),
             reshare: false,
+            scan: None,
         })
     }
 
@@ -3065,6 +3284,36 @@ impl SyncHandle {
     #[doc(hidden)]
     pub fn test_fetch_wait(&self, wait: Duration) {
         *lock(&self.inner.ctx.fetch_wait) = wait;
+    }
+
+    /// **Tests only:** each scan step holds the folder's core this much longer (a slow disk under a scan): what the hosts
+    /// and the app read meanwhile must not wait for it.
+    #[doc(hidden)]
+    pub fn test_scan_hold(&self, hold: Duration) {
+        *lock(&self.inner.ctx.scan_hold) = hold;
+    }
+
+    /// **Tests only:** this device lets go of every read of its unhashed files it keeps for others (as a restart does):
+    /// a device asking for the next piece is answered busy, and starts again.
+    #[doc(hidden)]
+    pub fn test_forget_streams(&self) {
+        for f in self.inner.ctx.registry.folders() {
+            lock(&f.streams).clear();
+        }
+    }
+
+    /// **Tests only:** each chunk this device serves is answered after a pause this long (a slow link: a fetch that
+    /// stands on a chunk).
+    #[doc(hidden)]
+    pub fn test_serve_wait(&self, wait: Duration) {
+        *lock(&self.inner.ctx.serve_wait) = wait;
+    }
+
+    /// **Tests only:** each piece of an unhashed file this device serves (SPEC §7G.11) is read after a pause this long:
+    /// a first download that takes long, as of a big file over a slow link.
+    #[doc(hidden)]
+    pub fn test_stream_wait(&self, wait: Duration) {
+        *lock(&self.inner.ctx.stream_wait) = wait;
     }
 
     /// **Tests only:** the speed limits apply to LAN sessions too, as [`crate::limit::QA_LIMIT_LAN`] makes them in an
@@ -3469,6 +3718,15 @@ impl SyncHandle {
             _ => Ok(()),
         }
     }
+}
+
+/// Why a folder's files are not moved: the torrents (`names`, at least one) that use files in it, the first three
+/// named. "Uses", not "seeds": a torrent still downloading there counts as much as one seeding.
+fn in_use_text(names: &[String]) -> String {
+    let shown: Vec<String> = names.iter().take(3).map(|n| format!("“{n}”")).collect();
+    let more = if names.len() > 3 { format!(" and {} more", names.len() - 3) } else { String::new() };
+    let (what, them) = if names.len() == 1 { ("a torrent uses".to_string(), "remove the torrent or move it elsewhere") } else { (format!("{} torrents use", names.len()), "remove the torrents or move them elsewhere") };
+    format!("{what} files in this folder ({}{more}): its files stay where they are; {them} first", shown.join(", "))
 }
 
 fn refuse_cloud_root(p: &Path) -> Result<(), SyncError> {
@@ -4326,12 +4584,22 @@ type Foreign = mpsc::Receiver<trs_utp::ForeignDatagram>;
 /// Binds the sync port: TCP, and with `utp` its UDP twin (same number) for uTP and hole-punch probes. The
 /// saved port first; if it (or its UDP twin) is taken, any free pair, which the caller then remembers. If
 /// no pair is free after a few tries, the service runs without uTP.
-async fn bind_port(ip: IpAddr, saved: u16, utp: bool) -> io::Result<(TcpListener, Option<trs_utp::UtpSocket>, Option<Foreign>)> {
+///
+/// On `[::]` both sockets take IPv4 as well (`IPV6_V6ONLY` off, set on every system: Windows defaults to on, and
+/// its sync port then refused every IPv4 connection). A system that cannot do that (IPv6 turned off) gets
+/// `0.0.0.0` instead, said in the log. Returns the address bound.
+async fn bind_port(ip: IpAddr, saved: u16, utp: bool) -> io::Result<(IpAddr, TcpListener, Option<trs_utp::UtpSocket>, Option<Foreign>)> {
+    let ip = if ip == IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED) && !trs_platform::net::dual_stack_available() {
+        eprintln!("seedwell sync: this system cannot listen for IPv4 and IPv6 on one socket (IPv6 off?): listening on IPv4 only");
+        IpAddr::V4(Ipv4Addr::UNSPECIFIED)
+    } else {
+        ip
+    };
     const TRIES: usize = 8;
     let mut last = None;
     for attempt in 0..TRIES {
         let want = if attempt == 0 { saved } else { 0 };
-        let listener = match TcpListener::bind(SocketAddr::new(ip, want)).await {
+        let listener = match trs_platform::net::listen_tcp(SocketAddr::new(ip, want)) {
             Ok(l) => l,
             Err(e) if attempt + 1 < TRIES => {
                 last = Some(e);
@@ -4340,21 +4608,28 @@ async fn bind_port(ip: IpAddr, saved: u16, utp: bool) -> io::Result<(TcpListener
             Err(e) => return Err(e),
         };
         if !utp {
-            return Ok((listener, None, None));
+            return Ok((ip, listener, None, None));
         }
         let port = listener.local_addr()?.port();
         let (tx, rx) = mpsc::channel(256);
         let cfg = trs_utp::Config::default();
-        match trs_utp::UtpSocket::bind_with_foreign(SocketAddr::new(ip, port), cfg, tx).await {
-            Ok(u) => return Ok((listener, Some(u), Some(rx))),
+        match utp_socket(SocketAddr::new(ip, port), cfg, tx).await {
+            Ok(u) => return Ok((ip, listener, Some(u), Some(rx))),
             Err(e) if attempt + 1 < TRIES => last = Some(e),
             Err(e) => {
                 eprintln!("seedwell sync: no uTP (UDP port {port}: {e})");
-                return Ok((listener, None, None));
+                return Ok((ip, listener, None, None));
             }
         }
     }
     Err(last.unwrap_or_else(|| io::Error::other("could not bind the sync port")))
+}
+
+/// The uTP socket on `addr`, bound like the TCP listener (dual-stack on `[::]`).
+async fn utp_socket(addr: SocketAddr, cfg: trs_utp::Config, foreign: mpsc::Sender<trs_utp::ForeignDatagram>) -> io::Result<trs_utp::UtpSocket> {
+    let udp = trs_platform::net::bind_udp(addr)?;
+    udp.writable().await?;
+    trs_utp::UtpSocket::from_udp(udp, cfg, Some(foreign))
 }
 
 /// Accepts uTP sessions on the sync port's UDP twin, like TCP ones (magic, then TLS).
@@ -4595,6 +4870,18 @@ async fn dht_loop(h: SyncHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The refusal names the torrents in the right number and never says one seeds that is still downloading: fails on
+    /// "torrents seed ... remove the torrents" for one torrent, or a count that is not the number of torrents.
+    #[test]
+    fn the_refusal_for_torrents_in_a_folder_counts_them_and_says_uses() {
+        let one = in_use_text(&["V for Vendetta (2005)".into()]);
+        assert!(one.starts_with("a torrent uses files in this folder (“V for Vendetta (2005)”)") && one.contains("remove the torrent or move it"), "{one}");
+        let names: Vec<String> = (1..=5).map(|i| format!("t{i}")).collect();
+        let five = in_use_text(&names);
+        assert!(five.starts_with("5 torrents use files in this folder (“t1”, “t2”, “t3” and 2 more)") && five.contains("remove the torrents or move them"), "{five}");
+        assert!(!one.contains("seed") && !five.contains("seed"));
+    }
 
     #[test]
     fn a_copy_to_another_volume_that_fails_halfway_leaves_nothing_behind() {
@@ -4957,5 +5244,47 @@ mod tests {
         assert_eq!(finish_move(&from, &to, true, false, true).unwrap(), Some(Some(aside.clone())));
         std::fs::set_permissions(aside.join("sub"), std::fs::Permissions::from_mode(0o755)).unwrap();
         assert!(whole(&to) && !from.exists());
+    }
+
+    /// The sync port on `[::]` (what the app binds) that refuses IPv4, TCP or its uTP twin: on Windows, where
+    /// `IPV6_V6ONLY` is on by default, Seedwell 0.1.18 answered only `::1` and every pairing device found "nothing
+    /// answers there". Fails when a dial to 127.0.0.1 or a datagram from it does not get through, or the listener is
+    /// left IPv6 only (a Mac is dual-stack by default; the platform tests simulate the Windows default); and when the
+    /// uTP socket cannot send to an IPv4 peer, a hole-punch answer or a uTP dial (EINVAL for a plain IPv4 destination
+    /// on an IPv6 socket, on the Mac since the sync port moved to `[::]`).
+    #[tokio::test]
+    async fn the_sync_port_on_any_ipv6_address_takes_ipv4_and_ipv6_over_tcp_and_utp() {
+        if !trs_platform::net::dual_stack_available() {
+            eprintln!("no IPv6 here: nothing to check");
+            return;
+        }
+        let any6 = IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED);
+        let (ip, l, utp, foreign) = bind_port(any6, 0, true).await.unwrap();
+        assert_eq!(ip, any6);
+        assert!(!socket2::SockRef::from(&l).only_v6().unwrap(), "the sync port is IPv6 only");
+        let port = l.local_addr().unwrap().port();
+        let (utp, mut foreign) = (utp.expect("uTP twin"), foreign.unwrap());
+        let wait = Duration::from_secs(5);
+        for to in ["127.0.0.1", "::1"] {
+            let to: IpAddr = to.parse().unwrap();
+            tokio::time::timeout(wait, tokio::net::TcpStream::connect((to, port))).await.expect("dial timed out").unwrap_or_else(|e| panic!("TCP {to}: {e}"));
+            tokio::time::timeout(wait, l.accept()).await.expect("accept timed out").unwrap();
+            // Not uTP, so it comes out as a foreign datagram (as a hole-punch probe does).
+            let c = tokio::net::UdpSocket::bind((to, 0)).await.unwrap();
+            c.send_to(b"seedwell probe", (to, port)).await.unwrap();
+            let d = tokio::time::timeout(wait, foreign.recv()).await.unwrap_or_else(|_| panic!("no datagram from {to}")).unwrap();
+            assert_eq!(&*d.data, b"seedwell probe");
+            // And back, to the address as a peer gives it (an IPv4 one for an IPv4 peer).
+            let back = c.local_addr().unwrap();
+            utp.send_foreign(back, b"probe back").await.unwrap_or_else(|e| panic!("UDP to {back}: {e}"));
+            let mut buf = [0u8; 16];
+            let n = tokio::time::timeout(wait, c.recv(&mut buf)).await.unwrap_or_else(|_| panic!("nothing came back to {back}")).unwrap();
+            assert_eq!(&buf[..n], b"probe back");
+            // A uTP dial from the sync port to a peer on that address.
+            let peer = trs_utp::UtpSocket::bind(SocketAddr::new(to, 0), trs_utp::Config::default()).await.unwrap();
+            let (dial, accept) = tokio::join!(tokio::time::timeout(wait, utp.connect(peer.local_addr())), tokio::time::timeout(wait, peer.accept()));
+            dial.expect("uTP dial timed out").unwrap_or_else(|e| panic!("uTP to {to}: {e}"));
+            accept.expect("uTP accept timed out").unwrap();
+        }
     }
 }

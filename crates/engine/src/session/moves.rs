@@ -88,8 +88,8 @@ pub(crate) struct Mover {
     parked: Vec<MovePlan>,
     /// Destination device -> the torrent copying to it.
     copying: HashMap<u64, TorrentId>,
-    /// Jobs being planned right now.
-    planning: usize,
+    /// Jobs being planned right now: the torrent and where it goes.
+    planning: Vec<(TorrentId, MoveTarget)>,
     /// Downloading torrents whose actor is stopping before their files move.
     pending_exit: HashMap<TorrentId, Arc<MovePlan>>,
     /// `remove` calls that arrived while the torrent was moving.
@@ -164,6 +164,30 @@ impl Session {
         let a = self.mover.active.get(id)?;
         let total = a.progress.total.load(Ordering::Relaxed);
         Some(if total == 0 { 0.0 } else { (a.progress.done.load(Ordering::Relaxed) as f64 / total as f64).clamp(0.0, 1.0) as f32 })
+    }
+
+    /// Where the moves of torrent `id` (named `name`) put its files: the file or folder and the staging folder of each
+    /// plan that is running, parked or waiting for the download to stop, and the folder of a queued or planned "Move
+    /// to..."; `true` with them when a move is queued or being planned to a place not known until it is planned.
+    pub(crate) fn move_destinations(&self, id: &TorrentId, name: &str) -> (Vec<PathBuf>, bool) {
+        let mut out = Vec::new();
+        let plans = self.mover.active.get(id).map(|a| &*a.plan).into_iter().chain(self.mover.parked.iter().filter(|p| p.id == *id)).chain(self.mover.pending_exit.get(id).map(|p| &**p));
+        for p in plans {
+            out.push(p.to_save.join(&p.name));
+            if p.from_stage_dir.is_some() {
+                out.push(p.to_stage_root.as_ref().map_or_else(|| p.to_save.join(".incomplete"), |r| r.join(crate::util::hex(id))));
+            }
+            out.extend(p.reserved.iter().cloned());
+        }
+        let mut unknown = false;
+        let targets = self.mover.queue.iter().filter(|j| j.id == *id).map(|j| &j.target).chain(self.mover.planning.iter().filter(|(t, _)| t == id).map(|(_, t)| t));
+        for t in targets {
+            match t {
+                MoveTarget::Rebase(dir) => out.push(dir.join(name)),
+                MoveTarget::Config | MoveTarget::Status(_) => unknown = true,
+            }
+        }
+        (out, unknown)
     }
 
     /// Is a move queued, planned or running for this torrent?
@@ -360,7 +384,7 @@ impl Session {
     // ---- scheduling -------------------------------------------------------------------------
 
     pub(crate) fn pump_moves(&mut self) {
-        while !self.shutting_down && self.mover.planning + self.mover.active.len() < MAX_PARALLEL_MOVES {
+        while !self.shutting_down && self.mover.planning.len() + self.mover.active.len() < MAX_PARALLEL_MOVES {
             let Some(job) = self.mover.queue.pop_front() else { break };
             self.mover.queued.remove(&job.id);
             self.begin_planning(job);
@@ -376,7 +400,7 @@ impl Session {
                 return;
             }
         };
-        self.mover.planning += 1;
+        self.mover.planning.push((job.id, job.target.clone()));
         let sh = self.sh.clone();
         tokio::task::spawn_blocking(move || {
             let mut result = plan_move(&sh, &src, &job.target).map(|o| o.map(Box::new));
@@ -394,7 +418,9 @@ impl Session {
     }
 
     pub(super) fn on_move_planned(&mut self, job: MoveJob, result: Result<Option<Box<MovePlan>>, String>) {
-        self.mover.planning = self.mover.planning.saturating_sub(1);
+        if let Some(i) = self.mover.planning.iter().position(|(id, _)| *id == job.id) {
+            self.mover.planning.swap_remove(i);
+        }
         let id = job.id;
         match result {
             Err(reason) if job.auto => self.auto_move_failed(id, reason),

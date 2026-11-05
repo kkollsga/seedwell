@@ -59,4 +59,4 @@ mod dial_tests;
 
 pub use relay_server::{RelayOptions, run_relay};
 pub use rendezvous::RendezvousStatus;
-pub use service::{Activity, DeleteSeen, FULL_HERE, InviteInfo, Keep, LocalChange, MemberInfo, OnDemandError, OnDemandHost, OnDemandHostCell, Options, PublicDiscovery, SyncError, SyncHandle};
+pub use service::{Activity, DeleteSeen, FULL_HERE, InviteInfo, Keep, LocalChange, LocalTorrents, MemberInfo, OnDemandError, OnDemandHost, OnDemandHostCell, Options, PublicDiscovery, SyncError, SyncHandle};

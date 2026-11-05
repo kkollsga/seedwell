@@ -227,7 +227,7 @@ sealed class AddFolderDialog
         }
         if (model.Follow is FollowLine follow)
         {
-            content.Children.Add(Follow(follow, form.AllDevices, !starting, on => Change(form with { AllDevices = on })));
+            content.Children.Add(Follow(follow, form.AllDevices, !starting, on => Change(form with { AllDevices = on }), ro => Change(form with { ReadOnly = ro })));
         }
         if (starting)
         {
@@ -291,8 +291,8 @@ sealed class AddFolderDialog
         return line;
     }
 
-    /// <summary>"On all my devices": the core's title, its line, its help as the tooltip, bound to the form's choice.</summary>
-    internal static StackPanel Follow(FollowLine follow, bool on, bool enabled, Action<bool> set)
+    /// <summary>"On all my devices": the core's title, its line, its help as the tooltip, bound to the form's choice; a folder's "Read only" under it.</summary>
+    internal static StackPanel Follow(FollowLine follow, bool on, bool enabled, Action<bool> set, Action<bool>? setReadOnly = null)
     {
         var s = new StackPanel { Spacing = 2 };
         var toggle = new ToggleSwitch { Header = follow.Title, IsOn = on, IsEnabled = follow.Enabled && enabled };
@@ -302,6 +302,20 @@ sealed class AddFolderDialog
         if (follow.Line.Length > 0)
         {
             s.Children.Add(Note(follow.Line));
+        }
+        if (follow.ReadOnly is FollowReadOnly ro && setReadOnly is not null)
+        {
+            var readOnly = new ToggleSwitch { Header = ro.Title, IsOn = ro.On, IsEnabled = ro.Enabled && enabled, Margin = new Thickness(16, 4, 0, 0) };
+            Help(readOnly, ro.Help);
+            readOnly.Toggled += (_, _) => { if (readOnly.IsOn != ro.On) setReadOnly(readOnly.IsOn); };
+            s.Children.Add(readOnly);
+            if (ro.Line.Length > 0)
+            {
+                var line = Note(ro.Line);
+                line.Margin = new Thickness(16, 0, 0, 0);
+                line.MaxWidth = 424;
+                s.Children.Add(line);
+            }
         }
         return s;
     }
@@ -370,6 +384,10 @@ sealed class AddFolderDialog
     internal void QaLocation(string path) => Change(TrsFfiMethods.SyncAddSetLocation(form, path));
     internal void QaParent(string path) => Change(TrsFfiMethods.SyncAddChooseParent(form, path));
     internal void QaAllDevices(bool on) => Change(form with { AllDevices = on });
+    /// <summary>The switches a dialog has drawn: each one's name, whether it is on, and "(off)" when it cannot be switched.</summary>
+    internal static string QaSwitches(UIElement content) => string.Join(", ", RowCommands.Tree(content).OfType<ToggleSwitch>().Select(t => $"{t.Header} {t.IsOn}{(t.IsEnabled ? "" : " (off)")}"));
+    internal string Switches => QaSwitches(content);
+    internal void QaReadOnly(bool on) => Change(form with { ReadOnly = on });
     internal void QaOnDemand(bool on) => Change(form with { OnDemand = on });
     internal async Task<bool> QaStart()
     {

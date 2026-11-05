@@ -23,6 +23,7 @@ use trs_platform::fs::Trashed;
 use trs_sync::ondemand::Deleted;
 use trs_sync_net::{Keep, SyncHandle};
 use trs_sync_net::status::FolderStatus;
+use trs_sync_proto::members::Role;
 
 use super::{Conn, Ctx, Reply, blocking, denied, reply};
 use crate::backend::Backend;
@@ -109,8 +110,8 @@ pub(super) async fn call<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &Conn, req: Reques
         Request::SyncStatus(p) => reply(&folder_out(&h, &pick(&h, &p.folder)?)),
         Request::SyncAdd(p) => {
             let path = folder_path(&p.path, "path")?;
-            let f = h.add_folder(path).await.map_err(s::err)?;
-            folder_reply(&h, &f, "shared")
+            let f = h.add_folder_with(path, p.on_demand).await.map_err(s::err)?;
+            folder_reply(&h, &f, if p.on_demand { "shared (on demand for the other devices)" } else { "shared" })
         }
         Request::SyncJoin(p) => {
             let path = match p.path.as_deref() {
@@ -127,7 +128,13 @@ pub(super) async fn call<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &Conn, req: Reques
         }
         Request::SyncShare(p) => {
             let f = pick(&h, &p.folder)?;
-            let role = s::parse_role(p.role.as_deref().unwrap_or("read_write"))?;
+            // No role given: Read & write, or Read only while the folder is Read only on the user's devices (as the
+            // app's Share dialog starts).
+            let role = match p.role.as_deref() {
+                Some(r) => s::parse_role(r)?,
+                None if h.follow_read_only(&folder_id(&f)?) => Role::ReadOnly,
+                None => Role::ReadWrite,
+            };
             let (uses, days) = (p.uses.unwrap_or(1), p.days.unwrap_or(7));
             let inv = match p.chat.as_deref().map(str::trim) {
                 None | Some("") => h.create_invite(&folder_id(&f)?, role, uses, days).map_err(s::err)?,
@@ -277,10 +284,22 @@ pub(super) async fn call<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &Conn, req: Reques
                 "full" => false,
                 _ => return Err(ApiError::params("`mode` is `full` or `on_demand`")),
             };
+            if p.free_space && !on {
+                return Err(ApiError::params("`free_space` goes with `on_demand` only"));
+            }
             let f = pick(&h, &p.folder)?;
+            let id = folder_id(&f)?;
             let place = p.path.as_deref().map(|raw| folder_path(raw, "path")).transpose()?;
-            let f = h.set_on_demand(&folder_id(&f)?, on, place).await.map_err(s::err)?;
-            folder_reply(&h, &f, if on { "on demand:" } else { "full:" })
+            // To full from on demand: what it fetches (online only here); the rest is moved back from the cache.
+            let fetching = (!on && f.on_demand).then(|| h.online_only(&id)).transpose().map_err(s::err)?;
+            // Files on demand never moves the files of a folder that holds them: only the explicit `free_space` does.
+            let f = if p.free_space { h.free_local_copies(&id, place).await } else { h.set_files_on_demand(&id, on, place).await }.map_err(s::err)?;
+            let mut d = folder_out(&h, &f);
+            d.fetching = fetching.filter(|_| !f.on_demand);
+            let mut r = reply(&d)?;
+            let what = if f.on_demand { "on demand:" } else if f.on_demand_others { "on demand elsewhere:" } else { "full:" };
+            r.note = Some(format!("{what} {} ({})", clip(&d.name, 80), short(&d.id)));
+            Ok(r)
         }
         r @ (Request::SyncItems(_)
         | Request::SyncChanges(_)

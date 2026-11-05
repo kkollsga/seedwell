@@ -950,6 +950,10 @@ pub struct SyncFolderParams {
 pub struct SyncAddParams {
     /// Absolute path (or `~/...`) of an existing folder.
     pub path: String,
+    /// On demand for the devices without its files, from the start (SPEC §7G.11, *Modes*): its files stay where they
+    /// are, and its first scan lists them and reads none (*Listed first, hashed when first fetched*).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub on_demand: bool,
 }
 
 /// `sync.share`: make an invitation link to a folder.
@@ -958,7 +962,8 @@ pub struct SyncAddParams {
 pub struct SyncShareParams {
     /// The folder.
     pub folder: String,
-    /// The role it admits at: `read_write` (default), `read_only`, `admin` or `owner` (the last two: owners only).
+    /// The role it admits at: `read_write` (default; `read_only` while the folder is Read only on the user's devices),
+    /// `read_only`, `admin` or `owner` (the last two: owners only).
     #[serde(default)]
     pub role: Option<String>,
     /// How many devices it admits (default 1; 0 = unlimited; at most 1000).
@@ -1349,6 +1354,11 @@ pub struct SyncModeParams {
     /// Where the folder is shown (on demand) or goes (full; must be free). Absent: where it is now.
     #[serde(default)]
     pub path: Option<String>,
+    /// With `on_demand`: free this device's local copies (its files move into Seedwell's cache, a rename on one disk).
+    /// Without it, `on_demand` on a full folder only makes it on demand on the devices that do not hold its files; this
+    /// device keeps them where they are.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub free_space: bool,
 }
 
 /// An item of an on-demand folder: by `item` (its identifier) or `path` (in the folder); neither is the folder.

@@ -40,6 +40,26 @@ fn devices(n: u32) -> String {
     d::count(u64::from(n), "device")
 }
 
+/// A scan's phase and how far it is (SPEC §7G.2): "Listing · 1234 files (56 GB)" while the tree is walked, "Checking
+/// contents · 3 of 407 files · 4.1 of 914 GB" while the files found changed are read; "Scanning…" before it says.
+fn scan_words(f: &SyncFolder) -> Vec<String> {
+    use crate::sync::SyncScanPhase;
+    let Some(s) = &f.scan else { return vec!["Scanning…".into()] };
+    if s.phase == SyncScanPhase::CheckingContents && s.check_files > 0 {
+        return vec!["Checking contents".into(), format!("{} of {}", s.checked_files.min(s.check_files), d::count(s.check_files, "file")), d::progress(s.checked_bytes.min(s.check_bytes), s.check_bytes)];
+    }
+    if s.files == 0 {
+        return vec!["Listing…".into()];
+    }
+    vec!["Listing".into(), format!("{} ({})", d::count(s.files, "file"), d::bytes(s.bytes))]
+}
+
+/// How far a scan that reads files is (0...1), `None` while it only lists.
+fn scan_fraction(f: &SyncFolder) -> Option<f64> {
+    let s = f.scan.as_ref().filter(|s| s.phase == crate::sync::SyncScanPhase::CheckingContents && s.check_bytes > 0)?;
+    Some(s.checked_bytes.min(s.check_bytes) as f64 / s.check_bytes as f64)
+}
+
 pub(crate) fn subtitle(f: &SyncFolder) -> String {
     let conflicts = (f.conflicts > 0).then(|| d::count(u64::from(f.conflicts), "conflict"));
     let after_conflicts = |parts: Vec<String>| conflicts.iter().cloned().chain(parts).collect::<Vec<_>>().join(" · ");
@@ -48,7 +68,7 @@ pub(crate) fn subtitle(f: &SyncFolder) -> String {
         SyncState::Paused => "Paused".into(),
         SyncState::Error => f.error.as_ref().map_or_else(|| "Can't sync".into(), |e| format!("Can't sync · {e}")),
         SyncState::Starting => "Starting…".into(),
-        SyncState::Scanning => after_conflicts(vec!["Scanning…".into()]),
+        SyncState::Scanning => after_conflicts(scan_words(f)),
         // Whom it waits for, from the core ("Waiting for Mac mini (last seen 3 days ago: …)").
         SyncState::WaitingForDevices => after_conflicts(vec![f.waiting.clone().unwrap_or_else(|| "Waiting for devices".into())]),
         // What the join does now, from the core ("Looking for Anna's Mac mini on the local network…").
@@ -66,7 +86,8 @@ pub(crate) fn subtitle(f: &SyncFolder) -> String {
             }
             after_conflicts(parts)
         }
-        SyncState::UpToDate if f.connected == 0 && f.waiting.is_some() => after_conflicts(f.waiting.iter().cloned().collect()),
+        // Alone (whom it waits for), or connected to devices that have not listed the folder yet: the core says which.
+        SyncState::UpToDate if f.waiting.is_some() => after_conflicts(f.waiting.iter().cloned().collect()),
         SyncState::UpToDate => match (conflicts, f.connected) {
             (Some(c), 0) => c,
             (Some(c), n) => format!("{c} · {}", devices(n)),
@@ -124,7 +145,7 @@ pub(crate) fn badge(f: &SyncFolder) -> SyncBadge {
         // Waiting is not progress: a ring would read as "almost done" (or done) while nothing moves (the user,
         // 2026-10-28). The subtitle says what is still to fetch.
         SyncState::WaitingForDevices | SyncState::WaitingForAdmin => SyncBadge::Waiting,
-        SyncState::Starting | SyncState::Scanning => SyncBadge::Progress { fraction: 0.0 },
+        SyncState::Starting | SyncState::Scanning => SyncBadge::Progress { fraction: scan_fraction(f).unwrap_or(0.0) },
         SyncState::UpToDate => SyncBadge::UpToDate,
     }
 }
@@ -555,8 +576,8 @@ pub fn sync_add_mode_label(mode: SyncAddMode) -> String {
     .into()
 }
 
-/// The add modal's choices (SPEC 7G.5). The host keeps it as a value, edits `mode`, `on_demand` and `all_devices`
-/// itself and asks the `sync_add_*` functions (and `Core::sync_add_*`) for the rest; `sync_add_window` draws it.
+/// The add modal's choices (SPEC 7G.5). The host keeps it as a value, edits `mode`, `on_demand`, `all_devices` and
+/// `read_only` itself and asks the `sync_add_*` functions (and `Core::sync_add_*`) for the rest; `sync_add_window` draws it.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct SyncAddForm {
     pub mode: SyncAddMode,
@@ -582,6 +603,8 @@ pub struct SyncAddForm {
     /// computer is paired with others), and the choice: off by default.
     pub follow: FollowLine,
     pub all_devices: bool,
+    /// Its "Read only" for the other devices (SPEC 7G.1; off by default, applied with `all_devices` only).
+    pub read_only: bool,
 }
 
 /// A fresh form: From this computer, nothing chosen.
@@ -600,6 +623,7 @@ pub fn sync_add_form_new() -> SyncAddForm {
         existing_folder: None,
         follow: crate::devices_text::follow_line_new(&[], false),
         all_devices: false,
+        read_only: false,
     }
 }
 
@@ -1000,8 +1024,15 @@ pub fn sync_on_demand_label() -> String {
 /// The switch's tooltip.
 #[uniffi::export]
 pub fn sync_on_demand_help() -> String {
-    concat!("List every file in the ", file_manager!(), ", and download each only when it is opened").into()
+    concat!("Where the files are not, list every file in the ", file_manager!(), " and download each only when it is opened; where they are, they stay").into()
 }
+
+/// Where a folder joined on demand is, said plainly where the system decides it: macOS keeps a File Provider folder in
+/// its own place, not at the location the user picked.
+#[cfg(target_os = "macos")]
+const JOIN_PLACE: &str = "macOS keeps such a folder in ~/Library/CloudStorage; the location chosen here is where its files go if you turn Files on demand off. ";
+#[cfg(not(target_os = "macos"))]
+const JOIN_PLACE: &str = "";
 
 /// Under the switch: what it means, said for the change it makes. `place_shown`: where a folder switched back to full
 /// goes (its place), as the host shows a path.
@@ -1015,20 +1046,18 @@ pub fn sync_on_demand_note(change: SyncOnDemandChange, place_shown: String) -> S
                 file_manager!(),
                 "’s sidebar, under Locations, but its content stays on your other devices until you open it. What you open stays on this ",
                 computer!(),
-                ". {}"
+                ". {}{}"
             ),
-            allow
+            JOIN_PLACE, allow
         ),
-        SyncOnDemandChange::Add | SyncOnDemandChange::TurnOn => format!(
-            concat!(
-                "The folder moves to the ",
-                file_manager!(),
-                "’s sidebar, under Locations, with every file still on this ",
-                computer!(),
-                ". Remove Download frees a file’s space once another device has it; opening it brings it back. {}"
-            ),
-            allow
-        ),
+        // A folder whose files are here keeps them where they are: on demand is for the devices without them, and only
+        // those that get it through On all my devices (one that joins with a link chooses in its own dialog).
+        SyncOnDemandChange::Add | SyncOnDemandChange::TurnOn => concat!(
+            "Every file stays on this ",
+            computer!(),
+            ", where it is: nothing is moved. Your other devices that get this folder through On all my devices list every file and download each only when it is opened; while On all my devices is off, nothing changes until you turn it on. A device that joins with a link chooses for itself."
+        )
+        .into(),
         SyncOnDemandChange::Stays => concat!(
             "Every file is listed; content is downloaded when you open it, or always for what you keep on this ",
             computer!(),
@@ -1039,24 +1068,6 @@ pub fn sync_on_demand_note(change: SyncOnDemandChange, place_shown: String) -> S
             concat!("Every file is downloaded to this ", computer!(), " again, into {}. That needs room for the whole folder and can take a while."),
             place_shown
         ),
-    }
-}
-
-/// The Add modal's note for a folder of this computer made on demand (`other_volume`: the folder is on another disk
-/// than Seedwell's storage, so its files are copied first).
-pub(crate) fn on_demand_add_note(other_volume: bool) -> String {
-    let note = sync_on_demand_note(SyncOnDemandChange::Add, String::new());
-    if other_volume {
-        format!(
-            concat!(
-                "The folder is on another disk: its files are copied to this ",
-                computer!(),
-                "’s disk first (that needs room for all of them), then removed from the other disk. {}"
-            ),
-            note
-        )
-    } else {
-        note
     }
 }
 
@@ -1102,6 +1113,7 @@ pub(crate) mod tests {
             last_synced_s: None,
             channel_id: None,
             on_demand: false,
+            on_demand_others: false,
             unavailable: 0,
             progress: None,
             problem: None,
@@ -1109,6 +1121,7 @@ pub(crate) mod tests {
             gone: Vec::new(),
             can_reshare: false,
             removes_everywhere: false,
+            scan: None,
         }
     }
 
@@ -1124,6 +1137,28 @@ pub(crate) mod tests {
             f.need_files = if need > 0 { 3 } else { 0 };
             f.rate_in = rate;
         })
+    }
+
+    /// The failure: a folder that scans for minutes (a big first scan) shows a bare "Scanning…" and an empty ring, so
+    /// nobody can tell whether it moves or how long it takes (the user's report, 0.1.18).
+    #[test]
+    fn a_scan_says_its_phase_and_how_far_it_is() {
+        use crate::sync::{SyncScan, SyncScanPhase};
+        let scan = |phase, checked_bytes| {
+            with(SyncState::Scanning, |f| {
+                f.scan = Some(SyncScan { phase, files: 407, bytes: 914_000_000_000, check_files: 407, check_bytes: 914_000_000_000, checked_files: 3, checked_bytes })
+            })
+        };
+        let listing = with(SyncState::Scanning, |f| {
+            f.scan = Some(SyncScan { phase: SyncScanPhase::Listing, files: 1234, bytes: 56_000_000_000, check_files: 0, check_bytes: 0, checked_files: 0, checked_bytes: 0 })
+        });
+        let words = subtitle(&listing);
+        assert!(words.contains("Listing") && words.contains("1234 files") && words.contains("56 GB"), "{words}");
+        assert_eq!(badge(&listing), SyncBadge::Progress { fraction: 0.0 });
+        let checking = scan(SyncScanPhase::CheckingContents, 457_000_000_000);
+        let words = subtitle(&checking);
+        assert!(words.contains("Checking contents") && words.contains("3 of 407 files") && words.contains("457 of 914 GB"), "{words}");
+        assert_eq!(badge(&checking), SyncBadge::Progress { fraction: 0.5 }, "the ring at the bytes read");
     }
 
     #[test]
@@ -1622,8 +1657,11 @@ pub(crate) mod tests {
         assert!(!sync_add_form_new().on_demand, "full unless chosen");
         let join = sync_on_demand_note(SyncOnDemandChange::Join, String::new());
         assert!(join.contains("stays on your other devices until you open it") && join.contains("asks you once"), "{join}");
+        // A folder whose files are here: nothing moves (the bug: they went into Seedwell's storage, from under torrents).
         let on = sync_on_demand_note(SyncOnDemandChange::TurnOn, String::new());
-        assert!(on.contains("Remove Download frees") && on.contains("asks you once"), "{on}");
+        // Placeholders only for the devices that get it through On all my devices (the review: it said every joiner).
+        assert!(on.contains("nothing is moved") && on.contains("through On all my devices") && !on.contains("asks you once"), "{on}");
+        assert!(on.contains("while On all my devices is off") && on.contains("joins with a link chooses"), "{on}");
         assert_eq!(sync_on_demand_note(SyncOnDemandChange::Add, String::new()), on);
         let off = sync_on_demand_note(SyncOnDemandChange::TurnOff, "~/Seedwell/Team".into());
         assert!(off.starts_with(concat!("Every file is downloaded to this ", computer!(), " again, into ~/Seedwell/Team.")), "{off}");
@@ -1634,13 +1672,5 @@ pub(crate) mod tests {
         let n = sync_on_demand_notice(false);
         assert_eq!((n.title.as_str(), n.button.as_deref()), (concat!("Allow Seedwell in the ", file_manager!()), Some("Open Settings")));
         assert!(sync_on_demand_notice(true).button.is_none());
-    }
-
-    #[test]
-    fn a_folder_on_another_disk_says_its_files_are_copied_first() {
-        let same = on_demand_add_note(false);
-        assert_eq!(same, sync_on_demand_note(SyncOnDemandChange::Add, String::new()));
-        let other = on_demand_add_note(true);
-        assert!(other.starts_with("The folder is on another disk: its files are copied to this") && other.ends_with(&same), "{other}");
     }
 }

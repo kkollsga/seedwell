@@ -350,3 +350,111 @@ fn agents_on_one_mac_talk_in_their_projects_threads() {
     assert_eq!(bodies, ["## Built\n\n1. app\n2. cli", "thanks"], "{r}");
     assert_ne!(a.cli(&["chat", "send", "Bridge", "--project", "x", "--topic", "y", "z"]).code, 0);
 }
+
+#[cfg(unix)]
+fn seeding(r: &serde_json::Value) -> bool {
+    matches!(r["state"].as_str(), Some("seeding" | "low-power" | "completed"))
+}
+
+#[cfg(unix)]
+fn ino(p: &std::path::Path) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(p).unwrap_or_else(|e| panic!("{p:?}: {e}")).ino()
+}
+
+/// The bug (0.1.18): making a folder on demand moved its files (by rename) into Seedwell's cache, from under the
+/// torrents seeding from it, which went missing-data. On a folder whose files are here, on demand now moves, renames
+/// and changes nothing: the files stay at their paths with the same file ids, the folder stays full there, the torrent
+/// keeps seeding. Freeing the local copies, the explicit choice, is refused while the torrent seeds from it.
+#[cfg(unix)]
+#[test]
+fn a_folder_made_on_demand_keeps_its_files_in_place_and_its_torrent_seeding() {
+    let root = tempfile::tempdir().unwrap();
+    let d = Daemon::start(root.path(), "od", "full");
+    let movies = root.path().join("Movies");
+    let t = make_torrent("V for Vendetta (2005)", &[("V.for.Vendetta.mkv", 700_000)], 5);
+    t.write_payload(&movies);
+    let film = movies.join(&t.name).join("V.for.Vendetta.mkv");
+    let tf = t.write_torrent(root.path());
+    d.json(&["add", tf.to_str().unwrap(), "--save-path", movies.to_str().unwrap()]);
+    wait_until(30, "the torrent to verify and seed", || row(&d, &t.id).filter(seeding));
+    let f = d.json(&["sync", "add", movies.to_str().unwrap()]);
+    let id = f["id"].as_str().unwrap().to_owned();
+    let before = (ino(&movies), ino(&film));
+
+    let m = d.json(&["sync", "mode", "Movies", "on-demand"]);
+    assert_eq!((m["on_demand"].as_bool(), m["on_demand_others"].as_bool()), (Some(false), Some(true)), "full here, on demand for the others: {m}");
+    assert_eq!(m["path"].as_str(), movies.to_str(), "at the user's path");
+    assert_eq!((ino(&movies), ino(&film)), before, "the same folder and file, at the same path");
+    assert!(!d.state.join("sync").join(format!("{id}.cache")).exists(), "nothing went into Seedwell's cache");
+    t.verify(&movies);
+    let text = cli_text(&d.socket, &["sync", "mode", "Movies", "on-demand"]);
+    assert!(text.stdout.contains("keeps every file where it is"), "{}", text.stdout);
+    // The torrent never misses its files: it keeps seeding, and a check of it finds them all.
+    d.json(&["recheck", &t.id]);
+    wait_until(30, "the torrent to check and seed again", || row(&d, &t.id).filter(seeding));
+    std::thread::sleep(Duration::from_millis(500));
+    let r = row(&d, &t.id).unwrap();
+    assert!(seeding(&r) && r["error"].is_null(), "{r}");
+
+    // Freeing this device's copies moves the files: refused while a torrent seeds from the folder, nothing touched.
+    let o = d.cli(&["sync", "mode", "Movies", "on-demand", "--free-space"]);
+    assert_ne!(o.code, 0, "{}", o.stdout);
+    assert!(o.stderr.contains("a torrent uses files in this folder") && o.stderr.contains("V for Vendetta (2005)"), "{}", o.stderr);
+    assert_eq!((ino(&movies), ino(&film)), before);
+    assert!(seeding(&row(&d, &t.id).unwrap()));
+}
+
+/// The user's state after 0.1.18 made their folder on demand: its files in the cache, a torrent's record still at the
+/// old path, missing-data. `sync mode <folder> full --to <path>` puts every file back by rename (the same file ids),
+/// says they are back in place (nothing is fetched), and the torrent finds its files at once, without a recheck.
+#[cfg(target_os = "macos")]
+#[test]
+fn switching_back_to_full_puts_the_files_back_and_the_torrent_recovers_without_a_recheck() {
+    let root = tempfile::tempdir().unwrap();
+    let movies = root.path().join("Movies");
+    let t = make_torrent("V for Vendetta (2005)", &[("V.for.Vendetta.mkv", 700_000), ("Subs/en.srt", 3_000)], 6);
+    t.write_payload(&movies);
+    let film = movies.join(&t.name).join("V.for.Vendetta.mkv");
+    let tf = t.write_torrent(root.path());
+    let mut d = Daemon::start(root.path(), "seed", "full");
+    d.json(&["add", tf.to_str().unwrap(), "--save-path", movies.to_str().unwrap()]);
+    wait_until(30, "the torrent to verify and seed", || row(&d, &t.id).filter(seeding));
+    let id = d.json(&["sync", "add", movies.to_str().unwrap()])["id"].as_str().unwrap().to_owned();
+    // (Its resume data, with each file's size and time, is written in the background after the check.)
+    std::thread::sleep(Duration::from_secs(2));
+    d.terminate();
+    let inode = ino(&film);
+
+    // What 0.1.18 did: the folder renamed into the cache, the folder on demand from its next start.
+    let cache = d.state.join("sync").join(format!("{id}.cache"));
+    std::fs::rename(&movies, &cache).unwrap();
+    let cfg = d.state.join("sync.toml");
+    let toml = std::fs::read_to_string(&cfg).unwrap();
+    assert!(toml.contains("on_demand = false") && toml.contains("mode_switched = false"), "{toml}");
+    std::fs::write(&cfg, toml.replacen("on_demand = false", "on_demand = true", 1).replacen("mode_switched = false", "mode_switched = true", 1)).unwrap();
+    drop(d);
+
+    let d = Daemon::start(root.path(), "seed", "full");
+    assert_eq!(d.json(&["sync", "status", "Movies"])["on_demand"].as_bool(), Some(true));
+    // A peer wakes the torrent: its files are gone from under it.
+    let leech = Daemon::start(root.path(), "leech", "full");
+    let peer = format!("127.0.0.1:{}", d.port);
+    leech.json(&["add", tf.to_str().unwrap(), "--peer", &peer]);
+    wait_until(30, "missing data", || row(&d, &t.id).filter(|r| r["state"] == "missing-data"));
+
+    let m = d.json(&["sync", "mode", "Movies", "full", "--to", movies.to_str().unwrap()]);
+    assert_eq!((m["on_demand"].as_bool(), m["fetching"].as_u64()), (Some(false), Some(0)), "{m}");
+    assert_eq!(ino(&film), inode, "renamed back, not copied or fetched");
+    t.verify(&movies);
+    assert!(!cache.exists());
+    let r = wait_until(20, "the torrent to find its files", || row(&d, &t.id).filter(seeding));
+    assert!(r["error"].is_null(), "{r}");
+    // It serves them: a new download from it completes.
+    leech.json(&["remove", &t.id, "-y"]);
+    wait_until(20, "the leech to forget it", || row(&leech, &t.id).is_none().then_some(()));
+    leech.json(&["add", tf.to_str().unwrap(), "--peer", &peer]);
+    wait_until(60, "the leech to download it", || row(&leech, &t.id).filter(seeding));
+    let rechecks = d.json(&["debug", "perf"])["probe"]["counters"]["rechecks"].as_u64();
+    assert_eq!(rechecks, Some(0), "no recheck from zero");
+}

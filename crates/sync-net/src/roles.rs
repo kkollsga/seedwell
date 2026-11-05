@@ -189,23 +189,32 @@ pub(crate) fn member_ids(m: &Membership) -> std::collections::BTreeSet<ShortId> 
     m.members().map(|(pk, _)| DeviceId::of_public_key(pk).short()).collect()
 }
 
+/// An owner signs again what admins admitted (same role, same invitation), so those devices stay if that admin is
+/// later demoted. True when it signed any. Nothing on a device that is not an owner.
+pub(crate) fn confirm_admitted(ctx: &Ctx, f: &Space) -> bool {
+    if f.role_of(ctx.key.public_key()) != Some(Role::Owner) {
+        return false;
+    }
+    let todo = f.membership.read().unwrap_or_else(|e| e.into_inner()).to_confirm();
+    let mut serial = f.membership.read().unwrap_or_else(|e| e.into_inner()).next_serial();
+    let mut confirmed = Vec::new();
+    for (device, role, invite) in todo {
+        if let Some(st) = by_owner(f, Body::Grant { device, role, serial, at_s: now_s(), invite }) {
+            confirmed.push(st);
+            serial += 1;
+        }
+    }
+    !confirmed.is_empty() && add(f, confirmed)
+}
+
 pub(crate) async fn changed(ctx: &Arc<Ctx>, f: &Arc<Space>) {
     let me = *ctx.key.public_key();
     // Admitted (or not named here yet): the others learn this device's name with the statements below.
     publish_profile(ctx, f);
-    // An owner signs again what admins admitted, so those devices stay if that admin is later demoted.
-    if f.role_of(&me) == Some(Role::Owner) {
-        let todo = f.membership.read().unwrap_or_else(|e| e.into_inner()).to_confirm();
-        let mut serial = f.membership.read().unwrap_or_else(|e| e.into_inner()).next_serial();
-        let mut confirmed = Vec::new();
-        for (device, role, invite) in todo {
-            if let Some(st) = by_owner(f, Body::Grant { device, role, serial, at_s: now_s(), invite }) {
-                confirmed.push(st);
-                serial += 1;
-            }
-        }
-        add(f, confirmed);
-    }
+    confirm_admitted(ctx, f);
+    // Read only on the user's devices, not lowered by an owner yet: this device writes nothing meanwhile.
+    let held = f.kind == SpaceKind::Folder && crate::devices::held_read_only(ctx, f);
+    f.held_read_only.store(held, std::sync::atomic::Ordering::SeqCst);
     let (role, statements) = {
         let m = f.membership.read().unwrap_or_else(|e| e.into_inner());
         (m.role(&me), m.statements().cloned().collect::<Vec<_>>())
@@ -223,7 +232,7 @@ pub(crate) async fn changed(ctx: &Arc<Ctx>, f: &Arc<Space>) {
                 let m = space.membership.read().unwrap_or_else(|e| e.into_inner());
                 (m.role(&me), m.writers(), member_ids(&m))
             };
-            let access = role.map_or(Access::Read, Role::access);
+            let access = if held { Access::Read } else { role.map_or(Access::Read, Role::access) };
             // Joining with write access, not admitted yet: what it changes meanwhile is its own once it is.
             let awaiting = role.is_none() && lock(&space.invite).as_ref().is_some_and(|i| i.invite.role.access() == Access::Write);
             let signed = core.signs();

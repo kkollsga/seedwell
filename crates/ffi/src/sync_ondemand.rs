@@ -142,7 +142,13 @@ pub enum SyncLocalChange {
     /// with `sync_hydrated` for the item that call returns.
     Modified { base: Option<String> },
     /// An earlier version, or content this computer let go of, unchanged since: dehydrate it (and fill it again when
-    /// the item is wanted: downloaded, downloading or pinned).
+    /// the item is wanted: downloaded, downloading or pinned). Also the user's edit once `sync_modify_item` wrote it as
+    /// a conflict copy (the item had moved on): recorded there, so it is never Modified again, and the feed names the
+    /// item again so the host lets go of it. Never for a placeholder the core reads the version at the name from (the
+    /// only copy here: its refill would have no source), whatever was recorded of it since
+    /// (docs/build-71-unhashed-conflicts.md). Windows: that placeholder is not in sync (the user wrote to it), so the
+    /// dehydrate marks it in sync first, guarded by the file's last write and size noted before this call and an open
+    /// check (CloudHost.Update).
     Stale,
 }
 
@@ -278,7 +284,7 @@ fn state_of(s: ItemState) -> SyncItemState {
     }
 }
 
-pub(super) fn item_of(i: &Item) -> SyncItem {
+pub(crate) fn item_of(i: &Item) -> SyncItem {
     SyncItem {
         id: i.id.clone(),
         parent_id: i.parent_id.clone(),
@@ -426,7 +432,16 @@ impl RealSync {
     pub(super) fn od_set_mode(&self, id: &str, on: bool, path: Option<&str>) -> Result<SyncFolder, CoreError> {
         let h = self.handle()?;
         let place = path.filter(|p| !p.trim().is_empty()).map(|p| folder_path(p, "the location").map_err(super::api_err)).transpose()?;
-        let f = self.rt.block_on(h.set_on_demand(&folder_id(id)?, on, place)).map_err(sync_err)?;
+        // Freeing the local copies is refused while a torrent uses files in the folder.
+        let f = if on { self.rt.block_on(h.free_local_copies(&folder_id(id)?, place)) } else { self.rt.block_on(h.set_on_demand(&folder_id(id)?, false, place)) }
+            .map_err(sync_err)?;
+        Ok(folder_of(&f))
+    }
+
+    pub(super) fn od_set_files_on_demand(&self, id: &str, on: bool, path: Option<&str>) -> Result<SyncFolder, CoreError> {
+        let h = self.handle()?;
+        let place = path.filter(|p| !p.trim().is_empty()).map(|p| folder_path(p, "the location").map_err(super::api_err)).transpose()?;
+        let f = self.rt.block_on(h.set_files_on_demand(&folder_id(id)?, on, place)).map_err(sync_err)?;
         Ok(folder_of(&f))
     }
 
@@ -712,9 +727,22 @@ impl MockSync {
         f(od.entry(id.to_string()).or_insert_with(MockOd::sample))
     }
 
+    /// The mock's *Files on demand*: a full folder only offers it (its files stay); an on-demand one goes full.
+    pub(super) fn od_set_files_on_demand(&self, id: &str, on: bool) -> Result<SyncFolder, CoreError> {
+        let here = lock(&self.state).folders.iter().any(|m| m.f.id == id && m.f.on_demand);
+        if here {
+            return if on { self.with(id, |m| m.f.clone()) } else { self.od_set_mode(id, false) };
+        }
+        self.with(id, |m| {
+            m.f.on_demand_others = on;
+            m.f.clone()
+        })
+    }
+
     pub(super) fn od_set_mode(&self, id: &str, on: bool) -> Result<SyncFolder, CoreError> {
         let f = self.with(id, |m| {
             m.f.on_demand = on;
+            m.f.on_demand_others = false;
             m.f.clone()
         })?;
         if !on {
@@ -922,15 +950,27 @@ fn mock_ignored(path: &str, dir: bool) -> Option<SyncIgnored> {
 /// named by their identifier (`root` is the folder). Calls that change something block (a fetch waits up to
 /// `wait_ms`): call them off the main thread.
 impl Core {
-    /// Makes a folder on demand (its files become this computer's cache, all of them downloaded) or full again (every
-    /// file is fetched; `path`, or the folder's place, must be free).
+    /// Frees this computer's local copies of a folder (`on_demand`: its files move into this computer's cache, all of
+    /// them still downloaded; refused while a torrent uses files in it), or makes an on-demand folder full again (the
+    /// files it holds move back to `path`, or the folder's place, which must be free; the rest is fetched). The user's
+    /// explicit choice only: the dialogs' *Files on demand* is [`Core::sync_set_files_on_demand`], which never moves a
+    /// folder's files.
     pub fn sync_set_on_demand(&self, id: String, on_demand: bool, path: Option<String>) -> Result<SyncFolder, CoreError> {
         self.backend.sync().set_on_demand(&id, on_demand, path.as_deref())
     }
 
-    /// Adds a folder of this computer on demand: its files move into this computer's storage before it ever opens
-    /// (all still here), so it is added whole or not at all, and can be tried again (a move cut off is finished at the
-    /// next start; one that cannot be finished now keeps the folder, held back, and says so).
+    /// *Files on demand* as the Add and Edit dialogs switch it (SPEC 7G.11, *Modes*): on a folder whose files are on
+    /// this computer it reads, moves and changes nothing (the folder stays full at its path, torrents seeding from it
+    /// keep seeding) and the devices that do not hold its files get placeholders; off on a folder that is on demand
+    /// here makes it full again at `path` or its place.
+    pub fn sync_set_files_on_demand(&self, id: String, on_demand: bool, path: Option<String>) -> Result<SyncFolder, CoreError> {
+        self.backend.sync().set_files_on_demand(&id, on_demand, path.as_deref())
+    }
+
+    /// Adds a folder of this computer with its local copies freed: its files move into this computer's storage before
+    /// it ever opens (all still here), so it is added whole or not at all, and can be tried again (a move cut off is
+    /// finished at the next start; one that cannot be finished now keeps the folder, held back, and says so). The
+    /// explicit choice only (the Add dialog adds a full folder that offers on demand).
     pub fn sync_add_folder_on_demand(&self, path: String) -> Result<SyncFolder, CoreError> {
         self.backend.sync().add_folder_on_demand(&path)
     }
@@ -943,21 +983,11 @@ impl Core {
 
 #[uniffi::export]
 impl Core {
-    /// The Add modal's note for `path` made on demand: said differently when the folder is on another disk than
-    /// Seedwell's storage (its files are copied there first).
+    /// The Add modal's note for a folder of this computer added with Files on demand: its files stay where they are
+    /// (`path` is not read: nothing is moved or copied, wherever it is).
     pub fn sync_on_demand_add_note(&self, path: String) -> String {
-        #[cfg(unix)]
-        let other = {
-            use std::os::unix::fs::MetadataExt;
-            let dev = |p: &std::path::Path| std::fs::metadata(p).map(|m| m.dev()).ok();
-            matches!((dev(std::path::Path::new(&path)), dev(&self.dir)), (Some(a), Some(b)) if a != b)
-        };
-        #[cfg(not(unix))]
-        let other = {
-            let _ = &path;
-            false
-        };
-        crate::sync_text::on_demand_add_note(other)
+        let _ = path;
+        crate::sync_text::sync_on_demand_note(crate::sync_text::SyncOnDemandChange::Add, String::new())
     }
 
     /// One item, or `None` when the identifier names nothing (any more).
@@ -1020,7 +1050,9 @@ impl Core {
     /// item's `content_version` the change of content started from (checked before a rename in the same call): when the item moved on
     /// since (another device's version came first), the content becomes a conflict copy, named as a full folder names
     /// one, whose item is returned; the other version stays. A new file (`sync_create_item`) where something is now
-    /// becomes a conflict copy the same way.
+    /// becomes a conflict copy the same way. One content makes one copy: the same content reported again returns the
+    /// copy made already (nothing written), and the item's current content returns the item (no conflict, no new
+    /// version), however often a host reports it.
     pub fn sync_modify_item(
         &self,
         id: String,
@@ -1209,6 +1241,45 @@ mod tests {
         assert!(c.sync_create_item(f.id.clone(), ROOT_ID.into(), "a/b".into(), true, None).is_err());
         let p = c.sync_pin(f.id.clone(), n.id.clone(), true).unwrap();
         assert!(p.pinned);
+    }
+
+    /// The bug (0.1.18): *Files on demand* in the Add and Edit dialogs moved the folder's files into Seedwell's
+    /// storage, from under the torrents seeding from it. On a folder whose files are here it now moves, renames and
+    /// changes nothing: every file stays at its path with the same file id, the folder stays full there, and only the
+    /// devices without the files get placeholders.
+    #[cfg(unix)]
+    #[test]
+    fn files_on_demand_from_the_dialogs_leaves_a_folders_files_where_they_are() {
+        use std::os::unix::fs::MetadataExt;
+        let home = tempfile::tempdir().unwrap();
+        let work = tempfile::tempdir().unwrap();
+        // SAFETY: set before the core starts any thread; nothing else here reads the environment.
+        unsafe { std::env::set_var("HOME", home.path()) };
+        let state = work.path().join("state");
+        let c = core(false, &state);
+        let movies = work.path().join("Movies");
+        std::fs::create_dir_all(movies.join("V for Vendetta (2005)")).unwrap();
+        let film = movies.join("V for Vendetta (2005)/V.for.Vendetta.mkv");
+        std::fs::write(&film, b"a film").unwrap();
+        let stamp = |p: &std::path::Path| std::fs::metadata(p).map(|m| (m.ino(), m.mtime_nsec(), m.len())).unwrap();
+        // (A synced folder gets its `.seedwell` state folder inside, so the folder's own time changes: its file id does not.)
+        let before = (stamp(&movies).0, stamp(&film));
+        let form = crate::SyncAddForm { mode: crate::SyncAddMode::Local, folder: movies.display().to_string(), on_demand: true, ..c.sync_add_form(None) };
+        let f = c.sync_add_start(form).unwrap();
+        assert!(!f.on_demand && f.on_demand_others, "full here, on demand for the others: {f:?}");
+        assert_eq!(f.path, movies.display().to_string(), "at the user's path, not the Seedwell folder");
+        assert_eq!((stamp(&movies).0, stamp(&film)), before, "the same folder and file, untouched");
+        assert!(!state.join("sync").join(format!("{}.cache", f.id)).exists(), "nothing went into Seedwell's storage");
+        assert_eq!(c.sync_host_folder_state(f.id.clone()), crate::SyncHostFolderState::Full, "no file manager domain: the files are here");
+        let e = c.sync_edit_form(f.id.clone());
+        assert!(e.on_demand && !e.folder.as_ref().unwrap().on_demand, "the Edit dialog shows the switch on");
+        // Off in Edit only takes the setting back; on again changes nothing either.
+        let off = c.sync_edit_save(crate::SyncEditForm { on_demand: false, ..e }).unwrap();
+        assert!(!off.on_demand && !off.on_demand_others);
+        let on = c.sync_edit_save(crate::SyncEditForm { on_demand: true, ..c.sync_edit_form(f.id.clone()) }).unwrap();
+        assert!(!on.on_demand && on.on_demand_others);
+        assert_eq!((stamp(&movies).0, stamp(&film)), before);
+        assert_eq!(std::fs::read(&film).unwrap(), b"a film");
     }
 
     #[test]

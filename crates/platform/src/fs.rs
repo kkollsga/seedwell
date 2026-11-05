@@ -856,6 +856,36 @@ fn reserved_device_name(name: &str) -> bool {
         || (stem.len() == 4 && (stem.starts_with("COM") || stem.starts_with("LPT")) && stem.as_bytes()[3].is_ascii_digit() && stem.as_bytes()[3] != b'0')
 }
 
+/// Whether the volume of `dir` (an existing folder, best resolved: [`crate::dirs::real_path`]) finds a name in any case,
+/// as APFS and HFS+ by default, NTFS and FAT do: `Movies` and `movies` are one folder there. Always on Windows.
+/// Elsewhere the disk is asked, read-only and in a few stats: the deepest name of `dir` on its volume that has an ASCII
+/// letter is looked up with its letters' case swapped, and the volume folds case when that finds the same folder (same
+/// volume, same file id). `false` when no name has such a letter or `dir` cannot be read.
+pub fn folds_case(dir: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        let _ = dir;
+        true
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let Ok(top) = std::fs::metadata(dir) else { return false };
+        for p in dir.ancestors() {
+            let (Some(name), Some(parent)) = (p.file_name().and_then(|n| n.to_str()), p.parent()) else { break };
+            let Ok(m) = std::fs::metadata(p) else { break };
+            if m.dev() != top.dev() {
+                break;
+            }
+            let swapped: String = name.chars().map(|c| if c.is_ascii_lowercase() { c.to_ascii_uppercase() } else { c.to_ascii_lowercase() }).collect();
+            if swapped != name {
+                return std::fs::metadata(parent.join(&swapped)).is_ok_and(|o| o.dev() == m.dev() && o.ino() == m.ino());
+            }
+        }
+        false
+    }
+}
+
 /// "Not found" also when a path component is a file: both mean the path is not there.
 pub fn is_not_found(e: &io::Error) -> bool {
     matches!(e.kind(), io::ErrorKind::NotFound | io::ErrorKind::NotADirectory)
@@ -875,6 +905,23 @@ mod tests {
     }
 
     use super::*;
+
+    /// A guard that compares paths needs to know whether `Movies` and `movies` are one folder: fails when the answer
+    /// disagrees with what the disk does with the other case (it would let a torrent's files be moved away on a Mac or
+    /// a PC, or join two folders on a disk that keeps them apart).
+    #[test]
+    fn folds_case_says_what_the_disk_does_with_a_name_in_the_other_case() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = crate::dirs::real_path(dir.path()).unwrap();
+        let movies = real.join("Movies");
+        std::fs::create_dir(&movies).unwrap();
+        let same = std::fs::metadata(real.join("mOVIES")).is_ok();
+        assert_eq!(folds_case(&movies), same || cfg!(windows), "{}", movies.display());
+        // A name without letters looks further up, on the same volume.
+        let digits = movies.join("2005");
+        std::fs::create_dir(&digits).unwrap();
+        assert_eq!(folds_case(&digits), folds_case(&movies));
+    }
 
     #[test]
     fn positioned_reads_and_writes_meet() {

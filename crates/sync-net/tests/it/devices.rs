@@ -11,7 +11,7 @@ use trs_sync_net::SyncHandle;
 use trs_sync_net::chat::MessageKind;
 use trs_sync_net::devices::DevicesState;
 use trs_sync_proto::ids::{DeviceId, FolderId};
-use trs_sync_proto::members::Role;
+use trs_sync_proto::members::{Body, FOLLOW_ON_DEMAND, FOLLOW_READ_ONLY, FOLLOW_REMOVED, MAX_FOLLOW_SERIAL, Role, Signer};
 use trs_sync_proto::msg::{FEATURE_DEVICES, FEATURES};
 
 use crate::chat::{at, start_at};
@@ -543,6 +543,95 @@ async fn an_on_demand_folder_follows_on_demand_and_its_owner_removing_it_removes
     shutdown(&[&a, &b, &pc]).await;
 }
 
+/// The bug (0.1.18): *Files on demand* on a folder whose files are here moved them into this device's cache. Now the
+/// device that holds them keeps them where they are (nothing read, moved or renamed: the same file ids, a full folder
+/// at its path), and a sibling without them still gets placeholders: every file listed, nothing downloaded.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn files_on_demand_keeps_the_holders_files_in_place_and_a_sibling_gets_placeholders() {
+    use std::os::unix::fs::MetadataExt;
+    let a = Dev::new("Anna's Mac").await;
+    let work = tempfile::tempdir().unwrap();
+    let src = work.path().join("Movies");
+    std::fs::create_dir_all(src.join("V for Vendetta (2005)")).unwrap();
+    let film = src.join("V for Vendetta (2005)/film.mkv");
+    std::fs::write(&film, vec![5u8; 300_000]).unwrap();
+    let f: FolderId = a.h.add_folder(src.clone()).await.unwrap().id.parse().unwrap();
+    let stamp = |p: &Path| std::fs::metadata(p).map(|m| (m.ino(), m.mtime_nsec(), m.len())).unwrap();
+    let before = (std::fs::metadata(&src).unwrap().ino(), stamp(&film));
+    let c_state = tempfile::tempdir().unwrap();
+    let c = start_at(c_state.path(), "Mac mini", |o| {
+        o.forbidden_root = trs_platform::dirs::home();
+        o.on_demand = true;
+    })
+    .await;
+    let c = Dev { h: c, state: c_state, name: "Mac mini", features: FEATURES };
+    pair(&a, &c).await;
+
+    let st = a.h.set_files_on_demand(&f, true, None).await.unwrap();
+    assert!(!st.on_demand && st.on_demand_others, "full here, on demand for the others");
+    assert_eq!(PathBuf::from(&st.path), src);
+    assert_eq!((std::fs::metadata(&src).unwrap().ino(), stamp(&film)), before, "the same folder and file, untouched");
+    assert!(a.h.offers_on_demand(&f));
+    assert!(snapshot_folder(&a, &f).is_some_and(|s| !s.on_demand && s.on_demand_others));
+
+    // The sibling, without the files: placeholders.
+    a.h.set_follow(&f, true).await.unwrap();
+    until(40, "C lists the film", || c.h.od_item_at(&f, "V for Vendetta (2005)/film.mkv").ok().flatten().is_some()).await;
+    let cs = snapshot_folder(&c, &f).unwrap();
+    assert!(cs.on_demand, "joined on demand");
+    assert_eq!(c.h.od_item_at(&f, "V for Vendetta (2005)/film.mkv").unwrap().unwrap().state, ItemState::OnlineOnly);
+    assert!(!c.h.od_cache_path(&f, "V for Vendetta (2005)/film.mkv").unwrap().exists(), "nothing downloaded");
+    assert_eq!((std::fs::metadata(&src).unwrap().ino(), stamp(&film)), before, "still untouched on A");
+
+    // Off takes only the mark back.
+    let st = a.h.set_files_on_demand(&f, false, None).await.unwrap();
+    assert!(!st.on_demand && !st.on_demand_others && !a.h.offers_on_demand(&f));
+    assert_eq!(stamp(&film), before.1);
+    shutdown(&[&a, &c]).await;
+}
+
+/// Review of the on-demand fix, #3: the *On all my devices* statement was signed anew only when the mark of a full
+/// folder changed, so freeing the copies or going back to full left it saying the old mode, and another holder turning
+/// the switch off left this device showing it on. Fails when a mode switch leaves the statement as it was, or a device
+/// shows its own mark instead of what the statement says.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_on_all_my_devices_statement_follows_every_mode_switch_and_every_holder_shows_it() {
+    let a = Dev::new("Anna's Mac").await;
+    let work = tempfile::tempdir().unwrap();
+    let src = work.path().join("Docs");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("a.txt"), b"from Anna").unwrap();
+    let f: FolderId = a.h.add_folder(src.clone()).await.unwrap().id.parse().unwrap();
+    let c = Dev::new("Mac mini").await;
+    pair(&a, &c).await;
+    a.h.set_follow(&f, true).await.unwrap();
+    assert_eq!(a.h.follow_on_demand(&f), Some(false), "full on all devices");
+    until(40, "the sibling holds the folder, as an admin", || {
+        read(&c.sync_dir().join("Docs/a.txt")).is_some() && folder_role(&c, &f, &c).is_some_and(Role::admits)
+    })
+    .await;
+
+    // Freeing this device's copies makes it on demand here: devices that join later get placeholders.
+    a.h.free_local_copies(&f, None).await.unwrap();
+    assert_eq!(a.h.follow_on_demand(&f), Some(true), "signed anew after freeing the copies");
+    // Full again: so for the devices that join too.
+    let st = a.h.set_files_on_demand(&f, false, None).await.unwrap();
+    assert!(!st.on_demand && !st.on_demand_others);
+    assert_eq!(a.h.follow_on_demand(&f), Some(false), "signed anew after going back to full");
+
+    // The switch on here; the sibling, which holds the files too, turns it off: both show it off. (The sibling has each
+    // statement before the next: one it has not seen yet would rank above its own.)
+    until(30, "the sibling has the statement of full", || c.h.follow_on_demand(&f) == Some(false)).await;
+    assert!(a.h.set_files_on_demand(&f, true, None).await.unwrap().on_demand_others);
+    until(30, "the sibling has the new statement", || c.h.follow_on_demand(&f) == Some(true)).await;
+    assert!(snapshot_folder(&c, &f).is_some_and(|s| !s.on_demand && s.on_demand_others), "the sibling shows the statement too");
+    c.h.set_files_on_demand(&f, false, None).await.unwrap();
+    until(30, "Anna's Mac has the sibling's statement", || a.h.follow_on_demand(&f) == Some(false)).await;
+    assert!(snapshot_folder(&a, &f).is_some_and(|s| !s.on_demand && !s.on_demand_others), "shown from the statement, not this device's mark");
+    shutdown(&[&a, &c]).await;
+}
+
 /// Removed on a sibling that is not its owner, a folder goes from that device only (its files stay there) and does
 /// not come back; the owner removing it later reaches a sibling that was away at the time when it is back.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -580,4 +669,475 @@ async fn a_siblings_removal_stays_local_and_an_away_sibling_removes_it_when_back
     until(40, "C removed it once back", || !has_folder(&c, &f) && !c.sync_dir().join("Dev/.seedwell").exists()).await;
     assert!(read(&c.sync_dir().join("Dev/seed.txt")).is_some(), "C's files stay");
     shutdown(&[&a, &b, &c]).await;
+}
+
+/// *Read only* on all my devices (SPEC §7G.1): a folder on every one of the user's computers that none of them can
+/// change. Fails when a device that joins through "On all my devices" is admitted with write access, when its edit,
+/// new file or delete reaches the owner or a sibling (the owner downloading anything of it), or when a member by link
+/// loses the role its link gave.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn read_only_siblings_join_read_only_and_none_of_their_changes_reach_the_owner_or_each_other() {
+    let (a, b, c, l) = (Dev::new("Anna's Mac").await, Dev::new("MacBook").await, Dev::new("Studio PC").await, Dev::new("Friend's Mac").await);
+    let work = tempfile::tempdir().unwrap();
+    let src = work.path().join("Films");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("a.txt"), b"from Anna").unwrap();
+    std::fs::write(src.join("b.txt"), b"keep me").unwrap();
+    let f: FolderId = a.h.add_folder(src.clone()).await.unwrap().id.parse().unwrap();
+    // A friend joins by a Read & write link: not one of the user's devices.
+    let friend = work.path().join("Friend");
+    l.h.join_folder(&a.h.create_invite(&f, Role::ReadWrite, 1, 7).unwrap().link, friend.clone()).await.unwrap();
+    l.h.add_address(&f, at(&a.h)).unwrap();
+    until(30, "the friend has the folder", || read(&friend.join("a.txt")).is_some()).await;
+    pair(&a, &b).await;
+    pair(&a, &c).await;
+    a.h.set_follow_read_only(&f, true).await.unwrap();
+    assert!(a.h.is_followed(&f) && a.h.follow_read_only(&f), "on all devices and read only, in one statement");
+
+    let has = |d: &Dev, name: &str| read(&d.sync_dir().join("Films").join(name));
+    // Every file the test then edits or deletes on B is there first (B deleting a file it has not received yet failed:
+    // "No such file or directory", 1 run in 12 at utility priority).
+    until(40, "B and C have the folder", || {
+        ["a.txt", "b.txt"].iter().all(|n| has(&b, n).is_some()) && has(&c, "a.txt").is_some() && has(&c, "b.txt").is_some()
+    })
+    .await;
+    for d in [&b, &c] {
+        until(30, "admitted Read only", || folder_role(&a, &f, d) == Some(Role::ReadOnly) && folder_role(d, &f, d) == Some(Role::ReadOnly)).await;
+    }
+    assert_eq!(folder_role(&a, &f, &a), Some(Role::Owner), "the owner keeps its role");
+    assert!(b.h.follow_read_only(&f) && b.h.follow_state(&f).unwrap().read_only, "B shows it");
+    assert!(b.h.set_follow_read_only(&f, false).await.is_err(), "a Read only device cannot switch it");
+
+    // B edits, adds and deletes; the friend adds a file (the sessions carry changes meanwhile).
+    let files = snapshot_folder(&a, &f).unwrap().files;
+    let bp = b.sync_dir().join("Films");
+    std::fs::write(bp.join("a.txt"), b"changed on B").unwrap();
+    std::fs::write(bp.join("new-on-b.txt"), b"B").unwrap();
+    std::fs::remove_file(bp.join("b.txt")).unwrap();
+    b.h.rescan(&f).unwrap();
+    std::fs::write(friend.join("from-friend.txt"), b"F").unwrap();
+    until(40, "A and C have the friend's file", || read(&src.join("from-friend.txt")).is_some() && has(&c, "from-friend.txt").is_some()).await;
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    for (who, dir) in [("A", src.clone()), ("C", c.sync_dir().join("Films")), ("the friend", friend.clone())] {
+        assert_eq!(read(&dir.join("a.txt")).as_deref(), Some(&b"from Anna"[..]), "B's edit reached {who}");
+        assert_eq!(read(&dir.join("b.txt")).as_deref(), Some(&b"keep me"[..]), "B's delete reached {who}");
+        assert!(read(&dir.join("new-on-b.txt")).is_none(), "B's new file reached {who}");
+    }
+    let st = snapshot_folder(&a, &f).unwrap();
+    assert_eq!((st.files, st.need_files, st.conflicts), (files + 1, 0, 0), "the owner downloads nothing but the friend's file: {st:?}");
+    // The friend keeps the role its link gave.
+    assert_eq!(folder_role(&a, &f, &l), Some(Role::ReadWrite));
+    shutdown(&[&a, &b, &c, &l]).await;
+}
+
+/// *Read only* turned on for a folder that is on the user's devices already, then off. Fails when one of the devices
+/// that have it keeps write access (or the change is not signed so that the others accept it), when a sibling made
+/// Read only lifts it with a statement of its own, when the device that turned it on loses its role, or when turning
+/// it off does not give them back Admin, or gives it to one the user had made Read only before.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn read_only_lowers_the_siblings_that_have_it_a_siblings_statement_cannot_lift_it_and_off_gives_admin_back() {
+    let (a, b, c, d) = (Dev::new("Anna's Mac").await, Dev::new("MacBook").await, Dev::new("Studio PC").await, Dev::new("Old Laptop").await);
+    let work = tempfile::tempdir().unwrap();
+    let f = folder(&a, work.path(), "Films").await;
+    for s in [&b, &c, &d] {
+        pair(&a, s).await;
+    }
+    a.h.set_follow(&f, true).await.unwrap();
+    for s in [&b, &c, &d] {
+        until(40, "admitted as an admin", || folder_role(&a, &f, s) == Some(Role::Admin) && read(&s.sync_dir().join("Films/seed.txt")).is_some()).await;
+    }
+    // The user made the old laptop Read only before.
+    a.h.set_role(&f, &d.id(), Role::ReadOnly).unwrap();
+    until(30, "D is Read only", || folder_role(&d, &f, &d) == Some(Role::ReadOnly)).await;
+
+    // On: B and C become Read only, signed with the folder key (each device accepts it), A keeps its role.
+    a.h.set_follow_read_only(&f, true).await.unwrap();
+    for s in [&b, &c] {
+        until(30, "Read only, on every device", || [&a, &b, &c].iter().all(|x| folder_role(x, &f, s) == Some(Role::ReadOnly))).await;
+    }
+    assert_eq!(folder_role(&b, &f, &a), Some(Role::Owner));
+    // B, Read only now, says it is not read only (as a build without the checks could): nothing changes. (Its
+    // statement says on demand, so A can tell it has it.)
+    assert!(b.h.test_say_follow(&f, true, FOLLOW_ON_DEMAND, None).await);
+    until(30, "A has B's statement", || a.h.test_has_follow(&f, &b.id(), FOLLOW_ON_DEMAND)).await;
+    assert_eq!(a.h.follow_on_demand(&f), Some(false), "a Read only sibling's statement changes nothing it says");
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(a.h.follow_read_only(&f) && b.h.follow_read_only(&f), "a Read only sibling's statement does not count");
+    for s in [&b, &c, &d] {
+        assert_eq!(folder_role(&a, &f, s), Some(Role::ReadOnly));
+    }
+    // A new file on B still never reaches A.
+    std::fs::write(b.sync_dir().join("Films/from-b.txt"), b"B").unwrap();
+    b.h.rescan(&f).unwrap();
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(read(&work.path().join("Films/from-b.txt")).is_none(), "B's file reached A");
+
+    // Off: B and C are admins again; D stays Read only, as the user made it.
+    a.h.set_follow_read_only(&f, false).await.unwrap();
+    assert!(a.h.is_followed(&f) && !a.h.follow_read_only(&f), "still on all devices");
+    for s in [&b, &c] {
+        until(30, "an admin again, on every device", || [&a, &b, &c].iter().all(|x| folder_role(x, &f, s) == Some(Role::Admin))).await;
+    }
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(folder_role(&a, &f, &d), Some(Role::ReadOnly), "the old laptop stays as the user made it");
+    // And they write again.
+    std::fs::write(c.sync_dir().join("Films/from-c.txt"), b"C").unwrap();
+    until(40, "A has C's file", || read(&work.path().join("Films/from-c.txt")).is_some()).await;
+    shutdown(&[&a, &b, &c, &d]).await;
+}
+
+/// Review of Read only, #1: the Follow that counted was the latest of any of the user's devices, so a Read only
+/// sibling (or one on another build) saying the folder was removed on all devices made the owner remove its own folder
+/// from Seedwell, its folder key included, and one saying it was off stopped every admission. Fails when a statement
+/// of a device that is not owner of the folder removes it anywhere, or one of a device that is neither owner nor
+/// admin keeps a new device from joining.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_read_only_siblings_removal_or_off_never_removes_the_folder_nor_stops_admissions() {
+    let (a, b, c) = (Dev::new("Anna's Mac").await, Dev::new("MacBook").await, Dev::new("Studio PC").await);
+    let work = tempfile::tempdir().unwrap();
+    let f = folder(&a, work.path(), "Films").await;
+    pair(&a, &b).await;
+    pair(&a, &c).await;
+    a.h.set_follow_read_only(&f, true).await.unwrap();
+    for s in [&b, &c] {
+        until(40, "Read only, with the files", || folder_role(&a, &f, s) == Some(Role::ReadOnly) && read(&s.sync_dir().join("Films/seed.txt")).is_some()).await;
+    }
+    // B says the folder was removed on all devices.
+    assert!(b.h.test_say_follow(&f, false, FOLLOW_REMOVED, None).await);
+    for d in [&a, &c] {
+        until(30, "it has B's statement", || d.h.test_has_follow(&f, &b.id(), FOLLOW_REMOVED)).await;
+    }
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(has_folder(&a, &f) && has_folder(&c, &f), "removed by a Read only sibling's statement");
+    assert_eq!(folder_role(&a, &f, &a), Some(Role::Owner), "the owner keeps the folder and its key");
+    assert!(a.h.is_followed(&f) && a.h.follow_read_only(&f) && c.h.is_followed(&f), "still on all devices, Read only");
+    // B says it is off: a device paired now still joins it, Read only.
+    assert!(b.h.test_say_follow(&f, false, FOLLOW_READ_ONLY, None).await);
+    until(30, "A has B's statement", || a.h.test_has_follow(&f, &b.id(), FOLLOW_READ_ONLY)).await;
+    let d = Dev::new("New Mac").await;
+    pair(&a, &d).await;
+    until(40, "D joined, Read only", || folder_role(&a, &f, &d) == Some(Role::ReadOnly) && read(&d.sync_dir().join("Films/seed.txt")).is_some()).await;
+    // And the folder syncs on.
+    std::fs::write(work.path().join("Films/after.txt"), b"A").unwrap();
+    until(40, "C has the owner's new file", || read(&c.sync_dir().join("Films/after.txt")).is_some()).await;
+    shutdown(&[&a, &b, &c, &d]).await;
+}
+
+/// Review of Read only, #2: the next Follow's serial was one above the highest any member said, unchecked, so a
+/// sibling saying `u64::MAX` panicked a debug build (and wrapped to 0 in a release one), freezing Read only on. Fails
+/// when such a serial panics, or keeps the owner from turning Read only off and on again (also once that sibling is
+/// an admin again, its statement at the highest serial counting: the owner's next one must still rank above it).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_huge_serial_from_a_sibling_neither_panics_nor_freezes_read_only() {
+    let (a, b) = (Dev::new("Anna's Mac").await, Dev::new("MacBook").await);
+    let work = tempfile::tempdir().unwrap();
+    let f = folder(&a, work.path(), "Films").await;
+    pair(&a, &b).await;
+    a.h.set_follow_read_only(&f, true).await.unwrap();
+    until(40, "B is Read only", || folder_role(&a, &f, &b) == Some(Role::ReadOnly) && folder_role(&b, &f, &b) == Some(Role::ReadOnly)).await;
+    // (Counting for nothing, it changes nothing here; it goes with the next statement.)
+    b.h.test_say_follow(&f, true, 0, Some(u64::MAX)).await;
+    assert!(b.h.test_say_follow(&f, true, 0, Some(MAX_FOLLOW_SERIAL)).await);
+    until(30, "A has B's statements", || a.h.test_has_follow(&f, &b.id(), 0)).await;
+    a.h.set_follow_read_only(&f, false).await.unwrap();
+    assert!(!a.h.follow_read_only(&f), "turned off");
+    until(40, "B is an admin again", || folder_role(&a, &f, &b) == Some(Role::Admin) && folder_role(&b, &f, &b) == Some(Role::Admin)).await;
+    a.h.set_follow_read_only(&f, true).await.unwrap();
+    until(40, "B is Read only again", || folder_role(&b, &f, &b) == Some(Role::ReadOnly)).await;
+    shutdown(&[&a, &b]).await;
+}
+
+/// Review of Read only, #3 and #5: with the owner away, an admin (the host) turning Read only on changed nothing until
+/// the owner was back (the other admin's edits reached the host), the owner then spared whichever device said it last
+/// (a sibling saying it again after a mode switch) and lowered the host, and a device the host admitted Read only
+/// meanwhile counted as "Read only before" and stayed so when it was turned off. Fails when a sibling that becomes
+/// Read only still sends changes while no owner is online, when the owner lowers the host, or when turning it off
+/// leaves the device admitted meanwhile Read only.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn with_the_owner_away_an_admin_turning_read_only_on_holds_the_others_back_and_the_owner_lowers_the_right_ones() {
+    let (a, h, s) = (Dev::new("Owner Mac").await, Dev::new("Host Mac").await, Dev::new("Studio PC").await);
+    let work = tempfile::tempdir().unwrap();
+    let f = folder(&a, work.path(), "Films").await;
+    pair(&a, &h).await;
+    pair(&a, &s).await;
+    a.h.set_follow(&f, true).await.unwrap();
+    for x in [&h, &s] {
+        until(40, "an admin, with the files", || folder_role(&a, &f, x) == Some(Role::Admin) && read(&x.sync_dir().join("Films/seed.txt")).is_some()).await;
+    }
+    // The host and S reach each other without the owner.
+    s.h.add_address(&f, at(&h.h)).unwrap();
+    h.h.add_address(&f, at(&s.h)).unwrap();
+    // The owner goes away; the host, an admin, turns Read only on.
+    a.h.shutdown().await;
+    h.h.set_follow_read_only(&f, true).await.unwrap();
+    // (The owner relays the group's statements; without it, they are handed over here as a session would.)
+    s.h.test_take_group_statements(h.h.test_group_statements()).await;
+    until(30, "S holds back", || s.h.test_held_read_only(&f)).await;
+    assert!(!h.h.test_held_read_only(&f), "the device that turned it on writes on");
+    // S says it again (as after a mode switch; the same flags, so a device that joins later joins it in full).
+    assert!(s.h.test_say_follow(&f, true, FOLLOW_READ_ONLY, None).await);
+    // (The owner relays the group's statements; without it, they are handed over here as a session would.)
+    h.h.test_take_group_statements(s.h.test_group_statements()).await;
+    until(30, "H has S's statement", || h.h.test_has_follow(&f, &s.id(), FOLLOW_READ_ONLY)).await;
+    assert!(s.h.test_held_read_only(&f), "saying it again does not make S the one that writes on");
+    // S's new file does not reach the host.
+    std::fs::write(s.sync_dir().join("Films/from-s.txt"), b"S").unwrap();
+    s.h.rescan(&f).unwrap();
+    // (The host and S sync with each other meanwhile: the host's new file reaches S.)
+    std::fs::write(h.sync_dir().join("Films/from-h.txt"), b"H").unwrap();
+    until(40, "S has the host's file", || read(&s.sync_dir().join("Films/from-h.txt")).is_some()).await;
+    // A device paired through the host meanwhile joins Read only.
+    let n = Dev::new("New Mac").await;
+    pair(&h, &n).await;
+    until(40, "N joined Read only", || folder_role(&h, &f, &n) == Some(Role::ReadOnly) && read(&n.sync_dir().join("Films/seed.txt")).is_some()).await;
+    assert!(read(&h.sync_dir().join("Films/from-s.txt")).is_none(), "S's file reached the host");
+    // The owner is back: S is lowered, the host keeps its role.
+    let a = Dev { h: start(a.state.path(), a.name, a.features).await, ..a };
+    until(60, "S is Read only", || folder_role(&a, &f, &s) == Some(Role::ReadOnly) && folder_role(&h, &f, &s) == Some(Role::ReadOnly)).await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(folder_role(&a, &f, &h), Some(Role::Admin), "the host keeps its role");
+    assert!(read(&work.path().join("Films/from-s.txt")).is_none(), "S's file reached the owner");
+    // The host turns it off: S and N, both made Read only after it came on, are admins again.
+    h.h.set_follow_read_only(&f, false).await.unwrap();
+    until(60, "S and N are admins", || [&s, &n].iter().all(|x| folder_role(&a, &f, x) == Some(Role::Admin))).await;
+    shutdown(&[&a, &h, &s, &n]).await;
+}
+
+/// Review of Read only, #4: Read only counted from the latest Follow of a current owner or admin only, so when the
+/// device that turned it on left the user's devices, an older Follow without the flag counted again and the owner made
+/// every sibling an admin, although nobody turned it off. Fails when the device that turned it on leaving lifts it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn read_only_stays_on_when_the_device_that_turned_it_on_leaves_the_group() {
+    let (a, h, b) = (Dev::new("Owner Mac").await, Dev::new("Host Mac").await, Dev::new("MacBook").await);
+    let work = tempfile::tempdir().unwrap();
+    let f = folder(&a, work.path(), "Films").await;
+    pair(&a, &h).await;
+    pair(&a, &b).await;
+    a.h.set_follow(&f, true).await.unwrap();
+    for x in [&h, &b] {
+        until(40, "an admin, here too", || folder_role(&a, &f, x) == Some(Role::Admin) && folder_role(x, &f, x) == Some(Role::Admin)).await;
+    }
+    h.h.set_follow_read_only(&f, true).await.unwrap();
+    until(40, "B is Read only", || folder_role(&a, &f, &b) == Some(Role::ReadOnly) && folder_role(&b, &f, &b) == Some(Role::ReadOnly)).await;
+    assert_eq!(folder_role(&a, &f, &h), Some(Role::Admin));
+    // The host leaves the user's devices.
+    h.h.devices_leave().await.unwrap();
+    until(60, "A and B no longer count the host", || [&a, &b].iter().all(|x| !x.h.devices_status().devices.iter().any(|d| d.id == h.id()))).await;
+    until(40, "Read only is still on, on A and B", || a.h.follow_read_only(&f) && b.h.follow_read_only(&f)).await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(folder_role(&a, &f, &b), Some(Role::ReadOnly), "lifted without anyone turning it off");
+    // The owner can still turn it off.
+    a.h.set_follow_read_only(&f, false).await.unwrap();
+    until(40, "B is an admin again", || folder_role(&a, &f, &b) == Some(Role::Admin)).await;
+    shutdown(&[&a, &h, &b]).await;
+}
+
+/// Review of Read only, #4, without a new key: the device that turned it on stops being an admin of the folder (the
+/// user made it Read only), so its statement no longer counts, and an older Follow without the flag counted again.
+/// Fails when that lifts Read only for the others.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn read_only_stays_on_when_the_device_that_turned_it_on_is_no_longer_an_admin() {
+    let (a, h, b) = (Dev::new("Owner Mac").await, Dev::new("Host Mac").await, Dev::new("MacBook").await);
+    let work = tempfile::tempdir().unwrap();
+    let f = folder(&a, work.path(), "Films").await;
+    pair(&a, &h).await;
+    pair(&a, &b).await;
+    a.h.set_follow(&f, true).await.unwrap();
+    for x in [&h, &b] {
+        until(40, "an admin, here too", || folder_role(&a, &f, x) == Some(Role::Admin) && folder_role(x, &f, x) == Some(Role::Admin)).await;
+    }
+    h.h.set_follow_read_only(&f, true).await.unwrap();
+    until(40, "B is Read only", || folder_role(&a, &f, &b) == Some(Role::ReadOnly)).await;
+    // The user makes the host Read only too: its statement no longer counts.
+    a.h.set_role(&f, &h.id(), Role::ReadOnly).unwrap();
+    until(30, "the host is Read only", || folder_role(&a, &f, &h) == Some(Role::ReadOnly)).await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(a.h.follow_read_only(&f), "Read only lifted when its device stopped counting");
+    assert_eq!(folder_role(&a, &f, &b), Some(Role::ReadOnly), "B made an admin without anyone turning it off");
+    shutdown(&[&a, &h, &b]).await;
+}
+
+/// The same, with the owner's statement saying it again held back (as when its round of the devices began before the
+/// host was lowered): Read only read off on every device from the moment the host's statement stopped counting until
+/// the owner said it again, and the owner, seeing the host's statement (the latest of the group) differ from its own
+/// older one without the flag, said that one again above it, which turned Read only off for good and made B an admin.
+/// Fails when Read only reads off on the owner or on B for a moment while nobody turned it off, when B is made an
+/// admin, or when the owner can no longer turn it off afterwards.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn read_only_never_reads_off_while_the_owner_has_not_said_it_again() {
+    let (a, h, b) = (Dev::new("Owner Mac").await, Dev::new("Host Mac").await, Dev::new("MacBook").await);
+    let work = tempfile::tempdir().unwrap();
+    let f = folder(&a, work.path(), "Films").await;
+    pair(&a, &h).await;
+    pair(&a, &b).await;
+    a.h.set_follow(&f, true).await.unwrap();
+    for x in [&h, &b] {
+        until(40, "an admin, here too", || folder_role(&a, &f, x) == Some(Role::Admin) && folder_role(x, &f, x) == Some(Role::Admin)).await;
+    }
+    h.h.set_follow_read_only(&f, true).await.unwrap();
+    until(40, "B is Read only, on A and B", || folder_role(&a, &f, &b) == Some(Role::ReadOnly) && folder_role(&b, &f, &b) == Some(Role::ReadOnly) && b.h.follow_read_only(&f)).await;
+    // The owner does not say it again for now; the user makes the host Read only.
+    a.h.test_hold_read_only_again(true);
+    a.h.set_role(&f, &h.id(), Role::ReadOnly).unwrap();
+    let end = std::time::Instant::now() + Duration::from_secs(3);
+    while std::time::Instant::now() < end {
+        assert!(a.h.follow_read_only(&f), "Read only reads off on the owner although nobody turned it off");
+        assert!(b.h.follow_read_only(&f), "Read only reads off on B although nobody turned it off");
+        assert_eq!(folder_role(&a, &f, &b), Some(Role::ReadOnly), "B made an admin without anyone turning it off");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    until(30, "B knows the host is Read only", || folder_role(&b, &f, &h) == Some(Role::ReadOnly)).await;
+    assert!(b.h.follow_read_only(&f), "Read only reads off on B once it knows the host stopped counting");
+    // The owner says it again: still on; then the owner turns it off, and B is an admin again.
+    a.h.test_hold_read_only_again(false);
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(a.h.follow_read_only(&f) && b.h.follow_read_only(&f), "saying it again turned it off");
+    a.h.set_follow_read_only(&f, false).await.unwrap();
+    until(40, "off, and B an admin again", || !a.h.follow_read_only(&f) && !b.h.follow_read_only(&f) && folder_role(&a, &f, &b) == Some(Role::Admin)).await;
+    shutdown(&[&a, &h, &b]).await;
+}
+
+/// Review of Read only, #6: an admin's admissions count only while it is an admin, and the owner lowered the sibling
+/// before confirming what it admitted, so a friend it had let in (not confirmed by an owner yet) dropped out. Fails
+/// when lowering an admin for Read only takes a member it admitted with it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn lowering_an_admin_for_read_only_keeps_the_members_it_admitted() {
+    let (a, s, l) = (Dev::new("Owner Mac").await, Dev::new("MacBook").await, Dev::new("Friend's Mac").await);
+    let work = tempfile::tempdir().unwrap();
+    let f = folder(&a, work.path(), "Films").await;
+    pair(&a, &s).await;
+    a.h.set_follow(&f, true).await.unwrap();
+    until(40, "S is an admin, with the files", || folder_role(&a, &f, &s) == Some(Role::Admin) && read(&s.sync_dir().join("Films/seed.txt")).is_some()).await;
+    // With the owner away, S admits a friend by a link of its own.
+    a.h.shutdown().await;
+    let friend = work.path().join("Friend");
+    l.h.join_folder(&s.h.create_invite(&f, Role::ReadWrite, 1, 7).unwrap().link, friend.clone()).await.unwrap();
+    l.h.add_address(&f, at(&s.h)).unwrap();
+    until(40, "the friend is in, admitted by S", || folder_role(&s, &f, &l) == Some(Role::ReadWrite) && read(&friend.join("seed.txt")).is_some()).await;
+    let statements = s.h.test_statements(&f);
+    shutdown(&[&s, &l]).await;
+    // The owner is back and learns of the friend (S's grant, not confirmed yet), then turns Read only on.
+    let a = Dev { h: start(a.state.path(), a.name, a.features).await, ..a };
+    assert!(a.h.test_add_statements(&f, statements));
+    assert_eq!(folder_role(&a, &f, &l), Some(Role::ReadWrite), "the owner knows the friend");
+    a.h.set_follow_read_only(&f, true).await.unwrap();
+    until(30, "S is Read only", || folder_role(&a, &f, &s) == Some(Role::ReadOnly)).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(folder_role(&a, &f, &l), Some(Role::ReadWrite), "the friend S admitted dropped out");
+    a.h.shutdown().await;
+}
+
+/// Where `by` said, in `d`'s group as it is there now, that the group moved (its Moved statement's group id).
+fn moved_by(d: &Dev, by: &Dev) -> Option<FolderId> {
+    let by = by.id();
+    d.h.test_group_statements().into_iter().find_map(|st| match (st.body, st.signer) {
+        (Body::Moved { target_pk, .. }, Signer::Device(pk)) if DeviceId::of_public_key(&pk) == by => Some(FolderId::of_public_key(&target_pk)),
+        _ => None,
+    })
+}
+
+/// A device left the user's devices and the two others both changed the key at once, so two new groups: the one whose
+/// group wins (the lowest id) told the other of its move while that one switched to its own new group, and what
+/// reached the old group then was not what the switching device read of it afterwards. Neither learned anything new
+/// later, so they stayed in two groups for good and stopped sharing what is on all their devices ("Read only" on on
+/// one, off on the other). Fails when the two do not settle on one group, or a change on one does not reach the other.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_devices_changing_the_key_at_once_settle_on_one_group() {
+    let (a, b, h) = (Dev::new("Owner Mac").await, Dev::new("MacBook").await, Dev::new("Host Mac").await);
+    let work = tempfile::tempdir().unwrap();
+    let f = folder(&a, work.path(), "Films").await;
+    pair(&a, &h).await;
+    pair(&a, &b).await;
+    a.h.set_follow(&f, true).await.unwrap();
+    until(40, "B is an admin of the folder", || folder_role(&a, &f, &b) == Some(Role::Admin) && folder_role(&b, &f, &b) == Some(Role::Admin)).await;
+    // The host leaves; A and B each change the key themselves (held until they do it on cue).
+    for x in [&a, &b] {
+        x.h.test_hold_key_changes(true);
+    }
+    h.h.devices_leave().await.unwrap();
+    until(30, "A and B know the host left", || [&a, &b].iter().all(|x| listed(x) == ids(&[&a, &b]))).await;
+    // B makes its new group and is held while it switches to it; A, which learned of B's move, makes one too, whose
+    // id is lower (so it wins), and tells B while B is still switching.
+    b.h.test_hold_switch(true);
+    let bh = b.h.clone();
+    let b_turn = tokio::spawn(async move { bh.test_rotate(None).await });
+    until(20, "B is switching", || b.h.test_switches_waiting() == 1).await;
+    until(20, "A knows of B's move", || moved_by(&a, &b).is_some()).await;
+    let gb = moved_by(&a, &b).unwrap();
+    let ga = a.h.test_rotate(Some(gb)).await.unwrap();
+    // Everything A says of its move reaches B before B goes on: the new name, sent after it, comes in the same order.
+    let mut s = a.h.settings();
+    s.user_name = "Kim".into();
+    a.h.set_settings(s).unwrap();
+    until(20, "A's move and name reached B while it switches", || {
+        moved_by(&b, &a) == Some(ga) && b.h.members(&f).is_ok_and(|m| m.iter().any(|x| x.device == a.id() && x.user == "Kim"))
+    })
+    .await;
+    b.h.test_hold_switch(false);
+    assert_eq!(b_turn.await.unwrap().unwrap(), gb);
+    for x in [&a, &b] {
+        x.h.test_hold_key_changes(false);
+    }
+    until(60, "one group, the two of them", || settled(&a, &b, &ids(&[&a, &b])) && settled(&b, &a, &ids(&[&a, &b]))).await;
+    assert_eq!(a.h.test_group_id(), Some(ga), "the lowest group id wins");
+    // They share what is on all their devices again: a change on one reaches the other.
+    a.h.set_follow_read_only(&f, true).await.unwrap();
+    until(40, "Read only is on, on A and B", || a.h.follow_read_only(&f) && b.h.follow_read_only(&f) && folder_role(&b, &f, &b) == Some(Role::ReadOnly)).await;
+    shutdown(&[&a, &b, &h]).await;
+}
+
+/// Three devices left after one leaves, all three changing the key at once: B and C switch to their new groups at the
+/// same moment while A makes the one that wins (the lowest id) and tells both meanwhile. Fails when what reached the old
+/// group while B and C switched is lost to them (they would settle apart from A, or on two groups), or a change on one
+/// does not reach the others.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn three_devices_changing_the_key_at_once_settle_on_one_group() {
+    let (a, b, c, h) = (Dev::new("Owner Mac").await, Dev::new("MacBook").await, Dev::new("Studio PC").await, Dev::new("Host Mac").await);
+    let work = tempfile::tempdir().unwrap();
+    let f = folder(&a, work.path(), "Films").await;
+    for x in [&h, &b, &c] {
+        pair(&a, x).await;
+    }
+    a.h.set_follow(&f, true).await.unwrap();
+    for x in [&b, &c] {
+        until(40, "an admin of the folder", || folder_role(&a, &f, x) == Some(Role::Admin) && folder_role(x, &f, x) == Some(Role::Admin)).await;
+    }
+    let all = ids(&[&a, &b, &c]);
+    for x in [&a, &b, &c] {
+        x.h.test_hold_key_changes(true);
+    }
+    h.h.devices_leave().await.unwrap();
+    until(30, "the three know the host left", || [&a, &b, &c].iter().all(|x| listed(x) == all)).await;
+    // B and C make their new groups together and are held while they switch.
+    for x in [&b, &c] {
+        x.h.test_hold_switch(true);
+    }
+    let turns: Vec<_> = [&b, &c].iter().map(|x| {
+        let h = x.h.clone();
+        tokio::spawn(async move { h.test_rotate(None).await })
+    }).collect();
+    until(20, "B and C are switching", || b.h.test_switches_waiting() == 1 && c.h.test_switches_waiting() == 1).await;
+    until(20, "A knows of both moves", || moved_by(&a, &b).is_some() && moved_by(&a, &c).is_some()).await;
+    let below = moved_by(&a, &b).min(moved_by(&a, &c));
+    let ga = a.h.test_rotate(below).await.unwrap();
+    let mut s = a.h.settings();
+    s.user_name = "Kim".into();
+    a.h.set_settings(s).unwrap();
+    until(20, "A's move and name reached B and C while they switch", || {
+        [&b, &c].iter().all(|x| moved_by(x, &a) == Some(ga) && x.h.members(&f).is_ok_and(|m| m.iter().any(|m| m.device == a.id() && m.user == "Kim")))
+    })
+    .await;
+    for x in [&b, &c] {
+        x.h.test_hold_switch(false);
+    }
+    for t in turns {
+        t.await.unwrap().unwrap();
+    }
+    for x in [&a, &b, &c] {
+        x.h.test_hold_key_changes(false);
+    }
+    until(60, "one group, the three of them", || [&a, &b, &c].iter().all(|x| settled(x, &a, &all) && x.h.test_group_id() == Some(ga))).await;
+    a.h.set_follow_read_only(&f, true).await.unwrap();
+    until(40, "Read only is on, on all three", || [&a, &b, &c].iter().all(|x| x.h.follow_read_only(&f))).await;
+    shutdown(&[&a, &b, &c, &h]).await;
 }

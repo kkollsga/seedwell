@@ -179,6 +179,7 @@ pub(crate) enum Cmd {
     DidWake,
     Snapshot(oneshot::Sender<Snapshot>),
     Totals(oneshot::Sender<Totals>),
+    Places(oneshot::Sender<Vec<TorrentPlaces>>),
     Detail(TorrentId, oneshot::Sender<Result<TorrentDetail, EngineError>>),
     Config(oneshot::Sender<crate::config::EngineConfig>),
     Flush(oneshot::Sender<()>),

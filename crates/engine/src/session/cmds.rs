@@ -194,6 +194,9 @@ impl Session {
             Cmd::Totals(reply) => {
                 let _ = reply.send(self.totals());
             }
+            Cmd::Places(reply) => {
+                let _ = reply.send(self.places());
+            }
             Cmd::Detail(id, reply) => self.detail(id, reply),
             Cmd::Config(reply) => {
                 let _ = reply.send((*self.sh.cfg()).clone());
@@ -693,11 +696,19 @@ impl Session {
     // ---- other commands -----------------------------------------------------------------
 
     fn recheck(&mut self, id: TorrentId) {
+        let blocked = self.mover_blocks(&id);
         let Some(e) = self.table.get_mut(&id) else { return };
         e.cold.set2(G_RECHECK, true);
         self.boot.release(&id);
         if e.live.is_some() {
             self.stop_live(id, After::Respawn { force_recheck: true });
+        } else if e.cold.want == Want::Error && !blocked {
+            // Stopped by a fault (its files missing, a disk that refused writes): the user's check looks for the files
+            // again, now, instead of waiting for the next retry. Still missing, it faults again and says so.
+            e.cold.error = None;
+            e.cold.set2(G_MISSING, false);
+            self.retries.remove(&id);
+            self.set_want_inner(id, Want::Active, true, false);
         } else {
             self.reconcile(id);
         }

@@ -74,6 +74,16 @@ impl Shared {
         self.start.elapsed().as_micros() as u64 + CLOCK_OFFSET_US
     }
 
+    /// Where a datagram for `to` goes: on an IPv6 socket (a dual-stack `[::]` one takes IPv4 too), an IPv4 peer
+    /// as its IPv4-mapped address, which is the only form such a socket sends to (macOS and Windows refuse a plain
+    /// IPv4 destination: EINVAL, so a dual-stack sync port could not uTP-dial or answer an IPv4 peer).
+    fn dest(&self, to: SocketAddr) -> SocketAddr {
+        match to {
+            SocketAddr::V4(v4) if self.local.is_ipv6() => SocketAddr::new(v4.ip().to_ipv6_mapped().into(), v4.port()),
+            _ => to,
+        }
+    }
+
     fn instant_of(&self, t: u64) -> Instant {
         self.start + Duration::from_micros(t.saturating_sub(CLOCK_OFFSET_US))
     }
@@ -219,13 +229,13 @@ impl UtpSocket {
 
     /// Send a non-uTP datagram through the shared socket (DHT / UDP tracker replies).
     pub async fn send_foreign(&self, to: SocketAddr, data: &[u8]) -> io::Result<usize> {
-        self.r.0.socket.send_to(data, to).await
+        self.r.0.socket.send_to(data, self.r.0.dest(to)).await
     }
 
     /// Like [`send_foreign`](Self::send_foreign) but never waits: `WouldBlock` when the kernel
     /// buffer is full (the DHT treats that as packet loss).
     pub fn try_send_foreign(&self, to: SocketAddr, data: &[u8]) -> io::Result<usize> {
-        self.r.0.socket.try_send_to(data, to)
+        self.r.0.socket.try_send_to(data, self.r.0.dest(to))
     }
 
     /// Stop (or resume) accepting inbound connections.
@@ -566,7 +576,7 @@ async fn run(sh: Arc<Shared>) {
                 crate::sockopt::set_dont_fragment(&sh.socket, df);
                 df_on = df;
             }
-            match sh.socket.try_send_to(&tx.data[start..start + n], to) {
+            match sh.socket.try_send_to(&tx.data[start..start + n], sh.dest(to)) {
                 Ok(_) => {
                     sent_count += 1;
                     tx.next += 1;
@@ -623,6 +633,9 @@ fn recv_batch(sh: &Shared, rbuf: &mut [u8], slot: usize) {
     for (i, buf) in rbuf.chunks_mut(slot).take(RECV_BATCH).enumerate() {
         match sh.socket.try_recv_from(buf) {
             Ok((n, from)) => {
+                // An IPv4 peer on a dual-stack socket arrives IPv4-mapped: it is known by its IPv4 address (the one
+                // it is dialed at), so its replies find its connection.
+                let from = SocketAddr::new(from.ip().to_canonical(), from.port());
                 // A datagram that fills the slot may have been cut short; uTP has no checksum, so
                 // a truncated payload would be taken for the real thing. Drop it instead.
                 let n = if n >= slot { 0 } else { n };

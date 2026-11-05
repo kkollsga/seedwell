@@ -10,7 +10,7 @@ use trs_sync_proto::ids::FolderId;
 use trs_sync_proto::model::FileKind;
 
 use super::{OnDemandError, SyncError, SyncHandle, invalid, lock, on_demand};
-use crate::placed::{Mark, Note, Placed, holds_content, mark_of_stamp};
+use crate::placed::{Mark, Note, PlaceFs, Placed, holds_content, holds_version, mark_of_stamp};
 use crate::shared::FolderShared;
 
 /// What a placeholder holds, against the core's record of its item: the host asks before it reports a change or
@@ -27,7 +27,8 @@ pub enum LocalChange {
         base: Option<String>,
     },
     /// An earlier version, or content this device let go of, unchanged since the core put it there: the host may
-    /// dehydrate it (and fill it again if the item is wanted).
+    /// dehydrate it (and fill it again if the item is wanted). Never for a placeholder the core reads the version at
+    /// the name from (held): that would let go of its only copy here, and the refill would have no source.
     Stale,
 }
 
@@ -155,6 +156,8 @@ impl SyncHandle {
                 _ => handed,
             };
             let same = match &info {
+                // Unhashed (SPEC §7G.11): no hashes to check by, so against the copy in the cache it was handed from.
+                Some(i) if i.is_unhashed() => crate::placed::same_bytes(&place, &p2, &StdFs::new(f2.root.clone()), &p2).unwrap_or(false),
                 Some(i) => holds_content(&place, &p2, i)?,
                 None => false,
             };
@@ -234,9 +237,15 @@ impl SyncHandle {
                 let current = here.is_some_and(|r| trs_sync::ondemand::content_version_of(&r.file.info) == n.content);
                 return Ok(if n.held || current { LocalChange::Unchanged } else { LocalChange::Stale });
             }
-            // Changed since it was filled, or never noted: its content says.
+            // The core reads the version at the name from this placeholder (held): it is that version's only copy here.
+            let held = note.as_ref().is_some_and(|n| n.held);
+            let core = PlaceFs::new(placed.clone());
+            let place = StdFs::new(placed.place());
+            // Changed since it was filled, or never noted: its content says. An unhashed version (SPEC §7G.11) by the
+            // bytes this device has of it: this placeholder as the scan recorded it (an edit made while the host was not
+            // looking, recorded before the host reports it) is that version, no change to report.
             if let Some(r) = &rec
-                && holds_content(&StdFs::new(placed.place()), &at, &r.file.info)?
+                && holds_version(&core, r, &place, &at, held)?
             {
                 if r.dataless {
                     return Ok(LocalChange::Stale);
@@ -248,7 +257,45 @@ impl SyncHandle {
                 }
                 return Ok(LocalChange::Unchanged);
             }
-            Ok(LocalChange::Modified { base: note.map(|n| n.content) })
+            // The edit started from the version the placeholder held: while held, the version at the name (the core
+            // reads it from here, so whatever this device recorded of it since, its scan's record of an edit included,
+            // came from this file); else the one noted.
+            let base = match (&note, here) {
+                (Some(_), Some(r)) if held => Some(trs_sync::ondemand::content_version_of(&r.file.info)),
+                (n, _) => n.as_ref().map(|n| n.content.clone()),
+            };
+            // The user's edit reported already from an earlier version (a report of it now would be a conflict copy,
+            // `od_write`): written as a conflict copy of the item, held here. Recorded, so no change to report again
+            // (else every look would make another copy); the version at the name is another, so the host lets go of
+            // this one. Noted as it is now: the next look reads nothing. (An edit from the current version is one,
+            // whatever it holds: the user may put a copy's content back at the name.) Never while held: the host
+            // would let go of the only copy here of the version at the name.
+            let conflict = !held && rec.as_ref().is_some_and(|r| base.as_deref().is_none_or(|b| b != trs_sync::ondemand::content_version_of(&r.file.info)));
+            let view = f.index.view();
+            let holds_copy = &mut |i: &trs_sync_proto::model::FileInfo| match view.local(&i.path)? {
+                Some(r) => holds_version(&core, &r, &place, &at, false),
+                None => Ok(false),
+            };
+            let copy = if conflict { trs_sync::ondemand::copy_holding(&view, &p, holds_copy)? } else { None };
+            if copy.is_some() {
+                crate::placed::after_reading(&placed.place().join(&at));
+            }
+            // Only for the file as it was read: written meanwhile, it is the user's new edit.
+            let still = || -> io::Result<bool> { Ok(content_at(&place, &at)?.is_some_and(|now| Mark::of(&now).same(&mark))) };
+            // A copy not here (freed, or another device's) is no record of these bytes on this device: reported, the
+            // write takes them for it (`od_write`).
+            if let Some(c) = copy.filter(|c| !c.dataless)
+                && still()?
+            {
+                let content = trs_sync::ondemand::content_version_of(&c.file.info);
+                let n = match note {
+                    Some(n) => Note { at: at.clone(), real: Some(mark), content, held: false, ..n },
+                    None => Note { at: at.clone(), real: Some(mark), shown: mark, exec: false, content, held: false },
+                };
+                placed.put(&p, n)?;
+                return Ok(LocalChange::Stale);
+            }
+            Ok(LocalChange::Modified { base })
         })
         .await
         .map_err(io::Error::other)?

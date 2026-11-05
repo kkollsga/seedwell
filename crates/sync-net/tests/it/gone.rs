@@ -113,6 +113,8 @@ async fn a_member_whose_owner_is_gone_shares_the_folder_again_with_its_files_unt
     assert!(f.gone.is_empty(), "a member removes nobody");
     let before = files(&place);
     assert_eq!(before.len(), 3, "{before:?}");
+    // Files on demand for the devices without the files: shared again, the new folder keeps it (review #4: it was lost).
+    assert!(b.h.set_files_on_demand(&id, true, None).await.unwrap().on_demand_others);
 
     let st = b.h.reshare(&id).await.unwrap();
     let new: FolderId = st.id.parse().unwrap();
@@ -125,6 +127,7 @@ async fn a_member_whose_owner_is_gone_shares_the_folder_again_with_its_files_unt
     until(30, "the new folder has read its files in", || folder(&b, &new).is_some_and(|f| f.state == trs_sync_net::status::FolderState::UpToDate && f.files == 3)).await;
     let f = folder(&b, &new).unwrap();
     assert_eq!((f.waiting, f.reshare, f.need_files), (None, false, 0), "nobody else in it yet, nothing to fetch");
+    assert!(f.on_demand_others && !f.on_demand, "the mark came along, nothing moved");
     assert_eq!(files(&place), before, "no file was touched");
 
     let c = device("Cy").await;

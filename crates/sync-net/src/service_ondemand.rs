@@ -514,11 +514,16 @@ impl SyncHandle {
         if !r.dataless {
             return Ok(FetchProgress { done: total, total, here: true, fetching: false });
         }
-        let tmp = abs(&f.root, &trs_sync::pull::temp_path(path));
-        let done = match std::fs::metadata(tmp) {
-            Ok(m) => m.len().min(total),
-            Err(_) if std::fs::metadata(abs(&f.root, path)).is_ok_and(|m| m.is_file() && m.len() == total) => total,
-            Err(_) => 0,
+        // (A stream of a file not hashed yet builds a temp file of its own.)
+        let built = [trs_sync::pull::temp_path(path), trs_sync::pull::stream_temp_path(path)]
+            .iter()
+            .filter_map(|t| std::fs::metadata(abs(&f.root, t)).ok())
+            .map(|m| m.len())
+            .max();
+        let done = match built {
+            Some(n) => n.min(total),
+            None if std::fs::metadata(abs(&f.root, path)).is_ok_and(|m| m.is_file() && m.len() == total) => total,
+            None => 0,
         };
         Ok(FetchProgress { done, total, here: false, fetching: r.want })
     }
@@ -637,9 +642,13 @@ impl SyncHandle {
     /// (written aside, then renamed), with any missing folders above it, and recorded as this device's version.
     ///
     /// `base` is the item's `content_version` the user's edit started from, `None` for a new file. When the item moved on since (another device's version came first), or a new file's path is taken now,
-    /// the content becomes a conflict copy named as a full folder names one, and the version there stays. Returns the
-    /// path written. Kept in place, a new file that is the item's own placeholder there, filled with its content and
-    /// unchanged since (the host adopting it a second time), is that item: nothing is written, and its path returned.
+    /// the content becomes a conflict copy named as a full folder names one, and the version there stays: one copy for
+    /// one content, so the same content reported again is the copy made already (its path returned, nothing written),
+    /// and the item's current content is no conflict (`path`, no new version). An unhashed version (SPEC §7G.11) holds
+    /// that content when the file this device has its bytes in is unchanged since it was recorded and holds the same
+    /// bytes (or is `from` itself): so this device's own edit, recorded by its scan before the host reported it, is the
+    /// version at the name, and a copy recorded unhashed is that copy. Returns the path written. Kept in place,
+    /// a new file that is the item's own placeholder there, filled with its content and unchanged since (the host adopting it a second time), is that item: nothing is written, and its path returned.
     pub async fn od_write(&self, id: &FolderId, path: &str, from: &Path, base: Option<&str>) -> Result<String, SyncError> {
         check(path)?;
         if path.is_empty() {
@@ -661,6 +670,55 @@ impl SyncHandle {
                 }
                 // Checked first: a refused write leaves the cache as it was.
                 let to = c.host_target(&p, base.as_deref(), &device)?;
+                // An edit from an earlier version: content the folder records already is no new edit, so no host can
+                // make copy after copy by reporting one again (Windows 0.1.18 did, at every look). The item's current
+                // content is no conflict and no new version; content already written as a conflict copy of the item is
+                // that copy. (A new file, without a base, is a file of its own wherever it lands: never folded in.)
+                let edit_moved_on = base.is_some() && to != p;
+                // An unhashed version (SPEC §7G.11) by the bytes this device has of it: this device's own edit, which
+                // its scan recorded before the host reported it (Windows: a placeholder written while the app was not
+                // running), is the version at the name, never a conflict with itself.
+                let core = c.fs();
+                let same_file = |q: &str| {
+                    placed.as_ref().and_then(|pl| pl.held(q).map(|n| (pl.place(), n))).is_some_and(|(place, n)| {
+                        let from = std::fs::canonicalize(&from).ok();
+                        from.is_some() && [q, n.at.as_str()].iter().any(|at| std::fs::canonicalize(abs(&place, at)).ok() == from)
+                    })
+                };
+                if edit_moved_on
+                    && let Some(r) = c.store().local(&p)?.filter(|r| trs_sync::ondemand::live(r) && r.file.info.kind == trs_sync_proto::model::FileKind::File)
+                    && host_file_holds_version(&*core, &r, &from, same_file(&p))?
+                {
+                    return Ok(p);
+                }
+                let store = c.store();
+                let holds_copy = &mut |i: &trs_sync_proto::model::FileInfo| match store.local(&i.path)? {
+                    Some(r) => host_file_holds_version(&*core, &r, &from, false),
+                    None => Ok(false),
+                };
+                if edit_moved_on && let Some(r) = trs_sync::ondemand::copy_holding(c.store(), &p, holds_copy)? {
+                    let copy = r.file.info.path.clone();
+                    if !r.dataless {
+                        return Ok(copy);
+                    }
+                    // The copy's content is not here any more (freed, or another device's copy): the host's bytes,
+                    // checked against its hashes once copied, are its content here again (as `od_local_change` asks:
+                    // a copy not here is no record of the host's file), and the host's feed names the item again so
+                    // the host lets go of its file. Changed while copied: a new edit, written below.
+                    make_parents(c, &root, &copy)?;
+                    let tmp_rel = trs_sync::pull::temp_path(&copy);
+                    let tmp = abs(&root, &tmp_rel);
+                    trs_platform::fs::copy_shared(&from, &tmp)?;
+                    if host_file_holds(&tmp, &r.file.info)? {
+                        let cache = trs_sync::fs::StdFs::new(root.clone());
+                        cache.set_mtime(&tmp_rel, r.file.info.mtime_ns)?;
+                        std::fs::rename(&tmp, abs(&root, &copy))?;
+                        c.scan(&copy)?;
+                        c.host_show(&p)?;
+                        return Ok(copy);
+                    }
+                    let _ = std::fs::remove_file(&tmp);
+                }
                 make_parents(c, &root, &to)?;
                 let target = abs(&root, &to);
                 let tmp = abs(&root, &trs_sync::pull::temp_path(&to));
@@ -1022,6 +1080,13 @@ impl SyncHandle {
             self.reopen_when_closed(closed, entry);
             return Err(invalid("the folder is still busy (a scan or a transfer); it stays as it is, try again in a moment"));
         }
+        // Freeing the local copies moves the files from under any torrent there: asked again now that the folder has
+        // stopped (which takes up to a minute), right before the move. Refused, the folder goes on as it was.
+        if on && let Err(e) = self.refuse_in_use(&entry.path).await {
+            self.drop_journal(id);
+            self.open_folder(&entry).await?;
+            return Err(e);
+        }
         // An empty folder at the place (the host's) is taken over, and back if the move fails.
         let empty = !on && to.is_dir();
         let moved = match if empty { std::fs::remove_dir(&to) } else { Ok(()) } {
@@ -1047,6 +1112,8 @@ impl SyncHandle {
         };
         let mut entry2 = entry.clone();
         entry2.on_demand = on;
+        // Full again is full for the devices that join it too: an earlier mark goes (SPEC §7G.11, *Modes*).
+        entry2.on_demand_others &= on;
         entry2.pins = Vec::new();
         entry2.mode_switched = true;
         entry2.path = place;
@@ -1067,6 +1134,8 @@ impl SyncHandle {
         if let Some(l) = leftover {
             eprintln!("seedwell sync: the folder's files are in {}; a copy left behind could not be deleted: {}", to_shown.display(), l.display());
         }
+        // The *On all my devices* statement says the new mode, for the devices that join it later.
+        self.follow_mode_changed(id).await;
         self.folder_status(id).ok_or(SyncError::NotFound)
     }
 
@@ -1146,6 +1215,20 @@ fn adopted_already(pl: &crate::placed::Placed, store: &dyn IndexStore, p: &str, 
     }
     let Some(m) = trs_sync::fs::StdFs::new(pl.place()).lstat(p)? else { return Ok(false) };
     Ok(n.real.is_some_and(|r| r.same(&crate::placed::Mark::of(&m))))
+}
+
+/// Whether the host's file `from` holds exactly `info`'s content (its size, each chunk's hash; never an unhashed one's).
+fn host_file_holds(from: &Path, info: &trs_sync_proto::model::FileInfo) -> io::Result<bool> {
+    let (Some(dir), Some(name)) = (from.parent(), from.file_name().and_then(|n| n.to_str())) else { return Ok(false) };
+    crate::placed::holds_content(&trs_sync::fs::StdFs::new(dir.to_path_buf()), name, info)
+}
+
+/// Whether the host's file `from` holds the content of `rec`, a version recorded here ([`crate::placed::holds_version`]:
+/// an unhashed one by the bytes `core`, the folder's filesystem, has of it; `same_file`: `from` is where the core reads
+/// it).
+fn host_file_holds_version(core: &dyn Fs, rec: &trs_sync::index::LocalRecord, from: &Path, same_file: bool) -> io::Result<bool> {
+    let (Some(dir), Some(name)) = (from.parent(), from.file_name().and_then(|n| n.to_str())) else { return Ok(false) };
+    crate::placed::holds_version(core, rec, &trs_sync::fs::StdFs::new(dir.to_path_buf()), name, same_file)
 }
 
 /// Makes the folders above `path` that are missing in the cache, each recorded as the host's new folder.

@@ -105,8 +105,9 @@ fn inside_any(path: &Path, roots: &[PathBuf]) -> bool {
 }
 
 /// `path` as a real path: its deepest existing folder resolved (links, `/private`, Windows' long names and `\\?\`
-/// form, as `canonicalize` gives the roots), the rest joined as it is.
-fn real_path(path: &Path) -> Option<PathBuf> {
+/// form, as `canonicalize` gives the roots; on a Mac and on Windows also the case each name has on the disk), the rest
+/// joined as it is. `None` when no part of it can be resolved.
+pub fn real_path(path: &Path) -> Option<PathBuf> {
     let base = path.ancestors().find(|a| a.exists())?;
     let rest = path.strip_prefix(base).ok()?;
     Some(base.canonicalize().ok()?.join(rest))

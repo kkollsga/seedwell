@@ -454,8 +454,42 @@ fn copy_between(from: &StdFs, from_rel: &str, to: &StdFs, to_rel: &str) -> io::R
     dst.sync_all()
 }
 
-/// Whether the file `rel` of `fs` holds exactly `info`'s content: its size, and each chunk's hash.
+/// Whether file `ra` of `a` and file `rb` of `b` hold the same bytes (an unhashed version's placeholder against its
+/// copy in the cache, which has no hashes to be checked by).
+pub fn same_bytes(a: &dyn Fs, ra: &str, b: &dyn Fs, rb: &str) -> io::Result<bool> {
+    let (fa, fb) = (a.open_read(ra)?, b.open_read(rb)?);
+    let size = fa.len()?;
+    if fb.len()? != size {
+        return Ok(false);
+    }
+    let (mut x, mut y) = (vec![0u8; 1 << 20], vec![0u8; 1 << 20]);
+    let mut off = 0;
+    while off < size {
+        let n = (size - off).min(1 << 20) as usize;
+        for (f, buf) in [(&fa, &mut x), (&fb, &mut y)] {
+            let mut got = 0;
+            while got < n {
+                match f.read_at(off + got as u64, &mut buf[got..n])? {
+                    0 => return Ok(false),
+                    k => got += k,
+                }
+            }
+        }
+        if x[..n] != y[..n] {
+            return Ok(false);
+        }
+        off += n as u64;
+    }
+    Ok(true)
+}
+
+/// Whether the file `rel` of `fs` holds exactly `info`'s content: its size, and each chunk's hash. An unhashed version
+/// (SPEC §7G.11) has no hashes to check by, so nothing holds it by this check: [`holds_version`] knows where this
+/// device has its bytes.
 pub fn holds_content(fs: &dyn Fs, rel: &str, info: &FileInfo) -> io::Result<bool> {
+    if info.is_unhashed() {
+        return Ok(false);
+    }
     let fh = fs.open_read(rel)?;
     if fh.len()? != info.size {
         return Ok(false);
@@ -475,6 +509,59 @@ pub fn holds_content(fs: &dyn Fs, rel: &str, info: &FileInfo) -> io::Result<bool
         }
     }
     Ok(true)
+}
+
+/// Whether file `rel` of `fs` holds the content of `rec`, a version the folder records here (SPEC §7G.11, *Unhashed
+/// versions held here*). A hashed version by its hashes. An unhashed one has none, so by the bytes this device has of
+/// it, in `core` (the folder's filesystem: the cache, or a held file's placeholder): that file unchanged since the
+/// version was recorded from it (size, time and file id: the listing a scan records an unhashed version by) and the
+/// same bytes as `rel`, or `rel` itself (`same_file`: the placeholder the core reads the version from). An unhashed
+/// version whose bytes are not here (dataless, or its file changed since) is known to be in no file.
+///
+/// So this device's own edit, recorded first by its scan and reported by its host after, is the version recorded,
+/// never a conflict with itself (Windows, master after build 69: a conflict copy, and the placeholder let go of as
+/// stale while it held the only copy of the version at the name).
+pub fn holds_version(core: &dyn Fs, rec: &trs_sync::index::LocalRecord, fs: &dyn Fs, rel: &str, same_file: bool) -> io::Result<bool> {
+    let info = &rec.file.info;
+    if !info.is_unhashed() {
+        return holds_content(fs, rel, info);
+    }
+    if rec.dataless || info.deleted || info.kind != FileKind::File {
+        return Ok(false);
+    }
+    let (Some(stamp), Some(m)) = (rec.stamp.as_ref(), core.lstat(&info.path)?) else { return Ok(false) };
+    if m.kind != FileKind::File || m.dataless || m.other || m.size != info.size || !Mark::of_stamp(stamp).same(&Mark::of(&m)) {
+        return Ok(false);
+    }
+    if same_file {
+        return Ok(true);
+    }
+    same_bytes(core, &info.path, fs, rel)
+}
+
+type ReadHook = (PathBuf, Box<dyn FnMut() + Send>);
+static READ_HOOKS: Mutex<Vec<ReadHook>> = Mutex::new(Vec::new());
+static READ_HOOKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// **Tests:** `hook` runs each time [`crate::SyncHandle::od_local_change`] has read the placeholder at `at` to find
+/// its content in a conflict copy, before it looks at the file again (as a write landing while it was read); `None`
+/// takes `at`'s away.
+#[doc(hidden)]
+pub fn test_after_reading(at: &Path, hook: Option<Box<dyn FnMut() + Send>>) {
+    let mut hooks = lock(&READ_HOOKS);
+    hooks.retain(|(p, _)| p != at);
+    hooks.extend(hook.map(|f| (at.to_path_buf(), f)));
+    READ_HOOKED.store(!hooks.is_empty(), std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Runs the test hook of `at`, if any ([`test_after_reading`]).
+pub(crate) fn after_reading(at: &Path) {
+    if !READ_HOOKED.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    if let Some((_, f)) = lock(&READ_HOOKS).iter_mut().find(|(p, _)| p == at) {
+        f();
+    }
 }
 
 /// The record's stamp as a mark.

@@ -19,7 +19,7 @@ use trs_sync::folder::FolderCore;
 use trs_sync::store_redb::RedbReader;
 use trs_sync_proto::ids::{DeviceId, FolderId};
 use trs_sync_proto::keys::{Access, FolderKey, FolderSecret};
-use trs_sync_proto::members::{InviteLink, Membership, Role};
+use trs_sync_proto::members::{Follow, InviteLink, Membership, Role};
 use trs_sync_proto::msg::{Message, Request, Response};
 
 /// Locks a std mutex, also after a panic elsewhere (the data is still consistent: every critical
@@ -160,6 +160,15 @@ pub struct Space {
     /// (0.1.13): no invitation, it proves it is one of that device's own instead ([`crate::devices`]). Set while it
     /// is not admitted yet.
     pub following: AtomicBool,
+    /// A folder on the user's devices *Read only* that this device holds back from: it is one of the devices that
+    /// become Read only, and no owner has lowered it yet (owner offline), so it writes nothing meanwhile
+    /// ([`crate::devices::held_read_only`]). The value the folder's core was last given.
+    pub held_read_only: AtomicBool,
+    /// The run of *Read only* this device read last for this folder, with the devices group it is of: the trusted
+    /// Follow that turned it on ([`crate::devices::read_only_run`]). Kept while no later Follow of an owner or admin
+    /// without the flag turned it off, so it stays on when that statement stops counting (its device left the group,
+    /// or is no longer owner or admin) until the owner says it again.
+    pub read_only_run: Mutex<Option<(FolderId, Follow)>>,
 }
 
 /// What a space's membership and sessions tell the status.
@@ -241,6 +250,8 @@ impl Space {
             lan_only: AtomicBool::new(false),
             notes: Mutex::new(Notes::default()),
             following: AtomicBool::new(false),
+            held_read_only: AtomicBool::new(false),
+            read_only_run: Mutex::new(None),
         }
     }
 
@@ -312,6 +323,10 @@ pub struct FolderShared {
     pub place: Mutex<PathBuf>,
     /// On demand (SPEC §7G.11).
     pub on_demand: bool,
+    /// A full folder on demand for the devices without its files (`on_demand_others`): its scans list and do not read
+    /// (SPEC §7G.11, *Listed first, hashed when first fetched*). Set when it is marked; each scan step hands it to the
+    /// core.
+    pub list_first: AtomicBool,
     /// On demand: the paths kept on this device (a copy of the core's, for listing items without it).
     pub pins: Mutex<std::collections::BTreeSet<String>>,
     /// On demand: the items a host lists, read from `index` (never waiting for the core).
@@ -352,10 +367,58 @@ pub struct FolderShared {
     pub fetches: Mutex<Fetches>,
     /// Tests only: each batch an index session announces starts with this pause.
     pub announce_pause: Mutex<std::time::Duration>,
+    /// The reads of this device's unhashed files for the devices fetching them, by path and device (SPEC §7G.11: each
+    /// read once, hashed as it goes).
+    pub streams: Mutex<HashMap<(String, trs_sync_proto::ids::ShortId), StreamSlot>>,
+    /// The streams this device runs of others' unhashed files, one at a time, with the core let go
+    /// (`runtime::enqueue_jobs`): one lane.
+    pub streamer: Mutex<Streamer>,
+    /// The other lane: peers' chunks of hashed files (so a stream minutes long holds up no hashed file's fetch).
+    pub fetcher: Mutex<Streamer>,
+    /// The core's state of those jobs ([`trs_sync::folder::FolderCore::streams`]): a job's end is handed back here,
+    /// never waiting for the core.
+    pub jobs: Arc<Mutex<trs_sync::lazy::Streams>>,
     /// Set once everything above is dropped, the index included. Last, because fields drop in order: the last
     /// `Arc` of a folder counts as gone before its fields are, so only this says the index file is closed.
     pub closed: Closed,
 }
+
+/// The jobs queued and running in one lane of one folder ([`FolderShared::streamer`], [`FolderShared::fetcher`]).
+#[derive(Default)]
+pub struct Streamer {
+    /// Waiting their turn.
+    pub queue: std::collections::VecDeque<trs_sync::lazy::Job>,
+    /// The path whose job runs now.
+    pub current: Option<String>,
+    /// A task runs the lane.
+    pub running: bool,
+}
+
+impl Streamer {
+    /// Queues `job`. A job of the same path already queued is replaced (returned: the caller tells the core it will
+    /// not run, [`trs_sync::lazy::Streams::cancelled`]); one of the path running now is no reason to drop it (the
+    /// core took it after that one ended: it runs after it).
+    pub fn push(&mut self, job: trs_sync::lazy::Job) -> Option<trs_sync::lazy::Job> {
+        match self.queue.iter_mut().find(|q| q.path() == job.path()) {
+            Some(q) => Some(std::mem::replace(q, job)),
+            None => {
+                self.queue.push_back(job);
+                None
+            }
+        }
+    }
+}
+
+/// One device's read of one of this device's unhashed files ([`FolderShared::streams`]).
+pub struct StreamSlot {
+    /// The read (one piece at a time).
+    pub stream: Arc<Mutex<trs_sync::lazy::Stream>>,
+    /// When a piece was last asked for: a read left alone for [`STREAM_IDLE`] is dropped.
+    pub used: std::time::Instant,
+}
+
+/// How long a read of an unhashed file nobody asks a piece of is kept.
+pub const STREAM_IDLE: std::time::Duration = trs_sync::lazy::STREAM_IDLE;
 
 /// The fetches of an on-demand folder being waited for ([`FolderShared::fetches`]).
 #[derive(Default)]
@@ -470,6 +533,8 @@ pub struct Live {
     pub kept: BTreeMap<String, String>,
     /// When the kept folders were last looked at on disk (at most every [`KEPT_CHECK_EVERY`] from a snapshot).
     pub kept_checked: Option<std::time::Instant>,
+    /// While it scans: the phase and how far it is (SPEC §7G.2: the app shows it, never a bare spinner).
+    pub scan: Option<trs_sync::scan::ScanProgress>,
 }
 
 /// How often a snapshot has the kept folders looked at on disk (off the caller's thread) while there are any.
@@ -511,6 +576,7 @@ impl Default for Live {
             ignore_file: false,
             kept: BTreeMap::new(),
             kept_checked: None,
+            scan: None,
         }
     }
 }
@@ -589,6 +655,8 @@ pub struct PeerHandle {
     renames_pending: Mutex<HashMap<u32, oneshot::Sender<trs_sync_proto::msg::RenameReply>>>,
     /// Our [`BlobWant`](trs_sync_proto::msg::BlobWant)s waiting for their part.
     blobs_pending: Mutex<HashMap<u32, oneshot::Sender<trs_sync_proto::msg::BlobData>>>,
+    /// Our [`StreamRequest`](trs_sync_proto::msg::StreamRequest)s waiting for their piece.
+    streams_pending: Mutex<HashMap<u32, oneshot::Sender<trs_sync_proto::msg::StreamData>>>,
 }
 
 impl PeerHandle {
@@ -637,6 +705,7 @@ impl PeerHandle {
             holds_pending: Mutex::new(HashMap::new()),
             renames_pending: Mutex::new(HashMap::new()),
             blobs_pending: Mutex::new(HashMap::new()),
+            streams_pending: Mutex::new(HashMap::new()),
             stale: Mutex::new(BTreeSet::new()),
             joined: Mutex::new(BTreeSet::new()),
             got: Mutex::new(BTreeSet::new()),
@@ -711,6 +780,9 @@ impl PeerHandle {
             for (id, tx) in waiting {
                 let _ = tx.send(Response { id, code: trs_sync_proto::msg::ResponseCode::Busy, data: vec![] });
             }
+            // A piece of a stream is given up the same way (its sender dropped): asked again later, the maker serves it
+            // once more, and the stream goes on from there.
+            lock(&self.streams_pending).clear();
         }
     }
 
@@ -718,6 +790,33 @@ impl PeerHandle {
     pub fn answer(&self, resp: Response) {
         if let Some(tx) = lock(&self.pending).remove(&resp.id) {
             let _ = tx.send(resp);
+        }
+    }
+
+    /// Asks for a piece of an unhashed file (SPEC §7G.11; its id set here); the piece arrives on the returned receiver
+    /// (dropped if the session ends). `None` while the session does not read (as [`Self::request`]).
+    pub async fn stream(&self, mut req: trs_sync_proto::msg::StreamRequest) -> Option<(u32, oneshot::Receiver<trs_sync_proto::msg::StreamData>)> {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        req.id = id;
+        let (tx, rx) = oneshot::channel();
+        lock(&self.streams_pending).insert(id, tx);
+        if self.reading_held.load(Ordering::SeqCst) || self.control.send(Message::StreamRequest(req)).await.is_err() {
+            lock(&self.streams_pending).remove(&id);
+            return None;
+        }
+        Some((id, rx))
+    }
+
+    /// A piece that will not be waited for any more.
+    pub fn forget_stream(&self, id: u32) {
+        lock(&self.streams_pending).remove(&id);
+    }
+
+    /// A piece of an unhashed file we asked for arrived.
+    pub fn answer_stream(&self, d: trs_sync_proto::msg::StreamData) {
+        self.rx_bytes.fetch_add(d.data.len() as u64, Ordering::Relaxed);
+        if let Some(tx) = lock(&self.streams_pending).remove(&d.id) {
+            let _ = tx.send(d);
         }
     }
 
@@ -1062,6 +1161,12 @@ pub struct Ctx {
     /// **Tests:** a pause at the start of each fetch of a pull, before it asks, the folder's core held (a slow disk
     /// under a pull: a round that takes long).
     pub fetch_wait: Mutex<std::time::Duration>,
+    /// **Tests:** a pause before each piece of an unhashed file this device serves is read (a slow first download).
+    pub stream_wait: Mutex<std::time::Duration>,
+    /// **Tests:** a pause before each chunk this device serves is read (a slow link, a slow device).
+    pub serve_wait: Mutex<std::time::Duration>,
+    /// **Tests:** a pause in each scan step, the folder's core held (a slow disk under a scan).
+    pub scan_hold: Mutex<std::time::Duration>,
     /// **Tests:** hold queries and rename requests go unanswered, as an earlier Seedwell leaves them.
     pub silent_ondemand: std::sync::atomic::AtomicBool,
     /// Bumped (SeqCst) whenever a folder opens or closes here (pause, resume, stop, reopen, LAN-only, removal,
@@ -1087,6 +1192,14 @@ pub struct Ctx {
     pub devices_wake: Notify,
     /// One change of the devices group at a time (a removal and its key change, a move, leaving).
     pub devices_lock: tokio::sync::Mutex<()>,
+    /// **Tests:** the devices group's key is left as it is: no move, no new key ([`crate::devices`]).
+    pub hold_key_changes: AtomicBool,
+    /// **Tests:** a switch to another devices group waits, once it has its groups ready and before they count.
+    pub hold_switch: AtomicBool,
+    /// **Tests:** an owner does not say *Read only* again when the statement that turned it on stops counting.
+    pub hold_read_only_again: AtomicBool,
+    /// **Tests:** switches waiting there now.
+    pub switches_waiting: std::sync::atomic::AtomicUsize,
     /// Sessions may still be coming up until then (the service started, the network changed, a session began): a
     /// fetch whose file no connected device has waits for them until then, and says so after (SPEC §7G.11).
     pub settling: Mutex<std::time::Instant>,
@@ -1185,4 +1298,32 @@ mod tests {
         assert_eq!(live.issues, [("docs/old".to_string(), "could not be read: busy".to_string())]);
         assert!(live.kept.is_empty());
     }
+
+    fn chunk_job(path: &str) -> trs_sync::lazy::Job {
+        trs_sync::lazy::Job::Chunks(Box::new(trs_sync::lazy::ChunkJob {
+            path: path.into(),
+            tmp: trs_sync::pull::temp_path(path),
+            version: trs_sync_proto::model::Version::new(),
+            chunks: Vec::new(),
+            old: None,
+            known: None,
+            holders: Vec::new(),
+            local: None,
+        }))
+    }
+
+    /// The failure (a race): a job's end reaches the core while its lane still names its path as the one running; a
+    /// round takes a job for the path again in between (the core marks it running), and the lane drops it as the one it
+    /// runs already, so the path stays "running" in the core and no round touches it again until the folder reopens.
+    /// A job for the path running now is queued; one for a path queued already replaces it (handed back to be told off).
+    #[test]
+    fn a_job_for_the_path_running_now_is_queued_never_dropped() {
+        let mut lane = Streamer { current: Some("film.bin".into()), running: true, ..Default::default() };
+        assert!(lane.push(chunk_job("film.bin")).is_none());
+        assert_eq!(lane.queue.len(), 1, "queued behind the one running");
+        let replaced = lane.push(chunk_job("film.bin")).expect("the queued one, replaced");
+        assert_eq!(replaced.path(), "film.bin");
+        assert_eq!(lane.queue.len(), 1);
+    }
 }
+

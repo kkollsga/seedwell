@@ -358,7 +358,7 @@ impl<'a, S: IndexStore + ?Sized> Batch<'a, S> {
     }
 
     /// Every remote entry at a path, including this batch's writes and drops.
-    fn remote_at(&self, path: &str) -> io::Result<Vec<(ShortId, IndexEntry)>> {
+    pub fn remote_at(&self, path: &str) -> io::Result<Vec<(ShortId, IndexEntry)>> {
         let mut out: BTreeMap<ShortId, IndexEntry> =
             self.store.remote(path)?.into_iter().filter(|(d, _)| !self.dropped.contains(d)).collect();
         for ((p, d), e) in self.remote.range((path.to_string(), ShortId(0))..) {

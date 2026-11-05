@@ -1463,3 +1463,135 @@ fn the_containers_folders_are_the_users_alone() {
     fsx::own_dir(&u).unwrap();
     assert_eq!(std::fs::metadata(&u).unwrap().permissions().mode() & 0o777, 0o700);
 }
+
+/// The host's core calls made on a sync service of its own (a member device), as `BackendCore` makes them through the
+/// app's backend: the listing calls only.
+struct NetCore(trs_sync_net::SyncHandle);
+
+fn fid(f: &str) -> Result<trs_sync_proto::ids::FolderId, OdError> {
+    f.parse().map_err(|_| crate::sync::ondemand::od_err(trs_sync_net::SyncError::NotFound))
+}
+
+impl HostCore for NetCore {
+    fn folders(&self) -> Option<Vec<HostFolder>> {
+        let all = self.0.snapshot().folders.into_iter().filter(|f| f.on_demand);
+        Some(all.map(|f| HostFolder { writable: f.access == trs_sync_proto::keys::Access::Write, id: f.id, name: f.name }).collect())
+    }
+    fn item(&self, f: &str, id: &str) -> Result<Option<SyncItem>, OdError> {
+        let r = self.0.od_item(&fid(f)?, id).map_err(crate::sync::ondemand::od_err)?;
+        Ok(r.map(|i| crate::sync::ondemand::item_of(&i)))
+    }
+    fn children(&self, f: &str, id: &str, cursor: Option<&str>, limit: u32) -> Result<SyncItemPage, OdError> {
+        let page = self.0.od_children(&fid(f)?, id, cursor, limit as usize).map_err(crate::sync::ondemand::od_err)?.ok_or_else(|| no_item(id))?;
+        Ok(SyncItemPage { items: page.items.iter().map(crate::sync::ondemand::item_of).collect(), next: page.next })
+    }
+    fn changes(&self, f: &str, anchor: u64, limit: u32) -> Result<SyncChangePage, OdError> {
+        let p = self.0.od_changes(&fid(f)?, anchor, limit as usize).map_err(crate::sync::ondemand::od_err)?;
+        Ok(SyncChangePage { items: p.items.iter().map(crate::sync::ondemand::item_of).collect(), deleted: p.deleted, anchor: p.anchor, more: p.more })
+    }
+    fn anchor(&self, f: &str) -> Result<u64, OdError> {
+        self.0.od_anchor(&fid(f)?).map_err(crate::sync::ondemand::od_err)
+    }
+    fn fetch(&self, _: &str, id: &str, _: u64) -> Result<SyncFetch, OdError> {
+        Err(no_item(id))
+    }
+    fn cancel(&self, _: &str, id: &str) -> Result<(), OdError> {
+        Err(no_item(id))
+    }
+    fn pin(&self, _: &str, id: &str, _: bool) -> Result<SyncItem, OdError> {
+        Err(no_item(id))
+    }
+    fn evict(&self, _: &str, id: &str) -> Result<SyncEvicted, OdError> {
+        Err(no_item(id))
+    }
+    fn create(&self, _: &str, parent: &str, _: &str, _: bool, _: Option<&str>) -> Result<SyncItem, OdError> {
+        Err(no_item(parent))
+    }
+    fn modify(&self, _: &str, id: &str, _: Option<&str>, _: Option<&str>, _: Option<&str>, _: Option<&str>) -> Result<SyncItem, OdError> {
+        Err(no_item(id))
+    }
+    fn delete(&self, _: &str, id: &str, _: Option<trs_sync_net::DeleteSeen>) -> Result<SyncDeleted, OdError> {
+        Err(no_item(id))
+    }
+}
+
+/// The failure (the user's report, on the receiving device): a device that joined an on-demand folder whose owner has
+/// sent nothing yet shows the folder in the Finder with a spinner that never ends: an enumeration that waits for an
+/// index that has not come, or a domain never signalled once it does. Over the real socket, as the extension asks:
+/// the folder lists at once (empty), and when the owner's list arrives the domain is signalled and the next listing
+/// has the files.
+#[test]
+fn a_member_lists_at_once_while_its_owner_has_sent_nothing_and_is_signalled_when_it_does() {
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(4).enable_all().build().unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let start = |name: &str, dir: PathBuf| {
+        rt.block_on(async {
+            let secrets = Arc::new(trs_sync_net::secrets::FileSecrets::new(dir.join("secrets")));
+            let mut o = trs_sync_net::Options::new(dir, "Seedwell test".into(), secrets);
+            o.default_device_name = name.into();
+            o.bind = IpAddr::V4(Ipv4Addr::LOCALHOST);
+            o.lan_discovery = false;
+            trs_sync_net::SyncHandle::start(o).await.unwrap()
+        })
+    };
+    let (a, b) = (start("Alpha", tmp.path().join("a")), start("Beta", tmp.path().join("b")));
+    let src = tmp.path().join("Movies");
+    std::fs::create_dir_all(src.join("Extras")).unwrap();
+    std::fs::write(src.join("Film.mkv"), vec![1u8; 300_000]).unwrap();
+    std::fs::write(src.join("Extras/note.txt"), b"note").unwrap();
+    let id = rt.block_on(a.add_folder_on_demand(src)).unwrap().id;
+    let f = fid(&id).unwrap();
+    // The owner sends its list only after a while.
+    a.test_announce_pause(&f, Duration::from_secs(5));
+    let link = a.create_invite(&f, trs_sync_proto::members::Role::ReadWrite, 1, 1).unwrap().link;
+    rt.block_on(b.join_folder_on_demand(&link, tmp.path().join("place"))).unwrap();
+    b.add_address(&f, SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), a.port())).unwrap();
+
+    let group = tmp.path().join("group");
+    let told = Arc::new(Told::default());
+    let server = Server::start_host(Host::new(Arc::new(NetCore(b.clone())), &group), &group, told.clone()).unwrap();
+    let socket = server.socket().to_path_buf();
+    let ask = |req: Value| -> (Value, Duration) {
+        let t = Instant::now();
+        let mut s = UnixStream::connect(&socket).unwrap();
+        s.write_all(format!("{req}\n").as_bytes()).unwrap();
+        let mut out = String::new();
+        s.read_to_string(&mut out).unwrap();
+        (serde_json::from_str(out.lines().last().unwrap()).unwrap(), t.elapsed())
+    };
+    let t0 = Instant::now();
+    while !told.domains.lock().unwrap().last().is_some_and(|d| d.iter().any(|x| x.id == id)) {
+        assert!(t0.elapsed() < Duration::from_secs(10), "the host never heard of the domain");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    for req in [
+        json!({"v":1,"op":"children","folder":id,"item":"root"}),
+        json!({"v":1,"op":"item","folder":id,"item":"root"}),
+        json!({"v":1,"op":"anchor","folder":id}),
+        json!({"v":1,"op":"changes","folder":id,"anchor":"0"}),
+    ] {
+        let (r, took) = ask(req.clone());
+        assert!(took < Duration::from_secs(1), "{req} took {took:?}");
+        assert!(r.get("ok").is_some(), "{req}: {r}");
+    }
+    let (kids, _) = ask(json!({"v":1,"op":"children","folder":id,"item":"root"}));
+    assert_eq!(kids["ok"]["items"], json!([]), "an empty folder while nothing has come");
+    told.moved.lock().unwrap().clear();
+
+    a.test_announce_pause(&f, Duration::ZERO);
+    let t0 = Instant::now();
+    loop {
+        let signalled = told.moved.lock().unwrap().contains(&id);
+        let (kids, _) = ask(json!({"v":1,"op":"children","folder":id,"item":"root"}));
+        let names: Vec<String> = kids["ok"]["items"].as_array().unwrap().iter().map(|i| i["name"].as_str().unwrap().to_string()).collect();
+        if signalled && names == ["Extras", "Film.mkv"] {
+            break;
+        }
+        assert!(t0.elapsed() < Duration::from_secs(30), "signalled: {signalled}, listed: {names:?}");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    drop(server);
+    rt.block_on(a.shutdown());
+    rt.block_on(b.shutdown());
+}

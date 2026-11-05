@@ -659,7 +659,7 @@ async fn an_on_demand_folder_is_listed_changed_and_its_downloads_kept_or_freed()
     let e = call(&mut c, "sync.items", json!({"folder": "Docs"})).await.unwrap_err();
     assert_eq!(e.code, ErrorCode::Invalid, "not on demand yet: {e:?}");
 
-    let f: SyncFolderDto = serde_json::from_value(call(&mut c, "sync.set_mode", json!({"folder": "Docs", "mode": "on_demand"})).await.unwrap()).unwrap();
+    let f: SyncFolderDto = serde_json::from_value(call(&mut c, "sync.set_mode", json!({"folder": "Docs", "mode": "on_demand", "free_space": true})).await.unwrap()).unwrap();
     assert!(f.on_demand);
     assert!(!docs.exists(), "its files are the cache now");
     let root: SyncItemsDto = serde_json::from_value(call(&mut c, "sync.items", json!({"folder": "Docs"})).await.unwrap()).unwrap();
@@ -759,7 +759,7 @@ async fn an_on_demand_folder_goes_to_the_trash_from_its_cache() {
     std::fs::create_dir(&docs).unwrap();
     std::fs::write(docs.join("a.txt"), b"held here").unwrap();
     call(&mut c, "sync.add", json!({"path": text(&docs)})).await.unwrap();
-    call(&mut c, "sync.set_mode", json!({"folder": "Docs", "mode": "on_demand"})).await.unwrap();
+    call(&mut c, "sync.set_mode", json!({"folder": "Docs", "mode": "on_demand", "free_space": true})).await.unwrap();
     // The place cannot take the files now.
     std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
     let plan: SyncRemovePlanDto = serde_json::from_value(call(&mut c, "sync.remove", json!({"folder": "Docs", "delete_files": true})).await.unwrap()).unwrap();
@@ -778,7 +778,7 @@ async fn an_on_demand_folder_goes_to_the_trash_from_its_cache() {
     let other = s.folder("Other");
     std::fs::write(other.join("b.txt"), b"kept").unwrap();
     call(&mut c, "sync.add", json!({"path": text(&other)})).await.unwrap();
-    call(&mut c, "sync.set_mode", json!({"folder": "Other", "mode": "on_demand"})).await.unwrap();
+    call(&mut c, "sync.set_mode", json!({"folder": "Other", "mode": "on_demand", "free_space": true})).await.unwrap();
     let trash = s.root.path().join("Trash");
     std::fs::set_permissions(&trash, std::fs::Permissions::from_mode(0o555)).unwrap();
     let plan: SyncRemovePlanDto = serde_json::from_value(call(&mut c, "sync.remove", json!({"folder": "Other", "delete_files": true})).await.unwrap()).unwrap();

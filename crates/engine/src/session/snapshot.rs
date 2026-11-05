@@ -103,6 +103,25 @@ impl Session {
         }
     }
 
+    /// Where each torrent's files are or are about to be ([`crate::EngineHandle::torrent_places`]); direct downloads
+    /// with their file or folder.
+    pub(super) fn places(&self) -> Vec<TorrentPlaces> {
+        let mut out: Vec<TorrentPlaces> = self
+            .table
+            .values()
+            .map(|e| {
+                let c = &e.cold;
+                let mut paths = vec![self.save_path(c).join(&*c.name)];
+                paths.extend(self.staging_for(c));
+                let (moves, moving_somewhere) = self.move_destinations(&c.id, &c.name);
+                paths.extend(moves);
+                TorrentPlaces { name: c.name.to_string(), paths, moving_somewhere }
+            })
+            .collect();
+        out.extend(self.direct_rows().map(|r| TorrentPlaces { name: r.name, paths: vec![r.save_path], moving_somewhere: false }));
+        out
+    }
+
     /// The rule that governs `c` (None = the Default rule).
     pub(super) fn rule_in_effect(&self, c: &ColdTorrent, pol: &PolicyData) -> Option<String> {
         let profile = ColdTorrent::opt(c.tracker_profile).and_then(|i| self.ids.get(i)).filter(|p| pol.profiles.get(p).is_some());
