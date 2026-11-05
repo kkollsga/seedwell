@@ -2215,7 +2215,8 @@ $checks.ondemandfirst = {
       if (-not $noShell.Said) { Write-Host '  ondemandfirst: no shell namespace in this session, so listed through the file system only'; $noShell.Said = $true }
       return OnDisk $path
     }
-    @($folder.Items() | ForEach-Object { $_.Name } | Sort-Object) -join ','
+    # By the file's name: an item's Name is what it is shown as (no .txt where known extensions are hidden, as on a CI runner).
+    @($folder.Items() | ForEach-Object { [IO.Path]::GetFileName($_.Path) } | Sort-Object) -join ','
   }
   function NoStall([string]$during, [int]$limit) {
     $late = @($slowest.GetEnumerator() | Where-Object { $_.Value -gt $limit } | ForEach-Object { "$($_.Key) $($_.Value) ms" })
