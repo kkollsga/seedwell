@@ -151,6 +151,7 @@ import os
         }
         commands = Commands(core: core)
         settings = SettingsModel(core: core)
+        settings.proxy = commands.proxy
         if let snapshotDir = options.renderSnapshots {
             Task { @MainActor in
                 await SnapshotRenderer(core: core, commands: commands, settings: settings, dir: snapshotDir).renderAll()

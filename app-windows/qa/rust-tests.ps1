@@ -26,6 +26,9 @@ param(
 )
 
 $ErrorActionPreference = 'Continue'
+# Below normal, for this and all it starts: QA runs beside it (AGENTS.md: no waiting for a quiet machine), and the suite's
+# many processes must not starve the UI thread of the app under test, whose stall of fail_ms fails that check.
+(Get-Process -Id $PID).PriorityClass = 'BelowNormal'
 # What it shows is UTF-8 (nextest's progress, test names): Windows PowerShell 5.1 writes the OEM code page otherwise.
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
 $Repo = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent

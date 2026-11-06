@@ -332,6 +332,29 @@ fn a_reader_sees_every_commit_and_keeps_compaction_off() {
     db.compact().unwrap();
 }
 
+/// The failure: reads made together (a file's record, then what it needs) straddle a commit made between them, and the
+/// two disagree: the record from before (not here, asked for), the need from after (none, it is here), so an on-demand
+/// fetch found no device that has the file just as it arrived. A snapshot's reads all see the state it was made at,
+/// whatever is committed meanwhile; a view sees each commit.
+#[test]
+fn a_snapshot_reads_one_committed_state_whatever_is_committed_meanwhile() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut db = RedbStore::open(dir.path().join("f.redb"), 1).unwrap();
+    let f = signed("film", false, &[(1, 1)], &[(1, 5)], 0, 1);
+    let rec = |dataless, want| LocalRecord { file: f.clone(), sequence: 1, invalid: false, stamp: None, tier: None, dataless, want };
+    let need = NeedRecord { need: Need::Take, file: f.clone(), holders: vec![DEVS[0]] };
+    db.apply(vec![Op::PutLocal(rec(true, true)), Op::SetNeed("film".into(), Some(need.clone()))]).unwrap();
+    let reader = db.reader();
+    let snap = reader.snapshot().unwrap();
+    assert_eq!(snap.local("film").unwrap(), Some(rec(true, true)));
+    // The pull round places the file and commits: here, nothing needed.
+    db.apply(vec![Op::PutLocal(rec(false, false)), Op::SetNeed("film".into(), None)]).unwrap();
+    assert_eq!(snap.need("film").unwrap(), Some(need), "the snapshot's need is of the state its record is");
+    assert_eq!(snap.local_paths("", None, 10).unwrap(), vec!["film".to_string()]);
+    assert_eq!(reader.view().need("film").unwrap(), None, "a view sees the commit");
+    assert_eq!(reader.snapshot().unwrap().local("film").unwrap(), Some(rec(false, false)), "a new snapshot sees it too");
+}
+
 #[test]
 fn a_failed_apply_leaves_nothing() {
     let dir = tempfile::tempdir().unwrap();

@@ -7,14 +7,20 @@
         <Grid.RowDefinitions>
             <RowDefinition Height="*" />
             <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
         <ScrollViewer Grid.Row="0" VerticalScrollBarVisibility="Auto">
             <StackPanel x:Name="Body" Spacing="0" />
         </ScrollViewer>
         <Grid x:Name="Footer" Grid.Row="1" Margin="0,6,0,0" BorderThickness="0,1,0,0" Padding="0,6,0,0"
               BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}">
-            <Button x:Name="OpenButton" HorizontalAlignment="Left" Background="Transparent" BorderThickness="0" Click="OnOpen" />
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Left" Spacing="2">
+                <Border x:Name="ProxySlot" VerticalAlignment="Center" Margin="10,0,0,0" />
+                <Button x:Name="OpenButton" Background="Transparent" BorderThickness="0" Click="OnOpen" />
+            </StackPanel>
             <Button x:Name="QuitButton" HorizontalAlignment="Right" Background="Transparent" BorderThickness="0" Click="OnQuit" />
         </Grid>
+        <TextBlock x:Name="ProxyNote" Grid.Row="2" Visibility="Collapsed" FontSize="12" TextWrapping="Wrap" Margin="12,2,12,2"
+                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
     </Grid>
 </Window>

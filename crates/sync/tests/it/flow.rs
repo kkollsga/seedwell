@@ -799,3 +799,175 @@ fn a_big_file_that_changes_while_hashed_apart_is_scanned_again_not_recorded() {
     assert_eq!(r.changed, 1);
     assert_eq!(a.core.store().local("big.bin").unwrap().unwrap().file.info.size, 250_000);
 }
+
+/// The owner device (seed 1) of the folders below.
+fn owner_pk() -> [u8; 32] {
+    *DeviceKey::from_seed(&[1; 32]).public_key()
+}
+
+/// *Read only* (SPEC §7G.1) on every device: only the owner's versions count.
+fn read_only(devs: &mut [&mut Dev], on: bool) {
+    let owners = [owner_pk()];
+    for d in devs {
+        d.core.set_read_only(on.then_some(&owners[..])).unwrap();
+    }
+}
+
+/// While the folder is Read only a member's version counts nowhere: not on the owner (whose files no member may
+/// change), not on another member (members take no change from each other), whatever it is (an edit, a new file, a
+/// delete, a rename), even signed by a member that still signs (an older build, or a change made as it came on). Once
+/// it is off, it counts again, as an ordinary change. Fails when a member's version is taken while it is on, or lost
+/// once it is off.
+#[test]
+fn a_members_version_counts_nowhere_while_read_only_and_again_once_it_is_off() {
+    let key = rw();
+    let (mut a, mut b, mut c) = (dev("Owner", 1, &key), dev("B", 2, &key), dev("C", 3, &key));
+    for (p, body) in [("f", "v1"), ("gone", "x"), ("old", "y")] {
+        write_all(&a.fs, p, body.as_bytes()).unwrap();
+    }
+    a.core.scan("").unwrap();
+    for d in [&mut b, &mut c] {
+        send(&a, d);
+        pull(d, &[&a]);
+    }
+    send(&b, &mut a);
+    send(&c, &mut a);
+    read_only(&mut [&mut a, &mut b, &mut c], true);
+    // B changes everything it can, and (still a writer here) signs it.
+    write_all(&b.fs, "f", b"B's edit").unwrap();
+    write_all(&b.fs, "new", b"B's file").unwrap();
+    b.fs.remove_file("gone").unwrap();
+    b.fs.rename("old", "renamed").unwrap();
+    b.core.scan("").unwrap();
+    for d in [&mut a, &mut c] {
+        send(&b, d);
+        assert_eq!(d.core.need_totals().unwrap().0, 0, "{} needs a member's version while Read only", d.name);
+        pull(d, &[&b]);
+        assert_eq!(read_all(&d.fs, "f").unwrap(), b"v1", "{}", d.name);
+        assert!(read_all(&d.fs, "gone").is_ok() && read_all(&d.fs, "old").is_ok() && read_all(&d.fs, "new").is_err(), "{}", d.name);
+    }
+    // Off: they count again.
+    read_only(&mut [&mut a, &mut b, &mut c], false);
+    pull(&mut a, &[&b]);
+    assert_eq!(read_all(&a.fs, "f").unwrap(), b"B's edit");
+    assert_eq!(read_all(&a.fs, "new").unwrap(), b"B's file");
+    assert!(read_all(&a.fs, "gone").is_err() && read_all(&a.fs, "renamed").unwrap() == b"y");
+}
+
+/// While the folder is Read only a member passes the owner's versions on (a seeder of them): a version counts by what
+/// signed it, the owner's signature, whoever relays it; and the owner's own announcement vouches for a version a member
+/// made before it came on (the owner holds it). A member's version relayed by another member is no candidate. Fails
+/// when a relayed owner's version is not taken, when a member's version passes through another member, or when the
+/// owner's announcement does not bring a member's older version.
+#[test]
+fn under_read_only_members_relay_the_owners_versions_and_only_the_owner_vouches_for_a_members() {
+    let key = rw();
+    let (mut a, mut b, mut d) = (dev("Owner", 1, &key), dev("B", 2, &key), dev("D", 4, &key));
+    // Before Read only: a member's file, which the owner takes.
+    write_all(&b.fs, "by-b", b"B's, before").unwrap();
+    b.core.scan("").unwrap();
+    send(&b, &mut a);
+    pull(&mut a, &[&b]);
+    read_only(&mut [&mut a, &mut b, &mut d], true);
+    write_all(&a.fs, "by-owner", b"the owner's").unwrap();
+    a.core.scan("").unwrap();
+    send(&a, &mut b);
+    pull(&mut b, &[&a]);
+    // D hears only from B: the owner's version comes through B; B's own does not.
+    send(&b, &mut d);
+    pull(&mut d, &[&b]);
+    assert_eq!(read_all(&d.fs, "by-owner").unwrap(), b"the owner's", "the owner's version relayed by a member");
+    assert!(read_all(&d.fs, "by-b").is_err(), "a member's version passed through a member");
+    // The owner announces what it holds: B's older file too.
+    send(&a, &mut d);
+    pull(&mut d, &[&a]);
+    assert_eq!(read_all(&d.fs, "by-b").unwrap(), b"B's, before");
+}
+
+/// A regression guard (the puller has always checked this; the network source's own check, which stops asking such a
+/// device, has its test in `trs-sync-net`'s `source.rs`): a chunk from any peer is used only if it hashes to the chunk
+/// hash the version's signer signed, so a member serving bytes that differ (its own copy changed, or corrupted on the
+/// way) gives nothing, and the file stays as it was until a device serves the right bytes. Fails when a corrupted chunk
+/// is written into a file.
+#[test]
+fn a_corrupted_chunk_from_a_member_is_never_written() {
+    struct Corrupted;
+    impl ChunkSource for Corrupted {
+        fn fetch(&self, reqs: &[ChunkRequest]) -> Vec<Result<Vec<u8>, FetchError>> {
+            reqs.iter().map(|r| Ok(vec![b'x'; r.len as usize])).collect()
+        }
+    }
+    let key = rw();
+    let (mut a, mut d) = (dev("Owner", 1, &key), dev("D", 4, &key));
+    read_only(&mut [&mut a, &mut d], true);
+    write_all(&a.fs, "f", b"the owner's content").unwrap();
+    a.core.scan("").unwrap();
+    send(&a, &mut d);
+    let r = d.core.pull(&Corrupted, &|_| "B".into(), 64 << 20).unwrap();
+    assert_eq!(r.done, 0, "{r:?}");
+    assert!(read_all(&d.fs, "f").is_err(), "a corrupted chunk was written");
+    pull(&mut d, &[&a]);
+    assert_eq!(read_all(&d.fs, "f").unwrap(), b"the owner's content");
+}
+
+/// While the folder is Read only only the owner's versions count, and a version is the owner's by the owner's
+/// signature, checked on every device whoever passes it on: a member that names the owner as the maker of its own
+/// version (signed with its own key) is refused, and nothing of it counts. Fails when a version claiming the owner but
+/// signed by a member is taken.
+#[test]
+fn under_read_only_a_members_version_claiming_the_owner_is_refused() {
+    let key = rw();
+    let (mut a, mut b, mut d) = (dev("Owner", 1, &key), dev("B", 2, &key), dev("D", 4, &key));
+    write_all(&a.fs, "f", b"the owner's").unwrap();
+    a.core.scan("").unwrap();
+    send(&a, &mut d);
+    pull(&mut d, &[&a]);
+    read_only(&mut [&mut a, &mut b, &mut d], true);
+    write_all(&b.fs, "f", b"B's, as the owner's").unwrap();
+    write_all(&b.fs, "new", b"B's new, as the owner's").unwrap();
+    b.core.scan("").unwrap();
+    learn_writers(&mut d.core, &b.core.writers()).unwrap();
+    let (index_id, _) = b.core.index_state().unwrap();
+    let mut entries = b.core.announce_since(0, usize::MAX).unwrap();
+    for e in &mut entries {
+        e.file.info.modified_by = short(&a);
+    }
+    assert!(d.core.apply_remote(short(&b), RemoteIndex { index_id, full: true, done: true, entries }).is_err(), "a forged owner's version was taken");
+    assert_eq!(d.core.need_totals().unwrap().0, 0);
+    pull(&mut d, &[&b]);
+    assert_eq!(read_all(&d.fs, "f").unwrap(), b"the owner's");
+    assert!(read_all(&d.fs, "new").is_err());
+}
+
+/// A member that held its changes back while the folder was Read only sends them once it is off, also edits and
+/// deletes of files it had received (whose records keep the received version): they become its versions and reach the
+/// owner, whom nothing else changed. Fails when a held edit or delete of a received file stays on the member.
+#[test]
+fn held_edits_and_deletes_of_received_files_are_sent_once_read_only_is_off() {
+    let key = rw();
+    let (mut a, mut b) = (dev("Owner", 1, &key), dev("B", 2, &key));
+    for (p, body) in [("edited", "v1"), ("deleted", "x")] {
+        write_all(&a.fs, p, body.as_bytes()).unwrap();
+    }
+    a.core.scan("").unwrap();
+    send(&a, &mut b);
+    pull(&mut b, &[&a]);
+    send(&b, &mut a);
+    let writers: Vec<[u8; 32]> = b.core.writers().iter().map(|w| w.device_pk).collect();
+    // Held: B reads only meanwhile, and the core knows why.
+    read_only(&mut [&mut a, &mut b], true);
+    b.core.set_held(true).unwrap();
+    b.core.set_membership(&writers, Access::Read).unwrap();
+    write_all(&b.fs, "edited", b"B's held edit").unwrap();
+    b.fs.remove_file("deleted").unwrap();
+    b.core.scan("").unwrap();
+    // Off: B signs again; what it held becomes its own.
+    read_only(&mut [&mut a, &mut b], false);
+    b.core.set_membership(&writers, Access::Write).unwrap();
+    b.core.scan("").unwrap();
+    send(&b, &mut a);
+    pull(&mut a, &[&b]);
+    assert_eq!(read_all(&a.fs, "edited").unwrap(), b"B's held edit", "a held edit of a received file stayed on B");
+    assert!(read_all(&a.fs, "deleted").is_err(), "a held delete of a received file stayed on B");
+    assert!(!b.core.store().held().unwrap(), "cleared once claimed");
+}

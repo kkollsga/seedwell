@@ -1023,3 +1023,46 @@ fn a_failed_job_fails_only_its_own_version() {
     assert_eq!(read_all(&b.disk.fs, "f.bin").unwrap(), v2);
 }
 
+
+/// While the folder is Read only (SPEC §7G.1) members pass the owner's versions on, but an unhashed one (no chunk hash
+/// signed yet, §7G.11) is asked of its maker, the owner, alone: never of a member that holds or claims it, whose bytes
+/// nothing could check. Fails when a device asks anyone but the owner for an unhashed owner's version, or takes its
+/// bytes by chunk from anyone.
+#[test]
+fn under_read_only_an_unhashed_owners_version_is_asked_of_the_owner_alone() {
+    /// Every device but the owner: notes whom each stream is asked of, and answers nothing.
+    struct Others {
+        asked: Mutex<Vec<ShortId>>,
+        fetched: AtomicU64,
+    }
+    impl ChunkSource for Others {
+        fn stream(&self, ask: &StreamAsk) -> Result<StreamGot, StreamFail> {
+            self.asked.lock().unwrap().push(ask.maker);
+            Err(StreamFail::Unavailable)
+        }
+        fn fetch(&self, reqs: &[ChunkRequest]) -> Vec<Result<Vec<u8>, FetchError>> {
+            self.fetched.fetch_add(reqs.len() as u64, Ordering::SeqCst);
+            reqs.iter().map(|r| Ok(vec![b'x'; r.len as usize])).collect()
+        }
+    }
+    let key = Key::rw([9; 32]);
+    let owners = [*DeviceKey::from_seed(&[1; 32]).public_key()];
+    let mut a = dev(1, &key);
+    let mut c = dev_in(3, &key, false);
+    for d in [&mut a, &mut c] {
+        d.core.set_read_only(Some(&owners[..])).unwrap();
+    }
+    let film = noise(300_000, 7);
+    write_all(&a.disk.fs, "film.mkv", &film).unwrap();
+    a.core.scan("").unwrap();
+    assert!(a.core.store().local("film.mkv").unwrap().unwrap().file.info.is_unhashed());
+    send(&a, &mut c);
+    let others = Others { asked: Mutex::new(Vec::new()), fetched: AtomicU64::new(0) };
+    pull(&mut c, &others);
+    let asked = others.asked.lock().unwrap().clone();
+    assert!(!asked.is_empty() && asked.iter().all(|m| *m == a.core.me()), "asked of another device: {asked:?}");
+    assert_eq!(others.fetched.load(Ordering::SeqCst), 0, "an unhashed version's bytes taken by chunk");
+    assert!(read_all(&c.disk.fs, "film.mkv").is_err(), "placed without its maker");
+    pull(&mut c, &Maker::of(&a, None));
+    assert_eq!(read_all(&c.disk.fs, "film.mkv").unwrap(), film);
+}

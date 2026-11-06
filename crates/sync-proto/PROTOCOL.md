@@ -15,7 +15,10 @@ content, so the two refuse each other at the Hello and say which needs an update
 `tests/it/golden.rs` (each message type, statement kind, invitation link, proof, channel message and private
 message, decoded and encoded back byte for byte): protocol 3 changed no existing encoding, it only added two
 message types, a response code and the meaning of an entry with a size and no chunks. That table only ever gets
-new entries.
+new entries. **0.1.20 (protocol 4)** did the same once more (`PROTOCOL = MIN_PROTOCOL = 4`): *Read only* became a
+folder statement its owners sign (kind 12, below), and a device of 0.1.19 would keep it as a kind it does not know and
+take every member's versions while the folder is Read only. It added that kind and two message types (an admin's
+removal request and its answer, 35 and 36) and changed no existing encoding.
 
 ## Contents
 
@@ -134,6 +137,10 @@ new entries.
 | 30 | BlobData (blobs bit, 0.1.15) | `id` varint ‖ `code` u8 (0 ok, 1 not held, 2 refused, 3 gone: the sender's file changed, moved or is no longer shared, for good) ‖ `total` varint (the blob's or file's size) ‖ `data` bytes (≤ 1 MiB; empty unless ok) |
 | 31 | StreamRequest (protocol 3, 0.1.19) | `id` varint (u32) ‖ `folder_id` (32) ‖ `path` str ‖ version (the unhashed version asked for) ‖ `offset` varint ‖ `len` varint (u32, ≤ 8 MiB): the next piece of an unhashed file, asked of the version's maker, in order from 0 (see [Unhashed files](#unhashed-files)) |
 | 32 | StreamData (protocol 3, 0.1.19) | `id` varint ‖ `code` u8 (as Response: 0 ok; 4 busy: a piece out of order, or the read was dropped, start again from 0; 5 changed: the file changed since it was recorded or while it was read, nothing of it was signed) ‖ `data` bytes (≤ 16 MiB) ‖ chunks (count ‖ n × (len varint ‖ SHA-256 (32))): the chunks that ended inside the bytes sent so far and were not sent before ‖ `has_sig` bool [‖ `sig` (64): the maker's signature of the version asked for with the chunks of all the pieces]: with the file's last piece only (never the whole chunk list, which would not fit in a frame for a file of about a terabyte) |
+| 33 | ReachAsk (reach bit, 0.1.20) | `id` varint (u32) ‖ `addr` str (`ip:port`, ≤ 256 B): "can you reach me there?" The receiver opens a TCP connection to `addr` and closes it at once, only when `addr`'s IP is the one it sees the session come from (so a device can have only itself dialed), over the Internet only at a port the asker's own signed address record names (the IP may be a NAT other computers share), at most one at a time for each asking device and one a minute (counted from the start of the last); else it answers not tried, and the asker asks again after a minute. Never over a relayed session. |
+| 35 | RemoveRequest (protocol 4, 0.1.20) | `folder_id` (32) ‖ `device` pk (32) ‖ `seen` varint ‖ `at_s` varint ‖ `by` pk (32) ‖ `sig` (64): an admin's request that an owner's device remove a user; `seen` is the serial of the owners' latest statement about `device` the admin held when it asked (0: none), and an owner's device that holds a later one refuses ("the owner has decided about this device since"; no clocks are compared); `sig` is `by`'s over `"seedwell-sync/v1/remove-request" ‖ folder_id ‖ device ‖ seen (u64 BE) ‖ at_s (u64 BE) ‖ by`. Sent only to a device that is an owner of the folder, by the admin itself (`by` is the session's device). Only owners sign membership changes: an owner's device that holds the folder key checks that `by` is an admin there now and `device` a member that is neither owner nor admin (nor one of its own devices), signs an ordinary remove (kind 2) by itself, with no question to its user, and answers. A device without the folder key leaves it to another owner device. The admin's device keeps the request and sends it again to each owner device it links the folder with, until the remove is in the membership or one refuses it |
+| 36 | RemoveReply (protocol 4, 0.1.20) | `folder_id` (32) ‖ `device` pk (32) ‖ `refused` bool [‖ `reason` str (≤ 300 B)]: the owner's device's answer to a RemoveRequest: done (the remove comes with the membership) or refused, and why (the admin's device shows it, and stops keeping the device out). Only an answer from a device that is an owner of the folder counts |
+| 34 | ReachAnswer (reach bit, 0.1.20) | `id` varint ‖ `outcome` u8 (0 connected, 1 failed: no answer in 5 s, refused or unreachable, 2 not tried; any other value means not tried) |
 | other | (unknown) | skipped |
 
 - **Version** (in entries and progress): `count ‖ n × (short device id, 8 bytes BE ‖ counter varint)`, sorted by
@@ -220,6 +227,7 @@ signed    = "seedwell-sync/v2/statement" ‖ folder_id ‖ kind ‖ body (with i
 | 9 | follow (0.1.13) | `target` u8 (1 folder, 2 channel; another value: unknown) ‖ `target_pk` (32) ‖ `name` str (≤ 255 B, no control characters) ‖ `on` u8 (0 or 1; another value: unknown) ‖ `serial` varint ‖ `at_s` varint [‖ `flags` varint, 0.1.14: written only when not 0; bit 0 on demand, bit 1 removed] | in a devices group only: a member, with its device key; per target the latest of a current member's (by `serial`, then `at_s`, then signature bytes) counts. Anywhere else it means nothing. 0.1.13 reads a Follow with flags as the same Follow with bytes after it (kept, signed, passed on) |
 | 10 | moved (0.1.13) | `target_pk` (32) ‖ `at_s` varint | in a devices group only: a member, with its device key: the group moved to the group with this key (its key changed after a removal). Of the current members' moved statements the lowest target group id counts |
 | 11 | rendezvous (0.1.13) | `url` str (≤ 200 B, no spaces or control characters; empty: none) ‖ `serial` varint ‖ `at_s` varint | in a devices group only: the device it is about, with its device key, while a member: the rendezvous (§7G.3) it publishes to; its latest (by `serial`, then signature bytes) counts. A device that never said one takes the newest non-empty one of another member; one that turned it off says empty and takes none |
+| 12 | read only (0.1.20, protocol 4) | `on` u8 (0 or 1; another value: the body is unknown) ‖ `serial` varint ‖ `at_s` varint | owners (folder key) only; one signed by anyone else is no statement. The owners' latest (by `serial`, then signature bytes) counts, and it shares the owners' serials with grant, remove and share until |
 
 - A kind a device does not know, or a body it cannot read (a role it does not know), is kept as it came,
   checked by its signature only, stored, passed on unchanged, and gives no role.
@@ -241,6 +249,15 @@ signed    = "seedwell-sync/v2/statement" ‖ folder_id ‖ kind ‖ body (with i
     so to it a channel is open exactly while it carries the kind 7 mark: closed to its agents for a channel made or
     switched on since, open even after a later No for one it marked. Nothing breaks either way.
   - Devices before 0.1.12 keep both as unknown kinds, store them, pass them on, and see an ordinary channel.
+- **Read only** (0.1.20, protocol 4; SPEC §7G.1). A folder's owners' latest read only statement (kind 12); none:
+  off. While it is on, only the owners' versions count: an index entry counts toward which version is current only
+  when its `modified_by` is an owner (its signature checked against the writer table, whichever peer sends it) or
+  when an owner's device announces it from its own index. Any other entry is stored but takes no part, so nothing is
+  downloaded, deleted or renamed for it; off, it counts again. Every member that is not an owner signs and sends no
+  versions meanwhile (its changes stay where they were made) and keeps its role; the writer table does not change, so
+  versions signed before stay valid. Chunks are taken only when they hash to the signed chunk hash, from any member
+  (one that sends other bytes is asked for no chunk of the folder again in that session); an unhashed version is
+  streamed only from its maker.
 
 ## Invitations, links and proofs
 
@@ -478,7 +495,9 @@ OwnerKey). Its id, discovery topic and LAN tag come from its public key as for a
   switches its own afterwards. **Removed** (bit 1, with `on` 0): the folder's owner removed it from Seedwell, so each
   sibling removes it too, its files kept where they are (an on-demand folder's become an ordinary folder at its
   place). An off Follow without it only stops the folder coming to more devices. 0.1.13 reads either as the Follow
-  without flags: it joins in full and keeps a removed folder.
+  without flags: it joins in full and keeps a removed folder. Bit 2 was 0.1.19's *Read only* (it lowered the user's
+  other devices to Read only); since 0.1.20 it is no longer written, only read once by the step that gives the roles
+  it lowered back and turns the folder's own Read only (kind 12) on in its place.
 
 ## Other formats
 
@@ -594,16 +613,18 @@ What a later version may change, and how:
    | 3 | renames: answers RenameRequest (type 26) with RenameReply (type 27); only a device with it is asked | 0.1.12 |
    | 4 | devices: the user's own devices (DevicesJoin, type 28; the sibling proof, kind 6); only a device with it is sent either | 0.1.13 |
    | 5 | blobs: images and files of channels and private messages by hash (BlobWant, type 29; BlobData, type 30); only a device with it is asked | 0.1.15 |
+   | 6 | reach: answers ReachAsk (type 33) with ReachAnswer (type 34), a dial back that tells a device whether others can reach it (SPEC §7G.3); only a device with it is asked | 0.1.20 |
 
 5. **Breaking changes** raise `PROTOCOL`, the highest version spoken. The new build keeps `MIN_PROTOCOL` one
    behind for at least one release (N-1), so devices a release apart still sync at the older version, and
    raises it later. Two devices whose ranges do not overlap refuse each other and say which needs an update.
-   (Protocol 3, 0.1.19, raised both at once by the user's decision: see the top of this file.)
+   (Protocols 3, 0.1.19, and 4, 0.1.20, raised both at once by the user's decision: see the top of this file.)
 
    | protocol | since | what changed |
    |---|---|---|
    | 2 | 0.1.6 | the baseline |
    | 3 | 0.1.19 | unhashed file entries; StreamRequest (31), StreamData (32); response code 5 (changed) |
+   | 4 | 0.1.20 | the owners' read only statement (kind 12): while it is on, only the owners' versions count; an admin's removal request (35) and its answer (36) |
 6. **Invitations and links** never grow: a new form is a new invitation version (the first byte of an
    invitation and of a link's payload).
 7. **Signed bytes** never change for an existing type: a new signed form needs a new domain string

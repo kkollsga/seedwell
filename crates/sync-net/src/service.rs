@@ -106,6 +106,10 @@ pub struct Options {
     /// Seedwell's own torrents, when the engine runs beside the service (the app, the daemon): a folder's files are
     /// never moved from under one ([`LocalTorrents`]).
     pub torrents: Option<Arc<dyn LocalTorrents>>,
+    /// Told what each device this one talks to runs (its Hello's `client`; [`crate::shared::PeerClientHook`] says
+    /// which devices): the app's updater checks for a release when a device runs a newer Seedwell (SPEC 12A).
+    /// `None`: nobody is told (a daemon, tests).
+    pub peer_client: Option<crate::shared::PeerClientHook>,
 }
 
 /// Seedwell's own torrents, which may seed from inside a synced folder (SPEC §7G.11, *Modes*). Lent by whoever runs the
@@ -171,6 +175,7 @@ impl Options {
             on_demand_host: Arc::new(Mutex::new(None)),
             on_demand: trs_platform::ON_DEMAND_FOLDERS,
             torrents: None,
+            peer_client: None,
         }
     }
 }
@@ -297,6 +302,8 @@ pub struct MemberInfo {
     /// When its access ends: the folder's share end, for a device that is not an owner (Unix seconds); `None` =
     /// no end.
     pub expires_s: Option<u64>,
+    /// This device (an admin) asked the owners to remove it: waiting, or refused and why ([`crate::removals`]).
+    pub removal: Option<crate::removals::Asked>,
 }
 
 /// An invitation of a folder, for the UI.
@@ -357,6 +364,8 @@ pub(crate) struct Inner {
     pub(crate) cfg_saving: Mutex<()>,
     /// A save of `cfg` is queued off the caller's thread ([`SyncHandle::save_config_soon`]) and has not started.
     pub(crate) cfg_save_queued: AtomicBool,
+    /// Up (under `cfg_saving`) when [`SyncHandle::shutdown`] returns: no save is made after it.
+    pub(crate) cfg_saves_over: AtomicBool,
     /// **Tests:** how long a queued save waits once taken ([`SyncHandle::test_queued_save_wait`]).
     pub(crate) queued_save_wait_ms: AtomicU64,
     pub(crate) secrets: Arc<dyn SecretStore>,
@@ -419,6 +428,13 @@ pub struct SyncHandle {
 
 const DEVICE_KEY: &str = "device";
 
+/// A folder's issue line while it is *Read only* and this device, not its owner, holds its changes back.
+pub const HELD_READ_ONLY: &str = concat!(
+    "Read only: only the folder's owner changes it. Changes made on this ",
+    trs_platform::computer!(),
+    " stay here until the owner turns it off."
+);
+
 /// The page of a folder joined in full although it is on demand on the device that put it on all the user's devices.
 pub const FULL_HERE: &str = concat!(
     "On demand on your other device, but this ",
@@ -428,6 +444,10 @@ pub const FULL_HERE: &str = concat!(
 
 /// How long stopping a folder waits for its runtime and its index to let go.
 const STOP_WAIT: Duration = Duration::from_secs(60);
+
+/// What a call on a service that has stopped says when it would save (the app may hold the old service for a moment
+/// while sync starts again on another port, `trs_control::sync::SyncSlot::move_port`, and show this).
+pub const STOPPED: &str = "Folder sync is restarting. Try again in a moment.";
 
 /// A folder public key from its hex form in `sync.toml`.
 pub(crate) fn public_key_from_hex(s: &str) -> Option<[u8; 32]> {
@@ -543,6 +563,10 @@ impl SyncHandle {
             stream_wait: Mutex::new(Duration::ZERO),
             serve_wait: Mutex::new(Duration::ZERO),
             scan_hold: Mutex::new(Duration::ZERO),
+            job_hold: Mutex::new(Duration::ZERO),
+            jobs_held: std::sync::atomic::AtomicUsize::new(0),
+            fetch_read_gap: AtomicBool::new(false),
+            place_wait: Mutex::new(Duration::ZERO),
             silent_ondemand: AtomicBool::new(false),
             folder_gen: std::sync::atomic::AtomicU64::new(0),
             file_hooks: crate::files::Hooks::default(),
@@ -556,11 +580,12 @@ impl SyncHandle {
             devices_lock: tokio::sync::Mutex::new(()),
             hold_key_changes: AtomicBool::new(false),
             hold_switch: AtomicBool::new(false),
-            hold_read_only_again: AtomicBool::new(false),
             switches_waiting: std::sync::atomic::AtomicUsize::new(0),
             settling: Mutex::new(std::time::Instant::now() + FETCH_GRACE),
             fetch_grace: Mutex::new(FETCH_GRACE),
             fetch_stall: Mutex::new(FETCH_STALL),
+            reach: crate::inbound::Reach::default(),
+            peer_client: opts.peer_client.clone(),
         });
         ctx.limits.set_kib(cfg.settings.up_kib, cfg.settings.down_kib);
         if let Some(a) = opts.chat_agents {
@@ -575,6 +600,7 @@ impl SyncHandle {
             cfg: Mutex::new(cfg),
             cfg_saving: Mutex::new(()),
             cfg_save_queued: AtomicBool::new(false),
+            cfg_saves_over: AtomicBool::new(false),
             queued_save_wait_ms: AtomicU64::new(0),
             secrets: opts.secrets,
             port,
@@ -672,6 +698,7 @@ impl SyncHandle {
             tokio::spawn(access_clock(h.clone())),
             tokio::spawn(held_loop(h.clone(), opts.held_retry)),
             tokio::spawn(crate::netchange::run(h.clone())),
+            tokio::spawn(crate::inbound::run(h.clone())),
             tokio::spawn(crate::rendezvous::run(h.clone())),
             tokio::spawn(crate::devices::run(h.clone())),
         ];
@@ -722,7 +749,7 @@ impl SyncHandle {
 
     /// Stops everything: folder runtimes, sessions, the listener; returns once the folders' indexes and the channels'
     /// stores are closed (at most 10 s after the rest), so a service can start again on the same state in this
-    /// process. The handle shows no folders or channels afterwards.
+    /// process. The handle shows no folders or channels afterwards, and saves no configuration.
     pub async fn shutdown(&self) {
         self.inner.stopping.store(true, Ordering::SeqCst);
         // A read mark's save still queued is made now, one under way is waited for, and none comes after.
@@ -748,6 +775,8 @@ impl SyncHandle {
         let channels: Vec<std::sync::Weak<crate::chat::ChannelShared>> = reg.channels().iter().map(Arc::downgrade).collect();
         for f in reg.folders() {
             reg.remove_folder(&f.id);
+            // What runs on it apart from the runtime (a lane's fetch, holding its index) stops at once.
+            f.stopped.send_replace(true);
         }
         for c in reg.channels() {
             reg.remove_channel(&c.id);
@@ -760,6 +789,12 @@ impl SyncHandle {
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
+        // The last save: one under way is waited for (its turn), and none is made after this returns. A task of this
+        // service may still be finishing (one noting a session's end, aborted while it saved): its save would land
+        // over the configuration of a service started again on the same state, or make that one's own save fail (both
+        // write the same temporary file).
+        let _turn = lock(&self.inner.cfg_saving);
+        self.inner.cfg_saves_over.store(true, Ordering::SeqCst);
     }
 
     pub(crate) fn save_config(&self) -> io::Result<()> {
@@ -770,8 +805,12 @@ impl SyncHandle {
         self.write_config(&turn)
     }
 
-    /// Writes the configuration as it is now; `_turn` is the save's turn (`cfg_saving`), held by the caller.
+    /// Writes the configuration as it is now; `_turn` is the save's turn (`cfg_saving`), held by the caller. After
+    /// [`Self::shutdown`] returned, nothing is written: an error says so, in words for the user ([`STOPPED`]).
     fn write_config(&self, _turn: &std::sync::MutexGuard<'_, ()>) -> io::Result<()> {
+        if self.inner.cfg_saves_over.load(Ordering::SeqCst) {
+            return Err(io::Error::other(STOPPED));
+        }
         let text = lock(&self.inner.cfg).text()?;
         SyncConfig::write_text(&self.inner.cfg_path, &text)
     }
@@ -907,6 +946,11 @@ impl SyncHandle {
         let awaiting = role.is_none() && invite.as_ref().is_some_and(|i| i.invite.role.access() == Access::Write);
         let writers = membership.writers();
         let members = crate::roles::member_ids(&membership);
+        // Read only (its owners' setting, SPEC §7G.1): only the owners' versions count, and a member that is not one
+        // holds its changes back, from the start as `roles::changed` keeps it later.
+        let owners = membership.read_only().then(|| membership.owners());
+        let held = crate::roles::held_read_only(&membership, self.inner.ctx.key.public_key());
+        let membership_upto = membership.max_serial();
         // An on-demand folder's files are this device's content cache, which is ours: its marker is made here.
         let root = if e.on_demand { self.cache_path(&id) } else { e.path.clone() };
         if e.on_demand {
@@ -933,7 +977,7 @@ impl SyncHandle {
             };
             let store = RedbStore::open(&index, random_u64())?;
             let reader = store.reader();
-            let access = role.map_or(Access::Read, Role::access);
+            let access = if held { Access::Read } else { role.map_or(Access::Read, Role::access) };
             let cfg = FolderConfig {
                 me: ctx.me,
                 folder_pk: pk,
@@ -956,6 +1000,8 @@ impl SyncHandle {
             core.follow_ignore_file(&entry.ignore)?;
             let ignore = core.ignore();
             let replacing = core.replacing();
+            core.set_read_only(owners.as_deref())?;
+            crate::roles::core_held(&mut core, held, role)?;
             core.set_membership(&writers, access).map_err(|e| invalid(e.to_string()))?;
             core.set_awaiting_write(awaiting);
             // Who is no member any more is no source or holder (as `roles::changed` keeps it).
@@ -982,12 +1028,21 @@ impl SyncHandle {
             }
             self.save_config()?;
         }
+        // The old Read only's migration (`devices::migrate_read_only`) has not run: what this device holds now is all of
+        // 0.1.19's (it met no device of this version yet), so the migration acts on no decision above it.
+        if !e.read_only_migrated && e.read_only_migrate_upto.is_none() {
+            if let Some(c) = lock(&self.inner.cfg).folder_mut(&e.id) {
+                c.read_only_migrate_upto = Some(membership_upto);
+            }
+            self.save_config()?;
+        }
 
         let (seq_tx, _) = watch::channel(core.index_state().map(|(_, s)| s).unwrap_or(0));
         let name = e.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let space = Space::new(id, SpaceKind::Folder, FolderKey::Member(pk), secret, membership, members_path, invite, links, name);
         space.paused.store(e.paused, Ordering::Relaxed);
         space.lan_only.store(e.lan_only, Ordering::Relaxed);
+        space.held_read_only.store(held, Ordering::SeqCst);
         crate::devices::mark_following(&self.inner.ctx, &space);
         let mut items = trs_sync::ondemand::Items::default();
         items.set_not_members(core.not_members());
@@ -2131,6 +2186,10 @@ impl SyncHandle {
         let my_name = lock(&self.inner.ctx.device_name).clone();
         let my_user = lock(&self.inner.ctx.user_name).clone();
         let profiles: BTreeMap<DeviceId, Names> = f.profile_names().into_iter().collect();
+        let asked: BTreeMap<[u8; 32], crate::removals::Asked> = lock(&f.removals)
+            .iter()
+            .map(|x| (x.request.device, x.refused.clone().map_or(crate::removals::Asked::Waiting, crate::removals::Asked::Refused)))
+            .collect();
         let m = f.membership.read().unwrap_or_else(|e| e.into_inner());
         let mut out: Vec<MemberInfo> = m
             .members()
@@ -2156,6 +2215,7 @@ impl SyncHandle {
                     online: device == me || online.contains_key(&device),
                     is_me: device == me,
                     expires_s: if mem.role == Role::Owner { None } else { m.share_until() },
+                    removal: asked.get(pk).cloned(),
                 }
             })
             .collect();
@@ -2376,16 +2436,18 @@ impl SyncHandle {
     pub fn set_role(&self, id: &FolderId, device: &DeviceId, role: Role) -> Result<(), SyncError> {
         let f = self.inner.ctx.registry.user_space(id).ok_or(SyncError::NotFound)?;
         let pk = self.owner_change(&f, device, role != Role::Owner)?;
-        let serial = f.membership.read().unwrap_or_else(|e| e.into_inner()).next_serial();
-        let st = crate::roles::by_owner(&f, Body::Grant { device: pk, role, serial, at_s: crate::roles::now_s(), invite: None });
-        if crate::roles::add(&f, st) {
+        let at_s = crate::roles::now_s();
+        if crate::roles::add_by_owner(&f, |_, serials| vec![Body::Grant { device: pk, role, serial: serials.next(), at_s, invite: None }]) == Some(true) {
             self.spawn_changed(&f);
         }
         Ok(())
     }
 
-    /// Removes a device from the folder (owners only): it is cut off at once and its later changes are ignored. It
-    /// keeps the files it has. This device leaves a folder with [`SyncHandle::remove_folder`] instead.
+    /// Removes a device from the folder: it is cut off at once and its later changes are ignored. It keeps the files it
+    /// has. An owner removes anyone (a folder keeps one owner). An admin asks the owners to remove a user, a member at
+    /// Read & write or Read only ([`crate::removals`]): the device is cut off here at once, and an owner's device signs
+    /// the removal by itself when it gets the request (the member list shows it waiting meanwhile, or why an owner's
+    /// device refused). This device leaves a folder with [`SyncHandle::remove_folder`] instead.
     pub fn remove_device(&self, id: &FolderId, device: &DeviceId) -> Result<(), SyncError> {
         let f = self.inner.ctx.registry.user_space(id).ok_or(SyncError::NotFound)?;
         if *device == self.inner.ctx.me {
@@ -2394,12 +2456,44 @@ impl SyncHandle {
                 SpaceKind::Channel | SpaceKind::Devices => concat!("to leave the channel on this ", trs_platform::computer!(), ", leave it instead"),
             }));
         }
+        let me = *self.inner.ctx.key.public_key();
+        if f.role_of(&me) == Some(Role::Admin) && f.kind != SpaceKind::Devices {
+            let noun = crate::roles::noun(&f);
+            let pk = {
+                let m = f.membership.read().unwrap_or_else(|e| e.into_inner());
+                let (pk, mem) = m.members().find(|(pk, _)| DeviceId::of_public_key(pk) == *device).ok_or_else(|| invalid(format!("no such device in this {noun}")))?;
+                if mem.role.admits() {
+                    return Err(invalid(format!("An admin can ask to remove only members who are not owners or admins of the {noun}.")));
+                }
+                *pk
+            };
+            let req = crate::removals::record(&self.inner.ctx, &f, pk);
+            let (ctx, f) = (self.inner.ctx.clone(), f.clone());
+            self.inner.rt.spawn(async move { crate::removals::deliver(&ctx, &f, req).await });
+            return Ok(());
+        }
         let pk = self.owner_change(&f, device, true)?;
-        let serial = f.membership.read().unwrap_or_else(|e| e.into_inner()).next_serial();
-        let st = crate::roles::by_owner(&f, Body::Remove { device: pk, serial, at_s: crate::roles::now_s() });
-        if crate::roles::add(&f, st) {
+        if crate::roles::add_by_owner(&f, |_, serials| vec![Body::Remove { device: pk, serial: serials.next(), at_s: crate::roles::now_s() }]) == Some(true) {
             self.spawn_changed(&f);
         }
+        Ok(())
+    }
+
+    /// **Tests:** this device answers a request to remove `device` (refused, and why; `None`: done) to every device
+    /// sharing the folder with it, whatever its own role (as a member that is not an owner could).
+    pub async fn test_reply_removal(&self, id: &FolderId, device: &DeviceId, refused: Option<String>) -> Result<(), SyncError> {
+        let f = self.inner.ctx.registry.user_space(id).ok_or(SyncError::NotFound)?;
+        let pk = f.membership.read().unwrap_or_else(|e| e.into_inner()).members().map(|(pk, _)| *pk).find(|pk| DeviceId::of_public_key(pk) == *device).ok_or(SyncError::NotFound)?;
+        crate::removals::test_reply(&self.inner.ctx, &f, pk, refused).await;
+        Ok(())
+    }
+
+    /// **Tests:** this device sends the owners a request to remove `device`, past every check it makes before it asks
+    /// (as a device that is not an admin, or another build, could).
+    pub async fn test_request_removal(&self, id: &FolderId, device: &DeviceId) -> Result<(), SyncError> {
+        let f = self.inner.ctx.registry.user_space(id).ok_or(SyncError::NotFound)?;
+        let pk = f.membership.read().unwrap_or_else(|e| e.into_inner()).members().map(|(pk, _)| *pk).find(|pk| DeviceId::of_public_key(pk) == *device).ok_or(SyncError::NotFound)?;
+        crate::removals::test_send(&self.inner.ctx, &f, pk).await;
         Ok(())
     }
 
@@ -2531,12 +2625,45 @@ impl SyncHandle {
         if f.role_of(&me) != Some(Role::Owner) || f.secret.read().unwrap_or_else(|e| e.into_inner()).is_none() {
             return Err(invalid(format!("Only the {}'s owner can change how long it is shared.", crate::roles::noun(&f))));
         }
-        let serial = f.membership.read().unwrap_or_else(|e| e.into_inner()).next_serial();
-        let st = crate::roles::by_owner(&f, Body::ShareUntil { until_s, serial, at_s: now });
-        if crate::roles::add(&f, st) {
+        if crate::roles::add_by_owner(&f, |_, serials| vec![Body::ShareUntil { until_s, serial: serials.next(), at_s: now }]) == Some(true) {
             self.spawn_changed(&f);
         }
         Ok(())
+    }
+
+    /// Turns folder `id`'s *Read only* on or off (SPEC §7G.1): its owners' setting, signed with the folder key
+    /// ([`Body::ReadOnly`]), so only an owner of the folder can, and every device refuses the statement from anyone
+    /// else. While on, only the owners' changes count: every other member, the user's own devices included, holds its
+    /// own back and takes none of another member's; nobody's role changes, and admins still admit and remove members.
+    /// Off: everyone sends what it held, as ordinary changes (a conflict where an owner changed the same file).
+    pub fn set_read_only(&self, id: &FolderId, on: bool) -> Result<(), SyncError> {
+        let f = self.inner.ctx.registry.user_space(id).ok_or(SyncError::NotFound)?;
+        if f.kind != SpaceKind::Folder {
+            return Err(invalid("Only a folder can be read only."));
+        }
+        let me = *self.inner.ctx.key.public_key();
+        if f.role_of(&me) != Some(Role::Owner) || f.secret.read().unwrap_or_else(|e| e.into_inner()).is_none() {
+            return Err(invalid("Only the folder's owner can make it read only, or turn that off."));
+        }
+        if crate::roles::add_by_owner(&f, |m, serials| crate::roles::read_only_statement(m, serials, on)) == Some(true) {
+            self.spawn_changed(&f);
+        }
+        Ok(())
+    }
+
+    /// Folder `id`'s *Read only* as this device has it: on or off, whether this device may switch it, and whether it
+    /// holds its changes back. `None`: no such folder here (or a channel).
+    pub fn read_only_state(&self, id: &FolderId) -> Option<crate::status::ReadOnlyState> {
+        let f = self.inner.ctx.registry.user_space(id).filter(|f| f.kind == SpaceKind::Folder)?;
+        let me = *self.inner.ctx.key.public_key();
+        let on = f.membership.read().unwrap_or_else(|e| e.into_inner()).read_only();
+        let owner = f.role_of(&me) == Some(Role::Owner) && f.secret.read().unwrap_or_else(|e| e.into_inner()).is_some();
+        Some(crate::status::ReadOnlyState { on, owner, held: f.held_read_only.load(Ordering::SeqCst) })
+    }
+
+    /// Folder `id` is *Read only* (its owners' setting, [`Self::set_read_only`]).
+    pub fn read_only(&self, id: &FolderId) -> bool {
+        self.inner.ctx.registry.user_space(id).is_some_and(|f| f.kind == SpaceKind::Folder && f.membership.read().unwrap_or_else(|e| e.into_inner()).read_only())
     }
 
     pub(crate) fn spawn_changed(&self, f: &Arc<Space>) {
@@ -2736,6 +2863,10 @@ impl SyncHandle {
         if !f.on_demand && lock(&self.inner.cfg).folder(&f.id.to_string()).is_some_and(|e| e.full_here) {
             live.issues.push((String::new(), FULL_HERE.into()));
         }
+        let held = f.held_read_only.load(Ordering::SeqCst);
+        if held {
+            live.issues.push((String::new(), HELD_READ_ONLY.into()));
+        }
         let refused = lock(&f.notes).refused.clone();
         let role = f.role_of(self.inner.ctx.key.public_key());
         // (Also one following the user's own devices, which joins with no invitation.)
@@ -2769,7 +2900,7 @@ impl SyncHandle {
             id: f.id.to_string(),
             name: lock(&f.name).clone(),
             path: lock(&f.place).display().to_string(),
-            access: role.map_or(Access::Read, Role::access),
+            access: if held { Access::Read } else { role.map_or(Access::Read, Role::access) },
             role,
             share_until,
             state,
@@ -2960,16 +3091,19 @@ impl SyncHandle {
     }
 
     /// A folder's or channel's members other than this device: which are connected for it, and for the others when
-    /// each was last seen and why the last attempt to reach it failed (from its own records).
+    /// each was last seen and why the last attempt to reach it failed (from its own records). A member this device (an
+    /// admin) cut off while its removal waits for the owner ([`crate::removals::waiting`]) is left out: this device
+    /// keeps it away on purpose, so the folder does not wait for it (it counts again once an owner refuses).
     pub(crate) fn away(&self, f: &Space) -> crate::absence::Away {
         let me = self.inner.ctx.me;
         let my_pk = *self.inner.ctx.key.public_key();
         let connected: BTreeSet<DeviceId> = self.inner.ctx.registry.peers().iter().filter(|p| p.access(&f.id).is_some()).map(|p| p.device).collect();
-        let (others, may_remove): (Vec<(DeviceId, Role)>, bool) = {
+        let (others, may_remove): (Vec<([u8; 32], DeviceId, Role)>, bool) = {
             let m = f.membership.read().unwrap_or_else(|e| e.into_inner());
-            let others = m.members().map(|(pk, mem)| (DeviceId::of_public_key(pk), mem.role)).filter(|(d, _)| *d != me).collect();
+            let others = m.members().map(|(pk, mem)| (*pk, DeviceId::of_public_key(pk), mem.role)).filter(|(_, d, _)| *d != me).collect();
             (others, m.role(&my_pk) == Some(Role::Owner))
         };
+        let others: Vec<(DeviceId, Role)> = others.into_iter().filter(|(pk, _, _)| !crate::removals::waiting(f, pk)).map(|(_, d, r)| (d, r)).collect();
         let may_remove = may_remove && f.secret.read().unwrap_or_else(|e| e.into_inner()).is_some();
         let kept: Vec<crate::config::SpaceDevice> = {
             let cfg = lock(&self.inner.cfg);
@@ -3239,6 +3373,32 @@ impl SyncHandle {
         self.inner.net.stats()
     }
 
+    /// Whether other devices can reach this one ([`crate::inbound`]): a device reached it, a device it reached could
+    /// not reach it back (and none has reached it since), or nothing is known. Cheap (a lock): hosts poll it.
+    pub fn inbound(&self) -> crate::inbound::Inbound {
+        self.inner.ctx.reach.inbound()
+    }
+
+    /// Asks the connected devices to dial this one back again now, not at the next round (up to ten minutes): the user
+    /// has just allowed Seedwell through a firewall. Returns at once; [`Self::inbound`] changes when the answer comes
+    /// (within [`crate::inbound::ANSWER_WAIT`]).
+    pub fn check_inbound_again(&self) {
+        self.inner.ctx.reach.again();
+    }
+
+    /// A check asked for with [`Self::check_inbound_again`] is under way: no device has answered it yet, and it has not
+    /// been given up ([`crate::inbound::CHECK_LIMIT`]). Cheap (a lock).
+    pub fn inbound_checking(&self) -> bool {
+        self.inner.ctx.reach.checking()
+    }
+
+    /// **Tests:** sessions over loopback count as evidence and may be asked about, and the dial back goes to `port`
+    /// instead of the sync port (a closed port plays a firewall).
+    #[doc(hidden)]
+    pub fn test_reach(&self, loopback: bool, port: Option<u16>) {
+        self.inner.ctx.reach.test(loopback, port);
+    }
+
     /// What each connected device's session runs over (`TCP`, `uTP` or `Relay`).
     pub fn transports(&self) -> Vec<(DeviceId, Via)> {
         self.inner.ctx.registry.peers().iter().map(|p| (p.device, p.via)).collect()
@@ -3313,6 +3473,19 @@ impl SyncHandle {
         *lock(&self.inner.ctx.scan_hold) = hold;
     }
 
+    /// **Tests only:** each job of a folder's lanes (a fetch of a peer's chunks, a stream) holds the folder's index and
+    /// files this much longer at its end (a slow disk's flush, a virus scanner reading the new file).
+    #[doc(hidden)]
+    pub fn test_job_hold(&self, hold: Duration) {
+        *lock(&self.inner.ctx.job_hold) = hold;
+    }
+
+    /// **Tests only:** how many jobs are in [`Self::test_job_hold`]'s pause now.
+    #[doc(hidden)]
+    pub fn test_jobs_held(&self) -> usize {
+        self.inner.ctx.jobs_held.load(Ordering::SeqCst)
+    }
+
     /// **Tests only:** this device lets go of every read of its unhashed files it keeps for others (as a restart does):
     /// a device asking for the next piece is answered busy, and starts again.
     #[doc(hidden)]
@@ -3334,6 +3507,25 @@ impl SyncHandle {
     #[doc(hidden)]
     pub fn test_stream_wait(&self, wait: Duration) {
         *lock(&self.inner.ctx.stream_wait) = wait;
+    }
+
+    /// **Tests only:** a fetch's read of where it stands ([`Self::od_fetch_wait`]), having read a file's record (not
+    /// here, asked for), waits until that record is committed as here (at most 30 s) before it reads what the file
+    /// needs: as a thread that lost the CPU between the two reads while the pull round committed the file.
+    #[doc(hidden)]
+    pub fn test_fetch_read_gap(&self, on: bool) {
+        self.inner.ctx.fetch_read_gap.store(on, Ordering::SeqCst);
+    }
+
+    /// **Tests only:** each pull round that has a finished download to place (a stream's or a build's end) starts after
+    /// a pause this long, the folder's core let go, and pauses as long again once it has taken the download, the core
+    /// held, before it renames and records it: the bytes are here and their record is not yet. For the folders open now.
+    #[doc(hidden)]
+    pub fn test_place_wait(&self, wait: Duration) {
+        *lock(&self.inner.ctx.place_wait) = wait;
+        for f in self.inner.ctx.registry.folders() {
+            trs_sync::lazy::lock(&f.jobs).test_place_pause = wait;
+        }
     }
 
     /// **Tests only:** the speed limits apply to LAN sessions too, as [`crate::limit::QA_LIMIT_LAN`] makes them in an

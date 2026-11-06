@@ -45,11 +45,11 @@ fn status(s: &Snapshot, listen: u16, extra: Option<u16>, public: Option<bool>, u
     }
 }
 
-/// The mappings to ask for: TCP and UDP for the listen port, and TCP and UDP for the extra port (when it is
-/// another port; sync runs TCP and uTP on it).
-fn wanted(listen: u16, extra: Option<u16>) -> Vec<Wanted> {
-    let mut w = Wanted::tcp_and_udp(listen);
-    if let Some(e) = extra.filter(|&e| e != 0 && e != listen) {
+/// The mappings to ask for: TCP and UDP for the listen port (`None`: not mapped, the torrent proxy is on, SPEC
+/// §7H), and TCP and UDP for the extra port (when it is another port; sync runs TCP and uTP on it).
+fn wanted(listen: Option<u16>, extra: Option<u16>) -> Vec<Wanted> {
+    let mut w = listen.map(Wanted::tcp_and_udp).unwrap_or_default();
+    if let Some(e) = extra.filter(|&e| e != 0 && Some(e) != listen) {
         w.extend(Wanted::tcp_and_udp(e));
     }
     w
@@ -64,6 +64,12 @@ impl PortMapRunner {
         if !pc.enabled || (!pc.upnp && !pc.natpmp) || port == 0 {
             return None;
         }
+        // While torrents go through the proxy their port is not opened on the router (SPEC §7H); folder sync's still is.
+        let listen = (!sh.proxy.on()).then_some(port);
+        let w = wanted(listen, extra);
+        if w.is_empty() {
+            return None;
+        }
         let mut methods = Vec::new();
         if pc.natpmp {
             methods.extend([Method::Pcp, Method::NatPmp]);
@@ -71,7 +77,7 @@ impl PortMapRunner {
         if pc.upnp {
             methods.push(Method::Upnp);
         }
-        let mut core = Config { wanted: wanted(port, extra), methods, ..Config::default() };
+        let mut core = Config { wanted: w, methods, ..Config::default() };
         let mut fixed_net = None;
         if let Some(gw) = pc.test_gateway {
             core.gateway_port = gw.port();
@@ -124,12 +130,15 @@ mod tests {
 
     #[test]
     fn the_extra_port_is_mapped_for_tcp_and_udp() {
-        assert_eq!(wanted(6881, None), Wanted::tcp_and_udp(6881));
-        let w = wanted(6881, Some(22000));
+        assert_eq!(wanted(Some(6881), None), Wanted::tcp_and_udp(6881));
+        let w = wanted(Some(6881), Some(22000));
         assert_eq!(w.len(), 4);
         assert_eq!(w[2..], Wanted::tcp_and_udp(22000)[..]);
-        assert_eq!(wanted(6881, Some(6881)).len(), 2, "the listen port itself is not mapped twice");
-        assert_eq!(wanted(6881, Some(0)).len(), 2);
+        assert_eq!(wanted(Some(6881), Some(6881)).len(), 2, "the listen port itself is not mapped twice");
+        assert_eq!(wanted(Some(6881), Some(0)).len(), 2);
+        // Failure: the torrent port is opened on the router while torrents go through the proxy (SPEC §7H).
+        assert_eq!(wanted(None, Some(22000)), Wanted::tcp_and_udp(22000));
+        assert!(wanted(None, None).is_empty());
     }
 
     #[test]

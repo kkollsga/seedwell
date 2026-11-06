@@ -80,6 +80,16 @@ impl Session {
             || cfg.category_locations != old.category_locations
             || cfg.by_status != old.by_status;
         self.sh.set_cfg(cfg.clone());
+        // Before the torrents hear of the change: a dial they start next already sees the proxy (SPEC §7H).
+        match (&old.proxy, &cfg.proxy) {
+            // Only the preference changed (a country chosen): the server in use stays while all are ranked again;
+            // nothing is held.
+            (Some(a), Some(b)) if a != b && a.same_servers(b) => {
+                self.start_proxy_monitor();
+            }
+            (a, b) if a != b => self.proxy_changed(old.proxy.is_some()),
+            _ => {}
+        }
         if cfg.developer_mode && !old.developer_mode {
             // The developer log names torrents by title: hand over the ones already known.
             for (id, e) in &self.table {
@@ -164,6 +174,102 @@ impl Session {
         self.schedule_after(self.sh.cfg().status_interval, Job::StatusCheck);
         self.restart_watcher();
         self.restart_portmap();
+        self.start_proxy_monitor();
+    }
+
+    /// The proxy's monitor for the configuration in force (none when the proxy is off).
+    fn start_proxy_monitor(&mut self) {
+        if let Some(t) = self.proxy_task.take() {
+            t.abort();
+        }
+        let cfg = self.sh.cfg();
+        let Some(p) = cfg.proxy.clone() else { return };
+        let tx = self.sh.session.clone();
+        let restored = move || {
+            let _ = tx.try_send(SessionMsg::ProxyRestored);
+        };
+        self.proxy_task = Some(tokio::spawn(crate::proxy::run(self.sh.proxy.clone(), p, restored)));
+    }
+
+    /// The proxy came on, went off, or changed (SPEC §7H). On: the listener closes, uTP takes nobody in, the torrent
+    /// port's mapping goes, torrents are held until a server answers (they drop their direct connections when they
+    /// hear of the change). Off: all of that comes back and torrents dial and announce again at once.
+    fn proxy_changed(&mut self, was_on: bool) {
+        let on = self.sh.cfg().proxy.is_some();
+        if let Some(t) = self.proxy_task.take() {
+            t.abort();
+        }
+        self.sh.proxy.reset(on);
+        let utp = self.sh.utp.read().unwrap_or_else(|e| e.into_inner()).clone();
+        if on {
+            self.start_proxy_monitor();
+            if !was_on {
+                if let Some(l) = self.listener.take() {
+                    l.abort();
+                }
+                if let Some(u) = &utp {
+                    u.set_accepting(false);
+                }
+                self.restart_portmap();
+                // Lookups that were running stop at once, with the announce they would end with: dropping their
+                // stream alone does not stop the node's walk (no new ones start: `dht_ok`).
+                if let Some(d) = self.dht.clone() {
+                    let ids: Vec<TorrentId> = self.dht_inflight.iter().copied().collect();
+                    tokio::spawn(async move {
+                        for id in ids {
+                            let _ = d.cancel(id).await;
+                        }
+                    });
+                }
+            }
+        } else if was_on {
+            if let Some(u) = &utp {
+                u.set_accepting(true);
+            }
+            self.relisten();
+            self.restart_portmap();
+            self.on_proxy_restored();
+        }
+    }
+
+    /// Torrents may go again: a server of the proxy works after none did, or the proxy went off.
+    pub(super) fn on_proxy_restored(&mut self) {
+        if self.shutting_down {
+            return;
+        }
+        for e in self.table.values() {
+            if let Some(l) = &e.live {
+                let _ = l.tx.try_send(TorrentMsg::NetRestored);
+            }
+        }
+        // The announces that waited for the proxy go now.
+        self.tracker_send(crate::tracker_driver::TrackerCmd::NetworkChanged);
+    }
+
+    /// The TCP listener on the current port again, after the proxy went off (off the actor).
+    fn relisten(&mut self) {
+        if self.shutting_down || self.listener.is_some() {
+            return;
+        }
+        let serial = self.rebind_gen;
+        let addr = std::net::SocketAddr::new(self.sh.cfg().listen_addr.into(), self.sh.port());
+        let tx = self.sh.session.clone();
+        tokio::spawn(async move {
+            let result = tokio::net::TcpListener::bind(addr).await.map_err(|e| e.to_string());
+            let _ = tx.send(SessionMsg::Relistened { serial, result }).await;
+        });
+    }
+
+    pub(super) fn on_relistened(&mut self, serial: u64, result: Result<tokio::net::TcpListener, String>) {
+        // A port change in the meantime brought its own listener; a proxy on again wants none.
+        if serial != self.rebind_gen || self.shutting_down || self.sh.proxy.on() || self.listener.is_some() {
+            return;
+        }
+        match result {
+            Ok(l) => self.listener = Some(tokio::spawn(crate::engine::accept_loop(l, self.sh.clone()))),
+            // Somebody took the port meanwhile: a fresh pair, as a live port change does.
+            Err(_) => self.rebind(0),
+        }
     }
 
     pub(super) fn restart_watcher(&mut self) {
@@ -232,9 +338,15 @@ impl Session {
         let old_utp = self.sh.utp.write().unwrap_or_else(|e| e.into_inner()).take();
         self.sh.listen_port.store(u32::from(port), Ordering::Relaxed);
         self.sh.set_fallback(fallback);
-        self.listener = Some(tokio::spawn(crate::engine::accept_loop(listener, self.sh.clone())));
+        // While the proxy is on nobody connects in (SPEC §7H): the new port is kept, its listener is not.
+        if self.sh.proxy.on() {
+            drop(listener);
+        } else {
+            self.listener = Some(tokio::spawn(crate::engine::accept_loop(listener, self.sh.clone())));
+        }
         let mut feed = None;
         if let Some((sock, frx)) = utp {
+            sock.set_accepting(!self.sh.proxy.on());
             *self.sh.utp.write().unwrap_or_else(|e| e.into_inner()) = Some(sock.clone());
             self.utp_listener = Some(tokio::spawn(crate::engine::utp_accept_loop(sock, self.sh.clone())));
             feed = Some(frx);

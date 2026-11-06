@@ -203,34 +203,41 @@ fn files_on_demand_is_offered_only_by_a_host_that_has_on_demand_folders() {
     }
 }
 
-/// "Read only" under "On all my devices" in Add Folder and Edit: it must be switchable only with "On all my devices"
-/// chosen (Save could not apply it otherwise), Save must count it as a change only then, and a channel's toggle (or an
-/// unpaired computer's) has none.
+/// "Read only" in Add Folder and Edit is the owner's folder setting, on its own: it must be there for a folder of this
+/// computer whether or not it is paired (not under "On all my devices"), switchable by an owner whether or not "On all my
+/// devices" is chosen, counted by Save as a change, and its line must say what applying it does (only the owner's
+/// changes count; nobody's role changes). Fails when an unpaired owner has no switch, or a member's Save changes it.
 #[test]
-fn read_only_rides_on_all_my_devices_in_the_add_and_edit_dialogs() {
+fn read_only_is_the_owners_own_setting_in_the_add_and_edit_dialogs() {
     let (core, _d) = mock();
     let paired = crate::devices_text::follow_line_new(&["MacBook".into()], false);
     let form = SyncAddForm { follow: paired.clone(), ..core.sync_add_form(None) };
-    let ro = |form: &SyncAddForm| core.sync_add_window(form.clone(), host_features_all()).follow.unwrap().read_only.unwrap();
-    assert!(!ro(&form).enabled, "not switchable before On all my devices is chosen");
-    let r = ro(&SyncAddForm { all_devices: true, read_only: true, ..form.clone() });
-    assert!(r.on && r.enabled && r.line.starts_with("Your other devices join it Read only"), "{r:?}");
-    assert_eq!(crate::devices_text::follow_line_new(&["MacBook".into()], true).read_only, None, "a channel has none");
-    assert_eq!(crate::devices_text::follow_line_new(&[], false).read_only, None, "not paired: none");
+    let ro = |form: &SyncAddForm| core.sync_add_window(form.clone(), host_features_all()).read_only.unwrap();
+    assert!(ro(&form).enabled, "a folder added here is this computer's own: it may switch it");
+    let r = ro(&SyncAddForm { all_devices: false, read_only: true, ..form.clone() });
+    assert!(r.on && r.enabled && r.line.contains("Nobody's role changes"), "{r:?}");
+    // Paired with nothing: no "On all my devices", Read only still.
+    let alone = SyncAddForm { follow: crate::devices_text::follow_line_new(&[], false), ..form.clone() };
+    let w = core.sync_add_window(alone, host_features_all());
+    assert!(w.follow.is_none() && w.read_only.is_some_and(|r| r.enabled), "an unpaired owner has no Read only");
 
-    // Edit: a folder on all devices, Read only off as the core has it.
+    // Edit: a folder on all devices, Read only off as the core has it, this computer its owner.
     let f = core.sync_add_folder("/tmp/seedwell-mock/Films".into()).unwrap();
     let on = FollowLine { on: true, ..paired.clone() };
-    let base = SyncEditForm { follow: on.clone(), all_devices: true, read_only: false, ..core.sync_edit_form(f.id.clone()) };
+    let owner = Some(crate::read_only_text::read_only_line(false, true));
+    let base = SyncEditForm { follow: on.clone(), all_devices: true, read_only: false, read_only_line: owner.clone(), ..core.sync_edit_form(f.id.clone()) };
     assert!(!sync_edit_window(base.clone(), host_windows_all(), host_features_all()).changed);
     let w = sync_edit_window(SyncEditForm { read_only: true, ..base.clone() }, host_windows_all(), host_features_all());
-    let r = w.follow.unwrap().read_only.unwrap();
-    assert!(w.changed && r.on && r.line.contains("that have it become Read only"), "{r:?}");
-    // With On all my devices turned off, Read only cannot change: only the switch counts.
+    let r = w.read_only.unwrap();
+    assert!(w.changed && r.on && r.line.contains("changes count"), "{r:?}");
+    // With On all my devices turned off, Read only still changes on its own; unpaired, too.
     let off = SyncEditForm { all_devices: false, read_only: true, ..base.clone() };
-    let r = sync_edit_window(off, host_windows_all(), host_features_all()).follow.unwrap().read_only.unwrap();
-    assert!(!r.on && !r.enabled, "{r:?}");
-    assert_eq!(follow_change(&on, false, true), Some((false, false)));
-    assert_eq!(follow_change(&on, true, true), Some((true, true)));
-    assert_eq!(follow_change(&on, true, false), None);
+    assert!(sync_edit_window(off, host_windows_all(), host_features_all()).changed);
+    let unpaired = SyncEditForm { follow: crate::devices_text::follow_line_new(&[], false), all_devices: false, read_only: true, ..base.clone() };
+    let w = sync_edit_window(unpaired, host_windows_all(), host_features_all());
+    assert!(w.follow.is_none() && w.read_only.is_some() && w.changed, "{w:?}");
+    // Not an owner: the switch shows the state and Save changes nothing.
+    let member = SyncEditForm { read_only: true, read_only_line: Some(crate::read_only_text::read_only_line(false, false)), ..base };
+    let w = sync_edit_window(member, host_windows_all(), host_features_all());
+    assert!(!w.changed && w.read_only.is_some_and(|r| !r.on && !r.enabled), "a member's Save would switch it");
 }

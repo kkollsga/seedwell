@@ -215,6 +215,12 @@ pub struct Streams {
     pub(crate) resume: HashMap<String, (Resume, i64)>,
     /// Finished, to place, by path.
     pub(crate) prepared: HashMap<String, Prepared>,
+    /// Taken by the pull round running now to place ([`Self::prepared`], a build with no chunk left), until that round
+    /// has committed (or failed): its bytes are all here, its record says so only from that commit.
+    pub(crate) placing: std::collections::HashSet<String>,
+    /// **Tests:** the round that takes a finished download to place pauses this long first, the core held (a slow disk
+    /// under load: the bytes are here, and the round has yet to rename and commit them).
+    pub test_place_pause: std::time::Duration,
     /// Failed, by path: the version and why. The next round that wants that version says so, once.
     pub(crate) failed: HashMap<String, (Version, String)>,
 }
@@ -467,6 +473,18 @@ pub fn lock(m: &std::sync::Mutex<Streams>) -> std::sync::MutexGuard<'_, Streams>
 }
 
 impl Streams {
+    /// The download of `path` came to its end and waits for a pull round to place and record it: a stream that ended
+    /// whole, or a build with no chunk left to come, also while the round that took it places it. Its bytes are all
+    /// here; until that round commits, its record still says it is not.
+    pub fn finished(&self, path: &str) -> bool {
+        self.prepared.contains_key(path) || self.placing.contains(path) || self.chunks.get(path).is_some_and(|c| c.remaining.is_empty())
+    }
+
+    /// Some download waits to be placed ([`Self::finished`]).
+    pub fn any_finished(&self) -> bool {
+        !self.prepared.is_empty() || self.chunks.values().any(|c| c.remaining.is_empty())
+    }
+
     /// How a job for `path` ended ([`crate::folder::FolderCore::take_jobs`]), `now_ns` the time now. A stream: done,
     /// it is placed and recorded by the next pull round (if that version is still wanted there); cut off, the next one
     /// goes on from there; failed, the next round says why. A fetch of chunks: the next round asks for what is still

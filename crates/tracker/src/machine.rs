@@ -1602,7 +1602,7 @@ impl AnnounceMachine {
                 self.hint_2s = hint.map_or(0, |h| {
                     u16::try_from(h.as_secs().div_ceil(2)).unwrap_or(u16::MAX)
                 });
-                self.last_failure_network = err.is_network();
+                self.last_failure_network = err.is_network() || err.waits_for_proxy();
                 self.last_failure_slow = false;
                 self.last_failure_host = err.is_host_level();
                 out.push(Intent::Report(Report::Failed {

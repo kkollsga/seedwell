@@ -242,6 +242,11 @@ pub struct SyncMember {
     /// When its access ends: the folder's share end, for a device that is not an owner (Unix seconds); `None` =
     /// no end.
     pub expires_s: Option<u64>,
+    /// This computer (an admin) asked the owners to remove it: "Removal asked: waiting for the owner" while an owner's
+    /// device has not done it yet, or why one refused it.
+    pub removal: Option<String>,
+    /// That request waits for an owner's device (Remove is not offered again meanwhile).
+    pub removal_waiting: bool,
 }
 
 /// A device that joined a channel (also one that left since), in the order they joined: what each person's colour in
@@ -584,6 +589,14 @@ pub trait SyncBackend: Send + Sync {
     fn members(&self, id: &str) -> Vec<SyncMember>;
     fn set_role(&self, id: &str, device_id: &str, role: SyncRole) -> Result<(), CoreError>;
     fn remove_device(&self, id: &str, device_id: &str) -> Result<(), CoreError>;
+    /// Folder `id`'s *Read only* as this computer has it (SPEC §7G.1; `None`: not a folder synced here).
+    fn read_only_state(&self, _id: &str) -> Option<trs_sync_net::status::ReadOnlyState> {
+        None
+    }
+    /// Turns folder `id`'s *Read only* on or off (an owner of the folder only).
+    fn set_read_only(&self, _id: &str, _on: bool) -> Result<(), CoreError> {
+        Err(failed("Folder sync is not available"))
+    }
     /// Shares a folder again from this computer when its owners and admins are gone: a new folder owned here, at the
     /// same place, its files untouched; returns it.
     fn reshare(&self, _id: &str) -> Result<SyncFolder, CoreError> {
@@ -1052,7 +1065,7 @@ fn conflict_of(root: &Path, copy: String, original: String) -> SyncConflict {
     }
 }
 
-fn default_location_of(setting: &str) -> String {
+pub(crate) fn default_location_of(setting: &str) -> String {
     let base = if setting.trim().is_empty() { "~/Seedwell" } else { setting };
     crate::settings::expand_home(base).display().to_string()
 }
@@ -1080,22 +1093,26 @@ fn is_test_run() -> bool {
 }
 
 impl RealSync {
-    /// Starts the service in the background: on all interfaces, IPv4 and IPv6 (`::`), LAN discovery on,
+    /// Starts the service in the background with its keys in `secrets` ([`secret_store_checked`]: the store and why
+    /// its vault is not used): on all interfaces, IPv4 and IPv6 (`::`), LAN discovery on,
     /// the engine's DHT and port mapping lent to it. Tests bind to loopback and stay off the LAN.
     /// `forbidden_root`: an isolated (test) run's real home: Folder Sync starts LAN only, keeps joined folders in the
-    /// run's state and refuses folders inside it (`trs_sync_net::service::Options::forbidden_root`).
+    /// run's state and refuses folders inside it (`trs_sync_net::service::Options::forbidden_root`). `builds`: where
+    /// the app's updater is, once the host made one: it hears what the devices this one talks to run (a newer
+    /// Seedwell starts a check, SPEC 12A).
     pub fn start(
         rt: &tokio::runtime::Handle,
         engine: &EngineHandle,
         dir: &Path,
-        vault: Option<Arc<dyn SecretVault>>,
+        secrets: (Arc<dyn SecretStore>, Option<String>),
         forbidden_root: Option<PathBuf>,
+        builds: trs_control::BuildsSlot,
     ) -> Arc<Self> {
         let slot = SyncSlot::new();
         let problem = Arc::new(Mutex::new(None));
         let default_name = trs_control::sync::default_device_name();
         let od_host: trs_sync_net::OnDemandHostCell = Arc::new(Mutex::new(None));
-        let (secrets, secrets_problem) = secret_store_checked(vault, dir);
+        let (secrets, secrets_problem) = secrets;
         if let Some(p) = &secrets_problem {
             eprintln!("seedwell: {p}");
         }
@@ -1112,14 +1129,19 @@ impl RealSync {
         let (engine, dir) = (engine.clone(), dir.to_path_buf());
         // The same start again when the port changes (`SyncSlot::move_port`).
         let starter: trs_control::sync::Starter = Arc::new(move || {
-            let (dir, secrets, engine, default_name, forbidden_root, od_host) =
-                (dir.clone(), secrets.clone(), engine.clone(), default_name.clone(), forbidden_root.clone(), od_host.clone());
+            let (dir, secrets, engine, default_name, forbidden_root, od_host, builds) =
+                (dir.clone(), secrets.clone(), engine.clone(), default_name.clone(), forbidden_root.clone(), od_host.clone(), builds.clone());
             Box::pin(async move {
                 let client = format!("Seedwell {}", env!("CARGO_PKG_VERSION"));
                 start_sync_with(&dir, client, secrets, Some(&engine), |o| {
                     o.default_device_name = default_name;
                     o.forbidden_root = forbidden_root;
                     o.on_demand_host = od_host;
+                    o.peer_client = Some(Arc::new(move |client: &str| {
+                        if let Some(updater) = builds.get() {
+                            updater.peer_runs(client);
+                        }
+                    }));
                     if is_test_run() {
                         o.bind = std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
                         o.lan_discovery = false;
@@ -1482,6 +1504,8 @@ impl SyncBackend for RealSync {
                 online: m.online,
                 is_me: m.is_me,
                 expires_s: m.expires_s,
+                removal_waiting: m.removal == Some(trs_sync_net::removals::Asked::Waiting),
+                removal: m.removal.as_ref().map(crate::sync_text::removal_line),
             })
             .collect()
     }
@@ -1496,6 +1520,14 @@ impl SyncBackend for RealSync {
         let h = self.handle()?;
         let device = device_id.parse().map_err(|_| failed("Not a device of this folder"))?;
         h.remove_device(&folder_id(id)?, &device).map_err(sync_err)
+    }
+
+    fn read_only_state(&self, id: &str) -> Option<trs_sync_net::status::ReadOnlyState> {
+        self.handle().ok()?.read_only_state(&folder_id(id).ok()?)
+    }
+
+    fn set_read_only(&self, id: &str, on: bool) -> Result<(), CoreError> {
+        self.handle()?.set_read_only(&folder_id(id)?, on).map_err(sync_err)
     }
 
     fn reshare(&self, id: &str) -> Result<SyncFolder, CoreError> {
@@ -1905,6 +1937,8 @@ struct MockState {
     direct_agents: SyncAgentAccess,
     settings: SyncSettings,
     next: u32,
+    /// The folders made Read only (by id).
+    read_only: std::collections::BTreeSet<String>,
 }
 
 /// A few fake folders in every state the UI draws, for design work and the snapshot renderer. Nothing on
@@ -1971,9 +2005,11 @@ fn mock_members(mine: SyncRole, others: &[(&str, SyncRole, bool)], share_until_s
         online: true,
         is_me: true,
         expires_s: ends(mine),
+        removal: None,
+        removal_waiting: false,
     }];
     for (i, (name, role, online)) in others.iter().enumerate() {
-        out.push(SyncMember { device_id: MOCK_DEVICES[i % MOCK_DEVICES.len()].into(), name: (*name).into(), user: mock_user(name), role: *role, online: *online, is_me: false, expires_s: ends(*role) });
+        out.push(SyncMember { device_id: MOCK_DEVICES[i % MOCK_DEVICES.len()].into(), name: (*name).into(), user: mock_user(name), role: *role, online: *online, is_me: false, expires_s: ends(*role), removal: None, removal_waiting: false });
     }
     out
 }
@@ -2122,7 +2158,7 @@ impl MockSync {
             ],
             read: 2,
         }];
-        let state = MockState { folders, channels, directs, direct_agents: SyncAgentAccess::Off, settings: Self::default_settings(), next: 20 };
+        let state = MockState { folders, channels, directs, direct_agents: SyncAgentAccess::Off, settings: Self::default_settings(), next: 20, read_only: Default::default() };
         Arc::new(MockSync { state: Mutex::new(state), started: Instant::now(), od: Mutex::new(std::collections::BTreeMap::new()) })
     }
 
@@ -2845,10 +2881,41 @@ impl SyncBackend for MockSync {
         })?
     }
 
+    fn read_only_state(&self, id: &str) -> Option<trs_sync_net::status::ReadOnlyState> {
+        let s = lock(&self.state);
+        let f = s.folders.iter().find(|m| m.f.id == id)?;
+        let (on, owner) = (s.read_only.contains(id), f.f.role == SyncRole::Owner);
+        let held = on && !owner && f.f.role != SyncRole::ReadOnly;
+        Some(trs_sync_net::status::ReadOnlyState { on, owner, held })
+    }
+
+    fn set_read_only(&self, id: &str, on: bool) -> Result<(), CoreError> {
+        let mut s = lock(&self.state);
+        let f = s.folders.iter().find(|m| m.f.id == id).ok_or_else(gone)?;
+        if f.f.role != SyncRole::Owner {
+            return Err(failed("Only the folder's owner can make it read only, or turn that off."));
+        }
+        if on {
+            s.read_only.insert(id.to_string());
+        } else {
+            s.read_only.remove(id);
+        }
+        Ok(())
+    }
+
     fn remove_device(&self, id: &str, device_id: &str) -> Result<(), CoreError> {
         self.with(id, |m| {
+            // An owner removes anyone; an admin asks the owners to remove a user (Read & write, Read only).
+            let user = m.members.iter().any(|d| d.device_id == device_id && matches!(d.role, SyncRole::ReadWrite | SyncRole::ReadOnly));
+            if m.f.role == SyncRole::Admin && user {
+                let asked = trs_sync_net::removals::Asked::Waiting;
+                for d in m.members.iter_mut().filter(|d| d.device_id == device_id) {
+                    (d.removal, d.removal_waiting) = (Some(crate::sync_text::removal_line(&asked)), true);
+                }
+                return Ok(());
+            }
             if m.f.role != SyncRole::Owner {
-                return Err(failed("Only the folder's owner can change roles"));
+                return Err(failed("Only the folder's owner can remove a device, or an admin a member at Read & write or Read only"));
             }
             if m.members.iter().any(|d| d.device_id == device_id && d.is_me) {
                 return Err(failed(concat!("To stop syncing on this ", trs_platform::computer!(), ", remove the folder instead")));

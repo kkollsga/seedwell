@@ -9,7 +9,7 @@ namespace Seedwell;
 /// The Share dialog on Windows (the Mac's Share window) for a synced folder, a folder not synced yet, or a channel,
 /// drawn from the core's <c>SyncShareWindowModel</c> (trs-ffi sync_share.rs): the role a link gives, Single use and Link
 /// expires with their menus, Include a chat, the summary, the sharing period (its countdown and Extend, or Stop sharing
-/// after), "On all my devices" and its "Read only", and the active links with Revoke. The form is the core's value: this keeps it and edits its fields, reads
+/// after), "On all my devices", "Read only", and the active links with Revoke. The form is the core's value: this keeps it and edits its fields, reads
 /// the links off the UI thread when it opens and after every change, and draws the model again. Copy Link runs
 /// <c>sync_share_copy_link</c> off the UI thread (it syncs a new folder and makes a new chat first) and puts the link on
 /// the clipboard: a secret, never shown or logged.
@@ -237,8 +237,12 @@ sealed class ShareDialog
         if (model.Devices is FollowLine devices)
         {
             content.Children.Add(Rule());
-            content.Children.Add(AddFolderDialog.Follow(devices, devices.On, !copying && !settingDevices,
-                on => SetDevices(on, devices.ReadOnly?.On ?? false), readOnly => SetDevices(devices.On, readOnly)));
+            content.Children.Add(AddFolderDialog.Follow(devices, devices.On, !copying && !settingDevices, SetDevices));
+        }
+        if (model.ReadOnly is ReadOnlyLine readOnly)
+        {
+            content.Children.Add(Rule());
+            content.Children.Add(AddFolderDialog.ReadOnly(readOnly, !copying && !settingDevices, SetReadOnly));
         }
 
         if (model.Links.Length > 0 || model.LinksMore is not null)
@@ -274,7 +278,7 @@ sealed class ShareDialog
         content.Children.Add(failure);
     }
 
-    static UIElement Rule() => new Microsoft.UI.Xaml.Shapes.Rectangle { Height = 1, Margin = new Thickness(0, 4, 0, 4), Fill = Res("DividerStrokeColorDefaultBrush") };
+    internal static UIElement Rule() => new Microsoft.UI.Xaml.Shapes.Rectangle { Height = 1, Margin = new Thickness(0, 4, 0, 4), Fill = Res("DividerStrokeColorDefaultBrush") };
 
     /// <summary>A setting: its switch with the name, the value menu beside it while it has choices (the core's).</summary>
     UIElement Setting(SyncShareSetting s, Action<bool> setOn, Action<uint> setValue)
@@ -324,8 +328,12 @@ sealed class ShareDialog
 
     void Revoke(string linkId) => Background(() => app.Core.SyncRevokeInvite(form.Id, linkId), "revoke");
 
+    void SetDevices(bool on) => SetSwitch(f => app.Core.SyncShareSetDevices(f, on), $"devices {on}");
+
+    void SetReadOnly(bool on) => SetSwitch(f => app.Core.SyncShareSetReadOnly(f, on), $"read-only {on}");
+
     /// <summary>"On all my devices" or "Read only" switched: applied at once, off the UI thread; of the answer only the role is kept (the user may have changed the rest meanwhile).</summary>
-    void SetDevices(bool on, bool readOnly)
+    void SetSwitch(Func<SyncShareForm, Task<SyncShareForm>> set, string what)
     {
         if (settingDevices)
         {
@@ -335,10 +343,10 @@ sealed class ShareDialog
         failure.Visibility = Visibility.Collapsed;
         var f = form;
         Draw();
-        _ = Task.Run(() => app.Core.SyncShareSetDevices(f, on, readOnly)).ContinueWith(t => content.DispatcherQueue.TryEnqueue(() =>
+        _ = Task.Run(() => set(f)).ContinueWith(t => content.DispatcherQueue.TryEnqueue(() =>
         {
             settingDevices = false;
-            AppLog.Write($"share: devices {on} read-only {readOnly} {(t.IsCompletedSuccessfully ? "done" : "failed")}");
+            AppLog.Write($"share: {what} {(t.IsCompletedSuccessfully ? "done" : "failed")}");
             if (t.IsCompletedSuccessfully)
             {
                 form = form with { Role = t.Result.Role };
@@ -420,8 +428,8 @@ sealed class ShareDialog
     }
     internal void QaShareFor(uint days) => ShareUntil(TrsFfiMethods.SyncSharingEnd(days, Now()));
     internal void QaNoEnd() => ShareUntil(0);
-    internal void QaDevices(bool on) => SetDevices(on, model.Devices?.ReadOnly?.On ?? false);
-    internal void QaReadOnly(bool on) => SetDevices(model.Devices?.On ?? false, on);
+    internal void QaDevices(bool on) => SetDevices(on);
+    internal void QaReadOnly(bool on) => SetReadOnly(on);
     internal bool SettingDevices => settingDevices;
     internal string Switches => AddFolderDialog.QaSwitches(content);
     internal void QaScrollEnd() => (dialog.Content as ScrollViewer)?.ChangeView(null, double.MaxValue, null, true);

@@ -835,3 +835,9 @@ pub fn pattern_bytes(n: usize, seed: u64) -> Vec<u8> {
 pub fn free_port() -> u16 {
     std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
 }
+
+/// A TCP port that refuses connections on each of `ips`, and nothing else can listen at
+/// ([`trs_platform::net::closed_tcp_port`]).
+pub fn closed_port(ips: &[std::net::IpAddr]) -> u16 {
+    trs_platform::net::closed_tcp_port(ips)
+}

@@ -348,6 +348,19 @@ fn fmt_span(d: Duration) -> String {
     }
 }
 
+/// An announce that finds the proxy without a working server waits this long for one (a test takes at most
+/// `proxy::PROBE_TIMEOUT`) before it gives up unsent.
+const HELD_WAIT: Duration = Duration::from_secs(8);
+
+/// How one announce goes out (SPEC §7H).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Plan {
+    Direct,
+    Proxied,
+    /// Not sent: the proxy is on and cannot carry it.
+    Blocked(trs_tracker::ProxyBlock),
+}
+
 fn clock() -> Millis {
     Millis(unix_ms())
 }
@@ -359,13 +372,18 @@ async fn run(
     wakeups: Arc<Diag>,
 ) {
     let policy = d.sh.cfg().tracker_destinations;
-    let http = HttpTransport::with_config(&version, trs_tracker::http::HttpConfig { policy, ..Default::default() });
+    // A direct request asks the proxy state again before every hop and the other family's retry (SPEC §7H).
+    let gate_state = d.sh.proxy.clone();
+    let http = HttpTransport::with_config(&version, trs_tracker::http::HttpConfig { policy, ..Default::default() })
+        .with_direct_gate(Arc::new(move || !gate_state.on()));
     // An engine bound to one address (a test on loopback, `daemon --bind`) keeps its tracker sockets there too.
     let listen = d.sh.cfg().listen_addr;
     let udp = UdpTransport::bind(UdpConfig { policy, bind: (!listen.is_unspecified()).then_some(listen), ..UdpConfig::default() }).await.ok();
     // Torrents added by `seedwell sim` (marked by the control layer) announce to the mock tracker on 127.0.0.1;
     // every other torrent keeps the configured policy.
     let http_sim = HttpTransport::with_config(&version, trs_tracker::http::HttpConfig { policy: trs_tracker::policy::DestinationPolicy { allow_loopback: true, ..policy }, ..Default::default() });
+    // Through the proxy (SPEC §7H): a transport per server in use, made when the server changes.
+    let mut via: Option<(Arc<trs_socks::Proxy>, HttpTransport)> = None;
     let (done_tx, mut done_rx) = mpsc::unbounded_channel();
     let (extra_tx, mut extra_rx) = mpsc::unbounded_channel::<(String, u32)>();
     let mut shutdown: Option<ShutdownState> = None;
@@ -408,8 +426,36 @@ async fn run(
             {
                 d.flight_started(req.ticket(), p.info_hash, now);
             }
-            let simulated = req.announce_params().is_some_and(|p| d.sh.simulated.lock().unwrap_or_else(|e| e.into_inner()).contains(&p.info_hash));
-            let (http, udp, tx, extra) = (if simulated { http_sim.clone() } else { http.clone() }, udp.clone(), done_tx.clone(), extra_tx.clone());
+            // `seedwell sim`'s torrents announce to the mock tracker on loopback, which never leaves the computer: only
+            // that goes around the proxy; any other tracker of theirs is treated like everyone's.
+            let simulated = req.announce_params().is_some_and(|p| d.sh.simulated.lock().unwrap_or_else(|e| e.into_inner()).contains(&p.info_hash))
+                && req.url().host_ip().is_some_and(|ip| ip.is_loopback());
+            // While torrents go through the proxy (SPEC §7H) an announce goes through it or not at all: a UDP tracker
+            // is skipped (the proxy carries TCP only), and with no working server nothing is sent.
+            let route = if simulated { crate::proxy::Route::Direct } else { d.sh.proxy.route() };
+            if matches!(route, crate::proxy::Route::Direct) {
+                // Off (a removed key): the transport holding its credentials goes.
+                via = None;
+            }
+            let plan = match &route {
+                crate::proxy::Route::Direct => Plan::Direct,
+                crate::proxy::Route::Held => Plan::Blocked(trs_tracker::ProxyBlock::Down),
+                crate::proxy::Route::Via(p) => {
+                    if via.as_ref().is_none_or(|(q, _)| !Arc::ptr_eq(q, p)) {
+                        let cfg = trs_tracker::http::HttpConfig { policy, ..Default::default() };
+                        via = Some((p.clone(), HttpTransport::with_proxy(&version, cfg, (**p).clone())));
+                    }
+                    Plan::Proxied
+                }
+            };
+            let plan = if req.url().scheme() == Scheme::Udp && plan == Plan::Proxied { Plan::Blocked(trs_tracker::ProxyBlock::Udp) } else { plan };
+            let http = match (&plan, &via) {
+                (Plan::Proxied, Some((_, t))) => t.clone(),
+                _ if simulated => http_sim.clone(),
+                _ => http.clone(),
+            };
+            let (proxy_state, held_version) = (d.sh.proxy.clone(), version.clone());
+            let (udp, tx, extra) = (udp.clone(), done_tx.clone(), extra_tx.clone());
             let ts_ms = now.0;
             // At quit a `stopped` that has not been answered in `QUIT_STOP_TIMEOUT` is given up
             // (the normal request timeout is 30 s), and a request that is still in flight when the
@@ -427,6 +473,30 @@ async fn run(
                 let ticket = req.ticket();
                 let started = Instant::now();
                 let call = async {
+                    let mut plan = plan;
+                    let mut late = None;
+                    if plan == Plan::Blocked(trs_tracker::ProxyBlock::Down) && !quit_stop {
+                        // The servers are being tested (at start, after a switch): wait for one a little, rather
+                        // than fail and wait for the retry. Never sent directly meanwhile.
+                        let until = Instant::now() + HELD_WAIT;
+                        while Instant::now() < until {
+                            if let crate::proxy::Route::Via(p) = proxy_state.route() {
+                                if req.url().scheme() == Scheme::Udp {
+                                    plan = Plan::Blocked(trs_tracker::ProxyBlock::Udp);
+                                } else {
+                                    let cfg = trs_tracker::http::HttpConfig { policy, ..Default::default() };
+                                    late = Some(HttpTransport::with_proxy(&held_version, cfg, (*p).clone()));
+                                    plan = Plan::Proxied;
+                                }
+                                break;
+                            }
+                            tokio::time::sleep(Duration::from_millis(200)).await;
+                        }
+                    }
+                    if let Plan::Blocked(why) = plan {
+                        return (Err(trs_tracker::AnnounceError::Transport(trs_tracker::TransportError::Proxy(why))), Wire::None);
+                    }
+                    let http = late.as_ref().unwrap_or(&http);
                     match req.url().scheme() {
                         Scheme::Udp => match &udp {
                             Some(u) => {
@@ -438,6 +508,10 @@ async fn run(
                         _ => {
                             let o = if quit_stop { http.announce_quit(&req, QUIT_STOP_LIMITS).await } else { http.announce(&req).await };
                             let _ = extra.send((req.url().host().to_owned(), o.extra_hops));
+                            if matches!(o.result, Err(trs_tracker::AnnounceError::Transport(trs_tracker::TransportError::Proxy(_)))) {
+                                // The server in use failed: the monitor tests it now and switches.
+                                proxy_state.kick();
+                            }
                             (o.result, Wire::Http(o.trace))
                         }
                     }
@@ -1333,6 +1407,8 @@ pub(crate) fn short_failure(e: &trs_tracker::AnnounceError) -> String {
             T::Io => "Connection dropped".into(),
             T::TooLarge => "Answer too big".into(),
             T::Connect | T::Forbidden(_) | T::NotSent | T::Redirect => "Can't connect".into(),
+            T::Proxy(trs_tracker::ProxyBlock::Down) => "Waiting for the proxy".into(),
+            T::Proxy(trs_tracker::ProxyBlock::Udp) => "Off with the proxy".into(),
         },
     }
 }
@@ -1399,6 +1475,12 @@ pub(crate) fn describe_failure(e: &trs_tracker::AnnounceError) -> String {
             T::Io => "The tracker can't be reached (the connection broke).".into(),
             T::Redirect => "The tracker can't be reached (it sent Seedwell somewhere it won't follow).".into(),
             T::TooLarge => "The tracker sent an answer that was too big to use.".into(),
+            T::Proxy(trs_tracker::ProxyBlock::Down) => {
+                "Not asked: torrents go through the proxy, which isn\u{2019}t working right now (Seedwell never connects directly instead).".into()
+            }
+            T::Proxy(trs_tracker::ProxyBlock::Udp) => {
+                "Not asked: this is a UDP tracker, and UDP is off while torrents go through the proxy.".into()
+            }
         },
     }
 }

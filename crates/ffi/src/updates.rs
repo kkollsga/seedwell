@@ -50,6 +50,10 @@ const UNSTARTED_LIMIT: u32 = 3;
 const FAILED_KEEP: usize = 20;
 /// The most a build zip may be (the app is about 40 MB).
 const MAX_BUILD_BYTES: u64 = 1 << 30;
+/// A check started by a device that runs a newer Seedwell ([`Updates::peer_runs`]) comes at most once in this time.
+const PEER_CHECK_EVERY_MS: u64 = 3600 * 1000;
+/// The versions devices claimed that started a check, remembered for the run (the newest this many).
+const PEER_CLAIMS_KEEP: usize = 32;
 
 // MARK: Versions and latest.json
 
@@ -297,6 +301,12 @@ struct St {
     dev_on_seen: bool,
     /// The newest build of the watched folder, when it is on offer.
     folder_build: Option<FolderBuild>,
+    /// When the last check a newer device started ran ([`PEER_CHECK_EVERY_MS`]).
+    peer_check_ms: Option<u64>,
+    /// The versions devices claimed that started a check: each starts one at most in a run.
+    peer_claims: Vec<(u32, u32, u32, u32)>,
+    /// The app is quitting (`quitting`): a check a device started installs nothing any more.
+    quitting: bool,
 }
 
 /// The watched folder's watcher: its consumer thread reads the folder on each notification and ends when the guard
@@ -901,6 +911,12 @@ impl trs_control::Builds for Hook {
         let u = self.0.upgrade().ok_or("Seedwell is quitting")?;
         u.update_now(unix_ms())
     }
+
+    fn peer_runs(&self, client: &str) {
+        if let Some(u) = self.0.upgrade() {
+            let _ = u.peer_runs(client, unix_ms());
+        }
+    }
 }
 
 impl Updates {
@@ -1116,17 +1132,23 @@ impl Updates {
             // Up to date, nothing published, or a watched folder's build the check started installing.
             return Ok(text);
         }
+        let Some(started) = self.start_release(&mut st, now_ms) else { return Ok(text) };
+        let version = started?;
+        Ok(format!("Installing {}: {APP_NAME} quits, is replaced and reopens (log: {})", shown(&version), log_in(&self.core.dir).display()))
+    }
+
+    /// Starts the installer of the release on offer itself, detached, into the app's own folder (`update.now`, a check
+    /// a newer device started): its version, or why it did not start. `None`: nothing to install (nothing on offer, a
+    /// watched folder's build, an install running).
+    fn start_release(&self, st: &mut St, now_ms: u64) -> Option<Result<String, String>> {
         let install_dir = self.install_dir.clone();
-        let Some((version, c)) = self.release_install(&mut st, &install_dir, now_ms) else { return Ok(text) };
-        match os::spawn(&c, &log_in(&self.core.dir)) {
+        let (version, c) = self.release_install(st, &install_dir, now_ms)?;
+        self.save(&st.saved);
+        Some(match os::spawn(&c, &log_in(&self.core.dir)) {
             Ok(pid) => {
                 st.saved.pending_pid = Some(pid);
                 self.save(&st.saved);
-                Ok(format!(
-                    "Installing {}: {APP_NAME} quits, is replaced and reopens (log: {})",
-                    shown(&version),
-                    log_in(&self.core.dir).display()
-                ))
+                Ok(version)
             }
             Err(e) => {
                 st.saved.pending = None;
@@ -1135,6 +1157,73 @@ impl Updates {
                 self.save(&st.saved);
                 Err(format!("the installer did not start: {e}"))
             }
+        })
+    }
+
+    /// A device this one talks to runs `client` (`Seedwell <version>`, from its Hello; folder sync tells only of
+    /// devices it set up a session with and of members it refused, SPEC 12A). A plain version newer than this one
+    /// starts a check, on a thread of its own, instead of waiting for the daily one: in a release build with Check
+    /// automatically on and no folder watched; at most once an hour; never while a check or an install runs, within a
+    /// failed check's back-off or once the app quits; each claimed version once a run; and not when a check of this
+    /// run already found that version or a newer one. Within a minute of launch it waits for that minute, as the first
+    /// automatic check does. The claim only starts the check: what is offered and installed is GitHub's latest
+    /// release, as always, so a device claiming a version that does not exist costs one check. With Install
+    /// automatically on, what the check finds is installed at once ([`Updates::peer_check`]); else it waits on offer
+    /// (the menu bar's row, Settings). The started thread, or `None`.
+    pub(crate) fn peer_runs(&self, client: &str, now_ms: u64) -> Option<std::thread::JoinHandle<()>> {
+        let (a, b, c) = parse_version(client.strip_prefix(APP_NAME)?.strip_prefix(' ')?)?;
+        let claim = (a, b, c, 0);
+        if version_order(&self.current).is_none_or(|current| claim <= current) {
+            return None;
+        }
+        // (The switches are read from the settings file, so before the lock.)
+        if !self.automatic() || self.watched().is_some() {
+            return None;
+        }
+        let wait_ms = {
+            let mut st = self.lock();
+            let recent = st.peer_check_ms.is_some_and(|t| now_ms.abs_diff(t) < PEER_CHECK_EVERY_MS);
+            let found = st.saved.last_check_ms.is_some_and(|l| l >= st.launched_ms)
+                && matches!(&st.status, Status::Available { version, .. } if version_order(version).is_some_and(|v| v >= claim));
+            let backing_off = st.saved.last_attempt_ms.is_some_and(|at| at <= now_ms && now_ms - at < retry_after(st.saved.failures));
+            if st.quitting || st.checking || matches!(st.status, Status::Installing { .. }) || recent || found || backing_off || st.peer_claims.contains(&claim) {
+                return None;
+            }
+            st.peer_check_ms = Some(now_ms);
+            st.peer_claims.push(claim);
+            let over = st.peer_claims.len().saturating_sub(PEER_CLAIMS_KEEP);
+            st.peer_claims.drain(..over);
+            (st.launched_ms + FIRST_CHECK_DELAY_MS).saturating_sub(now_ms)
+        };
+        eprintln!("seedwell: a device runs {client}, newer than {}: checking for an update now", shown(&self.current));
+        let me = self.me.clone();
+        std::thread::Builder::new()
+            .name("seedwell-peer-update".into())
+            .spawn(move || {
+                if wait_ms > 0 {
+                    std::thread::sleep(Duration::from_millis(wait_ms));
+                }
+                if let Some(u) = me.upgrade() {
+                    u.peer_check(now_ms + wait_ms);
+                }
+            })
+            .ok()
+    }
+
+    /// The check a newer device started ([`Updates::peer_runs`]), silent as an automatic one, then the install of the
+    /// release it found when the app would install it by itself now ([`Updates::should_install`]: both switches on,
+    /// nothing downloading or being moved), unless the app is quitting meanwhile.
+    fn peer_check(&self, now_ms: u64) {
+        self.check(true, now_ms);
+        if !self.should_install() {
+            return;
+        }
+        let mut st = self.lock();
+        if st.quitting {
+            return;
+        }
+        if let Some(Err(why)) = self.start_release(&mut st, now_ms) {
+            eprintln!("seedwell: the update a newer device pointed to did not start: {why}");
         }
     }
 
@@ -1200,6 +1289,9 @@ impl Updates {
                 may_import,
                 dev_on_seen: dev_on,
                 folder_build: None,
+                peer_check_ms: None,
+                peer_claims: Vec::new(),
+                quitting: false,
             }),
             watch: Mutex::new(None),
             build_keys,
@@ -1357,6 +1449,7 @@ impl Updates {
     /// whether it reached `started` or not.
     pub fn quitting(&self) {
         let mut st = self.lock();
+        st.quitting = true;
         if st.saved.unstarted != 0 {
             st.saved.unstarted = 0;
             self.save(&st.saved);

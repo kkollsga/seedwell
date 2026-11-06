@@ -95,6 +95,81 @@ pub struct SyncHostDomain {
     pub name: String,
 }
 
+/// Seedwell's one entry in the file manager's sidebar (Windows: File Explorer's navigation pane, a shell folder under
+/// its own CLSID), opening the Seedwell folder: where joined folders go (Settings › Folder Sync › Seedwell folder,
+/// `sync.toml`'s `default_location`). The folders inside it are ordinary folders; on-demand ones are their own sync
+/// roots nested inside. One entry for all of them, so the sidebar stays one line however many folders there are.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct SyncNavPane {
+    /// The entry's CLSID, in braces ([`NAV_PANE_CLSID`]): fixed, so a start after a crash finds the same entry and
+    /// the uninstaller knows which to remove.
+    pub clsid: String,
+    /// What the sidebar shows: the product's name.
+    pub name: String,
+    /// The Seedwell folder, absolute: the setting with `~` expanded, `~/Seedwell` when it is empty.
+    pub target: String,
+    /// The registry value the host writes under the entry's key (any data): a sweep (at start after a crash, at
+    /// uninstall) removes only keys that carry it, so it never touches another program's entry.
+    pub marker: String,
+    /// Whether there is an entry at all: the Seedwell folder is set in Settings, or a synced folder lies inside it,
+    /// and (as the listener is told) the folder is there. Without it (nothing synced, every folder elsewhere, a place
+    /// not made yet or on a disk that is away) the host removes the entry: it would open a folder that is not there.
+    /// The host never makes the folder for it.
+    pub show: bool,
+}
+
+/// [`SyncNavPane::clsid`]: generated once for Seedwell, never derived (one entry, so nothing to derive it from).
+pub const NAV_PANE_CLSID: &str = "{1F99E88C-875A-477E-9AE4-845298196137}";
+/// [`SyncNavPane::marker`].
+pub const NAV_PANE_MARKER: &str = "SeedwellNavPane";
+
+/// The entry's CLSID without a `Core`: for the uninstaller (`Seedwell.exe --unregister`), which removes the entry
+/// after the app has stopped.
+#[uniffi::export]
+pub fn sync_nav_pane_clsid() -> String {
+    NAV_PANE_CLSID.into()
+}
+
+/// The marker value's name without a `Core`, for the uninstaller's sweep (it removes only keys that carry it).
+#[uniffi::export]
+pub fn sync_nav_pane_marker() -> String {
+    NAV_PANE_MARKER.into()
+}
+
+/// Whether `path` lies inside `root` (or is it), by their components alone: no disk is read (this runs on the UI
+/// thread), and names compare without case, as the default file systems of the Mac and Windows do.
+fn lexically_inside(root: &Path, path: &Path) -> bool {
+    let key = |p: &Path| -> Vec<String> { plain(p).components().map(|c| c.as_os_str().to_string_lossy().to_lowercase()).collect() };
+    let (root, path) = (key(root), key(path));
+    path.len() >= root.len() && path[..root.len()] == root[..]
+}
+
+/// The entry for the setting `setting` (`default_location`, as stored) and the synced folders' places.
+pub(crate) fn nav_pane_of(setting: &str, folders: &[&Path]) -> SyncNavPane {
+    let target = PathBuf::from(crate::sync::default_location_of(setting));
+    let set = !setting.trim().is_empty();
+    let show = target.is_absolute() && (set || folders.iter().any(|f| f.is_absolute() && lexically_inside(&target, f)));
+    SyncNavPane {
+        clsid: NAV_PANE_CLSID.into(),
+        name: crate::menu::APP_NAME.into(),
+        target: target.display().to_string(),
+        marker: NAV_PANE_MARKER.into(),
+        show,
+    }
+}
+
+/// The entry as folder sync has it now; `None` while folder sync is not running (nothing is known: the host leaves
+/// the entry as it is). Reads the configuration in memory only: no disk, no engine.
+pub(crate) fn nav_pane(sync: &dyn SyncBackend) -> Option<SyncNavPane> {
+    let s = sync.snapshot();
+    if !s.running {
+        return None;
+    }
+    let setting = sync.settings().default_location;
+    let places: Vec<&Path> = s.folders.iter().map(|f| Path::new(f.path.as_str())).collect();
+    Some(nav_pane_of(&setting, &places))
+}
+
 /// What the server tells the host, from its own thread (the host hops to its main thread).
 #[uniffi::export(with_foreign)]
 pub trait SyncHostListener: Send + Sync {
@@ -111,6 +186,12 @@ pub trait SyncHostListener: Send + Sync {
     fn remove_domain(&self, folder_id: String) -> SyncHostRemoval;
     /// Something the user should know (what the system kept of a removed domain, and where it is now).
     fn notice(&self, title: String, text: String);
+    /// Seedwell's entry in the file manager's sidebar ([`SyncNavPane`]), once folder sync runs and whenever it changes
+    /// (the Seedwell folder set elsewhere in Settings or by the command line, the first folder joined into it, the last
+    /// one gone): the host writes the entry, or removes it when `show` is false. Never told in an isolated run (tests,
+    /// QA): the CLSID is one per user, so a test's entry would replace the user's own. Called from the core's threads.
+    /// The Mac's host has no entry yet and ignores it.
+    fn nav_pane(&self, entry: SyncNavPane);
     /// Whether the process at the other end of a connection is this app's own File Provider extension, from its audit
     /// token (32 bytes, `LOCAL_PEERTOKEN`): the host checks its code signature. Asked before anything of the request is
     /// read; anything else is refused unserved. Called from the server's threads.
@@ -150,6 +231,30 @@ fn release_note(state: &Path, id: &str) -> PathBuf {
     state.join(RELEASES).join(id)
 }
 
+/// The removals of domains the app did not finish (`Core::sync_host_unfinished_releases`); read once: the notes go.
+pub(crate) fn unfinished_releases(state: &Path) -> Vec<SyncHostNotice> {
+    let dir = state.join(RELEASES);
+    let Ok(entries) = std::fs::read_dir(&dir) else { return Vec::new() };
+    let mut out = Vec::new();
+    for e in entries.flatten() {
+        let name = std::fs::read_to_string(e.path()).unwrap_or_default();
+        let _ = std::fs::remove_file(e.path());
+        out.push(SyncHostNotice {
+            title: format!("Check “{name}” for changes"),
+            text: format!(
+                concat!(
+                    "Seedwell stopped while it removed “{}” from the ",
+                    trs_platform::file_manager!(),
+                    ". Changes made there that Seedwell had not taken in yet may have been kept by macOS, in a folder it ",
+                    "names for the removal (look in ~/Library/CloudStorage); Seedwell was not told where."
+                ),
+                name
+            ),
+        });
+    }
+    out
+}
+
 /// A notice for the user: a title and the text.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct SyncHostNotice {
@@ -187,6 +292,15 @@ pub(crate) fn keep_preserved(name: &str, place: Option<&Path>, preserved: &Path)
     if !preserved.exists() {
         return None;
     }
+    let to = kept_dir(name, place)?;
+    // On another volume a rename fails: copied, checked whole, then removed (left where it was if that fails).
+    let at = if std::fs::rename(preserved, &to).is_ok() || copy_verified(preserved, &to).is_ok() { to } else { preserved.to_path_buf() };
+    Some(kept_notice(name, &at))
+}
+
+/// A free place for what was kept of folder `name`: `<name> (changes not synced)` next to the folder's place (numbered
+/// when taken), or in `~/Seedwell` for a folder with no place. Its parent is made; the place itself is not.
+pub(crate) fn kept_dir(name: &str, place: Option<&Path>) -> Option<PathBuf> {
     let dir = place
         .and_then(Path::parent)
         .map(Path::to_path_buf)
@@ -195,13 +309,16 @@ pub(crate) fn keep_preserved(name: &str, place: Option<&Path>, preserved: &Path)
     let base = format!("{name} (changes not synced)");
     let mut to = dir.join(&base);
     let mut n = 2;
-    while to.exists() {
+    while to.symlink_metadata().is_ok() {
         to = dir.join(format!("{base} {n}"));
         n += 1;
     }
-    // On another volume a rename fails: copied, checked whole, then removed (left where it was if that fails).
-    let at = if std::fs::rename(preserved, &to).is_ok() || copy_verified(preserved, &to).is_ok() { to } else { preserved.to_path_buf() };
-    Some(SyncHostNotice {
+    Some(to)
+}
+
+/// What the user is told of changes kept from folder `name`, now at `at`.
+pub(crate) fn kept_notice(name: &str, at: &Path) -> SyncHostNotice {
+    SyncHostNotice {
         title: format!("Changes kept from “{name}”"),
         text: format!(
             concat!(
@@ -211,7 +328,7 @@ pub(crate) fn keep_preserved(name: &str, place: Option<&Path>, preserved: &Path)
             ),
             at.display()
         ),
-    })
+    }
 }
 
 /// Copies the tree `from` to the new `to` (files, folders, links; on the Mac with their extended attributes, Finder
@@ -301,7 +418,11 @@ struct Release {
 
 impl trs_sync_net::OnDemandHost for Release {
     fn release(&self, folder: &str, name: &str, place: &Path) -> Result<(), String> {
-        lock(&self.host.releasing).insert(folder.to_string());
+        // A domain per folder: left out of the reported domains at once. The hub keeps serving the folder while the
+        // system hands over its pending changes; the host's `sync_host_let_go` drops it from the hub after that.
+        if !self.host.hub {
+            lock(&self.host.releasing).insert(folder.to_string());
+        }
         let _ = (name, place);
         let r = self.listener.remove_domain(folder.to_string());
         if let Some(e) = r.error {
@@ -313,6 +434,9 @@ impl trs_sync_net::OnDemandHost for Release {
 
     fn settled(&self, folder: &str) {
         lock(&self.host.releasing).remove(folder);
+        lock(&self.host.frozen).remove(folder);
+        lock(&self.host.letting_go).remove(folder);
+        lock(&self.host.pass_hold).remove(folder);
         self.host.force_report.store(true, Ordering::SeqCst);
     }
 }
@@ -393,7 +517,20 @@ pub(crate) trait HostCore: Send + Sync {
     fn replace_hold(&self, _f: &str) -> Option<trs_sync::ondemand::Hold> {
         None
     }
-
+    /// Seedwell's entry in the sidebar ([`nav_pane`]); `None`: none to report (not running, or an isolated run).
+    fn nav_pane(&self) -> Option<SyncNavPane> {
+        None
+    }
+    /// Every synced folder, on demand or full, for the Mac's hub ([`hub`]); `None` while folder sync is not running.
+    /// (A core that knows only its on-demand folders lists those, without a place.)
+    fn hub_folders(&self) -> Option<Vec<hub::HubFolder>> {
+        Some(
+            self.folders()?
+                .into_iter()
+                .map(|f| hub::HubFolder { id: f.id, name: f.name, path: String::new(), on_demand: true, writable: f.writable })
+                .collect(),
+        )
+    }
 }
 
 /// The sync backend as the server's core.
@@ -481,6 +618,26 @@ impl HostCore for BackendCore {
     }
     fn set_release(&self, host: Option<Arc<dyn trs_sync_net::OnDemandHost>>) {
         self.0.set_on_demand_host(host);
+    }
+    fn hub_folders(&self) -> Option<Vec<hub::HubFolder>> {
+        let s = self.0.snapshot();
+        if !s.running {
+            return None;
+        }
+        Some(
+            s.folders
+                .into_iter()
+                .filter(|f| self.1.as_deref().is_none_or(|root| inside(root, Path::new(&f.path))))
+                .map(|f| hub::HubFolder { writable: f.access != SyncAccess::ReadOnly, on_demand: f.on_demand, id: f.id, name: f.name, path: f.path })
+                .collect(),
+        )
+    }
+    fn nav_pane(&self) -> Option<SyncNavPane> {
+        // An isolated run (confined to its state folder) never reports one: the CLSID is the user's.
+        if self.1.is_some() {
+            return None;
+        }
+        nav_pane(self.0.as_ref())
     }
     fn item(&self, f: &str, id: &str) -> Result<Option<SyncItem>, OdError> {
         self.0.od_item(f, id)
@@ -728,10 +885,33 @@ pub(crate) struct Host {
     open: AtomicUsize,
     /// Folder versions, per folder, kept up from the change feed ([`Self::folder_version`]).
     dir_versions: Mutex<HashMap<String, DirVersions>>,
-    /// Folders being let go of (removed or switched to full): not reported as domains until that is over.
+    /// Folders being let go of (removed or switched to full): not reported as domains (left out of the hub) until that
+    /// is over.
     pub(crate) releasing: Mutex<HashSet<String>>,
+    /// The hub's folders being let go of whose changes the system handed over already: what it still sends for them
+    /// is refused (it stays on disk, where the host's let-go finds it and keeps it). Until that is over.
+    pub(crate) frozen: Mutex<HashSet<String>>,
+    /// The Mac's hub ([`hub`]): one domain for every synced folder, instead of a domain per on-demand folder.
+    pub(crate) hub: bool,
+    /// The core's state folder, where the hub's anchors are kept (`None`: in memory only, tests).
+    pub(crate) hub_state: Option<PathBuf>,
+    /// The hub's anchors, opened at first use.
+    pub(crate) hub_anchors: Mutex<Option<hub::AnchorStore>>,
+    /// Folders whose feed a save by replace held past its window, and when the hold let through ends: the hub reads
+    /// them once anyway (then they are held again while a hold lasts), never for a hold that started since.
+    pub(crate) pass_hold: Mutex<HashMap<String, Instant>>,
+    /// The hub's folders being let go of: where what is found and refused is kept.
+    pub(crate) letting_go: Mutex<HashMap<String, hub::KeptPlace>>,
+    /// Run once just before a let-go's look copies what it found (tests: something vanishes meanwhile).
+    #[cfg(test)]
+    pub(crate) before_copy: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// The on-demand folders the hub was last reported with: when one more is, the host is told again (it shows the
+    /// new folder's held files downloaded).
+    hub_on_demand: Mutex<HashSet<String>>,
     /// Report the domains on the next look even if nothing changed (a release ended: one refused shows again).
     pub(crate) force_report: AtomicBool,
+    /// The sidebar entry the listener was last told of.
+    nav_pane: Mutex<Option<SyncNavPane>>,
     pub(crate) keepalive: Duration,
     /// The host hears of a folder's changes after a delete at most this long later (a save by replace may follow).
     pub(crate) replace_cap: Duration,
@@ -805,7 +985,17 @@ impl Host {
             open: AtomicUsize::new(0),
             dir_versions: Mutex::new(HashMap::new()),
             releasing: Mutex::new(HashSet::new()),
+            frozen: Mutex::new(HashSet::new()),
+            hub: false,
+            hub_state: None,
+            hub_anchors: Mutex::new(None),
+            pass_hold: Mutex::new(HashMap::new()),
+            letting_go: Mutex::new(HashMap::new()),
+            #[cfg(test)]
+            before_copy: Mutex::new(None),
+            hub_on_demand: Mutex::new(HashSet::new()),
             force_report: AtomicBool::new(false),
+            nav_pane: Mutex::new(None),
             held_since: Mutex::new(HashMap::new()),
             keepalive: KEEPALIVE,
             replace_cap: trs_sync::ondemand::REPLACE_WINDOW,
@@ -1077,6 +1267,9 @@ impl Host {
         if r.v != PROTOCOL {
             return Err(HostError::new(ErrKind::BadRequest, format!("This Seedwell speaks version {PROTOCOL} of the extension's protocol, not {}.", r.v)));
         }
+        if self.hub && r.folder == hub::HUB_ID {
+            return self.hub_answer(r, progress);
+        }
         let f = r.folder.as_str();
         let item = || r.item.as_deref().ok_or_else(|| HostError::new(ErrKind::BadRequest, "The request names no item."));
         match r.op.as_str() {
@@ -1324,11 +1517,20 @@ impl Host {
     /// unless a later report was taken already (this one is stale). A report without a number is whole.
     pub(crate) fn report(&self, f: &str, r: &Request) -> u64 {
         let _one = lock(&self.report_lock);
+        match self.report_whole(f, r) {
+            Some(whole) => self.materialized(f, whole),
+            None => 0,
+        }
+    }
+
+    /// The whole set once the last part of a report is in (`None` before that, and for a stale report). Called with
+    /// `report_lock` held.
+    pub(crate) fn report_whole(&self, f: &str, r: &Request) -> Option<Vec<String>> {
         let ids = r.ids.clone().unwrap_or_default();
-        let Some(n) = r.report else { return self.materialized(f, ids) };
+        let Some(n) = r.report else { return Some(ids) };
         let (part, parts) = (r.part.unwrap_or(0), r.parts.unwrap_or(1).max(1));
         if part >= parts || lock(&self.last_report).get(f).is_some_and(|last| *last >= n) {
-            return 0;
+            return None;
         }
         let whole = {
             let mut all = lock(&self.reports);
@@ -1336,19 +1538,19 @@ impl Host {
             if e.n != n || e.parts != parts {
                 // A newer report starts (an unfinished older one is dropped); an older one's part is ignored.
                 if n < e.n {
-                    return 0;
+                    return None;
                 }
                 *e = Report { n, parts, got: BTreeMap::new() };
             }
             e.got.insert(part, ids);
             // Taken only whole: every part of it here (one whose parts went before a restart never is).
             if e.got.len() < parts as usize {
-                return 0;
+                return None;
             }
             all.remove(f).map(|r| r.got.into_values().flatten().collect::<Vec<_>>()).unwrap_or_default()
         };
         lock(&self.last_report).insert(f.to_string(), n);
-        self.materialized(f, whole)
+        Some(whole)
     }
 
     /// The system's new set of items on disk: the files that left it since the last report were let go of by the
@@ -1421,17 +1623,56 @@ impl Host {
             let releasing = lock(&self.releasing);
             folders.retain(|f| !releasing.contains(&f.id));
         }
-        let domains: Vec<SyncHostDomain> = folders.iter().map(|f| SyncHostDomain { id: f.id.clone(), name: f.name.clone() }).collect();
+        // The hub: one domain while any folder is synced (its tree is the core's, `hub`); else one per on-demand folder.
+        let tops = if self.hub { self.hub_tops() } else { None };
+        let domains: Vec<SyncHostDomain> = match &tops {
+            Some(t) if !t.is_empty() => vec![hub::hub_domain()],
+            Some(_) => Vec::new(),
+            None if self.hub => return,
+            None => folders.iter().map(|f| SyncHostDomain { id: f.id.clone(), name: f.name.clone() }).collect(),
+        };
         *lock(&self.folders) = folders.clone();
-        if self.force_report.swap(false, Ordering::SeqCst) || shown.as_ref() != Some(&domains) {
+        // The hub: told again when an on-demand folder joined it (switched or joined here, by the app, the command line
+        // or an agent), so the host shows its held files downloaded.
+        let mut grew = false;
+        if self.hub {
+            let now: HashSet<String> = folders.iter().map(|f| f.id.clone()).collect();
+            let mut before = lock(&self.hub_on_demand);
+            grew = !now.is_subset(&before);
+            *before = now;
+        }
+        if self.force_report.swap(false, Ordering::SeqCst) || grew || shown.as_ref() != Some(&domains) {
             listener.domains(domains.clone());
             *shown = Some(domains);
         }
-        anchors.retain(|id, _| folders.iter().any(|f| &f.id == id));
-        lock(&self.materialized).retain(|id, _| folders.iter().any(|f| &f.id == id));
-        lock(&self.reports).retain(|id, _| folders.iter().any(|f| &f.id == id));
-        lock(&self.last_report).retain(|id, _| folders.iter().any(|f| &f.id == id));
-        lock(&self.dir_versions).retain(|id, _| folders.iter().any(|f| &f.id == id));
+        // Seedwell's sidebar entry: told at the first look while folder sync runs, then on each change (the location
+        // set elsewhere, the first folder in it, the last gone).
+        if let Some(mut entry) = self.core.nav_pane() {
+            // Only a folder that is there: one chosen in Settings but not made yet, or on a disk that is away, would
+            // open nothing. Looked at here, on the core's thread (a disk that is away may be slow to answer), never in
+            // `Core::sync_nav_pane`; the host acts on what it is told here.
+            entry.show = entry.show && Path::new(&entry.target).is_dir();
+            let mut told = lock(&self.nav_pane);
+            if told.as_ref() != Some(&entry) {
+                listener.nav_pane(entry.clone());
+                *told = Some(entry);
+            }
+        }
+        // (The hub's own entries are kept: its report in parts, the top level's state.)
+        let keep = |id: &String| folders.iter().any(|f| &f.id == id) || (self.hub && id == hub::HUB_ID);
+        anchors.retain(|id, _| keep(id));
+        lock(&self.materialized).retain(|id, _| keep(id));
+        lock(&self.reports).retain(|id, _| keep(id));
+        lock(&self.last_report).retain(|id, _| keep(id));
+        lock(&self.dir_versions).retain(|id, _| keep(id));
+        lock(&self.pass_hold).retain(|id, _| keep(id));
+        // The hub hears of a move of any folder's feed, and of a change at its top level (a folder added, renamed,
+        // switched or let go of), as one signal.
+        let mut hub_moved = false;
+        if let Some(t) = &tops {
+            let h = hub::tops_hash(t);
+            hub_moved = anchors.insert(hub::HUB_ID.to_string(), h) != Some(h);
+        }
         for f in &folders {
             // A delete a moment ago may turn out to be a save by replace: the system hears of it once that is settled
             // (one edit), as the other devices do.
@@ -1445,13 +1686,23 @@ impl Host {
                     continue;
                 }
                 held.insert(f.id.clone(), Instant::now());
+                // The hub reads the folder's feed once now, for this hold (not one a new delete starts).
+                lock(&self.pass_hold).insert(f.id.clone(), Instant::now() + hold.left);
             } else {
                 lock(&self.held_since).remove(&f.id);
+                lock(&self.pass_hold).remove(&f.id);
             }
             let Ok(a) = self.core.anchor(&f.id) else { continue };
             if anchors.insert(f.id.clone(), a) != Some(a) {
-                listener.feed_moved(f.id.clone());
+                if self.hub {
+                    hub_moved = true;
+                } else {
+                    listener.feed_moved(f.id.clone());
+                }
             }
+        }
+        if hub_moved {
+            listener.feed_moved(hub::HUB_ID.to_string());
         }
     }
 }
@@ -1711,7 +1962,9 @@ mod unix {
     }
 
     impl Server {
-        /// Listens at `<dir>/fp` (made anew) and watches the folders for `listener`.
+        /// Listens at `<dir>/fp` (made anew) and watches the folders for `listener`, a domain per folder (tests; the
+        /// app says its mode through `Core::sync_host_start`).
+        #[cfg(test)]
         pub(crate) fn start(core: Arc<dyn HostCore>, dir: &Path, listener: Arc<dyn SyncHostListener>) -> std::io::Result<Server> {
             Self::start_host(Host::new(core, dir), dir, listener)
         }
@@ -1899,10 +2152,14 @@ mod unix {
 #[uniffi::export]
 impl Core {
     /// Serves the File Provider extension of on-demand folders (SPEC §7G.11) at `<dir>/fp`, `dir` being the app group's
-    /// container, and tells `listener` which domains there should be and when a folder's change feed moved. Only the
-    /// user's own app runs it: an isolated run (tests, QA) is refused, so it never registers a domain nor takes the
-    /// socket. Starting again replaces the server. Returns the socket's path.
-    pub fn sync_host_start(&self, dir: String, listener: Arc<dyn SyncHostListener>) -> Result<String, CoreError> {
+    /// container, and tells `listener` which domains there should be and when a domain's change feed moved. `mode`:
+    /// the host says how it shows the folders. `Hub` (the Mac): one domain, `sync_host_hub_domain`, listing every
+    /// synced folder (on-demand ones as folders, full ones as links to their place), its feed one signal; `Folders`:
+    /// a domain per on-demand folder. Requests for a folder's own domain (one left from before the hub, until the host's
+    /// migration removes it) are served in either mode. Only the user's own app runs it: an isolated run (tests, QA)
+    /// is refused, so it never registers a domain nor takes the socket. Starting again replaces the server. Returns
+    /// the socket's path.
+    pub fn sync_host_start(&self, dir: String, listener: Arc<dyn SyncHostListener>, mode: hub::SyncHostMode) -> Result<String, CoreError> {
         if self.isolated {
             return Err(CoreError::Failed { message: "An isolated run does not serve the File Provider extension.".into() });
         }
@@ -1911,7 +2168,10 @@ impl Core {
             let mut slot = lock(&self.host);
             *slot = None;
             let core: Arc<dyn HostCore> = Arc::new(BackendCore(self.backend.sync(), None));
-            let s = Server::start(core, Path::new(&dir), listener)
+            let mut host = Host::new(core, Path::new(&dir));
+            host.hub = mode == hub::SyncHostMode::Hub;
+            host.hub_state = Some(self.dir.clone());
+            let s = Server::start_host(host, Path::new(&dir), listener)
                 .map_err(|e| CoreError::Failed { message: format!("The Finder's on-demand folders could not start: {e}.") })?;
             let path = s.socket().display().to_string();
             *slot = Some(s);
@@ -1919,7 +2179,7 @@ impl Core {
         }
         #[cfg(not(unix))]
         {
-            let _ = (dir, listener);
+            let _ = (dir, listener, mode);
             Err(CoreError::Failed { message: "The File Provider extension is the Mac's.".into() })
         }
     }
@@ -1927,10 +2187,14 @@ impl Core {
     /// Files the core holds in on-demand folder `id` but the system does not have on disk (`on_disk`: the domain's
     /// materialized set, as the host read it), queued for the host to ask the system to download, so they show
     /// downloaded (the fetch hands back clones: no space twice, nothing downloaded). Returns how many; the host then
-    /// takes them with `sync_host_next_batch`. Without the server, nothing.
+    /// takes them with `sync_host_next_batch`. For the hub (`id` = its domain's), every on-demand folder in it, its
+    /// identifiers the hub's. Without the server, nothing.
     pub fn sync_host_materialize(&self, id: String, on_disk: Vec<String>) -> Result<u64, CoreError> {
         #[cfg(unix)]
         if let Some(s) = lock(&self.host).as_ref() {
+            if s.host.hub && id == hub::HUB_ID {
+                return Ok(s.host.hub_queue_materialize(on_disk));
+            }
             return s.host.queue_materialize(&id, on_disk).map_err(|e| CoreError::Failed { message: e.message });
         }
         let _ = (id, on_disk);
@@ -1941,10 +2205,89 @@ impl Core {
     pub fn sync_host_next_batch(&self, id: String) -> Option<SyncHostBatch> {
         #[cfg(unix)]
         if let Some(s) = lock(&self.host).as_ref() {
+            if s.host.hub && id == hub::HUB_ID {
+                return s.host.hub_next_batch();
+            }
             return s.host.next_batch(&id);
         }
         let _ = id;
         None
+    }
+
+    /// The hub's domain (the Mac: one *Seedwell* in the Finder's sidebar for every synced folder).
+    pub fn sync_host_hub_domain(&self) -> SyncHostDomain {
+        hub::hub_domain()
+    }
+
+    /// The hub's item for folder `id`: the folder an on-demand folder is, or the link a full folder is (the folder's
+    /// configuration says which). For the host's calls on it (`waitForChanges(below:)`, its place in the Finder). Cheap:
+    /// it reads the configuration in memory.
+    pub fn sync_host_hub_item(&self, id: String) -> String {
+        hub::top_id(&id, self.backend.sync().configured(&id).flatten().unwrap_or(false))
+    }
+
+    /// The hub lets go of on-demand folder `id` (the host asked by `remove_domain`, after the system handed over its
+    /// pending changes below the folder): from now on what the system sends for it is refused; what is still on disk
+    /// below its place in the Finder (`visible`, the folder's user-visible path; `None` when the system has none:
+    /// nothing of it is on disk) that the folder does not hold as it is there (made or changed after the hand-over,
+    /// a name or a link the folder does not sync) is copied to `<name> (changes not synced)` next to the folder's
+    /// place, the place looked at again while the folder is still listed until a look finds nothing new (what was
+    /// saved meanwhile is kept too, and what the system still sends is kept before it is refused); only then does the
+    /// folder leave the hub (the system deletes what it has of it once the host signals). Returns what to tell the
+    /// user, if anything was kept. An error when anything found could not be copied (a full disk, a file it cannot
+    /// read), or when the folder kept changing look after look: the folder is then back as it was, and the host
+    /// refuses the removal or switch with the error's words (the system would delete what was not kept). Reads the
+    /// disk: call it off the main thread. Undone by
+    /// `sync_host_let_go_undo`, and over when the core's removal or switch ends.
+    pub fn sync_host_let_go(&self, id: String, visible: Option<String>) -> Result<Option<SyncHostNotice>, CoreError> {
+        #[cfg(unix)]
+        let host = lock(&self.host).as_ref().map(|s| s.host.clone());
+        #[cfg(unix)]
+        if let Some(s) = host {
+            let folder = self.backend.sync().snapshot().folders.into_iter().find(|f| f.id == id);
+            let name = folder.as_ref().map_or_else(|| id.clone(), |f| f.name.clone());
+            let place = folder.map(|f| PathBuf::from(f.path));
+            return s.let_go(&id, &name, place.as_deref(), visible.as_deref().map(Path::new)).map_err(|message| CoreError::Failed { message });
+        }
+        let _ = (id, visible);
+        Ok(None)
+    }
+
+    /// The core gave up on a removal while the host let go of the folder (`sync_host_let_go`): the folder comes back in
+    /// the hub, and its changes are taken again.
+    pub fn sync_host_let_go_undo(&self, id: String) {
+        #[cfg(unix)]
+        if let Some(s) = lock(&self.host).as_ref() {
+            s.host.let_go_undo(&id);
+        }
+        let _ = id;
+    }
+
+    /// The domains of the per-folder era still to be removed before the hub is registered (`registered`: every
+    /// domain the system has of this app): each through the safe path (the release note, the system's pending changes
+    /// handed over, removed keeping what is unsynced, that put next to its folder and told). Empty once the migration
+    /// is done (`sync_host_migration_done`): it runs once. A start after an interruption gets the domains still there.
+    pub fn sync_host_migration(&self, registered: Vec<SyncHostDomain>) -> Vec<SyncHostDomain> {
+        hub::migration_plan(&self.dir, registered)
+    }
+
+    /// Every domain of the plan went: the migration is over and never runs again.
+    pub fn sync_host_migration_done(&self) {
+        hub::migration_done(&self.dir);
+    }
+
+    /// Seedwell's entry in the file manager's sidebar as it should be now ([`SyncNavPane`]); `None` while folder sync
+    /// is not running (nothing is known: leave the entry as it is) and in an isolated run (tests, QA: the CLSID is the
+    /// user's). The host hears of each change through `SyncHostListener::nav_pane`; this is for a look of its own.
+    ///
+    /// Promise: cheap, safe on the UI thread at start. It reads folder sync's settings and folder list in memory: no
+    /// disk, no wait for the engine, a scan, a held folder or a save in progress (`ui_wait_tests` times it while a
+    /// save is slow and the engine stalled).
+    pub fn sync_nav_pane(&self) -> Option<SyncNavPane> {
+        if self.isolated {
+            return None;
+        }
+        nav_pane(self.backend.sync().as_ref())
     }
 
     /// What the core says of folder `id`, for a domain the host has that the core did not ask for (one left from
@@ -1977,26 +2320,7 @@ impl Core {
     /// the system put it, a place only the removing call is told, so Seedwell cannot move it for the user; each notice
     /// says so and where to look. Read once: the notes go.
     pub fn sync_host_unfinished_releases(&self) -> Vec<SyncHostNotice> {
-        let dir = self.dir.join(RELEASES);
-        let Ok(entries) = std::fs::read_dir(&dir) else { return Vec::new() };
-        let mut out = Vec::new();
-        for e in entries.flatten() {
-            let name = std::fs::read_to_string(e.path()).unwrap_or_default();
-            let _ = std::fs::remove_file(e.path());
-            out.push(SyncHostNotice {
-                title: format!("Check “{name}” for changes"),
-                text: format!(
-                    concat!(
-                        "Seedwell stopped while it removed “{}” from the ",
-                        trs_platform::file_manager!(),
-                        ". Changes made there that Seedwell had not taken in yet may have been kept by macOS, in a folder it ",
-                        "names for the removal (look in ~/Library/CloudStorage); Seedwell was not told where."
-                    ),
-                    name
-                ),
-            });
-        }
-        out
+        unfinished_releases(&self.dir)
     }
 
     /// For a host of on-demand folders that calls the core in its own process (Windows' Cloud Files sync roots; no
@@ -2035,9 +2359,157 @@ impl Core {
     }
 }
 
+#[path = "sync_hub.rs"]
+pub mod hub;
+
 #[cfg(all(test, unix))]
 #[path = "sync_host_tests.rs"]
 mod tests;
+
+#[cfg(all(test, unix))]
+#[path = "sync_hub_tests.rs"]
+mod hub_tests;
+
+#[cfg(test)]
+mod nav_pane_tests {
+    use super::*;
+
+    fn home() -> PathBuf {
+        trs_platform::dirs::home().expect("a home folder to resolve `~` against")
+    }
+
+    /// Catches an entry that opens the wrong folder: `~` left unexpanded or a relative path (File Explorer opens
+    /// nothing), an empty setting not meaning `~/Seedwell`, or a chosen place not followed.
+    #[test]
+    fn the_entry_opens_the_seedwell_folder_the_setting_names() {
+        let default = home().join("Seedwell");
+        for empty in ["", "  "] {
+            let e = nav_pane_of(empty, &[]);
+            assert_eq!(Path::new(&e.target), default, "an empty setting is the default");
+        }
+        assert_eq!(Path::new(&nav_pane_of("~/Seedwell", &[]).target), default, "`~` expanded");
+        let chosen = tempfile::tempdir().unwrap();
+        let e = nav_pane_of(&chosen.path().display().to_string(), &[]);
+        assert_eq!(Path::new(&e.target), chosen.path(), "a chosen place is followed");
+        assert!(Path::new(&e.target).is_absolute());
+        assert!(!e.name.is_empty());
+        assert_eq!(e.marker, NAV_PANE_MARKER);
+    }
+
+    /// Catches an entry that opens a folder that is not there (nothing synced, or every folder elsewhere and the
+    /// default never made), and one missing while folder sync is set up.
+    #[test]
+    fn there_is_an_entry_while_folder_sync_is_set_up() {
+        let default = home().join("Seedwell");
+        assert!(!nav_pane_of("", &[]).show, "nothing synced, no place chosen: no entry");
+        let inside = default.join("Team");
+        assert!(nav_pane_of("", &[inside.as_path()]).show, "a folder in the Seedwell folder");
+        let shouted = PathBuf::from(default.display().to_string().to_uppercase()).join("Team");
+        assert!(nav_pane_of("", &[shouted.as_path()]).show, "the same folder in another case (the default file systems fold case)");
+        let elsewhere = home().join("Documents").join("Work");
+        assert!(!nav_pane_of("", &[elsewhere.as_path()]).show, "every folder elsewhere: the Seedwell folder may not exist");
+        let sibling = home().join("Seedwell 2");
+        assert!(!nav_pane_of("", &[sibling.as_path()]).show, "a neighbour whose name starts the same is not inside");
+        let chosen = tempfile::tempdir().unwrap();
+        assert!(nav_pane_of(&chosen.path().display().to_string(), &[]).show, "a place chosen in Settings");
+        assert!(!nav_pane_of("relative/place", &[Path::new("relative/place/x")]).show, "never an entry at a relative path");
+    }
+
+    /// Catches an entry that changes or doubles: the host keeps no state, so a CLSID that moved with the setting, the
+    /// folders or a new version would leave the old entry in File Explorer; and one Windows' registry refuses (braces,
+    /// 8-4-4-4-12 hex digits).
+    #[test]
+    fn the_entry_has_one_fixed_and_valid_clsid() {
+        let chosen = tempfile::tempdir().unwrap();
+        let place = chosen.path().display().to_string();
+        let folder = chosen.path().join("Team");
+        let all = [nav_pane_of("", &[]), nav_pane_of(&place, &[folder.as_path()]), nav_pane_of("~/Elsewhere", &[])];
+        assert!(all.iter().all(|e| e.clsid == NAV_PANE_CLSID), "{all:?}");
+        let a = NAV_PANE_CLSID;
+        assert!(a.starts_with('{') && a.ends_with('}'), "{a}");
+        let parts: Vec<&str> = a[1..a.len() - 1].split('-').collect();
+        assert_eq!(parts.iter().map(|p| p.len()).collect::<Vec<_>>(), [8, 4, 4, 4, 12], "{a}");
+        assert!(parts.iter().all(|p| p.chars().all(|c| c.is_ascii_hexdigit())), "{a}");
+        assert!(a.chars().any(|c| c.is_ascii_hexdigit() && c != '0'), "not the nil GUID");
+        assert!(!NAV_PANE_MARKER.is_empty());
+        // The uninstaller has no Core: what it removes must be the entry the app made.
+        assert_eq!((sync_nav_pane_clsid(), sync_nav_pane_marker()), (NAV_PANE_CLSID.to_string(), NAV_PANE_MARKER.to_string()));
+    }
+
+    #[derive(Default)]
+    struct Heard {
+        entries: Mutex<Vec<SyncNavPane>>,
+    }
+
+    impl SyncHostListener for Heard {
+        fn feed_moved(&self, _folder_id: String) {}
+        fn domains(&self, _domains: Vec<SyncHostDomain>) {}
+        fn remove_domain(&self, _folder_id: String) -> SyncHostRemoval {
+            SyncHostRemoval { error: None }
+        }
+        fn notice(&self, _title: String, _text: String) {}
+        fn nav_pane(&self, entry: SyncNavPane) {
+            lock(&self.entries).push(entry);
+        }
+        fn verify_peer(&self, _audit_token: Vec<u8>) -> bool {
+            true
+        }
+    }
+
+    /// Catches a host that never learns the Seedwell folder moved (the entry would keep opening the old place), one
+    /// told again and again of an entry that did not change (it rewrites the registry each second), and an isolated
+    /// run (QA) that reports the user's CLSID (its entry would replace the user's own).
+    #[test]
+    fn the_host_hears_of_the_entry_at_start_and_when_the_seedwell_folder_moves() {
+        let (core, dir) = crate::library::tests::mock();
+        let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let put = |p: &Path| {
+            let mut s = core.sync_settings();
+            s.default_location = p.display().to_string();
+            core.set_sync_settings(s).unwrap();
+        };
+        put(a.path());
+        let h = Host::new(Arc::new(BackendCore(core.backend.sync(), None)), dir.path());
+        let heard = Heard::default();
+        let (mut anchors, mut shown) = (HashMap::new(), None);
+        h.watch_once(&heard, &mut anchors, &mut shown);
+        h.watch_once(&heard, &mut anchors, &mut shown);
+        let targets = || lock(&heard.entries).iter().map(|e| PathBuf::from(&e.target)).collect::<Vec<_>>();
+        assert_eq!(targets(), [a.path()], "told once at the start, not again while nothing changed");
+        assert_eq!(core.sync_nav_pane().map(|e| PathBuf::from(e.target)), Some(a.path().to_path_buf()), "the call says the same");
+        // Moved in Settings (or by the command line: the same setting).
+        put(b.path());
+        h.watch_once(&heard, &mut anchors, &mut shown);
+        assert_eq!(targets(), [a.path(), b.path()], "the move is heard");
+        assert!(lock(&heard.entries).iter().all(|e| e.show && e.clsid == NAV_PANE_CLSID));
+
+        // Catches an entry that opens nothing: a place chosen but not made yet (or on a disk that is away) is told as
+        // no entry, and the entry comes back once the folder is there. The host never makes the folder.
+        let missing = b.path().join("not yet");
+        put(&missing);
+        h.watch_once(&heard, &mut anchors, &mut shown);
+        assert!(!lock(&heard.entries).last().unwrap().show, "a Seedwell folder that is not there: no entry");
+        assert!(!missing.exists(), "nothing made it");
+        std::fs::create_dir(&missing).unwrap();
+        h.watch_once(&heard, &mut anchors, &mut shown);
+        assert!(lock(&heard.entries).last().unwrap().show, "there now: the entry comes back");
+
+        // An isolated run: neither told nor answered.
+        let confined = Host::new(Arc::new(BackendCore(core.backend.sync(), Some(dir.path().join("state")))), dir.path());
+        let quiet = Heard::default();
+        confined.watch_once(&quiet, &mut HashMap::new(), &mut None);
+        assert!(lock(&quiet.entries).is_empty(), "an isolated run reports no entry");
+        let d = tempfile::tempdir().unwrap();
+        let isolated = Core::new(crate::CoreOptions {
+            config_dir: d.path().display().to_string(),
+            mock: true,
+            allow_loopback_trackers: false,
+            forbidden_root: Some(d.path().join("home").display().to_string()),
+        })
+        .unwrap();
+        assert_eq!(isolated.sync_nav_pane(), None, "an isolated run answers none");
+    }
+}
 
 #[cfg(test)]
 mod attached_tests {
@@ -2060,6 +2532,7 @@ mod attached_tests {
             SyncHostRemoval { error: None }
         }
         fn notice(&self, _title: String, _text: String) {}
+        fn nav_pane(&self, _entry: SyncNavPane) {}
         fn verify_peer(&self, _audit_token: Vec<u8>) -> bool {
             panic!("an in-process host has no peer to verify")
         }

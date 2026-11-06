@@ -223,7 +223,7 @@ fn pick_device(h: &SyncHandle, q: &str) -> Result<trs_sync_proto::ids::DeviceId,
     let directs = if directs_visible(h) { h.chat_directs() } else { Vec::new() };
     for d in directs {
         if !members.iter().any(|m| m.device == d.device) {
-            members.push(trs_sync_net::MemberInfo { device: d.device, name: d.name, user: d.user, role: trs_sync_proto::members::Role::ReadOnly, online: d.online, is_me: false, expires_s: None });
+            members.push(trs_sync_net::MemberInfo { device: d.device, name: d.name, user: d.user, role: trs_sync_proto::members::Role::ReadOnly, online: d.online, is_me: false, expires_s: None, removal: None });
         }
     }
     let mut seen = std::collections::BTreeSet::new();

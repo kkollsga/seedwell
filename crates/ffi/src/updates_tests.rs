@@ -819,22 +819,32 @@ fn the_way_back_to_the_release_is_checked_at_once_then_backs_off_like_any_check(
 /// (written aside and renamed, so a reader never sees half of it) into `ran`.
 #[cfg(unix)]
 fn serve_release(version: &str, ran: &Path) -> String {
+    serve_counted(version, ran).0
+}
+
+/// [`serve_release`], and how many times `latest.json` was asked for (each one a check).
+fn serve_counted(version: &str, ran: &Path) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
     let r = ran.display().to_string();
     let script = format!("printf '%s\\n' \"$@\" > '{r}.part' && mv '{r}.part' '{r}'\n");
     let latest = latest(version);
     let l = TcpListener::bind("127.0.0.1:0").unwrap();
     let base = format!("http://{}", l.local_addr().unwrap());
+    let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let count = asked.clone();
     std::thread::spawn(move || {
         for s in l.incoming() {
             let Ok(mut s) = s else { return };
             let mut buf = [0u8; 4096];
             let n = s.read(&mut buf).unwrap_or(0);
             let line = String::from_utf8_lossy(&buf[..n]).lines().next().unwrap_or_default().to_owned();
+            if line.contains("latest.json") {
+                count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
             let body = if line.contains(os::INSTALLER) { &script } else { &latest };
             let _ = write!(s, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
         }
     });
-    base
+    (base, asked)
 }
 
 /// `update.now` (an agent at full, `seedwell update now`): Check Now, then Install, the core starting the release's
@@ -860,4 +870,165 @@ fn update_now_checks_and_starts_the_installer_as_check_now_and_install_do() {
     let _u = updates(&core, false, &serve(503, String::new()), T0);
     let e = core.builds.get().unwrap().update_now().unwrap_err();
     assert!(e.starts_with("the check failed"), "{e}");
+}
+
+// MARK: A newer Seedwell on the network
+
+/// `Seedwell <version>`, as a device's Hello says it.
+fn hello(v: &str) -> String {
+    format!("Seedwell {v}")
+}
+
+/// The next minor version after the running one (newer than [`newer`]).
+fn much_newer() -> String {
+    let (a, b, _) = parse_version(&current()).unwrap();
+    format!("{a}.{}.0", b + 1)
+}
+
+fn checks(asked: &std::sync::atomic::AtomicUsize) -> usize {
+    asked.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+#[cfg(unix)]
+fn set_auto_install(core: &Arc<Core>, on: bool) {
+    let mut s = core.settings_load();
+    s.updates.auto_install = on;
+    core.settings_save(s).unwrap();
+}
+
+/// The failures: a device running a newer Seedwell starts no check (the release waits for the daily one), or starts
+/// one per device, per reconnection or while one runs (a crowd of devices, or one that lies, makes the app hammer
+/// GitHub). One check, at most one an hour, none while one runs; what it finds is on offer (the menu bar's row).
+#[test]
+fn a_newer_device_starts_one_check_and_another_within_the_hour_none() {
+    let (core, dir) = mock();
+    let (repo, asked) = serve_counted(&newer(), &dir.path().join("installer-ran"));
+    let u = updates(&core, true, &repo, T0);
+    let t = T0 + 2 * MIN;
+    u.peer_runs(&hello(&newer()), t).expect("a check starts").join().unwrap();
+    assert_eq!(checks(&asked), 1);
+    assert_eq!(u.available_version(), Some(newer()), "on offer: the menu bar's row and Settings say so");
+    assert!(u.peer_runs(&hello(&newer()), t + 2 * HOUR).is_none(), "found already: no check for it again");
+    assert!(u.peer_runs(&hello(&much_newer()), t + 30 * MIN).is_none(), "another newer device within the hour");
+    assert_eq!(checks(&asked), 1);
+    u.lock().checking = true;
+    assert!(u.peer_runs(&hello(&much_newer()), t + 2 * HOUR).is_none(), "a check runs already");
+    u.lock().checking = false;
+    u.peer_runs(&hello(&much_newer()), t + 2 * HOUR).expect("an hour later it may").join().unwrap();
+    assert_eq!(checks(&asked), 2);
+}
+
+/// The failure: a device of the same or an older version, or one that says something that is not a release's
+/// version, starts a check; or one starts where no automatic check may (a local build, checking off).
+#[test]
+fn an_equal_older_or_garbled_version_starts_no_check() {
+    let (core, dir) = mock();
+    let (repo, asked) = serve_counted(&newer(), &dir.path().join("installer-ran"));
+    let u = updates(&core, true, &repo, T0);
+    let (a, b, c) = parse_version(&current()).unwrap();
+    let older = if c > 0 { format!("{a}.{b}.{}", c - 1) } else { "0.0.0".to_owned() };
+    let n = newer();
+    let t = T0 + 2 * MIN;
+    for client in [
+        hello(&current()),
+        hello(&older),
+        hello(&format!("{n}.1")),
+        hello(&format!("v{n}")),
+        hello(&format!("{n}-beta")),
+        "Seedwell".to_owned(),
+        format!("Seedwell  {n}"),
+        format!("Other {n}"),
+        n.clone(),
+        String::new(),
+    ] {
+        assert!(u.peer_runs(&client, t).is_none(), "{client:?}");
+    }
+    let local = updates(&core, false, &repo, T0);
+    assert!(local.peer_runs(&hello(&n), t).is_none(), "a local build checks only when asked");
+    let mut s = core.settings_load();
+    s.updates.check = false;
+    core.settings_save(s).unwrap();
+    assert!(u.peer_runs(&hello(&n), t).is_none(), "Check automatically is off");
+    assert_eq!(checks(&asked), 0);
+}
+
+/// The failures: with Install automatically on, the release a newer device pointed to waits (for the daily check,
+/// or for the host to look again) instead of being installed; with it off, it is installed anyway; or it is
+/// installed while the app quits.
+#[cfg(unix)]
+#[test]
+fn a_release_a_newer_device_pointed_to_is_installed_at_once_only_with_install_automatically_on() {
+    let t = T0 + 2 * MIN;
+    // Off: only the notice.
+    let (core, dir) = mock();
+    idle(&core);
+    let ran = dir.path().join("installer-ran");
+    let u = updates(&core, true, &serve_release(&newer(), &ran), T0);
+    u.peer_runs(&hello(&newer()), t).unwrap().join().unwrap();
+    assert_eq!(u.available_version(), Some(newer()));
+    assert!(u.lock().saved.pending.is_none() && !ran.exists(), "nothing installed with Install automatically off");
+
+    // On, but the app quits.
+    let (core, dir) = mock();
+    idle(&core);
+    set_auto_install(&core, true);
+    let ran = dir.path().join("installer-ran");
+    let u = updates(&core, true, &serve_release(&newer(), &ran), T0);
+    u.quitting();
+    if let Some(h) = u.peer_runs(&hello(&newer()), t) {
+        h.join().unwrap();
+    }
+    assert!(u.lock().saved.pending.is_none() && !ran.exists(), "nothing installed while the app quits");
+
+    // On: installed at once.
+    let (core, dir) = mock();
+    idle(&core);
+    set_auto_install(&core, true);
+    let ran = dir.path().join("installer-ran");
+    let u = updates(&core, true, &serve_release(&newer(), &ran), T0);
+    u.peer_runs(&hello(&newer()), t).unwrap().join().unwrap();
+    assert_eq!(wait_for(&ran), format!("--version\n{}\n", newer()), "the release's own installer, for that version");
+    assert_eq!(u.model(t).status, format!("Installing {}…", newer()));
+    assert!(u.lock().saved.pending_pid.is_some(), "the core started it");
+}
+
+/// The failure: a device that claims a version GitHub does not have gets something installed, or keeps starting
+/// checks with the same claim.
+#[cfg(unix)]
+#[test]
+fn a_claimed_version_github_does_not_have_installs_nothing_and_starts_one_check() {
+    let (core, dir) = mock();
+    idle(&core);
+    set_auto_install(&core, true);
+    let ran = dir.path().join("installer-ran");
+    let (repo, asked) = serve_counted(&current(), &ran);
+    let u = updates(&core, true, &repo, T0);
+    let t = T0 + 2 * MIN;
+    u.peer_runs(&hello("999.0.0"), t).expect("one check").join().unwrap();
+    assert_eq!(checks(&asked), 1);
+    assert_eq!(u.available_version(), None);
+    let status = u.model(t).status;
+    assert!(status.contains("is up to date"), "{status}");
+    assert!(u.lock().saved.pending.is_none() && !ran.exists(), "nothing installed");
+    for later in [t + 2 * HOUR, t + 48 * HOUR] {
+        assert!(u.peer_runs(&hello("999.0.0"), later).is_none(), "the same claim checks once");
+    }
+    assert_eq!(checks(&asked), 1);
+}
+
+/// The failure: the control server's view of the updater (where folder sync tells what a device runs) drops what it
+/// is told, so a newer device starts nothing in the app.
+#[test]
+fn what_folder_sync_tells_the_updater_reaches_it() {
+    let (core, dir) = mock();
+    let (repo, asked) = serve_counted(&newer(), &dir.path().join("installer-ran"));
+    let u = updates(&core, true, &repo, unix_ms() - 2 * MIN);
+    core.builds.get().expect("the updater registered").peer_runs(&hello(&newer()));
+    for _ in 0..500 {
+        if u.available_version().is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert_eq!((checks(&asked), u.available_version()), (1, Some(newer())));
 }

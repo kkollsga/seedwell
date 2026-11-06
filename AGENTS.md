@@ -58,8 +58,24 @@ release procedure.
   bundle from the Mac, and always on the final candidate before the coordinator pushes, it also runs
   `app-windows\qa\rust-tests.ps1` (the Rust tests as CI's Windows job runs them, about 2 minutes): Windows-only Rust
   failures are found there, not on CI (a save-by-replace gap reached CI on 2026-11-05 because this run was skipped). Local
-  Rust builds on the PC are debug, `CARGO_BUILD_JOBS=4`, one at a time; never a local release core (it ran the PC out
-  of memory). Every batch says what ran.
+  Rust builds on the PC are debug, `CARGO_BUILD_JOBS=4`, one build per `target` folder; never a local release core (it
+  ran the PC out of memory). Tests and QA may overlap other work there (no quiet machine, see Heavy work). Every batch says what ran.
+
+## Simple, owner-decided designs
+
+**One device decides; the others ask** (the user's rule, 2026-11-06: "This simplistic approach should be the rule. This is
+how we make it robust"). Shared state between devices (who is a member, a folder's settings such as Read only) has one
+writer: the owner's device.
+- Other devices send requests. An owner's device applies them automatically when the rules allow (an admin's admission or
+  removal of a user, never of an owner or another admin) and signs the result as its own decision. A later change to the
+  requester (a demoted admin) changes nothing already decided.
+- A requester acts locally at once where that is safe (an admin's device disconnects a user it asked to remove) and keeps
+  its request, re-sent until the owner's decision arrives.
+- **No multi-writer rules**: no ordering by device clocks, no deciding "who was what when" from signatures, no tenure,
+  backdating or serial-reach logic. Read only went through three such designs (clock dating, run identities, admin
+  tenure) and every review found new edge cases; the owner-decided version had none of them.
+- When a design needs rules about concurrent writers, stop and propose the owner-decided version to the user first.
+- A device that is away catches up from the owner's signed decisions; it never decides alone what the owner would.
 
 ## Bugs
 
@@ -99,7 +115,14 @@ trip; most can be caught in the first minutes on the Mac.
 
 ## Heavy work (16 GB Mac)
 
-- Run builds, tests and benches through `tools/sysguard/heavy.sh`, one at a time and never nested.
+- **Don't wait for a quiet machine** (the user's rule, 2026-11-05: "We should limit waiting"). Load doesn't let an
+  error go uncaught, and that is the only thing the tests guard against. Tests, QA and renders run alongside other
+  work. A failure under load is still a finding: rerun it to tell a timing false alarm from a bug, and fix a test
+  that fails only under load (it targets a race) instead of explaining it away. Only memory, disk and a shared
+  `target` folder still put work in line.
+- Run builds, tests and benches through `tools/sysguard/heavy.sh`, one at a time and never nested. This is for memory
+  on the 16 GB Mac (parallel Rust builds crashed it twice), not for quiet: work that isn't a Rust build or test
+  (QA scripts, renders, reviews, git) doesn't wait for it.
   Machine-specific settings go in the untracked `tools/sysguard/local.env`.
 - **Check with `tools/check.sh`.** It runs clippy and the tests (cargo nextest) for the crates a change touches
   plus the crates that depend on them, and the app build and Swift tests only when `app/` or `trs-ffi` is affected.

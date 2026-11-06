@@ -1,0 +1,19 @@
+[package]
+name = "trs-socks"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "SOCKS5 client (RFC 1928, username/password auth RFC 1929) for torrent traffic, and a loopback test proxy"
+
+[features]
+# `testkit`: a loopback SOCKS5 server with auth for the tests of the crates that dial through a proxy.
+testkit = []
+
+[dependencies]
+tokio = { version = "1", default-features = false, features = ["net", "time", "io-util", "rt", "sync", "macros"] }
+
+[dev-dependencies]
+trs-socks = { path = ".", features = ["testkit"] }
+tokio = { version = "1", default-features = false, features = ["net", "time", "io-util", "rt", "rt-multi-thread", "sync", "macros"] }

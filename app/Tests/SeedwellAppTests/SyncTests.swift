@@ -31,7 +31,7 @@ import Testing
         #expect(SyncText.role(.readWrite) == "Read & write" && SyncText.canShare(.admin) && !SyncText.canShare(.readOnly))
         #expect(SyncText.message(CoreError.NotFound(id: "F")) == "This folder is no longer synced on this Mac.")
         #expect(SyncText.message(CoreError.Failed(message: "Disk full.")) == "Disk full.")
-        let guest = SyncMember(deviceId: "G", name: "G", user: "", role: .readWrite, online: false, isMe: false, expiresS: 1_800_000_000)
+        let guest = SyncMember(deviceId: "G", name: "G", user: "", role: .readWrite, online: false, isMe: false, expiresS: 1_800_000_000, removal: nil, removalWaiting: false)
         #expect(SyncText.memberLine(guest, device: nil) == "Offline · until \(Fmt.day(1_800_000_000))", "the day in the user's style")
         #expect(SyncText.linkLine("hello", info: nil) == "Not a Seedwell folder link")
     }

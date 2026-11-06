@@ -7,6 +7,7 @@ macOS, Linux and Windows.
 | Module | What |
 |---|---|
 | `fs` | Positioned reads and writes, volume ids, free space, renames that never replace, preallocation, no-cache, metadata copy, Unix modes (none on Windows), file stamps for Folder Sync (times, file id, exec bit, cloud placeholders), symlinks with `/` targets, folder sync, lock flags, path bytes for Seedwell's own files. |
+| `firewall` | Whether the system's firewall lets other devices connect to Seedwell (Windows: its rules, read through PowerShell's NetSecurity module, off the UI thread), and the `netsh` command the app runs elevated to allow it. |
 | `dirs` | Home, Seedwell's state folder (Application Support, XDG state, `%LOCALAPPDATA%`), mount roots. |
 | `proc` | Open-file limit, performance cores, background I/O priority, giving memory back, the local UTC offset, shell commands in a group of their own (process group, Job Object), detached commands. |
 | `signal` | `Shutdown`: SIGTERM/SIGINT; Ctrl+C, console close, logoff, shutdown. |

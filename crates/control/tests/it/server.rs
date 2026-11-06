@@ -109,7 +109,9 @@ async fn permission_matrix_every_method_every_level() {
             | Method::SyncConflicts
             | Method::SyncMembers
             | Method::SyncInvites
-            | Method::SyncReshare => json!({"folder": "Docs"}),
+            | Method::SyncReshare
+            | Method::SyncReadOnly => json!({"folder": "Docs"}),
+            Method::SyncSetReadOnly => json!({"folder": "Docs", "read_only": true}),
             Method::SyncRevokeInvite => json!({"folder": "Docs", "invite": "00"}),
             Method::SyncSetRole => json!({"folder": "Docs", "device": "NOPE", "role": "admin"}),
             Method::SyncRemoveDevice => json!({"folder": "Docs", "device": "NOPE"}),

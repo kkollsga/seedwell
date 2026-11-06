@@ -46,6 +46,12 @@ public sealed partial class FlyoutWindow : Window
     {
         this.app = app;
         InitializeComponent();
+        // The proxy's shield, left of Open Seedwell; its window opens over the library, not over this.
+        proxyShield = new ProxyShieldButton(app.Proxy, 16);
+        ProxySlot.Child = proxyShield;
+        app.Proxy.BeforeWindow = () => { if (IsOpen) Hide(); };
+        app.Proxy.MenuOpen = on => menuOpen = on;
+        app.Proxy.Changed += FollowProxyNote;
         // Acrylic, as the system's own flyouts (volume, network) have; without a backdrop the window is plain black.
         SystemBackdrop = new DesktopAcrylicBackdrop();
         var p = OverlappedPresenter.Create();
@@ -88,6 +94,23 @@ public sealed partial class FlyoutWindow : Window
     }
 
     bool menuOpen;
+    readonly ProxyShieldButton proxyShield;
+
+    /// <summary>A refusal or Find a Faster Server's answer, for a few seconds, under the footer.</summary>
+    void FollowProxyNote()
+    {
+        var note = app.Proxy.Notice;
+        var shown = note.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+        ProxyNote.Text = note;
+        if (ProxyNote.Visibility != shown)
+        {
+            ProxyNote.Visibility = shown;
+            if (IsOpen) Place();
+        }
+    }
+
+    /// <summary>The shield as drawn, and the sentence under the footer (QA).</summary>
+    internal string QaProxy() => $"flyout open {IsOpen}, shield {proxyShield.QaDescribe()}, note \"{ProxyNote.Text}\"";
 
     /// <summary>The visual QA run: shown without the focus that hides it, and never hidden by losing it.</summary>
     internal bool Pinned { get; private set; }
@@ -103,6 +126,7 @@ public sealed partial class FlyoutWindow : Window
         Refresh(true);
         Place();
         Quiet.Show(this);
+        if (!IsOpen) app.Proxy.Watch(true);
         IsOpen = true;
     }
 
@@ -142,6 +166,7 @@ public sealed partial class FlyoutWindow : Window
         {
             first.Focus(FocusState.Programmatic);
         }
+        if (!IsOpen) app.Proxy.Watch(true);
         IsOpen = true;
         focus.Start();
         app.FlyoutChanged();
@@ -172,6 +197,7 @@ public sealed partial class FlyoutWindow : Window
         refresh.Stop();
         focus.Stop();
         AppWindow.Hide();
+        if (IsOpen) app.Proxy.Watch(false);
         IsOpen = false;
         hiddenAt = DateTime.UtcNow;
         app.FlyoutChanged();

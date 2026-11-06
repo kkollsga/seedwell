@@ -33,7 +33,45 @@ pub(crate) struct Net {
     user_agent: String,
     pub cfg: NetConfig,
     hosts: Mutex<HashMap<String, Arc<Semaphore>>>,
+    /// Where connections go, asked before every request (`None`: always directly).
+    route: Option<crate::types::RouteFn>,
+    /// The client through the proxy in use, kept while that proxy is (its own keep-alive pool: a direct
+    /// connection is never reused for a proxied request or the other way round).
+    via: Mutex<Option<(trs_socks::Proxy, SocksClient)>>,
 }
+
+type SocksClient = Client<HttpsConnector<SocksConnector>, Empty<Bytes>>;
+
+/// Connects through a SOCKS5 proxy, which resolves the host name: nothing is looked up here.
+#[derive(Clone)]
+struct SocksConnector {
+    proxy: Arc<trs_socks::Proxy>,
+    timeout: Duration,
+}
+
+impl tower_service::Service<Uri> for SocksConnector {
+    type Response = hyper_util::rt::TokioIo<tokio::net::TcpStream>;
+    type Error = Box<dyn std::error::Error + Send + Sync>;
+    type Future = std::pin::Pin<Box<dyn std::future::Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+    fn poll_ready(&mut self, _cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), Self::Error>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, uri: Uri) -> Self::Future {
+        let me = self.clone();
+        Box::pin(async move {
+            let host = uri.host().unwrap_or_default();
+            let host = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')).unwrap_or(host).to_owned();
+            let port = uri.port_u16().unwrap_or(if uri.scheme_str() == Some("https") { 443 } else { 80 });
+            let (s, _) = trs_socks::connect(&me.proxy, &trs_socks::Target::Name(host, port), me.timeout).await?;
+            Ok(hyper_util::rt::TokioIo::new(s))
+        })
+    }
+}
+
+/// How long a request waits for the proxy to work again before it fails (and its download retries later).
+const HELD_WAIT: Duration = Duration::from_secs(10);
 
 /// A response whose headers we have, plus the host permit that keeps the
 /// per-host connection count honest until the body is dropped.
@@ -53,6 +91,11 @@ pub(crate) struct Piece {
 
 impl Net {
     pub fn new(cfg: NetConfig) -> Self {
+        Self::with_route(cfg, None)
+    }
+
+    /// With `route` asked before every request (SPEC §7H): directly, through the proxy, or held (never directly).
+    pub fn with_route(cfg: NetConfig, route: Option<crate::types::RouteFn>) -> Self {
         let mut http = HttpConnector::new();
         http.enforce_http(false); // https is handled by the wrapping connector
         http.set_connect_timeout(Some(cfg.connect_timeout));
@@ -77,6 +120,53 @@ impl Net {
             user_agent: format!("Seedwell/{version}"),
             cfg,
             hosts: Mutex::new(HashMap::new()),
+            route,
+            via: Mutex::new(None),
+        }
+    }
+
+    fn socks_client(&self, proxy: trs_socks::Proxy) -> SocksClient {
+        let mut via = self.via.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some((p, c)) = via.as_ref()
+            && *p == proxy
+        {
+            return c.clone();
+        }
+        let conn = SocksConnector { proxy: Arc::new(proxy.clone()), timeout: self.cfg.connect_timeout };
+        let https = HttpsConnectorBuilder::new().with_webpki_roots().https_or_http().enable_http1().wrap_connector(conn);
+        let c = Client::builder(TokioExecutor::new())
+            .pool_idle_timeout(Duration::from_secs(60))
+            .pool_max_idle_per_host(self.cfg.max_connections_per_host.max(1))
+            .build(https);
+        *via = Some((proxy, c.clone()));
+        c
+    }
+
+    /// One request, the way the route says now: directly, through the proxy, or (held) not at all.
+    async fn send(&self, req: Request<Empty<Bytes>>) -> Result<Response<Incoming>, Error> {
+        let route = match &self.route {
+            None => crate::types::HttpRoute::Direct,
+            Some(r) => {
+                let until = tokio::time::Instant::now() + HELD_WAIT;
+                loop {
+                    match r() {
+                        crate::types::HttpRoute::Held if tokio::time::Instant::now() < until => {
+                            tokio::time::sleep(Duration::from_millis(250)).await;
+                        }
+                        other => break other,
+                    }
+                }
+            }
+        };
+        match route {
+            crate::types::HttpRoute::Direct => {
+                *self.via.lock().unwrap_or_else(|p| p.into_inner()) = None;
+                self.client.request(req).await.map_err(|e| classify(&e))
+            }
+            crate::types::HttpRoute::Via(p) => self.socks_client(p).request(req).await.map_err(|e| classify(&e)),
+            crate::types::HttpRoute::Held => Err(Error::Network(
+                "waiting for the proxy: torrents go through it and it isn't working (never sent directly)".into(),
+            )),
         }
     }
 
@@ -137,9 +227,9 @@ impl Net {
             let req = b
                 .body(Empty::<Bytes>::new())
                 .map_err(|e| Error::InvalidUrl(e.to_string()))?;
-            let resp = match tokio::time::timeout(self.cfg.read_timeout, self.client.request(req)).await {
+            let resp = match tokio::time::timeout(self.cfg.read_timeout + HELD_WAIT, self.send(req)).await {
                 Err(_) => return Err(Error::Timeout),
-                Ok(Err(e)) => return Err(classify(&e)),
+                Ok(Err(e)) => return Err(e),
                 Ok(Ok(r)) => r,
             };
             if resp.status().is_redirection() && resp.status().as_u16() != 304 {

@@ -2,7 +2,7 @@
 //! discovery and the DHT off, no address added), a dead address in it does not hold the join up, a joining folder
 //! says what it does and what went wrong, and the owner notes the attempts it refused.
 
-use std::net::{Ipv4Addr, SocketAddr, TcpListener};
+use std::net::{Ipv4Addr, SocketAddr};
 
 use trs_sync_net::status::FolderStatus;
 use trs_sync_proto::ids::FolderId;
@@ -20,10 +20,9 @@ fn folder(d: &Device, id: &FolderId) -> Option<FolderStatus> {
     d.h.snapshot().folders.into_iter().find(|f| f.id == id.to_string())
 }
 
-/// A port on loopback where nothing listens.
+/// A port on loopback where nothing listens ([`crate::closed_addr`]).
 fn dead() -> SocketAddr {
-    let l = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-    l.local_addr().unwrap()
+    crate::closed_addr()
 }
 
 /// `link` with its address block replaced by `reach`.

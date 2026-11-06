@@ -61,13 +61,17 @@ mod sync;
 mod sync_host;
 mod sync_menu;
 mod sync_dialogs;
+mod read_only_text;
 mod sync_page;
 mod sync_share;
+mod sync_reach;
 mod sync_rendezvous;
 mod sync_removal;
 mod sync_text;
 mod tracker_folders;
 mod tracker_log;
+mod proxy_countries;
+mod torrent_proxy;
 mod tracker_page;
 mod types;
 #[cfg(test)]
@@ -107,13 +111,16 @@ pub use settings_text::*;
 pub use sidebar::*;
 pub use starting::*;
 pub use sync::*;
+pub use sync_host::hub::SyncHostMode;
 pub use sync_host::{SyncHostBatch, SyncHostDomain, SyncHostFolderState, SyncHostListener, SyncHostNotice, SyncHostRemoval, SyncHostText};
 pub use sync_menu::*;
 pub use sync_dialogs::*;
 pub use sync_page::*;
+pub use sync_reach::{SyncReach, SyncReachAction, SyncReachModel, SyncReachNotice};
 pub use sync_share::*;
 pub use sync_rendezvous::{RendezvousState, RendezvousView};
 pub use sync_text::*;
+pub use torrent_proxy::{ProxyCountry, ProxyIcon, ProxyKind, ProxyModel, ProxyPaste, ProxyWindowModel};
 pub use tracker_page::*;
 pub use types::*;
 pub use ui_watch::*;
@@ -182,6 +189,8 @@ pub struct Core {
     polls: async_calls::Polls,
     /// What Settings shows of this computer's agent tools, as found last (`settings_view_host`).
     host_facts: settings_view_host::HostFacts,
+    /// The torrent proxy's key state and last action (`torrent_proxy`).
+    proxy: torrent_proxy::ProxyCell,
 }
 
 impl Core {
@@ -219,7 +228,7 @@ impl Core {
         player::look_up_players();
         let battery = Arc::new(battery::Battery::new(backend.clone(), dir.clone()));
         let isolated = options.forbidden_root.is_some();
-        Ok(Arc::new(Self {
+        let core = Arc::new(Self {
             backend,
             settings: SettingsStore::new(&dir),
             dir,
@@ -233,7 +242,11 @@ impl Core {
             sync_commands: calls::Lane::new("seedwell-sync-commands"),
             polls: async_calls::Polls::default(),
             host_facts: Default::default(),
-        }))
+            proxy: Default::default(),
+        });
+        // Whether a torrent proxy key is installed: read here, once, so the icon's poll never waits for the Keychain.
+        core.proxy_has_key();
+        Ok(core)
     }
 
 }

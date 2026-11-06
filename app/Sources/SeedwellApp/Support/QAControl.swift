@@ -86,6 +86,9 @@ import UserNotifications
 ///     power battery | power ac        the power source as PowerWatcher tells the core (the "On battery" setting acts);
 ///                                     a real change of the power source still reports as well
 ///     play-app <App.app> <file>       the one real launch: opens <file> in that app (a finished local test video)
+///     proxy model|click|menu-press|context [menubar]|press <title>|toggle|find-faster|country <code>|open|close|window|
+///           pane nordvpn|custom|guide show|hide|type <field> <text>|copy <text>|enable|use|remove
+///                                     the torrent proxy's shield, its menu and its window (QAProxy)
 @MainActor final class QAControl {
     private let path: String
     private unowned let app: AppDelegate
@@ -112,6 +115,8 @@ import UserNotifications
         PlayerLauncher.onBlockedLaunch = { [weak self] url in self?.report("play-url: \(url)") }
         // The conversation's rows say what their pointer, gallery and references do (`chat hover|gallery|chip`).
         ChatQAHooks.enabled = true
+        // The proxy window's copied credentials come from QA's own pasteboard (`proxy copy`), never the user's.
+        app.commands.proxy.pasteboard = SystemPasteboard(QAProxy.pasteboard)
         // A file-system watch instead of a timer: the harness must not add wake-ups of its own
         // while idle numbers are measured.
         fd = open(path, O_EVTONLY)
@@ -616,6 +621,10 @@ import UserNotifications
             starting(arg)
         case "choice":
             choiceCommand(arg)
+        case "proxy":
+            report(await QAProxy.run(arg, app: app) { [weak self] menu in
+                self?.pop(menu) { menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil) }
+            })
         default:
             break
         }

@@ -124,9 +124,7 @@ async fn nothing_is_written_when_the_mode_is_off() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_dead_tracker_is_logged_with_its_error_and_backoff() {
     // A port nothing listens on: connection refused.
-    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = l.local_addr().unwrap();
-    drop(l);
+    let addr = format!("127.0.0.1:{}", closed_port(&[std::net::IpAddr::from([127, 0, 0, 1])]));
     let t = standard_torrent(200_000, Some(format!("http://{addr}/announce?passkey={PASSKEY}")), false, 303);
     let logs = tempfile::tempdir().unwrap();
     let dir = logs.path().to_path_buf();
@@ -169,10 +167,8 @@ async fn tier_failover_is_logged_dead_tracker_first_then_the_one_behind_it() {
     // The dead tracker is spelled `localhost` so that it is another host for the gate than the mock
     // on 127.0.0.1: the host circuit breaker (three torrents failing on a host pause it, whatever
     // the port) must not pause the good tracker along with the dead one.
-    let dead = {
-        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        format!("localhost:{}", l.local_addr().unwrap().port())
-    };
+    // (Closed on both addresses `localhost` may name.)
+    let dead = format!("localhost:{}", closed_port(&[std::net::IpAddr::from([127, 0, 0, 1]), std::net::IpAddr::from(std::net::Ipv6Addr::LOCALHOST)]));
     let (dead_url, good_url) = (format!("http://{dead}/announce?passkey={PASSKEY}"), format!("{}?passkey={PASSKEY}", good.url()));
     let logs = tempfile::tempdir().unwrap();
     let dir = logs.path().to_path_buf();

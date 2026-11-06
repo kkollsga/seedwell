@@ -5,6 +5,30 @@ use std::time::Duration;
 
 use crate::error::Error;
 
+/// Where a download's connection goes (SPEC §7H), asked before every request.
+#[derive(Clone, Debug)]
+pub enum HttpRoute {
+    /// Directly.
+    Direct,
+    /// Through this SOCKS5 proxy, which resolves the host name.
+    Via(trs_socks::Proxy),
+    /// The proxy is on and not working: wait, never directly.
+    Held,
+}
+
+/// The engine's answer to "where does a connection go now?".
+pub type RouteFn = std::sync::Arc<dyn Fn() -> HttpRoute + Send + Sync>;
+
+/// [`RouteFn`] in a config that prints and compares.
+#[derive(Clone)]
+pub struct Route(pub RouteFn);
+
+impl std::fmt::Debug for Route {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Route")
+    }
+}
+
 /// Settings shared by every download of one [`Downloader`](crate::Downloader).
 #[derive(Clone, Debug)]
 pub struct DownloaderConfig {
@@ -29,6 +53,8 @@ pub struct DownloaderConfig {
     /// How often progress is made durable (fsync data, then rewrite the
     /// sidecar). A crash loses at most this much work.
     pub checkpoint_interval: Duration,
+    /// Where connections go (the torrent proxy, SPEC §7H); `None`: always directly.
+    pub route: Option<Route>,
 }
 
 impl Default for DownloaderConfig {
@@ -44,6 +70,7 @@ impl Default for DownloaderConfig {
             backoff_max: Duration::from_secs(60),
             max_retry_after: Duration::from_secs(600),
             checkpoint_interval: Duration::from_secs(2),
+            route: None,
         }
     }
 }

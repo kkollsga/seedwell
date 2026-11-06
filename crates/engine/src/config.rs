@@ -382,6 +382,9 @@ pub struct EngineConfig {
     /// How long a download must stay below `stall_rate` (or above it again) before the queue
     /// changes its mind (60 s, hysteresis both ways).
     pub stall_after: Duration,
+    /// Torrent traffic through a SOCKS5 proxy (SPEC §7H): set by the app from its key (never from `config.toml`, which
+    /// only says whether it is on; on without a key is a proxy with no server, which holds every torrent).
+    pub proxy: Option<crate::proxy::ProxyConfig>,
 }
 
 impl Default for EngineConfig {
@@ -459,6 +462,7 @@ impl Default for EngineConfig {
             retry_minute: Duration::from_secs(60),
             stall_rate: 2048,
             stall_after: Duration::from_secs(60),
+            proxy: None,
         }
     }
 }

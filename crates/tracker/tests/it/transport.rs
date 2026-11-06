@@ -15,6 +15,32 @@ use trs_tracker::response::{AnnounceError, TransportError};
 use trs_tracker::udp::{UdpConfig, UdpTransport};
 use trs_tracker::*;
 
+/// A loopback port that refuses connections, and nothing else can listen at (as `trs_platform::net::closed_tcp_port`,
+/// which this crate does not depend on). A port bound to port 0 and let go is in the system's range for ports it hands
+/// out (from 32768 on Linux, 49152 on macOS and Windows), so another test of a whole-suite run can be given it and
+/// listen there; this one is below those ranges, and checked: it binds, and a connection to it is refused (`std` binds
+/// with `SO_REUSEADDR` on macOS and Linux, which lets `127.0.0.1:p` be bound while something listens on `0.0.0.0:p`).
+fn closed_port() -> u16 {
+    let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().subsec_nanos() as u64 ^ (u64::from(std::process::id()) << 32);
+    let closed = |p: u16| {
+        let at = SocketAddr::from(([127, 0, 0, 1], p));
+        if std::net::TcpListener::bind(at).is_err() {
+            return false;
+        }
+        match std::net::TcpStream::connect_timeout(&at, Duration::from_millis(200)) {
+            Ok(_) => false,
+            Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => true,
+            // Windows says refused only after about 2 s of SYNs; there the bind found any listener already (no
+            // `SO_REUSEADDR`).
+            Err(e) => cfg!(windows) && e.kind() == std::io::ErrorKind::TimedOut,
+        }
+    };
+    (0..10_000u64)
+        .map(|i| 24_000 + ((seed ^ i).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 48) as u16 % 8_000)
+        .find(|p| closed(*p))
+        .expect("a closed port below the systems' ephemeral ranges")
+}
+
 /// A transport that may talk to the loopback mock servers of this file (the
 /// default policy refuses loopback: SSRF protection).
 fn local_http(version: &str) -> HttpTransport {
@@ -381,9 +407,7 @@ async fn http_keep_alive_reuses_one_connection() {
 #[tokio::test]
 async fn http_connect_refused_and_total_timeout_and_oversize() {
     // refused
-    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = l.local_addr().unwrap().port();
-    drop(l);
+    let port = closed_port();
     let out = local_http("1")
         .announce(&gated(&format!("http://127.0.0.1:{port}/announce")))
         .await;
@@ -792,9 +816,7 @@ async fn quit_stop_over_a_fast_tracker_completes_and_reuses_nothing_special() {
 #[tokio::test]
 async fn quit_stop_to_a_refusing_host_is_never_reached() {
     use trs_tracker::http::QuitLimits;
-    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = l.local_addr().unwrap().port();
-    drop(l);
+    let port = closed_port();
     let limits = QuitLimits { connect: Duration::from_secs(3), answer: Duration::from_secs(2) };
     let out = local_http("1").announce_quit(&gated_stopped(&format!("http://127.0.0.1:{port}/announce")), limits).await;
     assert!(out.result.unwrap_err().never_reached_tracker());
@@ -808,4 +830,50 @@ async fn a_bound_transport_listens_on_its_address_only() {
     assert_eq!(t.local_addr_v4().unwrap().ip(), std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
     let any = UdpTransport::bind(fast_udp()).await.unwrap();
     assert!(any.local_addr_v4().unwrap().ip().is_unspecified());
+}
+
+// ------------------------------------------------------------------ through a SOCKS5 proxy (SPEC §7H)
+
+/// Failure: an announce through the proxy resolves the tracker's name on this computer (a DNS leak) or connects to
+/// the tracker directly. The name `tracker.invalid` exists only at the fake proxy, so a local lookup would fail, and
+/// the tracker counts one connection, the proxy's.
+#[tokio::test]
+async fn http_announce_through_the_proxy_sends_the_name_to_the_proxy() {
+    let s = serve(|_, _| Some(http_response("200 OK", &[], &bencode_ok(1800)))).await;
+    let fake = trs_socks::testkit::FakeProxy::start("user", "pass").await;
+    fake.map_name("tracker.invalid", s.addr.ip());
+    let t = HttpTransport::with_proxy("0.0.1", HttpConfig { policy: DestinationPolicy::LOCAL, ..HttpConfig::default() }, fake.proxy());
+    let req = gated(&format!("http://tracker.invalid:{}/announce?passkey=k1", s.addr.port()));
+    let out = t.announce(&req).await;
+    assert_eq!(out.result.unwrap().peers.len(), 2);
+    assert_eq!(fake.connects(), vec![format!("tracker.invalid:{}", s.addr.port())]);
+    assert_eq!(s.connections.load(Ordering::SeqCst), 1);
+    let got = s.requests.lock().unwrap()[0].clone();
+    assert!(got.contains(&format!("Host: tracker.invalid:{}", s.addr.port())), "{got}");
+    assert!(!got.to_ascii_lowercase().contains("proxy-authorization"), "SOCKS credentials never reach HTTP: {got}");
+}
+
+/// Failure: with the proxy down or the credentials wrong, the announce goes directly to the tracker (no kill
+/// switch), or the failure counts against the tracker (its breaker) instead of saying the proxy is the problem.
+#[tokio::test]
+async fn http_announce_never_goes_direct_when_the_proxy_fails() {
+    let s = serve(|_, _| Some(http_response("200 OK", &[], &bencode_ok(1800)))).await;
+    let fake = trs_socks::testkit::FakeProxy::start("user", "pass").await;
+    let mut wrong = fake.proxy();
+    wrong.auth = Some(trs_socks::Credentials::new("user", "nope").unwrap());
+    let cfg = HttpConfig { policy: DestinationPolicy::LOCAL, ..HttpConfig::default() };
+    let t = HttpTransport::with_proxy("0.0.1", cfg, wrong);
+    let out = t.announce(&gated(&url_for(&s, "/announce"))).await;
+    let e = out.result.unwrap_err();
+    assert_eq!(e, AnnounceError::Transport(TransportError::Proxy(ProxyBlock::Down)));
+    assert!(e.never_reached_tracker() && !e.is_host_failure() && !e.is_unreachable(), "not the tracker's fault, not an outage");
+    fake.stop().await;
+    let t = HttpTransport::with_proxy("0.0.1", cfg, fake.proxy());
+    let out = t.announce(&gated(&url_for(&s, "/announce"))).await;
+    assert_eq!(out.result.unwrap_err(), AnnounceError::Transport(TransportError::Proxy(ProxyBlock::Down)));
+    assert_eq!(s.connections.load(Ordering::SeqCst), 0, "nothing reached the tracker directly");
+    // `localhost` would be the proxy's own: refused like a local lookup of it.
+    let t = HttpTransport::with_proxy("0.0.1", HttpConfig::default(), fake.proxy());
+    let out = t.announce(&gated("http://localhost:1/announce")).await;
+    assert!(matches!(out.result.unwrap_err(), AnnounceError::Transport(TransportError::Forbidden(_))));
 }

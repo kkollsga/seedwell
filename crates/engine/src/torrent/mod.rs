@@ -604,6 +604,7 @@ impl Torrent {
             plain_peers: init.shared.plain_peers.clone(),
             utp: init.shared.utp.clone(),
             utp_probe_timeout: cfg.utp_probe_timeout,
+            proxy: init.shared.proxy.clone(),
         });
         ctx.torrent_up.set(up_limit);
         ctx.group.assign(init.group.clone());
@@ -835,6 +836,8 @@ impl Torrent {
             }
             TorrentCmd::ConfigChanged => {
                 self.cfg = self.sh.cfg();
+                // The proxy may have come on (SPEC §7H): direct connections go.
+                self.drop_direct_peers();
                 self.refresh_pex();
             }
             TorrentCmd::Detail(reply) => {

@@ -171,12 +171,30 @@ core_async! {
     in_order fn set_file_priorities_async = set_file_priorities "set_file_priorities" (id: String, changes: Vec<FilePriorityChange>) -> Result<(), CoreError>;
     /// Deletes the tracker log.
     in_order fn tracker_log_clear_async = tracker_log_clear "tracker_log_clear" ();
+    /// The torrent proxy on or off (the shield icon's click with a key installed, SPEC §7H): the new model. Refused
+    /// without a key (the host opens the window then).
+    in_order fn proxy_toggle_async = proxy_toggle "proxy_toggle" () -> Result<ProxyModel, CoreError>;
+    /// Where the user is, for the torrent proxy's server choice (a code from the model's `countries`, "" none);
+    /// chosen by hand only. The new model.
+    in_order fn proxy_set_country_async = proxy_set_country "proxy_set_country" (code: String) -> Result<ProxyModel, CoreError>;
+    /// Forgets the torrent proxy's key; torrents connect directly again.
+    in_order fn proxy_remove_key_async = proxy_remove_key "proxy_remove_key" () -> Result<(), CoreError>;
 
     // ------------------------------------------------------------ reads and round trips, each on its own thread
 
     /// The user's Approve or Deny of an agent's request for access (a button, the menu, a notification's action): the
     /// change is made (a setting saved, a channel's switch, ...), and what happened is said.
     apart fn agent_request_decide_async = agent_request_decide "agent_request_decide" (id: String, approve: bool) -> AgentRequestAnswer;
+
+    /// Tests NordVPN service credentials with NordVPN's documented SOCKS5 servers (a few seconds at most), keeps them
+    /// in the secret store and turns the torrent proxy on (SPEC §7H). Wrong ones keep nothing and say so. The sentence
+    /// to show.
+    apart fn proxy_set_nordvpn_key_async = proxy_set_nordvpn_key "proxy_set_nordvpn_key" (user: String, pass: String) -> Result<String, CoreError>;
+    /// "Find a Faster Server": tests every server of the torrent proxy now, switches to the best, and says the
+    /// outcome (a few seconds at most).
+    apart fn proxy_find_faster_async = proxy_find_faster "proxy_find_faster" () -> Result<String, CoreError>;
+    /// A SOCKS5 proxy of the user's own (username and password both or neither): tested, kept, turned on.
+    apart fn proxy_set_custom_async = proxy_set_custom "proxy_set_custom" (host: String, port: u16, user: Option<String>, pass: Option<String>) -> Result<String, CoreError>;
 
     /// "Ask Tracker Again": a manual re-announce.
     apart fn ask_tracker_again_async = ask_tracker_again "ask_tracker_again" (ids: Vec<String>) -> AskAgainOutcome;
@@ -253,9 +271,11 @@ core_async! {
     apart fn sync_add_folder_on_demand_async = sync_add_folder_on_demand "sync_add_folder_on_demand" (path: String) -> Result<SyncFolder, CoreError>;
     apart fn sync_join_on_demand_async = sync_join_on_demand "sync_join_on_demand" (link: String, place: String) -> Result<SyncFolder, CoreError>;
     apart fn sync_set_follow_async = sync_set_follow "sync_set_follow" (id: String, on: bool) -> Result<(), CoreError>;
-    apart fn sync_set_follow_read_only_async = sync_set_follow_read_only "sync_set_follow_read_only" (id: String, read_only: bool) -> Result<(), CoreError>;
-    /// The Share window's "On all my devices" and "Read only" (applied at once; the form's next role).
-    apart fn sync_share_set_devices_async = sync_share_set_devices "sync_share_set_devices" (form: SyncShareForm, on: bool, read_only: bool) -> Result<SyncShareForm, CoreError>;
+    apart fn sync_set_read_only_async = sync_set_read_only "sync_set_read_only" (id: String, on: bool) -> Result<(), CoreError>;
+    /// The Share window's "On all my devices" (applied at once).
+    apart fn sync_share_set_devices_async = sync_share_set_devices "sync_share_set_devices" (form: SyncShareForm, on: bool) -> Result<SyncShareForm, CoreError>;
+    /// The Share window's "Read only" (applied at once; the form's next role).
+    apart fn sync_share_set_read_only_async = sync_share_set_read_only "sync_share_set_read_only" (form: SyncShareForm, on: bool) -> Result<SyncShareForm, CoreError>;
 
     // ------------------------------------------------------------ devices
 

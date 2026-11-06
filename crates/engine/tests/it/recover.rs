@@ -247,8 +247,16 @@ async fn missing_data_backs_off_instead_of_a_flat_minute() {
     }
 
     // Back again: the mount notification resumes it at once, no waiting for the 60 minute step.
+    // A retry that runs between the two steps finds the place free (outside /Volumes the storage layer may create the
+    // save folder again): what it made there is empty and goes, and the data comes back (it was racy: "Directory not
+    // empty" on the rename).
     std::fs::remove_file(&mnt).unwrap();
-    std::fs::rename(&off, &mnt).unwrap();
+    let mut tries = 0;
+    while let Err(e) = std::fs::rename(&off, &mnt) {
+        tries += 1;
+        assert!(tries < 50, "the volume could not come back: {e}");
+        std::fs::remove_dir_all(&mnt).unwrap();
+    }
     leech.h.volumes_changed();
     leech.h.add_peers(t.id, vec![seeder.addr()]);
     wait_done(&leech, &t.id, 60).await;

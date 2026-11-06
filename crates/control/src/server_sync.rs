@@ -43,6 +43,18 @@ fn status_of(h: &SyncHandle, id: &str) -> Result<FolderStatus, ApiError> {
 }
 
 /// A folder for an agent: the channel that goes with it only while that channel is open to agents.
+/// `sync.read_only` and `sync.set_read_only`: the folder's Read only as this Mac has it (`said`: just switched to that;
+/// the note says so).
+fn read_only_reply(h: &SyncHandle, f: &FolderStatus, said: Option<bool>) -> Result<Reply, ApiError> {
+    let st = h.read_only_state(&folder_id(f)?).ok_or_else(|| ApiError::not_found("the folder is no longer synced"))?;
+    let note = match said {
+        Some(true) => Some(format!("{} is Read only: only its owners' changes count", clip(&f.name, 80))),
+        Some(false) => Some(format!("{} is no longer Read only", clip(&f.name, 80))),
+        None => None,
+    };
+    reply(&SyncReadOnlyDto { id: f.id.clone(), name: f.name.clone(), read_only: st.on, may_switch: st.owner, held: st.held, note })
+}
+
 fn folder_out(h: &SyncHandle, f: &FolderStatus) -> SyncFolderDto {
     let mut d = folder_dto(f);
     if d.channel_id.as_deref().is_some_and(|c| !super::chat_methods::channel_visible(h, c)) {
@@ -128,11 +140,11 @@ pub(super) async fn call<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &Conn, req: Reques
         }
         Request::SyncShare(p) => {
             let f = pick(&h, &p.folder)?;
-            // No role given: Read & write, or Read only while the folder is Read only on the user's devices (as the
-            // app's Share dialog starts).
+            // No role given: Read & write, or Read only while the folder is Read only (as the app's Share dialog
+            // starts).
             let role = match p.role.as_deref() {
                 Some(r) => s::parse_role(r)?,
-                None if h.follow_read_only(&folder_id(&f)?) => Role::ReadOnly,
+                None if h.read_only(&folder_id(&f)?) => Role::ReadOnly,
                 None => Role::ReadWrite,
             };
             let (uses, days) = (p.uses.unwrap_or(1), p.days.unwrap_or(7));
@@ -196,8 +208,14 @@ pub(super) async fn call<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &Conn, req: Reques
             let members = h.members(&id).map_err(s::err)?;
             let m = s::resolve_member(&members, &p.device)?;
             h.remove_device(&id, &m.device).map_err(s::err)?;
-            let mut r = folder_reply(&h, &status_of(&h, &f.id)?, "device removed from")?;
-            r.note = Some(format!("{} removed from {}", clip(&m.name, 60), clip(&f.name, 80)));
+            // An admin asks the owners: their device removes it (members shows it waiting until then).
+            let asked = f.role == Some(Role::Admin);
+            let mut r = folder_reply(&h, &status_of(&h, &f.id)?, if asked { "removal asked of the owner of" } else { "device removed from" })?;
+            r.note = Some(if asked {
+                format!("asked the owner of {} to remove {}: it is cut off here now, and the owner's device removes it when it hears of it", clip(&f.name, 80), clip(&m.name, 60))
+            } else {
+                format!("{} removed from {}", clip(&m.name, 60), clip(&f.name, 80))
+            });
             Ok(r)
         }
         Request::SyncReshare(p) => {
@@ -251,6 +269,15 @@ pub(super) async fn call<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &Conn, req: Reques
             let f = pick(&h, &p.folder)?;
             h.set_lan_only(&folder_id(&f)?, p.lan_only).map_err(s::err)?;
             folder_reply(&h, &status_of(&h, &f.id)?, if p.lan_only { "local network only for" } else { "everywhere again for" })
+        }
+        Request::SyncReadOnly(p) => {
+            let f = pick(&h, &p.folder)?;
+            read_only_reply(&h, &f, None)
+        }
+        Request::SyncSetReadOnly(p) => {
+            let f = pick(&h, &p.folder)?;
+            h.set_read_only(&folder_id(&f)?, p.read_only).map_err(s::err)?;
+            read_only_reply(&h, &f, Some(p.read_only))
         }
         Request::SyncConflicts(p) => {
             let f = pick(&h, &p.folder)?;

@@ -18,6 +18,7 @@ pub mod persist;
 mod probe;
 pub mod picker;
 pub mod policy;
+pub mod proxy;
 pub mod queue;
 pub mod ratelimit;
 pub mod tier;
@@ -57,6 +58,7 @@ pub use state_store::StateStore;
 
 pub use api::*;
 pub use config::{EngineConfig, TierTimings};
+pub use proxy::{ProxyConfig, ProxyHealth, ProxyProblem, ProxyStatus};
 pub use tier::Tier;
 /// Same-volume check and the Settings warning for incomplete -> finished pairs on different
 /// disks (SPEC 7A.4); see `trs_state::volume`.

@@ -78,6 +78,8 @@ pub(crate) fn error_text(e: &AnnounceError) -> String {
             TransportError::Tls => "TLS handshake or certificate failure".into(),
             TransportError::Forbidden(r) => format!("destination not allowed by the network policy: {r}"),
             TransportError::NotSent => "not sent (a local write failed)".into(),
+            TransportError::Proxy(trs_tracker::ProxyBlock::Down) => "not sent (the proxy is not working; never sent directly)".into(),
+            TransportError::Proxy(trs_tracker::ProxyBlock::Udp) => "not sent (UDP trackers are off while the proxy is on)".into(),
             TransportError::Io => "connection reset or I/O error".into(),
             TransportError::Redirect => "too many or refused redirects".into(),
             TransportError::TooLarge => "answer too large".into(),

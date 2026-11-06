@@ -11,9 +11,10 @@ protocol FileProviderDomains: Sendable {
     /// Removes the domain; what the system had not handed to the extension yet is kept, and its place returned.
     func remove(id: String) async throws -> URL?
     func signal(id: String) async throws
-    func rootURL(id: String) async throws -> URL?
-    /// Waits until the system has handed the extension every change below the domain's root.
-    func waitForChanges(id: String) async throws
+    /// Where the Finder shows an item of the domain (the core's identifier; `root`: the domain's own folder).
+    func itemURL(id: String, item: String) async throws -> URL?
+    /// Waits until the system has handed the extension every change below the item (`root`: the whole domain).
+    func waitForChanges(id: String, below item: String) async throws
     /// The items (the core's identifiers) the system has on disk in the domain.
     func materialized(id: String) async throws -> [String]
     /// Asks the system to download an item (it fetches it from the extension when it can).
@@ -52,9 +53,9 @@ struct SystemDomains: FileProviderDomains {
         try await m.signalEnumerator(for: .workingSet)
     }
 
-    func rootURL(id: String) async throws -> URL? {
+    func itemURL(id: String, item: String) async throws -> URL? {
         guard let d = try await domain(id), let m = NSFileProviderManager(for: d) else { return nil }
-        return try await m.getUserVisibleURL(for: .rootContainer)
+        return try await m.getUserVisibleURL(for: FPIdentifiers.provider(item))
     }
 
     func materialized(id: String) async throws -> [String] {
@@ -67,9 +68,11 @@ struct SystemDomains: FileProviderDomains {
         }
     }
 
-    func waitForChanges(id: String) async throws {
+    /// `NSFileProviderManager.waitForChanges(below:)` (macOS 11.3, the Barrier category): returns once the system has
+    /// handed the extension every change on disk below the item.
+    func waitForChanges(id: String, below item: String) async throws {
         guard let d = try await domain(id), let m = NSFileProviderManager(for: d) else { return }
-        try await m.waitForChanges(below: .rootContainer)
+        try await m.waitForChanges(below: FPIdentifiers.provider(item))
     }
 
     func requestDownload(id: String, item: String) async throws {
@@ -79,21 +82,30 @@ struct SystemDomains: FileProviderDomains {
 }
 
 /// On-demand folders in the Finder (SPEC 7G.11), the app's side: it serves the extension (the core's server, at the
-/// socket in the app group's container), keeps one domain per on-demand folder (the core says which), signals the
-/// system when a folder's change feed moves, and notices when macOS keeps a domain switched off (a new domain is,
-/// until the user allows it in System Settings).
+/// socket in the app group's container) and keeps one domain, the hub (*Seedwell* in the Finder's sidebar), which lists
+/// every synced folder as the core says: on-demand folders as folders of placeholders, full ones as links to their
+/// place. It signals the system when the hub's feed moves, lets go of a folder before the core removes or switches it,
+/// moves the domains of the per-folder era over once, and notices when macOS keeps the hub switched off (a new domain
+/// is, until the user allows it in System Settings).
 @MainActor @Observable final class FileProviderHost {
     @ObservationIgnored let core: Core
     @ObservationIgnored let domains: FileProviderDomains
-    /// On-demand folders macOS keeps out of the Finder until the user allows Seedwell.
+    /// The hub's domain (the core's).
+    @ObservationIgnored let hub: SyncHostDomain
+    /// Domains macOS keeps out of the Finder until the user allows Seedwell (the hub, while it is off).
     private(set) var disabled: Set<String> = []
     /// Opens the window that asks the user to allow Seedwell (wired by the app delegate).
     @ObservationIgnored var showSetup: () -> Void = {}
-    /// Tells the user something (what the system kept of a removed domain, and where it is now).
+    /// Tells the user something (what the system kept of a folder let go of, and where it is now).
     @ObservationIgnored var onNotice: (_ title: String, _ text: String) -> Void = { _, _ in }
-    /// One reconcile at a time: each waits for the one before (a stale list never undoes a newer one).
+    /// The core's let-go of a folder and its undo (plumbing: a test records them). They read the disk: run off the
+    /// main thread.
+    @ObservationIgnored var letGo: @Sendable (_ folder: String, _ visible: String?) throws -> SyncHostNotice?
+    @ObservationIgnored var undoLetGo: @Sendable (_ folder: String) -> Void
+    /// One reconcile at a time: each waits for the one before (a stale list never undoes a newer one). The migration
+    /// from per-folder domains is the first of them.
     @ObservationIgnored private var reconciling: Task<Void, Never>?
-    /// The domains the core last asked for.
+    /// The domains the core last asked for (the hub, once any folder is synced).
     @ObservationIgnored private var wanted: [SyncHostDomain] = []
     /// Domains whose held files were shown downloaded this run (once each, when enabled), and those doing it now.
     @ObservationIgnored private var shownHeld: Set<String> = []
@@ -104,19 +116,24 @@ struct SystemDomains: FileProviderDomains {
     init(core: Core, domains: FileProviderDomains = SystemDomains()) {
         self.core = core
         self.domains = domains
+        hub = core.syncHostHubDomain()
+        letGo = { folder, visible in try core.syncHostLetGo(id: folder, visible: visible) }
+        undoLetGo = { folder in core.syncHostLetGoUndo(id: folder) }
     }
 
-    /// Serves the extension (the user's own app only: the core refuses an isolated run).
+    /// Serves the extension (the user's own app only: the core refuses an isolated run), then moves the domains of the
+    /// per-folder era over (once) before the hub is registered.
     func start() {
         guard let dir = FPGroup.container else {
             log.error("no app group container: on-demand folders stay out of the Finder")
             return
         }
         do {
-            let socket = try core.syncHostStart(dir: dir.path, listener: FileProviderListener(self))
+            let socket = try core.syncHostStart(dir: dir.path, listener: FileProviderListener(self), mode: .hub)
             log.info("serving the File Provider extension at \(socket, privacy: .public)")
             // Removals the app did not finish the last time it ran.
             for n in core.syncHostUnfinishedReleases() { onNotice(n.title, n.text) }
+            beginMigration()
         } catch {
             log.error("File Provider server: \(SyncText.message(error), privacy: .public)")
         }
@@ -128,12 +145,21 @@ struct SystemDomains: FileProviderDomains {
         core.syncHostStop()
     }
 
+    /// The migration runs first; reconciles (the hub's registration among them) wait for it.
+    func beginMigration() {
+        let before = reconciling
+        reconciling = Task { @MainActor [weak self] in
+            await before?.value
+            await self?.migrate()
+        }
+    }
+
     // MARK: The core's calls
 
-    /// The domains there should be (the core reports them only while folder sync runs): the missing ones are added,
-    /// renamed ones take the new name. A domain the list lacks is never removed for that: only when the core says
-    /// its folder was removed or is full (one left from before; a folder let go of now goes through `releaseDomain`).
-    /// One at a time, in order.
+    /// The domains there should be (the core reports them only while folder sync runs: the hub, while any folder is
+    /// synced): a missing one is added, a renamed one takes the new name. Nothing is removed for that (the domains of
+    /// the per-folder era went in the migration; a folder leaves the hub through `releaseDomain`). One at a time, in
+    /// order, after the migration.
     func reconcile(_ want: [SyncHostDomain]) async {
         let before = reconciling
         let next = Task { @MainActor [weak self] in
@@ -145,72 +171,133 @@ struct SystemDomains: FileProviderDomains {
     }
 
     private func reconcileNow(_ want: [SyncHostDomain]) async {
+        if want.contains(where: { $0.id == hub.id }) {
+            // The core tells the hub again when an on-demand folder joined it (switched here, by the command line or an
+            // agent): what the core holds shows downloaded again (asking for what is on disk already asks nothing).
+            shownHeld.remove(hub.id)
+        }
         wanted = want
         var new: Set<String> = []
         do {
             let have = try await domains.list()
             for d in want where !have.contains(where: { $0.id == d.id && $0.name == d.name }) {
-                // One that cannot be added now is tried again on its own (the others go on).
+                // One that cannot be added now is tried again on its own.
                 guard await addDomain(d.id, name: d.name) else { continue }
                 if !have.contains(where: { $0.id == d.id }) { new.insert(d.id) }
                 log.info("domain added: \(d.name, privacy: .public)")
-            }
-            let core = self.core
-            for h in have where !want.contains(where: { $0.id == h.id }) {
-                let state = await Task.detached(priority: .utility) { core.syncHostFolderState(id: h.id) }.value
-                guard state == .removed || state == .full else { continue }
-                let preserved = try await domains.remove(id: h.id)
-                log.info("domain of a folder no longer on demand removed: \(h.name, privacy: .public)")
-                await keep(preserved, id: h.id, name: h.name)
             }
         } catch {
             log.error("domains: \(error.localizedDescription, privacy: .public)")
         }
         await refreshEnabled()
-        // A folder made on demand elsewhere (the CLI, an agent): asked once, as when the user switches one here.
+        // The hub registered now and kept off by macOS: the user is asked, once.
         if !new.isDisjoint(with: disabled) { showSetup() }
     }
 
-    /// How long the system may take to hand over a domain's pending changes before it is removed (plumbing: what it
-    /// still has then is kept by the removal anyway).
-    static let handOverWait: UInt64 = 60_000_000_000
+    /// How long the system may take to hand over a folder's pending changes before it is let go of (plumbing: what it
+    /// still has then is kept by the let-go anyway).
+    var handOverWait: UInt64 = 60_000_000_000
+
+    /// Runs `body` for at most `handOverWait`: the system's hand-over, which a stuck extension could hold forever.
+    /// `waitForChanges(below:)` ignores cancellation, so the two race and whichever ends first ends the wait (the
+    /// hand-over left behind finishes on its own); never awaited past the cap.
+    private func handOver(_ body: @escaping @Sendable () async throws -> Void) async {
+        let (log, wait, once) = (self.log, handOverWait, Once())
+        await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
+            let timer = Task.detached {
+                try? await Task.sleep(nanoseconds: wait)
+                if once.claim() {
+                    log.info("hand-over: no answer in time, going on")
+                    done.resume()
+                }
+            }
+            Task.detached {
+                do { try await body() } catch { log.info("hand-over: \(error.localizedDescription, privacy: .public)") }
+                if once.claim() {
+                    // Over first: the timer has nothing left to do.
+                    timer.cancel()
+                    done.resume()
+                }
+            }
+        }
+    }
 
     /// The core lets go of a folder (it is about to be removed or switched to full, whoever asked): the system hands
-    /// over its pending changes first, then the domain goes, and what the system kept is put where the user finds it.
-    /// The removal is noted first (a start after the app died in the middle tells the user). `attempt` says whether the
-    /// core still waits: once it gave up (its removal or switch refused), a late completion leaves the domain as it was
-    /// (or adds it back if it went meanwhile); what the system kept is put away either way.
+    /// over what it has pending below the folder in the hub (`waitForChanges(below:)`), then the core refuses what it
+    /// sends for it, keeps what is still on disk there and unsynced next to the folder (the user is told), and the
+    /// folder leaves the hub. The hub itself stays. `attempt` says whether the core still waits: once it gave up (its
+    /// removal or switch refused), nothing is let go of, and a let-go that finishes late is undone.
     func releaseDomain(_ id: String, attempt: ReleaseAttempt = ReleaseAttempt()) async -> SyncHostRemoval {
         do {
-            guard let d = try await domains.list().first(where: { $0.id == id }) else { return SyncHostRemoval(error: nil) }
-            let core = self.core
-            core.syncHostReleaseBegin(id: id, name: d.name)
-            defer { core.syncHostReleaseDone(id: id) }
-            let domains = self.domains
-            let waited = Task { try await domains.waitForChanges(id: id) }
-            let timeout = Task { try await Task.sleep(nanoseconds: Self.handOverWait); waited.cancel() }
-            _ = await waited.result
-            timeout.cancel()
+            // No hub registered: nothing of the folder is in the Finder.
+            guard let d = try await domains.list().first(where: { $0.id == hub.id }) else { return SyncHostRemoval(error: nil) }
+            let (core, domains, hubId) = (self.core, self.domains, hub.id)
+            let item = await Task.detached(priority: .utility) { core.syncHostHubItem(id: id) }.value
+            // Switched off, the system has nothing of it on disk, and nothing pending.
+            if d.enabled { await handOver { try await domains.waitForChanges(id: hubId, below: item) } }
             guard attempt.commit() else {
-                log.info("the core gave up waiting: the domain stays")
+                log.info("the core gave up waiting: the folder stays in the hub")
                 return SyncHostRemoval(error: syncHostText(t: .noAnswer))
             }
-            let preserved = try await domains.remove(id: id)
-            await keep(preserved, id: id, name: d.name)
+            let visible = d.enabled ? (try? await domains.itemURL(id: hubId, item: item))?.path : nil
+            let (letGo, undo) = (self.letGo, self.undoLetGo)
+            let r = await Task.detached(priority: .utility) { Result { try letGo(id, visible) } }.value
+            switch r {
+            case .success(let n): if let n { onNotice(n.title, n.text) }
+            case .failure(let e):
+                // Something there could not be kept: the folder stays (the system would delete it), and the removal or
+                // switch is refused with the core's words.
+                // (Never `finish`: a core that gave up meanwhile must hear a refusal, not that the folder went.)
+                await Task.detached(priority: .utility) { undo(id) }.value
+                log.error("let-go refused: \(SyncText.message(e), privacy: .public)")
+                return SyncHostRemoval(error: SyncText.message(e))
+            }
+            try? await domains.signal(id: hubId)
             if !attempt.finish() {
-                // The core refused meanwhile: the folder stays on demand, so its domain comes back (tried again until
-                // it does), its held files shown downloaded again.
-                await addDomain(id, name: d.name)
-                log.info("the core gave up while the domain went: added back")
+                // The core refused meanwhile: the folder stays, so it comes back in the hub.
+                let undo = self.undoLetGo
+                await Task.detached(priority: .utility) { undo(id) }.value
+                try? await domains.signal(id: hubId)
+                log.info("the core gave up while the folder was let go of: back in the hub")
                 return SyncHostRemoval(error: syncHostText(t: .noAnswer))
             }
-            disabled.remove(id)
-            wanted.removeAll { $0.id == id }
-            log.info("domain removed before its folder was removed or switched")
+            log.info("folder let go of before it was removed or switched")
             return SyncHostRemoval(error: nil)
         } catch {
             return SyncHostRemoval(error: error.localizedDescription)
         }
+    }
+
+    /// Moves the domains of the per-folder era (`~/Library/CloudStorage/Seedwell-<Name>`) over to the hub, once: the
+    /// core says which are left. Each goes through the safe path: noted first (a start after the app stopped in the
+    /// middle tells the user), the system's pending changes handed over, removed keeping what is unsynced, which goes
+    /// next to its folder (the user is told). Only when every one went is the migration noted done; else the next
+    /// start goes on with what is left. Never removes the hub.
+    func migrate() async {
+        let core = self.core
+        guard let have = try? await domains.list() else { return }
+        let registered = have.map { SyncHostDomain(id: $0.id, name: $0.name) }
+        let plan = await Task.detached(priority: .utility) { core.syncHostMigration(registered: registered) }.value
+        var whole = true
+        for d in plan {
+            // (Notes are files: written off the main thread.)
+            await Task.detached(priority: .utility) { core.syncHostReleaseBegin(id: d.id, name: d.name) }.value
+            if have.first(where: { $0.id == d.id })?.enabled == true {
+                let domains = self.domains
+                await handOver { try await domains.waitForChanges(id: d.id, below: FPIdentifiers.root) }
+            }
+            do {
+                let preserved = try await domains.remove(id: d.id)
+                await keep(preserved, id: d.id, name: d.name)
+                log.info("domain of the per-folder era removed: \(d.name, privacy: .public)")
+            } catch {
+                // Still there: nothing was lost, and the next start tries again.
+                whole = false
+                log.error("migration: \(d.name, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            }
+            await Task.detached(priority: .utility) { core.syncHostReleaseDone(id: d.id) }.value
+        }
+        if whole { await Task.detached(priority: .utility) { core.syncHostMigrationDone() }.value }
     }
 
     /// Waits before each new try to add a domain the system refused (plumbing; nothing else would try again until the
@@ -231,7 +318,7 @@ struct SystemDomains: FileProviderDomains {
             Task { @MainActor [weak self] in
                 for w in waits {
                     try? await Task.sleep(nanoseconds: w)
-                    guard let self, self.wanted.contains(where: { $0.id == id }) || self.core.syncHostFolderState(id: id) == .onDemand else { return }
+                    guard let self, self.wanted.contains(where: { $0.id == id }) else { return }
                     if (try? await self.domains.add(id: id, name: name)) != nil {
                         self.shownHeld.remove(id)
                         await self.refreshEnabled()
@@ -252,13 +339,13 @@ struct SystemDomains: FileProviderDomains {
         if let n { onNotice(n.title, n.text) }
     }
 
-    /// The folder's change feed moved: the system asks for the changes.
+    /// The hub's change feed moved: the system asks for the changes.
     func feedMoved(_ id: String) async {
         do { try await domains.signal(id: id) } catch { log.info("signal \(id, privacy: .public): \(error.localizedDescription, privacy: .public)") }
     }
 
-    /// Which of the wanted domains macOS keeps switched off. While any is, checked again every two seconds (System
-    /// Settings has no callback); the folder pages and the setup window follow.
+    /// Whether macOS keeps the hub switched off. While it does, checked again every two seconds (System Settings has
+    /// no callback); the folder pages and the setup window follow.
     func refreshEnabled() async {
         let now: Set<String>
         do {
@@ -268,7 +355,7 @@ struct SystemDomains: FileProviderDomains {
             return
         }
         if now != disabled { disabled = now }
-        // Enabled: what the core holds shows downloaded (once a run, and again after a switch).
+        // Enabled: what the core holds shows downloaded (once a run, and again when a folder became on demand).
         for d in wanted where !disabled.contains(d.id) && !shownHeld.contains(d.id) {
             shownHeld.insert(d.id)
             Task { await showHeld(d.id) }
@@ -283,15 +370,16 @@ struct SystemDomains: FileProviderDomains {
         }
     }
 
+    /// Whether macOS keeps on-demand folders out of the Finder now (the hub is off): the folder page says so.
+    func isOff(_ folder: String) -> Bool { disabled.contains(hub.id) }
+
     // MARK: The app's calls
 
-    /// A folder became on demand here (switched, joined): its domain now, and the setup window when macOS keeps it off.
+    /// A folder became on demand here (switched, joined): its files the core holds show downloaded in the hub. (The
+    /// user is asked to allow Seedwell once, when the hub is registered; the folder page says so while it is off.)
     func added(_ f: SyncFolder) async {
-        shownHeld.remove(f.id)
-        if !wanted.contains(where: { $0.id == f.id }) { wanted.append(SyncHostDomain(id: f.id, name: f.name)) }
-        await addDomain(f.id, name: f.name)
+        shownHeld.remove(hub.id)
         await refreshEnabled()
-        if disabled.contains(f.id) { showSetup() }
     }
 
     /// Files the core holds show downloaded in the Finder, not online only (a folder switched to on demand has every
@@ -322,9 +410,11 @@ struct SystemDomains: FileProviderDomains {
         }
     }
 
-    /// Where the Finder shows the folder (`~/Library/CloudStorage/Seedwell-<Name>`).
-    func rootURL(_ id: String) async -> URL? {
-        try? await domains.rootURL(id: id)
+    /// Where the Finder shows a synced folder: its item in the hub (`~/Library/CloudStorage/…/<Name>`).
+    func rootURL(_ folder: String) async -> URL? {
+        let core = self.core
+        let item = await Task.detached(priority: .utility) { core.syncHostHubItem(id: folder) }.value
+        return try? await domains.itemURL(id: hub.id, item: item)
     }
 }
 
@@ -381,6 +471,9 @@ final class FileProviderListener: SyncHostListener, @unchecked Sendable {
     func notice(title: String, text: String) {
         Task { @MainActor [weak host] in host?.onNotice(title, text) }
     }
+
+    /// Windows' entry in File Explorer's navigation pane: the Finder's one entry is the hub, a domain of its own.
+    func navPane(entry: SyncNavPane) {}
 }
 
 /// A removal's outcome, handed from the main actor to the core's waiting thread.
@@ -466,5 +559,18 @@ struct FileProviderSetupView: View {
         .frame(width: 440)
         .background(.background)
         .task { await host.refreshEnabled() }
+    }
+}
+
+/// A flag taken once, from any thread: of two racing ends, only the first goes on.
+final class Once: @unchecked Sendable {
+    private let lock = NSLock()
+    private var taken = false
+
+    func claim() -> Bool {
+        lock.withLock {
+            defer { taken = true }
+            return !taken
+        }
     }
 }

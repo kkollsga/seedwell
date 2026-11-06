@@ -63,8 +63,15 @@ C# (bundles in `Seedwell Sync/builds`, patches in `from-pc/`, messages in "Seedw
       keys). The Windows app passes no `SecretVault`. Verified by Windows CI only.
     - An Explorer Share verb.
     - Cloud Files on-demand folders (CfRegisterSyncRoot; `sync_ondemand.rs` is host-neutral) and their states.
-      No navigation-pane entry and no sparse package (the user's decision, 2026-11-03: Seedwell can have several
-      on-demand folders, each in its own place); each folder shows Cloud Files states wherever it lives.
+      Each folder shows Cloud Files states wherever it lives. **Seedwell has one File Explorer navigation-pane
+      entry, opening the Seedwell folder** (the user's decision, 2026-11-05, replacing that day's one entry per
+      on-demand folder and 2026-11-03's none). The folders live inside it, on-demand ones as their own Cloud Files
+      sync roots nested inside. The core describes it (`Core::sync_nav_pane` → `SyncNavPane`: `clsid`, `name`,
+      `target`, `marker`, `show`) and tells `CloudHost` at start and on each change (`SyncHostListener::nav_pane`):
+      the entry follows the Seedwell folder (Settings › Folder Sync › *Seedwell folder*), goes when `show` is false
+      and at uninstall, and a sweep after a crash removes only keys carrying the marker value. How it is registered
+      (the documented shell-namespace registry entries, or `StorageProviderSyncRootManager` and whether that needs
+      package identity) is researched first (SPEC §7G.11). `CloudHost.NavPane` only logs it so far.
     - Overlays.
 11. **QA protocol:** `--qa` verbs for every new window, so `qa/run.ps1` covers it.
 

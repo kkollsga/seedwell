@@ -20,6 +20,11 @@
 //! the first send may have been counted) and the family that worked is
 //! remembered per host for `family_memory`. See [`HttpConfig`].
 //!
+//! Through a SOCKS5 proxy ([`HttpTransport::with_proxy`], SPEC §7H) the tracker's name goes to the proxy, which
+//! resolves it: no local lookup, no family fallback (the proxy picks the address), never a direct connection. A
+//! failure of the proxy itself is [`TransportError::Proxy`] (nothing sent, not the tracker's fault). IP literals are
+//! still vetted by the policy, and so is the name `localhost`.
+//!
 //! It only accepts a `&GatedRequest`, so nothing but the `HostGate` can cause
 //! a request. The User-Agent is `Seedwell/<version>` with the version passed
 //! in by the caller; there is deliberately no way to set another value
@@ -53,7 +58,7 @@ use tower_service::Service;
 use crate::gate::GatedRequest;
 use crate::policy::{DestinationPolicy, Refusal};
 use crate::response::{
-    AnnounceError, AnnounceResponse, MAX_BODY, ParseError, TransportError, parse_announce_response,
+    AnnounceError, AnnounceResponse, MAX_BODY, ParseError, ProxyBlock, TransportError, parse_announce_response,
 };
 use crate::retry_after::parse_retry_after;
 use crate::scrape::{ScrapeEntry, parse_scrape_response, scrape_url};
@@ -206,8 +211,73 @@ impl Family {
     }
 }
 
-type Conn = HttpsConnector<HttpConnector<VettingResolver>>;
+type BoxError = Box<dyn std::error::Error + Send + Sync>;
+
+/// How a connection to a tracker is made: directly (the vetting resolver, then TCP), or through a SOCKS5 proxy that
+/// resolves the name itself.
+#[derive(Clone)]
+enum Dialer {
+    Direct(HttpConnector<VettingResolver>),
+    Socks(Arc<SocksDial>),
+}
+
+struct SocksDial {
+    proxy: trs_socks::Proxy,
+    timeout: Duration,
+    policy: DestinationPolicy,
+}
+
+impl Service<Uri> for Dialer {
+    type Response = hyper_util::rt::TokioIo<tokio::net::TcpStream>;
+    type Error = BoxError;
+    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, BoxError>> + Send + 'static>>;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), BoxError>> {
+        match self {
+            Dialer::Direct(c) => c.poll_ready(cx).map_err(Into::into),
+            Dialer::Socks(_) => Poll::Ready(Ok(())),
+        }
+    }
+
+    fn call(&mut self, uri: Uri) -> Self::Future {
+        match self {
+            Dialer::Direct(c) => {
+                let f = c.call(uri);
+                Box::pin(async move { f.await.map_err(Into::into) })
+            }
+            Dialer::Socks(d) => {
+                let d = d.clone();
+                Box::pin(async move {
+                    let host = uri.host().unwrap_or_default();
+                    let host = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')).unwrap_or(host).to_ascii_lowercase();
+                    let port = uri.port_u16().unwrap_or(if uri.scheme_str() == Some("https") { 443 } else { 80 });
+                    // The proxy would take `localhost` as its own: the same refusal as a local lookup would give.
+                    if !d.policy.allow_loopback && (host == "localhost" || host.ends_with(".localhost")) {
+                        return Err(Box::new(ResolveError::Forbidden(crate::policy::Refusal::Loopback)) as BoxError);
+                    }
+                    let (s, _) = trs_socks::connect(&d.proxy, &trs_socks::Target::Name(host, port), d.timeout).await?;
+                    Ok(hyper_util::rt::TokioIo::new(s))
+                })
+            }
+        }
+    }
+}
+
+type Conn = HttpsConnector<Dialer>;
 type HClient = Client<Conn, Empty<Bytes>>;
+
+fn finish_client(cfg: &HttpConfig, dialer: Dialer) -> HClient {
+    let https = HttpsConnectorBuilder::new()
+        .with_webpki_roots()
+        .https_or_http()
+        .enable_http1()
+        .wrap_connector(dialer);
+    Client::builder(TokioExecutor::new())
+        .http1_title_case_headers(true)
+        .pool_idle_timeout(cfg.pool_idle_timeout)
+        .pool_max_idle_per_host(2)
+        .build(https)
+}
 
 /// A client whose connector uses addresses of `family` only (`None`: both,
 /// raced by hyper's connector). hyper-util restricts the candidates to the
@@ -222,16 +292,7 @@ fn build_client(cfg: &HttpConfig, resolver: &VettingResolver, family: Option<Fam
         Some(Family::V6) => http.set_local_address(Some(IpAddr::V6(Ipv6Addr::UNSPECIFIED))),
         None => {}
     }
-    let https = HttpsConnectorBuilder::new()
-        .with_webpki_roots()
-        .https_or_http()
-        .enable_http1()
-        .wrap_connector(http);
-    Client::builder(TokioExecutor::new())
-        .http1_title_case_headers(true)
-        .pool_idle_timeout(cfg.pool_idle_timeout)
-        .pool_max_idle_per_host(2)
-        .build(https)
+    finish_client(cfg, Dialer::Direct(http))
 }
 
 /// One try of a request: what came back, and what we know about the connection.
@@ -316,7 +377,15 @@ pub struct HttpTransport {
     prefs: Prefs,
     user_agent: String,
     cfg: HttpConfig,
+    /// Every connection goes through a SOCKS5 proxy: no local lookup, one attempt.
+    proxied: bool,
+    /// May a direct connection still be made? Asked before every hop and before the other family's retry: the
+    /// torrent proxy may have come on since the request was released (SPEC §7H). `None`: always.
+    direct_gate: Option<DirectGate>,
 }
+
+/// See [`HttpTransport::with_direct_gate`].
+pub type DirectGate = Arc<dyn Fn() -> bool + Send + Sync>;
 
 impl HttpTransport {
     /// `version` is the application version, e.g. `"1.0.0"`; the User-Agent
@@ -346,6 +415,18 @@ impl HttpTransport {
         Self::build(version, cfg, Some(Arc::new(table)))
     }
 
+    /// Every request through the SOCKS5 `proxy` (SPEC §7H): the proxy resolves the tracker's name, a proxy that fails
+    /// is [`TransportError::Proxy`], and nothing is ever sent directly.
+    pub fn with_proxy(version: &str, cfg: HttpConfig, proxy: trs_socks::Proxy) -> Self {
+        let mut t = Self::build(version, cfg, None);
+        let socks = finish_client(&cfg, Dialer::Socks(Arc::new(SocksDial { proxy, timeout: cfg.connect_timeout, policy: cfg.policy })));
+        t.client = socks.clone();
+        t.only_v4 = socks.clone();
+        t.only_v6 = socks;
+        t.proxied = true;
+        t
+    }
+
     fn build(
         version: &str,
         cfg: HttpConfig,
@@ -368,7 +449,21 @@ impl HttpTransport {
             prefs: Arc::new(Mutex::new(HashMap::new())),
             user_agent: format!("Seedwell/{version}"),
             cfg,
+            proxied: false,
+            direct_gate: None,
         }
+    }
+
+    /// Every direct connection asks `gate` first, also inside one request (a redirect hop, the other family's
+    /// retry): `false` (the torrent proxy came on, SPEC §7H) and nothing more is sent directly; the request ends as
+    /// [`TransportError::Proxy`] (or with the first attempt's own failure, for the retry).
+    pub fn with_direct_gate(mut self, gate: DirectGate) -> Self {
+        self.direct_gate = Some(gate);
+        self
+    }
+
+    fn direct_allowed(&self) -> bool {
+        self.proxied || self.direct_gate.as_ref().is_none_or(|g| g())
     }
 
     /// The exact User-Agent that is sent.
@@ -493,6 +588,9 @@ impl HttpTransport {
                 && let Err(r) = self.cfg.policy.check(ip) {
                     return Err(AnnounceError::Transport(TransportError::Forbidden(r)));
                 }
+            if !self.direct_allowed() {
+                return Err(AnnounceError::Transport(TransportError::Proxy(ProxyBlock::Down)));
+            }
             let response = self.send(&uri, may_retry, quit, trace).await?;
             let status = response.status();
             lock(trace).status = Some(status.as_u16());
@@ -612,7 +710,7 @@ impl HttpTransport {
         let host = uri.host().unwrap_or_default().to_ascii_lowercase();
         let mut first: Option<Family> = None;
         let mut both_families = false;
-        if literal_ip(uri).is_none() {
+        if literal_ip(uri).is_none() && !self.proxied {
             let remembered = self.preferred(&host);
             if may_retry || remembered.is_some() {
                 // A failed lookup is the answer (nothing was written): looking up a
@@ -653,6 +751,9 @@ impl HttpTransport {
         let Some(second) = second else {
             return Err(first_err);
         };
+        if !self.direct_allowed() {
+            return Err(first_err);
+        }
         if first.is_some() {
             self.remember(&host, None);
         }
@@ -911,6 +1012,7 @@ fn classify(e: &hyper_util::client::legacy::Error) -> TransportError {
     let mut text = String::new();
     let mut kind_timeout = false;
     let mut resolve: Option<&ResolveError> = None;
+    let mut socks: Option<&trs_socks::Error> = None;
     let mut cur: Option<&(dyn std::error::Error + 'static)> = Some(e);
     while let Some(err) = cur {
         text.push_str(&err.to_string().to_ascii_lowercase());
@@ -922,7 +1024,19 @@ fn classify(e: &hyper_util::client::legacy::Error) -> TransportError {
         if let Some(r) = err.downcast_ref::<ResolveError>() {
             resolve = Some(r);
         }
+        if let Some(r) = err.downcast_ref::<trs_socks::Error>() {
+            socks = Some(r);
+        }
         cur = err.source();
+    }
+    if let Some(s) = socks {
+        return if s.is_proxy_fault() {
+            TransportError::Proxy(ProxyBlock::Down)
+        } else if *s == trs_socks::Error::TargetTimeout {
+            TransportError::ConnectTimeout
+        } else {
+            TransportError::Connect
+        };
     }
     if let Some(r) = resolve {
         return match r {

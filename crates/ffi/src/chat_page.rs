@@ -344,6 +344,9 @@ pub struct ChatMemberRow {
     pub role_menu: Option<ChatPageMenu>,
     /// Message Privately (an envelope symbol), for another member.
     pub message: Option<ChatPageButton>,
+    /// A grey line under the name while this computer (an admin) asked the owners to remove it: "Removal asked: waiting
+    /// for the owner", or why an owner's device refused (`SyncMember::removal`, as the folder page's member line).
+    pub removal: Option<String>,
 }
 
 /// A device gone from the channel: the line and its Remove from Channel… (asks first).
@@ -886,13 +889,17 @@ fn members_panel(c: &SyncChannel, members: &[SyncMember], now: u64) -> ChatMembe
         .into_iter()
         .map(|m| {
             let name = named(&m.name, &m.user);
-            let role_menu = (c.role == SyncRole::Owner && !m.is_me).then(|| {
-                let mut entries: Vec<ChatPageMenuEntry> = ROLES
-                    .iter()
-                    .map(|&r| it(role(r), ChatPageCommand::SetRole { device_id: m.device_id.clone(), role: r }).enabled(r != m.role).entry())
-                    .collect();
-                entries.push(ChatPageMenuEntry::Separator);
-                entries.push(item("Remove from Channel", ChatPageCommand::RemoveDevice { device_id: m.device_id.clone() }));
+            // An owner changes roles and removes anyone; an admin removes a user (Read & write, Read only).
+            let owner = c.role == SyncRole::Owner;
+            let admin_removes = c.role == SyncRole::Admin && crate::sync_page::admin_may_remove(m.role);
+            let role_menu = (!m.is_me && (owner || admin_removes)).then(|| {
+                let mut entries: Vec<ChatPageMenuEntry> = Vec::new();
+                if owner {
+                    entries.extend(ROLES.iter().map(|&r| it(role(r), ChatPageCommand::SetRole { device_id: m.device_id.clone(), role: r }).enabled(r != m.role).entry()));
+                    entries.push(ChatPageMenuEntry::Separator);
+                }
+                // An admin's request waits for the owner: not asked twice.
+                entries.push(it("Remove from Channel", ChatPageCommand::RemoveDevice { device_id: m.device_id.clone() }).enabled(owner || !m.removal_waiting).entry());
                 ChatPageMenu { title: role(m.role).into(), help: String::new(), entries }
             });
             ChatMemberRow {
@@ -905,6 +912,7 @@ fn members_panel(c: &SyncChannel, members: &[SyncMember], now: u64) -> ChatMembe
                     accessibility_label: Some("Message Privately".into()),
                     ..button("Message Privately", format!("Message {name} privately"), ChatPageCommand::MessagePrivately { device_id: m.device_id.clone(), name })
                 }),
+                removal: m.removal.clone(),
             }
         })
         .collect();

@@ -170,6 +170,8 @@ pub fn describe(r: &Request) -> String {
         Request::SyncPause(p) => format!("pause folder {}", folder(&p.folder)),
         Request::SyncResume(p) => format!("resume folder {}", folder(&p.folder)),
         Request::SyncRescan(p) => format!("rescan folder {}", folder(&p.folder)),
+        Request::SyncReadOnly(p) => format!("read whether folder {} is Read only", folder(&p.folder)),
+        Request::SyncSetReadOnly(p) => format!("{} folder {}", if p.read_only { "make Read only:" } else { "turn Read only off for" }, folder(&p.folder)),
         Request::SyncSetLanOnly(p) => format!("{} for folder {}", if p.lan_only { "sync only on the local network" } else { "sync everywhere" }, folder(&p.folder)),
         Request::SyncConflicts(p) => format!("list conflicts of folder {}", folder(&p.folder)),
         Request::SyncResolve(p) => format!("resolve conflict {} in folder {}, keep {}", clip(&p.copy, 200), folder(&p.folder), clip(&p.keep, 20)),

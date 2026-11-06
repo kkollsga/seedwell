@@ -7,7 +7,7 @@ namespace Seedwell;
 
 /// <summary>
 /// A synced folder's Edit dialog on Windows (the Mac's folder editor), drawn from the core's <c>SyncEditWindowModel</c>
-/// (trs-ffi sync_dialogs.rs): the name, where it is with Move…, Files on demand, "On all my devices", Share… with its
+/// (trs-ffi sync_dialogs.rs): the name, where it is with Move…, Files on demand, "On all my devices", "Read only", Share… with its
 /// note, and the Options (Pause, Local network only, Rescan Now). The form is the core's value: this keeps it, edits
 /// the fields itself and the new place through <c>sync_edit_choose_parent</c>, and draws the model again after each
 /// change. Save closes without a call when nothing changed, else runs <c>sync_edit_save</c> off the UI thread (every
@@ -157,7 +157,12 @@ sealed class EditFolderDialog
         }
         if (model.Follow is FollowLine follow)
         {
-            content.Children.Add(AddFolderDialog.Follow(follow, form.AllDevices, !saving, on => Change(form with { AllDevices = on }), ro => Change(form with { ReadOnly = ro })));
+            content.Children.Add(AddFolderDialog.Follow(follow, form.AllDevices, !saving, on => Change(form with { AllDevices = on })));
+        }
+        if (model.ReadOnly is ReadOnlyLine readOnly)
+        {
+            content.Children.Add(ShareDialog.Rule());
+            content.Children.Add(AddFolderDialog.ReadOnly(readOnly, !saving, on => Change(form with { ReadOnly = on })));
         }
 
         content.Children.Add(new TextBlock { Text = model.ShareCaption, Margin = new Thickness(0, 6, 0, 0) });

@@ -39,13 +39,16 @@ impl Downloader {
     /// `gate` is the engine's global download limiter: every few KiB this
     /// downloader accepts is first granted by it.
     pub fn new(cfg: DownloaderConfig, gate: Arc<dyn RateGate>) -> Self {
-        let net = Net::new(NetConfig {
-            version: cfg.version.clone(),
-            max_connections_per_host: cfg.max_connections_per_host,
-            connect_timeout: cfg.connect_timeout,
-            read_timeout: cfg.read_timeout,
-            max_redirects: cfg.max_redirects,
-        });
+        let net = Net::with_route(
+            NetConfig {
+                version: cfg.version.clone(),
+                max_connections_per_host: cfg.max_connections_per_host,
+                connect_timeout: cfg.connect_timeout,
+                read_timeout: cfg.read_timeout,
+                max_redirects: cfg.max_redirects,
+            },
+            cfg.route.as_ref().map(|r| r.0.clone()),
+        );
         Downloader { inner: Arc::new(Inner { net, gate, cfg }) }
     }
 

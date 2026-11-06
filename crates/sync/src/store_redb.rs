@@ -107,6 +107,8 @@ const LOCAL_TOTALS_KEY: &str = "local_totals";
 const FEED_FLOOR_KEY: &str = "feed_floor";
 /// [`IndexStore::ignore_applied`] (absent: none noted; an earlier build ignores the key).
 const IGNORE_APPLIED_KEY: &str = "ignore_applied";
+/// [`IndexStore::held`] (absent: not held; an earlier build ignores the key).
+const HELD_KEY: &str = "held_read_only";
 
 /// Most holders one need record may list.
 const MAX_HOLDERS: usize = 1 << 16;
@@ -211,6 +213,26 @@ pub struct RedbStore {
     feeds_host: bool,
     /// [`IndexStore::ignore`].
     ignore: Option<Arc<crate::ignore::Ignore>>,
+    /// [`IndexStore::owners_only`].
+    owners_only: Option<Arc<BTreeSet<ShortId>>>,
+    /// A [`RedbReader::snapshot`]'s one read transaction: every read sees the same committed state.
+    pinned: Option<Arc<ReadTransaction>>,
+}
+
+/// A read transaction of a store's own, or a snapshot's.
+enum Rtx {
+    Own(ReadTransaction),
+    Pinned(Arc<ReadTransaction>),
+}
+
+impl std::ops::Deref for Rtx {
+    type Target = ReadTransaction;
+    fn deref(&self) -> &ReadTransaction {
+        match self {
+            Rtx::Own(t) => t,
+            Rtx::Pinned(t) => t,
+        }
+    }
 }
 
 /// A read-only handle on an open index, for reads that must not wait for whoever holds the store: a device
@@ -243,7 +265,20 @@ impl RedbReader {
             read_only: true,
             feeds_host: false,
             ignore: None,
+            owners_only: None,
+            pinned: None,
         }
+    }
+
+    /// A view ([`Self::view`]) whose reads all see one committed state, the one committed when it was made: what is read
+    /// of several records or tables together never mixes the states before and after a commit made between the reads
+    /// (a file's record from before the pull round that placed it, and what it needs from after). Held only as long as
+    /// those reads take: what a commit after it frees stays allocated until it is dropped.
+    pub fn snapshot(&self) -> io::Result<RedbStore> {
+        let rtx = guard(&self.path, || self.db.begin_read().map_err(dbe))?;
+        let mut view = self.view();
+        view.pinned = Some(Arc::new(rtx));
+        Ok(view)
     }
 }
 
@@ -335,6 +370,8 @@ impl RedbStore {
                 read_only: false,
                 feeds_host: false,
                 ignore: None,
+                owners_only: None,
+                pinned: None,
                 report: OpenReport { created, migrated },
             })
         })
@@ -410,8 +447,11 @@ impl RedbStore {
         })
     }
 
-    fn rtx(&self) -> io::Result<ReadTransaction> {
-        self.db.begin_read().map_err(dbe)
+    fn rtx(&self) -> io::Result<Rtx> {
+        match &self.pinned {
+            Some(t) => Ok(Rtx::Pinned(t.clone())),
+            None => self.db.begin_read().map(Rtx::Own).map_err(dbe),
+        }
     }
 }
 
@@ -935,6 +975,13 @@ impl<'t> Writing<'t> {
             Op::IgnoreApplied(source) => {
                 self.meta.insert(IGNORE_APPLIED_KEY, source.as_bytes()).map_err(dbe)?;
             }
+            Op::SetHeld(on) => {
+                if on {
+                    self.meta.insert(HELD_KEY, [1u8].as_slice()).map_err(dbe)?;
+                } else {
+                    self.meta.remove(HELD_KEY).map_err(dbe)?;
+                }
+            }
         }
         Ok(())
     }
@@ -1084,7 +1131,11 @@ impl IndexStore for RedbStore {
     }
 
     fn local(&self, path: &str) -> io::Result<Option<LocalRecord>> {
-        read_local(&self.db, &self.path, path)
+        guard(&self.path, || {
+            let rtx = self.rtx()?;
+            let t = rtx.open_table(LOCAL).map_err(dbe)?;
+            get_local(&t, path)
+        })
     }
 
     fn local_since(&self, after: u64, limit: usize) -> io::Result<Vec<LocalRecord>> {
@@ -1340,12 +1391,28 @@ impl IndexStore for RedbStore {
         self.ignore = ignore;
     }
 
+    fn owners_only(&self) -> Option<Arc<BTreeSet<ShortId>>> {
+        self.owners_only.clone()
+    }
+
+    fn set_owners_only(&mut self, owners: Option<Arc<BTreeSet<ShortId>>>) {
+        self.owners_only = owners;
+    }
+
     fn ignore_applied(&self) -> io::Result<Option<String>> {
         guard(&self.path, || {
             let rtx = self.rtx()?;
             let t = rtx.open_table(META).map_err(dbe)?;
             let Some(v) = t.get(IGNORE_APPLIED_KEY).map_err(dbe)? else { return Ok(None) };
             String::from_utf8(v.value().to_vec()).map(Some).map_err(|_| bad("meta", IGNORE_APPLIED_KEY, "not UTF-8"))
+        })
+    }
+
+    fn held(&self) -> io::Result<bool> {
+        guard(&self.path, || {
+            let rtx = self.rtx()?;
+            let t = rtx.open_table(META).map_err(dbe)?;
+            Ok(t.get(HELD_KEY).map_err(dbe)?.is_some())
         })
     }
 

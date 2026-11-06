@@ -189,10 +189,60 @@ fn interface_addresses() -> Vec<std::net::IpAddr> {
     out
 }
 
+/// **Tests:** a TCP port that refuses connections on each of `ips`, for a "dead" address (a tracker that is down, a
+/// device that does not answer, a firewall's closed port).
+///
+/// A port bound to port 0 and let go is in the system's range for ports it hands out (from 32768 on Linux, 49152 on
+/// macOS and Windows), so another test of a whole-suite run can be given it and listen there. This one is below those
+/// ranges (24000-31999), so no bind to port 0 and no outgoing connection is ever given it, and it is checked when
+/// chosen: binding it must work (an address this machine does not have, IPv6, has nothing listening at all), and a
+/// connection to it must be refused. The bind alone is not enough: on macOS and Linux `std` binds with
+/// `SO_REUSEADDR`, which lets `127.0.0.1:p` be bound while something listens on `0.0.0.0:p` or `[::]:p`.
+#[doc(hidden)]
+pub fn closed_tcp_port(ips: &[IpAddr]) -> u16 {
+    let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.subsec_nanos() as u64) ^ (u64::from(std::process::id()) << 32);
+    let candidates = (0..10_000u64).map(|i| 24_000 + ((seed ^ i).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 48) as u16 % 8_000);
+    closed_tcp_port_of(ips, candidates).expect("a closed port below the systems' ephemeral ranges")
+}
+
+/// The first of `candidates` that is closed on each of `ips` ([`closed_tcp_port`]).
+fn closed_tcp_port_of(ips: &[IpAddr], mut candidates: impl Iterator<Item = u16>) -> Option<u16> {
+    let closed = |ip: IpAddr, p: u16| {
+        let at = SocketAddr::new(ip, p);
+        match std::net::TcpListener::bind(at) {
+            Ok(l) => drop(l),
+            Err(e) => return e.kind() == io::ErrorKind::AddrNotAvailable,
+        }
+        match std::net::TcpStream::connect_timeout(&at, std::time::Duration::from_millis(200)) {
+            Ok(_) => false,
+            Err(e) if e.kind() == io::ErrorKind::ConnectionRefused => true,
+            // Windows answers a reset with more SYNs and says refused only after about 2 s; there `std` binds without
+            // `SO_REUSEADDR`, so the bind above already found any listener on the port.
+            Err(e) => cfg!(windows) && e.kind() == io::ErrorKind::TimedOut,
+        }
+    };
+    candidates.find(|p| ips.iter().all(|ip| closed(*ip, *p)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::net::{Ipv4Addr, UdpSocket};
+
+    /// The failure: a "closed" port that something listens on (another test, on every address: `0.0.0.0` or `[::]`)
+    /// was taken because `127.0.0.1:p` could still be bound there (`SO_REUSEADDR` on macOS), and the dead address
+    /// answered. The port listened on is passed over; the next, closed, is taken and refuses.
+    #[test]
+    fn a_closed_port_is_one_nothing_listens_on_at_any_address() {
+        let any = std::net::TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)).unwrap();
+        let taken = any.local_addr().unwrap().port();
+        let lo = [IpAddr::V4(Ipv4Addr::LOCALHOST)];
+        let p = closed_tcp_port(&lo);
+        assert!((24_000..32_000).contains(&p), "{p}");
+        assert_eq!(closed_tcp_port_of(&lo, [taken, p].into_iter()), Some(p));
+        let e = std::net::TcpStream::connect_timeout(&SocketAddr::from((Ipv4Addr::LOCALHOST, p)), std::time::Duration::from_secs(5)).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::ConnectionRefused);
+    }
 
     #[tokio::test]
     async fn a_dial_connects_and_a_refused_one_fails_within_about_a_second() {

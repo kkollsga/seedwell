@@ -719,8 +719,8 @@ struct ChatMetaLine: View {
     }
 }
 
-/// The members popover (the core's `ChatMembersPanel`): every device in the channel with its role, an owner's role
-/// menu for the others, and the devices gone from it with Remove from Channel…, which asks first.
+/// The members popover (the core's `ChatMembersPanel`): every device in the channel with its role and, under its name,
+/// an admin's removal of it waiting or refused; an owner's role menu for the others, and the devices gone from it with Remove from Channel…, which asks first.
 struct ChatMembersView: View {
     let panel: ChatMembersPanel
     let run: (ChatPageCommand) -> Void
@@ -733,7 +733,11 @@ struct ChatMembersView: View {
             ForEach(panel.rows, id: \.deviceId) { m in
                 HStack(spacing: Theme.Space.s + 2) {
                     Circle().fill(m.online ? Color.green : Color.secondary.opacity(0.4)).frame(width: 7, height: 7)
-                    Text(m.name).font(Theme.body)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(m.name).font(Theme.body)
+                        // An admin's removal of it: waiting for the owner, or why the owner's device refused.
+                        if let r = m.removal { Text(r).font(Theme.caption).foregroundStyle(.secondary) }
+                    }
                     Spacer(minLength: Theme.Space.m)
                     if let menu = m.roleMenu {
                         Menu(menu.title) { ChatPageMenuItems(entries: menu.entries) { c, _ in run(c) } }

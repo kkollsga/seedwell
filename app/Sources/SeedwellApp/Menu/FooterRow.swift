@@ -1,19 +1,24 @@
 import AppKit
 
-/// The menu's last row: "Open Seedwell…" on the left and "Quit" on the right, each with its own
-/// menu-style highlight. A view item cannot carry key equivalents, so ⌘L and ⌘Q live on hidden items
+/// The menu's last row: the torrent proxy's shield (SPEC §7H), "Open Seedwell…" beside it and "Quit" on the right,
+/// each with its own menu-style highlight. A view item cannot carry key equivalents, so ⌘L and ⌘Q live on hidden items
 /// next to it (`allowsKeyEquivalentWhenHidden`).
 @MainActor final class FooterRow: NSView {
     private let open: FooterButton
     private let quit: FooterButton
+    /// The proxy's shield, where the other rows have their images (nil: a picture of the menu without the proxy).
+    let shield: MenuProxyShield?
 
-    init(openTitle: String, onOpen: @escaping @MainActor () -> Void, onQuit: @escaping @MainActor () -> Void) {
-        open = FooterButton(title: openTitle, run: onOpen)
+    init(openTitle: String, proxy: ProxyCenter? = nil, onOpen: @escaping @MainActor () -> Void, onQuit: @escaping @MainActor () -> Void) {
+        shield = proxy.map { MenuProxyShield(center: $0) }
+        // Beside the shield the title keeps a smaller inset: the shield's square already sets it off from the edge.
+        open = FooterButton(title: openTitle, pad: proxy == nil ? Self.pad : 6, run: onOpen)
         quit = FooterButton(title: "Quit", run: onQuit)
         super.init(frame: NSRect(x: 0, y: 0, width: 220, height: Self.height))
         autoresizingMask = .width
         open.toolTip = "Open the library window"
         quit.toolTip = "Quit \(AppInfo.name) (trackers are told it stopped)"
+        if let shield { addSubview(shield) }
         addSubview(open)
         addSubview(quit)
         setAccessibilityRole(.group)
@@ -27,23 +32,32 @@ import AppKit
     private static let edge: CGFloat = 5
     static let pad: CGFloat = 11
 
+    /// The shield's square: a little wider than the row is high, around the menu's 16-point image size.
+    private static var shieldWidth: CGFloat { height + 4 }
+
     override func layout() {
         super.layout()
         let w = bounds.width - 2 * Self.edge
         let qw = min(quit.fitting + 2 * Self.pad, w / 2)
         quit.frame = NSRect(x: bounds.maxX - Self.edge - qw, y: 0, width: qw, height: bounds.height)
-        open.frame = NSRect(x: Self.edge, y: 0, width: w - qw - 4, height: bounds.height)
+        let sw = shield == nil ? 0 : Self.shieldWidth
+        shield?.frame = NSRect(x: Self.edge, y: 0, width: sw, height: bounds.height)
+        let ox = Self.edge + (sw > 0 ? sw + 2 : 0)
+        open.frame = NSRect(x: ox, y: 0, width: bounds.maxX - Self.edge - qw - 4 - ox, height: bounds.height)
     }
 
     override var intrinsicContentSize: NSSize {
-        NSSize(width: Self.edge * 2 + open.fitting + quit.fitting + 4 * Self.pad + 24, height: Self.height)
+        NSSize(width: Self.edge * 2 + (shield == nil ? 0 : Self.shieldWidth + 2) + open.fitting + quit.fitting + 4 * Self.pad + 24, height: Self.height)
     }
 
-    /// The two sides (hover).
-    var hoverRows: [FooterButton] { [open, quit] }
+    /// The parts that light up under the pointer: the shield, Open and Quit.
+    var hoverRows: [any HoverRow] { (shield.map { [$0] } ?? []) + [open, quit] }
 
-    /// QA: draws one side highlighted, as a hover would ("open", "quit" or nil).
+    /// QA: draws one side highlighted, as a hover would ("shield", "open", "quit" or nil).
     func qaHighlight(_ side: String?) {
+        shield?.animates = false
+        shield?.hovered = side == "shield"
+        shield?.animates = true
         open.hovered = side == "open"
         quit.hovered = side == "quit"
     }
@@ -56,11 +70,14 @@ import AppKit
 
 @MainActor final class FooterButton: NSView, HoverRow {
     private let title: String
+    /// The text's inset from the highlight's edge.
+    private let pad: CGFloat
     private let run: @MainActor () -> Void
     var hovered = false { didSet { if hovered != oldValue { needsDisplay = true } } }
 
-    init(title: String, run: @escaping @MainActor () -> Void) {
+    init(title: String, pad: CGFloat = FooterRow.pad, run: @escaping @MainActor () -> Void) {
         self.title = title
+        self.pad = pad
         self.run = run
         super.init(frame: .zero)
         setAccessibilityElement(true)
@@ -114,6 +131,6 @@ import AppKit
         }
         let attrs = attributes(highlighted: hovered)
         let size = (title as NSString).size(withAttributes: attrs)
-        (title as NSString).draw(at: NSPoint(x: FooterRow.pad, y: (bounds.height - size.height) / 2), withAttributes: attrs)
+        (title as NSString).draw(at: NSPoint(x: pad, y: (bounds.height - size.height) / 2), withAttributes: attrs)
     }
 }

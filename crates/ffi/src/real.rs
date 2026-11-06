@@ -288,6 +288,8 @@ pub struct RealBackend {
     videos: Mutex<std::collections::HashMap<String, RowFiles>>,
     /// Folder sync (SPEC 7G), started next to the engine.
     sync: Arc<crate::sync::RealSync>,
+    /// The keys' store (shared with folder sync): the torrent proxy's key is kept there (SPEC §7H).
+    secrets: Arc<dyn trs_sync_net::secrets::SecretStore>,
     /// An isolated run's own Trash (`Trash` in its state folder): whatever would go to the Trash goes there.
     trash: Option<PathBuf>,
 }
@@ -375,6 +377,15 @@ impl RealBackend {
         let isolated = trash.is_some();
         let allow_loopback = o.allow_loopback_trackers;
         let allow_lan = SettingsStore::new(&o.dir).config().network.allow_lan_trackers;
+        // The keys (folder sync's, chat's, the torrent proxy's) before the engine: a torrent proxy that is on must be in
+        // place when the engine starts, or its first connections would be direct ones (SPEC §7H).
+        let secrets = crate::sync::secret_store_checked(o.secret_vault.clone(), &o.dir);
+        // An isolated run's "NordVPN" servers are loopback fakes (or none): it never reaches NordVPN.
+        let start_proxy = crate::Core::proxy_at_start(
+            &SettingsStore::new(&o.dir).config().network.proxy,
+            &*secrets.0,
+            &crate::torrent_proxy::preset_for(&o.dir, isolated),
+        );
         let opts = HostOptions {
             tweak: Some(Box::new(move |ec| {
                 if ec.trash_dir.is_none() {
@@ -390,6 +401,7 @@ impl RealBackend {
                 if isolated {
                     ec.tracker_destinations.allow_public = false;
                 }
+                ec.proxy = start_proxy;
             })),
             time_zone: Some(Arc::new(trs_engine::util::local_utc_offset)),
             ..HostOptions::default()
@@ -403,7 +415,8 @@ impl RealBackend {
         let cfg = settings.config();
 
         // Folder sync starts in the background; the control server serves it once it is up.
-        let sync = crate::sync::RealSync::start(rt.handle(), &engine, &o.dir, o.secret_vault.clone(), o.forbidden_root.clone());
+        let secret_store = secrets.0.clone();
+        let sync = crate::sync::RealSync::start(rt.handle(), &engine, &o.dir, secrets, o.forbidden_root.clone(), o.builds.clone());
         // The control server for agents (SPEC 9A) lives on the engine's runtime.
         let server = trs_control::start_for_app_with_sync(
             rt.handle(),
@@ -477,6 +490,7 @@ impl RealBackend {
             cleared_at: Mutex::new(cleared),
             videos: Mutex::new(std::collections::HashMap::new()),
             sync,
+            secrets: secret_store,
             trash,
             sd: Arc::new(Shutdown {
                 started: AtomicBool::new(false),
@@ -1794,6 +1808,22 @@ impl Backend for RealBackend {
     fn watch_backlog(&self, folder: &Path) -> Vec<String> {
         let files = self.rt.block_on(self.engine.watch_backlog(folder));
         files.into_iter().map(|p| p.display().to_string()).collect()
+    }
+
+    fn secrets(&self) -> Option<Arc<dyn trs_sync_net::secrets::SecretStore>> {
+        Some(self.secrets.clone())
+    }
+
+    fn set_torrent_proxy(&self, proxy: Option<trs_engine::ProxyConfig>) {
+        self.engine.set_proxy(proxy);
+    }
+
+    fn torrent_proxy_rank_now(&self) {
+        self.engine.proxy_rank_now();
+    }
+
+    fn torrent_proxy_status(&self) -> trs_engine::ProxyStatus {
+        self.engine.proxy_status()
     }
 
     fn settings_saved(&self) {

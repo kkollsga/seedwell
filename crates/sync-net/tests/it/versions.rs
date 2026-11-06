@@ -52,26 +52,29 @@ async fn a_newer_device_syncs_at_the_version_both_speak_and_one_too_new_is_told_
     }
 }
 
-/// The failure: a device of Seedwell 0.1.18 or before (protocol 2) syncs with this one and is sent unhashed entries
-/// (SPEC §7G.11), which it cannot fetch (it reads a file of that size with no chunks). Protocol 3 alone: it is refused,
-/// and told to update.
+/// The failure: an older device syncs with this one and mishandles what it is sent: one of Seedwell 0.1.18 or before
+/// (protocol 2) reads an unhashed entry (SPEC §7G.11) as a file of that size with no chunks, and one of 0.1.19
+/// (protocol 3) keeps the owners' *Read only* statement (protocol 4, §7G.1) as a kind it does not know and takes every
+/// member's versions while the folder is Read only. Each is refused, and told to update.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_device_of_0_1_18_is_refused_and_told_to_update() {
-    assert_eq!((MIN_PROTOCOL, PROTOCOL), (3, 3), "unhashed entries need protocol 3 on both sides");
-    let dirs: Vec<tempfile::TempDir> = (0..2).map(|_| tempfile::tempdir().unwrap()).collect();
-    let a = device_with("Owner", |_| {}).await;
-    std::fs::write(dirs[0].path().join("seed.txt"), b"from the owner").unwrap();
-    let id: FolderId = a.h.add_folder(dirs[0].path().to_path_buf()).await.unwrap().id.parse().unwrap();
-    let old = device_with("Old", |o| o.protocol = (2, 2)).await;
-    old.h.join_folder(&a.h.create_invite(&id, Role::ReadOnly, 1, 7).unwrap().link, dirs[1].path().join("F")).await.unwrap();
-    old.h.add_address(&id, addr(&a)).unwrap();
-    until(20, "the old device is told to update", || {
-        matches!(state(&old, &id), Some((FolderState::Error, Some(e))) if e.contains("Owner runs Seedwell test, a newer Seedwell that this one cannot sync with"))
-    })
-    .await;
-    assert!(read(&dirs[1].path().join("F/seed.txt")).is_none());
-    for d in [&a, &old] {
-        d.h.shutdown().await;
+async fn devices_of_0_1_18_and_0_1_19_are_refused_and_told_to_update() {
+    const { assert!(MIN_PROTOCOL >= 4, "the Read only statement needs protocol 4 on both sides") };
+    for (n, old_protocol) in [2, 3].into_iter().enumerate() {
+        let dirs: Vec<tempfile::TempDir> = (0..2).map(|_| tempfile::tempdir().unwrap()).collect();
+        let a = device_with("Owner", |_| {}).await;
+        std::fs::write(dirs[0].path().join("seed.txt"), b"from the owner").unwrap();
+        let id: FolderId = a.h.add_folder(dirs[0].path().to_path_buf()).await.unwrap().id.parse().unwrap();
+        let old = device_with("Old", |o| o.protocol = (old_protocol, old_protocol)).await;
+        old.h.join_folder(&a.h.create_invite(&id, Role::ReadOnly, 1, 7).unwrap().link, dirs[1].path().join("F")).await.unwrap();
+        old.h.add_address(&id, addr(&a)).unwrap();
+        until(20, "the old device is told to update", || {
+            matches!(state(&old, &id), Some((FolderState::Error, Some(e))) if e.contains("Owner runs Seedwell test, a newer Seedwell that this one cannot sync with"))
+        })
+        .await;
+        assert!(read(&dirs[1].path().join("F/seed.txt")).is_none(), "protocol {old_protocol} got the file ({n})");
+        for d in [&a, &old] {
+            d.h.shutdown().await;
+        }
     }
 }
 
@@ -160,4 +163,59 @@ async fn folders_of_the_test_builds_are_forgotten_at_start_and_keep_their_files(
     }
     assert!(!state.path().join("sync").join(format!("{}.members", ids[0])).exists());
     h.shutdown().await;
+}
+
+/// The failure: the app's updater never hears that a device runs a newer Seedwell (a newer release this device has
+/// not found yet goes unchecked until the daily check), or hears it from any device that dials in and says so. Told:
+/// a device a session is set up with, and a member refused because the two cannot talk; not told: a device unknown
+/// here, refused before it proved anything.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_updater_hears_what_members_run_and_not_what_a_stranger_claims() {
+    let dirs: Vec<tempfile::TempDir> = (0..4).map(|_| tempfile::tempdir().unwrap()).collect();
+    let now = (MIN_PROTOCOL, PROTOCOL);
+    let told = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let heard = told.clone();
+    let start = |state: std::path::PathBuf, name: &'static str, client: &'static str, protocol: (u32, u32), hook: Option<trs_sync_net::PeerClientHook>| async move {
+        let secrets = std::sync::Arc::new(trs_sync_net::secrets::FileSecrets::new(state.join("secrets")));
+        let mut opts = trs_sync_net::Options::new(state.clone(), client.into(), secrets);
+        opts.default_device_name = name.into();
+        opts.bind = std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
+        opts.lan_discovery = false;
+        opts.protocol = protocol;
+        opts.peer_client = hook;
+        trs_sync_net::SyncHandle::start(opts).await.unwrap()
+    };
+    let hook: trs_sync_net::PeerClientHook = std::sync::Arc::new(move |c: &str| heard.lock().unwrap().push(c.to_owned()));
+    let a = start(dirs[0].path().to_path_buf(), "Owner", "Seedwell 0.1.0", now, Some(hook)).await;
+    let folder = dirs[3].path().join("A");
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(folder.join("seed.txt"), b"x").unwrap();
+    let id: FolderId = a.add_folder(folder).await.unwrap().id.parse().unwrap();
+    let at = std::net::SocketAddr::new(std::net::Ipv4Addr::LOCALHOST.into(), a.port());
+    let has = |c: &str| told.lock().unwrap().iter().any(|t| t == c);
+
+    // A member that syncs: heard.
+    let b = start(dirs[1].path().to_path_buf(), "Beta", "Seedwell 0.9.1", now, None).await;
+    b.join_folder(&a.create_invite(&id, Role::ReadWrite, 1, 7).unwrap().link, dirs[3].path().join("B")).await.unwrap();
+    b.add_address(&id, at).unwrap();
+    until(30, "the owner hears what B runs", || has("Seedwell 0.9.1")).await;
+
+    // The member comes back as a Seedwell the owner cannot talk to: refused, and still heard.
+    b.shutdown().await;
+    let b = start(dirs[1].path().to_path_buf(), "Beta", "Seedwell 0.9.2", (PROTOCOL + 1, PROTOCOL + 1), None).await;
+    b.add_address(&id, at).unwrap();
+    until(30, "the owner hears what the refused member runs", || has("Seedwell 0.9.2")).await;
+
+    // A device unknown here that cannot talk to it: refused (the owner notes the attempt), never heard.
+    let c = start(dirs[2].path().to_path_buf(), "Stranger", "Seedwell 0.9.3", (PROTOCOL + 1, PROTOCOL + 1), None).await;
+    c.join_folder(&a.create_invite(&id, Role::ReadOnly, 1, 7).unwrap().link, dirs[3].path().join("C")).await.unwrap();
+    c.add_address(&id, at).unwrap();
+    until(30, "the owner notes the stranger's attempt", || {
+        a.snapshot().folders.into_iter().any(|f| f.id == id.to_string() && f.join_attempts.iter().any(|t| t.name == "Stranger"))
+    })
+    .await;
+    assert!(!has("Seedwell 0.9.3"), "a stranger's claim is not heard: {:?}", told.lock().unwrap());
+    for h in [a, b, c] {
+        h.shutdown().await;
+    }
 }

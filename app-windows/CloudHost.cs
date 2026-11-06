@@ -279,6 +279,23 @@ sealed class CloudHost : SyncHostListener
 
     public void Notice(string title, string text) => app.Dispatch(() => app.Notify(title, text));
 
+    /// <summary>
+    /// Seedwell's entry in File Explorer's navigation pane (the core's SyncNavPane), at start and on each change: written
+    /// under its CLSID, or removed when Show is false.
+    /// </summary>
+    public void NavPane(SyncNavPane entry)
+    {
+        AppLog.Write($"navigation pane entry: {(entry.Show ? entry.Target : "none")}");
+        try
+        {
+            NavPaneEntry.Apply(entry, Environment.ProcessPath ?? Path.Combine(AppContext.BaseDirectory, "Seedwell.exe"));
+        }
+        catch (Exception e)
+        {
+            AppLog.Write($"navigation pane entry failed: {e.Message}");
+        }
+    }
+
     /// <summary>Never asked on Windows (no extension process: the host is in this app).</summary>
     public bool VerifyPeer(byte[] auditToken) => false;
 

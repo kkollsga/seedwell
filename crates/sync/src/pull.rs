@@ -1217,7 +1217,10 @@ impl Puller<'_> {
             s.jobs.insert(p.to_string(), crate::lazy::Wanted::Stream(n.file.clone()));
             return Err(Skip::Waiting);
         };
+        s.placing.insert(p.to_string());
+        let pause = s.test_place_pause;
         drop(s);
+        std::thread::sleep(pause);
         let left = self.fs.lstat(tmp)?;
         if !left.is_some_and(|m| m.kind == FileKind::File && m.size == want.size && (m.inode, m.mtime_ns) == pr.tmp) {
             // Not the file the stream left (changed or gone since): streamed again.
@@ -1398,7 +1401,10 @@ impl Puller<'_> {
                 // Built for this version from our record as it still is, the temp file as the job left it.
                 let as_left = st.version == want.version && st.local == ours && now.is_some_and(|m| m.kind == FileKind::File && (m.inode, m.size, m.mtime_ns) == st.tmp);
                 if as_left && st.remaining.is_empty() {
+                    s.placing.insert(p.to_string());
+                    let pause = s.test_place_pause;
                     drop(s);
+                    std::thread::sleep(pause);
                     let fh = self.fs.open_rw(tmp)?;
                     return self.finish_build(fh, tmp, local, want);
                 }

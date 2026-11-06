@@ -37,7 +37,7 @@ fn msg(id: &str, device: &str, at: u64, body: &str) -> SyncMessage {
 }
 
 fn member(id: &str, name: &str, role: SyncRole, is_me: bool, online: bool) -> SyncMember {
-    SyncMember { device_id: id.into(), name: name.into(), user: String::new(), role, online, is_me, expires_s: None }
+    SyncMember { device_id: id.into(), name: name.into(), user: String::new(), role, online, is_me, expires_s: None, removal: None, removal_waiting: false }
 }
 
 fn input(c: SyncChannel, messages: Vec<SyncMessage>) -> ChatPageInput {
@@ -359,6 +359,29 @@ fn the_channel_menu_with_every_window_and_with_the_windows_set() {
     assert!(!p.composer.can_post && !p.composer.attach);
 }
 
+/// An admin's removal of a channel member waits for the owner's device (SPEC §7G.1), or came back refused: the member's
+/// row in the panel says so, as the folder page's row does. Fails when the panel shows only a disabled Remove from
+/// Channel with no line saying why (the gap the Windows agent found), or drops the owner's reason for refusing.
+#[test]
+fn a_members_pending_or_refused_removal_is_its_rows_line() {
+    use trs_sync_net::removals::Asked;
+    let mut c = channel("Team", 3, 1, 0, false);
+    c.role = SyncRole::Admin;
+    let mut i = input(c, Vec::new());
+    let waiting = SyncMember { removal: Some(crate::sync_text::removal_line(&Asked::Waiting)), removal_waiting: true, ..member("D2", "Studio iMac", SyncRole::ReadWrite, false, false) };
+    let why = Asked::Refused("the owner decided about this device since it was asked".into());
+    let refused = SyncMember { removal: Some(crate::sync_text::removal_line(&why)), ..member("D3", "Air", SyncRole::ReadOnly, false, false) };
+    i.members = vec![member("D0", "MacBook", SyncRole::Admin, true, false), waiting, refused, member("D4", "Mini", SyncRole::ReadWrite, false, true)];
+    let rows = page(i, &[]).members.unwrap().rows;
+    let row = |id: &str| rows.iter().find(|r| r.device_id == id).unwrap();
+    assert_eq!(row("D2").removal.as_deref(), Some("Removal asked: waiting for the owner"));
+    let ChatPageMenuEntry::Item { enabled, .. } = find(&row("D2").role_menu.as_ref().unwrap().entries, "Remove from Channel") else { panic!() };
+    assert!(!enabled, "not asked twice");
+    let line = row("D3").removal.clone().unwrap_or_default();
+    assert!(line.contains("The owner decided about this device since it was asked"), "the refusal's reason: {line:?}");
+    assert_eq!((row("D0").removal.as_ref(), row("D4").removal.as_ref()), (None, None), "nothing asked: no line");
+}
+
 #[test]
 fn members_roles_and_gone_devices() {
     let mut c = channel("Team", 3, 2, 0, false);
@@ -386,10 +409,16 @@ fn members_roles_and_gone_devices() {
     assert_eq!(g.line, concat!("Old iPad has never connected to this ", computer!()));
     let q = g.button.question.as_ref().unwrap();
     assert_eq!((g.button.title.as_str(), q.title.as_str(), q.destructive), ("Remove from Channel…", "Remove Old iPad from “Team”?", true));
-    // Only an owner gets the menus.
-    let mut admin = c;
+    // An admin gets Remove for a user (Studio iMac) only; a user gets no menu.
+    let mut admin = c.clone();
     admin.role = SyncRole::Admin;
     i.channel = Some(admin);
+    let rows = page(i.clone(), &[]).members.unwrap().rows;
+    assert!(rows[0].role_menu.is_none() && rows[1].role_menu.is_none(), "an admin changes an owner or an admin");
+    assert_eq!(titles(&rows[2].role_menu.as_ref().unwrap().entries), ["Remove from Channel"]);
+    let mut user = c;
+    user.role = SyncRole::ReadWrite;
+    i.channel = Some(user);
     assert!(page(i, &[]).members.unwrap().rows.iter().all(|r| r.role_menu.is_none()));
 }
 

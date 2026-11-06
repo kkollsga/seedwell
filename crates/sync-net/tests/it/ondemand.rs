@@ -472,6 +472,20 @@ async fn two_on_demand_devices_freeing_at_once_keep_a_copy() {
         sb.len() == 1 && sc.len() == 1 && sb[0].name == "Gamma"
     })
     .await;
+    // And each knows the other holds it: their indexes reached each other over their own session. Connected and linked
+    // is not enough: under load each had listed the file from A's index only, so neither asked the other and both kept
+    // their copy, one after the other (rightly: no other copy was known).
+    for (d, other) in [(&b, "Gamma"), (&c, "Beta")] {
+        let end = Instant::now() + Duration::from_secs(30);
+        loop {
+            let askees = d.h.test_hold_askees(&id, "x.txt").await.unwrap();
+            if askees == [other] {
+                break;
+            }
+            assert!(Instant::now() < end, "a free would ask {askees:?}, not {other}");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
     // Both let go at once, each asking the other: a device freeing a file holds nothing for others meanwhile, and the
     // higher id never relies on the lower, so at least one keeps it.
     let (eb, ec) = tokio::join!(b.h.od_evict(&id, "x.txt"), c.h.od_evict(&id, "x.txt"));
@@ -1345,11 +1359,12 @@ async fn a_holder_freeing_a_file_says_no_and_its_free_ends_with_the_work_not_the
     // The higher one: its answer to the lower would be yes, but for its own free in progress.
     let (lo, hi) = if b.h.device_id().short().0 > c.h.device_id().short().0 { (&c, &b) } else { (&b, &c) };
     lo.h.test_silent_ondemand(true);
-    hi.h.test_hold_wait(Duration::from_secs(3));
+    hi.h.test_hold_wait(Duration::from_secs(10));
     let freeing = { let h = hi.h.clone(); tokio::spawn(async move { h.od_evict(&id, "x.txt").await }) };
-    // (Its free under way: on a loaded machine it can take longer than a moment to get there, a pull round on the core
-    // before it; it then waits 3 s for the lower's answer.)
-    until(2, "the higher is freeing it", || hi.h.test_freeing(&id) == 1).await;
+    // (Its free under way: on a loaded machine it can take seconds to get there, a pull round on the core before it;
+    // it then waits 10 s for the lower's answer, so the window to see it freeing is wide even under load: a 2 s look
+    // into a 3 s wait failed once beside a Rust build on the PC, 2026-11-06.)
+    until(8, "the higher is freeing it", || hi.h.test_freeing(&id) == 1).await;
     lo.h.test_hold_wait(Duration::from_secs(1));
     let e = lo.h.od_evict(&id, "x.txt").await.unwrap();
     assert_eq!(e.files, 0, "the other is freeing it: no: {e:?}");

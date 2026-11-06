@@ -18,13 +18,45 @@ pub(crate) struct Device {
 /// A service with its own temp state folder on loopback, LAN discovery off; `tune` changes the options.
 pub(crate) async fn device_with(name: &str, tune: impl FnOnce(&mut Options)) -> Device {
     let state = tempfile::tempdir().unwrap();
-    let secrets = Arc::new(FileSecrets::new(state.path().join("secrets")));
-    let mut opts = Options::new(state.path().to_path_buf(), "Seedwell test".into(), secrets);
+    Device { h: start_in(state.path(), name, tune).await, _state: state }
+}
+
+async fn start_in(state: &Path, name: &str, tune: impl FnOnce(&mut Options)) -> SyncHandle {
+    let secrets = Arc::new(FileSecrets::new(state.join("secrets")));
+    let mut opts = Options::new(state.to_path_buf(), "Seedwell test".into(), secrets);
     opts.default_device_name = name.into();
     opts.bind = IpAddr::V4(Ipv4Addr::LOCALHOST);
     opts.lan_discovery = false;
     tune(&mut opts);
-    Device { h: SyncHandle::start(opts).await.unwrap(), _state: state }
+    SyncHandle::start(opts).await.unwrap()
+}
+
+impl Device {
+    /// Stops the service and starts it again on the same state, as `name` (on a new port: the others are told where).
+    pub(crate) async fn restart(self, name: &str) -> Device {
+        self.h.shutdown().await;
+        let h = start_in(self._state.path(), name, |_| {}).await;
+        Device { h, _state: self._state }
+    }
+
+    /// Stops the service, keeping its state to start again later ([`Stopped::start`]).
+    pub(crate) async fn stop(self) -> Stopped {
+        self.h.shutdown().await;
+        Stopped { state: self._state }
+    }
+}
+
+/// A device that is away: its state, to start again on.
+pub(crate) struct Stopped {
+    state: tempfile::TempDir,
+}
+
+impl Stopped {
+    /// Starts it again, as `name` (on a new port).
+    pub(crate) async fn start(self, name: &str) -> Device {
+        let h = start_in(self.state.path(), name, |_| {}).await;
+        Device { h, _state: self.state }
+    }
 }
 
 pub(crate) fn addr(d: &Device) -> SocketAddr {

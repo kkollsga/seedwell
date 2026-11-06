@@ -216,6 +216,72 @@ async fn listings_and_status_answer_at_once_while_a_file_is_hashed_for_another_d
     }
 }
 
+/// The failure: a fetch reads a file's record (not here yet) and what the file needs in two reads, and the pull round
+/// that places the file commits between them: the record says not here, the need is gone (it is here now), so no device
+/// seems to hold it and the fetch gives up with "not here yet (no device that has it is connected)" just as the file
+/// arrives (seen once under load, at the end of a streamed first download, while the host waited up to 120 s). The
+/// round's commit lands between the two reads every time here.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_fetch_whose_file_is_recorded_between_its_reads_is_not_given_up() {
+    let film = noise(3_000_000, 7);
+    let (a, b, _fa, _fb, id) = owner_and_member(&[("Film.mkv", film.clone())], false).await;
+    // The sessions are up: a fetch no connected device can serve gives up at once.
+    b.h.test_fetch_times(Duration::ZERO, Duration::from_secs(30));
+    // The piece is read after a pause: the fetch reads the record before the file is here.
+    a.h.test_stream_wait(Duration::from_millis(500));
+    b.h.test_fetch_read_gap(true);
+    let got = b.h.od_fetch(&id, "Film.mkv", Duration::from_secs(60)).await;
+    let got = got.unwrap_or_else(|e| panic!("the fetch gave up as its file arrived: {e}"));
+    assert_eq!(std::fs::read(&got.path).unwrap(), film);
+    for d in [&a, &b] {
+        d.h.shutdown().await;
+    }
+}
+
+/// The failure: a download that came to its end waits for the pull round that places and records it (a round late
+/// under load, a slow flush), and a fetch waiting on it meanwhile gives up with "not here yet": the device it came from
+/// sends nothing more (it is all here), so it counts as stalled; or that device went away, so none that has it is
+/// connected. Asked as Finder and Explorer ask (a short wait, again and again), it answers coming, all of it done,
+/// until the record is committed, then here.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_download_waiting_for_its_record_is_coming_until_it_is_recorded() {
+    use trs_sync_net::service::FetchWait;
+    let film = noise(3_000_000, 8);
+    for maker_leaves in [false, true] {
+        let (a, b, _fa, _fb, id) = owner_and_member(&[("Film.mkv", film.clone())], false).await;
+        // The sessions are up, and a second with no byte further is a stall.
+        b.h.test_fetch_times(Duration::ZERO, Duration::from_secs(1));
+        // The round that places it comes 3 s after the download's end, and takes 3 s more before it renames and commits.
+        b.h.test_place_wait(Duration::from_secs(3));
+        let end = Instant::now() + Duration::from_secs(60);
+        let (mut whole, mut left) = (0, false);
+        loop {
+            assert!(Instant::now() < end, "never here (the maker left: {maker_leaves})");
+            match b.h.od_fetch_wait(&id, "Film.mkv", Duration::from_millis(300)).await {
+                Ok(FetchWait::Here(got)) => {
+                    assert_eq!(std::fs::read(&got.path).unwrap(), film);
+                    break;
+                }
+                Ok(FetchWait::Coming { .. }) => {}
+                Err(e) => panic!("the fetch gave up while its download waited for its record: {e} (the maker left: {maker_leaves})"),
+            }
+            let p = b.h.od_progress(&id, "Film.mkv").unwrap();
+            if p.done == p.total && !p.here {
+                whole += 1;
+                if maker_leaves && !left {
+                    a.h.shutdown().await;
+                    left = true;
+                }
+            }
+        }
+        assert!(whole >= 3, "asked only {whole} times while the download waited for its record");
+        if !left {
+            a.h.shutdown().await;
+        }
+        b.h.shutdown().await;
+    }
+}
+
 /// Calls the hosts' and the app's reads for `for_how_long`, as Finder, Explorer and the app call them, and fails if one
 /// takes a second or more (`owner_domain`: the owner has a domain, its copies freed). How many calls were made.
 async fn answers_at_once(a: &Device, b: &Device, id: &FolderId, owner_domain: bool, during: &str, for_how_long: Duration) -> usize {
@@ -489,3 +555,39 @@ async fn a_long_stream_holds_up_no_hashed_files_fetch() {
     }
 }
 
+
+/// The failure: a job of a folder's lanes (a fetch of a peer's chunks, run with the folder let go) held the folder's
+/// index after the folder was let go: `shutdown` returned while the index was still open, and the service started
+/// again on the same state could not open the folder ("the index is already open"; a move or a switch that opens it at
+/// its new place met the same). A stop now also tells the jobs to stop, and waits for them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_service_started_again_while_a_fetch_was_finishing_opens_the_folder() {
+    let a = device("Alpha").await;
+    let (fa, fb, state) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let start = || async {
+        let secrets = Arc::new(FileSecrets::new(state.path().join("secrets")));
+        let mut opts = Options::new(state.path().to_path_buf(), "Seedwell test".into(), secrets);
+        opts.default_device_name = "Beta".into();
+        opts.bind = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        opts.lan_discovery = false;
+        SyncHandle::start(opts).await.unwrap()
+    };
+    let src = fa.path().join("Movies");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("notes.bin"), noise(300_000, 71)).unwrap();
+    let id: FolderId = a.h.add_folder(src).await.unwrap().id.parse().unwrap();
+    until(30, "A has scanned", || a.h.snapshot().folders.iter().any(|f| f.id == id.to_string() && f.state == trs_sync_net::status::FolderState::UpToDate)).await;
+    let b = start().await;
+    // B's fetch of the file ends, then stands with the index held (as a slow disk's flush would).
+    b.test_job_hold(Duration::from_secs(3));
+    b.join_folder(&a.h.create_invite(&id, Role::ReadWrite, 1, 1).unwrap().link, fb.path().join("Movies")).await.unwrap();
+    b.add_address(&id, addr(&a)).unwrap();
+    until(30, "B's fetch holds the index", || b.test_jobs_held() > 0).await;
+    b.shutdown().await;
+    let b = start().await;
+    assert_eq!(b.snapshot().folders.len(), 1, "B's folder opens again right after shutdown");
+    b.add_address(&id, addr(&a)).unwrap();
+    until(30, "B has the file", || fb.path().join("Movies/notes.bin").exists()).await;
+    a.h.shutdown().await;
+    b.shutdown().await;
+}

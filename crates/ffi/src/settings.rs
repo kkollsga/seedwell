@@ -922,6 +922,17 @@ impl SettingsStore {
         self.cfg.save(&c).map_err(|e| doc_err(&e))
     }
 
+    /// The torrent proxy's settings (`network.proxy`, SPEC §7H): on or off, the kind, a custom proxy's host and port.
+    /// Never the key, which is in the secret store.
+    pub fn save_proxy(&self, p: &trs_state::config::TorrentProxy) -> Result<(), CoreError> {
+        let mut c = self.config();
+        if c.network.proxy == *p {
+            return Ok(());
+        }
+        c.network.proxy = p.clone();
+        self.cfg.save(&c).map_err(|e| doc_err(&e))
+    }
+
     pub fn load_rules_set(&self) -> RuleSet {
         self.rules.load().value
     }

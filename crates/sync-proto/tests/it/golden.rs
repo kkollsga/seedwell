@@ -64,6 +64,8 @@ fn statements() -> Vec<(&'static str, Statement)> {
         ("statement 3 invite", Statement::by_owner(&s, Body::Invite(invite(None, Role::ReadOnly, 6)))),
         ("statement 4 revoke", Statement::by_device(&admin, &fid(), Body::Revoke { id: [6; 16], at_s: T + 2 })),
         ("statement 5 share until", Statement::by_owner(&s, Body::ShareUntil { until_s: T + 30 * 86_400, serial: 4, at_s: T })),
+        // Protocol 4 (0.1.20): the owners' Read only setting.
+        ("statement 12 read only", Statement::by_owner(&s, Body::ReadOnly { on: true, serial: 5, at_s: T + 3 })),
         // 0.1.9
         (
             "statement 6 profile",
@@ -215,6 +217,10 @@ fn messages() -> Vec<(&'static str, Message)> {
                 groups: vec![JoinChannel { channel_id: fid(), proofs: vec![Proof::Grant(statements()[0].1.to_bytes()), Proof::Invite(redeem())] }],
             }),
         ),
+        // Protocol 4 (0.1.20): an admin asks an owner's device to remove a user, and its answer.
+        ("message 35 remove request", Message::RemoveRequest(RemoveRequest::new(&dev(2), fid(), *dev(5).public_key(), 3, T + 7))),
+        ("message 36 remove reply", Message::RemoveReply(RemoveReply { folder_id: fid(), device: *dev(5).public_key(), refused: Some("only an admin of the folder can ask its owner to remove a device".into()) })),
+        ("message 36 remove reply done", Message::RemoveReply(RemoveReply { folder_id: fid(), device: *dev(5).public_key(), refused: None })),
         (
             "message 2 join with a sibling proof",
             Message::Join(Join {
@@ -736,6 +742,7 @@ const GOLDEN: &[(&str, &str)] = &[
     ("statement 3 invite", "039e01019637b249c05e7c8e0191e443ba0d55bf87f417dd29ae535f51072e62af8ec13206060606060606060606060606060606040180f7bed70680829ad706008a875fff1eb38451577acd5afee405456568dd7c89e090863a0557bc7af49f17c492db27f15677af52794012d53ee66cf9a5afe3f550ebb02e0164e0fc886360467a3c3bebf1a2524340d1db7c89e7a50ac87d33490e52ead9252f63b5e4480c006c7ddcd7be02e2c50cc57f50fc671528fcddc08dc0dee1a6b5ed5766fce80ae8e87ffc63b70db958ad58b8d07a222aa87c1c458dc12e33578c66da47c41df502"),
     ("statement 4 revoke", "04150606060606060606060606060606060682829ad706018139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394e9c48e8815846956795e5944cb6a1f46d79fe309d75c82b9145d887f8f32ff0b0fa88ea3d2cf1c59f912621bf5c31adf6a18fce95354d9f1b26f237fbb1b2e0d"),
     ("statement 5 share until", "050b809cb8d8060480829ad706008dca1af0b9d0ccdaef792d18a367ccbcd2c4cb5423a3f3f6534f9c6089cbf842b39342e798c8597b5856331d2c9a8bb6b17e3fd18fa24e60f39c92968590be0c"),
+    ("statement 12 read only", "0c07010583829ad706003c218bf6675e1958b0e28c2a5bb446c9e6f1c088293fd84d61d23f342afc78c75e1c4e4b126b8ddce3297010aa87436b9afab160a8abe96a723168eeb63d9f0e"),
     ("statement 6 profile", "061c114b696d2773204d6163426f6f6b20416972036b696d0180829ad706018139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394a40f439f872bb7b309aca4cad34859efd04de6e6b1e45ee38a9c831fe85f5683c746d56591982091ef0906e3d8281b099f4b5e6e86f45389928a7879c1363b09"),
     ("link", "seedwell://sync/AGLDPMSJYBPHZDQBSHSEHOQNKW7YP5AX3UU24U27KEDS4YVPR3ATECAIBAEAQCAIBAEAQCAIBAEAQCADAGAPPPWXA2AIFGWXAYAK33EGQCPYBFA6WPIV5ZLSW3Y4TD2JR3EYE6KVJ43RA4RIYUDNTRWTXJRF53PLOCP3DR7ZTMH2HGHAOQPBW6DD6BLKYW5ERWKUSFZUAYEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQA7S?name=Family%20Photos"),
     ("proof 5 redeem", "019637b249c05e7c8e0191e443ba0d55bf87f417dd29ae535f51072e62af8ec13208080808080808080808080808080808030180f7bed70680829ad706001398f62c6d1a457c51ba6a4b5f3dbd2f69fca93216218dc8997e416bd17d93caadec86809f80941eb3d15ee572b6f1c98f498ec98279554f37107228c506d9c6d3ba625eedeb709fb1c7f99b0fa398e0741e1b7863f056ac5ba48d9549173406b4125bfe4ef842f5d4357d82bafc144a2e88a8dda4c437dd35886b034d025778159f67f11e7416e7c51c4edb90a87d6ba66f6ee7e802b07a152accae6b14380b"),
@@ -780,5 +787,8 @@ const GOLDEN: &[(&str, &str)] = &[
     ("statement 9 follow removed", "0930013c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c0650686f746f73000381829ad70602018139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394ec6bcefebffb8a48969ef37a8ce7360d6159e9f5c9705111cfca79637ffe27b2e9885d0209b5871f537738c62d98c3a22725c321725e8db75fa56495a5a52b06"),
     ("message 28 devices join","000001741c0001ef029e64389090ed3bd0aecea44c8015b863a7eea036114e2aa1d76daa5ed1f14c5602046b0128ed4928c628d1c2c6eae90338905995612959273a5c63f93636c14614ac8737d1010180829ad70600006e0fac6bc3157adbfa575e36b997a504aca780fd63baa2cfd3e3dfe8226c53a0c4dfb9e8356fa1463e3b6f3cefb254cfb512aefbdb4c250a5e9f72e6d73c4d0905de01019637b249c05e7c8e0191e443ba0d55bf87f417dd29ae535f51072e62af8ec13208080808080808080808080808080808030180f7bed70680829ad706001398f62c6d1a457c51ba6a4b5f3dbd2f69fca93216218dc8997e416bd17d93caadec86809f80941eb3d15ee572b6f1c98f498ec98279554f37107228c506d9c6d3ba625eedeb709fb1c7f99b0fa398e0741e1b7863f056ac5ba48d9549173406b4125bfe4ef842f5d4357d82bafc144a2e88a8dda4c437dd35886b034d025778159f67f11e7416e7c51c4edb90a87d6ba66f6ee7e802b07a152accae6b14380b"),
     ("message 2 join with a sibling proof", "0000004a020001469e64389090ed3bd0aecea44c8015b863a7eea036114e2aa1d76daa5ed1f14c560106203d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d050000"),
+    ("message 35 remove request", "000000a823009e64389090ed3bd0aecea44c8015b863a7eea036114e2aa1d76daa5ed1f14c566e7a1cdd29b0b78fd13af4c5598feff4ef2a97166e3ca6f2e4fbfccd80505bf10387829ad7068139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b39405034eec38fd08e1e26bf2a5cce78ece90dacab83f3042abb3f72f2a07c49a2d13554273a26513796c1e3c7b507192753a15ea735c7fde0c0a753deb525ba502"),
+    ("message 36 remove reply", "0000008424009e64389090ed3bd0aecea44c8015b863a7eea036114e2aa1d76daa5ed1f14c566e7a1cdd29b0b78fd13af4c5598feff4ef2a97166e3ca6f2e4fbfccd80505bf101406f6e6c7920616e2061646d696e206f662074686520666f6c6465722063616e2061736b20697473206f776e657220746f2072656d6f7665206120646576696365"),
+    ("message 36 remove reply done", "0000004324009e64389090ed3bd0aecea44c8015b863a7eea036114e2aa1d76daa5ed1f14c566e7a1cdd29b0b78fd13af4c5598feff4ef2a97166e3ca6f2e4fbfccd80505bf100"),
     ("devices link", "seedwell://devices/AGLDPMSJYBPHZDQBSHSEHOQNKW7YP5AX3UU24U27KEDS4YVPR3ATEDAMBQGAYDAMBQGAYDAMBQGAYDADAGAPPPWXA2AIFGWXAYAW46Q43UU3BN4P2E5PJRKZR7X7J3ZKS4LG4PFG6LSPX7GNQBIFX4LAKC6RDCDFYUJDWIGLQERDHDKQ2UBILDPPXLH26BKLIJU44XOU7UEG6N46OSKWTVYFWTULSCV75MYPV65I2KDYKQSRWIZYSZNNLWBQ6DAMBQGAYDAMBQGAYDAMBQGAYDAMBQGAYDAMBQGAYDAMBQGAYDAMYGRA?name=Kristian%27s%20Mac%20mini&a=AH5VI2P6YFI5TR4MFIAMR5G5MXQ6V5KKVYTZSIFJCKRH3XTVOBMRMOWS4ODSCYR4SHJFSUVSKLYFDIYDE4HLH7AELDE7QUZTCASBRWA72PGVLOJGZ7MUURQS4I7WBSLZYZ7OBCVVRB6L5KVM7APO7BVT4GEIDQTWCH4EFRS4BV2P5JD6JGZ6FXCB"),
 ];

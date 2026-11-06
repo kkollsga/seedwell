@@ -1,4 +1,5 @@
 using Microsoft.Win32;
+using uniffi.trs_ffi;
 
 namespace Seedwell;
 
@@ -85,6 +86,8 @@ static class Registration
     public static void Unregister()
     {
         Notifier.Unregister();
+        // (Whatever happens here, the rest of the uninstall's clean-up goes on.)
+        try { NavPaneEntry.RemoveAll(TrsFfiMethods.SyncNavPaneMarker()); } catch (Exception e) { AppLog.Write($"navigation pane entry not removed: {e.Message}"); }
         Registry.CurrentUser.DeleteSubKeyTree($@"{Classes}\{ProgId}", false);
         using (var ext = Registry.CurrentUser.OpenSubKey($@"{Classes}\.torrent\OpenWithProgids", true))
         {

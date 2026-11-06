@@ -28,13 +28,16 @@ use crate::sign::{flags_byte, kind_byte};
 
 /// The highest protocol version this build speaks (in [`Hello`]). 2 is 0.1.6's, the first release with sync; 3 is
 /// 0.1.19's: an index entry may be an unhashed file (a size and no chunks, [`crate::model::FileInfo::is_unhashed`]),
-/// fetched with [`StreamRequest`] and [`StreamData`].
-pub const PROTOCOL: u32 = 3;
+/// fetched with [`StreamRequest`] and [`StreamData`]. 4 is 0.1.20's: *Read only* is a folder setting its owners sign
+/// ([`crate::members::Body::ReadOnly`], statement kind 12), and while it is on only the owners' versions count.
+pub const PROTOCOL: u32 = 4;
 /// The lowest protocol version this build still speaks. A breaking change raises [`PROTOCOL`] and keeps this one
 /// version behind for a while (N-1), so devices that are a release apart still sync. Protocol 3 raised it at once (the
 /// user's decision, 2026-11-04: no older device is left, and one of 0.1.18 would mishandle an unhashed entry), so a
-/// device of 0.1.18 or before refuses the session and says which one needs an update.
-pub const MIN_PROTOCOL: u32 = 3;
+/// device of 0.1.18 or before refuses the session and says which one needs an update. Protocol 4 did the same (the
+/// user's rule: no older device is kept compatible; a device of 0.1.19 would keep the Read only statement as one it does
+/// not know and take every member's versions while the folder is Read only).
+pub const MIN_PROTOCOL: u32 = 4;
 /// Most bytes one [`StreamRequest`] asks for: the receiver asks for an unhashed file in pieces of this, in order.
 pub const STREAM_PIECE: u32 = 8 << 20;
 /// Feature bit 0: channels, their topics and private messages (in 0.1.6, the baseline, so every device has it; the
@@ -56,9 +59,14 @@ pub const FEATURE_DEVICES: u64 = 1 << 4;
 /// Feature bit 5 (0.1.15): images and files in chat messages. Sessions that both have it carry [`BlobWant`] (type 29)
 /// and [`BlobData`] (type 30); only a device with it is asked for an attachment's bytes.
 pub const FEATURE_BLOBS: u64 = 1 << 5;
+/// Feature bit 6 (0.1.20): answers [`ReachAsk`] (type 33) with a [`ReachAnswer`] (type 34): it dials the asker back
+/// to tell it whether other devices can reach it (SPEC §7G.3, *Can other devices reach this one*). Only a device with
+/// it is asked.
+pub const FEATURE_REACH: u64 = 1 << 6;
 /// The optional behaviours this build supports, one bit each; a session uses those both sides have (the AND). A new
 /// one takes the next free bit, documented here and in `PROTOCOL.md`; bits are never reused.
-pub const FEATURES: u64 = FEATURE_CHAT | FEATURE_DIRECT | FEATURE_HOLDS | FEATURE_RENAMES | FEATURE_DEVICES | FEATURE_BLOBS;
+pub const FEATURES: u64 =
+    FEATURE_CHAT | FEATURE_DIRECT | FEATURE_HOLDS | FEATURE_RENAMES | FEATURE_DEVICES | FEATURE_BLOBS | FEATURE_REACH;
 /// Most bytes of a blob in one [`BlobData`].
 pub const MAX_BLOB_CHUNK: usize = 1 << 20;
 
@@ -113,6 +121,97 @@ pub struct BlobData {
     /// The part (empty unless [`BlobCode::Ok`]).
     pub data: Vec<u8>,
 }
+/// Type 33 (feature [`FEATURE_REACH`]): "can you reach me at `addr`?" The receiver opens a TCP connection to `addr`
+/// (and closes it at once) only when `addr`'s IP is the one it sees the session come from, so a device can only have
+/// itself dialed; otherwise, and over a relayed session, it answers [`ReachOutcome::NotTried`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReachAsk {
+    /// Matches the [`ReachAnswer`].
+    pub id: u32,
+    /// Where the asker listens, as it believes the receiver can dial it (`ip:port`, at most [`MAX_ADDR`] bytes).
+    pub addr: String,
+}
+
+/// What a dial back for a [`ReachAsk`] did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReachOutcome {
+    /// The connection opened: something listens there and lets the receiver in.
+    Connected,
+    /// It did not open (no answer in time, refused, unreachable).
+    Failed,
+    /// Not tried: the address is not the one the session comes from, the session is relayed, or the receiver was
+    /// asked too often. Says nothing about the asker.
+    NotTried,
+}
+
+/// Type 34 (feature [`FEATURE_REACH`]): the answer to a [`ReachAsk`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReachAnswer {
+    /// The ask's id.
+    pub id: u32,
+    /// What the dial back did.
+    pub outcome: ReachOutcome,
+}
+
+/// Type 35 (0.1.20, protocol 4): an admin's request that an owner's device remove `device` from a folder (SPEC §7G.1
+/// *Removing a device*). Only owners sign membership changes: the owner's device that receives it checks that `by` is an
+/// admin of the folder now and `device` a user there (not an owner or an admin, nor one of the owner's own devices),
+/// then signs the removal by itself, with no question to its user, and answers with a [`RemoveReply`]. Signed with the
+/// admin's device key over [`RemoveRequest::payload`], so it says who asked.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RemoveRequest {
+    /// The folder.
+    pub folder_id: FolderId,
+    /// The device to remove (its public key).
+    pub device: [u8; 32],
+    /// The serial of the owners' latest statement about `device` the admin knew when it asked (0: none). An owner's
+    /// device that holds a later one refuses: the owners decided about the device since (no clocks are compared).
+    pub seen: u64,
+    /// When the admin asked (its clock; shown only).
+    pub at_s: u64,
+    /// The admin's device key.
+    pub by: [u8; 32],
+    /// `by`'s signature.
+    pub sig: [u8; 64],
+}
+
+impl RemoveRequest {
+    /// The request of admin `key` to remove `device` from `folder_id`, knowing the owners' statements about it up to
+    /// serial `seen`, signed.
+    pub fn new(key: &DeviceKey, folder_id: FolderId, device: [u8; 32], seen: u64, at_s: u64) -> RemoveRequest {
+        let by = *key.public_key();
+        RemoveRequest { folder_id, device, seen, at_s, by, sig: key.sign(&Self::payload(&folder_id, &device, seen, at_s, &by)) }
+    }
+
+    /// What is signed: `"seedwell-sync/v1/remove-request" ‖ folder_id ‖ device ‖ seen (u64 BE) ‖ at_s (u64 BE) ‖ by`.
+    pub fn payload(folder_id: &FolderId, device: &[u8; 32], seen: u64, at_s: u64, by: &[u8; 32]) -> Vec<u8> {
+        [REMOVE_REQUEST.as_bytes(), &folder_id.0, device, &seen.to_be_bytes(), &at_s.to_be_bytes(), by].concat()
+    }
+
+    /// The signature is `by`'s.
+    pub fn verify(&self) -> bool {
+        device::verify(&self.by, &Self::payload(&self.folder_id, &self.device, self.seen, self.at_s, &self.by), &self.sig)
+    }
+}
+
+/// The domain of a [`RemoveRequest`]'s signature.
+const REMOVE_REQUEST: &str = "seedwell-sync/v1/remove-request";
+
+/// Most bytes of a [`RemoveReply`]'s reason.
+pub const MAX_REMOVE_REASON: usize = 300;
+
+/// Type 36 (0.1.20, protocol 4): an owner's device's answer to a [`RemoveRequest`]: the removal is signed (`refused`
+/// `None`), or not, and why (shown to the admin's user).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RemoveReply {
+    /// The folder.
+    pub folder_id: FolderId,
+    /// The device the request named.
+    pub device: [u8; 32],
+    /// Why it was refused (at most [`MAX_REMOVE_REASON`] bytes); `None`: done.
+    pub refused: Option<String>,
+}
+
 /// Channels in one [`ChatJoin`].
 pub const MAX_JOIN_CHANNELS: usize = 1024;
 /// Messages in one [`ChatMessages`] (and [`DirectMessages`]).
@@ -766,6 +865,14 @@ pub enum Message {
     StreamRequest(StreamRequest),
     /// 32.
     StreamData(StreamData),
+    /// 33.
+    ReachAsk(ReachAsk),
+    /// 34.
+    ReachAnswer(ReachAnswer),
+    /// 35.
+    RemoveRequest(RemoveRequest),
+    /// 36.
+    RemoveReply(RemoveReply),
     /// A type this version does not know: skipped, not an error. Encodes as an empty frame of that type.
     Unknown(u8),
 }
@@ -806,6 +913,10 @@ impl Message {
             Message::BlobData(_) => 30,
             Message::StreamRequest(_) => 31,
             Message::StreamData(_) => 32,
+            Message::ReachAsk(_) => 33,
+            Message::ReachAnswer(_) => 34,
+            Message::RemoveRequest(_) => 35,
+            Message::RemoveReply(_) => 36,
             Message::Unknown(k) => *k,
         }
     }
@@ -1008,6 +1119,37 @@ impl Message {
                     None => put_bool(out, false),
                 }
             }
+            Message::ReachAsk(m) => {
+                put_varint(out, u64::from(m.id));
+                put_str(out, &m.addr);
+            }
+            Message::ReachAnswer(m) => {
+                put_varint(out, u64::from(m.id));
+                out.push(match m.outcome {
+                    ReachOutcome::Connected => 0,
+                    ReachOutcome::Failed => 1,
+                    ReachOutcome::NotTried => 2,
+                });
+            }
+            Message::RemoveRequest(m) => {
+                out.extend_from_slice(&m.folder_id.0);
+                out.extend_from_slice(&m.device);
+                put_varint(out, m.seen);
+                put_varint(out, m.at_s);
+                out.extend_from_slice(&m.by);
+                out.extend_from_slice(&m.sig);
+            }
+            Message::RemoveReply(m) => {
+                out.extend_from_slice(&m.folder_id.0);
+                out.extend_from_slice(&m.device);
+                match &m.refused {
+                    Some(why) => {
+                        put_bool(out, true);
+                        put_str(out, why);
+                    }
+                    None => put_bool(out, false),
+                }
+            }
         }
     }
 
@@ -1163,6 +1305,29 @@ impl Message {
                 data: r.bytes(MAX_DATA, "data")?.to_vec(),
                 chunks: r.list(MAX_CHUNKS, 33, "chunks", chunk)?,
                 sig: if r.bool("has signature")? { Some(r.array("signature")?) } else { None },
+            }),
+            33 => Message::ReachAsk(ReachAsk { id: r.u32("request id")?, addr: r.str(MAX_ADDR, "address")? }),
+            34 => Message::ReachAnswer(ReachAnswer {
+                id: r.u32("request id")?,
+                // An outcome this version does not know says nothing about the asker.
+                outcome: match r.u8("outcome")? {
+                    0 => ReachOutcome::Connected,
+                    1 => ReachOutcome::Failed,
+                    _ => ReachOutcome::NotTried,
+                },
+            }),
+            35 => Message::RemoveRequest(RemoveRequest {
+                folder_id: FolderId(r.array("folder id")?),
+                device: r.array("device key")?,
+                seen: r.varint("serial seen")?,
+                at_s: r.varint("time")?,
+                by: r.array("admin key")?,
+                sig: r.array("signature")?,
+            }),
+            36 => Message::RemoveReply(RemoveReply {
+                folder_id: FolderId(r.array("folder id")?),
+                device: r.array("device key")?,
+                refused: if r.bool("refused")? { Some(r.str(MAX_REMOVE_REASON, "reason")?) } else { None },
             }),
             k => Message::Unknown(k),
         })
@@ -1449,6 +1614,25 @@ mod tests {
         assert_eq!(roundtrip(&last), last);
     }
 
+    /// The failure: a dial-back's answer read as another outcome than the one sent (a failure read as "connected" hides
+    /// a blocked device; "not tried" read as "failed" blames one that is fine), or an outcome a later version adds read
+    /// as evidence either way.
+    #[test]
+    fn reach_asks_and_answers_keep_their_outcome() {
+        let ask = Message::ReachAsk(ReachAsk { id: 7, addr: "192.168.68.73:51710".into() });
+        assert_eq!(roundtrip(&ask), ask);
+        for outcome in [ReachOutcome::Connected, ReachOutcome::Failed, ReachOutcome::NotTried] {
+            let a = Message::ReachAnswer(ReachAnswer { id: u32::MAX, outcome });
+            assert_eq!(roundtrip(&a), a);
+        }
+        let mut out = Vec::new();
+        Message::ReachAnswer(ReachAnswer { id: 1, outcome: ReachOutcome::Failed }).encode(&mut out);
+        // The outcome is the payload's last byte: a later version's 9 is no evidence.
+        *out.last_mut().unwrap() = 9;
+        let (frame, _) = Frame::split(&out).unwrap().unwrap();
+        assert_eq!(Message::decode(frame), Ok(Message::ReachAnswer(ReachAnswer { id: 1, outcome: ReachOutcome::NotTried })));
+    }
+
     fn hello(protocol: u32, min_protocol: u32, features: u64) -> Hello {
         Hello { protocol, client: "Seedwell 0.1.6".into(), device_name: "Mac".into(), min_protocol, features }
     }
@@ -1616,5 +1800,28 @@ mod tests {
         let f = Frame { kind: 6, flags: 0, payload: &[7, 99, 0] };
         let Ok(Message::Response(r)) = Message::decode(f) else { panic!() };
         assert_eq!((r.id, r.code, r.data.len()), (7, ResponseCode::Generic, 0));
+    }
+
+    /// A removal request names who asked by its signature: fails when a request whose folder, device, serial seen,
+    /// time or signer was changed on the way still verifies, or a request that came back through its bytes does not.
+    #[test]
+    fn a_removal_request_verifies_only_as_its_admin_signed_it() {
+        let admin = DeviceKey::from_seed(&[2; 32]);
+        let req = RemoveRequest::new(&admin, FolderId([3; 32]), [5; 32], 7, 1_800_000_000);
+        assert!(req.verify());
+        let mut out = Vec::new();
+        Message::RemoveRequest(req.clone()).encode(&mut out);
+        let Ok(Message::RemoveRequest(back)) = Message::decode(Frame { kind: 35, flags: 0, payload: &out[6..] }) else { panic!() };
+        assert!(back == req && back.verify());
+        let other = DeviceKey::from_seed(&[4; 32]);
+        for bad in [
+            RemoveRequest { folder_id: FolderId([9; 32]), ..req.clone() },
+            RemoveRequest { device: [6; 32], ..req.clone() },
+            RemoveRequest { at_s: req.at_s + 1, ..req.clone() },
+            RemoveRequest { seen: req.seen + 1, ..req.clone() },
+            RemoveRequest { by: *other.public_key(), ..req.clone() },
+        ] {
+            assert!(!bad.verify(), "{bad:?}");
+        }
     }
 }

@@ -252,6 +252,7 @@ sealed partial class SettingsPage
         SettingsBlock.Rendezvous => Detach(Rendezvous.Root),
         SettingsBlock.Devices => Detach(Devices.Root),
         SettingsBlock.RulesEditor => RulesEditor(),
+        SettingsBlock.TorrentProxy t => new ProxySection(app, t.Title).Root,
         _ => new TextBlock(),
     };
 

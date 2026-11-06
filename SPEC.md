@@ -804,9 +804,13 @@ design notes, with the research behind them, are in `dev-docs/` (local).
 invitation and proof, the stored formats, and how they may change. 0.1.6, the first release with sync, was the
 baseline until 0.1.19, which speaks protocol 3 only (unhashed versions, §7G.11): the user's decision (2026-11-04,
 "no devices are older… we can update all"), so a device of 0.1.18 or before refuses a 0.1.19 one and says which
-needs an update, rather than receiving entries it would mishandle. The rules below hold from there on:
+needs an update, rather than receiving entries it would mishandle. 0.1.20 speaks protocol 4 only, the same way: its
+Read only is a folder statement (§7G.1) a device of 0.1.19 would not read, taking members' changes it must not. The
+rules below hold from there on:
 - devices agree on a protocol version and feature bits in their Hellos, and two that share none refuse each
-  other and say which needs an update;
+  other and say which needs an update; a Hello also says which Seedwell the device runs (`Seedwell 0.1.19`), and a
+  device this one syncs with (or a member it refused) that runs a newer release starts an update check here
+  (§12A, *A newer Seedwell on the network*);
 - fields are only appended, records carry their length, and types, kinds and values a device does not know are
   skipped or kept and passed on;
 - a breaking change raises the version and keeps the previous one (N-1) for at least a release;
@@ -846,7 +850,27 @@ needs an update, rather than receiving entries it would mishandle. The rules bel
       greater signature bytes).
   - Grants and removals form the folder's **membership**. Every device keeps it, checks every statement itself, and
     passes it on to the others when they connect, as with writers today.
-  - **Removing a device:** an owner-signed statement.
+  - **Removing a device:** an owner-signed statement. Only owners sign membership changes; the owners' devices keep
+    the member list.
+    - **An admin removes a user** (Read & write or Read only; never an owner or an admin) by asking (0.1.20): its
+      device signs a removal request (message 35) and sends it to the folder's owner devices it can reach, and cuts
+      the user off at once: no session with it in that folder until the removal comes. It keeps the request (on disk,
+      next to the membership) and sends it again to every owner device it links the folder with, also after a restart,
+      until the owners' removal is in the membership. The request names the owners' last word about the device that the
+      admin knew (the serial of their latest statement about it): when the owners decided about it again meanwhile (a
+      new role, a removal and a new admission), the owner's device refuses ("the owner has decided about this device
+      since"), and the admin's device, once it learns that statement, stops asking and shows why; no clocks are
+      compared. Only an owner's device's answer counts. An owner's device that gets one carries it out **by itself, with
+      no question to its user**, when the sender is an admin of the folder now and the device a user there and not one
+      of the owner's own devices: an ordinary owner removal, so demoting the admin later changes nothing. Otherwise it
+      refuses, with the reason ("only an admin of the folder can ask its owner to remove a device", "an admin can ask
+      to remove only members who are not owners or admins of the folder", "it is one of the folder's owner's own
+      devices"); the admin's member list shows it, and the device is no longer kept out there. Meanwhile the row says
+      "Removal asked: waiting for the owner" (on the folder page and in a channel's members panel alike), and Remove is
+      not offered again.
+    - Admissions are the same way round: an admin admits by invitation, and an owner's device confirms each admission
+      by itself (the same role and time, signed by the owners). An admission no owner has confirmed counts only while
+      its admin is one; once confirmed, it is the owners' decision.
     - Devices refuse sessions with a removed device and ignore every version it signs from then on.
     - Versions they already accepted stay valid.
     - From then on it is no source to fetch from and no holder to rely on (a free, a rename, the removal question's
@@ -855,6 +879,42 @@ needs an update, rather than receiving entries it would mishandle. The rules bel
       only it had becomes one no device can give, reported as such). The same when the sharing ends for a device; a
       member that is only offline is unchanged.
     - It keeps the files it has; that cannot be prevented.
+  - **Read only** (0.1.20, protocol 4): a folder setting only an owner signs (with the folder key, so a statement by
+    anyone else is no statement), the owners' latest by serial counting (equal serials: the greater signature bytes),
+    so owner devices that switch it at once settle on one answer everywhere. For a folder kept on one computer and
+    opened on the others, the user's and other people's alike. Nobody's role changes, and nothing else is written or
+    kept for it: a restart reads it again, and a new key of the user's devices does not touch it.
+    - While it is on, **only the owners' changes count.** Every other member (an admin, a member by link, one of the
+      user's own devices) holds its changes back: it signs and sends none, as a Read only member does, and its page
+      says why ("Read only: only the folder's owner changes it. Changes made on this Mac stay here until the owner
+      turns it off."). An admin still admits members (and revokes its links) and asks the owner to remove users,
+      as when it is off.
+    - **No device takes a member's version**, the owners' devices above all: a version counts only when an owner's
+      device signed it, whichever device passes it on, or when an owner's device announces it from its own index (a
+      version a member made before it came on, which the owner holds). Any other version (an edit, a new file, a
+      delete, a rename; one signed as it came on, or by an older build) is kept but takes no part in which version is
+      current, so nobody downloads, deletes or renames anything for it.
+    - **Members pass the owners' versions on** to each other, as seeders: a chunk counts only if it hashes to the chunk
+      hash its signer signed (a device that sends one that does not is asked for none of the folder's chunks again in
+      that session, and the chunk is asked of another holder), a member serves only chunks of files its index holds as they are (so a file it changed
+      is served by nobody but the owner), and an unhashed version is streamed only from the device that made it
+      (§7G.11).
+    - **Off:** everyone sends what it held back, as ordinary changes (a conflict copy where an owner changed the same
+      file), and the versions kept meanwhile count again. That includes edits and deletes of files it had received:
+      its index notes that it holds back (`held_read_only`), so as it signs again, at once or when it next starts, it
+      reads them into its own versions, as a device admitted after waiting does.
+    - **From 0.1.19** (whose Read only was a flag of the user's devices' Follow that lowered the others to Read only,
+      §7G.1 *Your devices*): once, on each folder, an owner gives every sibling that design lowered the role it had
+      before (Admin for one it first admitted Read only), and when that Read only still counts (the latest trusted
+      Follow of the folder on the group carries the flag), the folder becomes Read only by the owners' setting. It
+      reads what 0.1.19 left: the owner's record of when it came on (`devices_read_only`, then deleted; only the time:
+      an off the user said on another device while this owner was away wins) or the flag on the group's Follows, and
+      counts a sibling as lowered when its Read only was decided after that (the old design's own clock rule, used
+      this once). Like the old off, it also raises a sibling the user made Read only by hand while the old Read only
+      was on. It acts only on decisions this owner held when this version first opened the folder (`read_only_migrate_upto`,
+      the highest owner serial then: a device of 0.1.19 meets no device of this version), so a sibling another owner
+      already raised, and a Read only the user chose after that, stay. Marked done per folder (`read_only_migrated`),
+      it never runs again, so a Read only the user chooses later stays.
   - **Sharing end:** how long the folder is shared is an owner-signed statement: an end time, or none. Admins
     cannot set it; an owner's latest statement (by serial) counts.
     - Until the end nothing changes. Once it has passed, every device that is not an owner counts as removed:
@@ -994,36 +1054,10 @@ needs an update, rather than receiving entries it would mishandle. The rules bel
     no device reaches by counting, counts for nothing), and a device numbers its next one above those of the owners
     and admins, so no statement can freeze a folder's. A group that moves to a new key carries each statement as it
     counts, at its own time.
-  - **Read only** (0.1.19, a folder's): the statement can also say the user's other devices only read the folder
-    (`FOLLOW_READ_ONLY`, signed the same way, said again in every later statement for it, the off one included). For
-    a folder kept on one computer and opened on the others: they open and download its files but never change, add
-    or delete anything, here or on each other (Read only members, below and §7G.11), and nothing is downloaded to the
-    device that hosts it.
-    - *Who turned it on* is the earliest Follow with the flag since the last one without: a sibling saying it again
-      later (after a mode switch) does not take its place. That device keeps its role; owners are never lowered.
-    - While it is on, an owner admits the user's devices at Read only instead of Admin (an admin with a one-use
-      invitation at Read only), and raises nobody. An owner makes Read only, signed with the folder key, each sibling
-      at Admin or Read & write whose role was decided no later than the second it came on, and one at Read & write
-      by an admin's invitation (an admin that did not know yet). It confirms what such an admin admitted first, so
-      lowering it drops nobody it let in (its links that are not used yet stop working, as for any admin who is
-      lowered). A role an owner gives one of them afterwards stays. What an owner decides under Read only is dated
-      a second after it came on at least.
-    - **No owner online:** until an owner is, roles do not change. A sibling that becomes Read only then holds back
-      by itself: it writes nothing to the folder (its edits stay its own, as a Read only member's), so the host gets
-      none of its changes. A device on an older Seedwell does not hold back; the line of the switch on an admin says
-      so ("Until an owner of this folder is online, a device on an older Seedwell can still send changes.").
-    - Turned off (by a later statement without the flag), an owner gives every sibling at Read only since it came on
-      Admin back; those Read only before it came on stay so. Turned on and off while the owner was away, it gives
-      Admin back to those made Read only in between. Each once.
-    - It stays on until an owner or admin turns it off: when the statement that turned it on stops counting (its
-      device left the user's devices, or is no longer owner or admin), the owner says it again, numbered above the
-      one that turned it on. It notes in the folder's entry (`devices_read_only`) who turned it on, when, and the last
-      off it carried out. Until the owner's statement arrives, each device goes on reading it on from the statement
-      that turned it on, which it read before (never off for a moment, so nothing is admitted at Admin, written or
-      said off meanwhile); and an owner or admin that says its statement again (above) says it with the flag.
-    - Only the user's own devices follow it: members admitted by link keep the role their link gave. Only an owner
-      or admin can switch it. "On all my devices" turned off keeps it as it is. An owner on an older Seedwell admits
-      as before (it keeps the flag and passes it on).
+  - **Read only** is not a Follow's matter: it is the folder's own setting, below (*Read only*, under *Roles*). The
+    Follow flag 0.1.19 used for it (`FOLLOW_READ_ONLY`, which lowered the user's other devices to Read only) is read
+    once more, by the one-time step that gives back the roles it lowered (below), and no longer written.
+
   - **Removed by its owner** (0.1.14). The device that owns a folder on all devices (its owner, normally the device
     that added it) removing it in the app removes it from Seedwell on every device: it says so in the group (its
     Follow turns off, marked removed), and each other device stops syncing it, its files kept where they are (an
@@ -1204,6 +1238,39 @@ needs an update, rather than receiving entries it would mishandle. The rules bel
      carry channel sessions as they carry folder sessions.
 
   Relays carry only end-to-end-encrypted bytes. Seedwell runs no servers.
+- **Can other devices reach this one (0.1.20):** a device whose sync port a firewall blocks still dials out and syncs
+  with every device that listens, so nothing looks wrong on it, but no device can dial it (the user's PC in 0.1.19:
+  Windows Firewall on a Public network, where Windows never asks for a rule). Folder sync finds out with evidence
+  only (`trs-sync-net` `inbound.rs`):
+  - *reached:* a direct TCP session it accepted from another computer, or a dial back that got through;
+  - *not reached:* a device it dialed directly over TCP, asked to dial it back (ReachAsk, feature bit 6), could not
+    connect within 5 s (tried twice). The device dials back only the IP the session comes from (it can be made to
+    dial only the asker itself) with the port asked: on the local network the sync port at the address it reached,
+    where no router stands between them, so a failure is this computer's own firewall; over the Internet only the
+    router's mapped port (from NAT-PMP/UPnP), never without a mapping, and dialed back only at a port the asker's
+    own signed address record names (the IP may be a NAT other computers share). A device dials another back at
+    most once a minute (else "not tried", and the asker asks again a minute later).
+  - The latest success and the latest failure are kept per network (local, Internet) for an hour and forgotten on a
+    network change; one ask per network every 10 minutes while such a session lasts. *Blocked* only when a device
+    failed to reach it and none reached it within the hour (a failure never hides a success); a device any device
+    reached is never called blocked; without evidence (no session to a device with the bit) it is *not known*.
+  - **The notice** (`trs-ffi` `sync_reach.rs`, drawn as a banner at the top of the Folder Sync page): "Other
+    devices can't reach this PC", who could not connect at which address, and why. On Windows the firewall's rule
+    for the app's own exe is read off the UI thread (PowerShell's NetSecurity module, which answers in the same
+    words in every system language; at most every 5 minutes, only while blocked): *no rule* ("Windows Firewall
+    doesn't ask on this network (Public), so Seedwell can't be reached until it's allowed" when its profile's
+    NotifyOnListen is off), *a block rule* ("Windows Firewall blocks Seedwell"), or *a rule that allows* (something
+    else stops it: no action). With no rule or a block rule it offers **Allow Seedwell through Windows Firewall…**:
+    the host runs the core's `netsh advfirewall firewall add rule name="Seedwell" dir=in action=allow
+    program="<exe>" enable=yes profile=any` (inbound, every protocol: TCP and the uTP twin; every profile, as a
+    network's can change) with administrator rights (one UAC prompt; Seedwell installs per user and cannot add it
+    itself), or for a block rule `set rule name=all dir=in program="<exe>" new action=allow enable=yes
+    profile=any`; then the rule is read again and the devices dial back again at once (asks still waiting are
+    dropped), and the notice says nothing until both are in (two and a half minutes at most), then goes when either
+    says so (docs/build-76-firewall.md). A rule that reads as before the action means an administrator's policy
+    decides (Group Policy, which netsh cannot change): the notice says so, without the action. The program's path
+    reaches the PowerShell check in an environment variable, never in the script's text. The Mac's application
+    firewall asks by itself: a plain notice with where to let Seedwell in, no action.
 - **Rendezvous (0.1.13, off until the user sets it up):** an address book on the user's own Cloudflare account (a
   Worker with a SQLite-backed Durable Object per record, the free plan; `tools/rendezvous-worker`). Each device that
   uses it keeps one record there: its local and public addresses and the time, sealed with a key derived from its
@@ -1236,7 +1303,9 @@ needs an update, rather than receiving entries it would mishandle. The rules bel
   connected, says whom it waits for, since when and (for one device) why it cannot reach it, in one sentence the core
   makes: "Waiting for Kristian's Mac mini (last seen 3 days ago: nothing answers at 192.168.68.57:55799)", "Waiting
   for Mac mini (never connected to this Mac)", or for several "Waiting for 2 devices: Mac mini (3 days ago), Makro (1
-  hour ago)" (by name, three at most, then "and N more"). It is the folder's `waiting` in `sync.list`/`sync.status`
+  hour ago)" (by name, three at most, then "and N more"). A member this device (an admin) cut off while its removal
+  waits for the owner (§7G.1 *Removing a device*) is kept away on purpose, so it is not waited for, until an owner's
+  device refuses the request. It is the folder's `waiting` in `sync.list`/`sync.status`
   and the channel's in `chat.list`; the app shows it as the row's grey line and on the folder page (§7G.5). A folder
   whose members are connected but none of which has sent its list yet (its first index: a joining device just
   admitted, an owner busy) says so too, "Waiting for Kristian's Mac mini to list Movies", until one has; meanwhile
@@ -1245,8 +1314,8 @@ needs an update, rather than receiving entries it would mishandle. The rules bel
   has no time) is *gone*, as far as this device can tell. Nothing happens to it on its own; the user chooses:
   - **An owner** is offered to remove it: the folder's (or channel's) `gone` lists it, the CLI row names the
     `remove-device` command, and the folder page has *Remove <device> from This Folder…*, which asks first ("It stops
-    syncing at once, on every device. It keeps the files it already has."). Only owners remove devices (an admin
-    cannot: the removal is signed with the folder key).
+    syncing at once, on every device. It keeps the files it already has."). Only owners sign removals; an admin asks
+    for one from the member list (*Removing a device*) and is not offered gone devices.
   - **A member whose every owner and admin is gone** (nobody can admit devices or change roles any more; `can_reshare`)
     is offered *Share Again from This Mac…*: `sync.reshare` (Full; `seedwell sync reshare <folder>`) makes the folder
     a new folder, with a new id, owned by this device, at the same place:
@@ -1346,8 +1415,8 @@ needs an update, rather than receiving entries it would mishandle. The rules bel
       adds 1, 7 or 30 days to the current end, or **No End Date** lifts the end; the members count again.
     - Members' rows show "until 1 Nov", and the folder page shows "shared until 1 Nov".
     - An admin sees the countdown, without the menu.
-  - **Your devices** (0.1.19): a folder's *On all my devices* and its *Read only* (below), while this Mac is paired
-    and may share it, applied at once.
+  - **Your devices** (0.1.19): a folder's *On all my devices*, while this Mac is paired and may share it, and its
+    *Read only* (below; whenever this Mac may share it), each applied at once.
   - **Active links:** the links that still admit someone, with uses and dates, each with **Revoke**. Used, expired
     and revoked links are not listed.
 - **Edit** opens a modal, then **Cancel** and **Save**:
@@ -1357,7 +1426,11 @@ needs an update, rather than receiving entries it would mishandle. The rules bel
 - **Main window:** *Folder Sync* in the sidebar under Sharing. A folder page shows:
   - **Members:** every device in the folder, with this Mac first, then by role. Each row shows how the device is
     reached (LAN / Internet / relay, client, bytes each way) or *Offline*, and its role. The owner has a role menu
-    on every other device (Owner, Admin, Read & write, Read only, *Remove from Folder…*, which asks first).
+    on every other device (Owner, Admin, Read & write, Read only, *Remove from Folder…*, which asks first); an admin
+    has a menu with *Remove from Folder…* alone on each user (Read & write, Read only), which asks first ("The folder's
+    owner removes it, as soon as its device hears from this Mac. It stops syncing with this Mac at once. It keeps the
+    files it already has.") and sends the request; the row then says "Removal asked: waiting for the owner", or why an
+    owner's device refused it.
   - **Away:** under the status line, whom the folder waits for (§7G.3 "Whom a folder waits for"; the list's grey
     line says the same); for an owner, a line per gone device with *Remove…*; for a member whose owners and admins
     are all gone, a note and *Share Again from This Mac…*, which asks first, then opens the Share dialog of the new
@@ -1368,7 +1441,8 @@ needs an update, rather than receiving entries it would mishandle. The rules bel
   applies at once, sync starts again on it in a few seconds, and a port another app has is refused with "Port N is
   in use by another app." while the old one keeps running; under it *From the Internet*, the router's answer for
   the sync port: *Opened on the router*, *Checking*, *Closed* or *Not known*, §8.4 "Reachability"), finding devices on the LAN and over the Internet, relaying,
-  Internet speed limits, default location for joined folders, and *Sync status in Finder* (*Turn On…*, or *On* with
+  Internet speed limits, *Seedwell folder* (where joined folders go, `~/Seedwell` when empty; Seedwell in the
+  file manager's sidebar shows the synced folders, §7G.11), and *Sync status in Finder* (*Turn On…*, or *On* with
   *Manage…*).
   - **Find your devices over the Internet (Cloudflare)** (§7G.3, the rendezvous; every text from the core): what it
     does, that Cloudflare sees only sealed records and no files, that the free plan is enough. While off, numbered
@@ -1395,17 +1469,19 @@ needs an update, rather than receiving entries it would mishandle. The rules bel
   *On All My Devices* with a checkmark. Under the switch: "Your other devices (MacBook, Studio PC) join it by
   themselves." (a channel's: "…, as admins."), or why it cannot be turned on. Shown only while this Mac is paired
   with other devices (or the item is on all of them).
-  - **Read only** (0.1.19, §7G.1): a folder's second switch, under it (off by default), switchable by an owner or
-    admin while *On all my devices* is on (or chosen). Its tooltip: "Your other devices can open and download its
-    files but never change, add or delete anything, here or on each other; nothing is downloaded to this Mac". The
-    line under it says what it does and what applying it changes: "Your other devices that have it become Read only:
-    they can open and download its files, but never change, add or delete anything, here or on each other. Nothing
-    is downloaded to this Mac, which keeps its role."; turning it off, "Your other devices become admins again: they
-    can change, add and delete its files, here and on each other."; on a device that may not switch it, who can. In
-    the Add and Edit sheets it applies with Start or Save (on together with *On all my devices*: one statement); in
-    the Share dialog both switches apply at once, under the sharing period, and while Read only is on the dialog's
-    role starts at Read only (also when it opens), so a new link admits at Read only too; another role can still be
-    picked for one link.
+  - **Read only** (§7G.1, the owner's folder setting): a folder's own switch, below *On all my devices* but not part of
+    it (off by default): shown for every folder of this Mac, paired or not (an owner paired with nothing shares the
+    folder with others too), switchable only on an owner of the folder. Its tooltip: "Only the
+    owner's changes count: everyone else can open and download its files but change nothing in it". The line under it
+    says what it does and what applying it changes: "Only this Mac's changes count: everyone it is shared with, your
+    other devices too, can open and download its files but change nothing in it, here or on each other. Nobody's role
+    changes."; turning it off, "Everyone can change it again as their role allows; what they changed meanwhile comes in
+    (a conflict where this Mac changed the same file)."; on any other device the state and who can switch it ("Read
+    only: only the folder's owner changes it. Changes made on this Mac stay here until the owner turns it off." or
+    "Only the folder's owner can make it read only."). In the Add and Edit sheets it applies with Start or Save; in the
+    Share dialog each switch applies at once (Read only on its own, also without *On all my devices*), and while Read only is on the dialog's role
+    starts at Read only (also when it opens), so a new link admits at Read only too; another role can still be picked
+    for one link.
 - **Finder:** a Finder Sync extension inside the app badges each synced folder and its items.
   - **The folder's badge:**
     - green tick: up to date, with a device online;
@@ -1433,13 +1509,16 @@ needs an update, rather than receiving entries it would mishandle. The rules bel
     - Later, Settings has the way in.
 - **Agents (§9A):** the `sync.*` methods and `seedwell sync …` commands.
   - Making or listing invitation links (`sync.share`, `sync.invites`), changing roles and removing devices
-    (`sync.set_role`, `sync.remove_device`), sharing a folder again (`sync.reshare`) and how long a folder is shared
-    (`sync.set_share_until`) need Full permission; `sync.members` is read-only; revoking a link is
+    (`sync.set_role`; `sync.remove_device`: an owner removes, an admin asks the owner to remove a user, and
+    `sync.members` shows the request as `removal` `waiting` or `refused` with `removal_reason`), sharing a folder again (`sync.reshare`) and how long a folder is shared
+    (`sync.set_share_until`) need Full permission; `sync.members` and `sync.read_only` (the folder's Read only,
+    whether this Mac may switch it, whether it holds its changes back) are read-only; `sync.set_read_only` (an owner of
+    the folder only, as in the app; `seedwell sync read-only <folder> on|off|status`) and revoking a link are
     Control.
-  - `sync.share` without a role makes a Read & write link, or a Read only one while the folder is *Read only* on the
-    user's devices, as the Share dialog does (`seedwell sync share <folder> --read-only` is `--role read_only`). No
-    method switches *On all my devices* or *Read only* (§9A.3: agents never change what is on the user's other
-    devices).
+  - `sync.share` without a role makes a Read & write link, or a Read only one while the folder is *Read only*, as the
+    Share dialog does (`seedwell sync share <folder> --read-only` is `--role read_only`). No
+    method switches *On all my devices* (§9A.3: agents never change what is on the user's other devices); *Read
+    only* is the folder's own setting, which an agent on an owner's Mac switches like the user (`sync.set_read_only`).
   - Links never reach the activity log.
   - *Remove and delete files* takes two steps.
 
@@ -2041,33 +2120,86 @@ an app group shared by the app and its extension), a Cloud Files sync root on Wi
   register a domain. Only the app's own extension is served: its code signature is checked from the peer's audit
   token before anything of a request is read (the team's Developer ID; in an ad-hoc build, exactly the extension in
   the app's bundle), and content is taken only from a plain file the extension put in the container's `u/` (one
-  link, the user's, opened without following a link, and copied from that open file). Chats are not reachable there. One domain per on-demand folder (identifier = the folder's id, name = its name; the Finder shows
-  it at `~/Library/CloudStorage/Seedwell-<Name>`), added when the folder becomes on demand. The core reports the
-  domains only while folder sync runs, and the host only adds and renames from that list: a domain goes only when the
-  core lets go of its folder. Before an on-demand folder is removed or switched to full, by whoever asks (the app, the
-  control socket, an agent) and after the checks that need no host, the core asks the host to remove its domain, the
-  system's pending changes handed over first, and waits; the host's refusal refuses the removal or switch (nothing
-  changes); with no app running (a headless daemon) it goes on as before. The core waits at most two minutes; past that the
-  removal or switch is refused, and a removal the system completes late leaves the domain as it was (added back if it
-  went meanwhile). A removal is noted before the domain goes: if the app stops in the middle, the next start tells the
-  user that macOS may have kept changes (macOS tells the place only to the call that removed the domain, so Seedwell
-  cannot move them). What the system kept of a removed domain is
-  never thrown away (also when it comes late): it goes next to the folder's place as `<name> (changes not synced)` (numbered when taken; for a
-  folder no longer here, `~/Seedwell`), and the user is told where. A domain left from before (its folder removed or
-  switched while the app was not running) goes when the core says so. Each move of the core's change feed signals the
-  working set. macOS adds a domain
-  switched off: the app asks the user once, when the folder becomes on demand (a window with *Open Settings*, at
-  System Settings › General › Login Items & Extensions › File Providers, that notices by itself when it is on), and
-  the folder page says so while it is off. macOS keeps such a folder in `~/Library/CloudStorage`, not at the location
-  the user picked: the join dialog's note says so plainly ("the location chosen here is where its files go if you turn
-  Files on demand off"). A device that holds the files has no domain at all (*Modes*): its folder stays at its path. Items carry the core's identifiers (`root` is the root container), the
-  role's capabilities (a read-only member reads and deletes; the folder itself is neither renamed nor deleted from the
-  Finder), and a kept item downloads eagerly and is never evicted by the system; the Finder actions *Always Keep on
+  link, the user's, opened without following a link, and copied from that open file). Chats are not reachable there.
+
+  **One *Seedwell* in the Finder's sidebar, listing every synced folder** (the user's decision, 2026-11-05, replacing
+  0.1.19's domain per on-demand folder, `~/Library/CloudStorage/Seedwell-<Name>`, one sidebar entry each). The app
+  registers one File Provider domain, the hub (identifier `seedwell`, name *Seedwell*, with the extension's custom
+  sidebar symbol; macOS places it under `~/Library/CloudStorage`, which the user accepts), and the core decides what it
+  holds (trs-ffi `sync_hub`; the app starts the server in hub mode, `sync_host_start(…, Hub)`; Windows is unaffected).
+  Its root lists every synced folder in name order (without case), each under a name no other has (` 2`, ` 3`, … for a
+  name taken): an on-demand folder as a folder of placeholders, served as its own domain was; a full folder (its files
+  on this Mac, wherever its place is: the Seedwell folder, `~/Seedwell` by default, or elsewhere) as a link to its
+  absolute place, so its files never move. Item identifiers are the hub's: `root` is the hub's root, an item of
+  on-demand folder `F` is `F:<the core's id>` (its folder `F:root`), a full folder's link is `F` alone; folder ids
+  hold no `:`, so no two folders' items can share an id. The top-level items cannot be renamed, moved, deleted or
+  trashed from the Finder (a folder is renamed, moved and removed in Seedwell), nothing is made at the top level, a
+  link is read only, and a move from one folder into another is refused (each folder is its own index; the user
+  copies instead). Each folder's own rules hold below its item, its role's capabilities included (a read-only member
+  reads and deletes). The domain has one sync anchor, at most 500 bytes (NSFileProviderEnumerating.h), so the system
+  holds a short token, `h2.<epoch>.<n>`, the same size whatever the number of folders, and the core keeps what it
+  stands for: the top level it reached, each on-demand folder's own anchor, the full folders shown as links (the last
+  64, in `<sync state>/file-provider-hub-anchors.json`, written whole and put in place, so a start keeps the system's
+  token valid; a store read back numbers on 2^32 further, so a token handed out after a save that did not reach the
+  disk is never another anchor's; a token the core no longer has, or of another store, is expired and the system
+  lists everything again). The changes since one are every on-demand folder's own feed from its own anchor (a folder new to the hub
+  from the start), the top level again when it changed (a folder added, renamed, switched or let go of), and the top
+  item of a folder that left (the system deletes what is below it). Top items that go come alone in their page, the
+  top level in the next (the extension reports a page's updates before its deletes, so a folder switched to full, or
+  "X 2" becoming "X", would collide with the name still there). A page cut by its limit says so, and a folder that
+  cannot be read keeps its anchor, so no folder's change is ever lost; one folder's index made anew expires the hub's
+  anchor. A folder whose feed waits for a save by replace (a delete a moment ago) is not read while it waits, whatever
+  moved in another folder, except once after each window (the watch lets it through, as it signals; that pass is for
+  that hold only: a new delete since starts a hold of its own). Each move of any
+  folder's feed, and each change at the top level, signals the hub's working set once; the host is told the hub again
+  when an on-demand folder joins it (switched here, by the command line or an agent), and shows its held files
+  downloaded. The core reports the hub while folder sync runs and a folder is synced; the host only adds and
+  renames it. The system's set of items on disk is reported for the hub and taken per folder.
+
+  **Removing or switching an on-demand folder** (by whoever asks: the app, the control socket, an agent; after the
+  checks that need no host) first lets it go from the hub, and the core waits: the system hands over what it has
+  pending below the folder's item (`NSFileProviderManager.waitForChanges(below:)`, the SDK's barrier for a
+  sub-hierarchy; it ignores cancellation, so it races a minute's cap and the first to end goes on), while the folder
+  is still served; then the core refuses whatever the system still sends for it (content it sends is first kept,
+  below), and what is still on disk below the folder's place in the Finder that the folder does not hold as it is
+  there (a file or link it lacks or has otherwise, a folder it lacks; never a placeholder, which is not read) is
+  copied next to the folder's place as `<name> (changes not synced)` (numbered when taken; for a folder no longer
+  here, `~/Seedwell`), the user told where. The place is looked at again and again while the folder is still listed,
+  until a look copies nothing and sees the place as the look before it did (a save made during a look shows in the
+  next); only then does the folder leave the hub and the system is signalled (it deletes what it has of the folder;
+  the hub and the other folders are untouched). Content the system sends for the folder from then on (a create or a
+  change, until the removal or switch ends) is copied there too, at the item's path (numbered when something else is
+  there), before it is refused. A file that vanishes between a look's listing and its copy (a Word lock file `~$…`, a
+  safe-save temporary `.sb-…`) is nothing to keep. If anything else found cannot be copied (a full disk, a file or
+  folder that cannot be read, no writable place), or the folder still changes after five looks, nothing is let go of:
+  the folder stays in the hub, its changes are taken again, and the removal or switch is refused with what could not
+  be kept. The host's refusal refuses the removal or switch (nothing changes); with
+  no app running (a headless daemon) it goes on as before. The core waits at most two minutes; past that the removal
+  or switch is refused, nothing is let go of after that, and a let-go that completes late is undone (the folder comes
+  back in the hub).
+
+  **From per-folder domains** (once, at the first start of this version): before the hub is registered, each domain of
+  the per-folder era is removed through the safe path: noted first, its pending changes handed over
+  (`waitForChanges(below:)` the domain's root; served as that folder's own domain), removed keeping unsynced data
+  (`.preserveDirtyUserData`; a hand-over that does not end goes on after the minute's cap, so the hub is never held
+  back), what macOS kept moved next to its folder as `<name> (changes not synced)` and the user
+  told; the note goes. The core says which domains are left (`sync_host_migration`: every registered one but the hub);
+  only when all went is the migration noted done (`<sync state>/file-provider-hub`), and it never runs again. Cut off
+  in the middle, the next start goes on with the domains still there, and tells the user of a removal that was under
+  way that macOS may have kept changes (macOS tells the place only to the call that removed the domain, so Seedwell
+  cannot move them). Nothing of the user's is deleted.
+
+  macOS adds a domain switched off: the app asks the user once, when the hub is registered (a window with *Open
+  Settings*, at System Settings › General › Login Items & Extensions › File Providers, that notices by itself when it
+  is on), and each on-demand folder's page says so while it is off. macOS keeps an on-demand folder in the hub, under
+  `~/Library/CloudStorage`, not at the location the user picked: the join dialog's note says so plainly ("the location
+  chosen here is where its files go if you turn Files on demand off"). A device that holds the files shows its folder
+  as a link (*Modes*): its folder stays at its path. A kept item downloads eagerly and is never evicted by the system; the Finder actions *Always Keep on
   This Mac* and *Stop Keeping on This Mac* pin and unpin. A fetch reports progress and hands the extension a copy (a
   clone) of the cache's file, and fails when the core gives up on it (below, *When a fetch gives up*). The system's set of
   items on disk is reported on each change; a file that left it (Remove Download, disk pressure) is freed by the core
   as an evict (the first report after a start is the baseline). Files the core holds show downloaded, not online
-  only: once a run for each enabled domain, and again after a switch, the app reads the system's set, the core lists
+  only: once a run while the hub is enabled, and again after a folder became on demand, the app reads the system's set, the core lists
   the held files not in it, and the app asks the system for them in batches (50, 200 ms apart); their fetch hands back
   clones of the cache, and one that is no longer held by then fails instead of downloading (the set read becomes the
   baseline, so their arrival is never taken for a release). A delete of a file whose content moved on since the
@@ -2083,7 +2215,20 @@ an app group shared by the app and its extension), a Cloud Files sync root on Wi
 - **Windows' host.** Cloud Files calls back into the provider's own process, so the app calls the core's on-demand
   calls in-process: no extension, no socket. `sync_host_attach` tells it the folders there should be (a sync root
   each, identity = the folder's id), each move of a change feed, and asks it to let go of a folder before a removal
-  or switch (as `remove_domain` on the Mac). Every on-demand folder it registers it keeps in place (above). It keeps no
+  or switch (as `remove_domain` on the Mac). Every on-demand folder it registers it keeps in place (above). **Seedwell
+  has one entry in File Explorer's navigation pane, opening the Seedwell folder** (the user's decision, 2026-11-05,
+  replacing that day's one entry per on-demand folder and 2026-11-03's none; the Mac's Finder sidebar gets the same
+  later). The Seedwell folder is where joined folders go (Settings › Folder Sync › *Seedwell folder*, `~/Seedwell`
+  when empty); the synced folders live inside it as ordinary folders, and on-demand ones are their own Cloud Files
+  sync roots nested inside it. The core describes the entry (`Core::sync_nav_pane`, a `SyncNavPane`: one fixed CLSID,
+  the name *Seedwell*, the folder as an absolute path, the marker value, and whether there is one: the folder is set
+  in Settings or a synced folder lies inside it) and tells the host at start and at each change
+  (`SyncHostListener::nav_pane`, from the same watch that reports the folders): the Seedwell folder set elsewhere in
+  Settings or by the command line, the first folder in it, the last gone. The host writes the entry, follows the
+  folder, removes it when there should be none and at uninstall. Each key it writes carries the marker value, so a
+  sweep (at start after a crash, at uninstall) removes Seedwell's own entries and never another program's. An
+  isolated run (tests, QA) is never told and has none: the CLSID is the user's. Only an officially documented
+  registration is used. It keeps no
   state of its own: the last change-feed anchor it applied is the core's, kept with the folder
   (`sync_host_anchor`, `sync_set_host_anchor`; `<sync state>/<id>.anchor`, deleted with the folder and dropped by a
   switch). Failed calls are typed (`CoreError::OnDemand` with a `SyncErrorKind`), so each callback answers with the
@@ -2463,6 +2608,142 @@ an app group shared by the app and its extension), a Cloud Files sync root on Wi
   the item back (the Mac answers the delete `deletionRejected`, so it comes back dataless; Windows fails the delete
   and dehydrates). Writes, new folders and renames stay refused.
 
+## 7H. Torrent proxy (SOCKS5, NordVPN preset)
+
+**Decision (2026-11-05, the user's).** Torrents can go through a SOCKS5 proxy, with NordVPN as the preset, through
+NordVPN's officially documented route only: its SOCKS5 servers on port 1080 with the user's NordVPN *service
+credentials*. Folder sync, chat, device sessions and the rendezvous never use it.
+
+**Decision (2026-11-05, the user's): torrent traffic only goes through the proxy; folder sync and chats never, so
+NordVPN never sees them** ("folder sync and chat sync should be outside the proxy completely, for privacy reasons").
+Device sessions, chats, folder data, the rendezvous, the relay and the DHT node folder sync uses to find devices all
+connect directly, whether the proxy is on, off or down.
+
+*What goes through it.* Every peer connection a torrent makes (TCP, `CONNECT` to the peer's address) and every HTTP(S)
+announce (`CONNECT` to the tracker's **name**, which the proxy resolves: no name of a tracker or a peer is looked up
+on this computer). SOCKS5 per RFC 1928, username and password per RFC 1929 (`crates/socks`). The tracker's TLS runs
+inside the proxied connection, with full certificate checks. The destination policy still refuses IP literals it
+refuses without a proxy, and the name `localhost`. Direct downloads (§7D, Web sources) go through it too: a link may be
+a `.torrent` (a private tracker's carries the passkey), and which one it is is known only once it is fetched; the
+proxy resolves the name, its own keep-alive pool is used (never a connection made directly), and with no working
+server the request waits and is retried, never sent directly. Only `seedwell sim`'s torrents announce around it, and
+only to a tracker on a loopback address.
+
+*What is off while it is on* (the proxy carries TCP only; NordVPN's servers do not offer UDP ASSOCIATE reliably, so UDP
+is treated as off):
+- uTP: no uTP dial, and the shared UDP socket takes no incoming uTP connection.
+- UDP trackers: not asked (their row says why; the tracker's breaker is not touched, and the retry comes forward
+  when the proxy goes off).
+- The DHT for torrents: no torrent looks up or announces itself there, and a lookup that was running when the proxy
+  came on is cancelled in the node with the announce it would end with (`DhtHandle::cancel`). The DHT node itself
+  stays, as folder sync's device finder (`public_dht`): it never carries a torrent's info-hash while the proxy is on.
+- Port mapping (NAT-PMP, PCP, UPnP) of the torrent port; folder sync's own port stays mapped.
+- Incoming connections: the TCP listener is closed (the port number is kept); one accepted in the moment the proxy
+  came on is dropped unread.
+- Direct connections: each peer records whether it was opened through the proxy (decided when its dial chooses
+  its way, before it connects; one that came in is direct). While the proxy is on, every peer not opened through it
+  is closed, on every configuration change and on every tick of its torrent, not only at the moment it came on.
+- A direct request in flight when it came on (an announce, a download) sends nothing more directly: its next
+  redirect hop and its retry on the other address family ask the proxy state again first.
+- Local peer discovery: Seedwell has none.
+
+*The kill switch.* While the proxy is on, a torrent connects through it or not at all: never directly. With no
+working server (unreachable, wrong credentials, no key) torrents are **held**: no dial, no announce (announces answer
+`TransportError::Proxy` without sending anything; it counts neither against the tracker nor as a network outage), and
+the reason shows on the shield icon. A dial that failed because the proxy was down costs the peer no strike. When a
+server works again, torrents dial at once and the waiting announces go (a network change pulls each forward, not
+before 30 s after its failure). Turned on with no key installed (`config.toml` says on, the key is missing, or the
+headless daemon, which has no key) it holds every torrent, closed rather than open. Removing the key turns the proxy
+off. Only the app's call (`EngineHandle::set_proxy`) turns the proxy off or changes its servers: a reload of
+`config.toml` never does (one landing just after the app switched it on would otherwise send torrents directly while
+the app says on); the file can only switch on its own hold, and take that hold back.
+
+*Choosing the server* (`trs_engine::proxy`). Every candidate is tested at once with an authenticated SOCKS5
+handshake (connect, greeting, login; 6 s at most); the fastest that answers is used, the earlier in the list on a
+tie. The server in use is tested again every 60 s, a dial or announce that meets a dead proxy asks for a test at once
+(at most every 3 s), a failed test switches to the next best at once, and every 30 min all candidates are ranked
+again. While none works, they are tried again after 5 s, doubling up to 60 s.
+
+*The user's country* (`[network.proxy] country`, an ISO code; empty: no preference). Chosen by hand, in the window
+and the menu; Seedwell never detects where the user is. Each NordVPN server's country comes from its name
+(`amsterdam.nl.socks.nordhold.net`: the Netherlands). Among the servers that answer, those in the user's country come
+first, then those of the nearest countries (by the distance between approximate country centres, a static table in
+`crates/ffi/src/proxy_countries.rs`), and latency chooses only within that order. A server slower than 1.5 s (Slow)
+never wins over a healthy one: when the preferred country's servers are slow and another is healthy, the healthy one
+is used and the tooltip says which nearer one was passed over and why. Changing the country ranks the servers again
+at once, without holding torrents.
+
+*Find a Faster Server* (the window's button and the menu's entry, with the proxy on): every server is ranked again
+now by the same rule; meanwhile the status says "Testing servers…" (polled every 500 ms), afterwards the outcome:
+"Now using nl.socks.nordhold.net (Netherlands, 38 ms)." or "Already on the best server: …".
+
+*Health.* The handshake time is the proxy's latency; the CONNECT-to-answer time of peer connections is averaged
+beside it. **Slow** is a handshake over **1.5 s**: the handshake is three round trips, a server in the user's region
+answers in 100 to 300 ms and one on another continent in 500 to 800 ms; past 1.5 s each round trip takes 500 ms or
+more, every peer connection waits seconds for its first byte and a download's request pipeline stalls. **Failed** is
+no server answering, or the credentials turned down, with the reason in words.
+
+*The key.* The username and password live in the system's secret store (the Mac's Keychain through the app's
+`SecretVault`; DPAPI-sealed files on Windows; a 0600 file in a test's state folder), under `torrent-proxy-key`: never
+in `config.toml`, never in a log or a model. After saving, hosts only learn that a key is installed. `config.toml`
+keeps `[network.proxy]`: `enabled`, `kind` (`nordvpn` or `custom`), and a custom proxy's `host` and `port`. A key is
+kept only after a real handshake with it worked: NordVPN credentials are tested against NordVPN's servers, a custom
+proxy against its own. When NordVPN turns them down the user reads that these look like the Nord Account login, not
+the service credentials, and nothing is kept.
+
+*The NordVPN preset and its sources.* The server list is one constant (`NORDVPN_SOCKS5_SERVERS` in
+`crates/ffi/src/torrent_proxy.rs`), the twelve `*.socks.nordhold.net` names NordVPN lists in its own guides "NordVPN
+proxy setup for qBittorrent" (support.nordvpn.com/hc/en-us/articles/20195967385745) and "NordVPN proxy setup on
+Deluge" (support.nordvpn.com/hc/en-us/articles/20341624031505), port 1080. No other NordVPN interface is ever
+contacted (no server-recommendation API, no account API). The service credentials come from Nord Account › NordVPN ›
+Advanced settings › Set up NordVPN manually (a code by email) › Service credentials; the window's guide says so step
+by step.
+
+*Where it shows* (Rust decides, the host draws; `ProxyModel`, `ProxyWindowModel`, `docs/build-77-proxy.md`). A shield
+icon with a proxy logo, five looks: no key (all grey), off (green outline, dark grey logo), on (all green, white
+logo), slow (orange), failed (red). A click opens the "SOCKS5 proxy" window without a key and switches the proxy on or
+off with one; the right-click menu opens the window. The window holds the NordVPN preset ("Enable NordVPN", with the
+guide shown or hidden inside it) and a custom SOCKS5 proxy (server, port, optional username and password), and
+Remove Key. Settings › Network shows the status line.
+
+*On the Mac* (`app/Sources/SeedwellApp/Proxy/`). The shield sits at the left of the menu bar menu's last row, beside
+"Open Seedwell…", with the row's own highlight; a click there switches the proxy in place (the menu stays open) or,
+without a key, closes the menu and opens the window. Settings › Network has a "Torrent proxy" box between Connection and
+Peers (`SettingsBlock::TorrentProxy`): the shield (the same click and right-click menu), the status line, the key line
+and the problem in red, and "SOCKS5 Proxy…"; with a key, an On switch left of the button (the same switch is at the
+right of the window's title). With a key installed, its pane shows "NordVPN key installed" (or "Proxy installed:
+host:port") and "Replace Key…" instead of the empty setup form; the button brings the fields back with Cancel and
+Replace Key. While torrents wait for a working server the status reads "Waiting for proxy · NordVPN" with the reason
+under it (the accessible name and tooltip say both). While a key test or Find a Faster Server runs, the switch, the
+shield's click, Remove Key and the country wait (the core refuses a switch then: the test would undo it when it ends).
+Copied text fills the password only within two minutes of a copied username, and a note says the fields came from a
+copy. Problems are plain sentences ("No server answered. The proxy refused the connection."), never the
+system's "os error N" (`trs_socks::io_words`). The right-click menu: "SOCKS5 Proxy…", the switch and Find a Faster Server
+with a key, and "Country: Sweden…" (the chosen one's name). **The country list** (the user's request: the 60-row
+submenu was too long) is the same in the menu and the window: `country_visible_rows` rows (6) at the menu's row height
+and font with a scrollbar, "No preference" first, a checkmark on the chosen one, scrolled so it shows when the list
+opens; arrows and Return choose, a letter jumps to the first country with it, choosing closes it and calls
+`proxy_set_country` off the main thread. The menu's entry opens it in a popover from the menu bar item (the menu has
+closed by then); the window's "Your country" is a pop-up button with the chosen name that opens it under itself,
+waiting like the switch while a call runs. The window ("SOCKS5 proxy", a standalone window like
+the folder sync modals) has the shield and status line at its top, NordVPN and another SOCKS5 proxy as two panes,
+the country with Find a Faster Server, the progress or result line, Remove Key bottom left and Close bottom right.
+**Copied credentials fill the fields** (the user's request): while the window is open, and only then, the app watches
+the pasteboard's change count; each new copy goes to `proxy_paste_fill`, which fills the first empty NordVPN field
+(username, then password) and never a field that holds something; with both filled the pasteboard is not read.
+The models are read only while one of the three places shows them, every `refresh_ms`.
+
+*Isolated runs never reach NordVPN.* In a run with `forbidden_root` (QA, tests) the "NordVPN" servers are the ones
+`<state>/qa/proxy-servers.txt` names (loopback fakes, `app/qa/fake_socks5.py`), none without that file
+(`torrent_proxy::isolated_preset`). `app/qa/capture_proxy.sh` takes the app through every state with them.
+
+*Tests.* `crates/socks` (handshake, auth, names sent to the proxy, timeouts, a fake that goes down and comes back);
+`crates/tracker/tests/it/transport.rs` (announce through the proxy by name, never direct when it fails);
+`crates/engine/tests/it/proxy.rs` (peers and trackers through it and nothing around it, no uTP, UDP tracker, torrent
+DHT or incoming connection, the kill switch and resume, wrong credentials and a slow proxy);
+`crates/control/tests/it/proxy_sync.rs` (chat and a synced folder between devices never use it, also while it is down);
+`crates/ffi/src/torrent_proxy.rs` (the model, wrong credentials keep nothing, the key in no file but the store).
+
 ## 8. User interface
 
 Principle: **the menu is for glancing, the main window is for acting.** The menu shows status only. Adding, settings and every change happen in the main window.
@@ -2661,7 +2942,7 @@ Agents like Claude should be able to operate Seedwell as easily as a person: "ad
 | Settings | `settings get [key...]` · `settings set key=value...` |
 | Watch | `wait <torrent>... [--any] [--timeout S]` · `watch` · `activity` · `log trackers` |
 | Debug | `dev on\|off\|status` · `debug health\|trackers\|peers\|perf\|announce` (§9A.5) |
-| Folder sync | `sync list\|status\|add\|join\|share [--role R] [--uses N\|unlimited] [--days N\|never] [--chat <channel>\|new]\|share-until <days>\|never [--extend]\|members\|invites\|revoke-invite\|role\|remove-device\|rename\|move\|pause\|resume\|rescan\|address\|remove\|settings` (§7G.5) · `relay [--port N]`. Read-only: `list`, `status`, `members`, `settings`; full: `share`, `share-until`, `invites`, `role`, `remove-device`, `rename`, `move`, changing `settings`, `remove --delete-files`; control: the rest |
+| Folder sync | `sync list\|status\|add\|join\|share [--role R] [--uses N\|unlimited] [--days N\|never] [--chat <channel>\|new]\|share-until <days>\|never [--extend]\|members\|invites\|revoke-invite\|role\|remove-device\|rename\|move\|pause\|resume\|rescan\|read-only <folder> on\|off\|status\|address\|remove\|settings` (§7G.5) · `relay [--port N]`. Read-only: `list`, `status`, `members`, `read-only … status`, `settings`; full: `share`, `share-until`, `invites`, `role`, `remove-device`, `rename`, `move`, changing `settings`, `remove --delete-files`; control: the rest |
 | Channels | `chat list\|new\|join\|share [--role R] [--uses N\|unlimited] [--days N\|never]\|members\|role\|remove-device\|share-until\|topics\|topic <title>\|send [--topic T] [--reply ID] [--as-json] [--attach FILE]... -\|attachment <channel> <hash> [--out PATH] [--png] [--no-wait]\|read [--topic T] [--since ID\|--last N]\|watch [<channel>...] [--topic T]\|dm list\|send <device> [--attach FILE]... -\|attachment <device> <hash> [--out PATH]\|read <device>\|watch\|delete <device>\|address\|rename <name>\|mute\|wake <command>\|off\|agents <channel> no\|leave` (§7G.7); `rename` names the channel on this Mac only, as a folder's name. Every command needs the channel open to agents (Agents: Yes, one setting for the whole channel; a No channel is not there for agents), or the Mac's switch for private messages (only the user sets that one, in the app). `new` makes a Yes channel; `join` with a Yes channel's link opens it to agents at once (joining until admitted); `agents <channel> no` closes a channel (owners and admins). Read-only: `list`, `members`, `topics`, `read`, `attachment` of an image or a file here, `watch`, `dm list`, `dm read`, `dm watch`; full: `wake`, `dm delete`; control: the rest, and `attachment` that downloads a file (`dm send` also needs the switch at post) |
 | Test | `sim ...` (§9A.6) · `daemon ...` |
 | Agents | `skill show\|install\|uninstall` · `awake --for D\|off\|status` (§9A.7) · `agents request <what> [--why T] [--channel C [--topic T] [--reply ID]]\|requests [--all]` (§9A.8) · `update [status]\|now\|install <zip>\|watch <folder>\|watch --off\|dev-builds on\|off` (§12A) · `help [command\|agents]` |
@@ -2848,6 +3129,27 @@ Two back ends, picked once at launch; the Settings group, its two switches and t
 **Install.** A detached shell (`posix_spawn` with its own session, stdin /dev/null, stdout and stderr appended to `logs/update.log` in the state folder) runs `curl -fsSL <repo>/releases/download/v<version>/install.sh | bash -s -- --version <version>` with the install folder (the folder holding the running app) and the repo passed as arguments, never interpolated into the script text. `install.sh` checks the zip's SHA-256 against `SHA256SUMS`, verifies the signature (and, for a release from 0.1.11 on, that it is Seedwell's Developer ID and notarized: an update never puts an unsigned or foreign app in place), sends the running app SIGTERM (handled like a real quit: trackers get `stopped`), replaces the bundle and reopens it. The version is recorded as pending before the spawn. On the next launch, a running version equal to the pending one clears it ("Updated to 0.2.0"); otherwise the status is "Update to 0.2.0 failed" with **Show Log**, which reveals `update.log`. An app still running 90 s after the spawn shows the same failed state.
 
 **Automatic install.** Release builds with both switches on install an update that is waiting when nothing is downloading and no file move is running: checked when the update is found and whenever the menu bar refresh reports idle. Seeding torrents do not block it; they resume after the relaunch.
+
+**A newer Seedwell on the network.** Folder sync tells the updater which Seedwell each device it talks to runs (the
+`client` of its Hello, §7G): a device it set up a session with, and a member of a folder, channel or device group here
+that it refused because the two cannot talk. A device that only dialed in and proved nothing is not heard. When that
+version is a plain release newer than this one, the core checks for an update now instead of waiting for the daily
+check: so the user's devices follow one another to a new release, also before GitHub's `latest` link has caught up.
+- Only where an automatic check would run: a release build with **Check automatically** on and no watched folder. Not
+  while a check or an install runs or the app quits, not within a failed check's back-off, and not during the first
+  minute after launch (it waits for that minute, as the first automatic check does).
+- At most one such check an hour, each claimed version at most once a run, and none for a version a check of this run
+  already found. An equal or older version, or one that is not a plain `X.Y.Z` (a development build's, garbled text),
+  starts nothing.
+- The claim only starts the check. What is offered and installed is GitHub's latest release, through the same
+  `latest.json` and installer as always (signed, checked against `SHA256SUMS`); nothing a device sends is installed,
+  and never a development build. A device that claims a version that does not exist costs one check.
+- With **Install automatically** on, a release the check finds is installed at once, under the automatic install's
+  rules (nothing downloading, no move running, not while the app quits): the core starts the installer itself, as
+  `update now` does. Otherwise it waits on offer, as any found update does: the status line and the menu bar's
+  "Update to Seedwell …" row.
+- The other way round, a device that is the newer one and refuses an older one only says so in the folder ("Makro runs
+  Seedwell 0.1.18, an older Seedwell that cannot sync with this one: update it").
 
 **Development builds.** Settings › General › Updates has a third switch, **Allow development builds** (default off;
 `config.toml` `[updates] dev_builds`, absent means off, no format version change). With it on, the one installed

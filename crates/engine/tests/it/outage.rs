@@ -15,11 +15,6 @@ async fn wait_online(n: &Node, want: bool, secs: u64) {
     wait_for(if want { "online" } else { "offline" }, secs, || async { (online(n).await == want).then_some(()) }).await;
 }
 
-fn closed_port() -> u16 {
-    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    l.local_addr().unwrap().port()
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_unsatisfied_path_holds_announces_and_a_satisfied_one_releases_them() {
     let tracker = MockTracker::start(60).await;
@@ -85,7 +80,7 @@ async fn dials_wait_for_the_network_and_no_peer_is_blamed() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn trackers_on_two_hosts_that_cannot_be_reached_are_an_outage_not_a_backoff() {
-    let (p1, p2) = (closed_port(), closed_port());
+    let (p1, p2) = (closed_port(&[std::net::IpAddr::from([127, 0, 0, 1])]), closed_port(&[std::net::IpAddr::from(std::net::Ipv6Addr::LOCALHOST)]));
     let a = standard_named("Outage.A", 0, Some(format!("http://127.0.0.1:{p1}/announce")), false, 604);
     let b = standard_named("Outage.B", 0, Some(format!("http://[::1]:{p2}/announce")), false, 605);
     let n = node(|c| c.trackers_enabled = true).await;
@@ -130,7 +125,7 @@ async fn steady_transfer_means_two_dead_tracker_hosts_are_not_an_outage() {
     .await;
 
     // Two more torrents whose trackers (two hosts) refuse connections.
-    let (p1, p2) = (closed_port(), closed_port());
+    let (p1, p2) = (closed_port(&[std::net::IpAddr::from([127, 0, 0, 1])]), closed_port(&[std::net::IpAddr::from(std::net::Ipv6Addr::LOCALHOST)]));
     let a = standard_named("Outage.C", 0, Some(format!("http://127.0.0.1:{p1}/announce")), false, 611);
     let b = standard_named("Outage.D", 0, Some(format!("http://[::1]:{p2}/announce")), false, 612);
     for x in [&a, &b] {

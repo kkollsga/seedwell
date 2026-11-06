@@ -405,6 +405,14 @@ pub fn member_dto(m: &trs_sync_net::MemberInfo) -> SyncMemberDto {
         online: m.online,
         me: m.is_me,
         expires_at: m.expires_s,
+        removal: m.removal.as_ref().map(|a| match a {
+            trs_sync_net::removals::Asked::Waiting => "waiting".into(),
+            trs_sync_net::removals::Asked::Refused(_) => "refused".into(),
+        }),
+        removal_reason: match &m.removal {
+            Some(trs_sync_net::removals::Asked::Refused(why)) => Some(clip(why, 300)),
+            _ => None,
+        },
     }
 }
 

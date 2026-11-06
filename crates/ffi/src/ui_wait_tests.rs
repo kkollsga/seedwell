@@ -205,6 +205,8 @@ impl Calls {
         self.time("devices_view", |c| c.devices_view());
         self.time("sync_settings", |c| c.sync_settings());
         self.time("sync_reachability", |c| c.sync_reachability());
+        // Windows' host may look at its sidebar entry on the UI thread at start.
+        self.time("sync_nav_pane", |c| c.sync_nav_pane());
         self.time("agents_awake", |c| c.agents_awake());
         self.time("listen_port", |c| c.listen_port());
         let lib = self.library.clone();
@@ -633,5 +635,37 @@ fn the_users_commands_return_at_once_and_reach_a_busy_engine_in_order() {
     // A result comes back through the future: a move of a torrent that does not exist is refused.
     let moved = wait(core.clone().move_to_async(vec!["00".repeat(20)], work.join("x").display().to_string()));
     assert!(moved.as_ref().map_or(true, |m| m.queued == 0), "{moved:?}");
+    core.shutdown(5);
+}
+
+/// The shield icon's model (polled every `refresh_ms`) and the proxy window's model never wait for a key being tested
+/// (a proxy that takes seconds to answer) or for a busy engine; the key test itself returns at once to the host (its
+/// first poll) and finishes later. Hosts: the Mac polls on its main thread, Windows on the dispatcher.
+#[test]
+fn the_proxy_icon_never_waits_for_a_key_test_or_a_busy_engine() {
+    let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap();
+    let fake = rt.block_on(trs_socks::testkit::FakeProxy::start("svc-user", "svc-pass"));
+    fake.set_delay(Duration::from_millis(1500));
+    let (core, _work, _tmp) = real_core();
+    core.set_proxy_preset_for_tests(vec![fake.addr().ip().to_string()], fake.addr().port());
+    let _ = core.proxy_model();
+    let mut test = Box::pin(core.clone().proxy_set_nordvpn_key_async("svc-user".into(), "svc-pass".into()));
+    let (took, p) = first_poll(test.as_mut());
+    assert!(took < BOUND && p.is_pending(), "the key test held the host for {took:?}");
+    core.backend.test_stall_engine(Duration::from_secs(2));
+    let end = Instant::now() + Duration::from_millis(2000);
+    let mut slowest = Duration::ZERO;
+    let mut saw_progress = false;
+    while Instant::now() < end {
+        let at = Instant::now();
+        let m = core.proxy_model();
+        let w = core.proxy_open_modal_model();
+        slowest = slowest.max(at.elapsed());
+        saw_progress |= !w.progress.is_empty() && m.refresh_ms <= crate::torrent_proxy::REFRESH_BUSY_MS;
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(slowest < BOUND, "a proxy model took {slowest:?} (timers late by {:?})", timer_lateness());
+    assert!(saw_progress, "the window says the key is being tested, and the icon asks again soon");
+    assert!(wait(test).is_ok());
     core.shutdown(5);
 }

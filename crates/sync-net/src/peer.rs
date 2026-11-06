@@ -218,6 +218,8 @@ pub async fn run(ctx: Arc<Ctx>, conn: Connected, candidates: Vec<FolderId>, on_u
     let setup = tokio::time::timeout(SETUP_TIMEOUT, setup).await.unwrap_or_else(|_| Err(bad("setup timed out")));
     let setup = setup.inspect_err(|e| note_refusal(&ctx, &asked, device, lock(&met).as_ref(), remote, e));
     let (hello, agreed, checked, sent) = setup?;
+    // A device this one syncs with: the app's updater hears what it runs (SPEC 12A).
+    tell_client(&ctx, &hello);
     // The two Seedwells talk: a version problem with this device is over, and so is not reaching it.
     for f in ctx.registry.spaces() {
         let mut n = lock(&f.notes);
@@ -256,6 +258,7 @@ pub async fn run(ctx: Arc<Ctx>, conn: Connected, candidates: Vec<FolderId>, on_u
         return Ok(());
     }
     on_up();
+    crate::inbound::session_up(&ctx, &peer);
     let _ = ctx.hub.send(HubMsg::PeerUp(device));
     // Its folders link and its index comes next: a fetch waits for that.
     ctx.settle();
@@ -374,6 +377,11 @@ fn note_refusal(ctx: &Ctx, candidates: &[FolderId], device: DeviceId, hello: Opt
             f.members.read().unwrap_or_else(|e| e.into_inner()).contains(&device)
                 || f.membership.read().unwrap_or_else(|e| e.into_inner()).members().any(|(pk, _)| DeviceId::of_public_key(pk) == device)
         });
+        // A member that runs another Seedwell (a newer one may be a release this device has not found yet): the app's
+        // updater hears what it runs. A device unknown here is not heard: anyone may dial in and say anything.
+        if known && let Some(h) = hello {
+            tell_client(ctx, h);
+        }
         // The folders and channels we dialed it for, and those it was seen in (it may have dialed us).
         for f in ctx.registry.spaces() {
             let seen = f.members.read().unwrap_or_else(|e| e.into_inner()).contains(&device);
@@ -414,6 +422,13 @@ fn note_refusal(ctx: &Ctx, candidates: &[FolderId], device: DeviceId, hello: Opt
     };
     for f in spaces.iter().filter(|f| lock(&f.invite).is_some()) {
         lock(&f.notes).refused = Some(reason.to_string());
+    }
+}
+
+/// Tells the service's owner what `hello`'s device runs ([`crate::service::Options::peer_client`]).
+fn tell_client(ctx: &Ctx, hello: &Hello) {
+    if let Some(tell) = &ctx.peer_client {
+        tell(&hello.client);
     }
 }
 
@@ -597,6 +612,8 @@ pub(crate) fn start_link(
     let task = tokio::spawn(async move {
         let (ctx, peer) = (ctx2, peer2);
         let Some(f) = ctx.registry.folder(&folder) else { return };
+        // An owner: the removals this device asked for and still waits for.
+        crate::removals::send_waiting(&f.space, &peer).await;
         f.members.write().unwrap_or_else(|e| e.into_inner()).insert(peer.device);
         let _ = ctx.hub.send(HubMsg::MemberSeen { folder, device: peer.device });
         if let Err(e) = send_index(&f, &peer, their).await {
@@ -1000,6 +1017,20 @@ async fn read_loop(
                 });
             }
             Message::RenameReply(r) => peer.answer_rename(r),
+            // An admin asks this device, an owner, to remove a user (SPEC §7G.1 *Removing a device*).
+            Message::RemoveRequest(q) => {
+                if let Some(f) = shared_space(ctx, peer, &q.folder_id) {
+                    let (ctx2, peer2) = (ctx.clone(), peer.clone());
+                    tokio::spawn(async move { crate::removals::on_request(&ctx2, &peer2, f, q).await });
+                }
+            }
+            Message::RemoveReply(r) => {
+                if let Some(f) = shared_space(ctx, peer, &r.folder_id) {
+                    crate::removals::on_reply(&f, peer, r);
+                }
+            }
+            Message::ReachAsk(q) if peer.has(trs_sync_proto::msg::FEATURE_REACH) => crate::inbound::on_ask(ctx, peer, q),
+            Message::ReachAnswer(a) if peer.has(trs_sync_proto::msg::FEATURE_REACH) => crate::inbound::on_answer(ctx, peer, a),
             Message::Join(j) => {
                 // A folder added while connected (a refused invitation is not worth ending the session over).
                 let at_gen = ctx.folder_gen.load(Ordering::SeqCst);
@@ -1071,6 +1102,7 @@ async fn read_loop(
                 }
             }
             Message::Addresses(a) => {
+                crate::inbound::records(ctx, peer, &a.records);
                 let _ = ctx.hub.send(HubMsg::Addresses(a.records));
             }
             Message::Close(c) => return Err(io::Error::new(io::ErrorKind::ConnectionAborted, c.reason)),
@@ -1087,7 +1119,9 @@ async fn read_loop(
             | Message::DirectMessages(_)
             | Message::DevicesJoin(_)
             | Message::BlobWant(_)
-            | Message::BlobData(_) => {}
+            | Message::BlobData(_)
+            | Message::ReachAsk(_)
+            | Message::ReachAnswer(_) => {}
             Message::Rendezvous(_) | Message::Introduce(_) | Message::RelayOpen(_) | Message::RelayData(_) | Message::RelayClose(_) => {
                 let _ = ctx.hub.send(HubMsg::Relay(peer.device, Box::new(msg)));
             }

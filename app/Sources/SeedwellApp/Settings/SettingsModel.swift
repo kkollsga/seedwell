@@ -453,6 +453,8 @@ import Observation
     private(set) var syncPortMovingTo: UInt16?
     /// Settings › Folder Sync's rendezvous section, as the core has it (refreshed with the rest while the tab is open).
     private(set) var syncRendezvous: RendezvousView?
+    /// Settings › Network's torrent proxy (the app's one `ProxyCenter`, wired by the app delegate; nil: not drawn).
+    @ObservationIgnored var proxy: ProxyCenter?
     @ObservationIgnored private var syncSaveTask: Task<Void, Never>?
 
     func reloadSync() {

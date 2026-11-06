@@ -1,4 +1,5 @@
 import AppKit
+import SwiftUI
 
 /// Debug-only visual QA (`--render-snapshots <dir>`, see SnapshotRenderer): the menu bar icon in each of its looks,
 /// without and with the attention dot (an agent waiting for an answer), on light, dark and tinted menu bars, each at 2x
@@ -100,6 +101,77 @@ extension SnapshotRenderer {
         return out
     }
 
+    /// Writes `proxy-shield-sheet.png`: the proxy icon (ProxyShield.swift) in each state, a row each, at 16, 24 and
+    /// 32 pt on the light and the dark window background, each drawn at 2x and magnified 4x without smoothing, and
+    /// `proxy-shield-<state>-<light|dark>-<size>.png` of each at 2x. docs/proxy-shield.md shows them.
+    func renderProxyShields() {
+        let scale = 2, magnify: CGFloat = 4, pad: CGFloat = 4
+        let sizes: [CGFloat] = [16, 24, 32]
+        let looks: [(name: String, appearance: NSAppearance)] = [("light", NSAppearance(named: .aqua)!), ("dark", NSAppearance(named: .darkAqua)!)]
+        let labelW: CGFloat = 150, headH: CGFloat = 60, gap: CGFloat = 10, groupGap: CGFloat = 30
+        let groupW = sizes.map { ($0 + 2 * pad) * CGFloat(scale) * magnify + gap }.reduce(0, +)
+        let rowH = (sizes.max()! + 2 * pad) * CGFloat(scale) * magnify + gap
+        let sheetSize = NSSize(width: labelW + CGFloat(looks.count) * (groupW + groupGap),
+                               height: headH + CGFloat(ProxyIcon.allCases.count) * rowH + 20)
+        guard let sheet = Self.bitmap(sheetSize, scale: 1) else { return }
+        var count = 0
+        Self.draw(into: sheet) {
+            NSColor(white: 0.45, alpha: 1).setFill()
+            NSRect(origin: .zero, size: sheetSize).fill()
+            for (i, look) in looks.enumerated() {
+                Self.text("\(look.name)  16 · 24 · 32 pt", at: NSPoint(x: labelW + CGFloat(i) * (groupW + groupGap), y: sheetSize.height - headH + 14))
+            }
+            for (r, state) in ProxyIcon.allCases.enumerated() {
+                let y = sheetSize.height - headH - CGFloat(r + 1) * rowH
+                Self.text("\(state)", at: NSPoint(x: 14, y: y + rowH / 2 - 12))
+                for (i, look) in looks.enumerated() {
+                    var x = labelW + CGFloat(i) * (groupW + groupGap)
+                    for size in sizes {
+                        guard let rep = Self.proxyShield(state, size: size, pad: pad, appearance: look.appearance, scale: scale) else { continue }
+                        if let png = rep.representation(using: .png, properties: [:]) {
+                            try? png.write(to: URL(fileURLWithPath: dir).appendingPathComponent("proxy-shield-\(state)-\(look.name)-\(Int(size)).png"))
+                            count += 1
+                        }
+                        let w = CGFloat(rep.pixelsWide) * magnify
+                        NSGraphicsContext.current?.imageInterpolation = .none
+                        rep.draw(in: NSRect(x: x, y: y + (rowH - gap - w) / 2, width: w, height: w), from: .zero, operation: .sourceOver,
+                                 fraction: 1, respectFlipped: false, hints: [.interpolation: NSNumber(value: NSImageInterpolation.none.rawValue)])
+                        x += w + gap
+                    }
+                }
+            }
+        }
+        if let png = sheet.representation(using: .png, properties: [:]) {
+            try? png.write(to: URL(fileURLWithPath: dir).appendingPathComponent("proxy-shield-sheet.png"))
+            print("wrote proxy-shield-sheet.png (\(sheet.pixelsWide)x\(sheet.pixelsHigh)) and \(count) icons")
+        }
+    }
+
+    /// The proxy icon in place, through its SwiftUI view: beside a page title at 28 pt and in rows of body text at 16 pt,
+    /// in a real (offscreen) window: `proxy-shield-rows-<dark|light>.png`.
+    func renderProxyShieldRows() async {
+        for dark in [true, false] {
+            await render("proxy-shield-rows-\(dark ? "dark" : "light")", size: NSSize(width: 380, height: 300), dark: dark, settings: true) {
+                ProxyShieldPreview()
+            }
+        }
+    }
+
+    /// The proxy icon of `size` points with `pad` around it on the window background of `appearance`, at `scale`, drawn
+    /// through its NSImage (whose colours resolve in the appearance it is drawn in, as in the app).
+    static func proxyShield(_ state: ProxyIcon, size: CGFloat, pad: CGFloat, appearance: NSAppearance, scale: Int) -> NSBitmapImageRep? {
+        let box = NSSize(width: size + 2 * pad, height: size + 2 * pad)
+        guard let rep = bitmap(box, scale: scale) else { return nil }
+        draw(into: rep) {
+            appearance.performAsCurrentDrawingAppearance {
+                NSColor.windowBackgroundColor.setFill()
+                NSRect(origin: .zero, size: box).fill()
+                ProxyShieldDrawing.image(state, size: size).draw(in: NSRect(x: pad, y: pad, width: size, height: size))
+            }
+        }
+        return rep
+    }
+
     /// A clear bitmap of `size` points at `scale` pixels per point.
     private static func bitmap(_ size: NSSize, scale: Int) -> NSBitmapImageRep? {
         let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(size.width) * scale, pixelsHigh: Int(size.height) * scale,
@@ -120,5 +192,28 @@ extension SnapshotRenderer {
 
     private static func text(_ s: String, at p: NSPoint) {
         (s as NSString).draw(at: p, withAttributes: [.font: NSFont.systemFont(ofSize: 20, weight: .medium), .foregroundColor: NSColor.white])
+    }
+}
+
+/// The proxy icon in place for the snapshots (debug only): a page title with the 28-pt icon, then a row per state with
+/// the 16-pt icon, spaced as the app's rows are (Theme).
+private struct ProxyShieldPreview: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: Theme.Space.m) {
+            HStack(spacing: Theme.Space.s) {
+                ProxyShield(state: .on, size: 28)
+                Text("Proxy").font(Theme.title)
+            }
+            ForEach(ProxyIcon.allCases, id: \.self) { state in
+                HStack(spacing: Theme.Space.s) {
+                    ProxyShield(state: state)
+                    Text(verbatim: "\(state)").font(Theme.body)
+                    Spacer()
+                }
+            }
+        }
+        .padding(Theme.Space.xl)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(.background)
     }
 }

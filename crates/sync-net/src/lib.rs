@@ -14,6 +14,7 @@
 //! * [`lan`]: finding devices on the local network; `joining`: what a joining folder or channel says it does.
 //! * [`relay`], [`punch`], [`relay_server`]: reaching devices behind NATs: member relays, hole punching
 //!   through a common peer, and the stand-alone `seedwell relay` server ([`relay_server::run_relay`]).
+//! * [`inbound`]: whether other devices can reach this one (a dial back by a device this one reached).
 //! * [`netchange`]: network changes (the system's signal, or a check of its own) find the devices again at once.
 //! * [`rendezvous`]: the user's own address book on Cloudflare: this device's sealed record, and lookups.
 //! * [`config`], [`secrets`]: `sync.toml`, and where keys are kept; `at_rest`: messages encrypted on disk.
@@ -34,6 +35,7 @@ pub mod devices;
 pub mod describe;
 pub mod direct;
 pub mod framed;
+pub mod inbound;
 mod joining;
 mod journal;
 pub mod lan;
@@ -44,6 +46,7 @@ pub mod placed;
 pub mod punch;
 pub mod relay;
 pub mod relay_server;
+pub mod removals;
 pub mod rendezvous;
 pub mod roles;
 pub mod runtime;
@@ -58,5 +61,7 @@ pub mod tls;
 mod dial_tests;
 
 pub use relay_server::{RelayOptions, run_relay};
+pub use inbound::{Inbound, Network};
 pub use rendezvous::RendezvousStatus;
+pub use shared::PeerClientHook;
 pub use service::{Activity, DeleteSeen, FULL_HERE, InviteInfo, Keep, LocalChange, LocalTorrents, MemberInfo, OnDemandError, OnDemandHost, OnDemandHostCell, Options, PublicDiscovery, SyncError, SyncHandle};

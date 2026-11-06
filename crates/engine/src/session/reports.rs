@@ -270,6 +270,9 @@ impl Session {
 
     pub(super) async fn shutdown(&mut self, deadline: Instant, reply: oneshot::Sender<ShutdownReport>) {
         self.shutting_down = true;
+        if let Some(t) = self.proxy_task.take() {
+            t.abort();
+        }
         self.boot.clear();
         if let Some(l) = self.listener.take() {
             l.abort();

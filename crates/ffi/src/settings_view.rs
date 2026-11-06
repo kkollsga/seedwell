@@ -535,6 +535,10 @@ pub enum SettingsBlock {
     Pair { left: SettingsGroup, right: SettingsGroup },
     /// Folder Sync's Cloudflare rendezvous, drawn from `Core::sync_rendezvous` (`RendezvousView`).
     Rendezvous,
+    /// Network's torrent proxy (SPEC §7H): a box titled `title` with the shield, drawn from `Core::proxy_model`
+    /// (`ProxyModel`: the status line, the problem) and the key line of `Core::proxy_open_modal_model`; the key itself
+    /// is never in either.
+    TorrentProxy { title: String },
     /// The Devices tab, drawn from `Core::devices_view`.
     Devices,
     /// The rules and trackers editors.
@@ -1604,7 +1608,8 @@ fn network(i: &SettingsViewInput) -> Vec<SettingsBlock> {
             ]),
         ],
     );
-    vec![block(group("connection", "Connection", connection)), block(peers)]
+    // The proxy between the two: it switches parts of both off while it is on (SPEC §7H).
+    vec![block(group("connection", "Connection", connection)), SettingsBlock::TorrentProxy { title: "Torrent proxy".into() }, block(peers)]
 }
 
 // MARK: Folder Sync
@@ -1681,7 +1686,7 @@ fn folder_sync(i: &SettingsViewInput, features: &[HostFeature]) -> Vec<SettingsB
     out.push(block(group(
         "sync.folders",
         "Folders",
-        vec![row("sync.location", "Joined folders go to", Some("Each joined folder gets its own folder here"), vec![folder(
+        vec![row("sync.location", "Seedwell folder", Some("Where joined folders go. Seedwell in the sidebar shows your synced folders."), vec![folder(
             SettingKey::SyncLocation,
             &s.default_location,
             "~/Seedwell",

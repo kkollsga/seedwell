@@ -89,6 +89,8 @@ Copy-Item (Join-Path $Repo 'target\release\seedwell.exe') (Join-Path $stage 'cli
 # The app's own installer, next to the exe (the Mac's install.sh in the bundle): the core installs development builds
 # with it, and the copy kept to go back to carries it (SPEC 12A, Recovery).
 Copy-Item (Join-Path $Repo 'install.ps1') (Join-Path $stage 'install.ps1')
+# What the app's third-party parts ask to go with them, next to the exe (an install swaps the whole folder in, so it stays).
+Copy-Item (Join-Path $Repo 'THIRD-PARTY-NOTICES.md') (Join-Path $stage 'THIRD-PARTY-NOTICES.md')
 # Not shipped: debug symbols.
 Get-ChildItem $stage -Recurse -Filter *.pdb | Remove-Item -Force
 
@@ -107,7 +109,7 @@ $check = Join-Path ([IO.Path]::GetTempPath()) "seedwell-release-check-$([Guid]::
 try {
     if ((Get-FileHash (Join-Path $Out $zip) -Algorithm SHA256).Hash.ToLowerInvariant() -ne $zipSha) { throw 'the zip changed after hashing' }
     [IO.Compression.ZipFile]::ExtractToDirectory((Join-Path $Out $zip), "$check\app")
-    foreach ($f in 'Seedwell.exe', 'trs_ffi.dll', 'Seedwell.pri', 'App.xbf', 'MainWindow.xbf', 'FlyoutWindow.xbf', 'cli\seedwell.exe', 'install.ps1') { if (-not (Test-Path "$check\app\$f")) { throw "the zip has no $f" } }
+    foreach ($f in 'Seedwell.exe', 'trs_ffi.dll', 'Seedwell.pri', 'App.xbf', 'MainWindow.xbf', 'FlyoutWindow.xbf', 'cli\seedwell.exe', 'install.ps1', 'THIRD-PARTY-NOTICES.md') { if (-not (Test-Path "$check\app\$f")) { throw "the zip has no $f" } }
     $said = & "$check\app\cli\seedwell.exe" --version
     if ($said -ne "seedwell $version") { throw "the CLI says '$said', not 'seedwell $version'" }
     # The app starts from the unzipped folder with what the zip holds, and draws (quiet: no window is activated).

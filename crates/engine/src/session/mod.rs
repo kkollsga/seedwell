@@ -81,6 +81,10 @@ pub(crate) enum SessionMsg {
     Volumes(Vec<(u32, bool)>),
     /// The outage state changed (SPEC 7C.4c): `held` while the hub holds everything.
     Net { held: bool },
+    /// A server of the proxy works again after none did (SPEC §7H): torrents dial and announce again.
+    ProxyRestored,
+    /// The TCP listener is open again after the proxy went off (or could not be).
+    Relistened { serial: u64, result: Result<tokio::net::TcpListener, String> },
     /// The trackers of a torrent started or stopped failing.
     TrackerHealth { id: TorrentId, health: crate::tracker_driver::Health },
     /// A queued move was planned (off the actor).
@@ -350,6 +354,8 @@ pub(crate) struct Session {
     pub listener: Option<tokio::task::JoinHandle<()>>,
     /// Accepts uTP connections on the shared UDP socket.
     pub utp_listener: Option<tokio::task::JoinHandle<()>>,
+    /// The proxy's monitor (SPEC §7H), while the proxy is on.
+    pub proxy_task: Option<tokio::task::JoinHandle<()>>,
     /// The DHT node runs on the shared UDP socket (and so moves with it on a live port change).
     pub dht_shared: bool,
     /// Counts live port changes; an answer for an older one is dropped.
@@ -423,6 +429,7 @@ impl Session {
             hint_peers: HashMap::new(),
             listener: None,
             utp_listener: None,
+            proxy_task: None,
             dht_shared: false,
             rebind_gen: 0,
             extra_mapped_port: None,
@@ -587,6 +594,8 @@ impl Session {
             SessionMsg::PortMapRestart { serial } => self.on_portmap_restart(serial),
             SessionMsg::TrackerHealth { id, health } => self.on_tracker_health(id, health),
             SessionMsg::Net { held } => self.on_net(held),
+            SessionMsg::ProxyRestored => self.on_proxy_restored(),
+            SessionMsg::Relistened { serial, result } => self.on_relistened(serial, result),
             SessionMsg::Volumes(res) => self.on_volumes(res),
             SessionMsg::MovePlanned { job, result } => self.on_move_planned(job, result),
             SessionMsg::MoveSwitch { id, plan, reply } => self.on_move_switch(id, plan, reply),
@@ -840,7 +849,8 @@ impl Session {
     // ---- DHT ----------------------------------------------------------------------------
 
     pub(crate) fn dht_ok(&self, c: &ColdTorrent) -> bool {
-        self.dht.is_some() && !c.private() && c.want == Want::Active && !c.has(F_QUEUED) && !c.awaiting() && self.sh.cfg().dht_enabled
+        // No torrent uses the DHT while the proxy is on (SPEC §7H): the DHT is UDP, which the proxy does not carry.
+        self.dht.is_some() && !c.private() && c.want == Want::Active && !c.has(F_QUEUED) && !c.awaiting() && self.sh.cfg().dht_enabled && !self.sh.proxy.on()
     }
 
     /// Start a peer lookup (and optionally announce) for a public torrent.

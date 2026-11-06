@@ -495,6 +495,14 @@ impl DhtCore {
         self.forbidden.insert(info_hash);
     }
 
+    /// Drops the lookup for `info_hash`, running or queued, with the announce it would end with: nothing more about
+    /// that hash leaves (answers to queries already sent are ignored). The torrent proxy came on (SPEC §7H): a lookup
+    /// begun before must not go on to announce the torrent from this address.
+    pub fn cancel(&mut self, info_hash: Id) {
+        self.queue.retain(|q| q.info_hash != info_hash);
+        self.lookups.retain(|l| !(l.target == info_hash && matches!(l.purpose, Purpose::Peers { .. })));
+    }
+
     /// Undo [`forbid`](Self::forbid).
     pub fn unforbid(&mut self, info_hash: &Id) {
         self.forbidden.remove(info_hash);

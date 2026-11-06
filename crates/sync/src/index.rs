@@ -132,6 +132,9 @@ pub enum Op {
     /// The needs were worked out with these ignore patterns ([`Ignore::identity`]): a folder opened with other ones works
     /// out again what the change touches ([`IndexStore::ignore_applied`]).
     IgnoreApplied(String),
+    /// This device holds its changes back while the folder is *Read only* (SPEC §7G.1), or no longer
+    /// ([`IndexStore::held`]).
+    SetHeld(bool),
 }
 
 /// The storage behind an [`Index`]: reads, plus an atomic apply of [`Op`]s.
@@ -199,10 +202,23 @@ pub trait IndexStore: Send {
     }
     /// Sets [`Self::ignore`].
     fn set_ignore(&mut self, _ignore: Option<Arc<Ignore>>) {}
+    /// While the folder is *Read only* (SPEC §7G.1): its owners. Then another device's version counts only when one of
+    /// them made it, or announces it ([`Batch`]); the others stay stored and count again once it is off. Set by the
+    /// folder; not stored.
+    fn owners_only(&self) -> Option<Arc<BTreeSet<ShortId>>> {
+        None
+    }
+    /// Sets [`Self::owners_only`].
+    fn set_owners_only(&mut self, _owners: Option<Arc<BTreeSet<ShortId>>>) {}
     /// The ignore patterns the stored needs were worked out with ([`Op::IgnoreApplied`]); `None` in an index from
     /// before they were noted (whose needs never left ignored paths out).
     fn ignore_applied(&self) -> io::Result<Option<String>> {
         Ok(None)
+    }
+    /// This device held its changes back while the folder was *Read only* ([`Op::SetHeld`]): once it signs again,
+    /// what it changed meanwhile becomes its own versions, also after a restart.
+    fn held(&self) -> io::Result<bool> {
+        Ok(false)
     }
     /// Local files holding a chunk with this hash: (path, offset) pairs, at most `limit`.
     fn chunk_sources(&self, hash: &[u8; 32], limit: usize) -> io::Result<Vec<(String, u64)>>;
@@ -227,6 +243,8 @@ pub struct Batch<'a, S: IndexStore + ?Sized> {
     retire: bool,
     /// [`IndexStore::ignore`].
     ignore: Option<Arc<Ignore>>,
+    /// [`IndexStore::owners_only`].
+    owners_only: Option<Arc<BTreeSet<ShortId>>>,
     meta: Meta,
     local: BTreeMap<String, Option<LocalRecord>>,
     remote: BTreeMap<(String, ShortId), IndexEntry>,
@@ -244,6 +262,7 @@ impl<'a, S: IndexStore + ?Sized> Batch<'a, S> {
             writer: store.writers()?.iter().any(|(d, _)| *d == me),
             retire: store.feeds_host(),
             ignore: store.ignore(),
+            owners_only: store.owners_only(),
             meta: store.meta()?,
             local: BTreeMap::new(),
             remote: BTreeMap::new(),
@@ -403,7 +422,13 @@ impl<'a, S: IndexStore + ?Sized> Batch<'a, S> {
 
     fn need_of(&self, path: &str) -> io::Result<Option<NeedRecord>> {
         let local = self.local(path)?;
-        let remote = self.remote_at(path)?;
+        let mut remote = self.remote_at(path)?;
+        // Read only: another device's version takes part only when an owner made it (its signature says so, whoever
+        // relays it) or an owner's device announces it (its own index: what it holds, also a version made before by a
+        // member). Any other one is no candidate, no holder and no delete; it stays stored and counts once it is off.
+        if let Some(owners) = &self.owners_only {
+            remote.retain(|(d, e)| owners.contains(d) || owners.contains(&e.file.info.modified_by));
+        }
         // A path this device ignores needs nothing (SPEC §7G.2): what others announce there is not fetched, not
         // counted or waited for, and no change, delete or conflict there touches the file here.
         if let Some(ig) = &self.ignore {
@@ -490,6 +515,8 @@ pub struct MemStore {
     unavailable: BTreeMap<String, u64>,
     ignore: Option<Arc<Ignore>>,
     ignore_applied: Option<String>,
+    owners_only: Option<Arc<BTreeSet<ShortId>>>,
+    held: bool,
 }
 
 /// What a record adds to [`IndexStore::local_totals`]: its size, if it is a live file we hold.
@@ -681,6 +708,7 @@ impl IndexStore for MemStore {
                     }
                 },
                 Op::IgnoreApplied(source) => self.ignore_applied = Some(source),
+                Op::SetHeld(on) => self.held = on,
             }
         }
         Ok(())
@@ -694,8 +722,20 @@ impl IndexStore for MemStore {
         self.ignore = ignore;
     }
 
+    fn owners_only(&self) -> Option<Arc<BTreeSet<ShortId>>> {
+        self.owners_only.clone()
+    }
+
+    fn set_owners_only(&mut self, owners: Option<Arc<BTreeSet<ShortId>>>) {
+        self.owners_only = owners;
+    }
+
     fn ignore_applied(&self) -> io::Result<Option<String>> {
         Ok(self.ignore_applied.clone())
+    }
+
+    fn held(&self) -> io::Result<bool> {
+        Ok(self.held)
     }
 
     fn shown_since(&self, after: u64, limit: usize) -> io::Result<Vec<(u64, String)>> {

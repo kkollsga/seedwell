@@ -123,12 +123,19 @@ impl Engine {
         let Bound { listener, port, utp, fallback } = bind_ports(&cfg_copy, cfg_copy.listen_port, false).await?;
         sh.listen_port.store(u32::from(port), Ordering::Relaxed);
         sh.set_fallback(fallback);
-        let accept = tokio::spawn(accept_loop(listener, sh.clone()));
+        // While the proxy is on (SPEC §7H) nobody connects in: the port stays known, the listener is closed.
+        let accept = if cfg_copy.proxy.is_none() {
+            Some(tokio::spawn(accept_loop(listener, sh.clone())))
+        } else {
+            drop(listener);
+            None
+        };
 
         // The UDP socket on the listen port serves uTP and (below) the DHT.
         let mut dht_feed = None;
         let mut utp_accept = None;
         if let Some((sock, frx)) = utp {
+            sock.set_accepting(cfg_copy.proxy.is_none());
             *sh.utp.write().unwrap_or_else(|e| e.into_inner()) = Some(sock.clone());
             utp_accept = Some(tokio::spawn(utp_accept_loop(sock, sh.clone())));
             dht_feed = Some(frx);
@@ -158,7 +165,7 @@ impl Engine {
         let stored = store.load_torrents().map_err(|e| EngineError::Store(e.to_string()))?;
         let directs = store.load_directs().map_err(|e| EngineError::Store(e.to_string()))?;
         let mut session = Session::new(sh.clone(), srx, tracker, dht);
-        session.listener = Some(accept);
+        session.listener = accept;
         session.utp_listener = utp_accept;
         session.dht_shared = dht_shared;
         session.load(stored);
@@ -330,6 +337,10 @@ pub(crate) async fn accept_loop(listener: TcpListener, sh: Arc<Shared>) {
                 continue;
             }
         };
+        // (The listener is closed while the proxy is on; one accepted in the moment it came on goes unread.)
+        if sh.proxy.on() {
+            continue;
+        }
         admit(&sh, PeerIo::Tcp(stream), addr);
     }
 }
@@ -339,7 +350,7 @@ pub(crate) async fn utp_accept_loop(sock: trs_utp::UtpSocket, sh: Arc<Shared>) {
     loop {
         match sock.accept().await {
             Ok((stream, addr)) => {
-                if sh.cfg().utp {
+                if sh.cfg().utp && !sh.proxy.on() {
                     admit(&sh, PeerIo::Utp(stream), addr);
                 }
             }
@@ -943,6 +954,24 @@ impl EngineHandle {
     /// Change any setting at runtime; limits, caps and the queue are re-applied at once.
     pub fn update_config(&self, f: impl FnOnce(&mut EngineConfig) + Send + 'static) {
         self.send(Cmd::UpdateConfig(Box::new(f)));
+    }
+
+    /// Torrent traffic through a SOCKS5 proxy (SPEC §7H), or directly again (`None`). Takes effect at once: with the
+    /// proxy on, connections made before it close, the listener closes, uTP, UDP trackers, torrents' DHT use and the
+    /// torrent port's mapping stop, and torrents are held until a server of it answers.
+    pub fn set_proxy(&self, proxy: Option<crate::proxy::ProxyConfig>) {
+        self.update_config(move |c| c.proxy = proxy);
+    }
+
+    /// Tests every server of the proxy now and switches to the best (SPEC §7H, "Find a faster server"). Returns at
+    /// once; [`ProxyStatus::ranks`] counts up when the ranking is done.
+    pub fn proxy_rank_now(&self) {
+        self.sh.proxy.rank_now();
+    }
+
+    /// How the proxy is doing (SPEC §7H). Cheap: one lock read, never waits for the session.
+    pub fn proxy_status(&self) -> crate::proxy::ProxyStatus {
+        self.sh.proxy.status()
     }
 
     /// Apply a freshly loaded `config.toml`. Limits, the alt-speed schedule, queue, connection

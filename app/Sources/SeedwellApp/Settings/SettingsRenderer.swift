@@ -66,6 +66,8 @@ struct SettingsBlocksView: View {
                 if let r = model.syncRendezvous {
                     RendezvousSection(view: r) { await model.rendezvous($0) }
                 }
+            case .torrentProxy(let title):
+                if let proxy = model.proxy { ProxySettingsBox(title: title, center: proxy) }
             case .devices, .rulesEditor:
                 EmptyView()
             }

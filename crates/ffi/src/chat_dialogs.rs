@@ -463,7 +463,6 @@ mod tests {
             enabled: true,
             line: "Your other devices join it by themselves.".into(),
             help: String::new(),
-            read_only: None,
         }
     }
 

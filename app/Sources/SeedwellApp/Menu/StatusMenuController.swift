@@ -62,6 +62,8 @@ import os
         menu.delegate = self
         menu.autoenablesItems = false
         statusItem?.menu = menu
+        // The shield's "Country: …" opens its list from the menu bar item once this menu has closed.
+        commands.proxy.menuBarAnchor = { [weak self] in self?.statusButton }
         menuFiles.onMoved = { [weak self] in self?.refreshHover() }
         refreshIcon()
     }
@@ -117,6 +119,8 @@ import os
     func menuWillOpen(_ menu: NSMenu) {
         guard menu === self.menu else { return }
         onWillOpen?()
+        // The menu opening over the shield's country list closes the list.
+        if commands.proxy.countryList?.place == .menuBar { commands.proxy.closeCountryList() }
         qaMenuOpen = true
         pinToSRGB()
         let sync = core.syncSnapshot()
@@ -131,6 +135,8 @@ import os
         timer = t
         refreshIcon()  // the open menu's cadence
         installRightClickMonitor()
+        // The proxy's shield in the footer follows the proxy while the menu is open (at the core's cadence).
+        commands.proxy.watch()
     }
 
     /// Memory: the menu's pop-up window is the system's; with the display's wide-gamut profile it builds
@@ -144,6 +150,7 @@ import os
         guard menu === self.menu else { return }
         timer?.invalidate()
         timer = nil
+        commands.proxy.unwatch()
         if let m = rightClickMonitor { NSEvent.removeMonitor(m) }
         rightClickMonitor = nil
         clearHover()
@@ -339,7 +346,7 @@ import os
         // The only Quit that ends the process; ⌘Q elsewhere (and the Dock's Quit) just close the windows.
         let quit: @MainActor () -> Void = { (NSApp.delegate as? AppDelegate)?.quitForReal() ?? NSApp.terminate(nil) }
         let footer = NSMenuItem()
-        let row = FooterRow(openTitle: m.openTitle, onOpen: showMain, onQuit: quit)
+        let row = FooterRow(openTitle: m.openTitle, proxy: commands.proxy, onOpen: showMain, onQuit: quit)
         footer.view = row
         footerRow = row
         menu.addItem(footer)
@@ -496,6 +503,10 @@ import os
     /// Returns true when the click was consumed.
     private func handleRightClick(isUp: Bool) -> Bool {
         log.notice("right-click event during menu tracking (up: \(isUp))")
+        if isUp, let shield = footerRow?.shield, shield.menuPointerInside {
+            shield.context()
+            return true
+        }
         guard isUp, let row = rowForContext() else { return false }
         popContext(row)
         return true

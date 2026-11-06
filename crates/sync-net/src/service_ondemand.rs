@@ -70,6 +70,9 @@ struct FetchState {
     wanted: bool,
     /// Files here (below a folder): one more counts as getting further.
     here_count: u64,
+    /// Every file asked for and not here has all its bytes here already, waiting for the pull round that places and
+    /// records it (none from the devices that have it is to come any more).
+    recording: bool,
     /// The devices that hold what is asked for and is not here.
     holders: std::collections::BTreeSet<ShortId>,
     /// Files no device can give right now.
@@ -270,6 +273,11 @@ impl SyncHandle {
     ///   index);
     /// - or the devices asked sent none of it for [`FETCH_STALL`] while it was waited on.
     ///
+    /// Never while all of it is here and waits for the pull round that places and records it (a stream that ended, a
+    /// build with no chunk left: [`trs_sync::lazy::Streams::finished`]): that answers coming until the record is
+    /// committed, then here, whether the device it came from is still connected or not. A paused folder places nothing,
+    /// so there the usual rules apply.
+    ///
     /// A version no device can give at all is [`OnDemandError::Unavailable`] at once.
     ///
     /// Returns within about `wait` whatever the folder's core is doing: the core is needed only to make the request,
@@ -367,15 +375,20 @@ impl SyncHandle {
                 let mark = (data, st.here_count);
                 let mut w = lock(&f.fetches);
                 let e = w.watch.entry(path.to_string()).or_insert(FetchWatch { mark, since: now, seen: now });
-                // Nobody waited on it for a while (a fetch let go of, a host that came back later): counted anew.
-                if now.duration_since(e.seen) > FETCH_FORGOTTEN || e.mark != mark {
+                // Nobody waited on it for a while (a fetch let go of, a host that came back later): counted anew. And all
+                // of it is here, waiting for its record: nothing more is to come from the devices, so none is stalling.
+                if now.duration_since(e.seen) > FETCH_FORGOTTEN || e.mark != mark || st.recording {
                     *e = FetchWatch { mark, since: now, seen: now };
                 }
                 e.seen = now;
                 !asked.is_empty() && now.duration_since(e.since) >= stall
             };
             let settling = now < *lock(&self.inner.ctx.settling);
-            let why = if asked.is_empty() && !settling {
+            // All of it is here and waits for the round that records it (a round late under load, a slow flush): coming,
+            // whoever is connected now.
+            let why = if st.recording {
+                None
+            } else if asked.is_empty() && !settling {
                 Some("no device that has it is connected")
             } else if stalled {
                 Some("the devices that have it sent none of it for a while")
@@ -471,10 +484,14 @@ impl SyncHandle {
     }
 
     /// Where a fetch of `path` (a file, or every file below a folder) stands: a file no device can give counts as
-    /// neither here nor waited for, and is listed.
+    /// neither here nor waited for, and is listed. Read from one committed state: a file's record and what it needs
+    /// read apart could straddle the commit of the round that places it (its record from before, not here; its need
+    /// from after, none), and the fetch would find no device that has it just as it arrives.
     fn fetch_state(&self, f: &FolderShared, path: &str) -> io::Result<FetchState> {
-        let view = f.index.view();
+        let view = f.index.snapshot()?;
         let mut st = FetchState { here: true, ..FetchState::default() };
+        // Files asked for and not here, and how many of those have all their bytes here, waiting for their record.
+        let (mut left, mut finished) = (0u64, 0u64);
         let mut after: Option<String> = None;
         loop {
             let page = view.local_paths(path, after.as_deref(), 1000)?;
@@ -485,20 +502,27 @@ impl SyncHandle {
                     st.here_count += u64::from(r.file.info.kind == trs_sync_proto::model::FileKind::File);
                     continue;
                 }
+                if r.want && self.inner.ctx.fetch_read_gap.load(std::sync::atomic::Ordering::SeqCst) {
+                    test_read_gap(f, p);
+                }
                 if view.unavailable_at(p)?.is_some() {
                     st.unavailable.push(p.clone());
                     continue;
                 }
                 st.here = false;
                 st.wanted |= r.want;
-                if r.want
-                    && let Some(n) = view.need(p)?
-                {
-                    st.holders.extend(n.holders);
+                if r.want {
+                    left += 1;
+                    finished += u64::from(trs_sync::lazy::lock(&f.jobs).finished(p));
+                    if let Some(n) = view.need(p)? {
+                        st.holders.extend(n.holders);
+                    }
                 }
             }
             after = Some(last);
         }
+        // (Not in a paused folder: no round places anything there until it goes on.)
+        st.recording = left > 0 && finished == left && !f.paused.load(std::sync::atomic::Ordering::Relaxed);
         Ok(st)
     }
 
@@ -607,11 +631,7 @@ impl SyncHandle {
         let mut held = vec![false; candidates.len()];
         let mut asks = Vec::new();
         for (d, files) in by_peer {
-            // Only a writer's answer counts: a read-only member's change is never sent, so its copy is no copy to rely on.
-            // Only a device that answers is asked (an earlier build never does).
-            let Some(peer) = peers.iter().find(|p| {
-                p.device.short() == d && p.access(&f.id).is_some() && f.writes(&p.device_pk) && p.has(trs_sync_proto::msg::FEATURE_HOLDS)
-            }) else {
+            let Some(peer) = hold_askee(f, d, &peers) else {
                 continue;
             };
             for part in files.chunks(MAX_HOLD_FILES) {
@@ -636,6 +656,28 @@ impl SyncHandle {
             }
         }
         Ok((candidates.into_iter().zip(held).filter(|(_, h)| *h).map(|((i, _), _)| i).collect(), freeing))
+    }
+
+    /// **Tests only:** the devices a free of `path` here would ask now whether they hold its files (their names, sorted):
+    /// the connected writers that announce them held, on a session that answers ([`Self::od_evict`]).
+    #[doc(hidden)]
+    pub async fn test_hold_askees(&self, id: &FolderId, path: &str) -> Result<Vec<String>, SyncError> {
+        let f = self.on_demand_folder(id)?;
+        let p = path.to_string();
+        let holders = self
+            .with_core(&f, move |c| {
+                let (files, _) = c.free_candidates(&p, false)?;
+                let mut out = std::collections::BTreeSet::new();
+                for i in files {
+                    out.extend(c.holders_of(&i)?);
+                }
+                Ok(out)
+            })
+            .await?;
+        let peers = self.inner.ctx.registry.peers();
+        let mut names: Vec<String> = holders.into_iter().filter_map(|d| hold_askee(&f, d, &peers)).map(|p| p.name.clone()).collect();
+        names.sort();
+        Ok(names)
     }
 
     /// The user's new or changed file at `path`, whose content the host has at `from`: copied into the cache
@@ -1261,4 +1303,22 @@ fn make_parents(c: &mut FolderCore, root: &Path, path: &str) -> Result<(), HostE
         }
     }
     Ok(())
+}
+
+/// **Tests** ([`SyncHandle::test_fetch_read_gap`]): waits until the record at `path` is committed as here, at most 30 s.
+fn test_read_gap(f: &FolderShared, path: &str) {
+    let end = Instant::now() + Duration::from_secs(30);
+    while Instant::now() < end && f.index.local(path).ok().flatten().is_some_and(|r| r.dataless) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// The session to ask whether device `d` holds files of `f` ([`SyncHandle::od_evict`]), if it is to be asked: only a
+/// writer's answer counts (a read-only member's change is never sent, so its copy is no copy to rely on), and only a
+/// device that answers is asked (an earlier build never does).
+fn hold_askee(f: &FolderShared, d: ShortId, peers: &[Arc<crate::shared::PeerHandle>]) -> Option<Arc<crate::shared::PeerHandle>> {
+    peers
+        .iter()
+        .find(|p| p.device.short() == d && p.access(&f.id).is_some() && f.writes(&p.device_pk) && p.has(trs_sync_proto::msg::FEATURE_HOLDS))
+        .cloned()
 }

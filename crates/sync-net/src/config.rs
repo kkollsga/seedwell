@@ -121,32 +121,31 @@ pub struct FolderEntry {
     /// keeps that way; the Mac's File Provider keeps none.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub in_place: bool,
-    /// *Read only* on all the user's devices (SPEC §7G.1, [`trs_sync_proto::members::FOLLOW_READ_ONLY`]) as this
-    /// device, an owner of the folder, carries it out (`None`: it never did).
+    /// What 0.1.19's *Read only* (a devices-group flag that lowered roles) left in this entry, on an owner that carried
+    /// it out: read once, by the migration that gives those roles back ([`crate::devices`]), then gone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub devices_read_only: Option<DevicesReadOnly>,
+    pub devices_read_only: Option<LegacyReadOnly>,
+    /// That migration ran for this folder (it never runs again: a Read only the user chooses later stays).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub read_only_migrated: bool,
+    /// Until that migration ran: the highest owner serial this folder's membership held when this version first opened
+    /// it, before it met another device of this version (a device of 0.1.19 meets none: protocol 4). A sibling whose
+    /// latest owner decision is above it was decided since (another owner's migration, or the user's choice after it):
+    /// the migration leaves it as it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_only_migrate_upto: Option<u64>,
 }
 
-/// What an owner of a folder keeps of *Read only* for the user's other devices (SPEC §7G.1): while it is on, the
-/// Follow that turned it on, so the device that said it keeps its role even when another says it again later, and it
-/// stays on when that statement stops counting (its device left the group, or is no longer owner or admin) until an
-/// owner or admin turns it off; and the last Follow that turned it off that this device carried out, so it is done once.
+/// What 0.1.19 noted of its *Read only* on an owner that carried it out (the fields the migration needs; the others it
+/// wrote are left unread).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct DevicesReadOnly {
-    /// It is on, as this device carries it out.
+pub struct LegacyReadOnly {
+    /// It was on.
     pub on: bool,
-    /// The device that turned it on (its key, hex): it keeps its role.
-    pub setter: String,
-    /// The serial of the Follow that turned it on: one without the flag above it turns it off.
-    pub serial: u64,
-    /// That Follow's time: a device whose role was decided before it becomes Read only; one at Read only since then
-    /// gets Admin back when it is turned off.
+    /// When it came on (the clock of the device that turned it on): a sibling Read only by a decision dated after it
+    /// was lowered by it.
     pub at_s: u64,
-    /// The devices group (id) that serial is of: a group that moves to a new key numbers its statements anew.
-    pub group: String,
-    /// The serial of the last Follow without the flag that this device gave Admin back for.
-    pub off_serial: u64,
 }
 
 fn yes() -> bool {
@@ -179,6 +178,8 @@ impl FolderEntry {
             full_here: false,
             in_place: false,
             devices_read_only: None,
+            read_only_migrated: false,
+            read_only_migrate_upto: None,
         }
     }
 }

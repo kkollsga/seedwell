@@ -1269,3 +1269,25 @@ fn network_restored_resets_the_bootstrap_backoff() {
     let after = h.core.next_wakeup().unwrap().duration_since(h.base).as_millis() as u64;
     assert!(after - (t + 1000) <= 31_000, "retry in {} ms", after - (t + 1000));
 }
+
+/// Failure: a lookup that was running when the torrent proxy came on goes on (its retransmits, further get_peers)
+/// and ends with an announce_peer that names the torrent and its port from this address (SPEC §7H).
+#[test]
+fn a_cancelled_lookup_sends_nothing_more_and_never_announces() {
+    let mut h = H::new();
+    let node = peer(5);
+    introduce(&mut h, 0, node, nid(5));
+    let ih = PublicInfoHash::new([5; 20], false).unwrap();
+    let s = sends(&h.input(100, Input::Announce { info_hash: ih, port: 6881 }));
+    assert_eq!(s.len(), 1, "the lookup's first get_peers");
+    let tid = tid_of(&s[0].1);
+    h.core.cancel([5; 20]);
+    // The node answers with a token: a live lookup would now announce to it.
+    let out = h.pkt(200, node, &reply(&tid, &nid(5), None, Some(b"tok"), b"", &[]));
+    let named: Vec<_> = sends(&out).into_iter().filter(|(_, d)| d.windows(20).any(|w| w == [5u8; 20])).collect();
+    assert!(named.is_empty(), "nothing names the hash after the cancel: {named:?}");
+    for ms in [2_100, 4_200, 30_000] {
+        let later: Vec<_> = sends(&h.tick(ms)).into_iter().filter(|(_, d)| d.windows(20).any(|w| w == [5u8; 20])).collect();
+        assert!(later.is_empty(), "at {ms} ms: {later:?}");
+    }
+}

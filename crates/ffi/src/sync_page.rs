@@ -409,6 +409,18 @@ fn remove_device_question(device: &str, folder: &str) -> SyncQuestion {
     )
 }
 
+/// An admin's "Remove Mac mini from “Photos”?": the owner's device removes it (as soon as it hears of it, with no
+/// question to its user), and this computer stops syncing with it at once.
+fn ask_removal_question(device: &str, folder: &str) -> SyncQuestion {
+    let who = if device.trim().is_empty() { "A device" } else { device.trim() };
+    question(
+        format!("Remove {who} from “{folder}”?"),
+        concat!("The folder's owner removes it, as soon as its device hears from this ", computer!(), ". It stops syncing with this ", computer!(), " at once. It keeps the files it already has.").into(),
+        "Remove",
+        true,
+    )
+}
+
 fn reach(m: &SyncMember, device: Option<&SyncDevice>) -> SyncMemberReach {
     if m.is_me {
         return SyncMemberReach::ThisDevice;
@@ -419,6 +431,12 @@ fn reach(m: &SyncMember, device: Option<&SyncDevice>) -> SyncMemberReach {
         Some(_) => SyncMemberReach::Internet,
         None => SyncMemberReach::Away,
     }
+}
+
+/// An admin may remove a member at `r` (SPEC §7G.1, 0.1.20): a user, Read & write or Read only, never an owner or
+/// another admin.
+pub(crate) fn admin_may_remove(r: SyncRole) -> bool {
+    matches!(r, SyncRole::ReadWrite | SyncRole::ReadOnly)
 }
 
 /// The roles an owner hands out on the page, in the menu's order.
@@ -432,28 +450,33 @@ fn member(f: &SyncFolder, m: &SyncMember, device: Option<&SyncDevice>, now_s: u6
         named(&m.name, &m.user)
     };
     let expires_day = m.expires_s.map(|t| local_day(clock, t, now_s));
-    let role_menu = (f.role == SyncRole::Owner && !m.is_me).then(|| {
-        let mut entries: Vec<SyncPageMenuEntry> = ROLES
-            .iter()
-            .map(|&r| SyncPageMenuEntry::Item {
+    // An owner changes roles and removes anyone; an admin removes a user (Read & write, Read only), nothing more.
+    let owner = f.role == SyncRole::Owner;
+    let admin_removes = f.role == SyncRole::Admin && admin_may_remove(m.role);
+    let role_menu = (!m.is_me && (owner || admin_removes)).then(|| {
+        let mut entries: Vec<SyncPageMenuEntry> = Vec::new();
+        if owner {
+            entries.extend(ROLES.iter().map(|&r| SyncPageMenuEntry::Item {
                 title: role(r).into(),
                 command: SyncPageCommand::SetRole { device_id: m.device_id.clone(), role: r },
                 checked: r == m.role,
                 enabled: r != m.role,
                 destructive: false,
                 question: None,
-            })
-            .collect();
-        entries.push(SyncPageMenuEntry::Separator);
+            }));
+            entries.push(SyncPageMenuEntry::Separator);
+        }
         entries.push(SyncPageMenuEntry::Item {
             title: "Remove from Folder…".into(),
             command: SyncPageCommand::RemoveDevice { device_id: m.device_id.clone() },
             checked: false,
-            enabled: true,
+            // An admin's request waits for the owner: not asked twice.
+            enabled: owner || !m.removal_waiting,
             destructive: false,
-            question: Some(remove_device_question(&m.name, &f.name)),
+            question: Some(if owner { remove_device_question(&m.name, &f.name) } else { ask_removal_question(&m.name, &f.name) }),
         });
-        SyncPageMenu { title: role(m.role).into(), help: format!("Change what {} may do in this folder, or remove it", m.name), entries }
+        let help = if owner { format!("Change what {} may do in this folder, or remove it", m.name) } else { format!("Ask the folder's owner to remove {}", m.name) };
+        SyncPageMenu { title: role(m.role).into(), help, entries }
     });
     SyncPageMember {
         device_id: m.device_id.clone(),

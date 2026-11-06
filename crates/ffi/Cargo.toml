@@ -40,6 +40,8 @@ trs-sync-proto = { path = "../sync-proto" }
 # Conflict copy names read back (device and time, for the folder page).
 trs-sync = { path = "../sync" }
 trs-tracker = { path = "../tracker" }
+# Torrent traffic through a SOCKS5 proxy (SPEC §7H): testing a key before it is kept.
+trs-socks = { path = "../socks" }
 # Developer mode: the tracker log viewer reads and clears the log.
 trs-devlog = { path = "../devlog" }
 # Content types and container families of file names (the Play entries); the server itself is the engine's.
@@ -61,3 +63,4 @@ trs-buildsig = { path = "../buildsig" }
 
 [dev-dependencies]
 tempfile = "3"
+trs-socks = { path = "../socks", features = ["testkit"] }

@@ -68,6 +68,8 @@ pub enum Cmd {
     Rescan { folder: String },
     /// `sync lan-only <folder> on|off`
     LanOnly { folder: String, on: bool },
+    /// `sync read-only <folder> on|off|status` (`on`: `None` for status)
+    ReadOnly { folder: String, on: Option<bool> },
     /// `sync conflicts <folder>`
     Conflicts { folder: String },
     /// `sync resolve <folder> <copy> --keep original|copy|both`
@@ -107,7 +109,7 @@ fn mode_words(d: &SyncFolderDto, free_space: bool) -> String {
     }
 }
 
-pub const USAGE: &str = "usage: seedwell sync list | status <folder> | add <path> [--on-demand] | join <link> [--to <path>] [--on-demand] | mode <folder> full|on-demand [--to <path>] [--free-space] | items <folder> [<path>] | fetch <folder> <path> [--wait S|--no-wait] | pin <folder> <path> | unpin <folder> <path> | evict <folder> <path> | unavailable [<folder>] | share <folder> [--role read_write|read_only|admin|owner|--read-only] [--uses N|unlimited] [--days N|never] [--chat <channel>|new] | share-until <folder> <days>|never [--extend] | members <folder> | invites <folder> | revoke-invite <folder> <invite-id> | role <folder> <device> owner|admin|read_write|read_only | remove-device <folder> <device> | reshare <folder> | rename <folder> <name> | move <folder> <path> | pause <folder> | resume <folder> | rescan <folder> | lan-only <folder> on|off | conflicts <folder> | resolve <folder> <copy> --keep original|copy|both | address <folder> <host:port> | remove <folder> [--delete-files] [-y] | remove-confirm <token> | settings [--device-name N] [--user-name N] [--port N] [--lan on|off] [--dht on|off] [--relay-own on|off] [--relay-everyone on|off] [--up R] [--down R] [--default-location PATH]";
+pub const USAGE: &str = "usage: seedwell sync list | status <folder> | add <path> [--on-demand] | join <link> [--to <path>] [--on-demand] | mode <folder> full|on-demand [--to <path>] [--free-space] | items <folder> [<path>] | fetch <folder> <path> [--wait S|--no-wait] | pin <folder> <path> | unpin <folder> <path> | evict <folder> <path> | unavailable [<folder>] | share <folder> [--role read_write|read_only|admin|owner|--read-only] [--uses N|unlimited] [--days N|never] [--chat <channel>|new] | share-until <folder> <days>|never [--extend] | members <folder> | invites <folder> | revoke-invite <folder> <invite-id> | role <folder> <device> owner|admin|read_write|read_only | remove-device <folder> <device> | reshare <folder> | rename <folder> <name> | move <folder> <path> | pause <folder> | resume <folder> | rescan <folder> | lan-only <folder> on|off | read-only <folder> on|off|status | conflicts <folder> | resolve <folder> <copy> --keep original|copy|both | address <folder> <host:port> | remove <folder> [--delete-files] [-y] | remove-confirm <token> | settings [--device-name N] [--user-name N] [--port N] [--lan on|off] [--dht on|off] [--relay-own on|off] [--relay-everyone on|off] [--up R] [--down R] [--default-location PATH]";
 
 fn on_off(v: Option<String>, name: &str) -> Result<Option<bool>, Usage> {
     match v.as_deref() {
@@ -269,6 +271,16 @@ pub fn parse(args_in: Vec<String>) -> Result<Cmd, Usage> {
                 x => return Err(Usage(format!("lan-only is on or off, not `{x}`"))),
             };
             Cmd::LanOnly { folder: p.remove(0), on }
+        }
+        "read-only" | "read_only" => {
+            let mut p = args(o, 2, "read-only <folder> on|off|status")?;
+            let on = match p.remove(1).as_str() {
+                "on" | "yes" | "true" => Some(true),
+                "off" | "no" | "false" => Some(false),
+                "status" => None,
+                x => return Err(Usage(format!("read-only is on, off or status, not `{x}`"))),
+            };
+            Cmd::ReadOnly { folder: p.remove(0), on }
         }
         "conflicts" => Cmd::Conflicts { folder: one(o, "conflicts <folder>")? },
         "resolve" => {
@@ -509,6 +521,14 @@ pub async fn run(cmd: Cmd, g: &Global) -> R {
         Cmd::LanOnly { folder: f, on } => {
             let (raw, d): (_, SyncFolderDto) = ask(&mut c, Request::SyncSetLanOnly(SyncLanOnlyParams { folder: f, lan_only: on })).await?;
             show(g, &raw, || if on { format!("{} now syncs only with devices on the local network.", d.name) } else { format!("{} syncs with devices everywhere again.", d.name) });
+        }
+        Cmd::ReadOnly { folder: f, on } => {
+            let req = match on {
+                Some(on) => Request::SyncSetReadOnly(SyncReadOnlyParams { folder: f, read_only: on }),
+                None => Request::SyncReadOnly(folder(f)),
+            };
+            let (raw, d): (_, SyncReadOnlyDto) = ask(&mut c, req).await?;
+            show(g, &raw, || read_only_text(&d));
         }
         Cmd::Conflicts { folder: f } => {
             let (raw, l): (_, SyncConflictsDto) = ask(&mut c, Request::SyncConflicts(folder(f))).await?;
@@ -1000,6 +1020,17 @@ pub fn settings(s: &SyncSettingsDto) -> String {
     o
 }
 
+/// `sync read-only`: the folder's Read only as this computer has it.
+fn read_only_text(d: &SyncReadOnlyDto) -> String {
+    let state = if d.read_only { "is Read only: only its owners' changes count" } else { "is not Read only" };
+    let mine = match (d.may_switch, d.held) {
+        (true, _) => concat!("this ", trs_platform::computer!(), " is an owner and may switch it"),
+        (false, true) => concat!("changes made on this ", trs_platform::computer!(), " stay here until an owner turns it off"),
+        (false, false) => "only an owner of the folder may switch it",
+    };
+    format!("{} {state}; {mine}.", d.name)
+}
+
 fn removed(r: &SyncRemovedDto) -> String {
     match &r.trashed_to {
         Some(t) => format!(concat!("{} no longer syncs on this ", trs_platform::computer!(), "; the folder is in the ", trs_platform::trash!(), " ({t})."), r.name, t = t),
@@ -1067,6 +1098,9 @@ mod tests {
         assert_eq!(parse(w("rescan Docs")).unwrap(), Cmd::Rescan { folder: "Docs".into() });
         assert_eq!(parse(w("lan-only Docs on")).unwrap(), Cmd::LanOnly { folder: "Docs".into(), on: true });
         assert_eq!(parse(w("lan-only Docs off")).unwrap(), Cmd::LanOnly { folder: "Docs".into(), on: false });
+        assert_eq!(parse(w("read-only Docs on")).unwrap(), Cmd::ReadOnly { folder: "Docs".into(), on: Some(true) });
+        assert_eq!(parse(w("read-only Docs off")).unwrap(), Cmd::ReadOnly { folder: "Docs".into(), on: Some(false) });
+        assert_eq!(parse(w("read-only Docs status")).unwrap(), Cmd::ReadOnly { folder: "Docs".into(), on: None });
         assert_eq!(parse(w("conflicts Docs")).unwrap(), Cmd::Conflicts { folder: "Docs".into() });
         assert_eq!(
             parse(w("resolve Docs 'a (Mac, 2026-10-25 14.32).txt' --keep both")).unwrap(),
@@ -1080,7 +1114,7 @@ mod tests {
         assert_eq!((p.device_name.as_deref(), p.lan_discovery, p.up_limit, p.down_limit), (Some("Studio Mac"), Some(false), Some(1_000_000), Some(0)));
         let Cmd::SetSettings(p) = parse(w("settings --user-name Kari")).unwrap() else { panic!() };
         assert_eq!((p.user_name.as_deref(), p.device_name), (Some("Kari"), None));
-        for bad in ["share Docs --access-days 30", "share-until Docs", "share-until Docs 0", "share-until Docs never --extend", "share-until Docs soon", "share Docs --role boss", "share Docs --role admin --read-only", "share Docs --uses 0", "share Docs --uses 1001", "share Docs --days 0", "role Docs X chief", "role Docs X", "remove-device Docs", "", "frob", "status", "status a b", "rename Docs", "move Docs", "address Docs", "remove", "settings --lan maybe", "settings extra", "list x", "join", "lan-only Docs", "lan-only Docs maybe", "conflicts", "resolve Docs x", "resolve Docs x --keep neither", "resolve Docs --keep copy"] {
+        for bad in ["share Docs --access-days 30", "share-until Docs", "share-until Docs 0", "share-until Docs never --extend", "share-until Docs soon", "share Docs --role boss", "share Docs --role admin --read-only", "share Docs --uses 0", "share Docs --uses 1001", "share Docs --days 0", "role Docs X chief", "role Docs X", "remove-device Docs", "", "frob", "status", "status a b", "rename Docs", "move Docs", "address Docs", "remove", "settings --lan maybe", "settings extra", "list x", "join", "lan-only Docs", "lan-only Docs maybe", "read-only Docs", "read-only Docs maybe", "read-only", "conflicts", "resolve Docs x", "resolve Docs x --keep neither", "resolve Docs --keep copy"] {
             assert!(parse(w(bad)).is_err(), "`sync {bad}` should be a usage error");
         }
     }

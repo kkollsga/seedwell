@@ -55,7 +55,7 @@ impl NetSource {
             .registry
             .peers()
             .into_iter()
-            .filter(|p| p.access(&self.folder).is_some() && req.holders.contains(&p.device.short()))
+            .filter(|p| p.access(&self.folder).is_some() && req.holders.contains(&p.device.short()) && trusted(p, &self.folder))
             .filter(|p| avoid.is_none_or(|a| !Arc::ptr_eq(a, p)))
             .collect();
         peers.sort_by_key(|p| (!p.lan, p.inflight.load(Ordering::Relaxed)));
@@ -142,7 +142,7 @@ impl ChunkSource for NetSource {
                         None => {
                             ready.insert(i, Err(FetchError::Unavailable));
                         }
-                        Some(p) => spawn_collect(&mut running, i, true, p, reqs[i].len),
+                        Some(p) => spawn_collect(&mut running, i, true, p, &reqs[i], self.folder),
                     }
                     running.try_join_next()
                 } else {
@@ -155,7 +155,7 @@ impl ChunkSource for NetSource {
                         }
                         // Failed at a device: once more, of another holder.
                         Ok((i, true, Err((Some(peer), e)))) => match self.ask(&reqs[i], Some(&peer)).await {
-                            Some(p) => spawn_collect(&mut running, i, false, p, reqs[i].len),
+                            Some(p) => spawn_collect(&mut running, i, false, p, &reqs[i], self.folder),
                             None => {
                                 ready.insert(i, Err(e));
                             }
@@ -194,12 +194,29 @@ type Answer = (usize, bool, Got);
 type Pending = (Arc<PeerHandle>, tokio::sync::oneshot::Receiver<trs_sync_proto::msg::Response>);
 
 /// Waits for the answer to request `i` (of `len` bytes) on a task of its own, at most [`REQUEST_TIMEOUT`] from now.
-fn spawn_collect(running: &mut JoinSet<Answer>, i: usize, retry: bool, (peer, rx): Pending, len: u32) {
+fn spawn_collect(running: &mut JoinSet<Answer>, i: usize, retry: bool, (peer, rx): Pending, req: &ChunkRequest, folder: FolderId) {
     let deadline = Instant::now() + REQUEST_TIMEOUT;
+    let (len, hash) = (req.len, req.hash);
     running.spawn(async move {
-        let r = collect(&peer, len, rx, deadline).await;
+        let r = collect(&peer, len, rx, deadline).await.and_then(|data| checked(&peer, &folder, len, &hash, data));
         (i, retry, r.map_err(|e| (Some(peer), e)))
     });
+}
+
+/// `data` as `peer` sent it for a chunk of `len` bytes hashing to `hash` in `folder`: other bytes (a copy it changed,
+/// or corrupted) are [`FetchError::Corrupt`], and the peer is asked for none of the folder's chunks again in this
+/// session ([`trusted`]); the chunk is asked of another holder. (The puller checks every chunk as well.)
+fn checked(peer: &PeerHandle, folder: &FolderId, len: u32, hash: &[u8; 32], data: Vec<u8>) -> Result<Vec<u8>, FetchError> {
+    if data.len() == len as usize && crate::blobs::sha256(&data) == *hash {
+        return Ok(data);
+    }
+    crate::shared::lock(&peer.distrusted).insert(*folder);
+    Err(FetchError::Corrupt(peer.device.short()))
+}
+
+/// `peer` has sent no wrong chunk of `folder` in this session.
+fn trusted(peer: &PeerHandle, folder: &FolderId) -> bool {
+    !crate::shared::lock(&peer.distrusted).contains(folder)
 }
 
 impl NetSource {
@@ -260,6 +277,25 @@ mod tests {
     /// The failure: a device that announces the maker's unhashed version as held (a copy it took without its hashes)
     /// is on the LAN and ranked first, so every stream goes to it, which cannot serve one, and the download never
     /// happens. The maker is asked, wherever it is.
+    /// The failure: a device that serves bytes other than the signed chunk (its own changed copy of a Read only folder's
+    /// file, SPEC §7G.1, or corrupted ones) is asked again and again, each time for nothing. Its wrong chunk is
+    /// refused and it is asked for no chunk of that folder again in the session; other folders, and other devices, are
+    /// not touched.
+    #[test]
+    fn a_device_that_sends_a_wrong_chunk_is_asked_for_none_of_the_folders_again() {
+        let (member, other) = (peer(1, "192.168.1.5"), peer(2, "192.168.1.6"));
+        let (f, g) = (FolderId::of_public_key(&[1; 32]), FolderId::of_public_key(&[2; 32]));
+        let right = b"the owner's chunk".to_vec();
+        let hash = crate::blobs::sha256(&right);
+        assert_eq!(checked(&member, &f, right.len() as u32, &hash, right.clone()), Ok(right.clone()));
+        assert!(trusted(&member, &f), "right bytes keep it trusted");
+        let wrong = b"a member's chunk".to_vec();
+        assert_eq!(checked(&member, &f, wrong.len() as u32, &hash, wrong), Err(FetchError::Corrupt(member.device.short())));
+        assert!(!trusted(&member, &f), "asked again after a wrong chunk");
+        assert!(trusted(&member, &g) && trusted(&other, &f), "another folder or device distrusted");
+        assert_eq!(checked(&other, &f, 3, &hash, right), Err(FetchError::Corrupt(other.device.short())), "a length that does not match");
+    }
+
     #[test]
     fn a_stream_goes_to_the_maker_never_to_another_holder() {
         let (near, maker) = (peer(1, "192.168.1.5"), peer(2, "203.0.113.9"));

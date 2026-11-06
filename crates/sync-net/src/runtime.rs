@@ -332,6 +332,11 @@ async fn pull(ctx: &Arc<Ctx>, f: &Arc<FolderShared>, retry: &mut Option<(Instant
             lock(&f2.live).pending = sample_pending(&lock(&f2.core));
             let mut total = PullReport::default();
             for _ in 0..MAX_ROUNDS {
+                // (Tests: a round late under load, a finished download waiting for it.)
+                let late = *lock(&ctx2.place_wait);
+                if !late.is_zero() && trs_sync::lazy::lock(&f2.jobs).any_finished() {
+                    std::thread::sleep(late);
+                }
                 // The core is held for one round at a time (each round's records are committed at its end): a peer's
                 // index batches, the file provider's changes and a scan step get their turn between rounds.
                 let mut core = lock(&f2.core);
@@ -444,7 +449,9 @@ fn lane(f: &FolderShared, stream: bool) -> &std::sync::Mutex<crate::shared::Stre
 /// One lane of the folder's jobs: each queued job in turn, on a blocking thread, holding nothing of the folder but
 /// its files and a read-only view of its index (only a weak handle between jobs, so a folder that stops is let go
 /// of); each end handed to the core's job state (never the core), and a pull asked for when one came to its end (it
-/// places the file) or failed (it says why).
+/// places the file) or failed (it says why). A running job keeps the folder's `closed` flag down
+/// ([`crate::shared::Closed::hold`]): whoever waits for the folder to close (a stop, a move, a switch) waits until its
+/// index is let go here too, and opening it again finds it free.
 async fn run_lane(ctx: Arc<Ctx>, f: std::sync::Weak<FolderShared>, stream: bool) {
     loop {
         let Some(sh) = f.upgrade() else { return };
@@ -465,13 +472,24 @@ async fn run_lane(ctx: Arc<Ctx>, f: std::sync::Weak<FolderShared>, stream: bool)
         let path = job.path().to_string();
         let (fs, id, stop, index) = (sh.fs(), sh.id, sh.stopped.subscribe(), sh.index.view());
         let paused = sh.space.clone();
+        let open = sh.closed.hold();
         drop(sh);
         let (ctx2, rt) = (ctx.clone(), tokio::runtime::Handle::current());
+        let pause = *lock(&ctx.job_hold);
         let ran = tokio::task::spawn_blocking(move || {
+            let tests = ctx2.clone();
             let source = NetSource::new(ctx2, id, rt);
             let stop = || *stop.borrow() || paused.paused.load(Ordering::Relaxed);
             let mut fetched = 0;
             let end = trs_sync::lazy::run_job(&*fs, &source, &index, job, &stop, PULL_WINDOW, &mut fetched);
+            if !pause.is_zero() {
+                tests.jobs_held.fetch_add(1, Ordering::SeqCst);
+                std::thread::sleep(pause);
+                tests.jobs_held.fetch_sub(1, Ordering::SeqCst);
+            }
+            // The index and the files let go of, then the folder may count as closed.
+            drop((index, fs, source));
+            drop(open);
             (end, fetched)
         })
         .await;

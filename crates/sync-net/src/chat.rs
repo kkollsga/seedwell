@@ -1559,6 +1559,8 @@ pub(crate) fn start_chat_link(ctx: &Arc<Ctx>, peer: &Arc<PeerHandle>, id: Folder
     let (ctx, peer) = (ctx.clone(), peer.clone());
     tokio::spawn(async move {
         let Some(c) = ctx.registry.channel(&id) else { return };
+        // An owner: the removals this device asked for and still waits for (as a folder's link does).
+        crate::removals::send_waiting(&c.space, &peer).await;
         c.members.write().unwrap_or_else(|e| e.into_inner()).insert(peer.device);
         let _ = ctx.hub.send(HubMsg::MemberSeen { folder: id, device: peer.device });
         let statements: Vec<Statement> = c.membership.read().unwrap_or_else(|e| e.into_inner()).statements().cloned().collect();

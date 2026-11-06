@@ -28,6 +28,7 @@ mod pex_policy;
 mod policy;
 mod portmap;
 mod private_wire;
+mod proxy;
 mod quit;
 mod recover;
 mod redownload;

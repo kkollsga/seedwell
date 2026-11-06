@@ -142,6 +142,18 @@ pub enum TransportError {
     Redirect,
     /// Response body over the size cap.
     TooLarge,
+    /// Torrents go through a SOCKS5 proxy (SPEC §7H) and this request could not go through it. Nothing was sent:
+    /// never a direct connection instead. Not the tracker's fault (no breaker) and not an outage of the network.
+    Proxy(ProxyBlock),
+}
+
+/// Why a request that must go through the proxy was not sent.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ProxyBlock {
+    /// The proxy cannot be used right now (unreachable, wrong credentials, no server works): torrents are held.
+    Down,
+    /// A UDP tracker: the proxy carries TCP only, so UDP trackers are off while the proxy is on.
+    Udp,
 }
 
 /// Why a body could not be understood.
@@ -243,6 +255,13 @@ impl AnnounceError {
         )
     }
 
+    /// True when the request was not sent because torrents go through a proxy that could not carry it (SPEC §7H).
+    /// Like a network failure, a network change (the engine sends one when the proxy works again or goes off)
+    /// brings its retry forward.
+    pub fn waits_for_proxy(&self) -> bool {
+        matches!(self, AnnounceError::Transport(TransportError::Proxy(_)))
+    }
+
     /// True when the failure says the tracker's host is in trouble (a 5xx, a timeout, a refused or
     /// reset connection), so another torrent's success on the same host is good news for this one.
     /// A `failure reason` or a 4xx is about the torrent and never counts.
@@ -291,6 +310,7 @@ impl AnnounceError {
                     | TransportError::Tls
                     | TransportError::Forbidden(_)
                     | TransportError::NotSent
+                    | TransportError::Proxy(_)
             )
         )
     }
@@ -301,7 +321,7 @@ impl AnnounceError {
         !matches!(
             self,
             AnnounceError::Rejected { .. }
-                | AnnounceError::Transport(TransportError::Forbidden(_) | TransportError::NotSent)
+                | AnnounceError::Transport(TransportError::Forbidden(_) | TransportError::NotSent | TransportError::Proxy(_))
         )
     }
 }

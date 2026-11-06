@@ -101,6 +101,16 @@ pub fn engine_config(cfg: &Config, base: &EngineConfig) -> EngineConfig {
         trs_state::config::Encryption::Prefer => crate::config::EncryptionPolicy::Prefer,
         trs_state::config::Encryption::Require => crate::config::EncryptionPolicy::Require,
     };
+    // The file says whether torrents go through the proxy (SPEC §7H); the servers and the key come from the app
+    // (`EngineHandle::set_proxy`), never from the file. A reload never turns the proxy off or replaces its servers
+    // (one that lands after the app switched it on would send torrents directly while the app says on): only
+    // `set_proxy` does. The file can only switch it on, as a proxy with no server, which holds every torrent (a
+    // daemon, or the app before its key is read).
+    // (The file's own hold, a proxy with no server, goes when the file says off again: it never let anything out.)
+    e.proxy = match &base.proxy {
+        Some(p) if !p.servers.is_empty() => Some(p.clone()),
+        _ => n.proxy.enabled.then(crate::proxy::ProxyConfig::default),
+    };
     e.max_connections = n.max_connections as usize;
     e.max_connections_per_torrent = n.max_connections_per_torrent as usize;
     e.portmap = PortmapConfig {
@@ -150,6 +160,26 @@ pub fn default_state_dir() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Failure: a reload of `config.toml` (the app saves it right before it switches the proxy on, and the poller
+    /// applies it a moment later) turns the proxy off or empties it, so torrents connect directly while the app says
+    /// on.
+    #[test]
+    fn a_reload_never_turns_the_proxy_off_or_replaces_it() {
+        let real = crate::proxy::ProxyConfig { servers: vec!["proxy.example".into()], port: 1080, ..Default::default() };
+        let base = EngineConfig { proxy: Some(real.clone()), ..EngineConfig::default() };
+        let mut off = Config::default();
+        off.network.proxy.enabled = false;
+        assert_eq!(engine_config(&off, &base).proxy, Some(real.clone()), "a file saying off");
+        let mut on = Config::default();
+        on.network.proxy.enabled = true;
+        assert_eq!(engine_config(&on, &base).proxy, Some(real), "a file saying on");
+        let held = engine_config(&on, &EngineConfig::default()).proxy.expect("on without a key: held");
+        assert!(held.servers.is_empty());
+        assert_eq!(engine_config(&off, &EngineConfig::default()).proxy, None);
+        let base_held = EngineConfig { proxy: Some(held), ..EngineConfig::default() };
+        assert_eq!(engine_config(&off, &base_held).proxy, None, "the file's own hold goes with the file");
+    }
 
     #[test]
     fn defaults_map_to_a_sane_engine_config() {

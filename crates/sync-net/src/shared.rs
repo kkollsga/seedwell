@@ -19,7 +19,7 @@ use trs_sync::folder::FolderCore;
 use trs_sync::store_redb::RedbReader;
 use trs_sync_proto::ids::{DeviceId, FolderId};
 use trs_sync_proto::keys::{Access, FolderKey, FolderSecret};
-use trs_sync_proto::members::{Follow, InviteLink, Membership, Role};
+use trs_sync_proto::members::{InviteLink, Membership, Role};
 use trs_sync_proto::msg::{Message, Request, Response};
 
 /// Locks a std mutex, also after a panic elsewhere (the data is still consistent: every critical
@@ -160,15 +160,12 @@ pub struct Space {
     /// (0.1.13): no invitation, it proves it is one of that device's own instead ([`crate::devices`]). Set while it
     /// is not admitted yet.
     pub following: AtomicBool,
-    /// A folder on the user's devices *Read only* that this device holds back from: it is one of the devices that
-    /// become Read only, and no owner has lowered it yet (owner offline), so it writes nothing meanwhile
-    /// ([`crate::devices::held_read_only`]). The value the folder's core was last given.
+    /// The folder is *Read only* (its owners' setting) and this device, not an owner, may otherwise write: it holds its
+    /// changes back (sends none) until the setting is off ([`crate::roles::changed`] gives the folder's core this). The
+    /// value the core was last given.
     pub held_read_only: AtomicBool,
-    /// The run of *Read only* this device read last for this folder, with the devices group it is of: the trusted
-    /// Follow that turned it on ([`crate::devices::read_only_run`]). Kept while no later Follow of an owner or admin
-    /// without the flag turned it off, so it stays on when that statement stops counting (its device left the group,
-    /// or is no longer owner or admin) until the owner says it again.
-    pub read_only_run: Mutex<Option<(FolderId, Follow)>>,
+    /// The removals this device asked the owners for, as an admin ([`crate::removals`]), kept next to the membership.
+    pub removals: Mutex<Vec<crate::removals::Pending>>,
 }
 
 /// What a space's membership and sessions tell the status.
@@ -234,7 +231,7 @@ impl Space {
         links: BTreeMap<[u8; 16], String>,
         name: String,
     ) -> Self {
-        Space {
+        let s = Space {
             id,
             kind,
             public,
@@ -251,8 +248,10 @@ impl Space {
             notes: Mutex::new(Notes::default()),
             following: AtomicBool::new(false),
             held_read_only: AtomicBool::new(false),
-            read_only_run: Mutex::new(None),
-        }
+            removals: Mutex::new(Vec::new()),
+        };
+        *lock(&s.removals) = crate::removals::load(&s);
+        s
     }
 
     /// The names each device gave itself in this folder's or channel's membership (its profile): what every member
@@ -381,8 +380,9 @@ pub struct FolderShared {
     /// The core's state of those jobs ([`trs_sync::folder::FolderCore::streams`]): a job's end is handed back here,
     /// never waiting for the core.
     pub jobs: Arc<Mutex<trs_sync::lazy::Streams>>,
-    /// Set once everything above is dropped, the index included. Last, because fields drop in order: the last
-    /// `Arc` of a folder counts as gone before its fields are, so only this says the index file is closed.
+    /// Set once everything above is dropped, the index included, and every job that held the index without the folder
+    /// ([`Closed::hold`]) ended. Last, because fields drop in order: the last `Arc` of a folder counts as gone before
+    /// its fields are, so only this says the index file is closed.
     pub closed: Closed,
 }
 
@@ -451,18 +451,32 @@ pub struct FetchWatch {
     pub seen: std::time::Instant,
 }
 
-/// A flag that goes up when it is dropped (see [`FolderShared::closed`]).
+/// A flag that goes up once it is dropped and every [`Hold`] of it is too (see [`FolderShared::closed`]).
 #[derive(Debug, Default)]
-pub struct Closed(Arc<AtomicBool>);
+pub struct Closed(Arc<CloseFlag>);
+
+/// The flag itself: up when the last [`Closed`] or [`Hold`] of it goes.
+#[derive(Debug, Default)]
+pub struct CloseFlag(Arc<AtomicBool>);
+
+/// Keeps a folder's [`Closed`] down while work that outlives the folder's own handle runs: a lane's job holds the
+/// folder's index (and writes its files) with only a weak handle to the folder.
+#[derive(Debug)]
+pub struct Hold(#[allow(dead_code)] Arc<CloseFlag>);
 
 impl Closed {
-    /// Something to watch: true once the owner's earlier fields are dropped.
+    /// Something to watch: true once the owner's earlier fields are dropped, and every hold.
     pub fn watch(&self) -> Arc<AtomicBool> {
-        self.0.clone()
+        self.0.0.clone()
+    }
+
+    /// Keeps the flag down until the hold is dropped.
+    pub fn hold(&self) -> Hold {
+        Hold(self.0.clone())
     }
 }
 
-impl Drop for Closed {
+impl Drop for CloseFlag {
     fn drop(&mut self) {
         self.0.store(true, Ordering::SeqCst);
     }
@@ -637,6 +651,9 @@ pub struct PeerHandle {
     /// The task sending our index of each folder to the peer: a folder linked again (the peer opened it again)
     /// replaces it.
     pub links: Mutex<BTreeMap<FolderId, tokio::task::AbortHandle>>,
+    /// Folders this peer sent a chunk of that was not what was asked (bytes that do not hash to the chunk hash its
+    /// version's signer signed): it is asked for none of their chunks again in this session.
+    pub distrusted: Mutex<BTreeSet<FolderId>>,
     /// Our [`HoldQuery`](trs_sync_proto::msg::HoldQuery)s waiting for their answer.
     holds_pending: Mutex<HashMap<u32, oneshot::Sender<Vec<bool>>>>,
     /// Folders that went out in our Join on this session (at its start, offered since, or answering the peer's
@@ -705,6 +722,7 @@ impl PeerHandle {
             direct_key: Mutex::new(None),
             user_name: Mutex::new(String::new()),
             links: Mutex::new(BTreeMap::new()),
+            distrusted: Mutex::new(BTreeSet::new()),
             holds_pending: Mutex::new(HashMap::new()),
             renames_pending: Mutex::new(HashMap::new()),
             blobs_pending: Mutex::new(HashMap::new()),
@@ -919,12 +937,14 @@ impl PeerHandle {
         lock(&self.renames_pending).len()
     }
 
-    /// The session is over: pending requests fail (their receivers see the sender dropped).
+    /// The session is over: pending requests fail (their receivers see the sender dropped). Kept also when nothing
+    /// watches the flag yet (`send` would drop it then): a session closed between its registration and its read loop,
+    /// as the service's stop does to one coming up, ran on and held its folders, so their indexes stayed open.
     pub fn close(&self) {
         lock(&self.pending).clear();
         lock(&self.holds_pending).clear();
         lock(&self.renames_pending).clear();
-        let _ = self.closed.send(true);
+        self.closed.send_replace(true);
     }
 
     /// Is the session over?
@@ -1170,6 +1190,18 @@ pub struct Ctx {
     pub serve_wait: Mutex<std::time::Duration>,
     /// **Tests:** a pause in each scan step, the folder's core held (a slow disk under a scan).
     pub scan_hold: Mutex<std::time::Duration>,
+    /// **Tests:** a pause at the end of each job of a folder's lanes, its index and files held (a slow disk's flush, a
+    /// virus scanner reading the new file).
+    pub job_hold: Mutex<std::time::Duration>,
+    /// **Tests:** how many jobs are in that pause now.
+    pub jobs_held: std::sync::atomic::AtomicUsize,
+    /// **Tests:** a fetch's read of where it stands, having read a file's record (not here, asked for), waits until that
+    /// record is committed as here before it reads what the file needs: the thread let go of the CPU there while the
+    /// pull round committed the file (under load).
+    pub fetch_read_gap: AtomicBool,
+    /// **Tests:** a pull round with a finished download to place starts after a pause this long, the folder's core let
+    /// go (a round late under load: the bytes are here, their record is not yet).
+    pub place_wait: Mutex<std::time::Duration>,
     /// **Tests:** hold queries and rename requests go unanswered, as an earlier Seedwell leaves them.
     pub silent_ondemand: std::sync::atomic::AtomicBool,
     /// Bumped (SeqCst) whenever a folder opens or closes here (pause, resume, stop, reopen, LAN-only, removal,
@@ -1199,8 +1231,6 @@ pub struct Ctx {
     pub hold_key_changes: AtomicBool,
     /// **Tests:** a switch to another devices group waits, once it has its groups ready and before they count.
     pub hold_switch: AtomicBool,
-    /// **Tests:** an owner does not say *Read only* again when the statement that turned it on stops counting.
-    pub hold_read_only_again: AtomicBool,
     /// **Tests:** switches waiting there now.
     pub switches_waiting: std::sync::atomic::AtomicUsize,
     /// Sessions may still be coming up until then (the service started, the network changed, a session began): a
@@ -1211,7 +1241,16 @@ pub struct Ctx {
     /// How long a fetch may get no byte further from the devices it asks before it gives up
     /// ([`crate::service::FETCH_STALL`]; shorter in tests).
     pub fetch_stall: Mutex<std::time::Duration>,
+    /// Whether other devices can reach this one ([`crate::inbound`]).
+    pub reach: crate::inbound::Reach,
+    /// Told what each device this one talks to runs ([`crate::service::Options::peer_client`]).
+    pub peer_client: Option<PeerClientHook>,
 }
+
+/// Told the `client` (`Seedwell <version>`) of a device from its Hello: of each device a session with this one is
+/// set up with, and of a member of a folder, channel or device group here that was refused because the two cannot
+/// talk; never of a device that only dialed in. Called on the service's runtime, so it returns at once.
+pub type PeerClientHook = Arc<dyn Fn(&str) + Send + Sync>;
 
 impl Ctx {
     /// The speed limits apply to a session (`lan`: it stays on the local network, which is never limited, but in an
@@ -1274,6 +1313,23 @@ impl Drop for Freeing {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The failure: a session closed after it was registered and before its read loop watched the flag (the
+    /// service's stop met it coming up) was never closed: the flag's send found no receiver and dropped the value,
+    /// so the read loop waited for ever, held the session's folders, and their indexes stayed open after the stop
+    /// returned (the next start on the same state could not open them).
+    #[tokio::test]
+    async fn a_session_closed_before_its_read_loop_watches_is_closed() {
+        let addr: SocketAddr = "127.0.0.1:1".parse().unwrap();
+        let agreed = trs_sync_proto::msg::Agreed { protocol: trs_sync_proto::msg::PROTOCOL, features: 0 };
+        let (peer, _crx, _drx) = PeerHandle::new([7; 32], "X".into(), "Seedwell".into(), agreed, addr, addr, [0; 32], true, crate::session::Via::Tcp);
+        let reg = Registry::default();
+        assert!(reg.add_peer(&DeviceId([1; 32]), peer.clone()));
+        reg.stop_peers();
+        assert!(peer.is_closed());
+        let mut closed = peer.closed.subscribe();
+        tokio::time::timeout(std::time::Duration::from_secs(5), closed.wait_for(|c| *c)).await.expect("the read loop sees the close").unwrap();
+    }
 
     /// The QA switch never slows the user's own Seedwell (a state folder outside any temporary folder), and a value
     /// it cannot read is said, not taken as some other wait.

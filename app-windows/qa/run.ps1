@@ -12,7 +12,7 @@
   the network either (no DHT, PEX, LSD, UPnP or NAT-PMP).
 
   Checks: render, handoff, separate, gate, selection, keys, removal, info, alert, trash, choice, move, add, chat,
-  dialogs, newchannel, links, tray, scheme, rendezvous, follow, listen, readonly, folders, chatpage, chatslowdisk, platform, slowstart, damaged, notices, settingspage, requests, files, chooser, play, favorites, rules, cloudfiles, ondemand, ondemandfetch, ondemandpin, ondemandchanges, ondemandwrites, ondemandstale, ondemandfirst, notray, settings, quit (all of them: all, the default).
+  dialogs, newchannel, links, tray, scheme, rendezvous, follow, firewall, proxy, proxysecrets, navpane, listen, readonly, adminremove, folders, chatpage, chatslowdisk, platform, slowstart, damaged, notices, settingspage, requests, files, chooser, play, favorites, rules, cloudfiles, ondemand, ondemandfetch, ondemandpin, ondemandchanges, ondemandwrites, ondemandstale, ondemandfirst, notray, settings, quit (all of them: all, the default).
   -Build builds the app first (build.ps1; -CoreProfile Debug builds its core from the debug test build, as CI does).
   -Out keeps the pictures in <dir> (default: a temp folder, printed).
   Flyouts (menus, the members panel and its role menus) are drawn by the render run (SnapshotRenderer.cs, check
@@ -34,7 +34,7 @@ $Repo = Split-Path $App -Parent
 $Exe = Join-Path $App 'bin\x64\Release\net10.0-windows10.0.19041.0\win-x64\Seedwell.exe'
 $Cli = Join-Path $Repo 'target\debug\seedwell.exe'
 $Fixtures = Join-Path $Repo 'crates\metainfo\tests\fixtures'
-$All = @('render', 'handoff', 'separate', 'gate', 'selection', 'keys', 'removal', 'info', 'alert', 'trash', 'choice', 'move', 'add', 'chat', 'dialogs', 'newchannel', 'links', 'tray', 'scheme', 'rendezvous', 'follow', 'listen', 'readonly', 'folders', 'chatpage', 'chatslowdisk', 'platform', 'slowstart', 'damaged', 'notices', 'settingspage', 'requests', 'files', 'chooser', 'play', 'favorites', 'rules', 'cloudfiles', 'ondemand', 'ondemandfetch', 'ondemandpin', 'ondemandchanges', 'ondemandwrites', 'ondemandstale', 'ondemandfirst', 'notray', 'settings', 'quit')
+$All = @('render', 'handoff', 'separate', 'gate', 'selection', 'keys', 'removal', 'info', 'alert', 'trash', 'choice', 'move', 'add', 'chat', 'dialogs', 'newchannel', 'links', 'tray', 'scheme', 'rendezvous', 'follow', 'firewall', 'proxy', 'proxysecrets', 'navpane', 'listen', 'readonly', 'adminremove', 'folders', 'chatpage', 'chatslowdisk', 'platform', 'slowstart', 'damaged', 'notices', 'settingspage', 'requests', 'files', 'chooser', 'play', 'favorites', 'rules', 'cloudfiles', 'ondemand', 'ondemandfetch', 'ondemandpin', 'ondemandchanges', 'ondemandwrites', 'ondemandstale', 'ondemandfirst', 'notray', 'settings', 'quit')
 
 if ($Build) {
   & powershell -NoProfile -File (Join-Path $App 'build.ps1') -CoreProfile $CoreProfile | Out-Host
@@ -199,7 +199,9 @@ function Launch([string]$dir, [string[]]$words) {
 function Qa([string]$dir, [string[]]$words, [int]$ms = 10000) {
   $before = (Log $dir).Count
   Launch $dir (@('--qa') + $words) | Out-Null
-  $pattern = "qa $($words -join ' '):"
+  # (The app's QaSaid: what a credential field is given never reaches the log.)
+  $said = if ($words[0] -eq 'proxy-window' -and $words[1] -in 'fill', 'custom', 'copied', 'last') { "proxy-window $($words[1]) [*][*][*]" } else { $words -join ' ' }
+  $pattern = "qa ${said}:"
   WaitFor { Log $dir | Select-Object -Skip $before | Where-Object { $_ -like "*$pattern*" -or $_ -like '*qa refused*' } | Select-Object -Last 1 } $ms "'$pattern' in app.log"
 }
 
@@ -753,6 +755,360 @@ $checks.follow = {
   @("$Out\foldersync.png")
 }
 
+# "Other devices can't reach this PC", with the core's QA files standing for the devices' verdict and the rule. The
+# failures it names: no banner or button on a page that has no folders; a command not naming this exe whole; a banner
+# left after the rule came; UAC's No taken for a policy (a recheck on it, which drops the button for good); a policy not
+# told. The elevated command never runs here.
+$checks.firewall = {
+  $dir = New-State 'control'
+  New-Item -ItemType Directory -Force "$dir\state\qa" | Out-Null
+  function Files([string]$inbound, [string]$rule) { $inbound | Set-Content -NoNewline "$dir\state\qa\inbound.txt"; $rule | Set-Content -NoNewline "$dir\state\qa\firewall.txt" }
+  Files 'blocked' 'missing|Public|False'
+  $p = Start-App $dir -QaControl
+  $pictures = @()
+  try {
+    WaitForSync $dir
+    Qa $dir @('window') | Out-Null
+    $exe = (Get-Process -Id $p.Id).Path
+    $missing = WaitFor { $s = Qa $dir @('reach'); if ($s -match 'banner Visible') { $s } } 10000 'the banner on the empty page'
+    if ($missing -notmatch 'Windows Firewall' -or $missing -notmatch 'Public') { Fail "the notice does not name Windows Firewall and the network: $missing" }
+    if ($missing -notmatch 'program "netsh(\.exe)?"') { Fail "not netsh: $missing" }
+    if ($missing -notlike "*program=`"$exe`"*") { Fail "the command does not name this exe whole ($exe): $missing" }
+    if ($missing -notmatch 'buttons \[Allow Seedwell through Windows Firewall\S* on\]') { Fail "no button: $missing" }
+    Qa $dir @('shot', 'reach-missing') | Out-Null
+    Copy-Item "$dir\state\qa\reach-missing.png" "$Out\reach-missing.png"; $pictures += "$Out\reach-missing.png"
+
+    # UAC's No: nothing changes, the button stays.
+    $no = Qa $dir @('reach-allow', 'no')
+    if ($no -notmatch 'buttons \[Allow Seedwell through Windows Firewall\S* on\]') { Fail "after UAC's No the button should stay: $no" }
+    if (-not (Log $dir | Where-Object { $_ -like '*reach: allow through the firewall cancelled*' })) { Fail 'the No was not taken as a No' }
+
+    # The rule came: the notice goes.
+    Files 'blocked' 'allowed|Public|False'
+    $gone = Qa $dir @('reach-recheck')
+    if ($gone -notmatch 'notice none') { Fail "the notice stayed after the rule came: $gone" }
+    if ($gone -notmatch 'banner Collapsed, buttons \[\]') { Fail "the banner stayed after the rule came: $gone" }
+
+    # A block rule: the other command.
+    Files 'blocked' 'blocked|Public|True'
+    $blocked = WaitFor { $s = Qa $dir @('reach'); if ($s -match 'notice "') { $s } } 10000 'the blocked notice'
+    if ($blocked -notmatch 'set rule') { Fail "a block rule should be turned round with set rule: $blocked" }
+
+    # Ran, and the rule reads as before: an administrator's policy, no button.
+    Files 'blocked' 'missing|Domain|False'
+    $before = WaitFor { $s = Qa $dir @('reach'); if ($s -match 'action "') { $s } } 10000 'the action again'
+    $ran = Qa $dir @('reach-allow', 'ran')
+    $policy = WaitFor { $s = Qa $dir @('reach'); if ($s -match 'notice "' -and $s -match 'action none') { $s } } 20000 'the policy notice'
+    if ($policy -notmatch 'administrator') { Fail "the notice should say an administrator's policy decides: $policy (before: $before; ran: $ran)" }
+    Qa $dir @('shot', 'reach-policy') | Out-Null
+    Copy-Item "$dir\state\qa\reach-policy.png" "$Out\reach-policy.png"; $pictures += "$Out\reach-policy.png"
+  } finally { Stop-App $dir $p; Remove-Item -Recurse -Force $dir }
+  $pictures
+}
+
+# The torrent proxy's drawing, with the Mac's loopback fake standing for NordVPN's servers (never a real key or server).
+# The failures it names: a shield whose shape or colours differ from the Mac's sheet; a state or a click that does not
+# follow the core; a password left in a field, or filled from an unrelated copy; a key shown; a Country list longer than
+# 6 rows, or one an arrow alone applies; a call the switch, shield or country can run into.
+$checks.proxy = {
+  $a = New-State 'control'
+  $qa = "$a\state\qa"
+  New-Item -ItemType Directory -Force $qa | Out-Null
+  $free = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0); $free.Start(); $port = $free.LocalEndpoint.Port; $free.Stop()
+  "127.0.0.1:$port NL Amsterdam" | Set-Content -NoNewline -Encoding ascii "$qa\proxy-servers.txt"
+  $script = Resolve-Path "$PSScriptRoot\..\..\app\qa\fake_socks5.py"
+  $fake = Start-Process python -ArgumentList @('-I', "`"$script`"", "`"$qa`"", $port, 'fake-user', 'fake-pass') -PassThru -WindowStyle Hidden
+  $theme = 'dark'
+  $env:SEEDWELL_QA_THEME = $theme
+  $p = Start-App $a -QaControl
+  $pictures = @()
+  function Shot([string]$name, [string[]]$how = @()) {
+    Qa $a (@('shot', $name) + $how) | Out-Null
+    Copy-Item "$qa\$name.png" "$Out\$name.png"
+    "$Out\$name.png"
+  }
+  function Model { Qa $a @('proxy-model') }
+  function Window([string[]]$words) { Qa $a (@('proxy-window') + $words) 30000 }
+  # The state's pictures, in the theme this app was started with (an app's theme is fixed once it starts).
+  function States([string]$state) {
+    Qa $a @('settings', 'tab', 'Network') | Out-Null
+    Shot "proxy-$state-settings-$theme"
+    Qa $a @('proxy-window', 'open') | Out-Null
+    Shot "proxy-$state-window-$theme" @('dialog')
+    Window @('close') | Out-Null
+  }
+  try {
+    WaitForSync $a
+    if ($fake.HasExited) { Fail 'the fake SOCKS5 server did not start (python?)' }
+    Qa $a @('window') | Out-Null
+
+    # The shield against the Mac's sheet, cell by cell: the same layout, sampled on a grid, the same colour at nearly every point.
+    Add-Type -AssemblyName System.Drawing
+    $saved = Qa $a @('proxy-sheet') 20000
+    if ($saved -notmatch 'sheet saved') { Fail "no contact sheet: $saved" }
+    Copy-Item "$qa\proxy-shield-win.png" "$Out\proxy-shield-win.png"; $pictures += "$Out\proxy-shield-win.png"
+    $mine = [Drawing.Bitmap]::new("$qa\proxy-shield-win.png"); $mac = [Drawing.Bitmap]::new("$PSScriptRoot\reference\proxy-shield-sheet.png")
+    try {
+      $scale = $mine.Width / 1806.0
+      $macScale = $mac.Width / 1806.0
+      $worst = 1.0; $where = ''
+      foreach ($row in 0..4) { foreach ($dark in 0, 828) { foreach ($c in @(@(150, 134, 192), @(352, 102, 256), @(618, 70, 320))) {
+        $same = 0; $all = 0
+        foreach ($u in 0..39) { foreach ($v in 0..39) {
+          $x = $c[0] + $dark + ($u + 0.5) * $c[2] / 40; $y = $c[1] + 330 * $row + ($v + 0.5) * $c[2] / 40
+          $m = $mine.GetPixel([int]($x * $scale), [int]($y * $scale)); $r = $mac.GetPixel([int]($x * $macScale), [int]($y * $macScale))
+          $all++
+          if ([Math]::Abs($m.R - $r.R) + [Math]::Abs($m.G - $r.G) + [Math]::Abs($m.B - $r.B) -le 90) { $same++ }
+        } }
+        if ($same / $all -lt $worst) { $worst = $same / $all; $where = "row $row, x $($c[0] + $dark)" }
+      } } }
+      Write-Host ("  proxy: the shield against the Mac's sheet: the worst cell matches {0:p1} ({1})" -f $worst, $where)
+      if ($worst -lt 0.9) { Fail ("the shield differs from the Mac's sheet: {0:p1} at {1}" -f $worst, $where) }
+    } finally { $mine.Dispose(); $mac.Dispose() }
+
+    # No key: the shield opens the window; no switch, the fields.
+    $none = Model
+    if ($none -notmatch 'icon NoKey, has key False' -or $none -notmatch 'opens window True') { Fail "not the no-key state: $none" }
+    $pictures += @(States 'nokey')
+    $click = Qa $a @('proxy-click')
+    $open = Window @('status')
+    if ($open -notmatch 'shows \[nord,nord-fields') { Fail "a click without a key should open the window with the fields: click $click; $open" }
+    if ($open -match 'switch' -and $open -match 'shows \[[^\]]*switch') { Fail "a switch without a key: $open" }
+    $guide = Window @('guide', 'on')
+    if ($guide -notmatch 'guide') { Fail "the guide did not open: $guide" }
+    Window @('guide', 'off') | Out-Null
+
+    # Copies fill the fields in order, and nothing else does.
+    $first = Window @('copied', 'fake-user')
+    if ($first -notmatch 'user filled True, password filled False' -or $first -notmatch 'pasted') { Fail "the copied username: $first" }
+    $second = Window @('copied', 'fake-pass')
+    if ($second -notmatch 'user filled True, password filled True' -or $second -notmatch 'enable on True') { Fail "the copied password: $second" }
+    Window @('fill', 'typed-user') | Out-Null
+    $typed = Window @('copied', 'an-unrelated-secret')
+    if ($typed -notmatch 'password filled False') { Fail "a copy filled the password beside a username that was typed: $typed" }
+    if ((Log $a) -match 'an-unrelated-secret|fake-pass|wrong-pass') { Fail 'a credential reached the log' }
+
+    # Wrong credentials: the core's sentence, nothing kept, the password gone from its field.
+    Window @('fill', 'wrong-user', 'wrong-pass') | Out-Null
+    $wrong = Window @('enable')
+    if ($wrong -notmatch 'password filled False' -or $wrong -notmatch 'result "[^"]+"') { Fail "wrong credentials: $wrong" }
+    if ((Model) -notmatch 'has key False') { Fail "wrong credentials were kept: $(Model)" }
+    Shot 'proxy-badkey-window' @('dialog') | ForEach-Object { $pictures += $_ }
+
+    # The key: on, the fields gone, the switch there; no field holds it, and Replace Key shows them with Cancel.
+    Window @('fill', 'fake-user', 'fake-pass') | Out-Null
+    $on = Window @('enable')
+    if ($on -notmatch 'shows \[nord,nord-installed' -or $on -notmatch 'switch on True' -or $on -notmatch 'password filled False') { Fail "the key did not install: $on" }
+    if ((Model) -notmatch 'icon (On|Slow), has key True, enabled True') { Fail "not on: $(Model)" }
+    $replace = Window @('replace', 'on')
+    if ($replace -notmatch 'nord-fields') { Fail "Replace Key shows no fields: $replace" }
+    Shot 'proxy-replace-window' @('dialog') | ForEach-Object { $pictures += $_ }
+    if ((Window @('replace', 'off')) -notmatch 'nord-installed') { Fail 'Cancel did not hide the fields' }
+    $hover = Window @('hover', 'on')
+    if ($hover -notmatch 'glow 0\.75') { Fail "no glow on hover: $hover" }
+    if ((Window @('hover', 'off')) -notmatch 'glow 0[ ,]') { Fail 'the glow stayed' }
+
+    # The Country list: 6 rows that scroll, an arrow or a letter moves and applies nothing, Return chooses.
+    $list = Qa $a @('proxy-countries', 'open')
+    if ($list -notmatch 'list height 216 rows (\d+)' -or [int]$Matches[1] -le 6) { Fail "not 6 rows of a longer list: $list" }
+    if ($list -notmatch 'row height 36') { Fail "a row is not 36 tall: $list" }
+    Qa $a @('proxy-countries', 'shot', 'proxy-country-list') | Out-Null
+    Copy-Item "$qa\proxy-country-list.png" "$Out\proxy-country-list.png"; $pictures += "$Out\proxy-country-list.png"
+    $letter = Qa $a @('proxy-countries', 'key', 'S')
+    if ($letter -notmatch 'selected ([1-9]\d*), country ""') { Fail "a letter should move and apply nothing: $letter" }
+    Qa $a @('proxy-countries', 'key', 'Enter') | Out-Null
+    $chosen = WaitFor { $s = Model; if ($s -match 'country "[A-Z]{2}"') { $s } } 10000 'Return to choose the country'
+    if ($chosen -notmatch 'busy False') { $chosen = Model }
+
+    # The switch, and the shield with a key: off, then on, the states' pictures on the way.
+    $off = Qa $a @('proxy-toggle')
+    if ($off -notmatch 'icon Off, has key True, enabled False') { Fail "not off: $off" }
+    Window @('close') | Out-Null
+    $pictures += @(States 'off')
+    $back = Qa $a @('proxy-click')
+    if ($back -notmatch 'enabled True') { Fail "a click with a key should switch it on: $back" }
+    $pictures += @(States 'on')
+    $inFlyout = Qa $a @('proxy-flyout', 'open')
+    if ($inFlyout -notmatch 'flyout open True, shield (On|Slow)') { Fail "the flyout's shield does not follow: $inFlyout" }
+    Qa $a @('proxy-flyout', 'shot', "proxy-on-menu-$theme") | Out-Null
+    Copy-Item "$qa\proxy-on-menu-$theme.png" "$Out\proxy-on-menu-$theme.png"; $pictures += "$Out\proxy-on-menu-$theme.png"
+    Qa $a @('proxy-flyout', 'close') | Out-Null
+
+    # Slow: the server answers late; failed: it is gone, torrents wait, and the reason shows.
+    '2' | Set-Content -NoNewline -Encoding ascii "$qa\socks-delay-v4"
+    Qa $a @('proxy-window', 'open') | Out-Null
+    $faster = Window @('faster')
+    if ($faster -notmatch 'result "[^"]+"') { Fail "Find a Faster Server said nothing: $faster" }
+    Window @('close') | Out-Null
+    try { WaitFor { $s = Model; if ($s -match 'icon Slow') { $s } } 60000 'the slow state' | Out-Null; $pictures += @(States 'slow') }
+    catch { Write-Host "  proxy: the slow state did not come within 60 s, so it was not pictured: $(Model)" }
+    Remove-Item "$qa\socks-delay-v4" -Force
+    Stop-Process -Id $fake.Id -Force
+    $failed = WaitFor { $s = Model; if ($s -match 'icon Failed') { $s } } 90000 'the failed state'
+    if ($failed -notmatch 'problem "[^"]+"') { Fail "a failure should say why: $failed" }
+    $pictures += @(States 'failed')
+
+    # Remove Key: back to none.
+    Qa $a @('proxy-window', 'open') | Out-Null
+    Window @('remove') | Out-Null
+    if ((Model) -notmatch 'icon NoKey, has key False') { Fail "the key was not removed: $(Model)" }
+    Window @('close') | Out-Null
+    if ((Get-Content "$a\state\logs\core.log" -Raw -ErrorAction SilentlyContinue) -match 'fake-pass') { Fail 'the password reached core.log' }
+    # A core call or the window's own work holding the UI thread (a 2.2 s stall under load, 2026-11-05): named, so it is found.
+    $slow = @(Log $a | Where-Object { $_ -like '*proxy: slow on the UI thread:*' })
+    if ($slow.Count -gt 0) { Fail "a step held the UI thread: $(($slow | Select-Object -First 5 | ForEach-Object { $_ -replace '^.*UI thread: ', '' }) -join '; ')" }
+
+    # The same states in the light theme, for the pictures: the app started in it, as a light Windows starts it.
+    Stop-App $a $p
+    $theme = 'light'
+    $env:SEEDWELL_QA_THEME = $theme
+    $fake = Start-Process python -ArgumentList @('-I', "`"$script`"", "`"$qa`"", $port, 'fake-user', 'fake-pass') -PassThru -WindowStyle Hidden
+    $p = Start-App $a -QaControl
+    WaitForSync $a
+    Qa $a @('window') | Out-Null
+    $pictures += @(States 'nokey')
+    Qa $a @('proxy-window', 'open') | Out-Null
+    Window @('fill', 'fake-user', 'fake-pass') | Out-Null
+    $on = Window @('enable')
+    if ($on -notmatch 'nord-installed') { Fail "the key did not install in the light run: $on" }
+    Window @('close') | Out-Null
+    $pictures += @(States 'on')
+    Qa $a @('proxy-flyout', 'open') | Out-Null
+    Qa $a @('proxy-flyout', 'shot', "proxy-on-menu-$theme") | Out-Null
+    Copy-Item "$qa\proxy-on-menu-$theme.png" "$Out\proxy-on-menu-$theme.png"; $pictures += "$Out\proxy-on-menu-$theme.png"
+    Qa $a @('proxy-flyout', 'close') | Out-Null
+    Qa $a @('proxy-toggle') | Out-Null
+    $pictures += @(States 'off')
+    Qa $a @('proxy-toggle') | Out-Null
+    '2' | Set-Content -NoNewline -Encoding ascii "$qa\socks-delay-v4"
+    Qa $a @('proxy-window', 'open') | Out-Null
+    Window @('faster') | Out-Null
+    Window @('close') | Out-Null
+    try { WaitFor { $s = Model; if ($s -match 'icon Slow') { $s } } 60000 'the slow state' | Out-Null; $pictures += @(States 'slow') }
+    catch { Write-Host "  proxy: the slow state did not come within 60 s in the light run, so it was not pictured: $(Model)" }
+    Remove-Item "$qa\socks-delay-v4" -Force
+    Stop-Process -Id $fake.Id -Force
+    WaitFor { $s = Model; if ($s -match 'icon Failed') { $s } } 90000 'the failed state in the light run' | Out-Null
+    $pictures += @(States 'failed')
+  } finally {
+    Remove-Item Env:SEEDWELL_QA_THEME -ErrorAction SilentlyContinue
+    Stop-App $a $p
+    if (-not $fake.HasExited) { Stop-Process -Id $fake.Id -Force -ErrorAction SilentlyContinue }
+    Remove-Item -Recurse -Force $a -ErrorAction SilentlyContinue
+  }
+  $pictures
+}
+
+# The SOCKS5 window and credentials, with no proxy needed. The failures it names (the review of 49aca0da): a window that
+# failed to open going on reading the clipboard into a password field nobody clears; a copy filling a closed window; a
+# copied username surviving a change of pane, so a later copy pairs with it; a credential in any log.
+$checks.proxysecrets = {
+  $dir = New-State 'control'
+  $p = Start-App $dir -QaControl
+  $secrets = 'SECRET-USER-1', 'SECRET-PASS-1', 'SECRET-FILLED-2', 'SECRET-FILLED-3', 'SECRET-LATE-4', 'SECRET-CUSTOM-5', 'SECRET-CUSTOM-6'
+  function Window([string[]]$words) { Qa $dir (@('proxy-window') + $words) }
+  try {
+    WaitForSync $dir
+    Qa $dir @('window') | Out-Null
+    # Another dialog is open: this one's ShowAsync throws.
+    Qa $dir @('add-folder', 'open') | Out-Null
+    Window @('open') | Out-Null
+    if (-not (Log $dir | Where-Object { $_ -like '*proxy window failed:*' })) { Fail 'the second dialog opened, so nothing was tested' }
+    $late = Window @('last', 'SECRET-LATE-4')
+    if ($late -notmatch 'user filled False') { Fail "a window that never opened took a copy: $late" }
+    $left = Qa $dir @('proxy-model')
+    if ($left -notmatch 'watchers 0') { Fail "a window that never opened goes on watching: $left" }
+    Qa $dir @('add-folder', 'cancel') | Out-Null
+
+    # A change of pane empties both and forgets the copied username.
+    Window @('open') | Out-Null
+    $user = Window @('copied', 'SECRET-USER-1')
+    if ($user -notmatch 'user filled True, password filled False') { Fail "the copy did not fill the username: $user" }
+    Window @('pane', 'custom') | Out-Null
+    $back = Window @('pane', 'nord')
+    if ($back -notmatch 'user filled False, password filled False') { Fail "a change of pane left the fields: $back" }
+    $pair = Window @('copied', 'SECRET-PASS-1')
+    if ($pair -notmatch 'user filled True, password filled False') { Fail "a copy paired with the username of before the change: $pair" }
+    Window @('fill', 'SECRET-FILLED-2', 'SECRET-FILLED-3') | Out-Null
+    Window @('custom', '127.0.0.1', '1080', 'SECRET-CUSTOM-5', 'SECRET-CUSTOM-6') | Out-Null
+
+    # Closed: a copy that comes after it fills nothing.
+    Window @('close') | Out-Null
+    $after = Window @('last', 'SECRET-LATE-4')
+    if ($after -notmatch 'user filled False') { Fail "a closed window took a copy: $after" }
+
+    # No credential in any log, even once.
+    $logs = @(Get-ChildItem "$dir\state\logs" -File | ForEach-Object { Get-Content -Raw -LiteralPath $_.FullName -ErrorAction SilentlyContinue }) -join "`n"
+    foreach ($secret in $secrets) { if ($logs -match [regex]::Escape($secret)) { Fail "a credential reached a log: $secret" } }
+  } finally { Stop-App $dir $p; Remove-Item -Recurse -Force $dir }
+  @()
+}
+
+# The "Seedwell" entry in Explorer's navigation pane, under the test seam (never the real keys, which Explorer reads). The
+# failures it names: an entry not naming the core's name, folder or this exe; one that does not follow a new folder; one
+# left behind when the core says to remove it, or by an earlier crash (no orphans in Explorer); another program's entry
+# swept away; the real keys touched by a QA run.
+$checks.navpane = {
+  $dir = New-State 'control'
+  $id = '{7A1C0B52-6E44-4C1E-9D23-0F5B6A9E11C7}'
+  $orphan = '{7A1C0B52-6E44-4C1E-9D23-0F5B6A9E11C8}'
+  $foreign = '{7A1C0B52-6E44-4C1E-9D23-0F5B6A9E11C9}'
+  $marker = 'SeedwellQaNavPane'
+  $root = 'HKCU:\Software\SeedwellInstallTest'
+  $clsids = "$root\Classes\CLSID"
+  New-Item -Force "$clsids\$orphan" | Out-Null
+  New-ItemProperty "$clsids\$orphan" -Name $marker -Value 1 -PropertyType DWord -Force | Out-Null
+  New-Item -Force "$clsids\$foreign" | Out-Null
+  # A crash between the removals: the list's key is left, the CLSID gone. And another program's, which stays.
+  $desktop = "$root\Microsoft\Windows\CurrentVersion\Explorer\Desktop\NameSpace"
+  $halfGone = '{7A1C0B52-6E44-4C1E-9D23-0F5B6A9E11CA}'
+  New-Item -Force "$desktop\$halfGone" | Out-Null
+  New-ItemProperty "$desktop\$halfGone" -Name $marker -Value 1 -PropertyType DWord -Force | Out-Null
+  New-Item -Force "$desktop\$foreign" | Out-Null
+  $env:SEEDWELL_INSTALL_TEST = '1'
+  $p = $null
+  try {
+    $p = Start-App $dir -QaControl
+    WaitForSync $dir
+    $one = Qa $dir @('nav-pane', $id, $marker, 'on', 'Seedwell', "$dir\Seedwell")
+    if ($one -notlike "*entry `"Seedwell`", target `"$dir\Seedwell`"*") { Fail "not the core's name and folder: $one" }
+    if ($one -notlike "*icon `"$((Get-Process -Id $p.Id).Path),0`"*") { Fail "not this exe's icon: $one" }
+    # An expanding value would open another folder, or none, for a folder with % in its name.
+    $kind = (Get-Item "$clsids\$id\Instance\InitPropertyBag").GetValueKind('TargetFolderPath')
+    if ($kind -ne 'String') { Fail "the target is a $kind, not a plain string" }
+    if ($one -notmatch 'on the desktop list True, hidden from the desktop True') { Fail "not pinned as Microsoft's steps say: $one" }
+    if (Test-Path "$clsids\$orphan") { Fail 'an entry left by an earlier run was not swept' }
+    if (Test-Path "$desktop\$halfGone") { Fail 'a list entry left by a crash, its CLSID gone, was not swept' }
+    if (-not (Test-Path "$desktop\$foreign")) { Fail "another program's list entry was swept" }
+    if (-not (Test-Path "$clsids\$foreign")) { Fail "another program's entry was swept" }
+    $moved = Qa $dir @('nav-pane', $id, $marker, 'on', 'Seedwell', "$dir\Moved here")
+    if ($moved -notlike "*target `"$dir\Moved here`"*") { Fail "the entry did not follow the folder: $moved" }
+    $gone = Qa $dir @('nav-pane', $id, $marker, 'off', 'Seedwell', "$dir\Moved here")
+    if ($gone -notmatch 'entry none') { Fail "the entry stayed: $gone" }
+    if (Test-Path "$root\Microsoft\Windows\CurrentVersion\Explorer\Desktop\NameSpace\$id") { Fail 'the desktop list kept it' }
+    $hidden = Get-ItemProperty "$root\Microsoft\Windows\CurrentVersion\Explorer\HideDesktopIcons\NewStartPanel" -Name $id -ErrorAction SilentlyContinue
+    if ($hidden) { Fail 'the hidden list kept it' }
+    foreach ($k in "HKCU:\Software\Classes\CLSID\$id", "HKCU:\Software\Classes\CLSID\$orphan", "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Desktop\NameSpace\$id") {
+      if (Test-Path $k) { Fail "a QA run touched a real key: $k" }
+    }
+    # A QA run's core offers no entry at all: the CLSID is one per user.
+    if ((Log $dir | Where-Object { $_ -like '*navigation pane entry:*' }).Count -gt 0) { Fail 'the core gave a QA run the real entry' }
+    # Uninstalling removes the entry by the core's marker (--unregister has no core), and leaves another program's.
+    $coreMarker = 'SeedwellNavPane'
+    New-Item -Force "$clsids\$id" | Out-Null
+    New-ItemProperty "$clsids\$id" -Name $coreMarker -Value 1 -PropertyType DWord -Force | Out-Null
+    Start-Process $Exe -ArgumentList '--unregister' -Wait
+    if (Test-Path "$clsids\$id") { Fail '--unregister left the entry' }
+    if (-not (Test-Path "$clsids\$foreign")) { Fail "--unregister took another program's entry" }
+  } finally {
+    Stop-App $dir $p
+    Remove-Item Env:SEEDWELL_INSTALL_TEST -ErrorAction SilentlyContinue
+    Remove-Item -Recurse -Force $root -ErrorAction SilentlyContinue
+    Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue
+  }
+  @()
+}
+
 # The sync port answers on IPv4 as well as IPv6. The failure it names: a listener on [::] is IPv6 only on Windows unless
 # told otherwise (on a Mac it takes both), so no device can dial this PC at the IPv4 addresses a link gives or a router maps.
 $checks.listen = {
@@ -770,31 +1126,85 @@ $checks.listen = {
   @()
 }
 
-# "Read only" on two paired temp devices, A and B. The failures it names: a dialog that does not draw the switch or does
-# not apply it (B keeps its role and can still send changes), a switch left on while "On all my devices" is off, the
-# Share dialog's next link not following it, and a role not given back when it goes off.
+# "Read only", the folder owner's own setting (SPEC 7G.1), on temp devices A (the owner) and B (paired with A, an admin).
+# The failures it names: a switch missing for an owner paired with nothing, or inside "On all my devices" (gone or stuck with
+# it); a member that may switch it or is not told who can; a member's change reaching the owner while it is on, or lost
+# when it goes off; the owner's own change held back; a role changed by it (the old design); the Share dialog's next link
+# not following it.
 $checks.readonly = {
-  $a = New-State 'control'; $b = New-State 'control'
+  $a = New-State 'control'; $b = New-State 'control'; $alone = New-State 'control'
   $docs = "$a\Docs"
-  New-Item -ItemType Directory -Force $docs, "$a\New" | Out-Null
+  New-Item -ItemType Directory -Force $docs, "$a\New", "$alone\New" | Out-Null
   Set-Content -NoNewline -Encoding ascii "$docs\from-a.txt" 'from A'
   $sa = "$a\state\control.sock"; $sb = "$b\state\control.sock"
+  $env:SEEDWELL_QA_THEME = 'dark'
   $pa = Start-App $a -QaControl
   $pb = $null
   $pictures = @()
-  function Shot([string]$name) {
-    Qa $a @('shot', $name, 'dialog') | Out-Null
-    Copy-Item "$a\state\qa\$name.png" "$Out\$name.png"
+  function Shot([string]$dir, [string]$name) {
+    Qa $dir @('shot', $name, 'dialog') | Out-Null
+    Copy-Item "$dir\state\qa\$name.png" "$Out\$name.png"
     "$Out\$name.png"
   }
   function RoleOfB {
     $m = (& $Cli --socket $sa sync members Docs --json 2>&1) -join '' | ConvertFrom-Json
     @($m.members | Where-Object { -not $_.me } | ForEach-Object { $_.role }) -join ','
   }
+  function ReadOnlyOn([string]$sock) { (& $Cli --socket $sock sync read-only Docs status --json 2>&1) -join '' | ConvertFrom-Json }
+  # The Read only switch in each dialog of both devices (it is on, B follows), in the theme the apps started in.
+  function Pictures([string]$theme) {
+    Qa $a @('window') | Out-Null
+    Qa $b @('window') | Out-Null
+    Qa $a @('edit-folder', 'open', 'Docs') | Out-Null
+    Shot $a "readonly-edit-$theme"
+    Qa $a @('edit-folder', 'cancel') | Out-Null
+    Qa $b @('edit-folder', 'open', 'Docs') | Out-Null
+    Shot $b "readonly-member-$theme"
+    Qa $b @('edit-folder', 'cancel') | Out-Null
+    Qa $a @('share', 'open', 'Docs') | Out-Null
+    Qa $a @('share', 'scroll-end') | Out-Null
+    Shot $a "readonly-share-$theme"
+    Qa $a @('share', 'cancel') | Out-Null
+    # Add Folder on a PC paired with nothing: its own temp device.
+    $pc = Start-App $alone -QaControl
+    try {
+      Qa $alone @('window') | Out-Null
+      Qa $alone @('add-folder', 'open') | Out-Null
+      Qa $alone @('add-folder', 'folder', "$alone\New") | Out-Null
+      Qa $alone @('add-folder', 'readonly', 'on') | Out-Null
+      Shot $alone "readonly-add-alone-$theme"
+      Qa $alone @('add-folder', 'cancel') | Out-Null
+    } finally { Stop-App $alone $pc }
+  }
   try {
+    # Paired with nothing, it is there and works: in Add Folder for a folder of this PC, not for one shared with me.
+    Qa $a @('window') | Out-Null
+    $open = Qa $a @('add-folder', 'open')
+    if ($open -notmatch 'read only False enabled True line "[^"]+"') { Fail "An unpaired owner's Add Folder should offer Read only: $open" }
+    if ($open -notmatch 'drawn \[[^\]]*Read only False') { Fail "Add Folder has no Read only switch on screen: $open" }
+    Qa $a @('add-folder', 'folder', "$a\New") | Out-Null
+    $chosen = Qa $a @('add-folder', 'readonly', 'on')
+    if ($chosen -notmatch 'read only True enabled True line "[^"]+"' -or $chosen -notmatch 'drawn \[[^\]]*Read only True') { Fail "Add Folder did not draw the choice: $chosen" }
+    $shared = Qa $a @('add-folder', 'mode', 'shared')
+    if ($shared -notmatch 'read only none' -or $shared -match 'drawn \[[^\]]*Read only') { Fail "Shared with me should have no Read only: $shared" }
+    Qa $a @('add-folder', 'cancel') | Out-Null
+    $added = (& $Cli --socket $sa sync add $docs 2>&1) -join ' '
+    if ($added -notlike 'Sharing Docs*') { Fail "sync add: $added" }
+    Qa $a @('edit-folder', 'open', 'Docs') | Out-Null
+    $chosen = Qa $a @('edit-folder', 'readonly', 'on')
+    if ($chosen -notmatch 'read only True enabled True line "[^"]+"' -or $chosen -notmatch 'drawn \[[^\]]*Read only True') { Fail "An unpaired owner's Edit did not draw the choice: $chosen" }
+    $saved = Qa $a @('edit-folder', 'save') 30000
+    if ($saved -notmatch 'saved' -or $saved -match 'not saved') { Fail "Edit Folder did not save: $saved" }
+    if (-not (ReadOnlyOn $sa).read_only) { Fail 'Save did not turn Read only on for an unpaired owner' }
+    Qa $a @('edit-folder', 'open', 'Docs') | Out-Null
+    Qa $a @('edit-folder', 'readonly', 'off') | Out-Null
+    Qa $a @('edit-folder', 'save') 30000 | Out-Null
+    if ((ReadOnlyOn $sa).read_only) { Fail 'Save did not turn Read only off for an unpaired owner' }
+
+    # B paired and following the folder, an admin.
     $pb = Start-App $b -QaControl
     WaitForSync $a; WaitForSync $b
-    Qa $a @('window') | Out-Null
+    Qa $b @('window') | Out-Null
     $link = [regex]::Match((Qa $a @('pair', 'link')), 'link (\S+) ;').Groups[1].Value
     if (-not $link) { Fail 'A made no pairing link' }
     Qa $b @('pair', 'join', $link) 30000 | Out-Null
@@ -802,64 +1212,193 @@ $checks.readonly = {
     catch { Fail "B did not reach A to pair; A: $(Qa $a @('pair', 'status')); B: $(Qa $b @('pair', 'status'))" }
     Qa $a @('pair', 'confirm') 30000 | Out-Null
     WaitFor { $s = Qa $b @('pair', 'status'); if ($s -match 'devices Paired') { $s } } 30000 'B to be paired' | Out-Null
-
-    # Add Folder: off and not switchable until "On all my devices" is chosen; the choice comes back from the core.
-    $added = (& $Cli --socket $sa sync add $docs 2>&1) -join ' '
-    if ($added -notlike 'Sharing Docs*') { Fail "sync add: $added" }
-    $open = Qa $a @('add-folder', 'open')
-    if ($open -notmatch 'read only False enabled False') { Fail "Add Folder's Read only should wait for On all my devices: $open" }
-    Qa $a @('add-folder', 'folder', "$a\New") | Out-Null
-    Qa $a @('add-folder', 'devices', 'on') | Out-Null
-    $chosen = Qa $a @('add-folder', 'readonly', 'on')
-    if ($chosen -notmatch 'all devices True enabled True, read only True enabled True line "[^"]+"') { Fail "Add Folder did not draw the choice: $chosen" }
-    if ($chosen -notmatch 'drawn \[[^\]]*On all my devices True, Read only True') { Fail "Add Folder has no Read only switch on screen: $chosen" }
-    $pictures += Shot 'readonly-add'
-    Qa $a @('add-folder', 'cancel') | Out-Null
-
-    # Edit Folder: both on and saved: B joins by itself, Read only, and what it makes does not reach A.
     Qa $a @('edit-folder', 'open', 'Docs') | Out-Null
     Qa $a @('edit-folder', 'devices', 'on') | Out-Null
-    $chosen = Qa $a @('edit-folder', 'readonly', 'on')
-    if ($chosen -notmatch 'read only True enabled True line "[^"]+"') { Fail "Edit Folder did not draw the choice: $chosen" }
-    if ($chosen -notmatch 'drawn \[[^\]]*On all my devices True, Read only True') { Fail "Edit Folder has no Read only switch on screen: $chosen" }
-    $pictures += Shot 'readonly-edit'
-    $saved = Qa $a @('edit-folder', 'save') 30000
-    if ($saved -notmatch 'saved' -or $saved -match 'not saved') { Fail "Edit Folder did not save: $saved" }
-    WaitFor { if ((RoleOfB) -eq 'read_only') { $true } } 60000 'B in the folder at Read only' | Out-Null
+    Qa $a @('edit-folder', 'save') 30000 | Out-Null
+    WaitFor { if ((RoleOfB) -eq 'admin') { $true } } 60000 'B in the folder as an admin' | Out-Null
     $inB = WaitFor {
       # A temp state's default location is its own Sync folder, never the real home.
       if (Test-Path "$b\state\Sync\Docs\from-a.txt") { "$b\state\Sync\Docs" }
     } 60000 'the folder on B'
+
+    # A turns it on in Edit, beside "On all my devices".
+    Qa $a @('edit-folder', 'open', 'Docs') | Out-Null
+    $chosen = Qa $a @('edit-folder', 'readonly', 'on')
+    if ($chosen -notmatch 'drawn \[[^\]]*On all my devices True, Read only True') { Fail "Edit Folder should draw both switches: $chosen" }
+    $saved = Qa $a @('edit-folder', 'save') 30000
+    if ($saved -notmatch 'saved' -or $saved -match 'not saved') { Fail "Edit Folder did not save: $saved" }
+
+    # B: told, may not switch it, its changes held; its role the same.
+    $on = WaitFor { $s = ReadOnlyOn $sb; if ($s.read_only) { $s } } 60000 'Read only to reach B'
+    if ($on.may_switch -or -not $on.held) { Fail "B should hold its changes and may not switch: $($on | ConvertTo-Json -Compress)" }
+    $edit = Qa $b @('edit-folder', 'open', 'Docs')
+    if ($edit -notmatch 'read only True enabled False line "Read only: only the folder''s owner changes it') { Fail "B's Edit should show the state and who can switch it: $edit" }
+    if ($edit -notmatch 'drawn \[[^\]]*Read only True \(off\)') { Fail "B's switch should be drawn disabled: $edit" }
+    Qa $b @('edit-folder', 'cancel') | Out-Null
+    if ((RoleOfB) -ne 'admin') { Fail "Read only changed B's role: $(RoleOfB)" }
+
+    # B's file stays on B while A's goes on reaching it.
     Set-Content -NoNewline -Encoding ascii "$inB\from-b.txt" 'from B'
     $why = (& $Cli --socket $sb sync rescan Docs 2>&1) -join ' '
-    Start-Sleep -Seconds 8
-    if (Test-Path "$docs\from-b.txt") { Fail "a file made on a Read only device reached A (rescan: $why)" }
+    Set-Content -NoNewline -Encoding ascii "$docs\from-a-2.txt" 'from A while read only'
+    & $Cli --socket $sa sync rescan Docs 2>&1 | Out-Null
+    WaitFor { Test-Path "$inB\from-a-2.txt" } 60000 'the owner''s change to reach B' | Out-Null
+    Start-Sleep -Seconds 5
+    if (Test-Path "$docs\from-b.txt") { Fail "a file made on B reached A while Read only (rescan: $why)" }
 
-    # Share: as the core has it, applied at once. Off: B is an admin again and the next link is not Read only any more.
+    # The pictures, dark as the run started, then light; the setting and the role stay over a restart.
+    $pictures += @(Pictures 'dark')
+    Stop-App $a $pa; $pa = $null
+    Stop-App $b $pb; $pb = $null
+    $env:SEEDWELL_QA_THEME = 'light'
+    $pa = Start-App $a -QaControl
+    $pb = Start-App $b -QaControl
+    WaitForSync $a; WaitForSync $b
+    $pictures += @(Pictures 'light')
+    if (-not (ReadOnlyOn $sa).read_only -or -not (ReadOnlyOn $sb).held) { Fail 'Read only did not stay over a restart' }
+
+    # Share: as the core has it, applied at once. Off: B's file comes in, B's role is what it was, the next link is not Read only.
     $share = Qa $a @('share', 'open', 'Docs')
     if ($share -notmatch 'role ReadOnly') { Fail "the Share dialog's next link should be Read only: $share" }
     if ($share -notmatch 'all devices True enabled True, read only True enabled True') { Fail "Share's model has not the switches: $share" }
     if ($share -notmatch 'drawn \[[^\]]*On all my devices True, Read only True') { Fail "Share has no Read only switch on screen: $share" }
-    Qa $a @('share', 'scroll-end') | Out-Null
-    $pictures += Shot 'readonly-share'
     Qa $a @('share', 'readonly', 'off') | Out-Null
     $off = WaitFor { $s = Qa $a @('share', 'status'); if ($s -match 'setting devices False' -and $s -match 'read only False') { $s } } 30000 'Read only to go off in Share'
     if ($off -notmatch 'role ReadWrite') { Fail "the next link stayed Read only: $off" }
     if ($off -match 'failure "[^"]') { Fail "Share's Read only failed: $off" }
-    WaitFor { if ((RoleOfB) -eq 'admin') { $true } } 30000 'B to be an admin again' | Out-Null
+    WaitFor { Test-Path "$docs\from-b.txt" } 60000 'B''s held file to reach A once Read only is off' | Out-Null
+    if ((RoleOfB) -ne 'admin') { Fail "B's role is not what it was: $(RoleOfB)" }
+    WaitFor { $s = ReadOnlyOn $sb; if (-not $s.read_only -and -not $s.held) { $s } } 30000 'B to hear it is off' | Out-Null
     Qa $a @('share', 'readonly', 'on') | Out-Null
-    $on = WaitFor { $s = Qa $a @('share', 'status'); if ($s -match 'setting devices False' -and $s -match 'read only True') { $s } } 30000 'Read only to come on in Share'
-    if ($on -notmatch 'role ReadOnly') { Fail "the next link should follow Read only: $on" }
-    WaitFor { if ((RoleOfB) -eq 'read_only') { $true } } 30000 'B to be Read only again' | Out-Null
+    $again = WaitFor { $s = Qa $a @('share', 'status'); if ($s -match 'setting devices False' -and $s -match 'read only True') { $s } } 30000 'Read only to come on in Share'
+    if ($again -notmatch 'role ReadOnly') { Fail "the next link should follow Read only: $again" }
+
+    # Its own switch: "On all my devices" going off neither changes it nor takes it away.
     Qa $a @('share', 'devices', 'off') | Out-Null
     $free = WaitFor { $s = Qa $a @('share', 'status'); if ($s -match 'setting devices False' -and $s -match 'all devices False') { $s } } 30000 'On all my devices to go off in Share'
-    if ($free -notmatch 'read only True enabled False') { Fail "Read only should stay as it is and not be switchable with On all my devices off: $free" }
+    if ($free -notmatch 'read only True enabled True') { Fail "Read only should stay and stay switchable with On all my devices off: $free" }
     Qa $a @('share', 'cancel') | Out-Null
     if ((Log $a) -match 'seedwell://sync/') { Fail 'a folder link was printed' }
   } finally {
+    Remove-Item Env:SEEDWELL_QA_THEME -ErrorAction SilentlyContinue
     Stop-App $a $pa
     if ($pb) { Stop-App $b $pb }
-    Remove-Item -Recurse -Force $a, $b
+    Remove-Item -Recurse -Force $a, $b, $alone
+  }
+  $pictures
+}
+
+# An admin removes a user by asking (SPEC 7G.1), on temp devices A (the owner), B (an admin) and C (Read & write). The
+# failures it names: the row not saying the request waits for the owner, the item still enabled so it is asked twice, an
+# admin offered more than the removal or a menu on the owner's row, the request lost over a restart, and the owner's
+# device not carrying it out when it comes back.
+$checks.adminremove = {
+  $a = New-State 'full'; $b = New-State 'control'; $c = New-State 'control'
+  $docs = "$a\Docs"
+  New-Item -ItemType Directory -Force $docs | Out-Null
+  Set-Content -NoNewline -Encoding ascii "$docs\from-a.txt" 'from A'
+  $sa = "$a\state\control.sock"; $sb = "$b\state\control.sock"; $sc = "$c\state\control.sock"
+  $env:SEEDWELL_QA_THEME = 'dark'
+  $pa = Start-App $a -QaControl
+  $pb = $null; $pc = $null
+  $pictures = @()
+  function Members([string]$sock) { @(((& $Cli --socket $sock sync members Docs --json 2>&1) -join '' | ConvertFrom-Json).members) }
+  function ChatMembers([string]$sock) { @(((& $Cli --socket $sock chat members 'Plans' --json 2>&1) -join '' | ConvertFrom-Json).members) }
+  function Rows { Qa $b @('syncpage', 'members') }
+  function Shot([string]$name) {
+    Qa $b @('shot', $name) | Out-Null
+    Copy-Item "$b\state\qa\$name.png" "$Out\$name.png"
+    "$Out\$name.png"
+  }
+  # The channel's panel: its rows as the core has them once they show the request, and its picture.
+  function Panel([string]$name) {
+    Qa $b @('place', 'chat', 'Plans') | Out-Null
+    Qa $b @('chatpage', 'members') | Out-Null
+    $rows = WaitFor { $s = Qa $b @('chatpage', 'member-rows'); if ($s -match "$([regex]::Escape($user)) [^|]*removal `"Removal asked: waiting for the owner`"") { $s } } 15000 'the waiting line in the channel panel'
+    if ($rows -notmatch "$([regex]::Escape($user)) [^|]*menu \[Remove from Channel disabled\]") { Fail "the channel's item should be disabled while it waits: $rows" }
+    $shot = Qa $b @('chatpage', 'members-shot', $name)
+    if ($shot -notmatch 'panel saved') { Fail "no picture of the panel: $shot" }
+    Copy-Item "$b\state\qa\$name.png" "$Out\$name.png"
+    "$Out\$name.png"
+  }
+  try {
+    $pb = Start-App $b -QaControl
+    $pc = Start-App $c -QaControl
+    WaitForSync $a; WaitForSync $b; WaitForSync $c
+    $added = (& $Cli --socket $sa sync add $docs 2>&1) -join ' '
+    if ($added -notlike 'Sharing Docs*') { Fail "sync add: $added" }
+    foreach ($join in @(@($sb, 'admin', "$b\state\Docs"), @($sc, 'read_write', "$c\state\Docs"))) {
+      $shared = (& $Cli --socket $sa sync share Docs --role $join[1] --json 2>&1) -join ''
+      $link = ($shared | ConvertFrom-Json).link
+      if (-not $link) { Fail "no $($join[1]) link: $shared" }
+      $joined = ($link | & $Cli --socket $join[0] sync join - --to $join[2] 2>&1) -join ' '
+      if ($joined -notlike 'Joining Docs*') { Fail "sync join: $joined" }
+    }
+    WaitFor { if (@(Members $sa).Count -eq 3 -and (Test-Path "$b\state\Docs\from-a.txt") -and (Test-Path "$c\state\Docs\from-a.txt")) { $true } } 60000 'B and C in the folder' | Out-Null
+    $user = (Members $sa | Where-Object { $_.role -eq 'read_write' }).device_id
+    $owner = (Members $sa | Where-Object { $_.role -eq 'owner' }).device_id
+    WaitFor { if (@(Members $sb | Where-Object { $_.device_id -eq $user -and $_.role -eq 'read_write' }).Count -eq 1) { $true } } 60000 'B to know C' | Out-Null
+
+    # A channel with the same three, where the same request has its line in the members panel.
+    & $Cli --socket $sa chat new 'Plans' | Out-Null
+    foreach ($join in @(@($sb, 'admin'), @($sc, 'read_write'))) {
+      $shared = (& $Cli --socket $sa chat share 'Plans' --role $join[1] --json 2>&1) -join ''
+      $link = ($shared | ConvertFrom-Json).link
+      if (-not $link) { Fail "no $($join[1]) channel link: $shared" }
+      $link | & $Cli --socket $join[0] chat join - 2>&1 | Out-Null
+    }
+    WaitFor { if (@(ChatMembers $sb | Where-Object { $_.device_id -eq $user -and $_.role -eq 'read_write' }).Count -eq 1 -and @(ChatMembers $sb | Where-Object { $_.me -and $_.role -eq 'admin' }).Count -eq 1) { $true } } 60000 'B an admin of the channel, knowing C' | Out-Null
+
+    # B's page: the removal alone on the user, its own question; the owner's row plain.
+    Qa $b @('window') | Out-Null
+    Qa $b @('syncpage', 'choose', 'Docs') | Out-Null
+    $rows = WaitFor { $s = Rows; if ($s -match [regex]::Escape($user)) { $s } } 30000 'C on B''s page'
+    if ($rows -notmatch "$([regex]::Escape($user)) [^|]*menu \[Remove from Folder\S* enabled\] question `"The folder's owner removes it") { Fail "B's menu on C should be the removal alone, with the admin's question: $rows" }
+    if ($rows -notmatch "$([regex]::Escape($owner)) [^|]*, plain") { Fail "the owner's row should be plain text for an admin: $rows" }
+
+    # The owner away: the request waits, the row says so, it is not asked twice.
+    Stop-App $a $pa; $pa = $null
+    $said = Qa $b @('syncpage', 'member', $user, 'Remove from Folder')
+    if ($said -notmatch 'ran RemoveDevice') { Fail "the removal did not run: $said" }
+    $rows = WaitFor { $s = Rows; if ($s -match 'Removal asked: waiting for the owner') { $s } } 15000 'the waiting line on C''s row'
+    if ($rows -notmatch "$([regex]::Escape($user)) [^|]*Removal asked: waiting for the owner[^|]*menu \[Remove from Folder\S* disabled\]") { Fail "C's row should wait with its item disabled: $rows" }
+    if ((Qa $b @('syncpage', 'member', $user, 'Remove from Folder')) -notmatch 'disabled') { Fail 'the removal could be asked twice' }
+    if ((Members $sb | Where-Object { $_.device_id -eq $user }).removal -ne 'waiting') { Fail "the CLI should say waiting: $(Members $sb | ConvertTo-Json -Compress)" }
+    if ($rows -match 'Waiting for 2 devices') { Fail "the folder should not wait for a device cut off pending its removal: $rows" }
+    $pictures += Shot 'admin-removal-dark'
+
+    # The channel: the panel's line under the name, the item disabled.
+    Qa $b @('place', 'chat', 'Plans') | Out-Null
+    Qa $b @('chatpage', 'members') | Out-Null
+    $before = Qa $b @('chatpage', 'member-rows')
+    if ($before -notmatch "$([regex]::Escape($user)) [^|]*removal `"`" role Read & write, menu \[Remove from Channel enabled\]") { Fail "B's menu on C in the channel should be the removal alone: $before" }
+    $said = Qa $b @('chatpage', 'member', $user, 'Remove from Channel')
+    if ($said -notmatch 'ran RemoveDevice') { Fail "the channel's removal did not run: $said" }
+    $pictures += Panel 'admin-removal-channel-dark'
+
+    # Over a restart, and in the light theme.
+    Stop-App $b $pb; $pb = $null
+    $env:SEEDWELL_QA_THEME = 'light'
+    $pb = Start-App $b -QaControl
+    WaitForSync $b
+    Qa $b @('window') | Out-Null
+    Qa $b @('syncpage', 'choose', 'Docs') | Out-Null
+    WaitFor { $s = Rows; if ($s -match "$([regex]::Escape($user)) [^|]*Removal asked: waiting for the owner[^|]*disabled") { $s } } 30000 'the request to survive B''s restart' | Out-Null
+    $pictures += Shot 'admin-removal-light'
+    $pictures += Panel 'admin-removal-channel-light'
+
+    # The owner back: its device carries it out by itself.
+    $pa = Start-App $a -QaControl
+    WaitFor { if (@(Members $sa | Where-Object { $_.device_id -eq $user }).Count -eq 0) { $true } } 90000 'A to remove C by itself' | Out-Null
+    WaitFor { if (@(Members $sb | Where-Object { $_.device_id -eq $user }).Count -eq 0) { $true } } 60000 'C to leave B''s members' | Out-Null
+    try { WaitFor { if (@(ChatMembers $sa | Where-Object { $_.device_id -eq $user }).Count -eq 0) { $true } } 90000 'A to remove C from the channel by itself' | Out-Null }
+    catch { Fail "A did not remove C from the channel. A: $(ChatMembers $sa | ConvertTo-Json -Compress) B: $(ChatMembers $sb | ConvertTo-Json -Compress) C: $(ChatMembers $sc | ConvertTo-Json -Compress); A's core: $((CoreLog $a | Select-Object -Last 12) -join ' | '); B's core: $((CoreLog $b | Select-Object -Last 12) -join ' | ')" }
+  } finally {
+    Remove-Item Env:SEEDWELL_QA_THEME -ErrorAction SilentlyContinue
+    if ($pa) { Stop-App $a $pa }
+    if ($pb) { Stop-App $b $pb }
+    if ($pc) { Stop-App $c $pc }
+    Remove-Item -Recurse -Force $a, $b, $c
   }
   $pictures
 }

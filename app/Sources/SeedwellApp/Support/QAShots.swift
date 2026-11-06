@@ -11,7 +11,7 @@ import AppKit
 ///     menu                 the open context menu, else the open menu bar menu: real item views and stand-ins of what
 ///                          NSMenu draws itself (MenuPanel), with the submenus of a context menu beside it
 ///     alert                the open alert
-///     window <id|title>    any other window of the app (chat-new, sync-add, finder-setup, …)
+///     window <id|title>    any other window of the app (chat-new, sync-add, finder-setup, proxy, …)
 @MainActor enum QAShots {
     struct Scene {
         let app: AppDelegate
@@ -52,7 +52,10 @@ import AppKit
             guard let w = NSApp.windows.first(where: { $0.isVisible && !key.isEmpty
                 && (($0.identifier?.rawValue ?? "").localizedCaseInsensitiveContains(key) || $0.title.localizedCaseInsensitiveContains(key)) })
             else { return .failure("no window \(key)") }
-            return await windows(w, with: w.attachedSheet.map { [$0] } ?? [])
+            // Its sheet and its popovers (the proxy window's country list).
+            var extras: [NSWindow] = w.attachedSheet.map { [$0] } ?? []
+            extras += (w.childWindows ?? []).filter { $0.isVisible && $0 !== w.attachedSheet }
+            return await windows(w, with: extras)
         default:
             return .failure("what is \(what)? main, settings, info, chooser, popover, menu, alert, window <id>")
         }
@@ -80,7 +83,7 @@ import AppKit
         if scene.menu != nil || app.statusMenuController?.qaMenuOpen == true { parts.append("menu") }
         if NSApp.modalWindow != nil { parts.append("alert") }
         for w in NSApp.windows where w.isVisible {
-            if let id = w.identifier?.rawValue, ["chat-new", "sync-", "finder-setup"].contains(where: id.hasPrefix) { parts.append(id) }
+            if let id = w.identifier?.rawValue, ["chat-new", "sync-", "finder-setup", "proxy"].contains(where: id.hasPrefix) { parts.append(id) }
         }
         return "windows: " + (parts.isEmpty ? "none" : parts.joined(separator: " | "))
     }
@@ -94,10 +97,10 @@ import AppKit
         QuietRun.drawActive(w)
         let rep = await SnapshotWindow.settled {
             var parts: [(NSView, NSRect, Bool)] = []
-            if let v = w.contentView?.superview { parts.append((v, w.frame, isPopover(w))) }
+            if let (v, f) = drawn(w) { parts.append((v, f, isPopover(w))) }
             for x in extras {
-                guard let v = x.contentView?.superview else { continue }
-                var f = x.frame
+                guard let (v, frame) = drawn(x) else { continue }
+                var f = frame
                 if x === w.attachedSheet, !w.frame.insetBy(dx: -40, dy: -40).contains(f) {
                     // A sheet hangs from the top of its window's content.
                     f.origin = NSPoint(x: w.frame.midX - f.width / 2, y: w.contentLayoutRect.maxY + w.frame.minY - f.height)
@@ -108,6 +111,17 @@ import AppKit
             return compose(parts)
         }
         return rep.map { .success($0) } ?? .failure("drawing failed")
+    }
+
+    /// What of `w` is drawn and where (screen points): its frame view, or for an NSPopover its content alone. A
+    /// popover's frame view draws its glass edge, which off the screens comes out as a rainbow; the content goes on the
+    /// stand-in background `compose` draws.
+    private static func drawn(_ w: NSWindow) -> (NSView, NSRect)? {
+        if String(describing: type(of: w)).contains("Popover"), let v = w.contentView {
+            // Beside its anchor (a quiet run's popover came up at a screen's edge, far from it), else where it is.
+            return (v, QuietRun.placeBesideAnchor(w, size: v.bounds.size) ?? w.convertToScreen(v.convert(v.bounds, to: nil)))
+        }
+        return w.contentView?.superview.map { ($0, w.frame) }
     }
 
     private static func isPopover(_ w: NSWindow) -> Bool {

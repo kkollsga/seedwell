@@ -5,6 +5,7 @@
 //! "read these bytes at this offset", never for `st_dev` or `pread`.
 
 pub mod dirs;
+pub mod firewall;
 pub mod fs;
 pub mod ipc;
 pub mod net;

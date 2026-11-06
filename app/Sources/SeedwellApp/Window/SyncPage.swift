@@ -17,7 +17,7 @@ struct SyncPage: View {
     }
 
     var body: some View {
-        let m = model.folderSyncPage(onDemandOff: { id in actions.fileProvider?.disabled.contains(id) ?? false })
+        let m = model.folderSyncPage(onDemandOff: { id in actions.fileProvider?.isOff(id) ?? false })
         Group {
             if let e = m.empty {
                 VStack(spacing: 10) {

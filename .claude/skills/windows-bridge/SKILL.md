@@ -95,7 +95,12 @@ before sending), and answer in the chat with what was merged.
   QA checks the change touches, `app-windows\qa\run.ps1 <check>...` (from bash:
   `powershell.exe -NoProfile -ExecutionPolicy Bypass -File app-windows/qa/run.ps1 <check>...`). Before every batch:
   the full `run.ps1 all -Build -CoreProfile Debug` on that code (about 18 minutes); a failure is fixed before sending.
-- Local Rust builds: debug, `CARGO_BUILD_JOBS=4`, one at a time. Never a local release core (memory).
+- Local Rust builds: debug, `CARGO_BUILD_JOBS=4`, one build per `target` folder. Never a local release core (memory).
+- **No waiting for a quiet machine** (the user's rule, 2026-11-05). Tests, QA and builds may overlap as long as the
+  memory and disk guards hold. A failure under load is still reported or fixed: rerun it to tell a timing false
+  alarm from a bug, never explain it away. When `rust-tests.ps1` overlaps a QA run, it runs at `BelowNormal` priority
+  (in the script since 2026-11-05): at normal priority its processes starved the app's UI thread past the 2 s hang
+  watch in 2 of 3 full runs, at BelowNormal in 0 of 2. The hang watch's limit stays: a real wait must still fail.
 - On every bundle from the Mac, and always on the final candidate before a push: `app-windows\qa\rust-tests.ps1`
   (the Rust tests as CI's Windows job runs them, about 2 minutes). It is the only place Windows-only Rust failures
   show before CI.

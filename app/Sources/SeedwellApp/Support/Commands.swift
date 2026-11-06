@@ -48,12 +48,15 @@ indirect enum MenuEntry {
     let sync: SyncActions
     /// Channels (SPEC 7G.7): their commands, the New Channel window and notifications.
     let chat: ChatActions
+    /// The torrent proxy (SPEC §7H): the shield in the menu and Settings, and the "SOCKS5 proxy" window.
+    let proxy: ProxyCenter
     private let log = Logger(subsystem: "io.github.kkollsga.Seedwell", category: "commands")
 
     init(core: Core) {
         self.core = core
         sync = SyncActions(core: core)
         chat = ChatActions(core: core, sync: sync)
+        proxy = ProxyCenter(core: core)
         favorites = FavoriteEditing(core: core)
         favorites.openTab = { [weak self] id in self?.showMain(.tracker(trackerId: id), nil) }
         favorites.openInfo = { [weak self] id in self?.showTrackerInfo(id) }

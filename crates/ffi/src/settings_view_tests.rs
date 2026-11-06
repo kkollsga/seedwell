@@ -425,6 +425,8 @@ fn network_shows_the_port_in_use_or_why_it_is_another() {
     s.settings.network.listen_port = 55252;
     let m = mac(input(SettingsTab::Network, s.clone(), live()));
     assert_eq!(titles(&m), ["Connection", "Peers"]);
+    // The torrent proxy's box, between them, on every host (its words are the proxy models').
+    assert_eq!(m.blocks[1], SettingsBlock::TorrentProxy { title: "Torrent proxy".into() });
     let port = find(&m, "connection.port");
     assert_eq!(field_text(port, 0).0, "55252");
     assert_eq!(texts(port), ["Active: 51413"]);

@@ -81,7 +81,6 @@ async fn an_admin_invites_but_cannot_change_roles_or_invite_admins() {
     until(20, "the owner knows C, admitted by the admin", || role_of(&a, &id, &c) == Some(Role::ReadOnly)).await;
     let err = b.h.set_role(&id, &c.h.device_id(), Role::ReadWrite).unwrap_err().to_string();
     assert!(err.contains("only the folder's owner"), "{err}");
-    assert!(b.h.remove_device(&id, &c.h.device_id()).is_err());
     for d in [&a, &b, &c] {
         d.h.shutdown().await;
     }

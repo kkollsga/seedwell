@@ -600,6 +600,37 @@ pub struct Network {
     /// (SPEC 7C, `trs-tracker` destination policy). Loopback, link-local and cloud metadata
     /// addresses stay refused whatever this says. Takes effect when the engine starts.
     pub allow_lan_trackers: bool,
+    /// Torrent traffic through a SOCKS5 proxy (SPEC §7H): `[network.proxy]`. The key (username and password) is in
+    /// the system's secret store, never here.
+    pub proxy: TorrentProxy,
+}
+
+/// Settings › Network › SOCKS5 proxy, for torrents only.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TorrentProxy {
+    /// Torrents go through the proxy. On without a key installed holds every torrent (never a direct connection).
+    pub enabled: bool,
+    /// The NordVPN preset or a proxy of the user's own.
+    pub kind: ProxyKind,
+    /// A custom proxy's host (the preset has its own servers).
+    pub host: String,
+    /// A custom proxy's port (0: 1080).
+    pub port: u16,
+    /// Where the user is, chosen by hand (ISO 3166 code, empty: no preference; never detected): servers in or
+    /// near it are preferred.
+    pub country: String,
+}
+
+/// Which proxy.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProxyKind {
+    /// NordVPN's SOCKS5 servers, with the user's NordVPN service credentials.
+    #[default]
+    Nordvpn,
+    /// A SOCKS5 proxy the user names.
+    Custom,
 }
 
 impl Default for Network {
@@ -617,6 +648,7 @@ impl Default for Network {
             max_connections: 200,
             max_connections_per_torrent: 50,
             allow_lan_trackers: false,
+            proxy: TorrentProxy::default(),
         }
     }
 }
@@ -1249,6 +1281,20 @@ mod tests {
         let again = Config::parse_str(&out).unwrap();
         assert_eq!(again.warnings.len(), 3);
         assert!(out.contains("future_flag = true") && out.contains("mystery = 1"));
+    }
+
+    #[test]
+    /// Failure: the proxy setting is lost on save (the kill switch would be off after a restart), or a file written
+    /// before it existed does not load.
+    fn torrent_proxy_round_trips_and_defaults_off() {
+        assert!(!Config::default().network.proxy.enabled);
+        let mut c = Config::default();
+        c.network.proxy = TorrentProxy { enabled: true, kind: ProxyKind::Custom, host: "proxy.example".into(), port: 1080, country: "NO".into() };
+        let out = c.render().unwrap();
+        assert!(out.contains("[network.proxy]") && out.contains("kind = \"custom\""), "{out}");
+        assert_eq!(Config::parse_str(&out).unwrap().value.network.proxy, c.network.proxy);
+        let old = Config::parse_str("[network]\ndht = false\n").unwrap();
+        assert_eq!(old.value.network.proxy, TorrentProxy::default());
     }
 
     #[test]

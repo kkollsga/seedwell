@@ -27,6 +27,8 @@ trs-http = { path = "../http" }
 trs-utp = { path = "../utp" }
 # NAT-PMP / PCP / UPnP port mapping for the listen port.
 trs-portmap = { path = "../portmap" }
+# Torrent traffic through a SOCKS5 proxy (SPEC §7H).
+trs-socks = { path = "../socks" }
 # Play while downloading (SPEC 7F): the loopback range server and its `PieceSource` contract.
 trs-stream = { path = "../stream" }
 # Runtime, sockets, timers, channels. No `full`: only what the engine uses.
@@ -37,6 +39,7 @@ bytes = { version = "1", default-features = false }
 getrandom = { version = "0.4", default-features = false }
 
 [dev-dependencies]
+trs-socks = { path = "../socks", features = ["testkit"] }
 tokio = { version = "1", default-features = false, features = ["process"] }
 tempfile = "3"
 serde_json = { version = "1", default-features = false, features = ["std"] }

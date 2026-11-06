@@ -174,6 +174,19 @@ pub trait Backend: Send + Sync {
     fn sync(&self) -> Arc<dyn crate::sync::SyncBackend> {
         Arc::new(crate::sync::NoSync)
     }
+    /// The secret store of the keys (the Keychain the app passed, else the state folder's vault): where the torrent
+    /// proxy's key is kept (SPEC §7H). `None` for a backend without one (the mock).
+    fn secrets(&self) -> Option<Arc<dyn trs_sync_net::secrets::SecretStore>> {
+        None
+    }
+    /// Torrent traffic through a SOCKS5 proxy, or directly again (`None`): at once (SPEC §7H).
+    fn set_torrent_proxy(&self, _proxy: Option<trs_engine::ProxyConfig>) {}
+    /// Tests every server of the torrent proxy now (the status's `ranks` counts up when done). Returns at once.
+    fn torrent_proxy_rank_now(&self) {}
+    /// How the torrent proxy is doing. Cheap, never waits for the engine.
+    fn torrent_proxy_status(&self) -> trs_engine::ProxyStatus {
+        trs_engine::ProxyStatus::default()
+    }
     /// A decision of the app's worth a line in the developer log (`Decision`, `event`): a stall of the host's UI thread.
     /// Never blocks.
     fn note_decision(&self, _event: &'static str, _note: String) {}

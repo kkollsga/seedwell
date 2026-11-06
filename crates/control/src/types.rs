@@ -2138,6 +2138,30 @@ pub struct SyncMemberDto {
     /// When its access ends (Unix seconds); absent: until removed.
     #[serde(default)]
     pub expires_at: Option<u64>,
+    /// This Mac (an admin) asked the owners to remove it: `waiting` (cut off here meanwhile) or `refused`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub removal: Option<String>,
+    /// Why an owner's device refused that removal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub removal_reason: Option<String>,
+}
+
+/// `sync.read_only` and `sync.set_read_only` result (SPEC §7G.1).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct SyncReadOnlyDto {
+    /// The folder id.
+    pub id: String,
+    /// Its name.
+    pub name: String,
+    /// Read only: only the owners' changes count.
+    pub read_only: bool,
+    /// This Mac may switch it (an owner of the folder).
+    pub may_switch: bool,
+    /// This Mac holds its changes back meanwhile (not an owner; they go out once it is off).
+    pub held: bool,
+    /// What was just done.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 /// `sync.members` result.

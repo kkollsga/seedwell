@@ -25,6 +25,10 @@ pub trait Builds: Send + Sync {
     /// Install do (with development builds allowed and a folder watched: that folder's newest build). Blocks for the
     /// check (up to about 15 s).
     fn update_now(&self) -> Result<String, String>;
+    /// A device this one talks to runs `client` (`Seedwell <version>`, from its Hello; folder sync says which devices):
+    /// a newer one starts a check for the latest release (SPEC 12A). Returns at once (the check runs apart); called
+    /// on folder sync's runtime.
+    fn peer_runs(&self, _client: &str) {}
 }
 
 /// Where the control server finds the updater (empty until the app's updater registers itself).

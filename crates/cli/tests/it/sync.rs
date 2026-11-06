@@ -71,10 +71,14 @@ fn the_sync_port_moves_at_once_and_a_port_in_use_is_refused() {
     let docs = root.path().join("Docs");
     std::fs::create_dir_all(&docs).unwrap();
     d.json(&["sync", "add", docs.to_str().unwrap()]);
-    let before = d.json(&["sync", "list"])["port"].as_u64().unwrap() as u16;
+    // Ports no other test is given (a port bound to port 0 and let go may be taken by another test before the move, or
+    // be listened on again after it, and "let go" would fail without a bug): the first move puts sync on one.
+    let lo = [std::net::IpAddr::from([127, 0, 0, 1]), std::net::IpAddr::from(std::net::Ipv6Addr::LOCALHOST)];
+    let before = trs_platform::net::closed_tcp_port(&lo);
+    assert_eq!(d.json(&["sync", "settings", "--port", &before.to_string()])["port"].as_u64(), Some(u64::from(before)));
+    let want = std::iter::repeat_with(|| trs_platform::net::closed_tcp_port(&lo)).find(|p| *p != before).unwrap();
 
     // A free port: sync starts again on it, with its folder, and the old port is let go.
-    let want = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
     let st = d.json(&["sync", "settings", "--port", &want.to_string()]);
     assert_eq!(st["port"].as_u64(), Some(u64::from(want)), "{st}");
     assert!(st["note"].as_str().is_some_and(|n| n.contains(&format!("port {want} now"))), "{st}");
@@ -83,7 +87,13 @@ fn the_sync_port_moves_at_once_and_a_port_in_use_is_refused() {
     assert_eq!(l["folders"][0]["name"], "Docs", "{l}");
     assert!(std::net::TcpStream::connect(("127.0.0.1", want)).is_ok(), "sync listens on the new port");
     assert!(std::fs::read_to_string(d.state.join("sync.toml")).unwrap().contains(&format!("port = {want}")), "kept for the next start");
-    assert!(std::net::TcpStream::connect(("127.0.0.1", before)).is_err(), "the old port is let go");
+    // The old listener closes as its task ends, a moment after the move answered.
+    let old = std::net::SocketAddr::from(([127, 0, 0, 1], before));
+    let end = std::time::Instant::now() + Duration::from_secs(10);
+    while std::net::TcpStream::connect_timeout(&old, Duration::from_secs(3)).is_ok() {
+        assert!(std::time::Instant::now() < end, "the old port is let go");
+        std::thread::sleep(Duration::from_millis(100));
+    }
 
     // A port another app has: refused, and sync stays where it is.
     let taken = std::net::TcpListener::bind("0.0.0.0:0").unwrap();
@@ -457,4 +467,48 @@ fn switching_back_to_full_puts_the_files_back_and_the_torrent_recovers_without_a
     wait_until(60, "the leech to download it", || row(&leech, &t.id).filter(seeding));
     let rechecks = d.json(&["debug", "perf"])["probe"]["counters"]["rechecks"].as_u64();
     assert_eq!(rechecks, Some(0), "no recheck from zero");
+}
+
+/// `sync read-only`: an agent sees and switches the folder's Read only natively. Fails when the owner cannot switch it
+/// or read it back, when a member (not an owner) may switch it, when the member does not see it on and itself held
+/// back, or when a run whose permission is read switches it.
+#[test]
+fn an_owner_switches_read_only_from_the_cli_and_a_member_sees_it_and_may_not() {
+    let root = tempfile::tempdir().unwrap();
+    let a = Daemon::start(root.path(), "a", "full");
+    let b = Daemon::start(root.path(), "b", "full");
+    let docs = root.path().join("Docs");
+    std::fs::create_dir_all(&docs).unwrap();
+    std::fs::write(docs.join("a.txt"), b"hello").unwrap();
+    let id = a.json(&["sync", "add", docs.to_str().unwrap()])["id"].as_str().unwrap().to_owned();
+    let link = a.json(&["sync", "share", "Docs"])["link"].as_str().unwrap().to_owned();
+    let j = cli_stdin(&b, &["sync", "join", "-", "--to", root.path().join("Joined").to_str().unwrap()], &link);
+    assert_eq!(j.code, 0, "{}", j.stderr);
+    let port = a.json(&["sync", "list"])["port"].as_u64().unwrap();
+    b.json(&["sync", "address", &id, &format!("127.0.0.1:{port}")]);
+    wait_until(40, "B admitted", || b.json(&["sync", "list"])["folders"][0]["role"].as_str().map(str::to_owned));
+
+    let s = a.json(&["sync", "read-only", "Docs", "status"]);
+    assert_eq!((s["read_only"].as_bool(), s["may_switch"].as_bool(), s["held"].as_bool()), (Some(false), Some(true), Some(false)), "{s}");
+    let mine = b.json(&["sync", "read-only", &id, "status"]);
+    assert_eq!(mine["may_switch"].as_bool(), Some(false), "{mine}");
+    let o = b.cli(&["sync", "read-only", &id, "on"]);
+    assert!(o.code != 0 && o.stderr.contains("Only the folder's owner"), "a member switched it: {}", o.stderr);
+
+    let on = a.json(&["sync", "read-only", "Docs", "on"]);
+    assert_eq!((on["read_only"].as_bool(), on["may_switch"].as_bool()), (Some(true), Some(true)), "{on}");
+    assert!(on["note"].as_str().is_some_and(|n| n.contains("Read only")), "{on}");
+    wait_until(30, "B sees it on, and holds back", || {
+        let s = b.json(&["sync", "read-only", &id, "status"]);
+        (s["read_only"].as_bool() == Some(true) && s["held"].as_bool() == Some(true)).then_some(())
+    });
+    let text = cli_text(&b.socket, &["sync", "read-only", &id, "status"]);
+    assert!(text.stdout.contains("is Read only") && text.stdout.contains("stay here"), "{}", text.stdout);
+
+    // A run with permission read is refused the switch (exit 4) before anything else.
+    let r = Daemon::start(root.path(), "r", "read_only");
+    let denied = r.cli(&["sync", "read-only", "Docs", "on"]);
+    assert_eq!(denied.code, 4, "permission read may switch it: {}", denied.stderr);
+    let off = a.json(&["sync", "read-only", "Docs", "off"]);
+    assert_eq!(off["read_only"].as_bool(), Some(false), "{off}");
 }

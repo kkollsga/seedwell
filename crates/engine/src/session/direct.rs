@@ -189,9 +189,19 @@ impl Session {
     fn downloader(&mut self) -> Downloader {
         if self.downloader.is_none() {
             let cfg = self.sh.cfg();
+            // While torrents go through the proxy (SPEC §7H) so do these: a link may be a `.torrent` (a private
+            // tracker's carries the passkey), and which one is known only once it is fetched. The proxy resolves the
+            // name; with no working server the request waits, never directly.
+            let proxy = self.sh.proxy.clone();
+            let route: trs_http::RouteFn = Arc::new(move || match proxy.route() {
+                crate::proxy::Route::Direct => trs_http::HttpRoute::Direct,
+                crate::proxy::Route::Via(p) => trs_http::HttpRoute::Via((*p).clone()),
+                crate::proxy::Route::Held => trs_http::HttpRoute::Held,
+            });
             let dc = DownloaderConfig {
                 version: cfg.client_version.clone(),
                 max_connections_per_host: cfg.direct.max_connections_per_host.max(1),
+                route: Some(trs_http::Route(route)),
                 ..DownloaderConfig::default()
             };
             self.downloader = Some(Downloader::new(dc, Arc::new(DownGate(self.sh.limiter.clone()))));

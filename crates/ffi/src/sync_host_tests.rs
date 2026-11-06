@@ -5,6 +5,7 @@ use std::os::unix::net::UnixStream;
 use std::sync::atomic::AtomicUsize;
 
 use super::*;
+use super::hub::SyncHostMode;
 use crate::sync::ondemand::SyncFailed;
 
 /// A small on-demand folder in memory. Fetches complete after `fetch_rounds` calls (never, with `u32::MAX`).
@@ -514,6 +515,7 @@ impl SyncHostListener for Told {
     fn notice(&self, title: String, text: String) {
         self.notices.lock().unwrap().push((title, text));
     }
+    fn nav_pane(&self, _entry: SyncNavPane) {}
 }
 
 #[test]
@@ -706,7 +708,7 @@ fn the_app_serves_the_extension_from_the_real_core() {
 
     let group = work.path().join("group");
     let told = Arc::new(Told::default());
-    let socket = c.sync_host_start(group.display().to_string(), told.clone()).unwrap();
+    let socket = c.sync_host_start(group.display().to_string(), told.clone(), SyncHostMode::Folders).unwrap();
     assert_eq!(socket, group.join(SOCKET_NAME).display().to_string());
     let ask = |req: Value| -> Value {
         let mut s = UnixStream::connect(&socket).unwrap();
@@ -778,7 +780,7 @@ fn a_save_by_replace_through_the_extension_keeps_the_item() {
     c.sync_set_on_demand(f.id.clone(), true, None).unwrap();
     let group = work.path().join("group");
     let told = Arc::new(Told::default());
-    let socket = c.sync_host_start(group.display().to_string(), told.clone()).unwrap();
+    let socket = c.sync_host_start(group.display().to_string(), told.clone(), SyncHostMode::Folders).unwrap();
     let ask = |req: Value| -> Value {
         let mut s = UnixStream::connect(&socket).unwrap();
         s.write_all(format!("{req}\n").as_bytes()).unwrap();
@@ -862,7 +864,7 @@ fn an_isolated_run_does_not_serve() {
         forbidden_root: Some(d.path().display().to_string()),
     })
     .unwrap();
-    assert!(c.sync_host_start(d.path().join("g").display().to_string(), Arc::new(Told::default())).is_err());
+    assert!(c.sync_host_start(d.path().join("g").display().to_string(), Arc::new(Told::default()), SyncHostMode::Folders).is_err());
     assert!(!d.path().join("g").exists());
 }
 
@@ -1190,7 +1192,7 @@ fn the_core_asks_the_host_to_let_go_first() {
     let f = c.sync_add_folder(docs.display().to_string()).unwrap();
     c.sync_set_on_demand(f.id.clone(), true, None).unwrap();
     let told = Arc::new(Told::default());
-    c.sync_host_start(work.path().join("group").display().to_string(), told.clone()).unwrap();
+    c.sync_host_start(work.path().join("group").display().to_string(), told.clone(), SyncHostMode::Folders).unwrap();
     // The host cannot: nothing changes.
     told.refuse_removal.store(true, Ordering::Relaxed);
     assert!(c.sync_remove(f.id.clone(), false).is_err());

@@ -35,6 +35,12 @@ public partial class App : Application
     internal static HostWindow[] HostWindows { get; } = [HostWindow.GetInfo, HostWindow.MoveTo, HostWindow.NewChannel, HostWindow.ChatDialogs, HostWindow.AddFolder, HostWindow.FolderEditor, HostWindow.FolderShare, HostWindow.ChannelShare, HostWindow.FileList, HostWindow.Chooser, HostWindow.Player, HostWindow.TrackerInfo, HostWindow.FavoriteEditing, HostWindow.RulesEditor];
     /// <summary>Notifications (the core's Notices), the core's questions, and the settings banner.</summary>
     internal Notifier? Notifier { get; private set; }
+    /// <summary>Whether other devices can reach this PC (the core's, one per run; Folder Sync's page draws it).</summary>
+    internal SyncReach Reach => reach ??= new SyncReach(Core);
+    SyncReach? reach;
+    /// <summary>The torrent proxy, as its views share it.</summary>
+    internal ProxyUi Proxy => proxy ??= new ProxyUi(this);
+    ProxyUi? proxy;
     internal Prompts Prompts { get; private set; } = null!;
     internal SettingsBannerView Banner { get; } = new();
     /// <summary>The small chat dialogs (New Topic…, Rename…, Leave…, ...).</summary>
@@ -68,6 +74,11 @@ public partial class App : Application
         if (Program.Render is { } render)
         {
             RequestedTheme = render.Light ? ApplicationTheme.Light : ApplicationTheme.Dark;
+        }
+        // A QA run's pictures, likewise (qa\run.ps1 proxy).
+        else if (Program.QaControl && Environment.GetEnvironmentVariable("SEEDWELL_QA_THEME") is string qaTheme)
+        {
+            RequestedTheme = qaTheme == "light" ? ApplicationTheme.Light : ApplicationTheme.Dark;
         }
         InitializeComponent();
         // The app ends only by Exit, after the core's shutdown: by default it ends when its last window closes, which
@@ -168,30 +179,39 @@ public partial class App : Application
         Core = t.Result;
         started = true;
         AppLog.Write($"launch: core ready after {ms} ms");
+        // All of this is one turn of the UI thread: each step is named for a stall's line and timed for the log.
+        var steps = new List<string>();
+        void Step(string doing, Action work)
+        {
+            var c = System.Diagnostics.Stopwatch.StartNew();
+            HangWatch.Doing = doing;
+            work();
+            HangWatch.Doing = "";
+            steps.Add($"{doing} {c.ElapsedMilliseconds}");
+        }
         Notifier = new Notifier(this, Core, ui);
         Prompts = new Prompts(this);
         Banner.Changed += () => LibraryWindowIfCreated?.Pane.Refresh();
         Core.SetListener(new Listener(this));
         PowerWatch.Start(Core);
         NetWatch.Start(Core);
-        CreateLibrary(dir);
+        Step("the library window", () => CreateLibrary(dir));
         Updater = new Updater(this, Core);
         Updater.Changed += () => flyout?.UpdateChanged();
         // On-demand folders over Cloud Files (item 6); in an isolated run the core hosts only the folders inside its own
         // state folder.
-        Cloud = new CloudHost(this);
-        Cloud.Start();
-        ApplySettings();
-        flyout = new FlyoutWindow(this);
-        TaskbarWatch.Start(flyout.Hwnd, TaskbarCreated);
+        Step("the cloud host", () => { Cloud = new CloudHost(this); Cloud.Start(); });
+        Step("the settings", ApplySettings);
+        Step("the flyout", () => flyout = new FlyoutWindow(this));
+        TaskbarWatch.Start(flyout!.Hwnd, TaskbarCreated);
         // The plain icon of the start gives way to the full one (its menu and flyout): one icon, never two.
         tray?.Dispose();
         tray = null;
-        CreateTray();
+        Step("the tray icon", CreateTray);
         iconTimer = ui.CreateTimer();
         iconTimer.IsRepeating = false;
         iconTimer.Tick += (_, _) => UpdateIcon();
-        UpdateIcon();
+        Step("the icon", UpdateIcon);
         // A theme change redraws the icon at once (it fires off the UI thread).
         uiSettings.ColorValuesChanged += (_, _) => ui.TryEnqueue(() =>
         {
@@ -218,6 +238,7 @@ public partial class App : Application
         }
         // The files already in the watch folders, offered once ever.
         Prompts.Backlog();
+        AppLog.Write($"launch: on the UI thread, ms: {string.Join(", ", steps)}");
     }
 
     /// <summary>The window on a transfer: its place, the row selected, Get Info on it (a notice's click, the Mac's showMain(nil, id)).</summary>
@@ -1184,25 +1205,27 @@ public partial class App : Application
         }
         if (!Ready(() => Qa(words)))
         {
-            AppLog.Write($"qa {string.Join(' ', words)}: waits for the core");
+            AppLog.Write($"qa {QaSaid(words)}: waits for the core");
             return;
         }
         _ = QaRun(words).ContinueWith(t =>
         {
             // A command that throws answers with its error (else the run waits for an answer that never comes).
             var e = t.Exception?.InnerException;
-            AppLog.Write($"qa {string.Join(' ', words)}: failed: {e?.GetType().Name}: {e?.Message} {e?.StackTrace?.Split(Environment.NewLine).FirstOrDefault()?.Trim()}");
+            AppLog.Write($"qa {QaSaid(words)}: failed: {e?.GetType().Name}: {e?.Message} {e?.StackTrace?.Split(Environment.NewLine).FirstOrDefault()?.Trim()}");
         }, TaskContinuationOptions.OnlyOnFaulted);
     }
 
     /// <summary>"On all my devices" and its "Read only" as a dialog's model draws them (QA).</summary>
-    static string QaFollow(FollowLine? f) => f is null ? "all devices none, read only none"
-        : $"all devices {f.On} enabled {f.Enabled}, read only {(f.ReadOnly is FollowReadOnly r ? $"{r.On} enabled {r.Enabled} line \"{r.Line}\"" : "none")}";
+    static string QaFollow(FollowLine? f, ReadOnlyLine? r) => $"all devices {(f is null ? "none" : $"{f.On} enabled {f.Enabled}")}, read only {(r is null ? "none" : $"{r.On} enabled {r.Enabled} line \"{r.Line}\"")}";
+
+    /// <summary>A QA command as the log may say it: never what a credential field is given (qa\run.ps1's Qa says the same).</summary>
+    static string QaSaid(string[] w) => w is ["proxy-window", "fill" or "custom" or "copied" or "last", ..] ? $"proxy-window {w[1]} ***" : string.Join(' ', w);
 
     async Task QaRun(string[] w)
     {
         string verb = w.Length > 0 ? w[0] : "";
-        HangWatch.LastAction = $"qa {string.Join(' ', w)}";
+        HangWatch.LastAction = $"qa {QaSaid(w)}";
         string Arg(int i) => w.Length > i ? w[i] : "";
         // A folder (or channel) named by its name or its id.
         string FolderId(string name) => Core.SyncSnapshot().Folders.FirstOrDefault(f => f.Name == name)?.Id ?? Core.ChatChannels().FirstOrDefault(c => c.Name == name)?.Id ?? name;
@@ -1458,7 +1481,8 @@ public partial class App : Application
                     result = await Task.Run(() => Core.OtherSeedwells()) ?? "none";
                     break;
                 // The conversation shown: describe | type <text> | send | reply <card> | attach <path> | menu <title> | menu-text |
-                // members | file <card> <file> <action> | image <card> <image> open|fetch | tag <card> <tag> | open-answer yes|no |
+                // members | member-rows | member <device id> <title> (a member's menu item) | members-shot <name> (the panel's content, as a picture) |
+                // file <card> <file> <action> | image <card> <image> open|fetch | tag <card> <tag> | open-answer yes|no |
                 // hover <card> on|off (its time, Tag and Reply as the pointer shows them) | quote <card> (a click on its reply quote) |
                 // show-image <card> <image> (an image reference's click) | escape (Escape in the field) | slow-read <ms> (each read of the
                 // page takes that much longer) | focus <caret> (the field has the focus, as someone typing) | redraw (the whole page) |
@@ -1480,6 +1504,13 @@ public partial class App : Application
                         case "menu": result = cp.QaMenu(Arg(2)) + "; "; await Quiet.Settle(LibraryWindow.Content); break;
                         case "menu-text": result = cp.QaMenuText() + "; "; break;
                         case "members": cp.QaMembers(); await Task.Delay(1500); break;
+                        case "member-rows": result = $"rows {cp.QaMemberRows()}; "; break;
+                        case "member": result = cp.QaMemberPress(Arg(2), string.Join(' ', w.Skip(3))) + "; "; await Task.Delay(1000); break;
+                        case "members-shot":
+                            var panelDir = Path.Combine(Path.GetDirectoryName(foldsFile) ?? "", "qa");
+                            Directory.CreateDirectory(panelDir);
+                            result = await cp.QaMembersShot(Path.Combine(panelDir, $"{Arg(2)}.png")) + "; ";
+                            break;
                         case "hover": result = (cp.QaHover(int.TryParse(Arg(2), out var hn) ? hn : -1, Arg(3) != "off") ? "hover" : "no such card") + "; "; break;
                         case "quote": result = cp.QaQuote(int.TryParse(Arg(2), out var qn) ? qn : -1) + "; "; break;
                         case "show-image":
@@ -1529,13 +1560,16 @@ public partial class App : Application
                     result += $"cards {cm.Messages.Length}, empty \"{cm.Empty ?? ""}\", last \"{(lastCard is null ? "" : BodyText(lastCard))}\", last images {lastCard?.Images.Length ?? 0} [{string.Join(",", lastCard?.Images.Select(i => i.State) ?? [])}], last files {lastCard?.Files.Length ?? 0} [{string.Join(",", lastCard?.Files.Select(f => $"{f.State}:{string.Join("+", f.Actions.Select(a => a.Kind))}") ?? [])}], last tags \"{string.Join("; ", lastCard?.Tags.Select(t => t.Text) ?? [])}\", tags total {cm.Messages.Sum(m => m.Tags.Length)}, reply quote \"{(lastCard?.ReplyQuote is ChatQuote quoted ? $"{quoted.Title}: {quoted.Text}" : "")}\", bubbles {cm.Bubbles}, last who {lastCard?.Who.ToString() ?? "none"}, last meta \"{(lastCard?.Meta is ChatMessageMeta lm ? $"{lm.Name} · {lm.Detail}" : "")}\", runs {cm.Messages.Count(m => m.StartsRun)}, metas {cm.Messages.Count(m => m.Meta is not null)}, toolbar [{(cm.Toolbar.Tag is null ? "" : "tag ")}{(cm.Toolbar.Members is null ? "" : "members ")}{(cm.Toolbar.Share is null ? "" : "share ")}menu], can post {cm.Composer.CanPost} \"{cm.Composer.CannotPost ?? ""}\", attach {cm.Composer.Attach}, attached {cp.Attached}, send enabled {cp.SendEnabled}, pending {cm.Composer.Pending.Length}, replying {cp.ReplyingTo ?? "none"}, members panel {(cm.Members is null ? "none" : $"{cm.Members.Rows.Length} rows")}, open {cp.MembersOpen}, {cp.QaField}";
                     break;
                 // The Folder Sync page: describe | press <title> [<folder>] (a button, or a list row's menu item; its question
-                // counts as confirmed) | trash on|off | remove (the Stop Syncing question's Remove) | choose <folder>. A folder is named by its name or id.
+                // counts as confirmed) | members (the member rows too) | member <device id> <title> (a member's menu item, its
+                // question counted as confirmed) | trash on|off | remove (the Stop Syncing question's Remove) | choose <folder>. A folder is named by its name or id.
                 case "syncpage":
                     if (pane.Model?.Page != LibraryPage.FolderSync) { Library.SelectPlace(new LibraryPlace.FolderSync()); pane.Refresh(); }
                     if (pane.SyncPage is not FolderSyncPage page) { result = "no page"; break; }
                     switch (Arg(1))
                     {
                         case "press": result = page.QaPress(Arg(2), w.Length > 3 ? FolderId(Arg(3)) : null) + "; "; break;
+                        case "member": result = page.QaMemberPress(Arg(2), string.Join(' ', w.Skip(3))) + "; "; await Task.Delay(1000); break;
+                        case "members": await Task.Delay(300); break;
                         case "trash": page.QaTrash(Arg(2) == "on"); break;
                         case "remove": page.Run(new SyncPageCommand.Remove(), page.Chosen); await Task.Delay(1000); break;
                         case "choose": page.Choose(FolderId(Arg(2))); break;
@@ -1543,6 +1577,7 @@ public partial class App : Application
                     await Quiet.Settle(LibraryWindow.Content);
                     page.Update();
                     result += page.QaDescribe();
+                    if (Arg(1) is "member" or "members") result += $"; rows {page.QaMembers()}";
                     break;
                 // Add Folder: open [link] | mode local|shared | folder <path> | link <text> | location <path> | parent <path> |
                 // devices on|off | readonly on|off | ondemand on|off | start | cancel | status.
@@ -1565,7 +1600,7 @@ public partial class App : Application
                     if (AddFolderDialog.Open is AddFolderDialog afOpen)
                     {
                         var am = afOpen.Model;
-                        result += $"; add folder {afOpen.Form.Mode}, can start {am.CanStart}, folder \"{am.FolderText}\", link line \"{am.LinkLine}\", location \"{am.Location}\", on demand \"{am.OnDemandLabel ?? "none"}\" {afOpen.Form.OnDemand} note \"{am.OnDemandNote ?? ""}\", {QaFollow(am.Follow)}, drawn [{afOpen.Switches}], failure \"{afOpen.Failure}\"";
+                        result += $"; add folder {afOpen.Form.Mode}, can start {am.CanStart}, folder \"{am.FolderText}\", link line \"{am.LinkLine}\", location \"{am.Location}\", on demand \"{am.OnDemandLabel ?? "none"}\" {afOpen.Form.OnDemand} note \"{am.OnDemandNote ?? ""}\", {QaFollow(am.Follow, am.ReadOnly)}, drawn [{afOpen.Switches}], failure \"{afOpen.Failure}\"";
                     }
                     if (ShareDialog.Open is not null) result += "; share open";
                     break;
@@ -1591,7 +1626,7 @@ public partial class App : Application
                     if (EditFolderDialog.Open is EditFolderDialog efOpen)
                     {
                         var em = efOpen.Model;
-                        result += $"; edit {em.Title}, changed {em.Changed}, can save {em.CanSave}, location \"{em.Location}\", share {(em.ShareTitle ?? "none")}, follow {(em.Follow is null ? "none" : em.Follow.On.ToString())}, on demand \"{em.OnDemandLabel ?? "none"}\" {efOpen.Form.OnDemand} note \"{em.OnDemandNote ?? ""}\", {QaFollow(em.Follow)}, drawn [{efOpen.Switches}], failure \"{efOpen.Failure}\"";
+                        result += $"; edit {em.Title}, changed {em.Changed}, can save {em.CanSave}, location \"{em.Location}\", share {(em.ShareTitle ?? "none")}, follow {(em.Follow is null ? "none" : em.Follow.On.ToString())}, on demand \"{em.OnDemandLabel ?? "none"}\" {efOpen.Form.OnDemand} note \"{em.OnDemandNote ?? ""}\", {QaFollow(em.Follow, em.ReadOnly)}, drawn [{efOpen.Switches}], failure \"{efOpen.Failure}\"";
                     }
                     if (ShareDialog.Open is not null) result += "; share open";
                     break;
@@ -1619,7 +1654,7 @@ public partial class App : Application
                     if (ShareDialog.Open is ShareDialog sdOpen)
                     {
                         var sm = sdOpen.Model;
-                        result += $"; share {sm.Title}, role {sm.Role}, summary \"{sm.Summary}\", links {sm.Links.Length}, sharing \"{sm.Sharing?.Countdown ?? sm.Sharing?.Line ?? "none"}\", copy {(sm.CopyTitle ?? "none")}, {QaFollow(sm.Devices)}, drawn [{sdOpen.Switches}], setting devices {sdOpen.SettingDevices}, refusal \"{sm.Gone ?? sm.Refusal ?? ""}\", failure \"{sdOpen.Failure}\"";
+                        result += $"; share {sm.Title}, role {sm.Role}, summary \"{sm.Summary}\", links {sm.Links.Length}, sharing \"{sm.Sharing?.Countdown ?? sm.Sharing?.Line ?? "none"}\", copy {(sm.CopyTitle ?? "none")}, {QaFollow(sm.Devices, sm.ReadOnly)}, drawn [{sdOpen.Switches}], setting devices {sdOpen.SettingDevices}, refusal \"{sm.Gone ?? sm.Refusal ?? ""}\", failure \"{sdOpen.Failure}\"";
                     }
                     break;
                 // The tray's right-click menu as drawn (its entries' titles, [x] when checked, (off) when disabled), or one
@@ -1666,6 +1701,94 @@ public partial class App : Application
                     if (!await fe.QaSave()) { result = $"not saved: {fe.Failure}; "; fe.QaCancel(); }
                     var fl = Core.SyncFollowLine(folderId);
                     result = $"follow shown {fl.Shown}, on {fl.On}, enabled {fl.Enabled}";
+                    break;
+                // The torrent proxy, by the calls its controls make: proxy-model | proxy-toggle | proxy-click | proxy-find-faster |
+                // proxy-country <code> | proxy-menu (the right click's menu) | proxy-flyout (the flyout's shield and sentence)
+                // | proxy-sheet (the contact sheet to the qa folder).
+                case "proxy-model": Proxy.Poll(); result = Proxy.QaDescribe(); break;
+                case "proxy-toggle": await Proxy.Toggle(); result = Proxy.QaDescribe(); break;
+                case "proxy-click": Proxy.Click(); await Task.Delay(300); await Quiet.Settle(LibraryWindow.Content); result = Proxy.QaDescribe(); break;
+                case "proxy-find-faster": await Proxy.FindFaster(); result = Proxy.QaDescribe(); break;
+                case "proxy-country": await Proxy.SetCountry(Arg(1)); result = Proxy.QaDescribe(); break;
+                case "proxy-sheet":
+                    var sheetDir = Path.Combine(Path.GetDirectoryName(foldsFile) ?? "", "qa");
+                    Directory.CreateDirectory(sheetDir);
+                    result = await ProxySheet.Save(LibraryWindow.Content.XamlRoot, Path.Combine(sheetDir, "proxy-shield-win.png"));
+                    break;
+                // The tray flyout's shield: open | close | shot <name> | status (it stays open while a QA run has no focus to lose).
+                case "proxy-flyout":
+                    if (flyout is null) { result = "no flyout"; break; }
+                    if (Arg(1) == "open") { flyout.OpenPinned(false); await Quiet.Settle(flyout.RootElement); }
+                    if (Arg(1) == "close") flyout.Hide();
+                    if (Arg(1) == "shot")
+                    {
+                        var flyoutDir = Path.Combine(Path.GetDirectoryName(foldsFile) ?? "", "qa");
+                        Directory.CreateDirectory(flyoutDir);
+                        await SnapshotRenderer.SaveImage(flyout.RootElement, Path.Combine(flyoutDir, $"{Arg(2)}.png"), flyout.RootElement.ActualTheme != ElementTheme.Dark);
+                    }
+                    result = flyout.QaProxy();
+                    break;
+                // The SOCKS5 window: open | close | status | pane nord|custom | fill <user> <password> | enable | custom <host> <port> [<user> <password>]
+                // | use-custom | replace on|off | guide on|off | copied <text> (as a new text on the clipboard: QA never reads the real one) |
+                // remove | faster | hover on|off.
+                case "proxy-window":
+                    if (Arg(1) == "open") { Proxy.OpenWindow(); await Task.Delay(300); await Quiet.Settle(LibraryWindow.Content); }
+                    // A window that failed to open or was closed: what it does with a new copy (nothing).
+                    else if (Arg(1) == "last") { ProxyWindow.QaLast?.QaCopied(string.Join(' ', w.Skip(2))); result = ProxyWindow.QaLast?.QaDescribe() ?? "no window yet"; break; }
+                    else if (ProxyWindow.Open is not ProxyWindow pw) { result = "not open"; break; }
+                    else switch (Arg(1))
+                    {
+                        case "close": pw.QaClose(); break;
+                        case "pane": pw.QaPane(Arg(2) == "custom"); break;
+                        case "fill": pw.QaFill(Arg(2), Arg(3)); break;
+                        case "enable": await pw.EnableNordVpn(); break;
+                        case "custom": pw.QaFillCustom(Arg(2), Arg(3), Arg(4), Arg(5)); break;
+                        case "use-custom": await pw.UseCustom(); break;
+                        case "replace": pw.QaReplace(Arg(2) == "on"); break;
+                        case "guide": pw.QaGuide(Arg(2) == "on"); break;
+                        case "copied": pw.QaCopied(string.Join(' ', w.Skip(2))); break;
+                        case "remove": await pw.RemoveKey(); break;
+                        case "faster": await pw.FindFaster(); break;
+                        case "hover": pw.QaHover(Arg(2) == "on"); break;
+                    }
+                    await Quiet.Settle(LibraryWindow.Content);
+                    Proxy.Poll();
+                    result = ProxyWindow.Open?.QaDescribe() ?? "closed";
+                    break;
+                // The Country list, as the window's button opens it: open | key <letter or Enter or Down> | choose <index> | shot <name> | status.
+                case "proxy-countries":
+                    if (Arg(1) == "open") { ProxyWindow.Open?.QaOpenCountries(); await Task.Delay(300); await Quiet.Settle(LibraryWindow.Content); }
+                    if (Proxy.QaCountries is not (ListView cl, var ckey, var cchoose)) { result = "no list"; break; }
+                    if (Arg(1) == "key" && Enum.TryParse<Windows.System.VirtualKey>(Arg(2), out var ck)) ckey(ck);
+                    if (Arg(1) == "choose") cchoose(int.Parse(Arg(2)));
+                    if (Arg(1) == "shot")
+                    {
+                        var listDir = Path.Combine(Path.GetDirectoryName(foldsFile) ?? "", "qa");
+                        Directory.CreateDirectory(listDir);
+                        await SnapshotRenderer.SaveImage(cl, Path.Combine(listDir, $"{Arg(2)}.png"), RequestedTheme == ApplicationTheme.Light);
+                    }
+                    await Quiet.Settle(LibraryWindow.Content);
+                    result = $"list height {cl.ActualHeight} rows {cl.Items.Count} row height {(cl.ContainerFromIndex(cl.SelectedIndex < 0 ? 0 : cl.SelectedIndex) as FrameworkElement)?.ActualHeight}, selected {cl.SelectedIndex}, country \"{Proxy.Model.Country}\", open {Proxy.QaCountries is not null}";
+                    break;
+                // The navigation-pane entry, under the test seam only (a QA run's core gives none, and Explorer never sees those keys):
+                // nav-pane <clsid> <marker> on|off <name> <target>.
+                case "nav-pane":
+                    if (Environment.GetEnvironmentVariable("SEEDWELL_INSTALL_TEST") != "1") { result = "refused: only under SEEDWELL_INSTALL_TEST=1"; break; }
+                    NavPaneEntry.Apply(new SyncNavPane(Arg(1), Arg(4), string.Join(' ', w.Skip(5)), Arg(2), Arg(3) == "on"), Environment.ProcessPath ?? "");
+                    result = NavPaneEntry.QaDescribe(Arg(1));
+                    break;
+                // Other devices can't reach this PC: reach (the core's model and the banner) | reach-recheck (as the button does after
+                // netsh) | reach-allow no|ran (the button with UAC's answer given: the real command never runs in QA).
+                case "reach" or "reach-recheck" or "reach-allow":
+                    if (pane.Model?.Page != LibraryPage.FolderSync) { Library.SelectPlace(new LibraryPlace.FolderSync()); pane.Refresh(); }
+                    if (pane.SyncPage is not FolderSyncPage rp) { result = "no page"; break; }
+                    if (verb == "reach-recheck") await Task.Run(() => Reach.Recheck());
+                    if (verb == "reach-allow") { rp.QaAllow(Arg(1) == "no"); await Task.Delay(500); }
+                    rp.PollReach();
+                    await Quiet.Settle(LibraryWindow.Content);
+                    var rm = Reach.Model();
+                    var ra = rm.Notice?.Action;
+                    result = $"notice {(rm.Notice is null ? "none" : $"\"{rm.Notice.Title}\" body \"{rm.Notice.Body}\"")}, action {(ra is null ? "none" : $"\"{ra.Title}\" program \"{ra.Program}\" arguments {ra.Arguments}")}, refresh {rm.RefreshMs}, {rp.QaReachDrawn()}";
                     break;
                 // Settings › Devices' calls, between two temp states: link (a temp state's, so it may be printed) | join <link> |
                 // confirm (the first asking) | status.
@@ -1714,7 +1837,7 @@ public partial class App : Application
         }
         pane.Refresh();
         var m = pane.Model;
-        AppLog.Write($"qa {string.Join(' ', w)}: {result}; place {m?.Place}, selection [{string.Join(", ", m?.Selection ?? [])}], removal {(m?.Removal is PendingRemoval pr ? $"{pr.RowId ?? "(title bar)"}: {pr.Question.Message}" : "none")}");
+        AppLog.Write($"qa {QaSaid(w)}: {result}; place {m?.Place}, selection [{string.Join(", ", m?.Selection ?? [])}], removal {(m?.Removal is PendingRemoval pr ? $"{pr.RowId ?? "(title bar)"}: {pr.Question.Message}" : "none")}");
     }
 
     /// <summary>Quit, asked from another thread (a second launch with --quit).</summary>

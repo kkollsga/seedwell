@@ -118,6 +118,8 @@ enum Cmd {
     Info(oneshot::Sender<Info>),
     Save(oneshot::Sender<Vec<u8>>),
     Forbid(Id),
+    /// Drop the lookup (and its announce) for a hash.
+    Cancel(Id),
     ReadOnly(bool),
     /// The network is down: send nothing and let no timer run until it is restored.
     Pause(bool),
@@ -190,6 +192,12 @@ impl DhtHandle {
             .send(Cmd::Forbid(info_hash))
             .await
             .map_err(|_| gone())
+    }
+
+    /// Drops the lookup for `info_hash`, running or queued, and the announce it would end with; its stream ends.
+    /// Nothing more about that hash is sent.
+    pub async fn cancel(&self, info_hash: Id) -> io::Result<()> {
+        self.tx.send(Cmd::Cancel(info_hash)).await.map_err(|_| gone())
     }
 
     /// Enables or disables BEP 43 read-only mode (see [`DhtCore::set_read_only`]).
@@ -485,6 +493,11 @@ async fn run(
                     }
                     Cmd::Forbid(h) => {
                         core.forbid(h);
+                        Vec::new()
+                    }
+                    Cmd::Cancel(h) => {
+                        core.cancel(h);
+                        subs.remove(&h);
                         Vec::new()
                     }
                     Cmd::ReadOnly(on) => {

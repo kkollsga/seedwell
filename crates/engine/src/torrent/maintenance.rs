@@ -135,6 +135,8 @@ impl Torrent {
         if self.shutting_down {
             return;
         }
+        // Never only on the edge the proxy came on (a missed notice, a peer that arrived while the torrent started).
+        self.drop_direct_peers();
         self.sample_rates(now);
         self.expire_requests(now);
         self.refresh_all_interest();

@@ -63,6 +63,10 @@ impl FileSecrets {
     }
 
     fn write(&self, all: &BTreeMap<String, Vec<u8>>) -> io::Result<()> {
+        // The first key can come before folder sync has made its folder (the torrent proxy's, at the first start).
+        if let Some(d) = self.path.parent() {
+            std::fs::create_dir_all(d)?;
+        }
         let tmp = self.path.with_extension("tmp");
         let mut o = std::fs::OpenOptions::new();
         o.write(true).create(true).truncate(true);
@@ -264,6 +268,15 @@ impl SecretStore for FileSecrets {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Failure: a key stored before folder sync has made its folder is lost ("No such file or directory").
+    #[test]
+    fn the_first_key_makes_its_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = FileSecrets::new(dir.path().join("sync").join("secrets"));
+        s.put("a", b"1").unwrap();
+        assert_eq!(s.get("a").unwrap(), Some(b"1".to_vec()));
+    }
 
     #[test]
     fn stores_and_forgets_with_owner_only_permissions() {

@@ -337,6 +337,18 @@ pub enum Body {
         /// When it was made.
         at_s: u64,
     },
+    /// *Read only* (protocol 4, owners only): while on, only the owners' changes count. Every other member holds its
+    /// own back (sends none), and no device takes a version one of them made: a version counts only when an owner
+    /// signed it, or an owner's device announces it ([`Membership::owners`]). Nobody's role changes. An owner's latest
+    /// (by serial, then signature) counts; one signed by anyone else is not a valid statement.
+    ReadOnly {
+        /// On.
+        on: bool,
+        /// Orders owners' statements (higher wins).
+        serial: u64,
+        /// When it was made (shown only).
+        at_s: u64,
+    },
     /// How the signing device is called here: its device name, and the name of the person using it (empty =
     /// none yet). Signed by that device; its latest (by serial) counts, and older ones are dropped. Every member
     /// shows the same names, also for a device it has never met (conflict copies are named with it).
@@ -476,10 +488,9 @@ pub const FOLLOW_REMOVED: u64 = 2;
 /// A serial grows by one per change: no device reaches it by counting.
 pub const MAX_FOLLOW_SERIAL: u64 = 1 << 32;
 
-/// [`Body::Follow`]'s flag (0.1.19) of a folder put on all devices *Read only*: an owner of the folder admits the
-/// user's other devices at Read only instead of Admin, and makes those that have it Read only (all but the device that
-/// said it). Only a Follow signed by an owner or admin of the folder counts for it ([`Membership::follow_by`]); a
-/// device before 0.1.19 keeps the bit and passes it on, and admits as before.
+/// [`Body::Follow`]'s flag of 0.1.19's *Read only*, which lowered the user's other devices to Read only. Since protocol
+/// 4 Read only is the folder's own setting ([`Body::ReadOnly`]); the flag is read once, to give back what it lowered,
+/// and no longer written.
 pub const FOLLOW_READ_ONLY: u64 = 4;
 
 /// A Follow's flags after its time (0.1.14): read only when they are there, not 0 and written as this version writes
@@ -609,6 +620,12 @@ impl Statement {
                 put_varint(&mut out, *at_s);
                 11
             }
+            Body::ReadOnly { on, serial, at_s } => {
+                out.push(u8::from(*on));
+                put_varint(&mut out, *serial);
+                put_varint(&mut out, *at_s);
+                12
+            }
             Body::Unknown { kind, data } => {
                 out.extend_from_slice(data);
                 *kind
@@ -687,6 +704,14 @@ impl Statement {
             3 => Body::Invite(Invite::read(r).ok()?),
             4 => Body::Revoke { id: r.array("invite id").ok()?, at_s: r.varint("time").ok()? },
             5 => Body::ShareUntil { until_s: r.varint("share end").ok()?, serial: r.varint("serial").ok()?, at_s: r.varint("time").ok()? },
+            12 => {
+                let on = match r.u8("read only").ok()? {
+                    0 => false,
+                    1 => true,
+                    _ => return None,
+                };
+                Body::ReadOnly { on, serial: r.varint("serial").ok()?, at_s: r.varint("time").ok()? }
+            }
             6 => {
                 let device_name = r.str(MAX_DEVICE_NAME * 4, "device name").ok()?;
                 let user_name = r.str(MAX_DEVICE_NAME * 4, "user name").ok()?;
@@ -749,7 +774,7 @@ impl Statement {
             Body::Invite(i) => invite_ok(i) && i.issuer == self.signer,
             // Only an owner removes, sets the share end or says what the channel is; an admin's grant needs the
             // invitation it admits with.
-            Body::Remove { .. } | Body::ShareUntil { .. } | Body::Channel { .. } => self.signer == Signer::Folder,
+            Body::Remove { .. } | Body::ShareUntil { .. } | Body::Channel { .. } | Body::ReadOnly { .. } => self.signer == Signer::Folder,
             Body::Grant { invite: None, .. } => self.signer == Signer::Folder,
             // An owner or an admin (the membership counts only a current admin's).
             Body::Revoke { .. } | Body::Agents { .. } => true,
@@ -888,7 +913,7 @@ impl Follow {
         !self.on && self.flags & FOLLOW_REMOVED != 0
     }
 
-    /// Read only for the user's other devices ([`FOLLOW_READ_ONLY`]).
+    /// It has 0.1.19's *Read only* flag ([`FOLLOW_READ_ONLY`]).
     pub fn read_only(&self) -> bool {
         self.flags & FOLLOW_READ_ONLY != 0
     }
@@ -911,6 +936,8 @@ pub struct Membership {
     share_until: Option<u64>,
     /// The statement that sets it (also when it lifted the end).
     share_by: Option<[u8; 32]>,
+    /// The folder is *Read only*: the owners' latest [`Body::ReadOnly`] says on.
+    read_only: bool,
     /// The time [`Membership::set_now`] gave (Unix seconds): after the share end only the owners count.
     now_s: u64,
     /// The channel is open to agents: the latest [`Body::Agents`] of an owner or current admin (an owner's
@@ -955,8 +982,8 @@ impl Membership {
     }
 
     /// The latest Follow for one target (on or off) of a current member that `trusted` accepts, by the same order as
-    /// [`Self::follow`]. What *Read only* counts ([`FOLLOW_READ_ONLY`]): only a statement of a device that is owner or
-    /// admin of the folder, so a sibling made Read only cannot lift it with a statement of its own.
+    /// [`Self::follow`]: for a folder a device has, only a statement of a device that is owner or admin of it counts, so a
+    /// member that is neither cannot turn it off or remove it.
     pub fn follow_by(&self, target_pk: &[u8; 32], trusted: impl Fn(&[u8; 32]) -> bool) -> Option<Follow> {
         self.follows_by(target_pk, trusted).pop()
     }
@@ -1069,6 +1096,7 @@ impl Membership {
             max_serial: 0,
             share_until: None,
             share_by: None,
+            read_only: false,
             now_s: 0,
             agents: false,
             agents_serial: 0,
@@ -1102,7 +1130,7 @@ impl Membership {
             statements.into_iter().filter(|st| st.verify(&self.folder_pk)).partition(|st| st.signer == Signer::Folder);
         // Profiles and follows last: a grant in the same batch may make their signer a member.
         by_device.sort_by_key(|st| matches!(st.body, Body::Profile { .. } | Body::Follow { .. } | Body::Moved { .. } | Body::Rendezvous { .. }));
-        let before = (self.members.clone(), self.invites.clone(), self.share_until, self.profile_hashes(), self.agents, self.follows.clone(), self.moves(), self.rendezvous());
+        let before = (self.members.clone(), self.invites.clone(), self.share_until, self.read_only, self.profile_hashes(), self.agents, self.follows.clone(), self.moves(), self.rendezvous());
         let mut new = false;
         for st in by_owner.drain(..) {
             new |= self.statements.insert(st.hash(), st).is_none();
@@ -1153,7 +1181,7 @@ impl Membership {
         }
         new_follow
             || (new || more)
-                && before != (self.members.clone(), self.invites.clone(), self.share_until, self.profile_hashes(), self.agents, self.follows.clone(), self.moves(), self.rendezvous())
+                && before != (self.members.clone(), self.invites.clone(), self.share_until, self.read_only, self.profile_hashes(), self.agents, self.follows.clone(), self.moves(), self.rendezvous())
     }
 
     /// The latest profile statement of a device, and its hash.
@@ -1213,6 +1241,32 @@ impl Membership {
         self.share_until
     }
 
+    /// The serial of the owners' latest decision about `device_pk` (a grant or a removal); `None` without one.
+    pub fn owner_serial(&self, device_pk: &[u8; 32]) -> Option<u64> {
+        self.statements.values().filter_map(owner_target).filter(|(d, _)| d == device_pk).map(|(_, s)| s).max()
+    }
+
+    /// The highest serial of the owners' statements here: what the next one goes above.
+    pub fn max_serial(&self) -> u64 {
+        self.max_serial
+    }
+
+    /// The role the owners gave `device_pk` before their latest decision about it (their grant or removal before that
+    /// one, by serial, then signature); `None` without one, or after a removal. What a device was before a change.
+    pub fn owner_role_before_latest(&self, device_pk: &[u8; 32]) -> Option<Role> {
+        let mut said: Vec<&Statement> = self.statements.values().filter(|st| owner_target(st).is_some_and(|(d, _)| d == *device_pk)).collect();
+        said.sort_by(|x, y| (statement_serial(x), &x.sig).cmp(&(statement_serial(y), &y.sig)));
+        match said.iter().rev().nth(1)?.body {
+            Body::Grant { role, .. } => Some(role),
+            _ => None,
+        }
+    }
+
+    /// The folder is *Read only* (the owners' setting, [`Body::ReadOnly`]): only the owners' changes count.
+    pub fn read_only(&self) -> bool {
+        self.read_only
+    }
+
     /// The channel is open to agents ("Agents: Yes"): the owners' and current admins' latest [`Body::Agents`], or an
     /// owner's [`CHANNEL_AGENTS`] mark when there is none. No statement: closed.
     pub fn agents(&self) -> bool {
@@ -1265,9 +1319,15 @@ impl Membership {
         self.members.iter().filter(|(_, m)| self.active(m))
     }
 
-    /// The devices whose versions count: every member that counts now and may write.
+    /// The devices whose versions count: every member that counts now and may write. (While the folder is *Read only*
+    /// only the owners' changes count: [`Self::owners`]; the versions the others signed before stay valid.)
     pub fn writers(&self) -> Vec<[u8; 32]> {
         self.members().filter(|(_, m)| m.role.access() == Access::Write).map(|(pk, _)| *pk).collect()
+    }
+
+    /// The owners now.
+    pub fn owners(&self) -> Vec<[u8; 32]> {
+        self.members().filter(|(_, m)| m.role == Role::Owner).map(|(pk, _)| *pk).collect()
     }
 
     /// Every invitation known, by id.
@@ -1370,6 +1430,7 @@ impl Membership {
         let mut invites: BTreeMap<[u8; 16], InviteState> = BTreeMap::new();
         let mut revokes: Vec<(&Statement, [u8; 16])> = Vec::new();
         let mut share: Option<(u64, &[u8; 64], u64, [u8; 32])> = None;
+        let mut read_only: Option<(u64, &[u8; 64], bool)> = None;
         let mut max_serial = 0;
         for (h, st) in &self.statements {
             let note = |invites: &mut BTreeMap<[u8; 16], InviteState>, i: &Invite| {
@@ -1385,6 +1446,12 @@ impl Membership {
                 max_serial = max_serial.max(*serial);
                 if share.is_none_or(|(cur, sig, _, _)| (*serial, &st.sig) > (cur, sig)) {
                     share = Some((*serial, &st.sig, *until_s, *h));
+                }
+            }
+            if let (Body::ReadOnly { on, serial, .. }, Signer::Folder) = (&st.body, st.signer) {
+                max_serial = max_serial.max(*serial);
+                if read_only.is_none_or(|(cur, sig, _)| (*serial, &st.sig) > (cur, sig)) {
+                    read_only = Some((*serial, &st.sig, *on));
                 }
             }
             let Some((device, serial)) = owner_target(st) else { continue };
@@ -1500,6 +1567,7 @@ impl Membership {
         self.max_serial = max_serial;
         self.share_until = share.map(|(_, _, u, _)| u).filter(|u| *u != 0);
         self.share_by = share.map(|(_, _, _, h)| h);
+        self.read_only = read_only.is_some_and(|(_, _, on)| on);
         // Agents: Yes/No: the latest of the owners' and current admins' (0.1.12's mark at serial 0, so after any other).
         let mut agents: Option<(AgentsKey, bool)> = None;
         let mut agents_serial = 0;
@@ -2706,5 +2774,56 @@ mod tests {
         assert_eq!(InviteLink::parse_devices(&link.format_chat()), Err(KeyError::ChannelLink));
         // A version before 0.1.13 does not know the prefix: not a Seedwell link to it.
         assert_eq!(parse_0_1_12(&text).map(|_| ()), Err(KeyError::Link));
+    }
+
+    /// *Read only* is the owners' setting (protocol 4, [`Body::ReadOnly`]): fails when a device's statement (an admin's)
+    /// turns it on or off anywhere, when the owners' latest (by serial, then signature) does not decide whatever order
+    /// the statements came in, when it changes who writes or anyone's role, or when it does not read back as written.
+    #[test]
+    fn read_only_is_the_owners_latest_setting_and_no_one_elses() {
+        let (s, mut m, me) = base();
+        let admin = dev(2);
+        m.add([grant(&s, &admin, Role::Admin, 2)]);
+        let fid = m.folder_id();
+        let by_admin = Statement::by_device(&admin, &fid, Body::ReadOnly { on: true, serial: 9, at_s: NOW });
+        assert!(!by_admin.verify(s.public_key()), "only the folder key signs it");
+        m.add([by_admin]);
+        assert!(!m.read_only(), "an admin turned it on");
+        let (writers, roles) = (m.writers(), (m.role(me.public_key()), m.role(admin.public_key())));
+        let ro = |on, serial| Statement::by_owner(&s, Body::ReadOnly { on, serial, at_s: NOW });
+        let said = [ro(true, 3), ro(false, 4), ro(true, 5)];
+        for order in [[0, 1, 2], [2, 1, 0], [1, 2, 0], [0, 2, 1]] {
+            let mut x = m.clone();
+            for i in order {
+                x.add([said[i].clone()]);
+            }
+            assert!(x.read_only(), "the latest says on, order {order:?}");
+            assert_eq!(x.next_serial(), 6, "above every owner statement");
+        }
+        m.add(said.clone());
+        assert_eq!((m.writers(), (m.role(me.public_key()), m.role(admin.public_key()))), (writers, roles), "it changed who writes, or a role");
+        let back = Statement::from_bytes(&said[2].to_bytes()).unwrap();
+        assert!(back == said[2] && back.verify(s.public_key()));
+    }
+
+    /// An admission no owner has confirmed counts only while its admin is one: demoted, its unconfirmed admissions stop
+    /// counting (whatever serial it gave them, inside its time as an admin too), while one an owner confirmed is the
+    /// owners' decision and stays. Fails when a demoted admin's unconfirmed admission still lets a device in, or a
+    /// confirmed one goes with it.
+    #[test]
+    fn a_demoted_admins_unconfirmed_admission_stops_counting_and_a_confirmed_one_stays() {
+        let (s, mut m, _) = base();
+        let (admin, x, y) = (dev(2), dev(5), dev(6));
+        let fid = m.folder_id();
+        m.add([grant(&s, &admin, Role::Admin, 2)]);
+        let (ix, iy) = (invite_by(&s, Some(&admin), Role::ReadWrite, 1, 1), invite_by(&s, Some(&admin), Role::ReadWrite, 1, 2));
+        let admit = |d: &DeviceKey, i: Invite, serial| Statement::by_device(&admin, &fid, Body::Grant { device: *d.public_key(), role: Role::ReadWrite, serial, at_s: NOW, invite: Some(i) });
+        m.add([admit(&x, ix, 3), admit(&y, iy, 3)]);
+        assert_eq!((m.role(x.public_key()), m.role(y.public_key())), (Some(Role::ReadWrite), Some(Role::ReadWrite)));
+        // The owner's device confirms Y (as confirm_admitted does), then the owner demotes the admin.
+        m.add([Statement::by_owner(&s, Body::Grant { device: *y.public_key(), role: Role::ReadWrite, serial: 4, at_s: NOW, invite: Some(iy) })]);
+        m.add([grant(&s, &admin, Role::ReadWrite, 5)]);
+        assert_eq!(m.role(x.public_key()), None, "a demoted admin's unconfirmed admission still counts");
+        assert_eq!(m.role(y.public_key()), Some(Role::ReadWrite), "a confirmed admission went with its admin");
     }
 }

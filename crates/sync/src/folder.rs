@@ -301,6 +301,46 @@ impl FolderCore {
         self.cfg.access
     }
 
+    /// *Read only* (SPEC §7G.1): `Some(owners)` while the folder's owners' setting is on. Then another device's version
+    /// counts only when an owner made it (its signature, whoever relays it) or an owner's device announces it; the rest
+    /// stay stored and count again once it is off. Every path's need is worked out again when it changes. (Whether this
+    /// device signs is its access: [`Self::set_membership`].) True when it changed.
+    pub fn set_read_only(&mut self, owners: Option<&[[u8; 32]]>) -> io::Result<bool> {
+        let owners = owners.map(|o| Arc::new(o.iter().map(|pk| DeviceId::of_public_key(pk).short()).collect::<BTreeSet<ShortId>>()));
+        if self.store.owners_only() == owners {
+            return Ok(false);
+        }
+        self.store.set_owners_only(owners);
+        let mut paths = BTreeSet::new();
+        let mut after: Option<String> = None;
+        loop {
+            let page = self.store.local_paths("", after.as_deref(), 1000)?;
+            let Some(last) = page.last().cloned() else { break };
+            paths.extend(page);
+            after = Some(last);
+        }
+        for peer in self.store.peer_ids()? {
+            let mut after: Option<String> = None;
+            loop {
+                let page = self.store.remote_paths(peer, after.as_deref(), 1000)?;
+                let Some(last) = page.last().cloned() else { break };
+                paths.extend(page);
+                after = Some(last);
+            }
+        }
+        let paths: Vec<String> = paths.into_iter().collect();
+        for chunk in paths.chunks(1000) {
+            let mut batch = Batch::new(&*self.store, self.me)?;
+            for p in chunk {
+                batch.touch(p);
+            }
+            let ops = batch.finish()?;
+            self.store.apply(ops)?;
+        }
+        self.follow_availability(&paths)?;
+        Ok(true)
+    }
+
     /// Replaces the ignore patterns (the `.seedwellignore` file changed). Paths that are no longer ignored are picked
     /// up by the next scan ([`Self::take_ignore_changed`] says one is due).
     pub fn set_ignore(&mut self, ignore: Ignore) -> io::Result<()> {
@@ -562,7 +602,10 @@ impl FolderCore {
             ignore: &ignore,
             round: Default::default(),
         };
-        let report = puller.pull(&mut *self.store)?;
+        let report = puller.pull(&mut *self.store);
+        // What the round took to place is recorded now (or the round failed, and a later one places it again).
+        crate::lazy::lock(&self.streams).placing.clear();
+        let report = report?;
         self.follow_availability(&report.holderless)?;
         if self.cfg.on_demand {
             self.prune_feed()?;
@@ -642,11 +685,29 @@ impl FolderCore {
             self.cfg.access = access;
             self.signer = signs.then(|| self.device_key.clone()).flatten().map(|k| DeviceSigner::new(k, self.writers.folder_id()));
             if !could_sign && self.signer.is_some() {
-                self.claim_local_only(self.awaiting_write)?;
+                // Held back while the folder was Read only (also before a restart): what it changed meanwhile, to
+                // files it had received too, becomes its own now, as for a device that waited to be admitted.
+                let held = self.store.held()?;
+                self.claim_local_only(self.awaiting_write || held)?;
+                if held {
+                    self.store.apply(vec![Op::SetHeld(false)])?;
+                }
             }
             changed = true;
         }
         Ok(changed)
+    }
+
+    /// This device holds its changes back while the folder is *Read only* (SPEC §7G.1): it may write by its role but
+    /// does not sign now (the driver gives it read access meanwhile). Kept in the index, so once it signs again (the
+    /// next [`Self::set_membership`] with write access, also after a restart) what it changed meanwhile, to files it had
+    /// received too, becomes its own versions; then it is cleared. The driver clears it itself only where the device
+    /// will not sign (its role reads only, or it was removed): a reader's changes stay local differences.
+    pub fn set_held(&mut self, on: bool) -> io::Result<()> {
+        if self.store.held()? != on {
+            self.store.apply(vec![Op::SetHeld(on)])?;
+        }
+        Ok(())
     }
 
     /// This device joined with an invitation that gives it write access and waits to be admitted: until it is, it

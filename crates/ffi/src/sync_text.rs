@@ -290,7 +290,15 @@ pub fn sync_member_line(member: SyncMember, device: Option<SyncDevice>, expires_
     let reach = device.filter(|_| member.online).map(|d| {
         [via(&d.via), d.client.as_str()].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · ")
     });
-    [Some(reach.unwrap_or_else(|| "Offline".into())), until].into_iter().flatten().collect::<Vec<_>>().join(" · ")
+    [Some(reach.unwrap_or_else(|| "Offline".into())), until, member.removal].into_iter().flatten().collect::<Vec<_>>().join(" · ")
+}
+
+/// What a member's row says of a removal this computer (an admin) asked the owners for (SPEC §7G.1).
+pub(crate) fn removal_line(asked: &trs_sync_net::removals::Asked) -> String {
+    match asked {
+        trs_sync_net::removals::Asked::Waiting => "Removal asked: waiting for the owner".into(),
+        trs_sync_net::removals::Asked::Refused(why) => format!("The owner did not remove it: {}", sentence(why)),
+    }
 }
 
 // MARK: Links
@@ -1429,7 +1437,7 @@ pub(crate) mod tests {
     }
 
     fn member(name: &str, role: SyncRole, me: bool) -> SyncMember {
-        SyncMember { device_id: name.into(), name: name.into(), user: String::new(), role, online: true, is_me: me, expires_s: None }
+        SyncMember { device_id: name.into(), name: name.into(), user: String::new(), role, online: true, is_me: me, expires_s: None, removal: None, removal_waiting: false }
     }
 
     #[test]
@@ -1461,7 +1469,12 @@ pub(crate) mod tests {
         let off = SyncMember { online: false, ..member("X", SyncRole::ReadOnly, false) };
         assert_eq!(sync_member_line(off.clone(), None, None), "Offline");
         let guest = SyncMember { expires_s: Some(NOW), ..off };
-        assert_eq!(sync_member_line(guest, None, Some("1 Nov".into())), "Offline · until 1 Nov", "time-limited access shows its end");
+        assert_eq!(sync_member_line(guest.clone(), None, Some("1 Nov".into())), "Offline · until 1 Nov", "time-limited access shows its end");
+        // A removal this computer (an admin) asked the owner for: waiting, or refused and why.
+        let asked = SyncMember { removal: Some(removal_line(&trs_sync_net::removals::Asked::Waiting)), ..guest.clone() };
+        assert_eq!(sync_member_line(asked, None, None), "Offline · Removal asked: waiting for the owner");
+        let refused = removal_line(&trs_sync_net::removals::Asked::Refused("only an admin of the folder can ask its owner to remove a device".into()));
+        assert_eq!(refused, "The owner did not remove it: Only an admin of the folder can ask its owner to remove a device");
         let dev = |via: &str, client: &str| SyncDevice {
             id: "X".into(),
             name: "X".into(),

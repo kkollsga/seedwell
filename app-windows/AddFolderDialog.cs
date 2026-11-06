@@ -227,7 +227,11 @@ sealed class AddFolderDialog
         }
         if (model.Follow is FollowLine follow)
         {
-            content.Children.Add(Follow(follow, form.AllDevices, !starting, on => Change(form with { AllDevices = on }), ro => Change(form with { ReadOnly = ro })));
+            content.Children.Add(Follow(follow, form.AllDevices, !starting, on => Change(form with { AllDevices = on })));
+        }
+        if (model.ReadOnly is ReadOnlyLine readOnly)
+        {
+            content.Children.Add(ReadOnly(readOnly, !starting, on => Change(form with { ReadOnly = on })));
         }
         if (starting)
         {
@@ -291,8 +295,8 @@ sealed class AddFolderDialog
         return line;
     }
 
-    /// <summary>"On all my devices": the core's title, its line, its help as the tooltip, bound to the form's choice; a folder's "Read only" under it.</summary>
-    internal static StackPanel Follow(FollowLine follow, bool on, bool enabled, Action<bool> set, Action<bool>? setReadOnly = null)
+    /// <summary>"On all my devices": the core's title, its line, its help as the tooltip, bound to the form's choice.</summary>
+    internal static StackPanel Follow(FollowLine follow, bool on, bool enabled, Action<bool> set)
     {
         var s = new StackPanel { Spacing = 2 };
         var toggle = new ToggleSwitch { Header = follow.Title, IsOn = on, IsEnabled = follow.Enabled && enabled };
@@ -303,19 +307,20 @@ sealed class AddFolderDialog
         {
             s.Children.Add(Note(follow.Line));
         }
-        if (follow.ReadOnly is FollowReadOnly ro && setReadOnly is not null)
+        return s;
+    }
+
+    /// <summary>A folder's "Read only", its own switch at "On all my devices"' leading edge: the core's title, state, line and help, and whether this PC may switch it.</summary>
+    internal static StackPanel ReadOnly(ReadOnlyLine line, bool enabled, Action<bool> set)
+    {
+        var s = new StackPanel { Spacing = 2 };
+        var toggle = new ToggleSwitch { Header = line.Title, IsOn = line.On, IsEnabled = line.Enabled && enabled };
+        Help(toggle, line.Help);
+        toggle.Toggled += (_, _) => { if (toggle.IsOn != line.On) set(toggle.IsOn); };
+        s.Children.Add(toggle);
+        if (line.Line.Length > 0)
         {
-            var readOnly = new ToggleSwitch { Header = ro.Title, IsOn = ro.On, IsEnabled = ro.Enabled && enabled, Margin = new Thickness(16, 4, 0, 0) };
-            Help(readOnly, ro.Help);
-            readOnly.Toggled += (_, _) => { if (readOnly.IsOn != ro.On) setReadOnly(readOnly.IsOn); };
-            s.Children.Add(readOnly);
-            if (ro.Line.Length > 0)
-            {
-                var line = Note(ro.Line);
-                line.Margin = new Thickness(16, 0, 0, 0);
-                line.MaxWidth = 424;
-                s.Children.Add(line);
-            }
+            s.Children.Add(Note(line.Line));
         }
         return s;
     }

@@ -1,3 +1,5 @@
+using System.ComponentModel;
+using System.Diagnostics;
 using Microsoft.UI;
 using Microsoft.UI.Text;
 using Microsoft.UI.Xaml;
@@ -23,6 +25,14 @@ sealed class FolderSyncPage
     readonly SyncRemoval removal = new();
     readonly Grid root = new();
     readonly DispatcherTimer timer = new() { Interval = TimeSpan.FromSeconds(1) };
+    // Above the page in all its states: "Other devices can't reach this PC" (the core's SyncReach).
+    readonly Grid frame = new();
+    readonly StackPanel reachBanner = new() { Margin = new Thickness(16, 12, 16, 4), Visibility = Visibility.Collapsed };
+    readonly DispatcherTimer reachTimer = new();
+    SyncReachModel? reachModel;
+    bool reachRunning;
+    // Runs the core's command elevated (a QA run gives another: it never elevates).
+    Action<ProcessStartInfo> reachStart = psi => { using var p = Process.Start(psi); p?.WaitForExit(30_000); };
     string? selected;
     SyncMember[] members = [];
     SyncConflict[] conflicts = [];
@@ -32,11 +42,19 @@ sealed class FolderSyncPage
     DateTime membersRead = DateTime.MinValue;
     DateTime conflictsRead = DateTime.MinValue;
 
-    public UIElement Root => root;
+    public UIElement Root => frame;
 
     public FolderSyncPage(App app)
     {
         this.app = app;
+        frame.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        frame.RowDefinitions.Add(new RowDefinition());
+        frame.Children.Add(reachBanner);
+        Grid.SetRow(root, 1);
+        frame.Children.Add(root);
+        reachTimer.Tick += (_, _) => PollReach();
+        frame.Loaded += (_, _) => PollReach();
+        frame.Unloaded += (_, _) => reachTimer.Stop();
         timer.Tick += (_, _) =>
         {
             // The core's pace, with the Mac's leeway of one refresh (200 ms).
@@ -134,6 +152,91 @@ sealed class FolderSyncPage
             if (t.IsCompletedSuccessfully) root.DispatcherQueue.TryEnqueue(() => { if (selected == id) { conflicts = t.Result; Update(); } });
         });
     }
+
+    // ------------------------------------------------------------------------------------------- can others reach it
+
+    /// <summary>Asks the core at its pace (instant: a lock) and draws the banner when it changed.</summary>
+    internal void PollReach()
+    {
+        var m = app.Reach.Model();
+        reachTimer.Interval = TimeSpan.FromMilliseconds(m.RefreshMs);
+        reachTimer.Start();
+        if (m != reachModel)
+        {
+            reachModel = m;
+            DrawReach();
+        }
+    }
+
+    void DrawReach()
+    {
+        reachBanner.Children.Clear();
+        if (reachModel?.Notice is not SyncReachNotice n)
+        {
+            reachBanner.Visibility = Visibility.Collapsed;
+            return;
+        }
+        var line = new Grid { ColumnSpacing = 12 };
+        line.ColumnDefinitions.Add(new ColumnDefinition());
+        line.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        var text = new StackPanel { Spacing = 2 };
+        text.Children.Add(new TextBlock { Text = n.Title, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, TextWrapping = TextWrapping.Wrap });
+        text.Children.Add(new TextBlock { Text = n.Body, FontSize = 12, Foreground = Res("SystemFillColorCautionBrush"), TextWrapping = TextWrapping.Wrap });
+        line.Children.Add(text);
+        if (n.Action is SyncReachAction action)
+        {
+            var b = new Button { Content = action.Title, IsEnabled = !reachRunning, VerticalAlignment = VerticalAlignment.Center };
+            b.Click += (_, _) => AllowThrough(action);
+            Grid.SetColumn(b, 1);
+            line.Children.Add(b);
+        }
+        reachBanner.Children.Add(line);
+        reachBanner.Visibility = Visibility.Visible;
+    }
+
+    /// <summary>The notice's action: the core's command, elevated, off the UI thread. The user saying No to UAC changes nothing: no
+    /// recheck, which would read the same rule and take it for a policy. Any other ending has the core read the rule again.</summary>
+    async void AllowThrough(SyncReachAction action)
+    {
+        reachRunning = true;
+        DrawReach();
+        var psi = new ProcessStartInfo(action.Program, action.Arguments) { UseShellExecute = true, Verb = "runas", WindowStyle = ProcessWindowStyle.Hidden };
+        var cancelled = false;
+        try
+        {
+            await Task.Run(() => reachStart(psi));
+        }
+        catch (Win32Exception e) when (e.NativeErrorCode == 1223)
+        {
+            cancelled = true;
+        }
+        catch (Exception e)
+        {
+            AppLog.Write($"reach: the command did not run: {e.Message}");
+        }
+        AppLog.Write($"reach: allow through the firewall {(cancelled ? "cancelled" : "ran")}");
+        if (!cancelled)
+        {
+            await Task.Run(() => app.Reach.Recheck());
+        }
+        reachRunning = false;
+        reachModel = null;
+        PollReach();
+        DrawReach();
+    }
+
+    /// <summary>QA: the action as the button runs it, with UAC's answer given: never the real command.</summary>
+    internal void QaAllow(bool userSaysNo)
+    {
+        if (reachModel?.Notice?.Action is SyncReachAction action)
+        {
+            reachStart = _ => { if (userSaysNo) throw new Win32Exception(1223); };
+            AllowThrough(action);
+        }
+    }
+
+    /// <summary>The banner as drawn (QA).</summary>
+    internal string QaReachDrawn() => $"banner {reachBanner.Visibility}, buttons [{string.Join(", ", RowCommands.Tree(reachBanner).OfType<Button>().Select(b => $"{b.Content} {(b.IsEnabled ? "on" : "off")}"))}]";
 
     // ------------------------------------------------------------------------------------------------ drawing
 
@@ -733,6 +836,22 @@ sealed class FolderSyncPage
         Run(b.Command, p.FolderId);
         return $"ran {b.Command.GetType().Name}{(b.Question is null ? "" : " (asked)")}";
     }
+
+    /// <summary>QA: a member's menu item by its device id and title, as its click after the question (a disabled one does not run).</summary>
+    internal string QaMemberPress(string deviceId, string title)
+    {
+        var row = model?.Page?.Members.Rows.FirstOrDefault(r => r.DeviceId == deviceId);
+        if (row?.RoleMenu?.Entries.OfType<SyncPageMenuEntry.Item>().FirstOrDefault(i => i.Title.StartsWith(title)) is not SyncPageMenuEntry.Item it) return "no such item";
+        if (!it.Enabled) return "disabled";
+        Run(it.Command, model!.Page!.FolderId);
+        return $"ran {it.Command.GetType().Name}";
+    }
+
+    /// <summary>QA: the member rows as drawn: who, the line under it, the role (menu or plain text) and the menu's items.</summary>
+    internal string QaMembers() => string.Join(" || ", (model?.Page?.Members.Rows ?? []).Select(r =>
+        $"{r.DeviceId} \"{r.Name}\" line \"{r.Line}\" role {r.Role}, " + (r.RoleMenu is SyncPageMenu m
+            ? $"menu [{string.Join(", ", m.Entries.OfType<SyncPageMenuEntry.Item>().Select(i => $"{i.Title} {(i.Enabled ? "enabled" : "disabled")}"))}] question \"{m.Entries.OfType<SyncPageMenuEntry.Item>().LastOrDefault()?.Question?.Text}\""
+            : "plain")));
 
     /// <summary>QA: the Stop Syncing question's Trash box.</summary>
     internal void QaTrash(bool on)

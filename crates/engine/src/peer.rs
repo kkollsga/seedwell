@@ -243,6 +243,8 @@ pub(crate) struct PeerCtx {
     pub utp: Arc<std::sync::RwLock<Option<UtpSocket>>>,
     /// Connect timeout of the uTP leg when TCP is the fallback (a peer that speaks uTP answers fast).
     pub utp_probe_timeout: Duration,
+    /// Torrent traffic through a SOCKS5 proxy (SPEC §7H): while it is on, every dial goes through it, or nowhere.
+    pub proxy: Arc<crate::proxy::ProxyState>,
 }
 
 impl PeerCtx {
@@ -268,7 +270,16 @@ pub(crate) struct PeerShared {
     pub up: AtomicU64,
     /// Give up the connection while it is still being opened (the peer task reads no commands yet).
     pub abort: tokio::sync::Notify,
+    /// How the connection was opened (SPEC §7H): 0 while the dial has not chosen its way (it asks the proxy state
+    /// when it does), else [`ROUTE_DIRECT`] or [`ROUTE_PROXY`]. Set when the dial chooses, before it connects, and
+    /// direct for one that came in.
+    pub route: std::sync::atomic::AtomicU8,
 }
+
+/// A direct connection: incoming, or dialled while the proxy was off.
+pub(crate) const ROUTE_DIRECT: u8 = 1;
+/// Dialled through the proxy.
+pub(crate) const ROUTE_PROXY: u8 = 2;
 
 /// Our pieces, as told to a new peer.
 pub(crate) enum HaveSummary {
@@ -412,7 +423,29 @@ pub(crate) async fn run(p: Box<PeerSpawn>) {
 
 /// Open the transport. TCP waits `connect_timeout`; a uTP leg that has TCP behind it is cut short
 /// (a peer that speaks uTP answers the SYN in a round trip, one that does not never will).
-async fn connect_transport(ctx: &PeerCtx, addr: SocketAddr, dial: Dial) -> Result<PeerIo, Close> {
+///
+/// With the proxy on (SPEC §7H) it is TCP through the proxy whatever `dial` says, and with no working server it is
+/// nothing: never a direct connection.
+async fn connect_transport(ctx: &PeerCtx, shared: &PeerShared, addr: SocketAddr, dial: Dial) -> Result<PeerIo, Close> {
+    let route = ctx.proxy.route();
+    let mark = if matches!(route, crate::proxy::Route::Via(_)) { ROUTE_PROXY } else { ROUTE_DIRECT };
+    shared.route.store(mark, Ordering::Relaxed);
+    match route {
+        crate::proxy::Route::Direct => {}
+        crate::proxy::Route::Held => return Err(Close::Io("held: the proxy is not working".into())),
+        crate::proxy::Route::Via(p) => {
+            return match trs_socks::connect(&p, &trs_socks::Target::Addr(addr), ctx.connect_timeout).await {
+                Ok((s, t)) => {
+                    ctx.proxy.dial_ok(t);
+                    Ok(PeerIo::Tcp(s))
+                }
+                Err(e) => {
+                    ctx.proxy.dial_failed(&e);
+                    Err(if e == trs_socks::Error::TargetTimeout { Close::Timeout } else { Close::Io(e.to_string()) })
+                }
+            };
+        }
+    }
     async fn tcp(ctx: &PeerCtx, addr: SocketAddr) -> Result<PeerIo, Close> {
         let s = tokio::time::timeout(ctx.connect_timeout, trs_platform::net::connect_tcp(addr))
             .await
@@ -446,9 +479,9 @@ async fn connect_transport(ctx: &PeerCtx, addr: SocketAddr, dial: Dial) -> Resul
 /// whether our BitTorrent handshake has been sent already (as the initial payload of an encrypted
 /// handshake). With `Prefer`, a peer that does not answer the encrypted handshake is dialled again
 /// plain and remembered, so that the next dial goes straight to plain.
-async fn dial_out(ctx: &PeerCtx, addr: SocketAddr, dial: Dial, ours: &Handshake) -> Result<(PeerIo, bool), Close> {
+async fn dial_out(ctx: &PeerCtx, shared: &PeerShared, addr: SocketAddr, dial: Dial, ours: &Handshake) -> Result<(PeerIo, bool), Close> {
     use crate::config::EncryptionPolicy as Enc;
-    let io = connect_transport(ctx, addr, dial).await?;
+    let io = connect_transport(ctx, shared, addr, dial).await?;
     let known_plain = ctx.plain_peers.lock().unwrap_or_else(|e| e.into_inner()).contains(&addr);
     if ctx.encryption == Enc::Off || (ctx.encryption == Enc::Prefer && known_plain) {
         return Ok((io, false));
@@ -465,7 +498,7 @@ async fn dial_out(ctx: &PeerCtx, addr: SocketAddr, dial: Dial, ours: &Handshake)
         _ => {
             // A client without MSE closes on the Diffie-Hellman bytes. Try again in the clear.
             ctx.diag.mse_fallbacks.fetch_add(1, Ordering::Relaxed);
-            let io = connect_transport(ctx, addr, dial).await?;
+            let io = connect_transport(ctx, shared, addr, dial).await?;
             ctx.plain_peers.lock().unwrap_or_else(|e| e.into_inner()).insert(addr);
             Ok((io, false))
         }
@@ -664,9 +697,12 @@ impl Peer {
         };
         // `sent`: an encrypted dial carries our handshake as its initial payload.
         let (mut stream, remote, is_incoming, sent) = match incoming {
-            Some((s, hs, answered)) => (s, hs, true, answered),
+            Some((s, hs, answered)) => {
+                shared.route.store(ROUTE_DIRECT, Ordering::Relaxed);
+                (s, hs, true, answered)
+            }
             None => {
-                let (s, sent) = dial_out(&ctx, addr, dial, &ours).await?;
+                let (s, sent) = dial_out(&ctx, &shared, addr, dial, &ours).await?;
                 (s, Handshake::new([0; 20], [0; 20], false), false, sent)
             }
         };

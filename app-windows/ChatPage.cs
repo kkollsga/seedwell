@@ -859,8 +859,14 @@ sealed class ChatPage
             g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             g.Children.Add(new Microsoft.UI.Xaml.Shapes.Ellipse { Width = 8, Height = 8, VerticalAlignment = VerticalAlignment.Center, Fill = r.Online ? Res("SystemFillColorSuccessBrush") : Res("TextFillColorTertiaryBrush") });
             var name = new TextBlock { Text = r.Name, VerticalAlignment = VerticalAlignment.Center, TextTrimming = TextTrimming.CharacterEllipsis };
-            Grid.SetColumn(name, 1);
-            g.Children.Add(name);
+            var who = new StackPanel { Spacing = 1, VerticalAlignment = VerticalAlignment.Center };
+            who.Children.Add(name);
+            if (r.Removal is string removal)
+            {
+                who.Children.Add(Faint(removal, Theme.Caption));
+            }
+            Grid.SetColumn(who, 1);
+            g.Children.Add(who);
             FrameworkElement role = r.RoleMenu is ChatPageMenu menu
                 ? new DropDownButton { Content = menu.Title, Flyout = Menu(menu.Entries), VerticalAlignment = VerticalAlignment.Center }
                 : new TextBlock { Text = r.Role, FontSize = 12, Foreground = Res("TextFillColorSecondaryBrush"), VerticalAlignment = VerticalAlignment.Center };
@@ -1363,6 +1369,34 @@ sealed class ChatPage
         if (model?.Messages.ElementAtOrDefault(n)?.Reply is ChatPageButton b) Run(b.Command);
     }
     internal void QaMembers() => Run(new ChatPageCommand.ShowMembers());
+
+    /// <summary>QA: the member rows of the panel: who, the removal line, the role and its menu.</summary>
+    internal string QaMemberRows() => string.Join(" || ", (model?.Members?.Rows ?? []).Select(r =>
+        $"{r.DeviceId} \"{r.Name}\" removal \"{r.Removal}\" role {r.Role}, " + (r.RoleMenu is ChatPageMenu m
+            ? $"menu [{string.Join(", ", m.Entries.OfType<ChatPageMenuEntry.Item>().Select(i => $"{i.Title} {(i.Enabled ? "enabled" : "disabled")}"))}]"
+            : "plain")));
+
+    /// <summary>QA: a member's menu item by its device id and title, as its click (a disabled one does not run).</summary>
+    internal string QaMemberPress(string deviceId, string title)
+    {
+        var row = model?.Members?.Rows.FirstOrDefault(r => r.DeviceId == deviceId);
+        if (row?.RoleMenu?.Entries.OfType<ChatPageMenuEntry.Item>().FirstOrDefault(i => i.Title.StartsWith(title)) is not ChatPageMenuEntry.Item it) return "no such item";
+        if (!it.Enabled) return "disabled";
+        Run(it.Command);
+        return $"ran {it.Command.GetType().Name}";
+    }
+
+    /// <summary>QA: the panel's content on the theme's page colour, saved as a picture: a flyout closes when a QA launch takes the focus.</summary>
+    internal async Task<string> QaMembersShot(string path)
+    {
+        if (model?.Members is not ChatMembersPanel panel) return "no panel";
+        var sheet = new Border { Child = Members(panel), Padding = new Thickness(16), Background = Res("SolidBackgroundFillColorBaseBrush") };
+        var host = new Microsoft.UI.Xaml.Controls.Primitives.Popup { XamlRoot = root.XamlRoot, Child = sheet, IsOpen = true };
+        await Task.Delay(300);
+        await SnapshotRenderer.SaveImage(sheet, path, true);
+        host.IsOpen = false;
+        return File.Exists(path) ? "panel saved" : "panel not saved";
+    }
 
     /// <summary>QA: message <paramref name="n"/>'s controls shown (or hidden) as the pointer on it does.</summary>
     internal bool QaHover(int n, bool on)

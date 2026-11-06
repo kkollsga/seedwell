@@ -183,7 +183,8 @@ impl Torrent {
     /// Which transport to try for an outgoing connection (libtorrent-style: TCP unless the peer
     /// is known to speak uTP, with the other transport as the fallback).
     fn dial_for(&self, addr: SocketAddr) -> Dial {
-        if self.ctx.utp().is_none() || !self.cfg.utp {
+        // Through the proxy only TCP exists (SPEC §7H).
+        if self.ctx.utp().is_none() || !self.cfg.utp || self.sh.proxy.on() {
             return Dial::Tcp;
         }
         if !self.cfg.outgoing_tcp {
@@ -195,6 +196,21 @@ impl Torrent {
 
     fn send(&self, key: PeerKey, c: PeerCmd) -> bool {
         self.peers.get(&key).is_some_and(|p| p.tx.try_send(c).is_ok())
+    }
+
+    /// While the proxy is on (SPEC §7H), every connection that did not open through it goes: incoming ones, and
+    /// those dialled directly before it came on, still opening or not. Called on every configuration change and on
+    /// every tick, so a missed notice cannot keep one. A dial that has not chosen its way yet chooses the proxy.
+    pub(super) fn drop_direct_peers(&self) {
+        if !self.sh.proxy.on() {
+            return;
+        }
+        for p in self.peers.values() {
+            if p.incoming || p.shared.route.load(std::sync::atomic::Ordering::Relaxed) == crate::peer::ROUTE_DIRECT {
+                p.shared.abort.notify_one();
+                let _ = p.tx.try_send(PeerCmd::Disconnect);
+            }
+        }
     }
 
     pub(super) fn disconnect(&self, key: PeerKey) {
@@ -849,6 +865,8 @@ impl Torrent {
             // An outage (SPEC 7C.4c): the dial failed because of the network, not the peer. The
             // address is kept without a strike and tried again when the network is back.
             _ if !p.incoming && !connected && self.sh.net.held() => self.pool.requeue(p.addr),
+            // The proxy is not working (SPEC §7H): the same, the peer is not to blame.
+            _ if !p.incoming && !connected && self.sh.proxy.held() => self.pool.requeue(p.addr),
             _ if !connected => self.pool.retry_later(p.addr, Duration::from_secs(30), now),
             Close::Eof | Close::Io(_) | Close::Timeout if !p.incoming => {
                 self.pool.retry_later(p.addr, Duration::from_secs(60), now)
@@ -868,6 +886,10 @@ impl Torrent {
         // An outage holds every dial (SPEC 7C.4c): nothing could connect, and every failure would
         // age the address.
         if self.sh.net.held() {
+            return;
+        }
+        // The proxy is on and no server of it works (SPEC §7H): nothing is dialled, never directly.
+        if self.sh.proxy.held() {
             return;
         }
         // A complete torrent only needs a few peers; leechers find us through the tracker. Every

@@ -71,15 +71,25 @@ import SwiftUI
         }
     }
 
-    /// "On all my devices" (`on`) and its "Read only" (`readOnly`) switched: applied at once, for the user's other
-    /// devices; the next link's role follows Read only (the core's choice).
-    func setDevices(on: Bool, readOnly: Bool) {
+    /// "On all my devices" switched (`on`): applied at once, for the user's other devices.
+    func setDevices(on: Bool) {
+        apply { core, form in try await core.syncShareSetDevices(form: form, on: on) }
+    }
+
+    /// "Read only" switched (`on`, the owner's folder setting): applied at once; the next link's role follows it (the
+    /// core's choice).
+    func setReadOnly(on: Bool) {
+        apply { core, form in try await core.syncShareSetReadOnly(form: form, on: on) }
+    }
+
+    /// Runs a switch's call off the main thread, then takes the form's next role or shows why it failed.
+    private func apply(_ call: @escaping @Sendable (Core, SyncShareForm) async throws -> SyncShareForm) {
         guard !busy else { return }
         busy = true
         error = nil
         let (core, form) = (core, form)
         Task {
-            let r: Result<SyncShareForm, Error> = await catching { try await core.syncShareSetDevices(form: form, on: on, readOnly: readOnly) }
+            let r: Result<SyncShareForm, Error> = await catching { try await call(core, form) }
             busy = false
             switch r {
             case .success(let f): self.form.role = f.role
@@ -170,13 +180,15 @@ struct SyncShareView: View {
                     .accessibilityIdentifier("sync-share-summary")
                 if let devices = w.devices {
                     Divider().padding(.top, 16)
-                    FollowToggle(
-                        line: devices,
-                        isOn: Binding(get: { devices.on }, set: { model.setDevices(on: $0, readOnly: devices.readOnly?.on ?? false) }),
-                        readOnly: Binding(get: { devices.readOnly?.on ?? false }, set: { model.setDevices(on: devices.on, readOnly: $0) })
-                    )
-                    .disabled(model.busy)
-                    .padding(.top, 12)
+                    FollowToggle(line: devices, isOn: Binding(get: { devices.on }, set: { model.setDevices(on: $0) }))
+                        .disabled(model.busy)
+                        .padding(.top, 12)
+                }
+                if let readOnly = w.readOnly {
+                    Divider().padding(.top, 16)
+                    ReadOnlyToggle(line: readOnly, isOn: Binding(get: { readOnly.on }, set: { model.setReadOnly(on: $0) }))
+                        .disabled(model.busy)
+                        .padding(.top, 12)
                 }
                 if let s = w.sharing {
                     Divider().padding(.top, 16)

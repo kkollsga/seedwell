@@ -162,67 +162,99 @@ import Testing
         #expect(try FPClient(dir: deep, gate: nil).ask(FPRequest("hello", folder: ""), as: FPHello.self).get().app == "deep")
     }
 
-    // MARK: The app's domains
+    // MARK: The hub
 
-    @MainActor @Test func domainsFollowTheCore() async throws {
+    /// Fails if the Finder gets more than one entry: the host registers only the hub the core names (*Seedwell*),
+    /// renames it when told, and asks the user to allow it once, when it is registered, never again per folder.
+    @MainActor @Test func theHubIsTheOneDomainAndIsAskedForOnce() async throws {
         let (core, fake) = try Self.host()
         let host = FileProviderHost(core: core, domains: fake)
         var asked = 0
         host.showSetup = { asked += 1 }
-        await fake.set([FileProviderDomainState(id: "old", name: "Gone", enabled: true)])
-        await host.reconcile([SyncHostDomain(id: "F", name: "Team")])
-        #expect(await fake.domains == [FileProviderDomainState(id: "F", name: "Team", enabled: false)])
-        #expect(host.disabled == ["F"] && asked == 1, "a new domain starts switched off: the user is asked once")
-        // Renamed: the same domain takes the new name (and nobody is asked again).
-        await host.reconcile([SyncHostDomain(id: "F", name: "Team 2")])
-        #expect(await fake.domains.map(\.name) == ["Team 2"] && asked == 1)
+        let hub = core.syncHostHubDomain()
+        #expect(hub.name == "Seedwell")
+        await host.reconcile([hub])
+        #expect(await fake.domains == [FileProviderDomainState(id: hub.id, name: "Seedwell", enabled: false)])
+        #expect(host.disabled == [hub.id] && asked == 1, "a new domain starts switched off: the user is asked once")
+        #expect(host.isOff("F"), "every on-demand folder's page says so")
+        // A folder made on demand: no domain of its own, and nobody is asked again.
+        var f = SyncTests.folder("Team", id: "F")
+        f.onDemand = true
+        await host.added(f)
+        await host.reconcile([hub])
+        let (adds, count) = (await fake.adds, await fake.domains.count)
+        #expect(asked == 1 && adds == 1 && count == 1)
         // The user allowed it in System Settings.
-        await fake.enable("F")
+        await fake.enable(hub.id)
         await host.refreshEnabled()
-        #expect(host.disabled.isEmpty)
+        #expect(host.disabled.isEmpty && !host.isOff("F"))
         host.stop()
     }
 
-    /// A domain the core's list lacks stays unless the core's configuration says its folder was removed or is full
-    /// (the list is no evidence: a folder that could not open, or is stopped for a move, is missing from it).
-    @MainActor @Test func aDomainGoesOnlyWhenTheCoreSaysSo() async throws {
+    /// Fails if the migration from the per-folder domains removes one before the system handed over its pending
+    /// changes, registers the hub before every old domain went, gives up the rest when one cannot be removed (the next
+    /// start must go on), or runs again once it is done.
+    @MainActor @Test func theMigrationMovesTheOldDomainsOverOnce() async throws {
         let (core, fake) = try Self.host()
-        var folders: [SyncFolder] = []
-        for _ in 0..<100 where folders.isEmpty {
-            folders = core.syncSnapshot().folders
-            if folders.isEmpty { try await Task.sleep(nanoseconds: 50_000_000) }
-        }
-        let f = try await core.syncSetOnDemand(id: try #require(folders.first).id, onDemand: true, path: nil)
         let host = FileProviderHost(core: core, domains: fake)
-        let full = try #require(folders.dropFirst().first)
-        await fake.set([FileProviderDomainState(id: f.id, name: f.name, enabled: true), FileProviderDomainState(id: "gone", name: "Old", enabled: true),
-                        FileProviderDomainState(id: full.id, name: full.name, enabled: true)])
-        // An empty list: the on-demand folder's domain stays; the removed one's and the full one's go.
-        await host.reconcile([])
-        #expect(await fake.domains.map(\.id) == [f.id])
+        let hub = core.syncHostHubDomain()
+        await fake.set([FileProviderDomainState(id: "F", name: "Team", enabled: true), FileProviderDomainState(id: "G", name: "Off", enabled: false),
+                        FileProviderDomainState(id: "H", name: "Stuck", enabled: true)])
+        await fake.failRemovals(of: ["H"])
+        host.beginMigration()
+        await host.reconcile([hub])
+        // F's pending changes were handed over first; G was switched off (nothing pending); H could not go.
+        #expect(await fake.waited == ["F/root", "H/root"])
+        let steps = await fake.steps
+        #expect(steps.prefix(2) == ["wait F", "remove F"], "\(steps)")
+        #expect(await fake.domains.map(\.id).sorted() == ["H", hub.id])
+        #expect(await fake.steps.last == "add \(hub.id)", "the hub comes after the old domains went")
+        #expect(core.syncHostUnfinishedReleases().isEmpty, "every removal was noted done")
+        // The next start goes on with what is left.
+        await fake.failRemovals(of: [])
+        let next = FileProviderHost(core: core, domains: fake)
+        next.beginMigration()
+        await next.reconcile([hub])
+        #expect(await fake.domains.map(\.id) == [hub.id])
+        // Done: never again, also for a domain that turns up later.
+        await fake.set(await fake.domains + [FileProviderDomainState(id: "X", name: "Later", enabled: true)])
+        let third = FileProviderHost(core: core, domains: fake)
+        third.beginMigration()
+        await third.reconcile([hub])
+        #expect(await fake.domains.map(\.id).contains("X"))
         host.stop()
+        next.stop()
+        third.stop()
     }
 
-    /// The core lets go of a folder: the system hands over its changes first, then the domain goes, and what it kept
-    /// comes back for the core. A folder without a domain: nothing to do.
-    @MainActor @Test func releasingADomainHandsOverFirst() async throws {
+    /// The core lets go of a folder: fails if the hub's pending changes below the folder are not handed over before
+    /// the core's let-go, or if the hub goes with the folder. Without a hub: nothing to do.
+    @MainActor @Test func releasingAFolderHandsOverFirstAndKeepsTheHub() async throws {
         let (core, fake) = try Self.host()
         let host = FileProviderHost(core: core, domains: fake)
-        await fake.set([FileProviderDomainState(id: "F", name: "Team", enabled: true)])
+        let hub = core.syncHostHubDomain()
+        #expect(await host.releaseDomain("F") == SyncHostRemoval(error: nil), "no hub: nothing to hand over")
+        let lets = Steps()
+        host.letGo = { f, visible in lets.add("let go \(f) \(visible ?? "-")"); return nil }
+        await fake.set([FileProviderDomainState(id: hub.id, name: hub.name, enabled: true)])
+        await fake.setVisible("/tmp/hub/Team")
         let r = await host.releaseDomain("F")
         #expect(r.error == nil)
-        #expect(await fake.waited == ["F"])
-        #expect(await fake.domains.isEmpty)
-        #expect(await host.releaseDomain("F") == SyncHostRemoval(error: nil))
+        #expect(await fake.waited == ["\(hub.id)/\(core.syncHostHubItem(id: "F"))"])
+        #expect(lets.all == ["let go F /tmp/hub/Team"])
+        #expect(await fake.domains.map(\.id) == [hub.id], "the hub stays")
         host.stop()
     }
 
-    /// Fails if a removal that was refused goes ahead late: the core gives up (the test says when) while the system
-    /// is still handing over, and the domain must stay, never removed after the core said no.
-    @MainActor @Test func aRemovalTheCoreGaveUpOnLeavesTheDomain() async throws {
+    /// Fails if a let-go that was refused goes ahead late: the core gives up (the test says when) while the system is
+    /// still handing over, and the folder must stay in the hub, never let go of after the core said no.
+    @MainActor @Test func aRemovalTheCoreGaveUpOnLeavesTheFolder() async throws {
         let (core, fake) = try Self.host()
         let host = FileProviderHost(core: core, domains: fake)
-        await fake.set([FileProviderDomainState(id: "F", name: "Team", enabled: true)])
+        let hub = core.syncHostHubDomain()
+        let lets = Steps()
+        host.letGo = { f, _ in lets.add("let go \(f)"); return nil }
+        await fake.set([FileProviderDomainState(id: hub.id, name: hub.name, enabled: true)])
         await fake.hold(.handOver)
         let cutoff = DispatchSemaphore(value: 0)
         let listener = FileProviderListener(host, waitForHost: { _ in _ = cutoff.wait(timeout: .now() + 30); return .timedOut })
@@ -232,51 +264,107 @@ import Testing
         #expect(await call.value.error == syncHostText(t: .noAnswer))
         await fake.finish(.handOver)
         guard began else { return host.stop() }
-        // The late hand-over finishes (the note of the removal goes with it), however busy the main actor is.
-        _ = await Self.within("the note of the removal went with it") { core.syncHostUnfinishedReleases().isEmpty }
-        #expect(await fake.domains.map(\.id) == ["F"], "still there")
-        #expect(await fake.removals == 0, "nothing was removed late")
+        // The late hand-over finishes; nothing is let go of.
+        try await Task.sleep(nanoseconds: 200_000_000)
+        #expect(lets.all.isEmpty, "nothing was let go of late")
         host.stop()
     }
 
-    /// Fails if a domain stays gone after the core gave up during its removal (the system's removal slow, its
-    /// hand-over finished regardless of the cutoff): the core refused, the folder stays on demand, so the domain must
-    /// come back. The give-up happens while the removal runs by construction: the fake holds the removal, and the test
-    /// ends the core's wait only once it started.
-    @MainActor @Test func aDomainRemovedAfterTheCoreGaveUpComesBack() async throws {
+    /// Fails if a folder stays out of the hub after the core gave up during its let-go: the core refused, the folder
+    /// stays, so the let-go must be undone. The give-up happens while the let-go runs by construction: the fake holds
+    /// the signal that follows it, and the test ends the core's wait only once it started.
+    @MainActor @Test func aFolderLetGoOfAfterTheCoreGaveUpComesBack() async throws {
         let (core, fake) = try Self.host()
         let host = FileProviderHost(core: core, domains: fake)
-        await fake.set([FileProviderDomainState(id: "F", name: "Team", enabled: true)])
-        await fake.hold(.removal)
+        let hub = core.syncHostHubDomain()
+        let lets = Steps()
+        host.letGo = { f, _ in lets.add("let go \(f)"); return nil }
+        host.undoLetGo = { f in lets.add("undo \(f)") }
+        await fake.set([FileProviderDomainState(id: hub.id, name: hub.name, enabled: true)])
+        await fake.hold(.signal)
         let cutoff = DispatchSemaphore(value: 0)
         let listener = FileProviderListener(host, waitForHost: { _ in _ = cutoff.wait(timeout: .now() + 30); return .timedOut })
         let call = Task { await Self.fromCoreThread { listener.removeDomain(folderId: "F") } }
-        let began = await Self.within("the removal started") { await fake.hasStarted(.removal) }
+        let began = await Self.within("the let-go started") { await fake.hasStarted(.signal) }
         cutoff.signal()
         #expect(await call.value.error == syncHostText(t: .noAnswer))
-        await fake.finish(.removal)
+        await fake.finish(.signal)
         guard began else { return host.stop() }
-        // The host adds it back once the removal returns (a liveness bound, not an ordering: the order is fixed above).
-        _ = await Self.within("the domain added back") { await fake.adds == 1 }
-        #expect(await fake.removals == 1, "it did go")
-        #expect(await fake.domains.map(\.id) == ["F"], "and came back")
+        _ = await Self.within("the let-go undone") { lets.all.contains("undo F") }
+        #expect(lets.all == ["let go F", "undo F"])
         host.stop()
     }
 
-    /// Fails if the core is told "no answer" for a domain that is already gone: the core's wait ends just as the host
+    /// Fails if the core is told "no answer" for a folder already let go of: the core's wait ends just as the host
     /// finished (after its last look at the give-up, before its signal reached the core). The core must take the
-    /// removal, not refuse it and leave an on-demand folder without its domain.
-    @MainActor @Test func aGiveUpRacingTheFinishedRemovalTakesIt() async throws {
+    /// removal, not refuse it and leave a folder out of the hub that it keeps.
+    @MainActor @Test func aGiveUpRacingTheFinishedLetGoTakesIt() async throws {
         let (core, fake) = try Self.host()
         let host = FileProviderHost(core: core, domains: fake)
-        await fake.set([FileProviderDomainState(id: "F", name: "Team", enabled: true)])
+        let hub = core.syncHostHubDomain()
+        let lets = Steps()
+        host.letGo = { f, _ in lets.add("let go \(f)"); return nil }
+        host.undoLetGo = { f in lets.add("undo \(f)") }
+        await fake.set([FileProviderDomainState(id: hub.id, name: hub.name, enabled: true)])
         // The host signals first; the core's wait reports a timeout all the same (the two crossed).
         let listener = FileProviderListener(host, waitForHost: { done in _ = done.wait(timeout: .now() + 30); return .timedOut })
         let r = await Self.fromCoreThread { listener.removeDomain(folderId: "F") }
-        #expect(r.error == nil, "the domain went: the core removes or switches the folder")
-        #expect(await fake.removals == 1)
-        #expect(await fake.domains.isEmpty)
-        #expect(await fake.adds == 0, "not added back")
+        #expect(r.error == nil, "the folder was let go of: the core removes or switches it")
+        #expect(lets.all == ["let go F"], "not undone")
+        host.stop()
+    }
+
+    /// Fails if a let-go that could not keep something lets the core remove or switch the folder anyway (the system would
+    /// delete what was not kept): the removal is refused with the core's words, and the let-go is undone.
+    @MainActor @Test func aLetGoThatCannotKeepAFileRefusesTheRemoval() async throws {
+        let (core, fake) = try Self.host()
+        let host = FileProviderHost(core: core, domains: fake)
+        let hub = core.syncHostHubDomain()
+        let lets = Steps()
+        host.letGo = { f, _ in
+            lets.add("let go \(f)")
+            throw CoreError.Failed(message: "Seedwell could not keep “late.txt”, so the folder stays as it is.")
+        }
+        host.undoLetGo = { f in lets.add("undo \(f)") }
+        await fake.set([FileProviderDomainState(id: hub.id, name: hub.name, enabled: true)])
+        let listener = FileProviderListener(host, waitForHost: { done in done.wait(timeout: .now() + 30) })
+        let r = await Self.fromCoreThread { listener.removeDomain(folderId: "F") }
+        #expect(r.error?.contains("late.txt") == true, "\(String(describing: r.error))")
+        #expect(lets.all == ["let go F", "undo F"])
+        host.stop()
+    }
+
+    /// Fails if a hand-over the system never ends (a stuck extension: `waitForChanges` ignores cancellation) holds the
+    /// migration, and so the hub's registration, past the cap.
+    @MainActor @Test func aHandOverThatNeverEndsGivesUpAtTheCap() async throws {
+        let (core, fake) = try Self.host()
+        let host = FileProviderHost(core: core, domains: fake)
+        host.handOverWait = 50_000_000
+        let hub = core.syncHostHubDomain()
+        await fake.set([FileProviderDomainState(id: "F", name: "Team", enabled: true)])
+        await fake.hold(.handOver)
+        host.beginMigration()
+        let registering = Task { @MainActor in await host.reconcile([hub]) }
+        let done = await Self.within("the hub registered", seconds: 10) { await fake.domains.contains { $0.id == hub.id } }
+        await fake.finish(.handOver)
+        await registering.value
+        #expect(done)
+        #expect(await fake.domains.map(\.id) == [hub.id], "the old domain went (keeping what is unsynced)")
+        host.stop()
+    }
+
+    /// Fails if a folder made on demand elsewhere (the command line, an agent) never has its held files shown
+    /// downloaded: the core tells the hub again, and each telling looks at what is on disk again.
+    @MainActor @Test func heldFilesAreShownAgainWhenTheCoreTellsTheHubAgain() async throws {
+        let (core, fake) = try Self.host()
+        let host = FileProviderHost(core: core, domains: fake)
+        let hub = core.syncHostHubDomain()
+        await fake.set([FileProviderDomainState(id: hub.id, name: hub.name, enabled: true)])
+        await host.reconcile([hub])
+        _ = await Self.within("held files looked at") { await fake.materializedReads == 1 }
+        await host.reconcile([hub])
+        _ = await Self.within("looked at again") { await fake.materializedReads == 2 }
+        #expect(await fake.materializedReads == 2)
         host.stop()
     }
 
@@ -285,42 +373,37 @@ import Testing
         let (core, fake) = try Self.host()
         let host = FileProviderHost(core: core, domains: fake)
         host.addRetries = [20_000_000, 20_000_000, 20_000_000]
+        let hub = core.syncHostHubDomain()
         await fake.failAdds(2)
-        await host.reconcile([SyncHostDomain(id: "F", name: "Team")])
+        await host.reconcile([hub])
         for _ in 0..<50 {
-            if await fake.domains.contains(where: { $0.id == "F" }) { break }
+            if await fake.domains.contains(where: { $0.id == hub.id }) { break }
             try await Task.sleep(nanoseconds: 20_000_000)
         }
-        #expect(await fake.domains.map(\.id) == ["F"])
+        #expect(await fake.domains.map(\.id) == [hub.id])
         host.stop()
     }
 
-    /// Reconciles run one at a time: a burst adds each domain once.
+    /// Reconciles run one at a time: a burst adds the hub once.
     @MainActor @Test func reconcilesRunInOrder() async throws {
         let (core, fake) = try Self.host()
         let host = FileProviderHost(core: core, domains: fake)
-        let burst = (0..<5).map { _ in Task { @MainActor in await host.reconcile([SyncHostDomain(id: "F", name: "Team")]) } }
+        let hub = core.syncHostHubDomain()
+        let burst = (0..<5).map { _ in Task { @MainActor in await host.reconcile([hub]) } }
         for t in burst { await t.value }
         #expect(await fake.adds == 1)
         host.stop()
     }
 
-    @MainActor @Test func aNewOnDemandFolderAsksToBeAllowed() async throws {
-        let (core, fake) = try Self.host()
-        let host = FileProviderHost(core: core, domains: fake)
-        var asked = 0
-        host.showSetup = { asked += 1 }
-        var f = SyncTests.folder("Team", id: "F")
-        f.onDemand = true
-        await host.added(f)
-        #expect(asked == 1 && host.disabled == ["F"])
-        // Allowed already: nothing to ask.
-        await fake.enable("G")
-        f.id = "G"
-        await fake.set(await fake.domains + [FileProviderDomainState(id: "G", name: "Team", enabled: true)])
-        await host.added(f)
-        #expect(asked == 1)
-        host.stop()
+    /// A full folder in the hub is a link: fails if the extension's item for it is not a symbolic link to its place
+    /// (the Finder would show placeholders for files that are on this Mac), or may be changed from the Finder.
+    @Test func aFullFolderIsALinkItem() {
+        let link = FPProviderItem(FPItem(id: "F", parent: "root", name: "Music", kind: "symlink", symlinkTarget: "/Volumes/Disk/Music", caps: ["read"]))
+        #expect(link.contentType == .symbolicLink && link.symlinkTargetPath == "/Volumes/Disk/Music")
+        #expect(link.capabilities == [.allowsReading] && link.parentItemIdentifier == .rootContainer)
+        let folder = FPProviderItem(FPItem(id: "F:root", parent: "root", name: "Team", kind: "dir", caps: ["read", "write"]))
+        #expect(folder.itemIdentifier.rawValue == "F:root" && folder.contentType == .folder)
+        #expect(!folder.capabilities.contains(.allowsRenaming) && !folder.capabilities.contains(.allowsDeleting))
     }
 
     @Test func theNoticeIsTheCores() {
@@ -363,8 +446,9 @@ import Testing
         #expect(syncPlaceLine(folder: core.syncSnapshot().folders.first { $0.id == f.id }!, pathShown: "x") == "In the Finder’s sidebar, under Locations")
     }
 
-    /// A folder switched to on demand has its files here: they are asked for, so the Finder shows them downloaded;
-    /// what the system has on disk already, and what is online only, is not.
+    /// A folder switched to on demand has its files here: they are asked for under the hub's identifiers, so the
+    /// Finder shows them downloaded; what the system has on disk already, and what is online only, is not. Fails if a
+    /// held file is asked for under its folder's own id (the hub would not know it) or not at all.
     @MainActor @Test func filesHeldHereAreShownDownloaded() async throws {
         let (core, fake) = try Self.host()
         var folders: [SyncFolder] = []
@@ -376,22 +460,50 @@ import Testing
         // The server, in a temporary folder (no domain is registered: the domains are fake).
         let dir = try FakeApp.tempDir()
         defer { core.syncHostStop(); try? FileManager.default.removeItem(at: dir) }
-        _ = try core.syncHostStart(dir: dir.path, listener: QuietListener())
+        _ = try core.syncHostStart(dir: dir.path, listener: QuietListener(), mode: .hub)
         let host = FileProviderHost(core: core, domains: fake)
-        await fake.set([FileProviderDomainState(id: f.id, name: f.name, enabled: true)])
-        await fake.setOnDisk(["root", "m:notes.txt"])
-        await host.reconcile([SyncHostDomain(id: f.id, name: f.name)])
+        let hub = core.syncHostHubDomain()
+        await fake.set([FileProviderDomainState(id: hub.id, name: hub.name, enabled: true)])
+        await fake.setOnDisk([core.syncHostHubItem(id: f.id), "\(f.id):m:notes.txt"])
+        await host.reconcile([hub])
         for _ in 0..<100 {
             if await fake.requested.count >= 2 { break }
             try await Task.sleep(nanoseconds: 20_000_000)
         }
         // The mock's held files: plan.md (downloaded), draft.pages (only here); notes.txt is on disk already.
-        #expect(Set(await fake.requested) == ["m:Projects/plan.md", "m:Projects/draft.pages"])
+        #expect(Set(await fake.requested) == ["\(f.id):m:Projects/plan.md", "\(f.id):m:Projects/draft.pages"])
         // Once a run: checking again asks for nothing more.
         await host.refreshEnabled()
         try await Task.sleep(nanoseconds: 100_000_000)
         #expect(await fake.requested.count == 2)
         host.stop()
+    }
+
+    /// The hub through the core's server, as the extension asks: fails if a full folder is not a link to its absolute
+    /// place, or an on-demand folder's items are not under the hub's identifiers.
+    @Test func theHubListsEveryFolder() async throws {
+        let (core, _) = try Self.host()
+        var folders: [SyncFolder] = []
+        for _ in 0..<100 where folders.isEmpty {
+            folders = core.syncSnapshot().folders
+            if folders.isEmpty { try await Task.sleep(nanoseconds: 50_000_000) }
+        }
+        let f = try await core.syncSetOnDemand(id: try #require(folders.first).id, onDemand: true, path: nil)
+        let dir = try FakeApp.tempDir()
+        defer { core.syncHostStop(); try? FileManager.default.removeItem(at: dir) }
+        _ = try core.syncHostStart(dir: dir.path, listener: QuietListener(), mode: .hub)
+        let hub = core.syncHostHubDomain()
+        var req = FPRequest("children", folder: hub.id, item: "root")
+        req.limit = 500
+        let top = try FPClient(dir: dir, gate: nil).ask(req, as: FPPage.self).get().items
+        #expect(top.count == core.syncSnapshot().folders.count)
+        let od = try #require(top.first { $0.id == core.syncHostHubItem(id: f.id) })
+        #expect(od.kind == "dir" && od.parent == "root")
+        for link in top where link.kind == "symlink" {
+            #expect(link.symlinkTarget?.hasPrefix("/") == true && link.caps == ["read"])
+        }
+        let kids = try FPClient(dir: dir, gate: nil).ask(FPRequest("children", folder: hub.id, item: od.id), as: FPPage.self).get().items
+        #expect(!kids.isEmpty && kids.allSatisfy { $0.id.hasPrefix("\(f.id):") && $0.parent == od.id })
     }
 
     /// Waits until `ok` holds, polling, at most `seconds`: when it does not, an issue names `what` (no wait in a test
@@ -423,6 +535,8 @@ import Testing
 /// Domains in memory: added switched off, as macOS adds them.
 actor FakeDomains: FileProviderDomains {
     private(set) var domains: [FileProviderDomainState] = []
+    /// What happened, in order: `wait <id>`, `remove <id>`, `add <id>`.
+    private(set) var steps: [String] = []
 
     func set(_ d: [FileProviderDomainState]) { domains = d }
 
@@ -433,17 +547,19 @@ actor FakeDomains: FileProviderDomains {
     func list() async throws -> [FileProviderDomainState] { domains }
 
     private(set) var adds = 0
+    /// Hand-overs waited for: `<domain>/<item>`.
     private(set) var waited: [String] = []
     private var preserved: URL?
     func setPreserved(_ u: URL?) { preserved = u }
-    func waitForChanges(id: String) async throws {
-        waited.append(id)
+    func waitForChanges(id: String, below item: String) async throws {
+        waited.append("\(id)/\(item)")
+        steps.append("wait \(id)")
         await pass(.handOver)
     }
 
     /// The system's steps a test holds: a held step waits for `finish` (30 s at most), and `hasStarted` says when it
     /// began. All in the actor, so the step and the test meet in a fixed order whatever the scheduling.
-    enum Step { case handOver, removal }
+    enum Step { case handOver, signal }
     private struct Gate {
         var held = false
         var started = false
@@ -470,6 +586,8 @@ actor FakeDomains: FileProviderDomains {
 
     private var failing = 0
     func failAdds(_ n: Int) { failing = n }
+    private var stuck: Set<String> = []
+    func failRemovals(of ids: Set<String>) { stuck = ids }
     private(set) var removals = 0
 
     func add(id: String, name: String) async throws {
@@ -478,28 +596,45 @@ actor FakeDomains: FileProviderDomains {
             throw CocoaError(.fileWriteUnknown)
         }
         adds += 1
+        steps.append("add \(id)")
         await Task.yield()
         if let i = domains.firstIndex(where: { $0.id == id }) { domains[i].name = name } else { domains.append(FileProviderDomainState(id: id, name: name, enabled: false)) }
     }
 
     func remove(id: String) async throws -> URL? {
         removals += 1
-        // Not cancellable, as the system's own removal.
-        await pass(.removal)
+        steps.append("remove \(id)")
+        if stuck.contains(id) { throw CocoaError(.fileWriteUnknown) }
         domains.removeAll { $0.id == id }
         defer { preserved = nil }
         return preserved
     }
 
-    func signal(id: String) async throws {}
-    func rootURL(id: String) async throws -> URL? { nil }
+    func signal(id: String) async throws { await pass(.signal) }
+
+    /// Where the Finder shows the items (one path for all of them).
+    private var visible: String?
+    func setVisible(_ path: String?) { visible = path }
+    func itemURL(id: String, item: String) async throws -> URL? { visible.map { URL(fileURLWithPath: $0) } }
 
     /// What the system has on disk, and what it was asked to download.
     var onDisk: [String] = []
     private(set) var requested: [String] = []
     func setOnDisk(_ ids: [String]) { onDisk = ids }
-    func materialized(id: String) async throws -> [String] { onDisk }
+    private(set) var materializedReads = 0
+    func materialized(id: String) async throws -> [String] {
+        materializedReads += 1
+        return onDisk
+    }
     func requestDownload(id: String, item: String) async throws { requested.append(item) }
+}
+
+/// Steps recorded from any thread (the host's let-go runs off the main actor).
+final class Steps: @unchecked Sendable {
+    private let lock = NSLock()
+    private var steps: [String] = []
+    var all: [String] { lock.withLock { steps } }
+    func add(_ s: String) { lock.withLock { steps.append(s) } }
 }
 
 /// A listener that hears nothing (a server started by a test).
@@ -509,6 +644,7 @@ final class QuietListener: SyncHostListener, @unchecked Sendable {
     func verifyPeer(auditToken: Data) -> Bool { true }
     func removeDomain(folderId: String) -> SyncHostRemoval { SyncHostRemoval(error: nil) }
     func notice(title: String, text: String) {}
+    func navPane(entry: SyncNavPane) {}
 }
 
 /// Only the app's own extension may use the socket.

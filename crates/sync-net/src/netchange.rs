@@ -81,6 +81,8 @@ impl SyncHandle {
             book.refused.clear();
         }
         self.inner.net.clear_backoffs();
+        // Whether devices could reach this one was about the old network.
+        self.inner.ctx.reach.forget();
         crate::rendezvous::network_changed(self);
         self.inner.lan.wake.notify_one();
         self.inner.netwatch.dht_wake.notify_one();

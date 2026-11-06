@@ -13,11 +13,13 @@ default = ["transport"]
 # builds without it, which keeps the model checker and fuzz targets light.
 transport = [
     "dep:tokio", "dep:hyper", "dep:hyper-util", "dep:http-body-util", "dep:bytes",
-    "dep:hyper-rustls", "dep:flate2", "dep:tower-service", "dep:getrandom",
+    "dep:hyper-rustls", "dep:flate2", "dep:tower-service", "dep:getrandom", "dep:trs-socks",
 ]
 
 [dependencies]
 trs-bencode = { path = "../bencode" }
+# HTTP(S) announces through a SOCKS5 proxy while torrents use one (SPEC §7H).
+trs-socks = { path = "../socks", optional = true }
 tokio = { version = "1", optional = true, default-features = false, features = ["rt", "net", "time", "sync", "io-util"] }
 hyper = { version = "1", optional = true, default-features = false, features = ["http1", "client"] }
 hyper-util = { version = "0.1", optional = true, default-features = false, features = ["tokio", "client-legacy", "http1"] }
@@ -31,6 +33,7 @@ tower-service = { version = "0.3", optional = true }
 getrandom = { version = "0.4", optional = true, default-features = false }
 
 [dev-dependencies]
+trs-socks = { path = "../socks", features = ["testkit"] }
 # Property tests, the model checker, and the (ignored) network test.
 proptest = { version = "1", default-features = false, features = ["std"] }
 stateright = { version = "0.31", default-features = false }

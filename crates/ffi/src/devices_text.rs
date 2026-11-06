@@ -142,32 +142,10 @@ pub struct FollowLine {
     pub line: String,
     /// The toggle's tooltip: "Put it on every device paired with this Mac: they join it by themselves".
     pub help: String,
-    /// A folder's "Read only" toggle under it (`None` for a channel, and while the toggle is not shown).
-    pub read_only: Option<FollowReadOnly>,
 }
 
-/// "Read only" under a folder's "On all my devices" (SPEC §7G.1): the user's other devices open and download its files
-/// but never change, add or delete anything, here or on each other, and nothing is downloaded to this computer.
-#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
-pub struct FollowReadOnly {
-    /// "Read only".
-    pub title: String,
-    /// As the core has it; in a dialog's model, the form's choice.
-    pub on: bool,
-    /// It can be switched: owner or admin here (and in a dialog, while "On all my devices" is chosen).
-    pub enabled: bool,
-    /// What it means as it is set, and what changes when it is applied ("Your other devices that have it become Read
-    /// only…").
-    pub line: String,
-    /// Its tooltip.
-    pub help: String,
-    /// This computer is an owner of the folder: the roles change at once. Else they change once an owner is online
-    /// (the line says so).
-    pub owner: bool,
-}
-
-/// A toggle with the fixed titles and tooltip (`read_only`: a folder's, as the core has it).
-fn follow(shown: bool, on: bool, enabled: bool, line: String, read_only: Option<FollowReadOnly>) -> FollowLine {
+/// A toggle with the fixed titles and tooltip.
+fn follow(shown: bool, on: bool, enabled: bool, line: String) -> FollowLine {
     FollowLine {
         shown,
         title: "On all my devices".into(),
@@ -176,60 +154,13 @@ fn follow(shown: bool, on: bool, enabled: bool, line: String, read_only: Option<
         enabled,
         line,
         help: concat!("Put it on every device paired with this ", computer!(), ": they join it by themselves").into(),
-        read_only: read_only.filter(|_| shown),
     }
 }
-
-/// The "Read only" toggle as the core has it: `on`, `may` (owner or admin here) for whether it can be switched, and
-/// whether the folder is on all devices (`follow_on`), and whether this computer is an owner of it (`owner`).
-fn read_only_line(on: bool, may: bool, follow_on: bool, owner: bool) -> FollowReadOnly {
-    let r = FollowReadOnly { title: "Read only".into(), on, enabled: may, line: String::new(), help: READ_ONLY_HELP.into(), owner };
-    // `enabled` stays `may`: a dialog draws it from here with its own choice of "On all my devices".
-    FollowReadOnly { line: follow_read_only_drawn(&r, on, follow_on, follow_on).line, ..r }
-}
-
-/// The "Read only" toggle drawn for a dialog: `core` as the core has it, `chosen` the form's choice, `follow_on` whether
-/// "On all my devices" is on now and `follow_chosen` whether it is chosen. Its line says what it means and what Save
-/// (or the switch, where it applies at once) changes. Without "On all my devices" chosen it cannot be switched and
-/// stays as it is.
-pub(crate) fn follow_read_only_drawn(core: &FollowReadOnly, chosen: bool, follow_on: bool, follow_chosen: bool) -> FollowReadOnly {
-    let what = "can open and download its files, but never change, add or delete anything, here or on each other";
-    let here = concat!("Nothing is downloaded to this ", computer!());
-    // Only an owner changes roles: from an admin, what the line promises waits for one (devices on this version hold
-    // back meanwhile; one on an older Seedwell does not).
-    let wait_on = if core.owner { "" } else { " Until an owner of this folder is online, a device on an older Seedwell can still send changes." };
-    let wait_off = if core.owner { "" } else { " Their roles change once an owner of this folder is online." };
-    let chosen = if follow_chosen { chosen } else { core.on };
-    let line = if !core.enabled {
-        if core.on {
-            "Your devices open and download its files but change nothing in it. Only an owner or admin of this folder can switch it.".to_string()
-        } else {
-            "Only an owner or admin of this folder can switch it.".to_string()
-        }
-    } else if !follow_chosen {
-        if core.on { "Your other devices that have it stay Read only.".to_string() } else { String::new() }
-    } else {
-        match (core.on, chosen) {
-            (true, true) => format!("Your other devices {what}. {here}.{wait_on}"),
-            (false, true) if follow_on => format!("Your other devices that have it become Read only: they {what}. {here}, which keeps its role.{wait_on}"),
-            (false, true) => format!("Your other devices join it Read only: they {what}. {here}.{wait_on}"),
-            (true, false) => format!("Your other devices become admins again: they can change, add and delete its files, here and on each other.{wait_off}"),
-            (false, false) => "Off: your other devices join it as admins and can change, add and delete its files.".to_string(),
-        }
-    };
-    FollowReadOnly { on: chosen, enabled: core.enabled && follow_chosen, line, ..core.clone() }
-}
-
-/// The "Read only" toggle's tooltip.
-const READ_ONLY_HELP: &str = concat!(
-    "Your other devices can open and download its files but never change, add or delete anything, here or on each other; nothing is downloaded to this ",
-    computer!()
-);
 
 /// The "On all my devices" toggle of folder or channel `id` as `backend` has it (hidden while this computer is not
 /// paired).
 pub(crate) fn follow_line_for(backend: &dyn Backend, id: &str) -> FollowLine {
-    let hidden = follow(false, false, false, String::new(), None);
+    let hidden = follow(false, false, false, String::new());
     let Some((h, _)) = backend.sync().service() else { return hidden };
     let Ok(fid) = id.parse::<FolderId>() else { return hidden };
     let channel = h.channel_status(&fid).is_some();
@@ -404,8 +335,7 @@ pub(crate) fn remove_view_of(p: &RemovePlan) -> RemoveDeviceView {
     }
 }
 
-/// The toggle of a folder or channel for `f` (`channel`: its noun). A folder's line leaves the role to its "Read only"
-/// toggle's line; a channel's says "as admins".
+/// The toggle of a folder or channel for `f` (`channel`: its noun). A channel's line says "as admins".
 pub(crate) fn follow_line_of(f: &FollowState, channel: bool) -> FollowLine {
     let noun = if channel { "channel" } else { "folder" };
     let others = quoted_list(&f.others);
@@ -419,19 +349,15 @@ pub(crate) fn follow_line_of(f: &FollowState, channel: bool) -> FollowLine {
     } else {
         format!("Your other devices ({others}) join it by themselves{role}.")
     };
-    let read_only = (!channel).then(|| read_only_line(f.read_only, f.may, f.on, f.role == Some(Role::Owner)));
-    follow(f.paired || f.on, f.on, f.on || f.may, line, read_only)
+    follow(f.paired || f.on, f.on, f.on || f.may, line)
 }
 
-/// The toggle in Add Folder and New Channel, before the item exists: on by default for a channel, off for a folder
-/// (and so is a folder's "Read only").
+/// The toggle in Add Folder and New Channel, before the item exists: on by default for a channel, off for a folder.
 pub(crate) fn follow_line_new(others: &[String], channel: bool) -> FollowLine {
     let shown = !others.is_empty();
     let role = if channel { ", as admins" } else { "" };
     let line = if shown { format!("Your other devices ({}) join it by themselves{role}.", quoted_list(others)) } else { String::new() };
-    // A folder added here is this computer's own.
-    let read_only = (!channel).then(|| read_only_line(false, shown, false, true));
-    follow(shown, shown && channel, shown, line, read_only)
+    follow(shown, shown && channel, shown, line)
 }
 
 fn devices_err(e: trs_sync_net::SyncError) -> CoreError {
@@ -522,12 +448,6 @@ impl Core {
         rt.block_on(h.set_follow(&fid, on)).map_err(devices_err)
     }
 
-    /// Turns "Read only" on or off for folder `id` on the user's other devices (on also puts it on all of them).
-    pub fn sync_set_follow_read_only(&self, id: String, read_only: bool) -> Result<(), CoreError> {
-        let (h, rt) = self.devices_service()?;
-        let fid: FolderId = id.parse().map_err(|_| CoreError::Failed { message: concat!("This folder is no longer synced on this ", computer!(), ".").into() })?;
-        rt.block_on(h.set_follow_read_only(&fid, read_only)).map_err(devices_err)
-    }
 }
 
 #[uniffi::export]
@@ -682,7 +602,7 @@ mod tests {
 
     #[test]
     fn the_toggle_says_who_joins_or_why_it_cannot() {
-        let f = |on, may, paired, role| FollowState { on, may, paired, role, others: vec!["MacBook".into(), "Studio PC".into()], read_only: false };
+        let f = |on, may, paired, role| FollowState { on, may, paired, role, others: vec!["MacBook".into(), "Studio PC".into()] };
         let l = follow_line_of(&f(false, true, true, Some(Role::Owner)), false);
         assert!(l.shown && l.enabled && !l.on);
         assert_eq!(l.line, "Your other devices (MacBook and Studio PC) join it by themselves.");
@@ -697,51 +617,5 @@ mod tests {
         assert!(n.shown && n.on && n.enabled, "a new channel: on by default when paired");
         assert!(!follow_line_new(&["MacBook".into()], false).on, "a new folder: off");
         assert!(!follow_line_new(&[], true).shown, "not paired: not shown");
-    }
-
-    /// The "Read only" toggle must say what applying it does before it is applied (that the devices which have the
-    /// folder lose write access, that turning it off makes them admins again), never offer a switch that cannot be
-    /// applied (a member that is not owner or admin, "On all my devices" not chosen), and never show for a channel.
-    #[test]
-    /// Review of Read only, #5: on an admin the line promised "become Read only" while nothing changed until an owner
-    /// was online. Fails when an admin's line does not say the roles wait for an owner, or an owner's says so.
-    fn the_read_only_line_of_an_admin_says_the_roles_wait_for_an_owner() {
-        let f = |role| FollowState { on: true, may: true, paired: true, role: Some(role), others: vec!["MacBook".into()], read_only: false };
-        let admin = follow_line_of(&f(Role::Admin), false).read_only.unwrap();
-        assert!(!admin.owner);
-        let on = follow_read_only_drawn(&admin, true, true, true).line;
-        assert!(on.contains("become Read only") && on.contains("Until an owner of this folder is online"), "{on}");
-        let off = follow_read_only_drawn(&FollowReadOnly { on: true, ..admin }, false, true, true).line;
-        assert!(off.contains("once an owner of this folder is online"), "{off}");
-        let owner = follow_line_of(&f(Role::Owner), false).read_only.unwrap();
-        assert!(!follow_read_only_drawn(&owner, true, true, true).line.contains("owner of this folder is online"));
-    }
-
-    #[test]
-    fn the_read_only_toggle_says_what_it_changes_and_only_offers_what_applies() {
-        let f = |on, may, read_only| FollowState { on, may, paired: true, role: Some(if may { Role::Owner } else { Role::ReadOnly }), others: vec!["MacBook".into()], read_only };
-        assert_eq!(follow_line_of(&f(true, true, false), true).read_only, None, "a channel has none");
-        let core = follow_line_of(&f(true, true, false), false).read_only.unwrap();
-        assert!(!core.on && core.enabled && core.title == "Read only" && core.help.contains("never change, add or delete"), "{core:?}");
-        // Turning it on for a folder the other devices have: they become Read only, this computer keeps its role.
-        let on = follow_read_only_drawn(&core, true, true, true);
-        assert!(on.on && on.enabled && on.line.contains("that have it become Read only") && on.line.contains("keeps its role"), "{}", on.line);
-        assert!(on.line.contains(concat!("Nothing is downloaded to this ", computer!())), "{}", on.line);
-        // Put on all devices together with it: they join Read only.
-        assert!(follow_read_only_drawn(&core, true, false, true).line.starts_with("Your other devices join it Read only"));
-        // Turning it off: they become admins again.
-        let was = follow_line_of(&f(true, true, true), false).read_only.unwrap();
-        assert!(was.on && was.line.contains("never change"), "{}", was.line);
-        let off = follow_read_only_drawn(&was, false, true, true);
-        assert!(!off.on && off.line.starts_with("Your other devices become admins again"), "{}", off.line);
-        // Without "On all my devices" chosen it cannot be switched, and stays as it is.
-        let alone = follow_read_only_drawn(&was, false, true, false);
-        assert!(alone.on && !alone.enabled && alone.line.contains("stay Read only"), "{alone:?}");
-        // A Read only member sees it, cannot switch it, and is told who can.
-        let member = follow_line_of(&f(true, false, true), false).read_only.unwrap();
-        assert!(member.on && !follow_read_only_drawn(&member, false, true, true).enabled && member.line.contains("Only an owner or admin"), "{member:?}");
-        // A new folder: off, switchable once On all my devices is chosen.
-        let new = follow_line_new(&["MacBook".into()], false).read_only.unwrap();
-        assert!(!new.on && !follow_read_only_drawn(&new, true, false, false).enabled && follow_read_only_drawn(&new, true, false, true).enabled);
     }
 }

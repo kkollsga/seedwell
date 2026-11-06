@@ -88,6 +88,8 @@ pub(crate) struct Shared {
     pub devlog: Arc<trs_devlog::DevLog>,
     /// Connectivity as the tracker driver decided it (SPEC 7C.4c).
     pub net: crate::netstate::NetFlags,
+    /// Torrent traffic through a SOCKS5 proxy (SPEC §7H): where a connection may go now.
+    pub proxy: Arc<crate::proxy::ProxyState>,
 }
 
 impl Shared {
@@ -100,6 +102,7 @@ impl Shared {
         session: mpsc::Sender<SessionMsg>,
     ) -> Self {
         let devlog = trs_devlog::DevLog::new(cfg.devlog_dir.clone());
+        let proxy = Arc::new(crate::proxy::ProxyState::new(cfg.proxy.is_some()));
         devlog.set_enabled(cfg.developer_mode);
         Self {
             devlog,
@@ -134,6 +137,7 @@ impl Shared {
             watch_baselines: std::sync::Mutex::new(std::collections::HashMap::new()),
             held_sources: std::sync::Mutex::new(std::collections::HashMap::new()),
             net: crate::netstate::NetFlags::default(),
+            proxy,
         }
     }
 

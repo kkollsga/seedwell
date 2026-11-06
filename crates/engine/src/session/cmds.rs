@@ -882,7 +882,8 @@ impl Session {
         use crate::peer::Refusal;
         let diag = self.sh.diag.clone();
         let refuse = |why| diag.refuse(why);
-        if self.shutting_down {
+        // While the proxy is on no torrent takes a connection that did not come through it (SPEC §7H).
+        if self.shutting_down || self.sh.proxy.on() {
             return refuse(Refusal::Torrent);
         }
         let id = hs.info_hash;

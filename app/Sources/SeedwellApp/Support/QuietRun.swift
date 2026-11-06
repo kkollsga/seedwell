@@ -58,6 +58,37 @@ enum QuietRun {
 
     /// The Dock icon the app would have (it shows none in a quiet run): QA's `policy` reports it.
     nonisolated(unsafe) static var policy: NSApplication.ActivationPolicy = .accessory
+
+    /// Where a popover was shown from: the view, the rect in it and the preferred edge.
+    final class Anchor: NSObject {
+        weak var view: NSView?
+        let rect: NSRect
+        /// NSRectEdge's value: 0 minX, 1 minY, 2 maxX, 3 maxY.
+        let edge: UInt
+        init(view: NSView, rect: NSRect, edge: UInt) { self.view = view; self.rect = rect; self.edge = edge & 0xF }
+    }
+
+    /// The popovers shown in this run and their anchors (weak: a closed popover drops out).
+    @MainActor static let anchors = NSMapTable<NSPopover, Anchor>.weakToStrongObjects()
+
+    /// Where the popover window `w` belongs, beside its anchor as AppKit places it on a screen (the content `size`
+    /// centred on the anchor, past the arrow), in screen points; nil when it was not shown from a view of a window.
+    @MainActor static func placeBesideAnchor(_ w: NSWindow, size: NSSize) -> NSRect? {
+        guard let e = anchors.keyEnumerator().allObjects as? [NSPopover],
+              let p = e.first(where: { $0.contentViewController?.view.window === w }),
+              let a = anchors.object(forKey: p), let v = a.view, let win = v.window else { return nil }
+        let r = win.convertToScreen(v.convert(a.rect, to: nil))
+        let arrow: CGFloat = 13
+        // The edge is in the view's own coordinates: in a flipped view minY is its top.
+        var edge = a.edge
+        if v.isFlipped, edge == 1 || edge == 3 { edge = 4 - edge }
+        switch edge {
+        case 3: return NSRect(x: r.midX - size.width / 2, y: r.maxY + arrow, width: size.width, height: size.height)
+        case 0: return NSRect(x: r.minX - arrow - size.width, y: r.midY - size.height / 2, width: size.width, height: size.height)
+        case 2: return NSRect(x: r.maxX + arrow, y: r.midY - size.height / 2, width: size.width, height: size.height)
+        default: return NSRect(x: r.midX - size.width / 2, y: r.minY - arrow - size.height, width: size.width, height: size.height)
+        }
+    }
 }
 
 /// The NSWindow and NSApplication methods a quiet run replaces (see QuietRun). Each replacement calls the original
@@ -134,6 +165,17 @@ enum QuietRun {
         replace(a, NSSelectorFromString("activateIgnoringOtherApps:"), ignoring)
         let plain: @convention(block) (NSApplication) -> Void = { _ in }
         replace(a, NSSelectorFromString("activate"), plain)
+
+        // Popovers: where each was anchored. AppKit keeps a popover on a screen, so one anchored to a view off every
+        // screen comes up at a screen's edge and is then moved off by the fixed offset, far from its anchor; a shot
+        // puts it back beside the anchor (QAShots, `QuietRun.anchor(of:)`).
+        let show = #selector(NSPopover.show(relativeTo:of:preferredEdge:))
+        let showBlock: @convention(block) (NSPopover, NSRect, NSView, UInt) -> Void = { p, r, v, e in
+            MainActor.assumeIsolated { QuietRun.anchors.setObject(QuietRun.Anchor(view: v, rect: r, edge: e), forKey: p) }
+            typealias F = @convention(c) (NSPopover, Selector, NSRect, NSView, UInt) -> Void
+            unsafeBitCast(original(show), to: F.self)(p, show, r, v, e)
+        }
+        replace(NSPopover.self, show, showBlock)
     }
 
     private static func replace(_ cls: AnyClass, _ sel: Selector, _ block: Any) {

@@ -511,3 +511,30 @@ async fn a_read_mark_being_saved_is_on_disk_when_shutdown_returns_and_nothing_wr
     tokio::time::sleep(Duration::from_millis(1000)).await;
     assert_eq!(std::fs::metadata(&cfg).unwrap().modified().unwrap(), written, "nothing writes after shutdown");
 }
+
+/// The failure: a save the stopped service made after `shutdown` returned (a task of it that noted a session's end
+/// was still finishing) landed over the configuration of the service started again on the same state in this process
+/// (as a port change does): the new one's change was lost, or its own save failed, both writing the same temporary
+/// file. Here the late save is a call on the old handle.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stopped_service_saves_nothing_over_the_one_started_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("a");
+    let old = start_at(&state, "Anna", |_| {}).await;
+    old.shutdown().await;
+    let new = start_at(&state, "Anna", |_| {}).await;
+    let mut s = new.settings();
+    s.up_kib = 123;
+    new.set_settings(s).unwrap();
+    let mut s = old.settings();
+    s.down_kib = 456;
+    // Said so in words the app can show (it may hold the old service for a moment while sync moves to another port).
+    assert_eq!(old.set_settings(s).unwrap_err().to_string(), trs_sync_net::service::STOPPED);
+    new.shutdown().await;
+    // What the state says, as the next start reads it.
+    let next = start_at(&state, "Anna", |_| {}).await;
+    let s = next.settings();
+    assert_eq!(s.up_kib, 123, "the new service's change is kept");
+    assert_ne!(s.down_kib, 456, "the stopped service's is not");
+    next.shutdown().await;
+}

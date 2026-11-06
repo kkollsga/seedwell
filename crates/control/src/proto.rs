@@ -1484,6 +1484,17 @@ pub struct SyncMoveParams {
     pub path: String,
 }
 
+/// `sync.set_read_only`: make a folder Read only, or turn that off (SPEC §7G.1): the owners' setting, so only an owner
+/// of the folder may; while it is on only the owners' changes count.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SyncReadOnlyParams {
+    /// The folder.
+    pub folder: String,
+    /// On or off.
+    pub read_only: bool,
+}
+
 /// `sync.set_lan_only`: only sync a folder with devices on the local network (or everywhere again).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1782,6 +1793,11 @@ methods! {
     SyncRescan(SyncFolderParams) = "sync.rescan", Control, true;
     /// Folder sync: only sync a folder with devices on the local network, or everywhere again.
     SyncSetLanOnly(SyncLanOnlyParams) = "sync.set_lan_only", Control, true;
+    /// Folder sync: whether a folder is Read only (the owners' setting), whether this Mac may switch it, and whether it
+    /// holds its changes back.
+    SyncReadOnly(SyncFolderParams) = "sync.read_only", ReadOnly, false;
+    /// Folder sync: make a folder Read only, or turn that off (an owner of the folder only).
+    SyncSetReadOnly(SyncReadOnlyParams) = "sync.set_read_only", Control, true;
     /// Folder sync: the unresolved conflict copies of a folder.
     SyncConflicts(SyncFolderParams) = "sync.conflicts", ReadOnly, false;
     /// Folder sync: settle a conflict copy (the version not kept is archived, never deleted).

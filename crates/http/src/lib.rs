@@ -30,7 +30,7 @@ pub use sidecar::Sidecar;
 pub use small::{SmallRequest, SmallResponse, get_small, request_small};
 pub use task::{DownloadTask, Downloader, discard_staged, list_staged};
 pub use types::{
-    DownloadRequest, DownloaderConfig, Event, ProbeInfo, Progress, RestartReason, StagedInfo, State,
+    DownloadRequest, DownloaderConfig, Event, HttpRoute, ProbeInfo, Progress, RestartReason, Route, RouteFn, StagedInfo, State,
 };
 
 /// Per-connection write buffer in bytes.

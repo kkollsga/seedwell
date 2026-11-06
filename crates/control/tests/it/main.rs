@@ -9,6 +9,8 @@ mod access;
 #[cfg(feature = "sync")]
 mod access_chat;
 mod decoder;
+#[cfg(feature = "sync")]
+mod proxy_sync;
 mod server;
 #[cfg(feature = "sync")]
 mod sync;

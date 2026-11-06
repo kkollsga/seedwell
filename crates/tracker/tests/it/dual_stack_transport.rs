@@ -27,7 +27,7 @@ use trs_tracker::gate::{GateConfig, GatedRequest, HostGate};
 use trs_tracker::http::{HttpConfig, HttpTransport};
 use trs_tracker::machine::SendKind;
 use trs_tracker::policy::DestinationPolicy;
-use trs_tracker::response::AnnounceError;
+use trs_tracker::response::{AnnounceError, TransportError};
 use trs_tracker::*;
 
 const OK: u8 = 0;
@@ -871,4 +871,22 @@ async fn udp_both_silent_is_a_connect_timeout_and_each_family_is_tried_once_per_
     assert!(v4.count(0) <= 3, "{}", v4.count(0));
     assert!(v6.count(0) <= 4, "{}", v6.count(0));
     assert_eq!(v4.count(1) + v6.count(1), 0);
+}
+
+/// Failure: the torrent proxy comes on while a direct announce is under way, and its retry on the other address
+/// family still goes out directly (SPEC §7H). The gate closes once the IPv6 tracker got the request.
+#[tokio::test]
+async fn the_other_familys_retry_asks_the_direct_gate_first() {
+    let lab = lab_or_skip!(lab(CLOSE, 900, None));
+    let v6_reqs = lab.v6.requests.clone();
+    let t = transport(fast_cfg(), true).with_direct_gate(Arc::new(move || v6_reqs.load(Ordering::SeqCst) == 0));
+    let out = t.announce(&gated(lab.port, Some(Event::Started))).await;
+    assert!(out.result.is_err(), "{:?}", out.result);
+    assert_eq!(lab.v6.reqs(), 1);
+    assert_eq!(lab.v4.conns(), 0, "no direct retry after the proxy came on");
+    // A gate closed from the start sends nothing at all.
+    let t = transport(fast_cfg(), true).with_direct_gate(Arc::new(|| false));
+    let out = t.announce(&gated(lab.port, Some(Event::Started))).await;
+    assert_eq!(out.result.unwrap_err(), AnnounceError::Transport(TransportError::Proxy(ProxyBlock::Down)));
+    assert_eq!((lab.v6.conns(), lab.v4.conns()), (1, 0));
 }

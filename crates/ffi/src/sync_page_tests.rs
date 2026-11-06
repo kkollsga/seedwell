@@ -56,7 +56,7 @@ fn titles(entries: &[SyncPageMenuEntry]) -> Vec<String> {
 }
 
 fn member(id: &str, name: &str, role: SyncRole, is_me: bool) -> SyncMember {
-    SyncMember { device_id: id.into(), name: name.into(), user: String::new(), role, online: false, is_me, expires_s: None }
+    SyncMember { device_id: id.into(), name: name.into(), user: String::new(), role, online: false, is_me, expires_s: None, removal: None, removal_waiting: false }
 }
 
 #[test]
@@ -221,10 +221,17 @@ fn members_are_ordered_named_and_an_owner_gets_their_menu() {
     let q = question.clone().unwrap();
     assert_eq!((q.title.as_str(), q.confirm_title.as_str(), q.destructive), ("Remove Studio from “Photos”?", "Remove", true));
     assert_eq!(q.text, "It stops syncing at once, on every device. It keeps the files it already has.");
-    // Not an owner: the role is plain text.
+    // An admin removes a user (Studio, Read only) and nothing more; an owner's or admin's role is plain text to it.
     let mut admin = i.clone();
     admin.snapshot.folders[0].role = SyncRole::Admin;
-    assert!(model(&admin, &host_windows_all()).page.unwrap().members.rows.iter().all(|r| r.role_menu.is_none()));
+    let rows = model(&admin, &host_windows_all()).page.unwrap().members.rows;
+    assert!(rows[0].role_menu.is_none() && rows[1].role_menu.is_none(), "an admin changes an owner or an admin");
+    let menu = rows[2].role_menu.clone().unwrap();
+    assert_eq!((titles(&menu.entries), menu.help.as_str()), (vec!["Remove from Folder…".to_string()], "Ask the folder's owner to remove Studio"));
+    // A user: plain text.
+    let mut user = i.clone();
+    user.snapshot.folders[0].role = SyncRole::ReadWrite;
+    assert!(model(&user, &host_windows_all()).page.unwrap().members.rows.iter().all(|r| r.role_menu.is_none()));
 }
 
 #[test]

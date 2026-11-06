@@ -20,8 +20,12 @@ hyper-rustls = { version = "0.27", default-features = false, features = ["http1"
 sha2 = { version = "0.11", default-features = false }
 # Retry-After HTTP-date parsing (already in the lock file via hyper).
 httpdate = "1"
+# Downloads through the torrent proxy while it is on (SPEC §7H): a `.torrent` link is torrent traffic.
+trs-socks = { path = "../socks" }
+tower-service = "0.3"
 
 [dev-dependencies]
+trs-socks = { path = "../socks", features = ["testkit"] }
 tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-thread", "macros", "net", "time", "sync"] }
 hyper = { version = "1", default-features = false, features = ["http1", "client", "server"] }
 tempfile = "3"

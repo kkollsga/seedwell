@@ -19,6 +19,9 @@ import SwiftUI
         if ProcessInfo.processInfo.environment["SEEDWELL_SNAPSHOTS"] == "files" { return await renderFileLists() }
         // The menu bar icon, plain and with the attention dot (IconSnapshots); `SEEDWELL_RENDER_ONLY=menubar-icon` alone.
         if wanted("menubar-icon") { renderMenuBarIcons() }
+        // The proxy icon (IconSnapshots): its contact sheet, and in place; `SEEDWELL_RENDER_ONLY=proxy-shield` alone.
+        if wanted("proxy-shield") { renderProxyShields() }
+        await renderProxyShieldRows()
         let mainSize = NSSize(width: 1180, height: 820)
 
         await render("downloads-dark", size: mainSize) { MainWindowView(model: model(.downloads, select: nil), commands: commands, settings: settings, nav: SettingsNavigation()) }

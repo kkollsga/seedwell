@@ -26,6 +26,17 @@ pub enum FolderState {
     Error,
 }
 
+/// A folder's *Read only* (SPEC §7G.1) as a device has it ([`crate::SyncHandle::read_only_state`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ReadOnlyState {
+    /// The owners' setting is on: only their changes count.
+    pub on: bool,
+    /// This device may switch it: an owner of the folder holding its key.
+    pub owner: bool,
+    /// This device holds its changes back meanwhile (it is not an owner and could write by its role).
+    pub held: bool,
+}
+
 /// One folder.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FolderStatus {

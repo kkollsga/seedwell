@@ -2,7 +2,7 @@
 //! and the DHT off, the link's addresses dead), a network change that writes a new record, the status, turning it off,
 //! and a rendezvous that is down.
 
-use std::net::{Ipv4Addr, SocketAddr, TcpListener};
+use std::net::SocketAddr;
 
 use trs_rendezvous::testkit::fake_rendezvous;
 use trs_sync_proto::ids::FolderId;
@@ -11,8 +11,9 @@ use trs_sync_proto::rendezvous::{Record, record_id_hex};
 
 use crate::utp::{addr, device_with, until};
 
+/// A port on loopback where nothing listens ([`crate::closed_addr`]).
 fn dead() -> SocketAddr {
-    TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap().local_addr().unwrap()
+    crate::closed_addr()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
