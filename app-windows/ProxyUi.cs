@@ -162,17 +162,15 @@ sealed class ProxyUi
         Model = m;
     }
 
-    /// <summary>A left click: the window without a key, the switch with one.</summary>
-    internal void Click()
+    /// <summary>A left click: the window without a key, the switch with one (the switch's call is what it returns).</summary>
+    internal Task Click()
     {
         if (Model.ClickOpensWindow)
         {
             OpenWindow();
+            return Task.CompletedTask;
         }
-        else
-        {
-            _ = Toggle();
-        }
+        return Toggle();
     }
 
     internal void OpenWindow()

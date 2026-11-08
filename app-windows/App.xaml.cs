@@ -1970,7 +1970,8 @@ public partial class App : Application
                 // | proxy-sheet (the contact sheet to the qa folder).
                 case "proxy-model": Proxy.Poll(); result = Proxy.QaDescribe(); break;
                 case "proxy-toggle": await Proxy.Toggle(); result = Proxy.QaDescribe(); break;
-                case "proxy-click": Proxy.Click(); await Task.Delay(300); await Quiet.Settle(LibraryWindow.Content); result = Proxy.QaDescribe(); break;
+                // The switch's call is awaited: on a loaded machine turning it on took longer than a fixed wait (CI, 0.1.21).
+                case "proxy-click": await Proxy.Click(); await Quiet.Settle(LibraryWindow.Content); result = Proxy.QaDescribe(); break;
                 case "proxy-find-faster": await Proxy.FindFaster(); result = Proxy.QaDescribe(); break;
                 case "proxy-country": await Proxy.SetCountry(Arg(1)); result = Proxy.QaDescribe(); break;
                 case "proxy-sheet":

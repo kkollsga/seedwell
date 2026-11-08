@@ -163,7 +163,7 @@ sealed class ProxyShieldButton : Button
         Template = plain ??= (ControlTemplate)XamlReader.Load(
             "<ControlTemplate xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation' TargetType='Button'>" +
             "<ContentPresenter Background='Transparent' Content='{TemplateBinding Content}' /></ControlTemplate>");
-        Click += (_, _) => ui.Click();
+        Click += (_, _) => _ = ui.Click();
         RightTapped += (_, e) =>
         {
             ui.ShowMenu(this);
