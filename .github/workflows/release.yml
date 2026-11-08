@@ -91,7 +91,7 @@ jobs:
           # codesign and notarytool use the key without a prompt.
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$kc_pass" "$kc" >/dev/null
           # Apple's Developer ID intermediate, in case the runner lacks it (the chain must verify).
-          curl -fsSL -o "$RUNNER_TEMP/DeveloperIDG2CA.cer" https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer \
+          curl -fsSL --retry 20 --retry-all-errors --retry-delay 30 --retry-max-time 900 --connect-timeout 30 -o "$RUNNER_TEMP/DeveloperIDG2CA.cer" https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer \
             && security import "$RUNNER_TEMP/DeveloperIDG2CA.cer" -k "$kc" >/dev/null 2>&1 || true
           identity=$(security find-identity -v -p codesigning "$kc" | sed -n "s/.*\"\(Developer ID Application: .*($team)\)\"\$/\1/p" | head -1)
           [ -n "$identity" ] || { echo "::error::MACOS_CERT_P12 holds no valid Developer ID Application identity of team $team"; security find-identity -v -p codesigning "$kc"; exit 1; }

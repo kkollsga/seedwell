@@ -12,7 +12,9 @@ DEST="$(cd "$(dirname "$0")" && pwd)/.sparkle"
 if [ -f "$DEST/VERSION" ] && [ "$(cat "$DEST/VERSION")" = "$VERSION" ] && [ -d "$DEST/Sparkle.xcframework" ]; then exit 0; fi
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 echo "==> Fetching Sparkle $VERSION"
-curl -fsSL -o "$TMP/sparkle.zip" "https://github.com/sparkle-project/Sparkle/releases/download/$VERSION/Sparkle-for-Swift-Package-Manager.zip"
+# Retried for up to 15 minutes: GitHub answered release downloads with 504 on and off for an hour (2026-11-08) and
+# withdrew the 0.1.21 release build twice.
+curl -fsSL --retry 20 --retry-all-errors --retry-delay 30 --retry-max-time 900 --connect-timeout 30 -o "$TMP/sparkle.zip" "https://github.com/sparkle-project/Sparkle/releases/download/$VERSION/Sparkle-for-Swift-Package-Manager.zip"
 [ "$(shasum -a 256 "$TMP/sparkle.zip" | cut -d' ' -f1)" = "$SHA256" ] || { echo "Sparkle checksum mismatch" >&2; exit 1; }
 rm -rf "$DEST"; mkdir -p "$DEST"
 ditto -x -k "$TMP/sparkle.zip" "$DEST"
